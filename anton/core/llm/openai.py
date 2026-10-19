@@ -201,9 +201,6 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
         BYOK OpenAI 403s (region blocks), Anthropic permission errors, and
         Cloudflare HTML 403s carry no such code and must fall through to
         the generic message, never the plan copy.
-      - 429 with a quota detail → TokenLimitExceeded, checked first so a body
-        carrying both ``detail`` and a structured code stays token_limit
-        (quota keeps its own card downstream).
       - 402/429 with an M3 gate billing code (``wallet_empty`` /
         ``included_allowance_exhausted`` / ``free_air_daily_spend_fuse_exceeded``,
         body or X-MindsHub-Reason header) → the matching TokenLimitExceeded
@@ -213,28 +210,28 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
         (``X-MindsHub-Deny-Detail`` header or ``deny_detail`` in the body)
         → ModelRestrictedError from ``mindshub_model_restriction``. A 403
         ``permission_denied`` without the detail stays generic.
+      - any other 429, one whose body carries only a FastAPI ``detail``
+        included → TransientProviderError from ``classify_transient``. The
+        MindsHub edge answers a request flood with exactly that body.
       - anything else → the generic "temporarily unavailable" ConnectionError.
 
     Body-shape tolerance (ENG-747): the OpenAI SDK UNWRAPS the error
     envelope before storing it — ``openai/_client.py`` does
     ``data = body.get("error", body)`` — so for the gateway's OpenAI-style
     403 (``{"error": {"code": …}}``), ``exc.body`` is the INNER dict and
-    ``code`` sits at top level. The gateway's 429 is FastAPI-style
-    (``{"detail": …}``, no envelope) and passes through untouched. Both
-    fields are therefore read from the top level first, with an envelope
-    fallback for clients that deliver the wire shape unmodified (anton requires
-    ``openai>=2.21.0``, and proxies exist that re-wrap).
+    ``code`` sits at top level. A FastAPI-style body (``{"detail": …}``, no
+    envelope) passes through untouched. Fields are therefore read from the
+    top level first, with an envelope fallback for clients that deliver the
+    wire shape unmodified (anton requires ``openai>=2.21.0``, and proxies
+    exist that re-wrap).
     The originally shipped ENG-598 mapper read only
     ``body["error"]["code"]`` — a key the SDK had already peeled off —
     which left the model-403 card dead in production.
 
-    Known limits, on purpose: a wire body carrying BOTH a top-level
-    ``detail`` and an ``error`` envelope loses the detail inside the SDK
-    (the unwrap discards siblings of ``error``) — unrecoverable from
-    ``exc.body``, and no real dialect emits that shape. OpenAI's own quota
-    dialect (429 + ``insufficient_quota`` code) maps to TokenLimitExceeded
-    with BYOK copy (OpenAI billing link, no MindsHub CTA) — detection is
-    code-exact so arbitrary provider messages never get quota treatment.
+    Known limits, on purpose: OpenAI's own quota dialect (429 +
+    ``insufficient_quota`` code) maps to TokenLimitExceeded with BYOK copy
+    (OpenAI billing link, no MindsHub CTA) — detection is code-exact so
+    arbitrary provider messages never get quota treatment.
     """
     # Computed once, up front: several branches below can mint a MindsHub
     # billing verdict and each must refuse a provably foreign origin (ENG-1693).
@@ -253,19 +250,6 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # message — the exact reason ENG-1145 surfaced as an opaque 404.
     raw_body = _error_body(exc)
     parsed = ProviderErrorBody.parse(raw_body)
-    detail = parsed.top.detail or parsed.envelope.detail
-    # str-only: FastAPI validation errors put a LIST in detail — rendering
-    # its repr into user-facing copy (with an upgrade CTA!) helps nobody.
-    # ENG-1693: origin-gated like every other branch that can mint a MindsHub
-    # billing verdict. This one is the cheapest to abuse — a single `detail`
-    # key on a 429, no header required — and it is the ONLY one whose copy is
-    # partly attacker-authored, since `detail` is interpolated into the message
-    # next to our console.mindshub.ai link. A foreign 429 falls through to
-    # classify_transient's honest rate-limit mapping instead.
-    if not _foreign and exc.status_code == 429 and isinstance(detail, str) and detail:
-        msg = f"Server returned 429 — {detail}"
-        msg += " Visit https://console.mindshub.ai to upgrade or top up your tokens."
-        raise TokenLimitExceeded(msg) from exc
 
     code = parsed.code
     etype = parsed.top.type or parsed.envelope.type
@@ -282,9 +266,8 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # MindsHub billing taxonomy: the authorization gate denies
     # an empty wallet as 402 ``wallet_empty``, a spent free allowance as 429
     # ``included_allowance_exhausted`` and a tripped fleet-wide free-serving
-    # budget as 429 ``free_air_daily_spend_fuse_exceeded``. The 429s carry NO
-    # FastAPI ``detail``, so the legacy 429 branch above never sees them. All
-    # three are permanent for the identical request: without this branch the
+    # budget as 429 ``free_air_daily_spend_fuse_exceeded``. All three are
+    # permanent for the identical request: without this branch the
     # 402 fell to the generic "temporarily unavailable" ConnectionError, got
     # auto-retried, and was finally rendered as assistant prose. The typed
     # subclass fails fast (the session re-raises TokenLimitExceeded unretried).
