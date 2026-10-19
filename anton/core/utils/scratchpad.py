@@ -153,8 +153,10 @@ _CALL_VIA = {
     "sqlalchemy": "change data through SQLAlchemy",
     "mongodb": "change data in MongoDB",
     "dynamodb": "change data in DynamoDB",
+    "bigquery": "change data in BigQuery",
     "redis": "change data in Redis",
     "elasticsearch": "change data in Elasticsearch",
+    "data_store": "change data in a data store",
     "sql_file": "run a SQL file too big to check",
 }
 
@@ -336,15 +338,16 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
     if not isinstance(gate, WriteGate):
         return None
     # The cells compaction folded away come first: the pad's process still
-    # holds what they imported and bound.
-    earlier = (
-        *getattr(pad, "compacted_code", ()),
-        *(cell.code for cell in getattr(pad, "cells", ()) or ()),
-    )
+    # holds what they imported and bound. Compaction keeps no cell's error.
+    compacted = tuple(getattr(pad, "compacted_code", ()))
+    cells = tuple(getattr(pad, "cells", ()) or ())
+    earlier = (*compacted, *(cell.code for cell in cells))
+    errored = (*(False for _ in compacted), *(bool(getattr(cell, "error", None)) for cell in cells))
     try:
         writes = await asyncio.to_thread(
             find_cell_writes,
             code=code, earlier_code=earlier, snapshots=gate.snapshots, http_rules=gate.http_rules,
+            earlier_errored=errored,
         )
     except Exception as exc:
         # The type only, as for a failed question.

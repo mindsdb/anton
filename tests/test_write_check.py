@@ -12,9 +12,12 @@ import os
 import re
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from anton.core.backends.base import Cell
+from anton.core.utils import scratchpad
 from anton.core.utils.scratchpad import _card_prompt, _code_span, _fence, _refusal
 from anton.core.utils.write_check import (
     CallWrite,
@@ -307,9 +310,64 @@ def test_each_write_in_one_string_is_its_own_statement():
     "CALL VOLUME BY HOUR",
     "EXEC summary attached",
     "Copy the chart to the deck",
+    # A question mark, a heading's colon or a template's braces aren't a
+    # driver's placeholder or ODBC's escape in prose, and "Begin" starts a sentence.
+    "EXEC summary ?",
+    "CALL ME: 555-0100",
+    "{call me}",
+    "Begin the review on Monday",
+    "BEGIN HERE",
+    "begin with the totals",
 ])
 def test_reads_and_prose(text):
     assert write_statements(text) == ()
+
+
+PYODBC = "import os, pyodbc\nconn = pyodbc.connect(os.environ['DSN'])\ncur = conn.cursor()\n"
+
+
+@pytest.mark.parametrize("sql", [
+    "EXEC p ?",
+    "EXEC dbo.purge ?, ?",
+    "exec purge ?",
+    "EXEC p :1",
+    "EXECUTE purge :days",
+    "CALL purge ?",
+    "{CALL p}",
+    "{call p(?)}",
+    "{CALL dbo.purge (?)}",
+    "{? = CALL f(?)}",
+    "BEGIN p; END;",
+    "BEGIN pkg.proc(:1); END;",
+    "begin purge_old(30); end;",
+    "BEGIN DELETE FROM t WHERE id = 1; END;",
+], ids=["exec-qmark", "exec-qmarks", "exec-lowercase-qmark", "exec-numbered", "execute-named", "call-qmark",
+        "odbc-call", "odbc-call-group", "odbc-call-spaced-group", "odbc-function", "oracle-block",
+        "oracle-package-block", "oracle-block-lowercase", "oracle-block-delete"])
+def test_a_procedure_call_a_driver_sends_is_held(sql, snap):
+    """pyodbc's `EXEC p ?`, Oracle's `:1`, ODBC's `{CALL p}` escape and an
+    Oracle block `BEGIN p; END;` each run a procedure, which can change anything."""
+    assert write_statements(sql, prose=False)
+    assert _held(PYODBC + f"cur.execute({sql!r}, (1,))", snap)
+
+
+@pytest.mark.parametrize("sql", [
+    "BEGIN",
+    "BEGIN;",
+    "BEGIN TRANSACTION",
+    "begin transaction;",
+    "BEGIN TRAN",
+    "BEGIN WORK",
+    "BEGIN IMMEDIATE TRANSACTION",
+    "BEGIN ISOLATION LEVEL SERIALIZABLE",
+    "BEGIN READ ONLY",
+    "BEGIN NULL; END;",
+    "BEGIN; SELECT * FROM t; COMMIT;",
+], ids=["begin", "begin-semicolon", "begin-transaction", "begin-transaction-lowercase", "begin-tran",
+        "begin-work", "sqlite-immediate", "isolation-level", "read-only", "empty-block", "read-in-a-transaction"])
+def test_a_transaction_start_is_no_write(sql, snap):
+    assert write_statements(sql, prose=False) == ()
+    assert not _held(PYODBC + f"cur.execute({sql!r})", snap)
 
 
 def test_a_dash_comment_ends_at_a_carriage_return():
@@ -1027,10 +1085,7 @@ def test_the_clis_output_folder_is_one_of_the_agents_folders(tmp_path, monkeypat
      "import os\nopen('stock.csv.tmp', 'w').write('y')\nos.replace('stock.csv.tmp', 'stock.csv')", "stock.csv"),
     ("import sqlite3\nc = sqlite3.connect('warehouse.db')\nc.execute('CREATE TABLE t (a int)')",
      "import sqlite3\nc = sqlite3.connect('warehouse.db')\nc.execute('INSERT INTO t VALUES (1)')", "warehouse.db"),
-    ("import pandas as pd\nfor f in ['stock', 'log']:\n    pd.DataFrame().to_csv(f + suffix)",
-     PD + "df.to_csv('stock.csv')", "stock.csv"),
-], ids=["open", "savefig", "earlier-helper-called-earlier", "temp-renamed-into-place", "database",
-        "earlier-name-picked-at-run-time"])
+], ids=["open", "savefig", "earlier-helper-called-earlier", "temp-renamed-into-place", "database"])
 def test_rewriting_a_file_an_earlier_cell_wrote_is_not_held(earlier, code, path, office):
     """The earlier cell ran in an earlier turn, so the file is in this turn's snapshot."""
     assert _changes(code, office, earlier=(earlier,)) == [("overwrite", (path,), False)]
@@ -1078,6 +1133,64 @@ def test_a_write_that_never_ran_in_an_earlier_cell_leaves_the_file_held(earlier,
         "called-under-an-if", "called-method"])
 def test_a_write_in_a_function_an_earlier_cell_called_makes_the_file_the_agents(earlier, office):
     assert _changes(PD + "df.to_csv('stock.csv')", office, earlier=earlier) == [("overwrite", ("stock.csv",), False)]
+
+
+@pytest.mark.parametrize("errored, held", [((True,), True), ((False,), False), ((), False)],
+                         ids=["stopped-on-an-error", "ran-to-its-end", "no-entry"])
+def test_a_write_in_an_earlier_cell_that_stopped_on_an_error_makes_no_file_the_agents(errored, held, office):
+    """The earlier cell may have stopped before its write ran, as `1 / 0`
+    does here, so rewriting the user's stock.csv still waits for approval."""
+    earlier = ("x = 1 / 0\nopen('stock.csv', 'w').write('z')",)
+    writes = find_cell_writes(code="open('stock.csv', 'w').write('y')", earlier_code=earlier, snapshots=(office,),
+                              earlier_errored=errored)
+    assert [(c.action, c.paths, c.held) for c in writes.files] == [("overwrite", ("stock.csv",), held)]
+
+
+def test_an_errored_cell_lines_up_with_its_code_past_one_that_does_not_parse(office):
+    """A cell that doesn't parse is dropped, and the flags still name the right cells."""
+    earlier = ("def (", "open('log.txt', 'w').write('z')", "x = 1 / 0\nopen('stock.csv', 'w').write('z')")
+    code = "open('log.txt', 'w').write('y')\nopen('stock.csv', 'w').write('y')"
+    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(office,),
+                              earlier_errored=(False, False, True))
+    assert [(c.paths, c.held) for c in writes.files] == [(("log.txt",), False), (("stock.csv",), True)]
+
+
+async def test_the_gate_passes_each_earlier_cells_error_to_the_check(office, monkeypatch):
+    """`hold_unapproved_write` reads the errors off the pad's cells; a
+    compacted cell kept no error, so it counts as one that ran."""
+    asked: list[CellWrites] = []
+
+    async def cancel(_session, writes):
+        asked.append(writes)
+        return "cancelled"
+
+    monkeypatch.setattr(scratchpad, "_ask_approval", cancel)
+    session = SimpleNamespace(_write_gate=scratchpad.WriteGate(snapshots=(office,)))
+    wrote = "x = 1 / 0\nopen('stock.csv', 'w').write('z')"
+    failed = Cell(code=wrote, stdout="", stderr="", error="ZeroDivisionError: division by zero")
+    rewrite = "open('stock.csv', 'w').write('y')"
+    pad = SimpleNamespace(compacted_code=(), cells=[failed])
+    assert await scratchpad.hold_unapproved_write(session, pad=pad, code=rewrite) is not None
+    assert [f.paths for f in asked[0].held_files] == [("stock.csv",)]
+    ran = SimpleNamespace(compacted_code=(wrote,), cells=[failed])
+    assert await scratchpad.hold_unapproved_write(session, pad=ran, code=rewrite) is None
+    assert len(asked) == 1
+
+
+@pytest.mark.parametrize("earlier", [
+    PD + "from datetime import date\ndf.to_csv(f'exports/orders_{date.today()}.csv', index=False)",
+    "import pandas as pd\nfor f in ['exports/orders', 'log']:\n    pd.DataFrame().to_csv(f + suffix)",
+], ids=["dated-export", "name-with-a-run-time-suffix"])
+def test_an_earlier_write_to_a_name_picked_at_run_time_makes_no_older_file_the_agents(earlier, tmp_path, monkeypatch):
+    """The snapshot holds what the turn began with, not what the conversation
+    began with, so an older day's export the earlier name could match may
+    be the user's: rewriting it still waits for approval."""
+    (tmp_path / "exports").mkdir()
+    (tmp_path / "exports/orders_2026-10-01.csv").write_text("x")
+    monkeypatch.chdir(tmp_path)
+    snapshot = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    code = PD + "df.to_csv('exports/orders_2026-10-01.csv', index=False)"
+    assert _changes(code, snapshot, earlier=(earlier,)) == [("overwrite", ("exports/orders_2026-10-01.csv",), True)]
 
 
 @pytest.mark.parametrize("code", [
@@ -2408,7 +2521,7 @@ def test_a_sql_file_past_the_cap_is_held_unchecked(sql_files):
     ("import pymongo\nclient = pymongo.MongoClient()\ndb = client['prod']\ncol = db['users']\ncol.drop()", "mongodb"),
     ("table.put_item(Item = {'id': '1'})", "dynamodb"),
     ("table.batch_write_item(RequestItems = {})", "dynamodb"),
-    ("client.delete_table(TableName = 't')", "dynamodb"),
+    ("import boto3\nclient = boto3.client('dynamodb')\nclient.delete_table(TableName = 't')", "dynamodb"),
     ("import redis\nr = redis.Redis()\nr.set('k', 'v')", "redis"),
     ("import redis\nr = redis.from_url('redis://x')\nr.delete('k')", "redis"),
     ("from redis import StrictRedis\nr = StrictRedis()\nr.flushall()", "redis"),
@@ -2449,10 +2562,12 @@ def test_a_write_with_no_sql_text_is_held(code, via, snap):
     "import sqlite3\nc = sqlite3.connect(':memory:')\nc.callproc('p')",
     # A session add with no commit or flush in the cell stays free.
     "session.add(User(id = 1))",
+    # An openpyxl worksheet's insert_rows changes only the workbook in memory.
+    "import openpyxl\nwb = openpyxl.load_workbook('a.xlsx')\nwb.active.insert_rows(2)",
 ], ids=["pandas-drop", "pandas-set-index", "pymongo-find", "pymongo-aggregate", "sqlalchemy-select",
         "redis-get-unknown", "redis-get-client", "es-search", "unknown-set", "unknown-delete",
         "unknown-update", "dict-update", "set-update", "df-insert",
-        "callproc-local", "session-add-no-commit"])
+        "callproc-local", "session-add-no-commit", "openpyxl-insert-rows"])
 def test_read_only_calls_on_the_same_libraries_stay_free(code, snap):
     assert not _held(code, snap)
 
@@ -2469,6 +2584,42 @@ def test_a_store_write_quotes_the_code_line_on_the_card(snap):
     card = _card_prompt(writes)
     assert "This step would change data in MongoDB:" in card
     assert _fenced(card) == ["db.users.insert_one({'id': 1})"]
+
+
+BQ = "from google.cloud import bigquery\nclient = bigquery.Client(project='p')\n"
+
+
+@pytest.mark.parametrize("code, via", [
+    (BQ + "client.delete_table('p.d.orders', not_found_ok=True)", "bigquery"),
+    (BQ + "client.create_table('p.d.orders')", "bigquery"),
+    ("from google.cloud.bigquery import Client\nc = Client()\nc.delete_table('p.d.orders')", "bigquery"),
+    (BQ + "client.insert_rows(table, rows)", "bigquery"),
+    ("client.insert_rows_json('p.d.orders', rows)", "bigquery"),
+    ("client.delete_dataset('p.d', delete_contents=True)", "bigquery"),
+    (BQ + "config = bigquery.LoadJobConfig(write_disposition='WRITE_TRUNCATE')\n"
+     "client.load_table_from_dataframe(df, 'p.d.orders', job_config=config).result()", "bigquery"),
+    ("import boto3\nddb = boto3.resource('dynamodb')\nddb.create_table(TableName = 't', KeySchema = [])", "dynamodb"),
+    ("import boto3\ns = boto3.Session()\nddb = s.client(service_name = 'dynamodb')\nddb.delete_table(TableName = 't')",
+     "dynamodb"),
+    ("client.delete_table(TableName = 't')", "data_store"),
+    ("client.delete_table('p.d.orders')", "data_store"),
+], ids=["bq-delete-table", "bq-create-table", "bq-client-imported", "bq-insert-rows", "bq-insert-rows-json",
+        "bq-delete-dataset", "bq-load-dataframe", "dynamo-resource-create-table", "dynamo-session-client",
+        "untraced-keywords", "untraced-positional"])
+def test_a_table_call_is_named_for_the_client_it_traces_to(code, via, snap):
+    """DynamoDB's and BigQuery's clients both have `delete_table` and
+    `create_table`: the card names the store the receiver traces to, and
+    neither for one the check can't trace."""
+    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(snap,))
+    assert writes.needs_approval()
+    assert [c.via for c in writes.calls] == [via]
+
+
+def test_a_bigquery_table_delete_names_bigquery_on_the_card(snap):
+    card = _card(BQ + "client.delete_table('p.d.orders')", snap)
+    assert "This step would change data in BigQuery:" in card
+    assert "DynamoDB" not in card
+    assert "This step would change data in a data store:" in _card("client.delete_table('p.d.orders')", snap)
 
 
 def test_a_call_write_inside_an_earlier_function_is_held_at_the_call(snap):

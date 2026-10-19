@@ -21,7 +21,9 @@ What it finds:
   in-process counts too. A statement hidden in a base64, base32, base16, hex
   or rot13 literal that the cell decodes, or read from a literal-path SQL
   file that exists (up to 1 MB), is decoded or read now and checked too.
-  CALL, EXEC and EXECUTE, a SELECT of a side-effecting function (``setval``,
+  CALL, EXEC and EXECUTE (``?`` and ``:1`` placeholders and ODBC's
+  ``{CALL p(?)}`` included), an Oracle block that calls a procedure
+  (``BEGIN p; END;``), a SELECT of a side-effecting function (``setval``,
   ``pg_terminate_backend``, ``dblink_exec``, ``GET_LOCK`` and friends), a
   SELECT ... INTO OUTFILE and a COPY ... TO a file all count.
 - **Data changes with no SQL text to quote**: a ``cursor.callproc``, a
@@ -29,9 +31,10 @@ What it finds:
   passed to ``execute``, ``Table.drop``/``create`` and ``MetaData``'s
   ``drop_all``/``create_all`` with an engine, ``session.query(...).delete()``,
   and ``session.add``/``merge`` and the like with a commit or flush in the
-  cell), a non-SQL store's own method (pymongo, boto3 DynamoDB, a Redis
-  client, an Elasticsearch client), or a SQL file past the 1 MB cap, held
-  unchecked. The card quotes the line.
+  cell), a non-SQL store's own method (pymongo, boto3 DynamoDB, BigQuery's
+  table, dataset, insert and load calls, a Redis client, an Elasticsearch
+  client), or a SQL file past the 1 MB cap, held unchecked. The card quotes
+  the line.
 - **Deletes, renames and moves** of a file or folder that was in the project
   folder (artifacts and the host's own files under ``.anton`` included) or the
   shared folder when the turn began, either folder itself included. The call
@@ -54,7 +57,8 @@ What it finds:
   in-process SQLite or DuckDB handle that opens it. An append, and an
   overwrite of a file the agent owns (one under ``.anton/artifacts``,
   ``.anton/skill_drafts`` or ``.anton/output``, or one an earlier cell in the
-  conversation wrote), are reported but not held. ``open`` in an ``x`` mode
+  conversation wrote, unless that cell stopped on an error or picked the
+  name when it ran, as a dated export does), are reported but not held. ``open`` in an ``x`` mode
   can't replace a file, so it isn't one.
 - **HTTP writes** through requests, httpx (their module functions, a
   Session's or Client's methods, ``.request(method, ...)``) and urllib: every
@@ -160,9 +164,12 @@ class SqlWrite(BaseModel):
 
 
 # How a `CallWrite` changes data: a stored procedure, a SQLAlchemy construct
-# or session, a non-SQL store's own client, or SQL read from a file the check
-# couldn't read before the cell runs.
-CallVia = Literal["procedure", "sqlalchemy", "mongodb", "dynamodb", "redis", "elasticsearch", "sql_file"]
+# or session, a non-SQL store's own client ("data_store" for a table call on a
+# client the check can't trace to DynamoDB or BigQuery), or SQL read from a
+# file the check couldn't read before the cell runs.
+CallVia = Literal[
+    "procedure", "sqlalchemy", "mongodb", "dynamodb", "bigquery", "redis", "elasticsearch", "data_store", "sql_file",
+]
 
 
 class CallWrite(BaseModel):
@@ -1306,7 +1313,57 @@ def _call_writes(tokens: Sequence[_Token], *, prose: bool) -> bool:
     # MySQL's CALL p, or T-SQL's EXEC p @a = 1, 'x', 2.
     return j == len(tokens) or tokens[j].kind in ("group", "hole", "text") or (
         tokens[j].kind == "punct" and (tokens[j].text in "@-" or tokens[j].text.isdigit())
+    ) or not prose and _placeholder_at(tokens, j)
+
+
+def _placeholder_at(tokens: Sequence[_Token], i: int) -> bool:
+    """Whether a driver's placeholder starts at `i`: pyodbc's `?`, or
+    Oracle's `:1` or `:name`."""
+    if _punct(tokens, i, "?"):
+        return True
+    return _punct(tokens, i, ":") and i + 1 < len(tokens) and (
+        tokens[i + 1].kind == "word" or tokens[i + 1].kind == "punct" and tokens[i + 1].text.isdigit()
     )
+
+
+# What follows BEGIN when it starts a transaction or a T-SQL TRY or CATCH
+# block, or makes an empty block, rather than an Oracle block that runs a
+# procedure: BEGIN TRANSACTION, BEGIN WORK, SQLite's BEGIN IMMEDIATE,
+# Postgres's BEGIN ISOLATION LEVEL ..., Snowflake's BEGIN NAME t, BEGIN NULL.
+_BEGIN_FOLLOWERS = frozenset({
+    "TRANSACTION", "TRAN", "WORK", "DEFERRED", "IMMEDIATE", "EXCLUSIVE", "ISOLATION", "READ", "NOT",
+    "DEFERRABLE", "DISTRIBUTED", "TRY", "CATCH", "NAME", "ATOMIC", "NULL",
+})
+
+
+def _begin_writes(tokens: Sequence[_Token], *, prose: bool) -> bool:
+    """An Oracle or Snowflake block, `BEGIN ...; END;`, up to its first `;`:
+    a write that opens it counts, and so does a bare procedure call, as in
+    `BEGIN p; END;` or `BEGIN pkg.proc(:1); END;`. BEGIN alone, or before a
+    word in `_BEGIN_FOLLOWERS`, changes nothing. In prose, only an
+    upper-case BEGIN counts, and a call needs its `name(`."""
+    if len(tokens) == 1 or _word(tokens, 1) in _BEGIN_FOLLOWERS or prose and not tokens[0].raw.isupper():
+        return False
+    if _writes(tokens[1:], prose=prose):
+        return True
+    if tokens[1].kind == "word" and (tokens[1].text in _RULES or tokens[1].text in _SCRIPT_WORDS):
+        return False
+    j = _name_end(tokens, 1)
+    if j is None:
+        return False
+    called = j + 1 == len(tokens) and tokens[j].kind == "group" and tokens[j].glued
+    return called or not prose and j == len(tokens)
+
+
+def _unescaped(tokens: Sequence[_Token]) -> Sequence[_Token]:
+    """ODBC's escape for a procedure call, `{CALL p(?)}` or `{? = CALL f(?)}`,
+    as the CALL inside it; any other tokens as they are."""
+    if not _punct(tokens, 0, "{"):
+        return tokens
+    i = 3 if _punct(tokens, 1, "?") and _punct(tokens, 2, "=") else 1
+    if _word(tokens, i) != "CALL":
+        return tokens
+    return tokens[i:-1] if _punct(tokens, len(tokens) - 1, "}") else tokens[i:]
 
 
 def _runs_writes(tokens: Sequence[_Token], *, prose: bool) -> bool:
@@ -1356,10 +1413,12 @@ _RULES: dict[str, _Rule] = {
     "CALL": _call_writes,
     "EXEC": _call_writes,
     "EXECUTE": _call_writes,
+    "BEGIN": _begin_writes,
 }
 
 
 def _writes(tokens: Sequence[_Token], *, prose: bool) -> bool:
+    tokens = _unescaped(tokens)
     rule = _RULES.get(_word(tokens, 0))
     return rule is not None and not (prose and _ends_a_sentence(tokens)) and rule(tokens, prose=prose)
 
@@ -3929,8 +3988,18 @@ _MONGO_WRITES = frozenset({
 # boto3 DynamoDB writes, distinctive enough to hold on any receiver.
 _DYNAMO_WRITES = frozenset({
     "put_item", "update_item", "delete_item", "batch_write_item", "transact_write_items",
-    "delete_table", "create_table",
 })
+# Table calls DynamoDB's and BigQuery's clients share: held on any receiver,
+# and named for the client the receiver traces to.
+_TABLE_WRITES = frozenset({"delete_table", "create_table"})
+# BigQuery client writes distinctive enough to hold on any receiver.
+_BIGQUERY_DISTINCT = frozenset({
+    "delete_dataset", "insert_rows_json", "load_table_from_dataframe", "load_table_from_json",
+    "load_table_from_file", "load_table_from_uri",
+})
+# A BigQuery write held only on a BigQuery client, since an openpyxl
+# worksheet's `insert_rows` changes only the workbook in memory.
+_BIGQUERY_WRITES = frozenset({"insert_rows"})
 # Elasticsearch writes distinctive enough to hold on any receiver.
 _ES_DISTINCT = frozenset({"delete_by_query", "update_by_query"})
 # Redis writes, held only on a redis client, since the names are shared.
@@ -3951,7 +4020,7 @@ _ENGINE_MAKERS = frozenset({"sqlalchemy.create_engine", "create_engine"})
 
 
 def _constructor_kind(name: str) -> CallVia | None:
-    """The store a constructor opens: `redis`, `elasticsearch` or `mongodb`."""
+    """The store a constructor opens: `redis`, `elasticsearch`, `mongodb` or `bigquery`."""
     parts = name.split(".")
     last = parts[-1]
     if "redis" in parts and last in ("Redis", "StrictRedis", "from_url"):
@@ -3960,7 +4029,18 @@ def _constructor_kind(name: str) -> CallVia | None:
         return "elasticsearch"
     if last == "MongoClient":
         return "mongodb"
+    if "bigquery" in parts and last == "Client":
+        return "bigquery"
     return None
+
+
+def _opens_dynamodb(call: ast.Call) -> bool:
+    """Whether `call` is boto3's `client("dynamodb")` or `resource("dynamodb")`,
+    on the module or a session."""
+    if not (isinstance(call.func, ast.Attribute) and call.func.attr in ("client", "resource")):
+        return False
+    service = call.args[0] if call.args else _keyword(call, "service_name")
+    return isinstance(service, ast.Constant) and service.value == "dynamodb"
 
 
 def _client_kind(node: ast.AST, reader: _Reader, *, depth: int = 0) -> CallVia | None:
@@ -3972,6 +4052,8 @@ def _client_kind(node: ast.AST, reader: _Reader, *, depth: int = 0) -> CallVia |
         kind = _constructor_kind(reader.dotted(node.func))
         if kind is not None:
             return kind
+        if _opens_dynamodb(node):
+            return "dynamodb"
         return _client_kind(node.func.value, reader, depth=depth + 1) if isinstance(node.func, ast.Attribute) else None
     if isinstance(node, (ast.Subscript, ast.Attribute)):
         return _client_kind(node.value, reader, depth=depth + 1)
@@ -4086,6 +4168,14 @@ def _call_write_kind(call: ast.Call, reader: _Reader, *, commits: bool) -> CallV
         return "mongodb"
     if method in _DYNAMO_WRITES:
         return "dynamodb"
+    if method in _BIGQUERY_DISTINCT:
+        return "bigquery"
+    if method in _TABLE_WRITES or method in _BIGQUERY_WRITES:
+        kind = _client_kind(recv, reader)
+        if kind == "bigquery" or kind == "dynamodb" and method in _TABLE_WRITES:
+            return kind
+        if method in _TABLE_WRITES:
+            return "data_store"
     if method in _ES_DISTINCT:
         return "elasticsearch"
     if method == "delete" and isinstance(recv, ast.Attribute) and recv.attr == "indices":
@@ -4606,11 +4696,16 @@ class _OwnedFiles:
     them with no card: those under `.anton/artifacts`, `.anton/skill_drafts`
     and `.anton/output` (`_AGENT_FOLDERS`), and those a write that ran in an
     earlier cell of the conversation replaced. The earlier cells are read the
-    first time a check asks, since most cells overwrite nothing."""
+    first time a check asks, since most cells overwrite nothing. A cell in
+    `errored`, by index, stopped on an error, so the check can't tell which
+    of its writes ran: none of them makes a file the agent's."""
 
-    def __init__(self, earlier: list[_Cell], snapshots: Sequence[ProjectSnapshot]) -> None:
+    def __init__(
+        self, earlier: list[_Cell], snapshots: Sequence[ProjectSnapshot], *, errored: frozenset[int] = frozenset(),
+    ) -> None:
         self._earlier = earlier
         self._snapshots = snapshots
+        self._errored = errored
         self._written: frozenset[str] | None = None
 
     def owns(self, path: str) -> bool:
@@ -4652,6 +4747,8 @@ class _OwnedFiles:
                     read_function(inner, cell=cell, at=at, chain=(*chain, id(func)))
 
         for cell in self._earlier:
+            if cell.index in self._errored:
+                continue
             changes += _file_findings(reader, cell, self._snapshots, owned=None)
             for callee in _earlier_function_uses(reader, cell.tree, cell, ran_only=True):
                 read_function(callee, cell=cell, at=callee.use, chain=())
@@ -4829,13 +4926,15 @@ class _FileFinder:
         """A write into the files `got` names that the turn began with: held
         as an overwrite unless the agent owns the file. With `append`, the
         write adds to the file, and is reported but not held. A path from a
-        root the check can't place counts as a new file, and so, in the
-        checked cell, does one with a part the code picks when it runs, as a
-        dated export or a chart per site has."""
+        root the check can't place counts as a new file, and so does one
+        with a part the code picks when it runs, as a dated export or a chart
+        per site has. In an earlier cell, such a path makes no file the
+        agent's own: the snapshot holds the files the turn began with, not
+        those the conversation began with, so it can't tell an older day's
+        export from one an earlier cell wrote."""
         if isinstance(got, _Unknown):
             return
-        if self.owned is not None:
-            got = [p for p in got if _RUN_TIME_PART not in p]
+        got = [p for p in got if _RUN_TIME_PART not in p]
         found = [p for p in self.locate(got, existing_files=True).paths if append or p not in self.overwritten]
         if append:
             self.add("append", _Targets(paths=tuple(found)), call, held=False)
@@ -5680,6 +5779,7 @@ def find_cell_writes(
     earlier_code: Sequence[str],
     snapshots: Sequence[ProjectSnapshot],
     http_rules: Sequence[HttpWriteRule] = (),
+    earlier_errored: Sequence[bool] = (),
 ) -> CellWrites:
     """What `code` would change, read against the conversation's earlier cells.
 
@@ -5687,6 +5787,9 @@ def find_cell_writes(
     this cell calls it or passes it on, with its parameters read from that
     call, and what it would change is reported at that place. A request that
     matches one of `http_rules` counts as a write, whatever its method.
+    `earlier_errored`, beside `earlier_code`, marks each earlier cell that
+    stopped on an error: its writes make no file the agent's own
+    (`_OwnedFiles`). A cell with no entry ran to its end.
 
     A cell that doesn't parse returns nothing to hold: the runner compiles it
     the same way and refuses it before any of it runs.
@@ -5696,9 +5799,12 @@ def find_cell_writes(
     except (SyntaxError, ValueError):
         return CellWrites()
     cells: list[_Cell] = []
-    for text in earlier_code:
+    errored: set[int] = set()
+    for i, text in enumerate(earlier_code):
         earlier = _EARLIER_CELLS.get(code=text, index=len(cells))
         if earlier is not None:
+            if i < len(earlier_errored) and earlier_errored[i]:
+                errored.add(earlier.index)
             cells.append(earlier)
     current = _Cell(tree, code, len(cells))
     cells.append(current)
@@ -5708,7 +5814,7 @@ def find_cell_writes(
     reader = _Reader(cells, current=current, project_root=project.root if project is not None else None)
     if any(not s.complete for s in snapshots):
         reader.made = _made(reader=reader)
-    owned = _OwnedFiles(cells[: current.index], snapshots)
+    owned = _OwnedFiles(cells[: current.index], snapshots, errored=frozenset(errored))
     sql: list[SqlWrite] = []
     calls: list[CallWrite] = []
     files: list[FileChange] = []
