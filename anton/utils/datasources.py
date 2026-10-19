@@ -249,18 +249,45 @@ _LINE_BREAK_PATTERN = re.compile(r"[\r\n]")
 _WORD_BEFORE_PATTERN = re.compile(r"[A-Za-z0-9]+$")
 # Lowercase Python string prefixes; `b'`, `f'` and `rb'` open a literal, not prose.
 _STRING_PREFIXES = frozenset({"b", "r", "u", "f", "rb", "br", "fr", "rf"})
-# Unquoted values can be source code the model reads and may write back: after a
-# key, a lowercase-led dotted path, a call, an all-lowercase value, a PascalCase
-# type or an UPPER_SNAKE constant is code. PascalCase words need three letters and
-# UPPER_SNAKE parts are letters with at most one trailing digit.
-_TOKEN_VALUE_PATTERN = re.compile(
+# An f-string is formatted before it prints, so one after a key is source code.
+_FORMAT_STRING_PREFIXES = frozenset(prefix for prefix in _STRING_PREFIXES if "f" in prefix)
+# An unquoted Bearer value, on its line or the next; a lowercase word after
+# `Bearer` is prose.
+_BEARER_VALUE_PATTERN = re.compile(
     r"((?i:\bbearer)(?:[ \t]+|[ \t]*\r?\n[ \t]*)"
-    r"(?![a-z_/-]+(?![A-Za-z0-9._~+/=%!-]))"
-    r"|" + _TOKEN_KEY + r"\\?[\"']?(?:[ \t]*[:=][ \t]*|[ \t]+)"
-    r"(?!(?:[a-z_/-]+|[a-z_]\w*(?:\.[A-Za-z_]\w*)+|(?:[A-Z][a-z]{2,}){2,}|[A-Z]{2,}[0-9]?(?:_[A-Z]{2,}[0-9]?)+)"
-    r"(?![A-Za-z0-9._~+/=%!-])))"
+    r"(?![a-z_/-]+(?![A-Za-z0-9._~+/=%!-])))"
     r"(?!!)[A-Za-z0-9._~+/=%!-]{16,}"
     r"(?![A-Za-z0-9._~+/=%!(-])"
+)
+# Group 1 is the `:` or `=` before the value; spaces alone separate a printed
+# table column. The value starts like a token, so a quoted, marker, template or
+# `$` value is left to the quoted pass or left alone.
+_UNQUOTED_TOKEN_OPENER_PATTERN = re.compile(
+    _TOKEN_KEY + r"\\?[\"']?(?:[ \t]*([:=])[ \t]*|[ \t]+)(?=[A-Za-z0-9._~+/%-])"
+)
+# An unquoted value ends at a line break or at `&`, `,` or `;`, which separate
+# query parameters and list items. In a column or a URL a space ends it too;
+# elsewhere it runs on through spaces up to the next `key=value` pair. Base64
+# padding at a value's end is no pair.
+_WORD_VALUE_END_PATTERN = re.compile(r"[\s&,;]")
+_SPACED_VALUE_END_PATTERN = re.compile(r"[\r\n&,;]|[ \t]+(?=[A-Za-z_][\w.-]*=[^\s=])")
+# Quotes and closing brackets at the end of a value close what holds it.
+_VALUE_TRAILER = " \t\"'`\\)]}>"
+_TOKEN_CHARS_PATTERN = re.compile(r"[A-Za-z0-9._~+/=%!-]*")
+# Unquoted values can be source code the model reads and may write back: a
+# lowercase-led dotted path, all-lowercase words, a PascalCase type or an
+# UPPER_SNAKE constant is code or prose. PascalCase words need three letters and
+# UPPER_SNAKE parts are letters with at most one trailing digit.
+_CODE_VALUE_PATTERN = re.compile(
+    r"[a-z_/-]+(?:[ \t]+[a-z_/-]+)*|[a-z_]\w*(?:\.[A-Za-z_]\w*)+"
+    r"|(?:[A-Z][a-z]{2,}){2,}|[A-Z]{2,}[0-9]?(?:_[A-Z]{2,}[0-9]?)+"
+)
+# What follows a value's first word in code rather than in a secret: an index,
+# a closing bracket or a `::` path, or after a space an operator, a comment, a
+# call or a keyword.
+_CODE_AFTER_WORD_PATTERN = re.compile(
+    r"[\[)\]}]|::"
+    r"|[ \t]+(?:#|//|\(|[A-Za-z_][\w.]*\(|[-+*/%=!<>|?:.]+(?![^ \t])|(?:if|else|or|and|not|in|is)\b)"
 )
 
 
@@ -594,6 +621,54 @@ def _redact_quoted_token_values(text: str) -> str:
     return "".join(parts)
 
 
+def _unquoted_value_reads_as_code(text: str, start: int, end: int) -> bool:
+    """Return whether `text[start:end]`, an unquoted value, reads as code or prose rather than a secret.
+
+    It does when the whole value is code-shaped, when its first word is called
+    or opens an f-string, or when a first word that is short or code-shaped is
+    followed by code. A quote, `@`, `#` or a plain word after the first word
+    continues a secret.
+    """
+    if _CODE_VALUE_PATTERN.fullmatch(text, start, end):
+        return True
+    word_end = _TOKEN_CHARS_PATTERN.match(text, start, end).end()
+    if word_end == end:
+        return False
+    if text[word_end] == "(":
+        return True
+    if text[word_end] in "\"'" and text[start:word_end] in _FORMAT_STRING_PREFIXES:
+        return True
+    word_is_code = word_end - start < 16 or _CODE_VALUE_PATTERN.fullmatch(text, start, word_end)
+    return bool(word_is_code and _CODE_AFTER_WORD_PATTERN.match(text, word_end, end))
+
+
+def _redact_unquoted_token_values(text: str) -> str:
+    """Redact each unquoted value after a token key, through the end of the value.
+
+    The value may hold quotes, `@` and `#`, and spaces after `:` or `=` outside
+    a URL. A value under 16 characters, or one that reads as code or prose,
+    stays. Returns `text` with each redacted value replaced.
+    """
+    parts: list[str] = []
+    position = 0
+    for opener in _UNQUOTED_TOKEN_OPENER_PATTERN.finditer(text):
+        if opener.start() < position:
+            continue
+        start = opener.end()
+        in_url = opener.start() > 0 and text[opener.start() - 1] in "?&#"
+        spaced = opener.group(1) is not None and not in_url
+        found = (_SPACED_VALUE_END_PATTERN if spaced else _WORD_VALUE_END_PATTERN).search(text, start)
+        value = text[start : found.start() if found else len(text)].rstrip(_VALUE_TRAILER)
+        end = start + len(value)
+        if len(value) < 16 or _unquoted_value_reads_as_code(text, start, end):
+            continue
+        parts.append(text[position:start])
+        parts.append("[REDACTED_TOKEN]")
+        position = end
+    parts.append(text[position:])
+    return "".join(parts)
+
+
 def scrub_output(text: str) -> str:
     """Scrub tool and scratchpad output before it reaches the LLM, a stream, or storage.
 
@@ -607,7 +682,8 @@ def scrub_output(text: str) -> str:
     text = _TOKEN_SHAPE_PATTERN.sub("[REDACTED_TOKEN]", text)
     text = _redact_quoted_token_values(text)
     text = _QUOTED_BEARER_VALUE_PATTERN.sub(r"\1[REDACTED_TOKEN]", text)
-    return _TOKEN_VALUE_PATTERN.sub(r"\1[REDACTED_TOKEN]", text)
+    text = _BEARER_VALUE_PATTERN.sub(r"\1[REDACTED_TOKEN]", text)
+    return _redact_unquoted_token_values(text)
 
 
 def unscrub_marker(vault: "DataVault", marker: str) -> str | None:

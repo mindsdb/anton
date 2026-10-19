@@ -300,6 +300,85 @@ class TestScrubOutput:
         result = scrub_output("access_token=AbCdEfGhIjKlMnOpQr!secretTailXYZ")
         assert result == "access_token=[REDACTED_TOKEN]"
 
+    @pytest.mark.parametrize("glue", ['"', "'", " ", "@", "#"], ids=["quote", "apostrophe", "space", "at", "hash"])
+    @pytest.mark.parametrize("key", ["access_token", "refresh_token", "client_secret"])
+    def test_an_unquoted_value_is_redacted_past_a_quote_space_at_or_hash(self, key, glue):
+        """The tail after a quote, space, `@` or `#` is part of the value."""
+        result = scrub_output(f"{key}={OPAQUE_TOKEN}{glue}tailGhIjKlMn")
+        assert result == f"{key}=[REDACTED_TOKEN]"
+
+    @pytest.mark.parametrize("glue", ['"', "'", " ", "@", "#"], ids=["quote", "apostrophe", "space", "at", "hash"])
+    @pytest.mark.parametrize("key", ["access_token", "refresh_token", "client_secret"])
+    def test_a_short_first_part_does_not_let_the_rest_of_a_token_through(self, key, glue):
+        """A first part under 16 characters is judged with the rest of the value, not alone."""
+        result = scrub_output(f"{key}=ab{glue}{OPAQUE_TOKEN}")
+        assert result == f"{key}=[REDACTED_TOKEN]"
+
+    @pytest.mark.parametrize("padding", ["=", "=="])
+    def test_base64_padding_after_a_space_is_not_the_next_pair(self, padding):
+        """`defGhIjKl=` at the end of a value is padding, not a `key=value` pair that ends it."""
+        result = scrub_output(f"client_secret=abc defGhIjKlMnOp{padding}")
+        assert result == "client_secret=[REDACTED_TOKEN]"
+
+    @pytest.mark.parametrize(("text", "expected"), [
+        (f'access_token=ACCESS_TOKEN_NAME"{OPAQUE_TOKEN}', "access_token=[REDACTED_TOKEN]"),
+        (f"access_token=ACCESS_TOKEN_NAME {OPAQUE_TOKEN}", "access_token=[REDACTED_TOKEN]"),
+        (f"client_secret=load_client_secret#{OPAQUE_TOKEN}", "client_secret=[REDACTED_TOKEN]"),
+        (f"refresh_token: AccessTokenResponse@{OPAQUE_TOKEN}", "refresh_token: [REDACTED_TOKEN]"),
+        (f"client_secret=b'{OPAQUE_TOKEN}", "client_secret=[REDACTED_TOKEN]"),
+    ], ids=["constant-quote", "constant-space", "lowercase-hash", "type-at", "bytes-literal"])
+    def test_a_code_shaped_first_part_does_not_let_the_rest_of_a_token_through(self, text, expected):
+        """A name, type or constant is code only as the whole value or with code after it."""
+        assert scrub_output(text) == expected
+
+    @pytest.mark.parametrize(("text", "expected"), [
+        (
+            f'a=1&access_token=ab"{OPAQUE_TOKEN}&b=2',
+            "a=1&access_token=[REDACTED_TOKEN]&b=2",
+        ),
+        (
+            f'{{"user": "bob", "access_token": ab"{OPAQUE_TOKEN}, "scope": "read write", "expires_in": 3600}}',
+            '{"user": "bob", "access_token": [REDACTED_TOKEN], "scope": "read write", "expires_in": 3600}',
+        ),
+        (
+            f"{{'client_secret': ab'{OPAQUE_TOKEN}}}",
+            "{'client_secret': [REDACTED_TOKEN]}",
+        ),
+        (
+            f"refresh_token=abc {OPAQUE_TOKEN} user=bob status=ok",
+            "refresh_token=[REDACTED_TOKEN] user=bob status=ok",
+        ),
+        (
+            f'"GET /cb?code=x&access_token={OPAQUE_TOKEN} HTTP/1.1" 200 OK',
+            '"GET /cb?code=x&access_token=[REDACTED_TOKEN] HTTP/1.1" 200 OK',
+        ),
+        (
+            f'{{"url": "https://idp.example/cb?access_token={OPAQUE_TOKEN}", "status": 401}}',
+            '{"url": "https://idp.example/cb?access_token=[REDACTED_TOKEN]", "status": 401}',
+        ),
+    ], ids=["query-string", "json-like", "dict-close", "log-pairs", "url-in-log", "url-in-json"])
+    def test_an_unquoted_value_leaves_the_rest_of_its_line(self, text, expected):
+        """A value ends at `&`, `,` or `;`, before the next `key=` pair, at a space
+        in a URL, and before the quote or bracket that closes what holds it."""
+        assert scrub_output(text) == expected
+
+    @pytest.mark.parametrize("line", [
+        "access_token = ACCESS_TOKEN_NAME or DEFAULT_TOKEN_NAME",
+        "access_token = ACCESS_TOKEN_DEFAULT  # fallback when unset",
+        'access_token: str = Field(default="", description="OAuth token")',
+        "access_token: Optional[SecretStr] = None",
+        'access_token: std::env::var("ACCESS_TOKEN").unwrap(),',
+        "const accessToken = await getAccessToken(session);",
+        "refresh_token: invalid_grant (Token has been expired or revoked.)",
+        "access_token: expired for user bob",
+        'access_token = f"{token_type} {token_value}"',
+        "access_token for user Bob has expired",
+    ])
+    def test_code_and_prose_after_a_short_or_code_shaped_first_word_are_left_alone(self, line):
+        """An operator, comment, bracket, call or keyword after the first word reads as
+        code; lowercase words read as prose; a column value ends at its first space."""
+        assert scrub_output(line) == line
+
     @pytest.mark.parametrize("token", TOKEN_SAMPLES)
     @pytest.mark.parametrize("word", ["Bearer", "bearer", "BEARER"])
     def test_bearer_value_is_redacted_and_the_word_kept(self, word, token):
