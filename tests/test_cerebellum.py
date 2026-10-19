@@ -58,10 +58,15 @@ def _make_llm_raising(exc: Exception) -> MagicMock:
     return llm
 
 
-def _make_cortex() -> MagicMock:
-    """Build a mock Cortex with an awaitable encode() method."""
+def _make_cortex(*, needs_confirmation: bool = False) -> MagicMock:
+    """Build a mock Cortex with an awaitable encode() method.
+
+    `encoding_gate` answers `needs_confirmation` for every engram: False is
+    autopilot, True is copilot holding back a medium-confidence lesson.
+    """
     cortex = MagicMock()
     cortex.encode = AsyncMock(return_value=["encoded ok"])
+    cortex.encoding_gate = MagicMock(return_value=needs_confirmation)
     return cortex
 
 
@@ -283,6 +288,68 @@ class TestErrorPath:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Encoding gate — copilot holds lessons back for the person to confirm
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestEncodingGate:
+    async def test_copilot_queues_the_lessons_and_writes_nothing(self, tmp_path):
+        from anton.core.memory.cortex import Cortex
+        from anton.core.memory.hippocampus import Hippocampus
+
+        project_dir = tmp_path / "project"
+        cortex = Cortex(
+            global_hc=Hippocampus(tmp_path / "global"),
+            project_hc=Hippocampus(project_dir),
+            mode="copilot",
+        )
+        queued: list[list[Engram]] = []
+        cb = Cerebellum(
+            cortex=cortex,
+            llm=_make_llm_returning(("Check the driver first.", "scratchpad")),
+            queue_for_confirmation=queued.append,
+        )
+        await cb.on_post_execute(_cell(error="boom"))
+
+        result = await cb.flush()
+
+        assert [lesson.text for lesson in result] == ["Check the driver first."]
+        [batch] = queued
+        assert [(e.text, e.kind, e.confidence) for e in batch] == [
+            ("Check the driver first.", "lesson", "medium"),
+        ]
+        assert not (project_dir / "lessons.md").exists()
+
+    async def test_a_held_lesson_is_dropped_when_nobody_can_confirm_it(self):
+        cortex = _make_cortex(needs_confirmation=True)
+        cb = Cerebellum(
+            cortex=cortex, llm=_make_llm_returning(("lesson", "scratchpad")),
+        )
+        await cb.on_post_execute(_cell(error="boom"))
+
+        await cb.flush()
+
+        cortex.encode.assert_not_called()
+
+    async def test_the_gate_splits_one_batch(self):
+        cortex = _make_cortex()
+        cortex.encoding_gate = MagicMock(side_effect=lambda e: e.text == "ask me")
+        queued: list[list[Engram]] = []
+        cb = Cerebellum(
+            cortex=cortex,
+            llm=_make_llm_returning(("ask me", "scratchpad"), ("just save", "scratchpad")),
+            queue_for_confirmation=queued.append,
+        )
+        await cb.on_post_execute(_cell(error="boom"))
+
+        await cb.flush()
+
+        [encoded] = cortex.encode.await_args.args
+        assert [e.text for e in encoded] == ["just save"]
+        assert [[e.text for e in batch] for batch in queued] == [["ask me"]]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Robustness — bad LLM responses, missing infra
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -340,7 +407,7 @@ class TestRobustness:
         """If cortex.encode itself fails, the cerebellum logs and moves on.
         The lesson was still extracted (returned to the caller) — only
         the persistence step failed."""
-        cortex = MagicMock()
+        cortex = _make_cortex()
         cortex.encode = AsyncMock(side_effect=RuntimeError("disk full"))
         cb = Cerebellum(
             cortex=cortex,
@@ -350,6 +417,7 @@ class TestRobustness:
         # Must not raise
         result = await cb.flush()
         assert len(result) == 1
+        cortex.encode.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_no_cortex_no_encode(self):

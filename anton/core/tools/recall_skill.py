@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from anton.core.llm.identity import DEPLOYMENT_PRODUCT_SKILL_PREFACE
 from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.tool_defs import ToolDef
 
@@ -64,7 +65,7 @@ def _recall_marker(label: str) -> str:
     return f"# Skill recalled: `{label}`"
 
 
-def _format_skill_response(skill, *, warning: str = "") -> str:
+def _format_skill_response(skill, *, warning: str = "", preface: str = "") -> str:
     """Render the recall payload sent back to the LLM as a tool result."""
     parts: list[str] = []
     if warning:
@@ -78,6 +79,9 @@ def _format_skill_response(skill, *, warning: str = "") -> str:
         parts.append("")
     parts.append("## Procedure (Stage 1 — declarative)")
     parts.append("")
+    if preface:
+        parts.append(preface)
+        parts.append("")  # blank line before the skill's own text
     parts.append(skill.declarative_md.strip())
     return "\n".join(parts)
 
@@ -232,10 +236,21 @@ async def handle_recall_skill(
     # input. If the LLM typo'd 'csv-sumary', we credit 'csv-summary'.
     store.increment_recommended(skill.label, stage=1)
 
+    # A session with a deployment identity reads its precedence rules ahead of
+    # the product skill's default facts. Every other session gets the file as is.
+    preface = (
+        DEPLOYMENT_PRODUCT_SKILL_PREFACE
+        if skill.label == "cowork-product"
+        and getattr(session, "_deployment_identity", None) is not None
+        else ""
+    )
+
     # Tier 1: the procedure was returned. Also covers the closest-match path,
     # where `warning` explains the substitution — a substitution is still a
     # served request.
-    return ToolOutcome(content=_format_skill_response(skill, warning=warning), ok=True)
+    return ToolOutcome(
+        content=_format_skill_response(skill, warning=warning, preface=preface), ok=True
+    )
 
 
 RECALL_SKILL_TOOL = ToolDef(

@@ -40,6 +40,10 @@ __all__ = [
 # pipeline: its brief phase (show the brief, then up
 # to two revise cycles) reserves 3 of these for itself so the confirm step is
 # not a one-shot — see generate_artifact/state.py's PHASE2_RESERVED_QUESTIONS.
+#
+# A write approval card is the one question outside this budget
+# (`elicit(..., counted=False)`): the write gate asks it, not the model, so it
+# spends none of the model's questions.
 MAX_QUESTIONS_PER_TURN = 8
 
 # One option is nothing to choose; thirty buttons is a UI failure and the
@@ -190,13 +194,18 @@ def validate_answer(
     return None
 
 
-async def elicit(session, question_id: str, request: AskRequest) -> AskAnswer:
+async def elicit(
+    session, question_id: str, request: AskRequest, *, counted: bool = True,
+) -> AskAnswer:
     """Ask *request* and wait for the answer. The only path a question takes.
 
     Called by the ``ask_user`` / ``select_path`` handlers and directly by
     orchestrator code in ``generate_artifact``. Everything that decides
     "there will be no question" happens before ``begin()``, so a card is
     never published for a question that cannot be answered.
+
+    ``counted=False`` asks outside ``MAX_QUESTIONS_PER_TURN``: neither
+    refused by it nor spending it.
     """
     elicitor = getattr(session, "elicitor", None)
     if elicitor is None or request.kind not in elicitor.supported_kinds:
@@ -212,9 +221,10 @@ async def elicit(session, question_id: str, request: AskRequest) -> AskAnswer:
     # still open a channel and publish a card that can never be answered —
     # nothing emits StreamAskUserAnswered to retire it, and the "expired"
     # state does not apply while the run is still alive.
-    if session.question_count >= MAX_QUESTIONS_PER_TURN:
-        return AskAnswer(status="limit")
-    session.question_count += 1
+    if counted:
+        if session.question_count >= MAX_QUESTIONS_PER_TURN:
+            return AskAnswer(status="limit")
+        session.question_count += 1
 
     # begin() sits outside the try/finally on purpose: if it fails there is
     # no channel to end, so end() must not run. The budget above is

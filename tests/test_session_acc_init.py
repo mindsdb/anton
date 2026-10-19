@@ -9,6 +9,9 @@ points where ChatSession and the ACC meet:
   - `_schedule_acc_flush` drains the ACC buffer, converts each Lesson
     into an Engram with the kind the detector tagged, and routes them
     through `cortex.encode()`.
+  - the de-dupe `__init__` hands the ACC also reads the operator's
+    read-only layer. That one is a closure, so its tests build a real
+    ChatSession.
 
 We exercise the methods by binding them onto a `SimpleNamespace` with
 the minimum attributes they read. This is the same approach
@@ -20,14 +23,22 @@ in workspaces, LLM clients, and storage backends.
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 import types
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from anton.core.memory.acc import AnteriorCingulate
 from anton.core.memory.base import Engram
-from anton.core.session import ChatSession
+from anton.core.memory.cortex import Cortex
+from anton.core.memory.hippocampus import Hippocampus
+from anton.core.session import ChatSession, ChatSessionConfig
+from anton.workspace import Workspace
+
+from tests.test_cloud_turn_session import _mock_llm
 
 
 class FakeCortex:
@@ -278,3 +289,81 @@ class TestAccMaybeNudge:
         stub._acc_observe("scratchpad_call", {"name": "x", "code_len": 1})
         n = stub._acc_maybe_nudge([])
         assert n == 0  # graceful degradation
+
+
+def _name_switch_rule() -> str:
+    """The rule `detect_name_switch` writes, taken from the ACC, not copied."""
+    acc = AnteriorCingulate()
+    acc.observe("scratchpad_call", {"name": "a", "code_len": 100})
+    acc.observe("scratchpad_call", {"name": "b", "code_len": 100})
+    (lesson,) = acc.at_end_of_turn()
+    return lesson.rule
+
+
+@pytest.fixture()
+def operator_rules(tmp_path):
+    """A read-only operator folder whose rules.md already holds the
+    name-switch rule, as when an operator promotes a learned rule."""
+    if sys.platform == "win32" or os.geteuid() == 0:
+        pytest.skip("file modes don't stop this user writing, so read-only proves nothing")
+    folder = tmp_path / "managed"
+    folder.mkdir()
+    rules = folder / "rules.md"
+    rules.write_text(f"## Always\n- {_name_switch_rule()}\n", encoding="utf-8")
+    rules.chmod(0o444)
+    folder.chmod(0o555)
+    yield folder
+    folder.chmod(0o755)
+
+
+def _real_session(tmp_path: Path, *, managed_dir: Path | None) -> ChatSession:
+    """A real ChatSession, so the de-dupe is the one `__init__` wires into the ACC."""
+    global_dir, project_dir = tmp_path / "global", tmp_path / "project"
+    global_dir.mkdir()
+    project_dir.mkdir()
+    workspace = Workspace(tmp_path / "ws")
+    workspace.initialize()
+    return ChatSession(ChatSessionConfig(
+        llm_client=_mock_llm(),
+        workspace=workspace,
+        cortex=Cortex(
+            global_hc=Hippocampus(global_dir),
+            project_hc=Hippocampus(project_dir),
+            mode="autopilot",
+            managed_hc=Hippocampus(managed_dir) if managed_dir is not None else None,
+        ),
+    ))
+
+
+async def _switch_names_and_flush(session: ChatSession) -> None:
+    session._acc.observe("scratchpad_call", {"name": "a", "code_len": 100})
+    session._acc.observe("scratchpad_call", {"name": "b", "code_len": 100})
+    session._schedule_acc_flush()
+    # Give the create_task'd drain a turn to run.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+
+class TestAccSkipsOperatorRules:
+    """The end-of-turn de-dupe also reads the operator's read-only layer, so a
+    rule every turn already gets isn't copied into the person's own tier."""
+
+    async def test_a_rule_the_operator_layer_has_is_not_copied(self, tmp_path, operator_rules):
+        before = (operator_rules / "rules.md").read_bytes()
+        session = _real_session(tmp_path, managed_dir=operator_rules)
+
+        await _switch_names_and_flush(session)
+
+        assert not (tmp_path / "global" / "rules.md").exists()
+        assert session._acc.events == ()
+        assert sorted(p.name for p in operator_rules.iterdir()) == ["rules.md"]
+        assert (operator_rules / "rules.md").read_bytes() == before
+
+    async def test_without_an_operator_layer_the_rule_is_learned(self, tmp_path):
+        """The control: the same turn does write, so the test above isn't
+        passing because nothing could be written."""
+        session = _real_session(tmp_path, managed_dir=None)
+
+        await _switch_names_and_flush(session)
+
+        assert _name_switch_rule() in (tmp_path / "global" / "rules.md").read_text()

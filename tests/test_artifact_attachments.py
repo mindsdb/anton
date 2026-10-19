@@ -21,9 +21,16 @@ from anton.core.tools.generate_artifact.discovery.prompts import build_call_kick
 from anton.core.tools.generate_artifact.state import GenState
 
 
+
+def _unsandboxed_session() -> AsyncMock:
+    """A mock session whose scratchpads carry no sandbox policy, as on the desktop."""
+    session = AsyncMock()
+    session._scratchpads.cell_sandbox = None
+    return session
+
 def _state(tmp_path: Path, **kw) -> GenState:
     base = dict(
-        session=AsyncMock(), artifact_type="html-app", artifact_path=tmp_path,
+        session=_unsandboxed_session(), artifact_type="html-app", artifact_path=tmp_path,
         slug="a", brief="Show sales", is_fullstack=False,
         user_request="show sales", agent_understanding="a sales page",
     )
@@ -324,6 +331,7 @@ async def test_generate_records_kept_and_dropped_attachments(tmp_path: Path, mon
     monkeypatch.setattr(engine, "_scratchpads_context", lambda session: "")
     monkeypatch.setattr(orchestrator, "_datasource_catalog", lambda session: None)
     session = AsyncMock()
+    session._scratchpads.cell_sandbox = None
     session._workspace = SimpleNamespace(base=tmp_path)
     secret = tmp_path / ".anton" / ".env"
     secret.parent.mkdir()
@@ -356,7 +364,7 @@ async def test_generate_without_a_workspace_refuses_plain_files(tmp_path: Path, 
     monkeypatch.setattr(engine, "_scratchpads_context", lambda session: "")
     monkeypatch.setattr(orchestrator, "_datasource_catalog", lambda session: None)
     await engine.generate(
-        session=AsyncMock(), slug="a", artifact_path=art, artifact_type="html-app",
+        session=_unsandboxed_session(), slug="a", artifact_path=art, artifact_type="html-app",
         user_request="r", agent_understanding="u", attachments=[str(csv)],
     )
     assert seen["attachments"] == []

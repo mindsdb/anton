@@ -67,17 +67,17 @@ def clean_workbook(tmp_path: Path) -> Path:
 def test_no_office_configured_yields_none(monkeypatch, circular_workbook: Path):
     monkeypatch.delenv("ANTON_XLSX_LINT_OFFICE", raising=False)
     monkeypatch.setattr("shutil.which", lambda _name: None)
-    assert check_xlsx_via_office(circular_workbook) is None
+    assert check_xlsx_via_office(circular_workbook, cell_sandbox=None) is None
 
 
 def test_office_path_that_does_not_exist_yields_none(monkeypatch, circular_workbook: Path):
     monkeypatch.setenv("ANTON_XLSX_LINT_OFFICE", "/no/such/binary-xyz")
-    assert check_xlsx_via_office(circular_workbook) is None
+    assert check_xlsx_via_office(circular_workbook, cell_sandbox=None) is None
 
 
 @requires_office
 def test_flags_a_formula_that_recalculates_to_an_error(circular_workbook: Path):
-    findings = check_xlsx_via_office(circular_workbook)
+    findings = check_xlsx_via_office(circular_workbook, cell_sandbox=None)
     assert findings is not None
     assert len(findings) == 1
     assert findings[0].sheet == "Assumptions"
@@ -88,7 +88,7 @@ def test_flags_a_formula_that_recalculates_to_an_error(circular_workbook: Path):
 
 @requires_office
 def test_clean_workbook_has_no_findings(clean_workbook: Path):
-    assert check_xlsx_via_office(clean_workbook) == []
+    assert check_xlsx_via_office(clean_workbook, cell_sandbox=None) == []
 
 
 @pytest.fixture
@@ -119,4 +119,4 @@ def test_does_not_flag_a_string_result_that_looks_like_an_error(string_results_w
     """The exact false-positive shape from the review: `_ERROR_PREFIXES`
     string-matching flagged these; only `data_type == 'e'` — a genuine
     formula error, not any string starting with '#' — should."""
-    assert check_xlsx_via_office(string_results_workbook) == []
+    assert check_xlsx_via_office(string_results_workbook, cell_sandbox=None) == []

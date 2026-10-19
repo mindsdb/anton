@@ -13,7 +13,7 @@ import json
 import logging
 import re
 import sys
-from typing import TYPE_CHECKING, List, Literal
+from typing import TYPE_CHECKING, List, Literal, get_args
 import os
 import uuid
 
@@ -21,22 +21,24 @@ from pydantic import BaseModel, Field, field_validator
 
 from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
+from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
 from anton.core.datasources.data_vault import DataVault
 from anton.core.llm import jev as _jev
 from anton.core.llm.endpoints import ENDPOINT_MINDSHUB, classify_base_url, classify_endpoint
-from anton.core.llm.identity import product_lines, serving_model_lines
+from anton.core.llm.identity import DeploymentIdentity, product_lines, serving_model_lines
 from anton.core.llm.liveness import ModelCallTracker, arm_turn_tracker, disarm_turn_tracker
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.acc import AnteriorCingulate
 from anton.core.root_cause import RootCauseLedger
 from anton.core.root_cause import classify as classify_root_cause
-from anton.core.memory.base import Engram
+from anton.core.memory.base import Engram, LearnedMemoryScope
 from anton.core.memory.cerebellum import Cerebellum
 from anton.core.memory.skills import SkillStore
 from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
 from anton.core.tools.skill_draft import CREATE_SKILL_DRAFT_TOOL
 from anton.memory.history_store import is_user_turn, repair_replayed_tool_ids
 from anton.core.llm.prompts import (
+    ANTON_NOTE,
     RESILIENCE_NUDGE,
     SCRATCHPAD_INSTALL_NUDGE,
     SCRATCHPAD_SIZE_NUDGE,
@@ -104,16 +106,22 @@ from anton.core.tools.tool_defs import (
 from anton.core.interaction.elicit import Elicitor
 from anton.core.interaction.emitter import TurnEmitter
 from anton.core.utils.scratchpad import (
+    CELL_NOT_RUN_REASONS,
+    WriteGate,
     build_workspace_discovery_context,
     cell_failure_reason,
     prepare_scratchpad_exec,
     format_cell_result,
     observe_scratchpad_cell,
 )
-# Artifact-edit tracking + lint: shared with handle_scratchpad's
-# own exec branch (tool_handlers.py) rather than duplicated here, since this
-# inline streaming exec bypasses that handler entirely.
+from anton.core.utils.write_check import parse_http_write_rules
+# Artifact-edit tracking + lint and the scratchpad observer hooks: shared with
+# handle_scratchpad's own exec branch (tool_handlers.py) rather than duplicated
+# here, since this inline streaming exec bypasses that handler entirely.
 from anton.core.tools.tool_handlers import (
+    _fire_post_execute,
+    _fire_pre_execute,
+    preliminary_cell,
     resolve_artifact_store,
     snapshot_existing_artifact_mtimes,
     track_edits_since,
@@ -152,7 +160,7 @@ _COMPACTED_MARKER = "[COMPACTED CONTEXT — REFERENCE ONLY]"
 # Composed from one lead and per-loss tails so the both-halves case reads as a
 # single message instead of repeating the lead twice.
 _TRUNCATED_LEAD = (
-    "SYSTEM: Your response was truncated because it exceeded the output token limit."
+    f"{ANTON_NOTE} Your response was truncated because it exceeded the output token limit."
 )
 _TRUNCATED_CONTINUE_TAIL = (
     "Continue exactly where you left off. If you were about to call a tool, "
@@ -172,7 +180,7 @@ _TRUNCATED_TEXT_AND_TOOL_CALL_NUDGE = (
     f"{_TRUNCATED_CONTINUE_NUDGE} {_TRUNCATED_TOOL_CALL_TAIL}"
 )
 _TRUNCATED_SILENT_NUDGE = (
-    "SYSTEM: Your previous response spent its entire output-token budget before "
+    f"{ANTON_NOTE} Your previous response spent its entire output-token budget before "
     "producing any visible text or tool call — the user saw nothing. Respond again, "
     "and lead with the answer or the tool call immediately; keep deliberation brief. "
     "If the output you are building is large, produce it in smaller parts."
@@ -731,6 +739,60 @@ class _VerifierLatch:
     last_no_verdict: str = ""
 
 
+@dataclass
+class _TurnSegment:
+    """The messages one turn appended to one history list.
+
+    A turn writes to a new list each time compaction or hard truncation
+    replaces `ChatSession.history`. While the turn runs, the segment holds the
+    list itself, not a copy, so rows appended after the swap land in it. A
+    dataclass rather than a pydantic model for that reason: validation would
+    copy the list. When the turn ends, one segment over a copy of the turn's
+    messages replaces them all (see `ChatSession._close_turn_segments`).
+
+    `end` is None to read to the list's end. It is set when a merge moves the
+    list's last message into the next segment (see
+    `ChatSession._claim_merged_message`).
+    """
+
+    messages: list[dict]
+    start: int
+    end: int | None = None
+
+    @property
+    def stop(self) -> int:
+        """Where the segment's messages end in its list."""
+        return len(self.messages) if self.end is None else self.end
+
+
+@dataclass(frozen=True)
+class _TurnStep:
+    """One tool call a turn ran, as `_handback_report` lists it.
+
+    `errored` is the call's final verdict: its handler said it failed, or it
+    raised. It is kept here because history can't answer that later: a failed
+    call's tool_result carries no error flag. `not_run` is a scratchpad cell
+    that never ran (`CELL_NOT_RUN_REASONS`), such as a write the user didn't
+    approve: its call succeeded, but it did nothing.
+    """
+
+    description: str
+    errored: bool
+    not_run: bool = False
+
+
+def _step_description(call: ToolCall) -> str:
+    """The step's own one-line description, else the tool's name and action, on one line.
+
+    Only a scratchpad `exec` carries a description; the action tells a
+    scratchpad `view` or `install` apart from the bare tool name.
+    """
+    described = " ".join(str(call.input.get("one_line_description") or "").split())
+    if described:
+        return described
+    return " ".join(f"{call.name} {call.input.get('action') or ''}".split())
+
+
 # Process-wide latches for hosts that rebuild a session per message. Keyed on
 # the coding endpoint, model, and credential: a denial belongs to the account,
 # so a new api key gets a fresh latch. Only a digest of the key is held, and the
@@ -809,6 +871,44 @@ def _limit_handback_clause(reached: str) -> str:
         "from where you stopped. "
     )
 
+
+# How many of the turn's latest steps `_handback_report` lists, so a turn that
+# ran up to the step limit still gets a short report.
+_HANDBACK_REPORT_MAX_STEPS = 10
+
+
+def _handback_report(*, reached: str | None, steps: list[_TurnStep]) -> str:
+    """The hand-back anton writes itself when the content filter stopped every try at it.
+
+    Opens with the limit that stopped the turn when one did (`reached`, from
+    `ChatSession._limit_reached`), lists the steps the turn took, marking the
+    ones that failed or never ran, and ends the way `_limit_handback_clause`
+    asks the model to end. It quotes no tool output; each step line is the
+    model's own description of the step, written before it ran.
+    """
+    paragraphs: list[str] = []
+    if reached:
+        paragraphs.append(f"{reached}.")
+    shown = steps[-_HANDBACK_REPORT_MAX_STEPS:]
+    stopped = "The model provider's content filter stopped my summary of this request."
+    if shown:
+        # No unit here: the limit sentence counts rounds, and a round can run
+        # several calls, so "steps" would list more of them than the limit.
+        if len(shown) == len(steps):
+            paragraphs.append(f"{stopped} This is what I did before I stopped:")
+        else:
+            paragraphs.append(f"{stopped} These are the last things I did before I stopped:")
+        paragraphs.append("\n".join(
+            f"- {step.description}"
+            + (" (not run)" if step.not_run else " (failed)" if step.errored else "")
+            for step in shown
+        ))
+    else:
+        paragraphs.append(stopped)
+    paragraphs.append('Reply "keep going" to continue from where I stopped.')
+    return "\n\n".join(paragraphs)
+
+
 # Appended to the verifier system prompt. Shortens the preamble on narrating
 # models but is not sufficient alone (0/3 at 256 with it), so it pairs with the
 # budgets above. Tool name comes off the schema class so it can't go stale.
@@ -850,6 +950,8 @@ _VERIFIER_JUDGMENT_RUBRIC = (
 # mention this" reads as an injection: Azure's prompt filter blocks variants of it, and
 # models answered it with "I cannot assist" or by inventing the figure just reported missing.
 _CHECK_NOTE = "[Automatic completion check, not written by the user]"
+# How anton's notes open. "SYSTEM:" stays for histories saved before the notes were labelled.
+_NOTE_PREFIXES = ("SYSTEM:", _CHECK_NOTE, ANTON_NOTE)
 
 # Appended to the work-limit pauses: a turn stopped mid-search filled the gap with a guess.
 _NO_GUESS_AT_LIMIT = (
@@ -1178,6 +1280,71 @@ def _render_tool_result_content(content, cap: int) -> str:
     return _clip_keep_cause(str(content), cap)
 
 
+# Replaces a tool result that `ChatSession.hard_truncate_history` keeps but the
+# retried request has no room for. The tool_use keeps an answer, and the model
+# learns to ask for less.
+_RESULT_TOO_LARGE = (
+    "[Result removed: too large for the context window. "
+    "Narrow the request and call the tool again.]"
+)
+
+
+def _window_byte_budget(model: str) -> int:
+    """UTF-8 bytes of text that fill about a quarter of `model`'s window.
+
+    One byte per window token: a quarter of the window at the ~4 chars/token
+    rule of thumb, where an ASCII char is one byte.
+    """
+    return context_window(model)
+
+
+def _result_text_bytes(content) -> int:
+    """How many UTF-8 bytes of text a tool_result's content carries.
+
+    An image block counts none: a provider scales an image down and bills it
+    by its pixels, a bounded cost, not by the length of its base64.
+    """
+    if isinstance(content, list):
+        text = "".join(
+            block.get("text") or ""
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    else:
+        text = str(content)
+    # "replace": a lone surrogate, which decoded JSON can hold, would raise.
+    return len(text.encode("utf-8", "replace"))
+
+
+def _stub_largest_results(*, messages: list[dict], model: str) -> list[dict]:
+    """`messages` with their largest tool_results stubbed until the rest fit
+    in `_window_byte_budget(model)` bytes of text.
+
+    Of two results the same size, the earlier one goes first: the next
+    planning call answers the latest. A message with no result stubbed is
+    returned as itself, so a caller can tell by identity whether it changed.
+    """
+    sizes: dict[tuple[int, int], int] = {
+        (i, j): _result_text_bytes(block.get("content", ""))
+        for i, message in enumerate(messages)
+        if isinstance(message.get("content"), list)
+        for j, block in enumerate(message["content"])
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    }
+    if not sizes:
+        return messages
+    stubbed = list(messages)
+    over = sum(sizes.values()) - _window_byte_budget(model)
+    for i, j in sorted(sizes, key=lambda position: (-sizes[position], position)):
+        if over <= 0:
+            break
+        content = list(stubbed[i]["content"])
+        content[j] = {**content[j], "content": _RESULT_TOO_LARGE}
+        stubbed[i] = {**stubbed[i], "content": content}
+        over -= sizes[i, j]
+    return stubbed
+
+
 # Stands in for a multimodal block in the verify transcript. Named because
 # the judged-entry selection below has to be able to tell it apart from a
 # real reply.
@@ -1203,8 +1370,8 @@ def _render_verify_transcript(
     ``max_tool`` tool events, merged back into chronological order. Speaker is
     taken from the message role (list-based *user* content — images/files — is
     labelled USER, not ASSISTANT); multimodal blocks are rendered block-by-block
-    (text kept, images as a placeholder, never raw base64); internal ``SYSTEM:``
-    injections are dropped before budgeting so they don't consume slots. Keeps
+    (text kept, images as a placeholder, never raw base64); anton's internal notes (``_NOTE_PREFIXES``)
+    are dropped before budgeting so they don't consume slots. Keeps
     the call cheap and free of tool_use/tool_result pairing constraints
     (ENG-716).
 
@@ -1244,7 +1411,7 @@ def _render_verify_transcript(
         speaker = "USER" if role == "user" else "ASSISTANT"
         if isinstance(content, str):
             text = content.strip()
-            if not text or (role == "user" and text.startswith(("SYSTEM:", _CHECK_NOTE))):
+            if not text or (role == "user" and text.startswith(_NOTE_PREFIXES)):
                 continue
             convo.append((i, speaker, text))
         elif isinstance(content, list):
@@ -1485,6 +1652,12 @@ class ChatSessionConfig:
     # the only source; see anton.utils.datasources._resolve_usage_notes.
     connector_usage_notes: dict[str, str] | None = None
     workspace_env_overlay: dict[str, str] | None = None
+    # The Landlock policy every spawn of this session's agent code runs under
+    # (cells, venv checks, installs, the artifact verifier). None runs them
+    # unlocked, as on the desktop and in the cloud pod. A host sets it per
+    # session, since the folders differ per person; a runtime factory that
+    # cannot take it makes the session refuse to build.
+    cell_sandbox: CellSandbox | None = None
     console: Console | None = None
     initial_history: list[dict] | None = None
     history_store: HistoryStore | None = None
@@ -1523,6 +1696,10 @@ class ChatSessionConfig:
     # in every surface breakdown, and a wrong surface is worse than an absent
     # one.
     surface: str | None = None
+    # Trusted deployment facts supplied by the host. Omitted by desktop, hosted
+    # web and CLI callers, whose identity and memory prompts stay unchanged.
+    deployment_identity: DeploymentIdentity | None = None
+    learned_memory_scope: LearnedMemoryScope | None = None
     # Whether this host renders a streaming tool's live tail — the last lines
     # of the file a tool is writing, relayed as the `tool_peek` progress phase
     # (`ToolRegistry.dispatch_tool`). Only the CLI has a footer for it today;
@@ -1657,6 +1834,10 @@ class ChatSession:
         # limit. Reset per turn in turn_stream.
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
+        # The tool calls this turn ran, for the report `_stream_handback_diagnosis`
+        # writes when the content filter stops every hand-back. Reset per turn in
+        # turn_stream.
+        self._turn_steps: list[_TurnStep] = []
         # Whether this turn's own message told the agent to keep going (None
         # until a limit first asks), and the limits that message has already
         # carried past once.
@@ -1766,7 +1947,14 @@ class ChatSession:
         self._seed_covered = 0
         self._synthetic_prefix_len = 0
         self._compaction_sealed = False
-        self._pending_memory_confirmations: list = []
+        # The latest turn's messages, one segment per history list it wrote to
+        # (see `turn_messages`). Set when a turn starts and frozen into one
+        # copied segment when it ends, so a host reads them once the stream is
+        # done. `_turn_open` is True only while `turn_stream` runs: a swap
+        # outside a turn is not recorded.
+        self._turn_segments: list[_TurnSegment] = []
+        self._turn_open = False
+        self._pending_memory_confirmations: list[Engram] = []
         self._turn_count = (
             sum(1 for m in self._history if is_user_turn(m))
             if config.initial_history
@@ -1776,6 +1964,16 @@ class ChatSession:
         self._session_id = config.session_id
         self._harness = config.harness
         self._surface = _validated_surface(config.surface)
+        self._deployment_identity = (
+            DeploymentIdentity.model_validate(config.deployment_identity)
+            if config.deployment_identity is not None else None
+        )
+        if config.learned_memory_scope not in (None, *get_args(LearnedMemoryScope)):
+            raise ValueError("unrecognized learned_memory_scope")
+        self._learned_memory_scope = (
+            config.learned_memory_scope or "unavailable"
+            if self._deployment_identity is not None else None
+        )
         self.live_tool_peek = config.live_tool_peek
         self.tool_messages = config.tool_messages
         self._user_id = _validated_account_id(config.user_id)
@@ -1812,6 +2010,16 @@ class ChatSession:
         # Seconds spent waiting on humans during the current tool dispatch,
         # subtracted from the tool's reported elapsed time.
         self.answer_wait_s = 0.0
+        # Holds a cell that changes a database, existing files, or data behind
+        # an HTTP API until the user approves it (`hold_unapproved_write`).
+        # Only when the host turns `write_approval` on; `is True` so a
+        # MagicMock settings object reads off.
+        self._write_gate: WriteGate | None = None
+        if getattr(s, "write_approval", False) is True:
+            listed = getattr(s, "write_approval_http", "")
+            self._write_gate = WriteGate(
+                http_rules=parse_http_write_rules(listed if isinstance(listed, str) else ""),
+            )
 
         coding_provider = config.llm_client.coding_provider
         coding_conn = coding_provider.export_connection_info()
@@ -1826,6 +2034,7 @@ class ChatSession:
             session_id=config.session_id,
             data_vault=config.data_vault,
             workspace_env_overlay=config.workspace_env_overlay,
+            cell_sandbox=config.cell_sandbox,
         )
 
         self.tool_registry = ToolRegistry()
@@ -1849,11 +2058,13 @@ class ChatSession:
         self._artifacts_touched: set[str] = set()
         # Cerebellum: supervised error learning over scratchpad cells.
         # Buffers errored/warning cells across the turn, runs one diff
-        # call at end-of-turn, and encodes lessons via cortex.encode().
+        # call at end-of-turn, and encodes lessons via cortex.encode(),
+        # or queues them for confirmation when the encoding gate says so.
         # Wired into the dispatcher's observer list below.
         self._cerebellum = Cerebellum(
             cortex=self._cortex,
             llm=self._llm,
+            queue_for_confirmation=self._queue_memory_confirmations,
         )
         # Anterior Cingulate Cortex: turn-level pattern detection.
         # Where the cerebellum looks at one cell and asks "did this
@@ -1869,17 +2080,24 @@ class ChatSession:
         # has_similar_lesson: cheap substring check against the
         # current rules.md content. Avoids re-encoding the same
         # rule every turn. Embedding similarity is a v2 upgrade.
+        # Checks the operator's read-only layer too, so a rule it
+        # already gives every turn isn't copied into the person's tier.
         def _acc_has_similar(rule: str) -> bool:
-            cortex = getattr(self, "_cortex", None)
-            hc = getattr(cortex, "global_hc", None) if cortex else None
-            if hc is None:
-                return False
-            try:
-                existing = hc.recall_rules() or ""
-            except Exception:
-                return False
             probe = (rule or "")[:60].lower()
-            return bool(probe) and probe in existing.lower()
+            if not probe:
+                return False
+            cortex = getattr(self, "_cortex", None)
+            for tier in ("managed_hc", "global_hc"):
+                hc = getattr(cortex, tier, None) if cortex else None
+                if hc is None:
+                    continue
+                try:
+                    existing = hc.recall_rules() or ""
+                except Exception:
+                    continue
+                if probe in existing.lower():
+                    return True
+            return False
 
         self._acc = AnteriorCingulate(has_similar_lesson=_acc_has_similar)
         # ANTON_ACC_MODE controls how aggressively ACC affects the
@@ -1898,7 +2116,8 @@ class ChatSession:
         _mode_raw = os.environ.get("ANTON_ACC_MODE", "active").strip().lower()
         self._acc_mode = _mode_raw if _mode_raw in ("off", "passive", "active") else "active"
         # Scratchpad observers — list of objects with on_pre_execute /
-        # on_post_execute. Fired by handle_scratchpad around pad.execute.
+        # on_post_execute. Fired around every scratchpad exec, by
+        # handle_scratchpad and by the inline streaming exec alike.
         # The runtime never sees this list; observation lives at the
         # dispatcher layer to keep local/remote runtimes interchangeable.
         # ACC is intentionally NOT in this list — its emit footprint
@@ -1942,6 +2161,27 @@ class ChatSession:
     @property
     def history(self) -> list[dict]:
         return self._history
+
+    def turn_messages(self) -> list[dict]:
+        """Every message the latest turn appended to history, in order.
+
+        Compaction and hard truncation replace `history` with a new list that
+        no longer holds the turn's earlier messages, so a slice of `history`
+        taken from the turn's start would drop them, or keep a tool_result
+        whose tool_use was folded away. This reads each list the turn wrote to
+        from where the turn started writing to it.
+
+        Without a swap it equals `history[n:]`, where n is the history length
+        when the turn started, so it includes the turn's own user input. Empty
+        before the first turn. Fixed once the turn ends: later appends or
+        rewrites of `history` (a CLI command between turns, the next turn's
+        compaction before it starts) do not change it.
+        """
+        return [
+            message
+            for segment in self._turn_segments
+            for message in segment.messages[segment.start:segment.end]
+        ]
 
     @property
     def act_first(self) -> bool:
@@ -2109,7 +2349,7 @@ class ChatSession:
 
         if streak >= self._max_consecutive_errors:
             result_text += (
-                f"\n\nSYSTEM: The '{tool_name}' tool has failed {self._max_consecutive_errors} times "
+                f"\n\n{ANTON_NOTE} The '{tool_name}' tool has failed {self._max_consecutive_errors} times "
                 "in a row. Stop retrying this approach. Either try a completely different "
                 "strategy or tell the user what's going wrong so they can help."
             )
@@ -2245,6 +2485,77 @@ class ChatSession:
     # mixed shapes get normalised to a list-of-blocks (the form
     # every chat API accepts for both roles).
 
+    def _start_turn_segments(self) -> None:
+        """Mark the turn's start: its messages begin at the end of history."""
+        self._turn_segments = [
+            _TurnSegment(messages=self._history, start=len(self._history))
+        ]
+        self._turn_open = True
+
+    def _close_turn_segments(self) -> None:
+        """Mark the turn's end: freeze its messages and release the lists.
+
+        The turn's messages are copied into one segment, so the session no
+        longer holds the history lists a swap replaced, and edits to `history`
+        between turns do not reach `turn_messages`.
+        """
+        self._turn_segments = [_TurnSegment(messages=self.turn_messages(), start=0)]
+        self._turn_open = False
+
+    def _replace_history(self, *, messages: list[dict]) -> None:
+        """Make `messages` the session's history.
+
+        Every swap of the history list goes through here. During a turn the
+        outgoing list stays in `_turn_segments` (anton never writes to it
+        again), and the new list starts a segment at its current end, so
+        `turn_messages` still returns the rows the swap folded away. Recorded
+        at the swap rather than by the host watching events, so rows anton
+        appends before its next yield are kept too.
+        """
+        if self._turn_open:
+            self._turn_segments.append(
+                _TurnSegment(messages=messages, start=len(messages))
+            )
+        self._history = messages
+
+    def _claim_merged_message(self, *, replaced: dict) -> None:
+        """Move a merged message into the turn's current segment.
+
+        Right after a swap the new list's last message sits just before the
+        segment's start: the swap carried it over from the outgoing list, or
+        made it (the summary, or the hard-truncation separator). When
+        `_append_history` merges a message into it, the merged message holds
+        content this turn added, so the segment starts one message earlier.
+        If the outgoing list's last turn message is the one replaced, its
+        segment stops before it, so the message is not read twice.
+        `hard_truncate_history` claims the carried-over message the same way
+        when it stubs a tool_result in the turn's last message.
+
+        The first segment is left alone: a merge into the last seeded message
+        (the turn's user input after a seed that ends with a user message) is
+        not this turn's, and `turn_messages` stays equal to the plain slice.
+        """
+        if not self._turn_open or len(self._turn_segments) < 2:
+            return
+        current = self._turn_segments[-1]
+        if current.start != len(self._history):
+            return
+        current.start -= 1
+        written = self._last_written_segment()
+        if written is not None and written.messages[written.stop - 1] is replaced:
+            written.end = written.stop - 1
+
+    def _last_written_segment(self) -> _TurnSegment | None:
+        """The latest segment before the current one that holds a message.
+
+        Walks past a segment that holds none: two swaps on one planning call
+        leave the first swap's list with nothing appended.
+        """
+        for segment in reversed(self._turn_segments[:-1]):
+            if segment.stop > segment.start:
+                return segment
+        return None
+
     @staticmethod
     def _coerce_to_block_list(content) -> list[dict]:
         """Normalise a message's content into a list of blocks.
@@ -2302,6 +2613,7 @@ class ChatSession:
             + self._coerce_to_block_list(content)
         )
         self._history[-1] = {**prev, "role": role, "content": merged_blocks}
+        self._claim_merged_message(replaced=prev)
         logger.info(
             "Merged consecutive %s messages in history (would have violated "
             "Anthropic role alternation). Combined block count: %d.",
@@ -2445,15 +2757,26 @@ class ChatSession:
 
         # Inject memory context (replaces old self_awareness)
         memory_section = ""
+        learned_memory_scope = getattr(self, "_learned_memory_scope", None)
         if self._cortex is not None:
             # Once per turn: a retry must not repeat the rule filter model calls.
             turn_memory = self._turn_memory
             if turn_memory is not None and user_message in turn_memory:
                 memory_section = turn_memory[user_message]
             else:
-                memory_section = await self._cortex.build_memory_context(user_message)
+                if learned_memory_scope is None:
+                    memory_section = await self._cortex.build_memory_context(user_message)
+                else:
+                    memory_section = await self._cortex.build_memory_context(
+                        user_message, learned_memory_scope=learned_memory_scope
+                    )
                 if turn_memory is not None:
                     turn_memory[user_message] = memory_section
+        elif learned_memory_scope is not None:
+            from anton.core.memory.cortex import learned_memory_notice
+
+            scope = "off" if learned_memory_scope == "off" else "unavailable"
+            memory_section = "\n\n" + learned_memory_notice(scope)
 
         sa_section = ""
         if self._self_awareness is not None and self._cortex is None:
@@ -2504,7 +2827,10 @@ class ChatSession:
             runtime_identity_lines=identity_lines,
             # ENG-2423. Cache-stable like the identity lines above: the surface
             # is fixed for the life of the session.
-            product_lines=product_lines(getattr(self, "_surface", None)),
+            product_lines=product_lines(
+                getattr(self, "_surface", None), getattr(self, "_deployment_identity", None)
+            ),
+            deployment_identity=getattr(self, "_deployment_identity", None),
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
             output_dir=self._output_dir,
@@ -2666,7 +2992,13 @@ class ChatSession:
 
         # Inject scratchpad wisdom from memory (procedural priming)
         if self._cortex is not None:
-            wisdom = self._cortex.get_scratchpad_context()
+            learned_memory_scope = getattr(self, "_learned_memory_scope", None)
+            if learned_memory_scope is None:
+                wisdom = self._cortex.get_scratchpad_context()
+            else:
+                wisdom = self._cortex.get_scratchpad_context(
+                    learned_memory_scope=learned_memory_scope
+                )
             if wisdom:
                 scratchpad_tool.description += (
                     f"\n\nLessons from past sessions:\n{wisdom}"
@@ -3091,14 +3423,14 @@ class ChatSession:
         # If the recent portion starts with a user message, insert a minimal
         # assistant separator to avoid consecutive user messages (API error).
         if recent_turns and recent_turns[0].get("role") == "user":
-            self._history = [
+            self._replace_history(messages=[
                 summary_msg,
                 {"role": "assistant", "content": "Understood — using that as reference."},
                 *recent_turns,
-            ]
+            ])
             self._synthetic_prefix_len = 2
         else:
-            self._history = [summary_msg] + recent_turns
+            self._replace_history(messages=[summary_msg, *recent_turns])
             self._synthetic_prefix_len = 1
         self._seed_covered = covered
         if recorded and not self._compaction_sealed:
@@ -3358,23 +3690,26 @@ class ChatSession:
         throws away everything except the last `keep` messages, preserving
         tool_use/tool_result pairing and the API rule that the first
         message must be from the user.
+
+        In a tool loop every kept message is a tool row, and the retried
+        planning call answers the last tool_result. So the tail keeps its
+        leading assistant message: the placeholder user message goes before
+        it, and dropping it would orphan the tool_result after it. When the
+        kept tool_results are too large for the retry, the largest become
+        stubs that ask the model to narrow the request and call the tool again.
         """
         if len(self._history) <= keep:
             return
         tail = list(self._history[-keep:])
 
-        # Strip leading messages that would leave tail in an invalid state:
-        # - assistant at head (API requires user first)
-        # - user whose only blocks are tool_result references (their
-        #   matching tool_use is in the dropped prefix, so they're orphaned)
-        # Repeat because dropping one can expose another. A user message
-        # with mixed content keeps its non-tool_result blocks.
+        # Strip a leading user message's tool_result blocks: their tool_use
+        # is in the dropped prefix, so nothing in the request calls them. A
+        # user message with mixed content keeps its non-tool_result blocks;
+        # one with nothing else goes. Repeat in case the next message is a
+        # user message too.
         while tail:
             head = tail[0]
             role = head.get("role")
-            if role == "assistant":
-                tail.pop(0)
-                continue
             if role == "user":
                 content = head.get("content")
                 if isinstance(content, list):
@@ -3389,6 +3724,17 @@ class ChatSession:
                         tail[0] = {**head, "content": filtered}
             break
 
+        # A kept tool result can be what overflowed on its own: a connector
+        # result has no size cap. The largest kept results become stubs until
+        # the rest fit a quarter of the planning model's window, which leaves
+        # the other three quarters for the system prompt, the tools and the
+        # reply. Every tool_use keeps its tool_result, and the retry fits.
+        # Sizes count UTF-8 bytes, one per ASCII char, so text that packs more
+        # tokens into each char, such as CJK at three bytes per char, counts
+        # closer to what it costs.
+        unstubbed_last = tail[-1] if tail else None
+        tail = _stub_largest_results(messages=tail, model=self._llm.planning_model)
+
         placeholder = {
             "role": "user",
             "content": "[Earlier conversation was truncated due to persistent context overflow.]",
@@ -3399,9 +3745,22 @@ class ChatSession:
         # case — the tail's first assistant message can directly
         # respond to the placeholder user message.
         if tail and tail[0].get("role") == "assistant":
-            self._history = [placeholder, *tail]
+            self._replace_history(messages=[placeholder, *tail])
         else:
-            self._history = [placeholder, separator, *tail]
+            self._replace_history(messages=[placeholder, separator, *tail])
+        # A stubbed last message replaces the outgoing list's last message, as
+        # a merge does, so `turn_messages` reads that tool_result once: as the
+        # stub the model saw. Each swap keeps the last tool_result message as
+        # it is, or claims the stub that replaces it, so the latest segment
+        # that holds a message ends with the one stubbed here. When no segment
+        # holds one, the turn has appended nothing: the stubbed message is the
+        # seed's and stays the seed's.
+        if (
+            tail
+            and tail[-1] is not unstubbed_last
+            and self._last_written_segment() is not None
+        ):
+            self._claim_merged_message(replaced=unstubbed_last)
 
         # A hard truncate discards the compacted summary — the turns it covered
         # are gone from history, so replaying it next turn would describe
@@ -3558,6 +3917,9 @@ class ChatSession:
             # so "error" covered a parse failure, a tool crash, a bad config
             # and an anton bug alike — indistinguishable in any query.
             tc.error_type = _safe_error_type(exc)
+        elif tc.content_filtered:
+            # Wins over a hand-back's reason, so a client can tell the filter fired and rerun.
+            tc.ended_by = "content_filter"
 
         # Stamped at books-open; the live lookup remains only for bare-session
         # tests and the legacy non-streaming path.
@@ -4121,23 +4483,25 @@ class ChatSession:
         _record_grace(self._turn_cost, "ceiling")
 
     def _limit_reached(self, limit: str) -> str:
-        """Names the limit that stopped the turn, and where it is set.
+        """Names the limit that stopped the turn.
 
         The user cannot act on "this took a lot of work": they need to know a
-        per-request limit fired, so that a reply carries on and a setting can
-        raise it. Reports the limit in force now, which a "Keep going" may
-        already have raised."""
+        per-request limit fired, so that a reply carries on. Reports the limit
+        in force now, which a "Keep going" may already have raised.
+
+        It names no setting that raises the limit, since the user often can't
+        change one. cowork-server refuses an org member's write to the limits
+        unless they are an org admin (`_require_org_admin_for` in
+        cowork/api/v1/endpoints/settings.py). A self-hosted stack's recording
+        proxy refuses every tester's (`decide`, with the limits among
+        `SHARED_SETTING_NAMES`, in recording-proxy/recording_proxy/rules.py of
+        cowork-self-hosted). Nothing tells the session which case it is in.
+        """
         if limit == "spend_ceiling":
             ceiling = self._max_turn_tokens + self._spend_ceiling_continued_tokens
-            return (
-                f"This task reached its limit of {ceiling:,} tokens per request "
-                "(Max tokens per task, in your settings)"
-            )
+            return f"This task reached its limit of {ceiling:,} tokens per request"
         cap = self._max_tool_rounds + self._round_cap_continued_rounds
-        return (
-            f"This task reached its limit of {cap} steps per request "
-            "(Max steps per task, in your settings)"
-        )
+        return f"This task reached its limit of {cap} steps per request"
 
     def _grant_limit(self, limit: str) -> None:
         """Raise `limit` by `_LIMIT_CONTINUE_MULTIPLIER` times its configured
@@ -4269,7 +4633,7 @@ class ChatSession:
         """
         spent = self._turn_cost.total_tokens if self._turn_cost is not None else 0
         return (
-            f"SYSTEM: This turn has used {spent:,} tokens, which is a large amount "
+            f"{ANTON_NOTE} This turn has used {spent:,} tokens, which is a large amount "
             "of work for a single request and counts against the user's plan. "
             "Pause here. Summarize what you have accomplished so far and what "
             "remains. Be straightforward that this has already taken a lot of "
@@ -4366,7 +4730,13 @@ class ChatSession:
             logger.debug("completion-verifier jev bookkeeping failed", exc_info=True)
 
     async def _stream_handback_diagnosis(
-        self, *, system: str, label: str, cancels_continuation: bool = False
+        self,
+        *,
+        system: str,
+        label: str,
+        answered: bool,
+        cancels_continuation: bool = False,
+        limit: Literal["round_cap", "spend_ceiling"] | None = None,
     ):
         """Stream a hand-back diagnosis and persist exactly what the user read.
 
@@ -4386,6 +4756,17 @@ class ChatSession:
         the callers know from the continuation counter. It announces the
         hand-back so no consumer mistakes this diagnosis for the replacement
         answer that boundary promised.
+
+        `answered` says the reply before the diagnosis has text; the tool-loop
+        stops have none. A diagnosis the provider's content filter stops is
+        dropped; with no answer to end on, it is tried once more. When that try
+        is filtered too, anton streams and saves the report `_handback_report`
+        builds instead of calling the model a third time, so the user still
+        reads where the turn stopped. The filtered calls already marked the
+        turn, so it still ends `content_filter`.
+
+        `limit` names the limit that stopped the turn, if one did; the report
+        opens with `_limit_reached`'s sentence for it.
         """
         log = logging.getLogger(__name__)
         # Marks this diagnosis as an explanation, not the replacement answer a
@@ -4394,17 +4775,62 @@ class ChatSession:
         # turn that never continued is unchanged on the wire.
         if cancels_continuation:
             yield StreamTaskProgress(phase="handback", message="")
-        diagnosis_response = None
-        async for event in self.plan_stream_with_recovery(system=system):
-            yield event
-            if isinstance(event, StreamComplete):
-                diagnosis_response = event
+        # A turn with no answer of its own tries a filtered diagnosis once more;
+        # one with an answer ends on it instead.
+        for attempt in range(1 if answered else 2):
+            diagnosis_response = None
+            # Held until the call ends: a content filter marks a reply only in its
+            # last event, after the text has streamed.
+            held_text: list[StreamTextDelta] = []
+            filtered = False
+            stream = self.plan_stream_with_recovery(system=system)
+            try:
+                async for event in stream:
+                    if isinstance(event, StreamTextDelta):
+                        # Held text yields no event for the CLI to see Escape on, so check here.
+                        watcher = self.escape_watcher
+                        if self._cancel_event.is_set() or (watcher and watcher.cancelled.is_set()):
+                            log.info("%s diagnosis cancelled while held — dropped", label)
+                            self._drop_handback_note()
+                            # Set here so the books say cancelled, then one event for the CLI to stop on.
+                            self._cancel_event.set()
+                            yield StreamTaskProgress(phase="analyzing", message="Cancelled")
+                            return
+                        held_text.append(event)
+                        continue
+                    if isinstance(event, StreamComplete):
+                        diagnosis_response = event
+                        filtered = event.response.stop_reason == "content_filter"
+                        if not filtered:
+                            for delta in held_text:
+                                yield delta
+                        held_text = []
+                    yield event
+            finally:
+                await stream.aclose()
+            if not filtered:
+                break
+            log.warning(
+                "%s diagnosis stopped by the provider's content filter — dropped (try %d)",
+                label, attempt + 1,
+            )
         text = (
             (diagnosis_response.response.content or "").strip()
-            if diagnosis_response is not None
+            if diagnosis_response is not None and not filtered
             else ""
         )
-        if text:
+        if filtered and not answered:
+            # Dropping this one too would end the turn with no text at all.
+            log.warning("%s diagnosis filtered on every try — sent anton's own report", label)
+            report = _handback_report(
+                reached=self._limit_reached(limit) if limit else None,
+                steps=self._turn_steps,
+            )
+            yield StreamTextDelta(text=report)
+            self._append_history({"role": "assistant", "content": report})
+        elif filtered:
+            self._drop_handback_note()
+        elif text:
             self._append_history({"role": "assistant", "content": text})
         else:
             log.warning(
@@ -4414,6 +4840,20 @@ class ChatSession:
                 "max-tool-rounds path, since the cap block appends that last)",
                 label,
             )
+
+    def _drop_handback_note(self) -> None:
+        """Remove the hand-back's note once its reply is dropped, so the turn ends on the answer.
+
+        Left in place, the user's next message merges into it. Only a standalone note goes: one
+        merged into tool results (a list) would take those results with it.
+        """
+        last = self._history[-1] if self._history else None
+        if (
+            isinstance(last, dict) and last.get("role") == "user"
+            and isinstance(last.get("content"), str)
+            and last["content"].strip().startswith(_NOTE_PREFIXES)
+        ):
+            self._history.pop()
 
     async def plan_stream_with_recovery(
         self,
@@ -4459,6 +4899,7 @@ class ChatSession:
 
         try:
             async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
+                self._book_content_filter(event)
                 yield event
             return
         except ContextOverflowError:
@@ -4473,6 +4914,7 @@ class ChatSession:
             )
         try:
             async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
+                self._book_content_filter(event)
                 yield event
             return
         except ContextOverflowError:
@@ -4483,7 +4925,17 @@ class ChatSession:
             message="Context still exceeded limits — older history was hard-truncated."
         )
         async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
+            self._book_content_filter(event)
             yield event
+
+    def _book_content_filter(self, event: StreamEvent) -> None:
+        """Note a call the provider's content filter stopped, so the turn ends naming it."""
+        if (
+            isinstance(event, StreamComplete)
+            and event.response.stop_reason == "content_filter"
+            and self._turn_cost is not None
+        ):
+            self._turn_cost.content_filtered = True
 
     def _acc_observe(
         self,
@@ -4675,11 +5127,16 @@ class ChatSession:
         Best-effort: if there's no buffered work or no event loop, this
         is a no-op. Exceptions in the background task are swallowed
         because they're already logged inside cerebellum.flush().
+
+        Drops the buffer without a model call when automatic memory passes
+        are off (`_background_memory_active`): the host turned them off, there
+        is no cortex, or memory mode is "off", where `cortex.encode` would
+        discard every lesson the diff call paid for.
         """
         cb = getattr(self, "_cerebellum", None)
         if cb is None:
             return
-        if not getattr(self, "_background_memory", True):
+        if not self._background_memory_active:
             cb.reset()
             return
         if cb.buffered_count == 0:
@@ -4718,7 +5175,12 @@ class ChatSession:
         """
         async for _event in self.turn_stream(user_input, enable_interaction=False):
             pass
-        last = self._history[-1] if self._history else None
+        # A dropped hand-back leaves anton's own note last; the reply is the one before it.
+        tail = list(self._history)
+        while tail and tail[-1].get("role") == "user" and isinstance(tail[-1].get("content"), str) \
+                and tail[-1]["content"].strip().startswith(_NOTE_PREFIXES):
+            tail.pop()
+        last = tail[-1] if tail else None
         if not isinstance(last, dict) or last.get("role") != "assistant":
             return ""
         content = last.get("content")
@@ -4851,6 +5313,13 @@ class ChatSession:
         # reports only what the CURRENT turn touched. Hosts that build a fresh
         # session per turn get the same result either way.
         self._artifacts_touched = set()
+        # What the project held when this turn began: a cell may delete or
+        # rename a file it wrote this turn without asking, not one from before.
+        if self._write_gate is not None:
+            await self._write_gate.begin_turn(manager=self._scratchpads)
+        # Before the inner turn appends the user input, so `turn_messages`
+        # starts where a slice of the seeded history would.
+        self._start_turn_segments()
         # Bind the inner generator so we can close it explicitly. A bare
         # `async for` would leave it suspended at its own `yield` when a host
         # abandons this wrapper: GeneratorExit lands on OUR yield, the loop is
@@ -4871,8 +5340,14 @@ class ChatSession:
             async for event in inner:
                 yield event
         finally:
-            await inner.aclose()
-            self.emitter = None
+            # Nested so the turn still closes when the inner turn's own
+            # cleanup raises; a turn left open would record the next
+            # between-turn swap as its own.
+            try:
+                await inner.aclose()
+            finally:
+                self._close_turn_segments()
+                self.emitter = None
 
     async def _turn_stream_inner(
         self,
@@ -4920,6 +5395,7 @@ class ChatSession:
         self._round_cap_grace_used = False
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
+        self._turn_steps = []
         self._finish_authorized = None
         self._limits_passed_by_message = set()
         self._turn_memory = {}
@@ -5253,13 +5729,13 @@ class ChatSession:
                         # just note it was transient and continue as planned (ENG-673).
                         if isinstance(_agent_exc, TransientProviderError):
                             recovery_note = (
-                                f"SYSTEM: A temporary provider error interrupted execution: {_agent_exc}\n\n"
+                                f"{ANTON_NOTE} A temporary provider error interrupted execution: {_agent_exc}\n\n"
                                 "This was a transient service issue, not a problem with your approach — "
                                 "continue the task as planned."
                             )
                         else:
                             recovery_note = (
-                                f"SYSTEM: An error interrupted execution: {_agent_exc}\n\n"
+                                f"{ANTON_NOTE} An error interrupted execution: {_agent_exc}\n\n"
                                 "If you can diagnose and fix the issue, continue working on the task. "
                                 "Adjust your approach to avoid the same error. "
                                 "If this is unrecoverable, summarize what you accomplished and suggest next steps."
@@ -5353,7 +5829,7 @@ class ChatSession:
                             {
                                 "role": "user",
                                 "content": (
-                                    f"SYSTEM: The task has failed {_retry_count} times. Latest error: {_agent_exc}\n\n"
+                                    f"{ANTON_NOTE} The task has failed {_retry_count} times. Latest error: {_agent_exc}\n\n"
                                     "Stop retrying. Please:\n"
                                     "1. Summarize what you accomplished so far.\n"
                                     "2. Explain what went wrong in plain language.\n"
@@ -5427,6 +5903,15 @@ class ChatSession:
             raise
         finally:
             self._turn_memory = None
+            # A cancelled turn drops the failed cells the cerebellum buffered,
+            # so neither this turn's flush nor the next one learns from a turn
+            # the person backed out of. Same cancel test the books use below.
+            if isinstance(_turn_exc, (GeneratorExit, asyncio.CancelledError)) or (
+                getattr(self, "_cancel_event", None) and self._cancel_event.is_set()
+            ):
+                cerebellum = getattr(self, "_cerebellum", None)
+                if cerebellum is not None:
+                    cerebellum.reset()
             # Closed before the books, with no await in between, so work that
             # outlives the turn (memory consolidation, a late finalizer) can
             # neither keep a host's wait line alive nor latch a deadline.
@@ -5783,7 +6268,7 @@ class ChatSession:
                         {
                             "role": "user",
                             "content": (
-                                f"SYSTEM: You have used {effective_round_cap} tool-call rounds on this turn. "
+                                f"{ANTON_NOTE} You have used {effective_round_cap} tool-call rounds on this turn. "
                                 "Pause here. Summarize what you have accomplished so far and what remains. "
                                 "If you believe you are on a good track and can finish the task with more steps, "
                                 "tell the user and ask if they'd like you to continue. "
@@ -5802,8 +6287,8 @@ class ChatSession:
                     # the highest-traffic one of the four).
                     _reply_persisted = True
                     async for event in self._stream_handback_diagnosis(
-                        system=system, label="max-tool-rounds",
-                        cancels_continuation=continuation > 0,
+                        system=system, label="max-tool-rounds", answered=False,
+                        cancels_continuation=continuation > 0, limit="round_cap",
                     ):
                         yield event
                     break
@@ -5860,8 +6345,8 @@ class ChatSession:
                             message="Reached this task's token budget — checking in with you...",
                         )
                         async for event in self._stream_handback_diagnosis(
-                            system=system, label="spend-ceiling",
-                            cancels_continuation=continuation > 0,
+                            system=system, label="spend-ceiling", answered=False,
+                            cancels_continuation=continuation > 0, limit="spend_ceiling",
                         ):
                             yield event
                         break
@@ -5957,11 +6442,35 @@ class ChatSession:
                     try:
                         if tc.name == "scratchpad" and tc.input.get("action") == "exec":
                             # Inline streaming exec — yields progress events
-                            prep = await prepare_scratchpad_exec(self, tc.input)
+                            if self._write_gate is not None and self.emitter is not None:
+                                # Drained: the approval card prepare may raise
+                                # reaches the host only through the emitter,
+                                # the way the limit question's does.
+                                prep = None
+                                agen = self._run_draining(prepare_scratchpad_exec(self, tc.input))
+                                try:
+                                    async for _kind, _payload in agen:
+                                        if _kind == "event":
+                                            yield _payload
+                                        else:
+                                            prep = _payload
+                                finally:
+                                    await agen.aclose()
+                            else:
+                                prep = await prepare_scratchpad_exec(self, tc.input)
                             if isinstance(prep, ToolOutcome):
                                 result_text = prep.content
                                 tool_ok = prep.ok
                                 tool_reason = prep.reason
+                                # The cell never ran. Its result still closes
+                                # the step the host drew from the call, with
+                                # the reason as its output. Plain text, not a
+                                # cell's JSON, so cowork-server's cell replay
+                                # (extract_scratchpad_cells) never reads it as
+                                # a cell that ran.
+                                yield StreamToolResult(
+                                    name=tc.name, action="exec", content=prep.content, id=tc.id,
+                                )
                             else:
                                 (
                                     pad,
@@ -5975,6 +6484,19 @@ class ChatSession:
                                     message=description or "Running code",
                                     eta_seconds=estimated_seconds,
                                     id=tc.id,
+                                )
+
+                                # The scratchpad observers (the cerebellum)
+                                # see this cell on this path too, in the
+                                # order handle_scratchpad fires them.
+                                await _fire_pre_execute(
+                                    self,
+                                    preliminary_cell(
+                                        code=code,
+                                        description=description,
+                                        estimated_time=estimated_time,
+                                        estimated_seconds=estimated_seconds,
+                                    ),
                                 )
 
                                 _sp_t0 = _time.monotonic()
@@ -6030,6 +6552,7 @@ class ChatSession:
                                         lint_messages = await asyncio.to_thread(
                                             lint_changed_artifact_files,
                                             artifact_store, before_artifact_mtimes,
+                                            cell_sandbox=cell_sandbox_of(self._scratchpads),
                                         )
                                     except Exception:
                                         lint_messages = []
@@ -6063,6 +6586,7 @@ class ChatSession:
                                         description=description,
                                         cell=cell,
                                     )
+                                    await _fire_post_execute(self, cell)
                                     # Same post-execute ACC event as the CLI
                                     # path (handle_scratchpad) — this inline
                                     # streaming exec bypasses that handler, so
@@ -6285,6 +6809,13 @@ class ChatSession:
                         error_type=_tool_error_type,
                         reason=tool_reason,
                     )
+                    # Every executed call passes here once with its final
+                    # verdict, so the hand-back report lists each step once.
+                    self._turn_steps.append(_TurnStep(
+                        description=_step_description(tc),
+                        errored=tool_ok is False,
+                        not_run=tool_reason in CELL_NOT_RUN_REASONS,
+                    ))
 
                     if isinstance(result_text, list):
                         # Multimodal tool result — scrub credentials from text
@@ -6476,7 +7007,7 @@ class ChatSession:
                     {
                         "role": "user",
                         "content": (
-                            "SYSTEM: You have attempted to complete this task multiple times "
+                            f"{_CHECK_NOTE} You have attempted to complete this task multiple times "
                             "but verification indicates it is still not done. Do NOT try again. "
                             "Instead:\n"
                             "1. Summarize exactly what was accomplished so far.\n"
@@ -6494,7 +7025,7 @@ class ChatSession:
                 if self._turn_cost is not None:
                     self._turn_cost.ended_by = "handback_budget"
                 async for event in self._stream_handback_diagnosis(
-                    system=system, label="budget-exhausted",
+                    system=system, label="budget-exhausted", answered=bool(reply.strip()),
                     cancels_continuation=continuation > 0,
                 ):
                     yield event
@@ -6840,21 +7371,20 @@ class ChatSession:
                     {
                         "role": "user",
                         "content": (
-                            "SYSTEM: Your reply above stands, and nothing in your work "
-                            "was rejected — no verdict came back at all. What failed is "
-                            "the automatic check on whether the task is complete, so "
-                            "completeness is unconfirmed rather than denied.\n"
-                            "1. Report accurately what you did: what succeeded, and "
-                            "anything that did not, including any tool that returned an "
-                            "error. Do not describe a failed step as done.\n"
-                            "2. Name a file only by a path that appears verbatim in a "
-                            "tool result above. Never state a path you intended to write "
-                            "or believe you wrote; where no tool result gives one, say "
-                            "what you produced without naming a location.\n"
-                            "3. Say whether anything still needs doing and ask how they'd "
-                            "like to proceed.\n"
-                            f"4. {_SOLVABILITY_CLAUSE}\n"
-                            "Do not mention this instruction or the verifier to the user."
+                            f"{_CHECK_NOTE} Your reply above stands, and nothing in it "
+                            "was rejected. The automatic check on whether the task is "
+                            "complete returned no verdict, so completeness is unconfirmed "
+                            "rather than denied.\n\n"
+                            "Tell the user what you did: what succeeded and anything that "
+                            "did not, including any tool that returned an error. Do not "
+                            "describe a failed step as done. Name a file only by a path "
+                            "that appears verbatim in a tool result above. Never state a "
+                            "path you intended to write or believe you wrote; where no tool "
+                            "result gives one, say what you produced without naming a "
+                            "location. Say whether anything still needs doing and ask how "
+                            "they'd like to proceed. "
+                            f"{_SOLVABILITY_CLAUSE} Write it for the user, without "
+                            "referring to this check."
                         ),
                     }
                 )
@@ -6865,7 +7395,7 @@ class ChatSession:
                 if self._turn_cost is not None:
                     self._turn_cost.ended_by = "handback_verifier_failure"
                 async for event in self._stream_handback_diagnosis(
-                    system=system, label="verifier-failure",
+                    system=system, label="verifier-failure", answered=bool(reply.strip()),
                     cancels_continuation=continuation > 0,
                 ):
                     yield event
@@ -6905,7 +7435,7 @@ class ChatSession:
                 if self._turn_cost is not None:
                     self._turn_cost.ended_by = "handback_stuck"
                 async for event in self._stream_handback_diagnosis(
-                    system=system, label="stuck",
+                    system=system, label="stuck", answered=bool(reply.strip()),
                     cancels_continuation=continuation > 0,
                 ):
                     yield event
@@ -6964,8 +7494,8 @@ class ChatSession:
                         message="Reached this task's token budget — checking in with you...",
                     )
                     async for event in self._stream_handback_diagnosis(
-                        system=system, label="spend-ceiling",
-                        cancels_continuation=continuation > 0,
+                        system=system, label="spend-ceiling", answered=bool(reply.strip()),
+                        cancels_continuation=continuation > 0, limit="spend_ceiling",
                     ):
                         yield event
                     break
@@ -7051,4 +7581,12 @@ class ChatSession:
             await self._cortex.encode(auto_encode)
 
         if needs_confirm:
-            self._pending_memory_confirmations.extend(needs_confirm)
+            self._queue_memory_confirmations(needs_confirm)
+
+    def _queue_memory_confirmations(self, engrams: list[Engram]) -> None:
+        """Hold engrams the encoding gate kept back until the person confirms them.
+
+        The CLI shows them before its next prompt and encodes the ones the
+        person keeps. A host that never reads the queue writes none of them.
+        """
+        self._pending_memory_confirmations.extend(engrams)

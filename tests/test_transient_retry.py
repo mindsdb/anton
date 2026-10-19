@@ -150,7 +150,6 @@ def test_billing_denials_never_enter_the_retry_loop(status, body):
         (401, {}),                                   # auth
         (403, {"error": {"code": "model_disabled"}}),      # model gate
         (403, {"error": {"code": "model_access_denied"}}),
-        (429, {"detail": "out of tokens"}),          # quota → TokenLimitExceeded upstream
         (400, {"error": {"type": "invalid_request_error"}}),
     ],
 )
@@ -188,10 +187,18 @@ def test_mapper_5xx_is_transient(mapper):
         mapper(503, {})
 
 
+def test_classify_transient_429_with_a_detail_is_a_rate_limit():
+    # The MindsHub edge answers a request flood with a FastAPI `detail` body.
+    result = classify_transient(429, {"detail": "You have reached your request limit."}, provider="X")
+    assert isinstance(result, TransientProviderError)
+    assert result.code == "rate_limited"
+
+
 @pytest.mark.parametrize("mapper", [_anthropic_map, _openai_map])
-def test_mapper_quota_429_is_token_limit_not_transient(mapper):
-    with pytest.raises(TokenLimitExceeded):
-        mapper(429, {"detail": "You have run out of tokens."})
+def test_mapper_detail_429_is_a_rate_limit_not_token_limit(mapper):
+    with pytest.raises(TransientProviderError) as ei:
+        mapper(429, {"detail": "You have reached your request limit."})
+    assert not isinstance(ei.value, TokenLimitExceeded)
 
 
 @pytest.mark.parametrize("mapper", [_anthropic_map, _openai_map])

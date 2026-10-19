@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .identity import build_runtime_identity_section
+from .identity import DeploymentIdentity, build_runtime_identity_section
 from .prompts import (
     ARTIFACTS_PROMPT,
     BASE_VISUALIZATIONS_PROMPT,
@@ -151,6 +151,7 @@ class ChatSystemPromptBuilder:
         workspace_context: str = "",
         runtime_identity_lines: list[str] | None = None,
         product_lines: list[str] | None = None,
+        deployment_identity: DeploymentIdentity | None = None,
     ) -> str:
         visualizations_section = self._build_visualizations_section(
             proactive_dashboards=proactive_dashboards,
@@ -178,6 +179,9 @@ class ChatSystemPromptBuilder:
             product_block=list(product_lines) if product_lines else None,
         )
         prompt += CHAT_SYSTEM_PROMPT.format(
+            # PRODUCT carries the configured name. An explicit deployment must
+            # not also introduce itself as Anton in the prompt's opening line.
+            identity_lead="You are an AI coworker" if deployment_identity is not None else "You are Anton",
             runtime_identity_section=runtime_identity_section,
             artifacts_section=ARTIFACTS_PROMPT,
             visualizations_section=visualizations_section,
