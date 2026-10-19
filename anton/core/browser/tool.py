@@ -710,7 +710,7 @@ BROWSER: you and the user share a real browser (Chromium, their own browser inst
 - After the user signs in to a site, call action=note_login with the site (and an account hint they'd recognise, never a secret) so later conversations know the login is there.
 - Ask before anything that commits on the user's behalf: buying, paying, sending, deleting, or submitting a form.
 - Only report what the page actually shows. If a step fails or the page didn't change, say so.
-- Use action=screenshot only when the page list can't show what you need (canvas, maps, charts, text in images).
+- Use action=screenshot when the page list can't show what you need (canvas, maps, charts, text in images), or when you seem stuck: a step failed or timed out, the page didn't change, or you're about to try the same thing again. Usually something is in the way (a modal, cookie banner or overlay); close it, then go on. Don't take one after every step.
 """
 
 BROWSER_TOOL_SCHEMA = {
@@ -722,7 +722,7 @@ BROWSER_TOOL_SCHEMA = {
             "description": (
                 "open: open the browser (optionally at url) and list signed-in sites. "
                 "run: work toward a goal, taking the steps that are clear. "
-                "page: read the current page. act: take one step. screenshot: see the page. "
+                "page: read the current page. act: take one step. screenshot: see the page, e.g. when stuck. "
                 "hand_to_user: let the user take over (sign-in, CAPTCHA, payment). "
                 "note_login: record that the user is signed in to a site. close: close the browser."
             ),

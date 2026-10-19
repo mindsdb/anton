@@ -21,7 +21,7 @@ How to drive it
 1. Start with `run`: one sentence of goal, plus `inputs` for anything that must be typed or chosen ({"search": "MacBook Air", "country": "Mexico"}). run takes the steps it is sure of and hands back with the page and the steps taken when it isn't.
 2. When run hands back, read the page and take the next step yourself with `act`, using the element numbers from the latest page. Then call run again if the rest is routine.
 3. Element numbers can go stale after the page changes. If a step says an element is gone, read the page again rather than guessing.
-4. Use `screenshot` only when the page list can't show what you need: canvas, maps, charts, images with text.
+4. Use `screenshot` when the page list can't show what you need (canvas, maps, charts, images with text), or when you seem stuck: a step failed or timed out, the page didn't change, or you're about to repeat yourself. Usually a modal, cookie banner or overlay is in the way; close it and go on. Not after every step.
 5. Report only what the page shows. If a step did nothing, say so; never describe a page you haven't read.
 
 Working with the user
