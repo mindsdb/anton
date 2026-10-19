@@ -270,16 +270,6 @@ class ScratchpadManager:
             _last_probe = probe
         return list(probe.names)
 
-    def has_connections(self) -> bool:
-        """Whether the data vault lists any connection; False without a vault.
-
-        A failed listing raises: a caller that holds writes to connected data
-        must not read "couldn't list" as "none".
-        """
-        if self._data_vault is None:
-            return False
-        return bool(self._data_vault.list_connections())
-
     def _derive_ds_env(self) -> dict[str, str] | None:
         """DS_* env values from the current vault state, fresh each call; None without a vault."""
         if self._data_vault is None:

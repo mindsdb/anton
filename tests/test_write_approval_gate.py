@@ -210,10 +210,11 @@ async def test_an_update_waits_for_approve_and_then_runs_once(project):
     assert ran_before == [0], "nothing ran before the user answered"
     assert pad.ran == [UPDATE_CELL], "it runs exactly once after Approve"
     prompt = seen[0].request.prompt
-    assert "UPDATE suppliers SET lead_time_days = %s WHERE supplier_id = %s" in prompt
-    assert "21" in prompt and "S005" in prompt, "the card shows the values too"
+    quoted = "UPDATE suppliers\nSET lead_time_days = %s\nWHERE supplier_id = %s\nwith values (21, 'S005')"
+    assert f"```\n{quoted}\n```" in prompt, "the card quotes the statement line by line, with its values"
     assert seen[0].id.startswith("write:")
     assert seen[0].request.allow_custom is False
+    assert {option.style for option in seen[0].request.options} == {"default"}, "no host renders a style"
 
 
 @pytest.mark.parametrize("answer", [CANCEL, SKIP, TIMEOUT], ids=["cancel", "skip", "timeout"])
@@ -233,7 +234,7 @@ async def test_a_rename_of_an_existing_file_waits_and_names_it(project):
     session, pad, elicitor = _session(project, RENAME_CELL)
     seen, ran_before = await _run(session, pad, elicitor, [APPROVE])
     assert len(seen) == 1 and ran_before == [0]
-    assert "rename report.pdf" in seen[0].request.prompt
+    assert "This step would rename:\n\n```\nreport.pdf\n```" in seen[0].request.prompt
     assert pad.ran == [RENAME_CELL]
 
 
@@ -305,12 +306,14 @@ class _AnswersAtOnce:
         self.answer = answer
         self.raises = raises
         self.asked = 0
+        self.prompts: list[str] = []
 
     async def begin(self, question_id, request):
         pass
 
     async def ask(self, question_id, request):
         self.asked += 1
+        self.prompts.append(request.prompt)
         if self.raises is not None:
             raise self.raises
         return self.answer
@@ -393,18 +396,14 @@ async def test_an_earlier_cells_connection_still_counts(project):
     assert outcome is not None and outcome.reason == "write_not_approved"
 
 
-async def test_a_connected_session_holds_a_write_with_no_ds_text(project):
+async def test_a_session_with_no_saved_connection_still_holds_a_database_write(project):
+    """No vault connection and no DS_ name: the write still waits."""
     session = await _gated_session(project, elicitor=_AnswersAtOnce(CANCEL))
-    session._write_gate.connected = True
     code = "import psycopg2\nconn = psycopg2.connect(dsn)\nconn.cursor().execute('UPDATE t SET a = 1')"
-    assert await _hold()(session, pad=_Pad(), code=code) is not None
-
-
-async def test_a_listing_failure_counts_as_connected(project):
-    session = await _gated_session(project)
-    session._scratchpads.has_connections = MagicMock(side_effect=OSError("vault unreadable"))
-    await session._write_gate.begin_turn(manager=session._scratchpads)
-    assert session._write_gate.connected is True
+    outcome = await _hold()(session, pad=_Pad(), code=code)
+    assert outcome is not None and outcome.reason == "write_not_approved"
+    local = "import duckdb\ncon = duckdb.connect()\ncon.execute(\"CREATE TABLE stock AS SELECT * FROM read_csv('stock.csv')\")"
+    assert await _hold()(session, pad=_Pad(), code=local) is None
 
 
 async def test_the_shared_folder_is_held_too(project, tmp_path_factory):
@@ -420,6 +419,26 @@ async def test_the_shared_folder_is_held_too(project, tmp_path_factory):
         session, pad=_Pad(), code=f"import os\nos.remove({str(shared / 'forecast.xlsx')!r})",
     )
     assert outcome is not None and "shared folder: forecast.xlsx" in outcome.content
+
+
+@pytest.mark.parametrize("code", [
+    "import shutil\nshutil.rmtree({root!r})",
+    "import subprocess\nsubprocess.run(['rm', '-rf', {root!r}])",
+], ids=["rmtree", "rm-rf"])
+async def test_the_whole_shared_folder_is_named_on_the_card(project, tmp_path_factory, code):
+    from anton.core.utils.write_check import snapshot_project_files
+
+    shared = tmp_path_factory.mktemp("shared")
+    (shared / "forecast.xlsx").write_text("x")
+    elicitor = _AnswersAtOnce(CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    session._write_gate.snapshots += (
+        snapshot_project_files(root=shared, label="shared", taken_at=10**10),
+    )
+    outcome = await _hold()(session, pad=_Pad(), code=code.format(root=str(shared)))
+    assert outcome is not None and outcome.reason == "write_not_approved"
+    assert elicitor.prompts and "This step would delete the whole shared folder." in elicitor.prompts[0]
+    assert (shared / "forecast.xlsx").exists()
 
 
 def test_a_refused_cell_is_not_working_code_for_the_artifact_pipeline():

@@ -235,6 +235,14 @@ ANTON_LANGFUSE_HEADERS=1
 
 ---
 
+## Self-hosted product identity
+
+A host can supply `ChatSessionConfig.deployment_identity` using `DeploymentIdentity(kind="self-hosted", product_name="Acme Cowork")` from `anton.core.llm.identity`. Anton uses that name, identifies MindsHub as the maker, and explains that users access an operator-managed deployment in the browser. The prompt opens with a neutral identity, leaving the configured name in its authoritative PRODUCT block. These facts take precedence over the default product skill. When such a session recalls the `cowork-product` skill, the deployment's precedence rules come ahead of the skill's default facts; without a deployment identity, the skill is recalled unchanged. The product name is 1 to 64 characters, with no leading or trailing whitespace, control or format characters, unpaired surrogates, or line separators. The host must read it from trusted deployment configuration, never from a chat message or a user's preferences.
+
+The same host supplies `learned_memory_scope` as `personal`, `shared`, `off` or `unavailable`. With a deployment identity, Anton explains the saved-memory state and distinguishes product instructions and operator rules from learned user preferences. It checks saved content before retrieval filters and reports unreadable stores as unverified. Off and unavailable turns skip learned-store reads during prompt assembly and tool-context construction; the host must also supply the appropriate stores and learning policy when constructing Cortex. Without a deployment identity, both identity and memory prompts keep their existing defaults.
+
+These are in-process session inputs. The cloud-turn wire does not transport deployment identity or learned-memory scope.
+
 ## Model-call deadline
 A model call that sends nothing for 10 minutes is stopped, and the turn ends with "The model sent no output for 10 minutes, so the call was stopped." Every piece of text, thinking or tool-call arguments anton reads from the model restarts the 10 minutes, so a slow model that keeps writing is never cut. A non-streamed call gets the 10 minutes for the whole call, including the SDK's own retries. After one call in a turn runs out, every later model call in that turn fails at once. The one exception is the completion check after an answer: when it runs out, the turn ends on the answer that already streamed, marked unverified.
 

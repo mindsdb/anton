@@ -15,6 +15,7 @@ from anton.core.backends.sandbox import cell_sandbox_of, validate_pad_name
 from anton.core.tools.registry import ToolOutcome
 from anton.core.utils.write_check import (
     CellWrites,
+    FileChange,
     ProjectSnapshot,
     find_cell_writes,
     snapshot_project_files,
@@ -45,14 +46,13 @@ _WHY = {
 
 @dataclass
 class WriteGate:
-    """Per-session state for holding cells that change data or existing files.
+    """Per-session state for holding cells that change a database or existing files.
 
     Present on a session only when the host turns the setting on. `begin_turn`
     records what the project and shared folders held when the turn began.
     """
 
     snapshots: tuple[ProjectSnapshot, ...] = ()
-    connected: bool = False
     # After one card goes unanswered, later flagged cells in the same turn are
     # refused without a new card, so an unattended turn doesn't wait out the
     # timeout once per cell.
@@ -60,14 +60,6 @@ class WriteGate:
 
     async def begin_turn(self, *, manager: ScratchpadManager) -> None:
         self.unanswered = False
-        try:
-            self.connected = manager.has_connections() or any(
-                key.startswith("DS_") for key in os.environ
-            )
-        except Exception:
-            # Can't tell: read every SQL write as one to connected data.
-            logger.warning("write approval: could not list connections", exc_info=True)
-            self.connected = True
         taken_at = time.time()
         roots: list[tuple[Literal["project", "shared"], Path]] = []
         if manager.workspace_path is not None:
@@ -94,26 +86,53 @@ class WriteApprovalDecision(BaseModel):
     status: RefusalCause | Literal["approved", "not_held"]
 
 
+def _inert(text: str) -> str:
+    """`text` with each HTML comment mark split by a zero-width space. Cowork
+    drops `<!-- ... -->` from a card before it reads the Markdown, code
+    included, and drops everything after an unclosed `<!--`."""
+    return text.replace("<!--", "<\u200b!--").replace("-->", "--\u200b>")
+
+
 def _fence(text: str) -> str:
     """`text` in a code fence longer than any run of backticks inside it, so
     the card shows it as written."""
     ticks = 3
     while "`" * ticks in text:
         ticks += 1
-    return "`" * ticks + "\n" + text + "\n" + "`" * ticks
+    return "`" * ticks + "\n" + _inert(text) + "\n" + "`" * ticks
+
+
+def _code_span(text: str) -> str:
+    """`text` in a code span longer than any run of backticks inside it."""
+    ticks = 1
+    while "`" * ticks in text:
+        ticks += 1
+    pad = " " if text[:1] in ("`", " ") or text[-1:] in ("`", " ") else ""
+    return "`" * ticks + pad + text + pad + "`" * ticks
+
+
+def _wholes(change: FileChange) -> str:
+    """The root folders `change` takes whole, as the card names them; "" for none."""
+    wholes = []
+    if change.whole_project:
+        wholes.append("the whole project folder")
+    if change.whole_shared:
+        wholes.append("the whole shared folder")
+    return " and ".join(wholes)
 
 
 def _describe_files(writes: CellWrites) -> list[str]:
+    """Each held file change for the refusal: every path it names, or the
+    code that picks the path when it runs."""
     out = []
     for change in writes.held_files:
-        verb = change.action
-        if change.whole_project:
-            out.append(f"{verb} the whole project folder")
-        elif change.paths:
-            shown = ", ".join(change.paths[:5]) + (f" and {len(change.paths) - 5} more" if len(change.paths) > 5 else "")
-            out.append(f"{verb} {shown}")
-        else:
-            out.append(f"{verb} a file it picks when it runs ({change.call})")
+        wholes = _wholes(change)
+        if wholes:
+            out.append(f"{change.action} {wholes}")
+        if change.paths:
+            out.append(f"{change.action} {', '.join(_code_span(p) for p in change.paths)}")
+        if not (wholes or change.paths):
+            out.append(f"{change.action} a file or folder it picks when it runs, in {_code_span(change.call)}")
     return out
 
 
@@ -128,17 +147,26 @@ def _summary(writes: CellWrites) -> str:
 
 
 def _card_prompt(writes: CellWrites) -> str:
+    """The card: every statement and every file change the step would make,
+    whole, since one Approve runs them all. Statements, paths and code go in
+    fences, so Cowork's Markdown shows them as written."""
     lines = ["**Approve this change?**", ""]
     if writes.sql:
-        lines.append("This step would change data in a connected source:")
-        lines.append("")
-        for write in writes.sql[:3]:
+        lines += ["This step would change data in a connected source:", ""]
+        for write in writes.sql:
             text = write.statement + (f"\nwith values {write.values}" if write.values else "")
             lines += [_fence(text), ""]
-        if len(writes.sql) > 3:
-            lines += [f"and {len(writes.sql) - 3} more.", ""]
-    for line in _describe_files(writes):
-        lines += [f"This step would {line}.", ""]
+        if any(write.run_time_parts for write in writes.sql):
+            lines += ["A part in braces, `{...}`, is the code that fills in that value when the step runs.", ""]
+    for change in writes.held_files:
+        wholes = _wholes(change)
+        if wholes:
+            lines += [f"This step would {change.action} {wholes}.", ""]
+        if change.paths:
+            lines += [f"This step would {change.action}:", "", _fence("\n".join(change.paths)), ""]
+        if not (wholes or change.paths):
+            lines += [f"This step would {change.action} a file or folder it picks when it runs, in this code:",
+                      "", _fence(change.call), ""]
     if writes.unchecked:
         lines += ["This step can't be checked before it runs.", ""]
     lines.append("It runs only if you approve. Cancel, Skip or no answer stops it.")
@@ -169,7 +197,7 @@ async def _ask_approval(session: ChatSession, writes: CellWrites) -> RefusalCaus
     request = AskRequest(
         prompt=_card_prompt(writes),
         options=(
-            AskOption(value="approve", label="Approve", detail="Run this step once", style="destructive"),
+            AskOption(value="approve", label="Approve", detail="Run this step once"),
             AskOption(value="cancel", label="Cancel", detail="Leave the data and files as they are"),
         ),
         # No typed answer and no default: only a picked Approve runs the cell.
@@ -200,7 +228,7 @@ def _log_decision(writes: CellWrites, status) -> None:
 
 
 async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> ToolOutcome | None:
-    """Hold a cell that changes connected data or existing files until the user
+    """Hold a cell that changes a database or existing files until the user
     approves it. None when the cell may run; otherwise the refusal to return
     in its place, before any of it runs.
 
@@ -214,8 +242,7 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
     try:
         writes = await asyncio.to_thread(
             find_cell_writes,
-            code=code, earlier_code=earlier,
-            snapshots=gate.snapshots, connected=gate.connected,
+            code=code, earlier_code=earlier, snapshots=gate.snapshots,
         )
     except Exception:
         logger.warning("write approval: the check failed", exc_info=True)

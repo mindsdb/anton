@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tests.conftest import make_mock_llm
+from tests.test_spend_ceiling import _REFUSAL, _described_call
 from tests.test_spend_ceiling import _session as _ceiling_session
 from tests.test_spend_ceiling import _text as _ceiling_text
 from tests.test_spend_ceiling import _tool_call as _ceiling_tool_call
@@ -30,8 +31,17 @@ from anton.core.llm.provider import (
     StreamTaskProgress,
     StreamTextDelta,
     StreamTurnEnded,
+    ToolCall,
 )
-from anton.core.session import ChatSession, ChatSessionConfig, _VerifierVerdict
+from anton.core.session import (
+    ChatSession,
+    ChatSessionConfig,
+    _handback_report,
+    _step_description,
+    _TurnStep,
+    _VerifierVerdict,
+)
+from anton.core.tools.registry import ToolOutcome
 
 
 @pytest.fixture(autouse=True)
@@ -297,9 +307,6 @@ async def test_escape_while_a_handback_is_held_cancels_the_turn_as_the_cli_sees_
     assert send.call_args.kwargs["ended_by"] == "cancelled"
 
 
-_REFUSAL = "I'm sorry, but I cannot assist with that request."
-
-
 def _filtered_stream():
     return _Iter([
         StreamTextDelta(text=_REFUSAL),
@@ -307,17 +314,26 @@ def _filtered_stream():
     ])
 
 
-def _unanswered_verifier_failure(workspace, *handbacks):
+def _unanswered_handback(workspace, *handbacks, base=_handback_verifier_failure, first_call=None):
     # The reply before the hand-back has no text, so the hand-back is the whole answer.
-    mock_llm = _handback_verifier_failure(workspace)._llm
-    plans = [_Iter([StreamComplete(response=_tool_call(1))]), _Iter([StreamComplete(response=_text(""))]), *handbacks]
+    mock_llm = base(workspace)._llm
+    plans = [
+        _Iter([StreamComplete(response=first_call or _tool_call(1))]),
+        _Iter([StreamComplete(response=_text(""))]),
+        *handbacks,
+    ]
     mock_llm.plan_stream = MagicMock(side_effect=lambda **kw: plans.pop(0))
     return _plain(workspace, mock_llm)
 
 
+def _handback_calls(session) -> int:
+    # A hand-back call sends no tools; every tool-loop call does.
+    return sum("tools" not in c.kwargs for c in session._llm.plan_stream.call_args_list)
+
+
 async def test_filtered_handback_without_an_answer_is_tried_once_more(workspace):
     retried = _Iter([StreamTextDelta(text="here is what I did"), StreamComplete(response=_text("here is what I did"))])
-    session = _unanswered_verifier_failure(workspace, _filtered_stream(), retried)
+    session = _unanswered_handback(workspace, _filtered_stream(), retried)
     events, booked = await _drain(session)
     shown = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
     assert shown == "here is what I did"
@@ -325,14 +341,134 @@ async def test_filtered_handback_without_an_answer_is_tried_once_more(workspace)
     assert booked == "content_filter"
 
 
-async def test_handback_filtered_twice_ends_with_no_text(workspace):
-    session = _unanswered_verifier_failure(workspace, _filtered_stream(), _filtered_stream())
+@pytest.mark.parametrize("base", [_handback_verifier_failure, _handback_stuck])
+async def test_handback_filtered_twice_sends_anton_s_own_report(workspace, base):
+    # No limit stopped these turns, so the report has no limit sentence.
+    session = _unanswered_handback(
+        workspace, _filtered_stream(), _filtered_stream(),
+        base=base, first_call=_described_call(1, "Sum the first 20 Fibonacci numbers"),
+    )
     events, booked = await _drain(session)
-    assert not any(isinstance(e, StreamTextDelta) and e.text for e in events)
+    shown = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+    assert shown == (
+        "The model provider's content filter stopped my summary of this request. "
+        "This is what I did before I stopped:\n\n"
+        "- Sum the first 20 Fibonacci numbers\n\n"
+        'Reply "keep going" to continue from where I stopped.'
+    )
+    assert session.history[-1] == {"role": "assistant", "content": shown}
     assert _REFUSAL not in str(session.history)
-    assert session._llm.plan_stream.call_count == 4
+    # Two hand-back tries and no third call to write the report.
+    assert _handback_calls(session) == 2
     assert booked == "content_filter"
     assert events[-1] == StreamTurnEnded(ended_by="content_filter")
+
+
+async def test_report_lists_only_this_turn_s_steps(workspace):
+    # A CLI session runs many turns on one ChatSession, so the step list must start empty each turn.
+    mock_llm = make_mock_llm()
+    plans = [
+        _Iter([StreamComplete(response=_described_call(1, "Old step"))]),
+        _Iter([StreamComplete(response=_text("done"))]),
+        _Iter([StreamComplete(response=_described_call(2, "New step"))]),
+        _Iter([StreamComplete(response=_text(""))]),
+        _filtered_stream(),
+        _filtered_stream(),
+    ]
+    mock_llm.plan_stream = MagicMock(side_effect=lambda **kw: plans.pop(0))
+    mock_llm.generate_object_code = AsyncMock(
+        return_value=_VerifierVerdict(status="COMPLETE", reason="ok")
+    )
+    session = _plain(workspace, mock_llm)
+    _events, first_booked = await _drain(session)
+    assert first_booked == "completed"
+    # The second turn's check fails, and both tries at its hand-back are filtered.
+    mock_llm.generate_object_code = AsyncMock(side_effect=RuntimeError("provider hiccup"))
+    events, booked = await _drain(session)
+    shown = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+    assert "- Old step" not in shown
+    assert shown == (
+        "The model provider's content filter stopped my summary of this request. "
+        "This is what I did before I stopped:\n\n"
+        "- New step\n\n"
+        'Reply "keep going" to continue from where I stopped.'
+    )
+    assert booked == "content_filter"
+    assert not plans
+
+
+async def test_round_cap_filtered_twice_reports_the_limit_and_the_steps(workspace):
+    descriptions = iter([
+        "Load the sales table", "Join the regions", "Sum revenue by region",
+        "Chart the totals", "Save the chart",
+    ])
+    mock_llm = make_mock_llm()
+
+    def _plan(**kw):
+        if "tools" not in kw:
+            return _filtered_stream()
+        return _Iter([StreamComplete(response=_described_call(1, next(descriptions, "Extra step")))])
+
+    mock_llm.plan_stream = MagicMock(side_effect=_plan)
+    mock_llm.generate_object_code = AsyncMock(
+        return_value=_VerifierVerdict(status="COMPLETE", reason="ok")
+    )
+    session = _plain(workspace, mock_llm)
+    session._max_tool_rounds = 2
+    # The second step reports a failure and the fourth raises: both count as failed.
+    session.tool_registry.dispatch_tool = AsyncMock(side_effect=[
+        ToolOutcome(content="revenue total = 48213", ok=True),
+        ToolOutcome(content="join failed", ok=False),
+        ToolOutcome(content="revenue total = 48213", ok=True),
+        RuntimeError("renderer crashed"),
+        ToolOutcome(content="saved", ok=True),
+    ])
+    events, booked = await _drain(session)
+    shown = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+    assert shown == (
+        "This task reached its limit of 2 steps per request."
+        "\n\nThe model provider's content filter stopped my summary of this request. "
+        "This is what I did before I stopped:\n\n"
+        "- Load the sales table\n"
+        "- Join the regions (failed)\n"
+        "- Sum revenue by region\n"
+        "- Chart the totals (failed)\n"
+        "- Save the chart\n\n"
+        'Reply "keep going" to continue from where I stopped.'
+    )
+    # It quotes no tool output, so the figure a step returned stays out.
+    assert "48213" not in shown
+    assert session.history[-1] == {"role": "assistant", "content": shown}
+    assert _REFUSAL not in str(session.history)
+    assert _handback_calls(session) == 2
+    assert booked == "content_filter"
+    assert events[-1] == StreamTurnEnded(ended_by="content_filter")
+
+
+def test_report_lists_only_the_latest_steps():
+    steps = [_TurnStep(description=f"Step {n}", errored=False) for n in range(1, 13)]
+    report = _handback_report(reached=None, steps=steps)
+    assert "These are the last things I did before I stopped:" in report
+    assert "- Step 1\n" not in report and "- Step 2\n" not in report
+    assert "- Step 3\n" in report and "- Step 12\n" in report
+
+
+@pytest.mark.parametrize(
+    "tool_input,expected",
+    [
+        ({"action": "exec", "one_line_description": "Load the\n  sales table"}, "Load the sales table"),
+        ({"action": "view", "name": "main"}, "scratchpad view"),
+        ({"action": "install", "one_line_description": "  "}, "scratchpad install"),
+    ],
+)
+def test_step_without_a_description_names_its_action(tool_input, expected):
+    call = ToolCall(id="tc_1", name="scratchpad", input=tool_input)
+    assert _step_description(call) == expected
+
+
+def test_step_of_a_tool_without_an_action_names_the_tool():
+    call = ToolCall(id="tc_1", name="connect_new_datasource", input={"engine": "postgres"})
+    assert _step_description(call) == "connect_new_datasource"
 
 
 async def test_filtered_main_reply_names_the_filter(workspace):
