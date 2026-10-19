@@ -73,7 +73,7 @@ class FakeInstance:
             self.sites.append(record)
             return httpx.Response(200, json={"site": record})
         if path.endswith("/screenshot"):
-            return httpx.Response(200, content=b"\xff\xd8jpeg")
+            return httpx.Response(200, content=b"\xff\xd8jpeg", headers={"x-image-width": "1024", "x-image-height": "640"})
         if request.method == "DELETE":
             return httpx.Response(200, json={"ok": True})
         return httpx.Response(404, json={"error": "not_found", "message": path})
@@ -261,6 +261,26 @@ async def test_act_takes_one_step_and_returns_the_page():
     result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "element": 2}})
     assert result.ok and result.content.startswith("Done: click [2].")
     assert ("POST", "/sessions/main/action", {"action": "click", "element": 2, "include_page": True}) == instance.calls[-1][:3]
+
+
+async def test_act_reads_coordinates_as_screenshot_pixels():
+    instance = FakeInstance()
+    session = make_session(instance)
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "x": 412, "y": 230, "clicks": 2}})
+    assert result.content.startswith("Done: click at (412, 230).")
+    assert instance.calls[-1][2] == {"action": "click", "x": 412, "y": 230, "clicks": 2, "coords": "screenshot", "include_page": True}
+
+
+async def test_act_drags_between_an_element_and_a_point():
+    instance = FakeInstance()
+    session = make_session(instance)
+    step = {"action": "drag", "from": {"element": 5}, "to": {"x": 600, "y": 300}}
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+    assert result.content.startswith("Done: drag [5] to (600, 300).")
+    assert instance.calls[-1][2] == {**step, "coords": "screenshot", "include_page": True}
+    # Element to element: nothing to scale.
+    await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "drag", "from": {"element": 5}, "to": {"element": 6}}})
+    assert "coords" not in instance.calls[-1][2]
 
 
 async def test_act_rejects_bad_steps_and_reports_stale_elements():
@@ -470,6 +490,7 @@ async def test_screenshot_returns_an_image_block():
     result = await browser_tool.handle_browser(session, {"action": "screenshot"})
     assert result.content[0]["type"] == "image"
     assert result.content[0]["source"]["media_type"] == "image/jpeg"
+    assert "1024x640 pixels" in result.content[1]["text"]
 
 
 async def test_auth_failures_read_as_a_login_problem():

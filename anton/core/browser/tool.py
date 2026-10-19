@@ -50,7 +50,7 @@ MAX_STALLS = 2
 SCROLL_PX = 700
 
 ACTIONS = ("open", "run", "page", "act", "screenshot", "hand_to_user", "note_login", "close")
-STEP_ACTIONS = ("click", "type", "press", "select", "scroll", "hover", "back", "forward", "reload", "wait", "navigate")
+STEP_ACTIONS = ("click", "type", "press", "select", "scroll", "hover", "drag", "back", "forward", "reload", "wait", "navigate")
 
 
 @dataclass
@@ -318,7 +318,13 @@ def _step_body(tc_input: dict) -> dict:
     step = tc_input.get("step")
     if not isinstance(step, dict) or step.get("action") not in STEP_ACTIONS:
         raise ValueError(f"act needs `step` with an action in {', '.join(STEP_ACTIONS)}")
-    return {**step, "include_page": True}
+    body = {**step, "include_page": True}
+    # The model only ever reads coordinates off a screenshot, which the service
+    # scales down on a wide viewport: say so, and the service scales them back.
+    ends = [step, step.get("from"), step.get("to")]
+    if any(isinstance(end, dict) and "x" in end for end in ends):
+        body.setdefault("coords", "screenshot")
+    return body
 
 
 async def _do_act(session: "ChatSession", tc_input: dict) -> str:
@@ -336,11 +342,15 @@ async def _do_act(session: "ChatSession", tc_input: dict) -> str:
 async def _do_screenshot(session: "ChatSession", tc_input: dict):
     state = _state(session)
     await _ensure_open(session)
-    image = await state.client.screenshot(state.session_id, annotate=tc_input.get("annotate", True) is not False)
+    image, size = await state.client.screenshot(state.session_id, annotate=tc_input.get("annotate", True) is not False)
+    sized = f", {size[0]}x{size[1]} pixels" if size else ""
     return ToolOutcome(
         content=[
             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.standard_b64encode(image).decode("ascii")}},
-            {"type": "text", "text": "Screenshot of the browser. Red labels are element ids from the page list."},
+            {"type": "text", "text": (
+                f"Screenshot of the browser{sized}. Red labels are element ids from the page list. "
+                "x/y in act steps are pixels on this image."
+            )},
         ],
         ok=True,
     )
@@ -506,6 +516,12 @@ async def _do_close(session: "ChatSession", tc_input: dict) -> str:
 # ── run: the Jev step loop ─────────────────────────────────────────────────
 
 
+def _describe_end(end) -> str:
+    if not isinstance(end, dict):
+        return "?"
+    return f"[{end['element']}]" if end.get("element") is not None else f"({end.get('x')}, {end.get('y')})"
+
+
 def _describe(step: dict) -> str:
     action = step.get("action", "")
     if step.get("element") is not None:
@@ -513,6 +529,10 @@ def _describe(step: dict) -> str:
         return f"{action} [{step['element']}]{text}"
     if action == "navigate":
         return f"navigate {step.get('url', '')}"
+    if action == "drag":
+        return f"drag {_describe_end(step.get('from'))} to {_describe_end(step.get('to'))}"
+    if "x" in step:
+        return f"{action} at ({step.get('x')}, {step.get('y')})"
     if action == "scroll":
         return f"scroll {step.get('direction', 'down')}"
     if action == "press":
@@ -705,7 +725,9 @@ BROWSER: you and the user share a real browser (Chromium, their own browser inst
 - Only open sites the user named or that the task plainly needs. Never invent URLs.
 - Start a task with action=run and a goal; give values to type in `inputs`. run takes the steps it is sure of and hands back with the page when it isn't.
 - To act yourself, use action=act with a step: {"action":"click","element":17}, {"action":"type","element":4,"text":"…","submit":true}, {"action":"select","element":9,"value":"Blue"}, {"action":"scroll","direction":"down"}, {"action":"press","key":"Enter"}, {"action":"back"}, {"action":"navigate","url":"…"}. Element numbers come from the latest page.
+- Where the page list has nothing to point at (a canvas, a drawing, a map), use pixels from your latest screenshot: {"action":"click","x":412,"y":230}. Clicks also take "button":"right" and "clicks":2. Drag with {"action":"drag","from":{"element":5} or {"x":…,"y":…},"to":{…}}; that's how shapes get drawn, sliders moved and items reordered.
 - Never ask for, read out, or type a password, one-time code, or card number. For sign-ins, CAPTCHAs, two-factor codes and payments, call action=hand_to_user with a short reason and let the user do it in the browser.
+- hand_to_user is only for those. Never use it to hand over work you found hard; if you can't do something with these actions, stop and say so in the chat, with what you tried and another way to get it done.
 - Never click or try to solve a "verify you are human" check (Cloudflare, reCAPTCHA, hCaptcha). The tool hands those to the user by itself; wait for them.
 - After the user signs in to a site, call action=note_login with the site (and an account hint they'd recognise, never a secret) so later conversations know the login is there.
 - Ask before anything that commits on the user's behalf: buying, paying, sending, deleting, or submitting a form.
@@ -734,8 +756,8 @@ BROWSER_TOOL_SCHEMA = {
             "additionalProperties": {"type": "string"},
             "description": "run: values run may type or select, by a short name, e.g. {\"search\": \"MacBook Air\"}. Never secrets.",
         },
-        "step": {"type": "object", "description": "act: one step, e.g. {\"action\": \"click\", \"element\": 17}."},
-        "reason": {"type": "string", "description": "hand_to_user: what the user needs to do, in one line."},
+        "step": {"type": "object", "description": "act: one step, e.g. {\"action\": \"click\", \"element\": 17}, {\"action\": \"click\", \"x\": 412, \"y\": 230}, or {\"action\": \"drag\", \"from\": {\"element\": 5}, \"to\": {\"x\": 600, \"y\": 300}}."},
+        "reason": {"type": "string", "description": "hand_to_user: what the user needs to do (sign in, CAPTCHA, payment), in one line."},
         "site": {"type": "string", "description": "note_login: the site, e.g. salesforce.com."},
         "account_hint": {"type": "string", "description": "note_login: which account, e.g. jorge@acme. Never a secret."},
         "annotate": {"type": "boolean", "description": "screenshot: draw element numbers (default true)."},

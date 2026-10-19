@@ -85,9 +85,16 @@ class BrowserClient:
     async def act(self, session_id: str, action: dict) -> dict:
         return (await self._request("POST", f"/sessions/{quote(session_id)}/action", json=action)).json()
 
-    async def screenshot(self, session_id: str, *, annotate: bool = True) -> bytes:
+    async def screenshot(self, session_id: str, *, annotate: bool = True) -> tuple[bytes, tuple[int, int] | None]:
+        """The JPEG and its (width, height), when the service says: the space the
+        model's x/y coordinates are in."""
         params = {"annotate": "true" if annotate else "false", "format": "jpeg", "quality": 70}
-        return (await self._request("GET", f"/sessions/{quote(session_id)}/screenshot", params=params)).content
+        response = await self._request("GET", f"/sessions/{quote(session_id)}/screenshot", params=params)
+        try:
+            size = (int(response.headers["x-image-width"]), int(response.headers["x-image-height"]))
+        except (KeyError, ValueError):
+            size = None
+        return response.content, size
 
     async def embed(self, session_id: str) -> dict:
         """A viewer URL another origin can frame (``POST /_embed``: the worker's on
