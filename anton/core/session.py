@@ -13,7 +13,7 @@ import json
 import logging
 import re
 import sys
-from typing import TYPE_CHECKING, List, Literal
+from typing import TYPE_CHECKING, List, Literal, get_args
 import os
 import uuid
 
@@ -1894,7 +1894,7 @@ class ChatSession:
             DeploymentIdentity.model_validate(config.deployment_identity)
             if config.deployment_identity is not None else None
         )
-        if config.learned_memory_scope not in (None, "personal", "shared", "off", "unavailable"):
+        if config.learned_memory_scope not in (None, *get_args(LearnedMemoryScope)):
             raise ValueError("unrecognized learned_memory_scope")
         self._learned_memory_scope = (
             config.learned_memory_scope or "unavailable"

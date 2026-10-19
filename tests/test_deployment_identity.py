@@ -8,7 +8,12 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from anton.core.llm.identity import DeploymentIdentity, product_lines
+from anton.core.llm.identity import (
+    _SURFACE_LINES,
+    DEPLOYMENT_PRODUCT_SKILL_PREFACE,
+    DeploymentIdentity,
+    product_lines,
+)
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.llm.provider import LLMResponse, ToolCall
 from anton.core.memory.cortex import Cortex
@@ -103,12 +108,15 @@ def test_complete_default_builder_output_is_byte_identical(surface, digest):
     assert hashlib.sha256(prompt.encode()).hexdigest() == digest
 
 
+# The self-hosted line replaces the surface line whatever surface the host
+# reports, including a desktop one.
+@pytest.mark.parametrize("surface", ["desktop", "web", "cli", None])
 @pytest.mark.parametrize("name", ["Acme Cowork", "Cowork"])
-async def test_host_identity_and_memory_status_reach_the_model(tmp_path, name):
+async def test_host_identity_and_memory_status_reach_the_model(tmp_path, name, surface):
     llm = make_mock_llm()
     cortex = Cortex(Hippocampus(tmp_path / "global"), Hippocampus(tmp_path / "project"))
     session = ChatSession(ChatSessionConfig(
-        llm_client=llm, surface="web", deployment_identity=deployment(name),
+        llm_client=llm, surface=surface, deployment_identity=deployment(name),
         learned_memory_scope="personal", cortex=cortex, background_memory=False,
     ))
     try:
@@ -119,7 +127,8 @@ async def test_host_identity_and_memory_status_reach_the_model(tmp_path, name):
         assert f'Deployment product name: "{name}"' in prompt
         assert "made by MindsHub" in prompt
         assert "self-hosted deployment accessed in the browser" in prompt
-        assert "This conversation is running in the Cowork desktop app" not in prompt
+        for line in _SURFACE_LINES.values():
+            assert line.removeprefix("- ") not in prompt
         assert "The operator installs, updates and removes this deployment" in prompt
         assert "No personal memories are saved" in prompt
         assert "not remembered user preferences" in prompt
@@ -156,24 +165,58 @@ async def test_missing_cortex_never_claims_empty_personal_memory(scope):
         await session.close()
 
 
-async def test_recalled_product_skill_defers_to_trusted_deployment(tmp_path):
-    store = SkillStore(
+def builtin_skill_store(tmp_path):
+    return SkillStore(
         root=tmp_path / "skills",
         builtin_root=Path(skills_module.__file__).parent / "builtin_skills",
     )
-    result = await handle_recall_skill(SimpleNamespace(_skill_store=store, history=[]), {"label": "cowork-product"})
+
+
+@pytest.mark.parametrize("surface", ["desktop", "web", "cli", None])
+async def test_default_session_recalls_the_unchanged_product_skill(tmp_path, surface):
+    store = builtin_skill_store(tmp_path)
+    session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm(), surface=surface))
+    session._skill_store = store
+    try:
+        result = await handle_recall_skill(session, {"label": "cowork-product"})
+    finally:
+        await session.close()
     assert result.ok
     text = result.content
-    assert text.index("TRUSTED DEPLOYMENT FACTS COME FIRST") < text.index("GETTING THE DESKTOP APP")
+    assert "Use these facts verbatim." in text
+    assert "TRUSTED DEPLOYMENT FACTS COME FIRST" not in text
+    # Nothing sits between the procedure heading and the skill file's own text.
+    body = store.load("cowork-product").declarative_md.strip()
+    assert text.endswith("## Procedure (Stage 1 — declarative)\n\n" + body)
+
+
+async def test_recalled_product_skill_defers_to_trusted_deployment(tmp_path):
+    store = builtin_skill_store(tmp_path)
+    session = SimpleNamespace(_skill_store=store, history=[], _deployment_identity=deployment())
+    result = await handle_recall_skill(session, {"label": "cowork-product"})
+    assert result.ok
+    text = result.content
+    assert text.index(DEPLOYMENT_PRODUCT_SKILL_PREFACE) < text.index("COWORK — PRODUCT FACTS")
     assert "take precedence" in text
     assert "Keep using that name after recalling this skill. MindsHub remains the maker." in text
     assert "The hosted browser's provider restrictions" in text
     assert "below do not describe self-hosted deployments" in text
-    assert "When no self-hosted deployment is declared, use the default facts below" in text
-    # Default instructions remain available when the host supplies no override.
+    assert "When no self-hosted deployment is declared" not in text
+    # The default facts follow the preface unchanged.
+    assert text.endswith(store.load("cowork-product").declarative_md.strip())
+    assert "Use these facts verbatim." in text
     assert "https://mindshub.ai/download" in text
     assert "Desktop updates itself" in text
     assert "https://cowork.mindshub.ai" in text
+
+
+async def test_deployment_preface_leads_only_the_product_skill(tmp_path):
+    session = SimpleNamespace(
+        _skill_store=builtin_skill_store(tmp_path), history=[], _deployment_identity=deployment(),
+    )
+    result = await handle_recall_skill(session, {"label": "build-html-dashboard"})
+    assert result.ok
+    assert "TRUSTED DEPLOYMENT FACTS COME FIRST" not in result.content
 
 
 async def test_identity_remains_authoritative_in_model_call_after_recall(tmp_path):
@@ -186,10 +229,7 @@ async def test_identity_remains_authoritative_in_model_call_after_recall(tmp_pat
         LLMResponse(content="Ask your operator about updates.", stop_reason="end_turn"),
     ]
     session = ChatSession(ChatSessionConfig(llm_client=llm, deployment_identity=deployment()))
-    session._skill_store = SkillStore(
-        root=tmp_path / "skills",
-        builtin_root=Path(skills_module.__file__).parent / "builtin_skills",
-    )
+    session._skill_store = builtin_skill_store(tmp_path)
     try:
         await run_turn(session, "How do I update this deployment?")
         assert llm.plan.call_count == 2
@@ -202,6 +242,6 @@ async def test_identity_remains_authoritative_in_model_call_after_recall(tmp_pat
             for message in after_recall["messages"] if isinstance(message.get("content"), list)
             for block in message["content"] if block.get("type") == "tool_result"
         ]
-        assert any("TRUSTED DEPLOYMENT FACTS COME FIRST" in content for content in results)
+        assert any(DEPLOYMENT_PRODUCT_SKILL_PREFACE in content for content in results)
     finally:
         await session.close()

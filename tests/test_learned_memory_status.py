@@ -5,8 +5,11 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from anton.core.llm.identity import DeploymentIdentity
 from anton.core.memory.cortex import Cortex
 from anton.core.memory.hippocampus import Hippocampus
+from anton.core.session import ChatSession, ChatSessionConfig
+from tests.conftest import make_mock_llm
 
 
 @pytest.fixture
@@ -111,6 +114,29 @@ async def test_shared_memory_is_never_labeled_personal(cortex, stores, has_conte
         assert "Shared learned memory" in cortex.get_scratchpad_context(learned_memory_scope="shared")
     else:
         assert "shared store has no saved memories" in context
+
+
+# An omitted scope on a deployment session means "unavailable".
+@pytest.mark.parametrize("scope", ["shared", "off", None])
+async def test_session_scratchpad_tool_labels_learned_memory_by_scope(cortex, stores, scope):
+    stores[2].encode_rule("If using scratchpad, page large tables", kind="when")
+    stores[0].encode_lesson("Use a separate scratchpad for each report", topic="scratchpad")
+    session = ChatSession(ChatSessionConfig(
+        llm_client=make_mock_llm(), cortex=cortex, learned_memory_scope=scope,
+        deployment_identity=DeploymentIdentity(kind="self-hosted", product_name="Acme Cowork"),
+    ))
+    try:
+        tools = session._build_tools()
+        description = next(t["description"] for t in tools if t["name"] == "scratchpad")
+    finally:
+        await session.close()
+    assert "Operator (applies to everyone, wins on conflict):" in description
+    assert "page large tables" in description
+    assert "Your own:" not in description
+    if scope == "shared":
+        assert "Shared learned memory:\n- Use a separate scratchpad for each report" in description
+    else:
+        assert "Use a separate scratchpad for each report" not in description
 
 
 @pytest.mark.parametrize("error", [PermissionError("unreadable"), UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")])

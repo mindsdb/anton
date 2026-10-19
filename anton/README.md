@@ -299,6 +299,8 @@ When the host passes an operator's read-only layer (`managed_hc`, see [the Corte
 
 The Cortex inserts these as labeled sections in the system prompt (`## Your Memory — Identity`, `## Your Memory — Global Rules`, etc.) so the LLM knows they're its own memories, not user instructions. The `anton.md` user-written context comes earlier in the prompt, ahead of memory. Memory changes every turn, so it rides the tail, followed only by workspace discovery, and everything above it stays cache-stable (`prompt_builder.py`).
 
+A host that sets `ChatSessionConfig.deployment_identity` also passes `learned_memory_scope`: `personal`, `shared`, `off` or `unavailable`. An omitted scope counts as `unavailable`. The memory part of the prompt then opens with `## Learned memory status`. That section tells the model whether learned memory is on, shared, off or unavailable, and whether the global and project stores hold saved content (`memory_presence()`, read before any retrieval filter). It also says that product instructions and operator rules are not remembered user preferences. With `shared`, the person tiers render as `## Shared Memory — Identity`, `## Shared Memory — Global Rules`, etc., and the operator's line says its rules win over Shared Memory. With `off` or `unavailable`, the Cortex skips the global and project stores, so only the status section and the operator's layer render. Without a deployment identity, the session ignores the scope and the prompt keeps the labels above.
+
 ### Moment B — Scratchpad Tool Description (Procedural Priming)
 
 When scratchpads are active, relevant lessons are appended to the scratchpad tool description. The LLM sees them right when composing code — like procedural memory that activates automatically when you get on a bike:
@@ -307,7 +309,7 @@ When scratchpads are active, relevant lessons are appended to the scratchpad too
 scratchpad_tool["description"] += f"\n\nLessons from past sessions:\n{wisdom}"
 ```
 
-This combines scratchpad-related "when" rules + scratchpad-related lessons from both scopes, ordered by confidence tier (high, then medium/unset, then low) and recency within a tier, trimmed to a token budget (default 2000/scope, ~4 chars/token). The content comes from `cortex.get_scratchpad_context()`, which calls `recall_scratchpad_wisdom()` on both hippocampi, after the operator's layer when there is one.
+This combines scratchpad-related "when" rules + scratchpad-related lessons from both scopes, ordered by confidence tier (high, then medium/unset, then low) and recency within a tier, trimmed to a token budget (default 2000/scope, ~4 chars/token). The content comes from `cortex.get_scratchpad_context()`, which calls `recall_scratchpad_wisdom()` on both hippocampi, after the operator's layer when there is one. A deployment session passes its `learned_memory_scope` here too: `shared` labels the person's lines `Shared learned memory:`, and `off` or `unavailable` leaves them out.
 
 ## The `memorize` Tool
 
@@ -814,6 +816,7 @@ The Hippocampus handles one scope (global OR project) and is the canonical file-
 | `recall_lessons(token_budget)` | `lessons.md` (budget-limited, most recent first) | Anterior Temporal Lobe |
 | `recall_topic(slug)` | `topics/{slug}.md` | Cortical Association Areas |
 | `recall_scratchpad_wisdom(token_budget)` | scratchpad-related "when" rules + scratchpad-related lessons (confidence tier + recency ordered, budget-limited) | Procedural memory |
+| `memory_presence()` | `profile.md`, `rules.md`, `lessons.md` and legacy `topics/*.md`, before any retrieval filter. Returns `empty`, `present` or `unavailable`; a failed read never returns `empty` | Metamemory (feeling of knowing) |
 
 **Encoding methods:**
 | Method | Writes | Behavior |
@@ -828,8 +831,8 @@ The Cortex manages two Hippocampus instances (plus an optional read-only third, 
 
 | Method | Purpose |
 |---|---|
-| `build_memory_context()` | Assemble memories for system prompt injection (~5800 token budget, plus the operator layer's when there is one) |
-| `get_scratchpad_context()` | Combine scratchpad wisdom from both scopes for tool description injection. **This is the channel the cerebellum's lessons flow through into future code generation.** |
+| `build_memory_context(user_message, *, learned_memory_scope=None)` | Assemble memories for system prompt injection (~5800 token budget, plus the operator layer's when there is one). A `learned_memory_scope` adds the `## Learned memory status` section and names the person tiers `Your Memory` or `Shared Memory`; `off` and `unavailable` skip those tiers. None keeps the default prompt. |
+| `get_scratchpad_context(*, learned_memory_scope=None)` | Combine scratchpad wisdom from both scopes for tool description injection. **This is the channel the cerebellum's lessons flow through into future code generation.** `shared` labels the person's lines `Shared learned memory:`; `off` and `unavailable` leave them out. |
 | `encode(engrams)` | Route engrams to correct hippocampus by scope. Returns action log. Called by `/memorize`, the consolidator, and the cerebellum. |
 | `encoding_gate(engram)` | Check if an engram needs user confirmation (mode-dependent) |
 | `needs_compaction()` | Check if any file exceeds the threshold |
@@ -840,8 +843,8 @@ The Cortex manages two Hippocampus instances (plus an optional read-only third, 
 
 A host that serves several people can give every one of them the same rules and lessons. It passes a third store, keyword-only: `Cortex(global_hc=..., project_hc=..., managed_hc=Hippocampus(<read-only folder>))`. The folder holds the usual `rules.md` and `lessons.md`. In `rules.md`, only `- ` bullets under `## Always`, `## Never` and `## When` reach the agent.
 
-- **System prompt.** The layer's rules render first, under `## Operator Memory — Rules`, then its lessons under `## Operator Memory — Lessons`. The first of those headings carries one line saying the operator's rules and lessons win over Your Memory when the two conflict. Identity and the person's own sections follow, unchanged.
-- **Scratchpad tool description.** When the layer has scratchpad wisdom, it comes first under `Operator (applies to everyone, wins on conflict):`, and the person's global then project wisdom follows under `Your own:`. When the layer has none, the person's lines render alone, unlabeled.
+- **System prompt.** The layer's rules render first, under `## Operator Memory — Rules`, then its lessons under `## Operator Memory — Lessons`. The first of those headings carries one line saying the operator's rules and lessons win over Your Memory when the two conflict. Identity and the person's own sections follow, unchanged. With `learned_memory_scope="shared"`, that line and the person's headings say Shared Memory instead. With `off` or `unavailable`, only the status section and the layer's sections render.
+- **Scratchpad tool description.** When the layer has scratchpad wisdom, it comes first under `Operator (applies to everyone, wins on conflict):`, and the person's global then project wisdom follows under `Your own:`. When the layer has none, the person's lines render alone, unlabeled. With `learned_memory_scope="shared"`, the person's lines always sit under `Shared learned memory:`, with or without the layer's wisdom. With `off` or `unavailable`, they are left out.
 - **Budgets.** The layer has its own budgets, counted apart from the person's tiers. It keeps about 4,000 characters of lessons and 8,000 of scratchpad wisdom. Its always and never rules load in full. Past 6,000 characters of rules, with at least 1,000 characters of when-rules, its when-rules go through the same relevance filter as the person's, in the same concurrent gather. Past the lessons budget, anton drops the lines nearest the top of `lessons.md` first, without a warning. Put the lessons that must always reach the agent at the bottom, or keep the file under 4,000 characters.
 - **Never written.** `encode`, compaction, vacuum and identity extraction name only `global_hc` and `project_hc`, so the cerebellum, the consolidator, `memorize` and the ACC can't reach it. The layer's entries don't count toward the compaction threshold. The ACC's end-of-turn de-dupe reads the layer's rules too, so it doesn't copy an operator rule into the person's tier. Only the ACC checks the layer: `memorize`, the consolidator and the cerebellum de-dupe inside the person's tier alone, so one of them can save a verbatim copy of an operator rule or lesson there, and that entry then renders under both `## Operator Memory` and `## Your Memory` headings.
 - **Never read.** The layer's `profile.md`. Identity comes only from `global_hc`.
