@@ -207,7 +207,7 @@ async def test_recalled_product_skill_defers_to_trusted_deployment(tmp_path):
     assert "Use these facts verbatim." in text
     assert "https://mindshub.ai/download" in text
     assert "Desktop updates itself" in text
-    assert "https://cowork.mindshub.ai" in text
+    assert "- In the browser, at https://cowork.mindshub.ai" in text
 
 
 async def test_deployment_preface_leads_only_the_product_skill(tmp_path):
