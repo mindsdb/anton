@@ -744,3 +744,11 @@ async def test_a_reset_forgets_the_compacted_code(project):
 def test_a_refused_cell_is_not_working_code_for_the_artifact_pipeline():
     refused = ToolOutcome(content="Not run", ok=True, reason="write_not_approved")
     assert _exec_ran(refused) is False
+
+
+def test_every_cell_that_never_ran_says_so_first():
+    """A host marks a step as not run by its result's opening "Not run: "."""
+    from anton.core.utils.scratchpad import _refusal
+    from anton.core.utils.write_check import CellWrites
+
+    assert _refusal(CellWrites(unchecked=True), "cancelled").content.startswith("Not run: ")

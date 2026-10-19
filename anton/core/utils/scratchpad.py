@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -45,6 +46,10 @@ _WHY = {
     "error": "the approval request failed",
     "unanswered_earlier": "an earlier approval request in this turn went unanswered",
 }
+# Paths the refusal names for one file change; the card names every one.
+_REFUSAL_PATHS = 20
+_TILDE_RUN = re.compile("~{3,}")
+_BACKTICK_RUN = re.compile("`+")
 
 
 @dataclass
@@ -97,21 +102,33 @@ def _inert(text: str) -> str:
 
 
 def _fence(text: str) -> str:
-    """`text` in a code fence longer than any run of backticks inside it, so
-    the card shows it as written."""
-    ticks = 3
-    while "`" * ticks in text:
-        ticks += 1
-    return "`" * ticks + "\n" + _inert(text) + "\n" + "`" * ticks
+    """`text` in a code fence nothing inside it can end, so the card shows it
+    as written. Cowork's math pass rewrites a `$` or `\\(` outside code, and
+    it reads a fence as code from one run of three backticks, or of three
+    tildes, to the next. So a text with three backticks in a row goes in
+    tildes, and a run of three tildes inside it is split with a zero-width
+    space."""
+    text = _inert(text)
+    if "```" not in text:
+        return "```\n" + text + "\n```"
+    return "~~~\n" + _TILDE_RUN.sub(lambda m: "\u200b".join(m.group()), text) + "\n~~~"
 
 
 def _code_span(text: str) -> str:
     """`text` in a code span longer than any run of backticks inside it."""
-    ticks = 1
-    while "`" * ticks in text:
-        ticks += 1
+    ticks = max((len(run) for run in _BACKTICK_RUN.findall(text)), default=0) + 1
     pad = " " if text[:1] in ("`", " ") or text[-1:] in ("`", " ") else ""
     return "`" * ticks + pad + text + pad + "`" * ticks
+
+
+def _shown_path(path: str) -> str:
+    """`path` as the card and the refusal name it: as written, or as Python
+    writes it, in quotes, when it holds a character that doesn't show as
+    itself (a line break, a tab, a text direction override, a zero-width
+    space) or a backslash, or starts with a quote."""
+    if path.isprintable() and "\\" not in path and not path.startswith(("'", '"')):
+        return path
+    return repr(path)
 
 
 def _wholes(change: FileChange) -> str:
@@ -125,15 +142,17 @@ def _wholes(change: FileChange) -> str:
 
 
 def _describe_files(writes: CellWrites) -> list[str]:
-    """Each held file change for the refusal: every path it names, or the
-    code that picks the path when it runs."""
+    """Each held file change for the refusal: the first paths it names, or
+    the code that picks the path when it runs. The card names every path."""
     out = []
     for change in writes.held_files:
         wholes = _wholes(change)
         if wholes:
             out.append(f"{change.action} {wholes}")
         if change.paths:
-            out.append(f"{change.action} {', '.join(_code_span(p) for p in change.paths)}")
+            named = ", ".join(_code_span(_shown_path(p)) for p in change.paths[:_REFUSAL_PATHS])
+            more = len(change.paths) - _REFUSAL_PATHS
+            out.append(f"{change.action} {named}" + (f" and {more} more" if more > 0 else ""))
         if not (wholes or change.paths):
             out.append(f"{change.action} a file or folder it picks when it runs, in {_code_span(change.call)}")
     return out
@@ -149,6 +168,20 @@ def _summary(writes: CellWrites) -> str:
     return "; ".join(parts)
 
 
+def _file_lines(change: FileChange, *, lead: str) -> list[str]:
+    """One file change on the card: the root folders it takes whole, every
+    path it names, or the code that picks the path when it runs."""
+    lines: list[str] = []
+    wholes = _wholes(change)
+    if wholes:
+        lines += [f"{lead} {wholes}.", ""]
+    if change.paths:
+        lines += [f"{lead}:", "", _fence("\n".join(_shown_path(p) for p in change.paths)), ""]
+    if not (wholes or change.paths):
+        lines += [f"{lead} a file or folder it picks when it runs, in this code:", "", _fence(change.call), ""]
+    return lines
+
+
 def _card_prompt(writes: CellWrites) -> str:
     """The card: every statement and every file change the step would make,
     whole, since one Approve runs them all. Statements, paths and code go in
@@ -162,14 +195,13 @@ def _card_prompt(writes: CellWrites) -> str:
         if any(write.run_time_parts for write in writes.sql):
             lines += ["A part in braces, `{...}`, is the code that fills in that value when the step runs.", ""]
     for change in writes.held_files:
-        wholes = _wholes(change)
-        if wholes:
-            lines += [f"This step would {change.action} {wholes}.", ""]
-        if change.paths:
-            lines += [f"This step would {change.action}:", "", _fence("\n".join(change.paths)), ""]
-        if not (wholes or change.paths):
-            lines += [f"This step would {change.action} a file or folder it picks when it runs, in this code:",
-                      "", _fence(change.call), ""]
+        lines += _file_lines(change, lead=f"This step would {change.action}")
+    # An overwrite raises no card on its own, but the Approve runs it too.
+    for change in writes.overwrites:
+        lines += _file_lines(change, lead="This step would also overwrite")
+    if any(_shown_path(p) != p for change in writes.files for p in change.paths):
+        lines += ["A name in quotes is written with escapes, as Python writes it: `\\n` is a line break "
+                  "and `\\\\` a backslash.", ""]
     if writes.unchecked:
         lines += ["This step can't be checked before it runs.", ""]
     lines.append("It runs only if you approve. Cancel, Skip or no answer stops it.")
@@ -596,7 +628,10 @@ async def prepare_scratchpad_exec(session: ChatSession, tc_input: dict):
         # wording happening to avoid the substring markers, ENG-1276).
         return ToolOutcome(
             content=(
-                f"You already have an active scratchpad ('{existing}') with live state "
+                # "Not run: " opens every result for a cell that never ran, so a
+                # host can mark the step as not run (cowork-server's
+                # classify_cell_status).
+                f"Not run: you already have an active scratchpad ('{existing}') with live state "
                 f"(imports, variables, fetched data). Starting a new one named '{name}' "
                 "creates a SEPARATE, empty environment — nothing from the existing "
                 "scratchpad is available there, so you'd re-import and re-fetch. Reuse the "

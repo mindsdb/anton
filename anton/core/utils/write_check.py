@@ -13,7 +13,8 @@ What it finds:
   string or bytes literal, an f-string, a ``+`` chain, ``str.format`` or ``%``
   on a template, a ``str.join``, a name built up with ``+=`` or ``.append``,
   a name an earlier cell bound, or code passed to ``exec`` or ``eval`` as a
-  literal. Each writing statement in a string is its own finding. A
+  literal. Each statement in a string that holds a write is its own
+  finding, writes or not, since one Approve runs them all. A
   statement only printed, logged or written to a file doesn't count, and
   neither does one run on an in-process DuckDB or SQLite handle. Any other
   handle, known or not, counts. ``to_sql`` into a database that isn't
@@ -22,15 +23,19 @@ What it finds:
   folder (artifacts and the host's own files under ``.anton`` included) or the
   shared folder when the turn began, either folder itself included. The call
   may be a Python one (``os``, ``shutil``, ``pathlib``, also reached through
-  ``getattr`` or passed as a value) or a shell ``rm``, ``mv``, ``find
-  -delete``, ``xargs rm`` or ``git clean`` in a command the cell builds,
-  wrapped in ``sh -c`` or not. A list of paths the cell builds up counts with
-  everything it adds, and a relative path counts from every folder the pad
-  changes into. A target the code picks when it runs, from a root the check
-  can't place, counts as well, because the check can't rule it out.
-- Both kinds inside a **function or lambda an earlier cell defined**, at each
-  place this cell calls it or passes it on, with its parameters read from the
-  call.
+  ``getattr``, ``vars`` or ``functools.partial`` or passed as a value) or a
+  shell ``rm``, ``mv``, ``find -delete``, ``xargs rm`` or ``git clean`` in a
+  command the cell builds, wrapped in ``sh -c``, piped into a shell or not. A
+  list of paths the cell builds up counts with everything it adds, through
+  any name or function it passes the list to, and a relative path counts
+  from every folder the pad changes into. A target the code picks when it
+  runs, from a root the check can't place, counts as well, because the check
+  can't rule it out.
+- Both kinds inside a **function, lambda or method an earlier cell
+  defined**, at each place this cell calls it or passes it on, with its
+  parameters read from the call: by its name, through an instance or the
+  class, a list or dict that holds it, a ``functools.partial`` of it, or a
+  function that returns it.
 
 What it can't find: a statement or path with no literal behind it, a stored
 procedure or function call (CALL, EXEC, SELECT f()) unless it is given the
@@ -53,6 +58,7 @@ import shlex
 import string
 import textwrap
 import threading
+import time
 import warnings
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, Sequence
@@ -80,12 +86,14 @@ __all__ = [
 # answer. A path under one still counts as one that existed.
 _UNWALKED = frozenset({".git", "node_modules", ".venv", "venv", "__pycache__"})
 # The folders under the project's .anton that the agent writes in, walked like
-# any other. Every other folder there is the host's (scratchpad venvs, memory,
+# any other: `output` is where the CLI saves what it makes when it has no
+# artifacts. Every other folder there is the host's (scratchpad venvs, memory,
 # saved state) and is recorded but not walked.
-_ANTON_WALKED = frozenset({"artifacts", "skill_drafts"})
+_ANTON_WALKED = frozenset({"artifacts", "skill_drafts", "output"})
 # A listing names entries under these after the project's own files and folders.
 _HOST_FOLDERS = _UNWALKED | {".anton"}
-# Entries a walk records before it stops; past it, a path's age decides.
+# Entries a walk records before it stops; past it, a path on disk counts
+# unless the turn's cells made it (`ProjectSnapshot.named`).
 _SNAPSHOT_CAP = 200_000
 # Entries a glob reads from disk, under a folder the walk didn't record,
 # before it gives up and counts the pattern itself.
@@ -150,6 +158,11 @@ class CellWrites(BaseModel):
         return tuple(kinds)
 
 
+# What one check read from disk under folders the walk didn't walk: the
+# matches for a root, a pattern, a folder, and whether only older ones count.
+_DiskReads = dict[tuple[str, str, str, bool], list[str]]
+
+
 class ProjectSnapshot(BaseModel):
     """The paths under one root when the turn began, relative and POSIX."""
 
@@ -161,8 +174,8 @@ class ProjectSnapshot(BaseModel):
     dirs: frozenset[str] = frozenset()
     unwalked: frozenset[str] = frozenset()
     taken_at: float
-    # Past the entry cap the walk stops, and a path counts as existing when its
-    # modification time is older than the turn.
+    # Past the entry cap the walk stops, and a path on disk counts as existing
+    # unless the turn changed it and the pad's cells made it new (`named`).
     complete: bool = True
     # The walk couldn't read the root or a folder under it: every path under
     # the root counts as existing.
@@ -191,9 +204,13 @@ class ProjectSnapshot(BaseModel):
             return rel
         return self.spellings.get(rel.casefold()) if self.casefold else None
 
-    def named(self, *, rel: str) -> str | None:
+    def named(self, *, rel: str, made: _Made | None = None) -> str | None:
         """The name a card gives `rel` when it existed at turn start: its
-        recorded spelling, or `rel` itself when only a fallback counts it."""
+        recorded spelling, or `rel` itself when only a fallback counts it.
+
+        Past the cap, a path on disk the walk didn't record counts, unless the
+        turn changed it and `made`, what the pad's cells write, made it new.
+        """
         found = self.recorded(rel=rel)
         if found is not None:
             return found
@@ -201,13 +218,14 @@ class ProjectSnapshot(BaseModel):
             return rel
         if not self.complete:
             try:
-                return rel if (self.root / rel).lstat().st_mtime < self.taken_at else None
+                changed = (self.root / rel).lstat().st_mtime >= self.taken_at
             except OSError:
                 return None
+            return None if changed and made is not None and made.new(snap=self, rel=rel) else rel
         return None
 
-    def holds(self, *, rel: str) -> bool:
-        return self.named(rel=rel) is not None
+    def holds(self, *, rel: str, made: _Made | None = None) -> bool:
+        return self.named(rel=rel, made=made) is not None
 
     def is_file(self, *, rel: str) -> bool:
         return self.recorded(rel=rel) in self.files
@@ -215,17 +233,28 @@ class ProjectSnapshot(BaseModel):
     def is_dir(self, *, rel: str) -> bool:
         return self.recorded(rel=rel) in self.dirs
 
-    def matching(self, *, pattern: str) -> list[str]:
+    def matching(self, *, pattern: str, made: _Made | None = None, disk: _DiskReads | None = None) -> list[str]:
         """Snapshot paths a glob-style pattern names, `*` within one folder and
         `**` across folders, as glob reads them: files first, then folders,
         then entries under the host's folders.
 
         Under a folder the walk recorded but didn't walk, the matches on disk
         count, as `holds` counts any path there. Past the cap, the matches on
-        disk older than the turn count.
+        disk count unless the turn changed one and `made` made it new. `disk`
+        keeps what one check read from disk, so each pattern reads each folder
+        once per check: one check reads with one `made`.
         """
         if self.failed:
             return [pattern]
+
+        def on_disk(start: str, *, older: bool) -> list[str]:
+            if disk is None:
+                return self._on_disk(pattern=pattern, start=start, older=older, made=made)
+            read = (str(self.root), pattern, start, older)
+            if read not in disk:
+                disk[read] = self._on_disk(pattern=pattern, start=start, older=older, made=made)
+            return disk[read]
+
         key = self.key(pattern)
         if self.casefold:
             hits = [p for folded, p in self.spellings.items() if glob_match(folded, key)]
@@ -233,9 +262,9 @@ class ProjectSnapshot(BaseModel):
             hits = [p for p in (*self.files, *self.dirs) if glob_match(p, key)]
         for folder in sorted(self.unwalked):
             if _reaches_under(key.split("/"), self.key(folder).split("/")):
-                hits += self._on_disk(pattern=pattern, start=folder, older=False)
+                hits += on_disk(folder, older=False)
         if not self.complete:
-            hits += self._on_disk(pattern=pattern, start="", older=True)
+            hits += on_disk("", older=True)
         return sorted(dict.fromkeys(hits), key=self._listing_order)
 
     def _under_unwalked(self, rel: str) -> bool:
@@ -247,10 +276,10 @@ class ProjectSnapshot(BaseModel):
         host = head in _HOST_FOLDERS and not (head == ".anton" and rest.split("/")[0] in _ANTON_WALKED)
         return (2 if host else 1 if path in self.dirs else 0, path)
 
-    def _on_disk(self, *, pattern: str, start: str, older: bool) -> list[str]:
+    def _on_disk(self, *, pattern: str, start: str, older: bool, made: _Made | None = None) -> list[str]:
         """Entries under `start` on disk that `pattern` names; with `older`,
-        only those older than the turn. Past the scan limit, or on a folder
-        it can't read, the pattern itself counts too."""
+        not those the turn changed and `made` made new. Past the scan limit,
+        or on a folder it can't read, the pattern itself counts too."""
         key = self.key(pattern)
         parts = key.split("/")
         out: list[str] = []
@@ -269,7 +298,9 @@ class ProjectSnapshot(BaseModel):
                 return [*out, pattern]
             for name in (*dirnames, *filenames):
                 rel = posixpath.join(rel_dir, name) if rel_dir else name
-                if glob_match(self.key(rel), key) and not (older and not self._older(rel)):
+                if glob_match(self.key(rel), key) and not (
+                    older and not self._older(rel) and made is not None and made.new(snap=self, rel=rel)
+                ):
                     out.append(rel)
             dirnames[:] = [
                 d for d in dirnames
@@ -292,6 +323,9 @@ def _match_parts(parts: list[str], patterns: list[str]) -> bool:
     if not patterns:
         return not parts
     head, rest = patterns[0], patterns[1:]
+    if head == "**" and "**" not in rest:
+        # The rest names one part each, so `**` takes the parts before them.
+        return len(parts) >= len(rest) and _match_parts(parts[len(parts) - len(rest):], rest)
     if head == "**":
         return any(_match_parts(parts[i:], rest) for i in range(len(parts) + 1))
     # A part spelled exactly as the pattern's matches it, so a name holding
@@ -341,12 +375,12 @@ def snapshot_project_files(
     """Record the files and folders under `root`.
 
     In the project, ``.anton`` holds the host's own files and folders: its
-    files are recorded, ``.anton/artifacts`` and ``.anton/skill_drafts``,
-    where the agent writes, are walked, and every other folder there is
-    recorded unwalked, so a path under it counts as existing without walking
-    the scratchpad venvs. A folder the walk can't read marks the snapshot
-    failed, which makes every path under the root count as existing: an
-    unread folder must not let a delete through.
+    files are recorded, ``.anton/artifacts``, ``.anton/skill_drafts`` and
+    ``.anton/output``, where the agent writes, are walked, and every other
+    folder there is recorded unwalked, so a path under it counts as existing
+    without walking the scratchpad venvs. A folder the walk can't read marks
+    the snapshot failed, which makes every path under the root count as
+    existing: an unread folder must not let a delete through.
     """
     real = Path(os.path.realpath(root))
     given = Path(os.path.abspath(root))
@@ -397,16 +431,22 @@ def snapshot_project_files(
 
 # ── SQL ───────────────────────────────────────────────────────────────────
 
-_TOKEN = re.compile(
-    # `#` starts a MySQL comment only at the start of a line: elsewhere it is
-    # Postgres's XOR, or a T-SQL temp table's name.
-    r"""(?P<comment>--[^\n]*|/\*.*?\*/|^[ \t]*\#[^\n]*)"""
+# Every token after a comment. A hole marker (`_HOLE`) reads as part of a word.
+_TOKEN_TAIL = (
     r"""|(?P<text>'(?:[^']|'')*'|\$(?P<tag>\w*)\$.*?\$(?P=tag)\$)"""
     r"""|(?P<name>"(?:[^"]|"")*"|`[^`]*`|\[[A-Za-z_@#$][^\]\n]*\])"""
     r"""|(?P<hole>\{[^{}\s;]*\}|%(?:\(\w+\))?[sd])"""
-    r"""|(?P<end>;)|(?P<word>[A-Za-z_][A-Za-z_0-9]*)|(?P<open>\()|(?P<close>\))|(?P<punct>\S)""",
-    re.S | re.M,
+    r"""|(?P<end>;)|(?P<word>[A-Za-z_\ue000][A-Za-z_0-9\ue000\ue001]*)|(?P<open>\()|(?P<close>\))|(?P<punct>\S)"""
 )
+# A `--` comment ends at a line feed or a carriage return, as Postgres ends
+# it. `#` is code: Postgres's XOR, or a T-SQL temp table's name.
+_TOKEN = re.compile(r"""(?P<comment>--[^\n\r]*|/\*.*?\*/)""" + _TOKEN_TAIL, re.S | re.M)
+# MySQL's reading: a `#` at the start of a line starts a comment too.
+_HASH_COMMENT_TOKEN = re.compile(
+    r"""(?P<comment>--[^\n\r]*|/\*.*?\*/|^[ \t]*\#[^\n]*)""" + _TOKEN_TAIL, re.S | re.M,
+)
+_HASH_LINE = re.compile(r"^[ \t]*#", re.M)
+_LINE_BREAK = re.compile(r"\r\n|\r|\n")
 _OBJECTS = frozenset({
     "TABLE", "VIEW", "INDEX", "SCHEMA", "DATABASE", "FUNCTION", "PROCEDURE",
     "SEQUENCE", "TRIGGER", "TYPE", "EXTENSION", "ROLE", "USER", "STAGE",
@@ -437,10 +477,28 @@ _DELETE_FOLLOWERS = frozenset({
     "WITH", "OPTION", "AS",
 })
 _INSERT_MODIFIERS = frozenset({"LOW_PRIORITY", "DELAYED", "HIGH_PRIORITY", "IGNORE", "OVERWRITE"})
-# What starts the rows of an INSERT, REPLACE or UPSERT after its table.
-_INSERT_ROWS = frozenset({
-    "VALUES", "VALUE", "SELECT", "WITH", "SET", "DEFAULT", "TABLE", "OVERRIDING",
-    "OUTPUT", "EXEC", "EXECUTE", "FORMAT",
+# English words that stand where a statement names its table only in prose,
+# as in "Insert the values ..." or "Create table of contents": SQL reserves
+# each, or no table is named it.
+_NOT_NAMES = frozenset({
+    "THE", "AN", "OF", "FOR", "TO", "AND", "OR", "WITH", "FROM", "BY", "INTO", "IN", "ON", "AS", "AT",
+})
+# What may follow the object's name in a CREATE written in sentence case,
+# besides a column or parameter list, `option = value` or a placeholder.
+_CREATE_FOLLOWERS = frozenset({"AS", "LIKE", "CLONE", "ON"})
+# What may follow a dropped object's name in a DROP written in sentence case.
+_DROP_FOLLOWERS = frozenset({"CASCADE", "RESTRICT", "PURGE", "ON", "FORCE"})
+# What may follow the object's name in an ALTER written in sentence case.
+_ALTER_ACTIONS = frozenset({
+    "ADD", "DROP", "ALTER", "RENAME", "SET", "RESET", "UNSET", "OWNER", "MODIFY", "CHANGE",
+    "ENABLE", "DISABLE", "ATTACH", "DETACH", "REFRESH", "SWAP", "SUSPEND", "RESUME",
+})
+# Words a T-SQL script starts a statement with, on its own line, with no `;`
+# before the next one.
+_SCRIPT_WORDS = frozenset({
+    "SELECT", "SET", "DECLARE", "USE", "BEGIN", "IF", "ELSE", "WHILE", "PRINT", "GO", "END",
+    "COMMIT", "ROLLBACK", "SAVE", "RAISERROR", "THROW", "RETURN", "WAITFOR", "OPEN", "FETCH",
+    "CLOSE", "DEALLOCATE", "DBCC", "BULK", "DENY", "BREAK", "CONTINUE",
 })
 _GRANTEE_KINDS = frozenset({"ROLE", "USER", "GROUP", "SHARE", "APPLICATION", "DATABASE"})
 # First words of a privilege granted with no ON, such as Oracle's CREATE SESSION.
@@ -450,11 +508,13 @@ _PRIVILEGE_WORDS = frozenset({
 })
 _EXPLAINED = frozenset({"SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE", "REPLACE", "UPSERT"})
 # Stands in for an f-string placeholder or a name in a `+` chain. The reader
-# numbers each one, `_x_0_`, `_x_1_`, so the card can show the code that
-# fills it in; a bare `_x_` is one too.
-_HOLE = "_x_"
-_HOLE_MARK = re.compile(r"_x_(?:\d+_)?", re.I)
-_NUMBERED_HOLE = re.compile(r"_x_(\d+)_")
+# numbers each one between two private-use characters, which source text
+# doesn't hold, so the card can show the code that fills it in and never
+# rewrites a literal that looks like one.
+_HOLE = "\ue000"
+_HOLE_END = "\ue001"
+_HOLE_MARK = re.compile(r"\ue000\d*\ue001")
+_NUMBERED_HOLE = re.compile(r"\ue000(\d+)\ue001")
 
 
 @dataclass(frozen=True)
@@ -485,9 +545,10 @@ class _Statement:
     end: int
 
 
-def _statements(text: str) -> Iterator[_Statement]:
+def _statements(text: str, *, hash_comments: bool = False) -> Iterator[_Statement]:
     """Each statement in `text`, comments dropped and each parenthesized part
-    folded into one "group" token."""
+    folded into one "group" token. With `hash_comments`, a line that starts
+    with `#` is a comment, as MySQL reads it."""
     tokens: list[_Token] = []
     inner: list[str] = []
     inner_texts: list[str] = []
@@ -500,9 +561,9 @@ def _statements(text: str) -> Iterator[_Statement]:
         tokens.append(_Token(kind="group", text=inner[0] if inner else "", line_start=group_line_start,
                              words=tuple(inner), texts=tuple(inner_texts)))
 
-    for m in _TOKEN.finditer(text):
+    for m in (_HASH_COMMENT_TOKEN if hash_comments else _TOKEN).finditer(text):
         kind = m.lastgroup
-        line_start = "\n" in text[gap_from:m.start()]
+        line_start = _LINE_BREAK.search(text, gap_from, m.start()) is not None
         gap_from = m.end()
         if kind == "comment":
             continue
@@ -563,6 +624,23 @@ def _name_end(tokens: Sequence[_Token], i: int) -> int | None:
     return i
 
 
+def _table_end(tokens: Sequence[_Token], i: int) -> int | None:
+    """`_name_end` for the table or object a statement names, None for an
+    English word standing there (`_NOT_NAMES`)."""
+    j = _name_end(tokens, i)
+    if j == i + 1 and tokens[i].kind == "word" and tokens[i].text in _NOT_NAMES:
+        return None
+    return j
+
+
+def _ends_a_sentence(tokens: Sequence[_Token]) -> bool:
+    """Whether the text ends as a sentence does, with a period after a word:
+    no SQL dialect parses that."""
+    return len(tokens) > 1 and _punct(tokens, len(tokens) - 1, ".") and (
+        tokens[-2].kind in ("word", "name", "text", "group")
+    )
+
+
 def _items(tokens: Sequence[_Token]) -> list[Sequence[_Token]]:
     """`tokens` split at each top-level comma."""
     out: list[Sequence[_Token]] = []
@@ -613,7 +691,7 @@ def _delete_writes(tokens: Sequence[_Token]) -> bool:
     if _word(tokens, i) == "TOP":
         i += 3 if _word(tokens, i + 2) == "PERCENT" else 2
     if _word(tokens, i) == "FROM":
-        j = _name_end(tokens, i + 1)
+        j = _table_end(tokens, i + 1)
         if j is None:
             return False
         if j == len(tokens):
@@ -627,13 +705,17 @@ def _delete_writes(tokens: Sequence[_Token]) -> bool:
             j + 1 == len(tokens) or _word(tokens, j + 1) in _DELETE_FOLLOWERS or tokens[j + 1].kind == "hole"
         )
     # DELETE t, DELETE t WHERE ..., or MySQL's DELETE a, b FROM a JOIN b ...
-    j = _name_end(tokens, i)
+    # A sentence takes this shape too, as in "Delete orders where the
+    # quantity is zero", and JavaScript's `delete params.page` the bare one.
+    if _sentence_case(tokens[0]):
+        return False
+    j = _table_end(tokens, i)
     while j is not None and _punct(tokens, j, ","):
-        j = _name_end(tokens, j + 1)
+        j = _table_end(tokens, j + 1)
     if j is None:
         return False
     if j == len(tokens):
-        return not _sentence_case(tokens[0])
+        return tokens[0].raw.isupper()
     return _word(tokens, j) in ("FROM", "WHERE", "OUTPUT") or tokens[j].kind == "hole"
 
 
@@ -645,12 +727,14 @@ def _insert_writes(tokens: Sequence[_Token]) -> bool:
     if _word(tokens, i) in ("ALL", "FIRST"):
         # Oracle's multi-table insert: INSERT ALL INTO t1 VALUES (...) INTO t2 ...
         return any(_word(tokens, k) == "INTO" for k in range(i + 1, len(tokens)))
-    if _word(tokens, i) == "INTO":
+    into = _word(tokens, i) == "INTO"
+    if into:
         i += 1
     if _word(tokens, i) == "TABLE":
         i += 1
-    j = _name_end(tokens, i)
-    if j is None:
+    j = _table_end(tokens, i)
+    # With no INTO, "a" is an article too, as in "Insert a table of totals".
+    if j is None or not into and j == i + 1 and _word(tokens, i) == "A":
         return False
     while j < len(tokens):
         if _word(tokens, j) in ("AS", "PARTITION"):
@@ -663,11 +747,55 @@ def _insert_writes(tokens: Sequence[_Token]) -> bool:
             j += 1  # the column list
         else:
             break
-    return j < len(tokens) and (tokens[j].kind in ("hole", "group") or _word(tokens, j) in _INSERT_ROWS)
+    return _rows_at(tokens, j, into=into)
+
+
+def _rows_at(tokens: Sequence[_Token], j: int, *, into: bool) -> bool:
+    """Whether the rows of an INSERT, REPLACE or UPSERT start at `j`, after
+    its table: VALUES (...), a query, MySQL's SET col = ..., DEFAULT VALUES,
+    Postgres's TABLE t, T-SQL's OUTPUT or EXEC, ClickHouse's FORMAT, or a
+    placeholder. Prose such as "Replace missing values" or "Replace nulls
+    with zeros" stops here."""
+    if j >= len(tokens):
+        return False
+    if tokens[j].kind in ("hole", "group"):
+        return True
+    word = _word(tokens, j)
+    if word in ("VALUES", "VALUE"):
+        # ClickHouse's driver passes the rows apart from `INSERT INTO t VALUES`.
+        return j + 1 < len(tokens) and tokens[j + 1].kind in ("group", "hole") or into and j + 1 == len(tokens)
+    if word == "SET":
+        return _assignment_at(tokens, j + 1)
+    if word == "DEFAULT":
+        return _word(tokens, j + 1) == "VALUES"
+    if word == "TABLE":
+        return _name_end(tokens, j + 1) == len(tokens)
+    if word == "WITH":
+        k = _name_end(tokens, j + 2 if _word(tokens, j + 1) == "RECURSIVE" else j + 1)
+        if k is not None and k < len(tokens) and tokens[k].kind == "group":
+            k += 1  # the CTE's column list
+        return k is not None and _word(tokens, k) == "AS"
+    if word == "OUTPUT":
+        return any(_word(tokens, k) in ("VALUES", "SELECT", "DEFAULT", "EXEC", "EXECUTE")
+                   for k in range(j + 1, len(tokens)))
+    if word in ("EXEC", "EXECUTE"):
+        return _name_end(tokens, j + 1) is not None
+    if word == "FORMAT":
+        return into
+    return word in ("SELECT", "OVERRIDING")
 
 
 def _merge_writes(tokens: Sequence[_Token]) -> bool:
-    return any(_word(tokens, k) == "USING" for k in range(1, len(tokens)))
+    """MERGE [INTO] t USING s ON ... WHEN [NOT] MATCHED ..., or a placeholder
+    for what follows USING or ON."""
+    using = next((k for k in range(1, len(tokens)) if _word(tokens, k) == "USING"), None)
+    if using is None:
+        return False
+    on = next((k for k in range(using + 1, len(tokens)) if _word(tokens, k) == "ON"), None)
+    rest = range(using + 1 if on is None else on + 1, len(tokens))
+    return any(tokens[k].kind == "hole" for k in rest) or on is not None and any(
+        _word(tokens, k) == "WHEN" and _word(tokens, k + 1) in ("MATCHED", "NOT") for k in rest
+    )
 
 
 def _sentence_case(token: _Token) -> bool:
@@ -697,19 +825,74 @@ def _truncate_writes(tokens: Sequence[_Token]) -> bool:
     return all(t.kind in ("group", "hole") or t.kind == "word" and t.text in _TRUNCATE_TAIL for t in tokens[j:])
 
 
+def _object_name_end(tokens: Sequence[_Token], i: int) -> int | None:
+    """The index after the name in CREATE, DROP or ALTER <object> <name>, `i`
+    at the object word, past IF [NOT] EXISTS and CONCURRENTLY: at ON for
+    Postgres's unnamed index, after a quoted user such as MySQL's 'bob'. None
+    when no name follows."""
+    index = tokens[i].text == "INDEX"
+    i += 1
+    if index and _word(tokens, i) == "CONCURRENTLY":
+        i += 1
+    if _word(tokens, i) == "IF" and _word(tokens, i + 1) in ("NOT", "EXISTS"):
+        i += 3 if _word(tokens, i + 1) == "NOT" else 2
+    if index and _word(tokens, i) == "ON":
+        return i
+    if i < len(tokens) and tokens[i].kind == "text":
+        return i + 1
+    if _punct(tokens, i, "$") and i + 1 < len(tokens) and tokens[i + 1].kind in ("word", "hole"):
+        return i + 2  # a string.Template placeholder such as $table
+    return _table_end(tokens, i)
+
+
+def _option_at(tokens: Sequence[_Token], j: int) -> bool:
+    """A column or parameter list, `option = value`, T-SQL's `@param` or a
+    placeholder at `j`: what follows an object's name only in SQL."""
+    return j < len(tokens) and (
+        tokens[j].kind in ("group", "hole") or _punct(tokens, j, "@")
+        or tokens[j].kind == "word" and _punct(tokens, j + 1, "=")
+    )
+
+
 def _create_writes(tokens: Sequence[_Token]) -> bool:
+    """CREATE <object> <name> ... A sentence-case one such as "Create user
+    accounts for ..." counts only with SQL's own shape after the name."""
     i = 1
     while _word(tokens, i) in _CREATE_MODIFIERS:
         i += 1
-    return _word(tokens, i) in _OBJECTS
+    if _word(tokens, i) not in _OBJECTS:
+        return False
+    j = _object_name_end(tokens, i)
+    if j is None:
+        return False
+    if not _sentence_case(tokens[0]):
+        return True
+    return _option_at(tokens, j) or _word(tokens, j) in _CREATE_FOLLOWERS
 
 
 def _drop_writes(tokens: Sequence[_Token]) -> bool:
-    """DROP and ALTER."""
+    """DROP and ALTER <object> <name> ... A sentence-case one such as "Drop
+    index funds below 2% weight" counts only with SQL's own shape after the
+    name, or as DROP TABLE <name> alone, as TRUNCATE takes it."""
     i = 1
     while _word(tokens, i) in _DROP_MODIFIERS:
         i += 1
-    return _word(tokens, i) in _OBJECTS
+    if _word(tokens, i) not in _OBJECTS:
+        return False
+    j = _object_name_end(tokens, i)
+    if j is None:
+        return False
+    if not _sentence_case(tokens[0]):
+        return True
+    if _word(tokens, 0) == "ALTER":
+        return _option_at(tokens, j) or _word(tokens, j) in _ALTER_ACTIONS
+    while j is not None and _punct(tokens, j, ","):
+        j = _table_end(tokens, j + 1)  # DROP TABLE a, b
+    if j is None:
+        return False
+    if j == len(tokens):
+        return _word(tokens, i) == "TABLE"
+    return _option_at(tokens, j) or _word(tokens, j) in _DROP_FOLLOWERS
 
 
 def _role_item(item: Sequence[_Token]) -> bool:
@@ -732,12 +915,16 @@ def _grantee_item(item: Sequence[_Token]) -> bool:
 
 
 def _grant_writes(tokens: Sequence[_Token]) -> bool:
-    """GRANT ... [ON ...] TO ..., and REVOKE ... [ON ...] FROM ..."""
+    """GRANT ... [ON ...] TO ..., and REVOKE ... [ON ...] FROM ... A
+    sentence-case one such as "Grant access to Finance" counts only when it
+    grants a privilege ON something."""
     to = "TO" if _word(tokens, 0) == "GRANT" else "FROM"
     k = next((i for i in range(1, len(tokens)) if _word(tokens, i) == to), None)
     if k is None:
         return False
     on = any(_word(tokens, i) == "ON" for i in range(1, k))
+    if _sentence_case(tokens[0]) and not (on and _word(tokens, 1) in _PRIVILEGE_WORDS):
+        return False
     if not on and not all(_role_item(item) for item in _items(tokens[1:k])):
         return False
     stop = next((i for i in range(k + 1, len(tokens))
@@ -779,21 +966,42 @@ def _select_into(tokens: Sequence[_Token]) -> bool:
     if first_from is not None and first_from < into:
         return False
     # A variable (@v, :v) or a T-SQL temp table (#t) holds nothing that lasts.
-    if _punct(tokens, into + 1, "@#:"):
+    if _punct(tokens, into + 1, "@#:") or _word(tokens, into + 1) in _TEMP:
         return False
-    return _word(tokens, into + 1) not in _TEMP
+    if into + 1 == len(tokens) and not _sentence_case(tokens[0]) or _word(tokens, into + 1) in ("OUTFILE", "DUMPFILE"):
+        # The table comes after the text ends; MySQL writes a file on the
+        # database's server.
+        return True
+    i = into + 1
+    while _word(tokens, i) in ("UNLOGGED", "TABLE"):
+        i += 1
+    # The new table, then the query's FROM or the end, not prose such as
+    # "Select suppliers into the watchlist for Q3".
+    j = _table_end(tokens, i)
+    return j is not None and (
+        j == len(tokens) or _word(tokens, j) in ("FROM", "WHERE") or tokens[j].kind == "hole" or _punct(tokens, j, ",")
+    )
 
 
 def _copy_writes(tokens: Sequence[_Token]) -> bool:
+    """COPY [INTO] t FROM a file, STDIN, a program, a stage, a query or a
+    placeholder, not prose such as "Copy data from the March export"; into a
+    Snowflake stage, from any table."""
     i = 2 if _word(tokens, 1) == "INTO" else 1
-    if _punct(tokens, i, "@"):
-        i += 1  # a Snowflake stage
-    j = _name_end(tokens, i)
+    stage = _punct(tokens, i, "@")
+    if stage:
+        i += 1
+    j = _table_end(tokens, i)
     if j is None:
         return False
     if j < len(tokens) and tokens[j].kind == "group":
         j += 1
-    return _word(tokens, j) == "FROM"
+    if _word(tokens, j) != "FROM":
+        return False
+    k = j + 1
+    return stage or k < len(tokens) and (
+        tokens[k].kind in ("text", "hole", "group") or _word(tokens, k) in ("STDIN", "PROGRAM") or _punct(tokens, k, "@")
+    )
 
 
 def _explain_writes(tokens: Sequence[_Token]) -> bool:
@@ -903,31 +1111,89 @@ _RULES: dict[str, Callable[[Sequence[_Token]], bool]] = {
 
 def _writes(tokens: Sequence[_Token]) -> bool:
     rule = _RULES.get(_word(tokens, 0))
-    return rule is not None and rule(tokens)
+    return rule is not None and not _ends_a_sentence(tokens) and rule(tokens)
 
 
 def _statement_writes(statement: _Statement) -> bool:
-    """Whether a statement changes data. A line inside it that starts a write
-    counts too: T-SQL runs statements that have no `;` between them."""
+    """Whether a statement changes data. In a script, a line inside it that
+    starts a write counts too: T-SQL runs statements that have no `;` between
+    them. A report's, an email's or an HTML page's lines aren't a script, and
+    a sentence-case line starts a sentence."""
     tokens = statement.tokens
-    return _writes(tokens) or any(
-        t.line_start and t.kind == "word" and t.text in _RULES and _writes(tokens[i:])
+    if _writes(tokens):
+        return True
+    head = tokens[0]
+    # A `#` that doesn't start its line is a MySQL comment too.
+    script = _punct(tokens, 0, "#") or head.kind == "word" and not _sentence_case(head) and (
+        head.text in _RULES or head.text in _SCRIPT_WORDS
+    )
+    if not script:
+        return False
+    return any(
+        t.line_start and t.kind == "word" and t.text in _RULES and not _sentence_case(t) and _writes(tokens[i:])
         for i, t in enumerate(tokens) if i
     )
 
 
 def write_statements(text: str) -> tuple[str, ...]:
-    """Each statement in `text` that changes data, as written."""
-    return tuple(text[s.start:s.end] for s in _statements(text) if _statement_writes(s))
+    """Each statement in `text` that changes data, as written. A line that
+    starts with `#` is read as code, as Postgres reads it, and then as a
+    comment, as MySQL reads it: a write in either reading counts."""
+    found = tuple(text[s.start:s.end] for s in _statements(text) if _statement_writes(s))
+    if found or not _HASH_LINE.search(text):
+        return found
+    return tuple(text[s.start:s.end] for s in _statements(text, hash_comments=True) if _statement_writes(s))
 
 
-# An ATTACH statement, not the English word: ATTACH then its optional
-# keywords, then a quote, placeholder or the end of the literal.
+def _quoted_statements(text: str) -> tuple[str, ...]:
+    """Every statement in `text` as the card quotes it, writes or not: all
+    the text from one top-level `;` to the next, comments and `#` lines
+    included, so nothing between them is left off. One Approve runs them all."""
+    out: list[str] = []
+    begin = 0
+    for m in _TOKEN.finditer(text):
+        if m.lastgroup == "end":
+            out.append(text[begin:m.start()].strip())
+            begin = m.end()
+    out.append(text[begin:].strip())
+    return tuple(s for s in out if s)
+
+
+# An ATTACH statement, not the English word: ATTACH or attach (a sentence's
+# "Attach" is prose), a space and its optional keywords, then what it
+# attaches. That is a quoted literal or a placeholder followed by AS,
+# options, `;` or the end; the start of a literal the code finishes when it
+# runs; or the end of the literal.
 _ATTACH = re.compile(
-    r"""(?:^|[;'"(])\s*ATTACH\b\s*(?:OR\s+REPLACE\s+)?(?:DATABASE\s+)?(?:IF\s+NOT\s+EXISTS\s+)?"""
-    r"""(?=[^A-Za-z_\s]|\Z)""",
-    re.I | re.M,
+    r"""(?:^|[;'"(])\s*(?:ATTACH|attach)\s+(?i:OR\s+REPLACE\s+)?(?i:DATABASE\s+)?(?i:IF\s+NOT\s+EXISTS\s+)?"""
+    r"""(?:(?:(?P<quoted>'(?:[^']|'')*'|"(?:[^"]|"")*")|\{[^{}]*\}|%s|%\(\w+\)s|\$\w+|:\w+|\?)"""
+    r"""(?=\s*(?:(?i:AS)\b|\(|;|\)|\Z))|['"][^'"]*\Z|\Z)""",
+    re.M,
 )
+# An ATTACH's options: (TYPE postgres, ...) or TYPE postgres.
+_ATTACH_TYPE = re.compile(r"""\bTYPE\b\s*=?\s*['"]?(\w+)""", re.I)
+# A scheme such as `postgres:` or `md:` before what an ATTACH names, but not
+# a Windows drive.
+_SCHEME = re.compile(r"(?![A-Za-z]:[\\/])[A-Za-z][\w+.-]*:")
+
+
+def _attaches_elsewhere(text: str) -> bool:
+    """Whether `text` holds an ATTACH of a database outside the process. An
+    in-memory database, a local file, or a SQLite one, named in full, is in
+    it, as `duckdb.connect` on one is."""
+    for m in _ATTACH.finditer(text):
+        quoted = m.group("quoted")
+        if quoted is None:
+            return True  # what it attaches is picked when the code runs
+        target = quoted[1:-1]
+        options = _ATTACH_TYPE.search(text[m.end():].split(";", 1)[0])
+        scheme = _SCHEME.match(target)
+        local = target == ":memory:" or bool(target) and "=" not in target and (
+            scheme is None or scheme.group().lower() in ("sqlite:", "file:")
+        )
+        if not local or options is not None and options.group(1).lower() not in ("sqlite", "duckdb"):
+            return True
+    return False
 
 
 # ── The reader ────────────────────────────────────────────────────────────
@@ -941,6 +1207,7 @@ _HARMLESS_METHODS = frozenset({
     "write", "write_text", "writelines", "debug", "info", "warning", "warn",
     "error", "exception", "critical", "log", "startswith", "endswith", "find",
     "count", "index", "split", "splitlines", "lower", "upper", "dump", "print", "pprint",
+    "writerow", "writerows",
 })
 _LOGGER_NAMES = frozenset({"logger", "log", "logging", "_log", "_logger"})
 _SQL_WRAPPERS = frozenset({
@@ -952,7 +1219,24 @@ _SQL_WRAPPERS = frozenset({
 _PASS_THROUGH = frozenset({
     "repr", "list", "tuple", "set", "sorted", "reversed", "iter", "next", "enumerate", "json.dumps",
     "IPython.display.Markdown", "IPython.display.HTML", "IPython.display.Code",
+    "zip", "dict", "textwrap.indent", "textwrap.fill", "textwrap.wrap", "textwrap.shorten",
+    "html.escape", "pandas.DataFrame", "pandas.Series",
 })
+# Methods whose result carries what their receiver holds: a dict's items, or
+# a DataFrame as text. to_sql isn't one: it writes a database.
+_CARRIERS = frozenset({
+    "items", "values", "tolist", "to_csv", "to_excel", "to_string", "to_markdown", "to_html", "to_json",
+})
+# Calls that build a new object, so no other name holds what they return.
+_FRESH_CALLS = frozenset({
+    "dict", "list", "set", "collections.defaultdict", "collections.OrderedDict", "copy.copy", "copy.deepcopy",
+    "pandas.DataFrame", "pandas.Series", "pandas.concat", "pandas.merge", "pandas.read_csv", "pandas.read_excel",
+    "pandas.read_parquet", "pandas.read_json", "pandas.read_sql", "pandas.read_sql_query",
+})
+# Calls that hand each item to the function they're given, and return what
+# it returns (map, a DataFrame's apply) or the items it picks (filter).
+_MAPPERS = frozenset({"map", "filter", "sorted", "min", "max"})
+_MAPPER_METHODS = frozenset({"apply", "map", "transform", "agg", "aggregate", "applymap"})
 _STR_METHODS = frozenset({
     "format", "strip", "lstrip", "rstrip", "replace", "upper", "lower", "decode", "encode",
 })
@@ -974,6 +1258,11 @@ _MOVE_FUNCS = {
     "pathlib.PosixPath.rename": "rename", "pathlib.PosixPath.replace": "rename",
 }
 _COPY_FUNCS = frozenset({"shutil.copy", "shutil.copy2", "shutil.copyfile"})
+# Modules and classes that hold a delete, a move or a shell call, for a
+# lookup by a name the check computes (`_FileFinder.lookup`).
+_LOOKUP_MODULES = frozenset({
+    "os", "shutil", "pathlib", "pathlib.Path", "pathlib.PosixPath", "send2trash", "subprocess",
+})
 _SHELL_FUNCS = frozenset({
     "subprocess.run", "subprocess.call", "subprocess.check_call", "subprocess.check_output",
     "subprocess.Popen", "subprocess.getoutput", "subprocess.getstatusoutput", "os.system", "os.popen",
@@ -992,10 +1281,22 @@ _LIST_ARGV_FUNCS = {
     "os.posix_spawn": 1, "os.posix_spawnp": 1,
 }
 _CHDIR_FUNCS = frozenset({"os.chdir", "contextlib.chdir"})
+# Calls that end the process, so nothing after them runs.
+_EXITS = frozenset({"sys.exit", "os._exit", "os.abort", "exit", "quit"})
 _SHELL_DELETE = frozenset({"rm", "unlink", "rmdir", "shred"})
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
 # Words that run the command after them, and shell keywords a command follows.
-_SHELL_PREFIXES = frozenset({"sudo", "doas", "env", "nohup", "time", "command", "exec", "nice", "xargs"})
+_SHELL_PREFIXES = frozenset({
+    "sudo", "doas", "env", "nohup", "time", "command", "exec", "nice", "xargs",
+    "timeout", "stdbuf", "ionice", "busybox",
+})
+# Flags of one runner that take the next word as their value, beyond
+# `_VALUE_FLAGS`, and the operands a runner takes before the command, as
+# timeout takes its duration.
+_PREFIX_VALUE_FLAGS = {
+    "timeout": frozenset({"-k"}), "stdbuf": frozenset({"-i", "-o", "-e"}), "ionice": frozenset({"-c", "-p"}),
+}
+_PREFIX_OPERANDS = {"timeout": 1}
 _SHELL_KEYWORDS = frozenset({"if", "then", "else", "elif", "do", "while", "until", "!", "{"})
 # Shell words that end one command and start the next.
 _SHELL_SEPARATORS = frozenset({";", "&&", "||", "|", "&", "(", ")", "|&", ";;"})
@@ -1053,8 +1354,9 @@ class _Binding:
 @dataclass(frozen=True, eq=False)
 class _Growth:
     """One place a cell adds to what a name holds: `x.append(v)`, `x.add(v)`,
-    `x.insert(i, v)`, `x.extend(vs)`, `x.update(vs)`, `x += vs` and `x |= vs`
-    ("add"), or `x /= part` ("join")."""
+    `x.insert(i, v)`, `x.extend(vs)`, `x.update(vs)`, `x += vs`, `x |= vs`,
+    `x[i] = v`, `x[:] = vs` and `x[0].append(v)` ("add"), or `x /= part`
+    ("join")."""
 
     site: ast.AST
     value: ast.AST
@@ -1072,6 +1374,24 @@ class _Arg:
 Function = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
 
 
+@dataclass(frozen=True, eq=False)
+class _Callee:
+    """A function or lambda an earlier cell defined, where the code read
+    calls it or passes it on.
+
+    `call` is the call, None when the code passes it on as a value; `use`
+    is the code that names it, where the card reports what it changes. For a
+    method, `bound` is what its first parameter gets: the instance or class
+    it is called on, or the call that makes the instance. None for a plain
+    function, a static method, or a method called on its class.
+    """
+
+    func: Function
+    call: ast.Call | None
+    use: ast.expr
+    bound: ast.AST | None = None
+
+
 class _Cell:
     """One parsed cell: its tree, parents, bindings and source lines, and
     what `_Reader` gathers from every cell. Nothing changes it once built, so
@@ -1085,12 +1405,16 @@ class _Cell:
         self.host_line = host_line
         self.lines = code.splitlines()
         self.parents: dict[ast.AST, ast.AST] = {}
-        # Every name the cell imports, by the name it binds; the functions it
-        # defines, by name; every call, in walk order; and whether a string
-        # in it attaches a database (`_ATTACH`).
+        # Every name the cell imports, by the name it binds; the functions and
+        # classes it defines, by name; every call, in walk order; the calls
+        # to a name or method that pass a name, by the name passed; and
+        # whether a string in it attaches a database outside the process
+        # (`_attaches_elsewhere`).
         self.imports: dict[str, str] = {}
         self.functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+        self.classes: dict[str, ast.ClassDef] = {}
         self.calls: list[ast.Call] = []
+        self.passed: dict[str, list[ast.Call]] = {}
         self.attaches = False
         for node in ast.walk(tree):
             for child in ast.iter_child_nodes(node):
@@ -1107,9 +1431,15 @@ class _Cell:
                     self.imports[a.asname or a.name] = f"{node.module}.{a.name}"
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self.functions[node.name] = node
+            elif isinstance(node, ast.ClassDef):
+                self.classes[node.name] = node
             elif isinstance(node, ast.Call):
                 self.calls.append(node)
-            elif isinstance(node, ast.Constant) and isinstance(node.value, str) and _ATTACH.search(node.value):
+                if isinstance(node.func, (ast.Name, ast.Attribute)):
+                    for arg in (*node.args, *(k.value for k in node.keywords)):
+                        if isinstance(arg, ast.Name):
+                            self.passed.setdefault(arg.id, []).append(node)
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str) and _attaches_elsewhere(node.value):
                 self.attaches = True
         self.bindings: dict[str, list[_Binding]] = {}
         self.loads: dict[str, list[ast.Name]] = {}
@@ -1125,6 +1455,10 @@ class _Cell:
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                 for t in targets:
                     self._bind(t, node.value, at=node, how="value")
+                    root = _subscript_root(node=t)
+                    if isinstance(t, ast.Subscript) and root is not None:
+                        # `x[i] = v` and `x[:] = vs` change the list `x` holds in place.
+                        self.grows.setdefault(root, []).append(_Growth(site=node, value=node.value, how="add"))
             elif isinstance(node, ast.AugAssign):
                 if isinstance(node.op, ast.Add) and isinstance(node.target, ast.Name):
                     self.augments.setdefault(node.target.id, []).append(node)
@@ -1151,12 +1485,23 @@ class _Cell:
                     self.grows.setdefault(node.func.value.id, []).append(
                         _Growth(site=node, value=node.args[-1], how="add"),
                     )
-        # The names each lambda the cell binds is bound to, by the lambda's id.
+            elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                  and isinstance(node.func.value, ast.Subscript) and node.func.attr in (*_ADDERS, "update")
+                  and node.args and _subscript_root(node=node.func.value) is not None):
+                # `x[0].append(v)`: what a list inside the one `x` holds grows.
+                self.grows.setdefault(_subscript_root(node=node.func.value), []).append(
+                    _Growth(site=node, value=node.args[-1], how="add"),
+                )
+        # The names each lambda the cell binds is bound to, by the lambda's id;
+        # and the names bound to another name's value, as `b` in `b = a`, by `a`.
         self.lambda_names: dict[int, list[str]] = {}
+        self.aliases: dict[str, list[str]] = {}
         for name, found in self.bindings.items():
             for b in found:
                 if b.how == "value" and isinstance(b.value, ast.Lambda):
                     self.lambda_names.setdefault(id(b.value), []).append(name)
+                if b.how == "value" and isinstance(b.value, ast.Name) and b.value.id != name:
+                    self.aliases.setdefault(b.value.id, []).append(name)
 
     def _bind(self, target: ast.AST, value: ast.AST, *, at: ast.AST, how: Literal["value", "element", "context"]) -> None:
         if self._dead(at):
@@ -1247,6 +1592,85 @@ def _inside(node: ast.AST, ancestor: ast.AST, cell: _Cell) -> bool:
     return False
 
 
+def _class_member(*, cls: ast.ClassDef, name: str) -> Function | None:
+    """The function `cls`'s body gives `name`: a def, or a lambda assigned
+    to it, bare or wrapped in staticmethod or classmethod."""
+    for item in cls.body:
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == name:
+            return item
+        if isinstance(item, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in item.targets):
+            value = item.value
+            if (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+                    and value.func.id in ("staticmethod", "classmethod") and value.args):
+                value = value.args[0]
+            if isinstance(value, ast.Lambda):
+                return value
+    return None
+
+
+def _method_kind(*, func: Function, cell: _Cell) -> Literal["static", "class", "plain"]:
+    """How a method takes its first parameter: a static method takes none, a
+    class method gets the class, a plain one the instance."""
+    if isinstance(func, ast.Lambda):
+        wrapper = cell.parents.get(func)
+        names = {wrapper.func.id} if isinstance(wrapper, ast.Call) and isinstance(wrapper.func, ast.Name) else set()
+    else:
+        names = {d.id for d in func.decorator_list if isinstance(d, ast.Name)}
+    return "static" if "staticmethod" in names else "class" if "classmethod" in names else "plain"
+
+
+def _subscript_root(*, node: ast.AST) -> str | None:
+    """The name `x` in `x[i]`, `x[i][j]` or `x[:]`; None for anything else."""
+    while isinstance(node, ast.Subscript):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def _follows(*, node: ast.AST, value: ast.AST) -> bool:
+    """Whether `node` starts after `value` ends, both in one cell."""
+    start = (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
+    return start >= (getattr(value, "end_lineno", 0) or 0, getattr(value, "end_col_offset", 0) or 0)
+
+
+def _reads_another(found: list[_Binding], given: set[int]) -> bool:
+    """Whether a read that gets `found` reads only bindings other than the
+    ones in `given`, by id."""
+    return bool(found) and not any(id(b) in given for b in found)
+
+
+def _since_last_sure(bindings: list[_Binding], *, name: str) -> list[_Binding]:
+    """One cell's module-level `bindings` of `name`, in line order, from the
+    last that surely ran and doesn't build on the value before it, as `sql =
+    sql.rstrip(', ')` does: a read after them gets that value or one an if,
+    loop or try after it gave."""
+    ordered = sorted(bindings, key=lambda b: b.line)
+    for i in range(len(ordered) - 1, -1, -1):
+        if not ordered[i].conditional and not _loads_in([ordered[i].value], name):
+            return ordered[i:]
+    return ordered
+
+
+def _ran_before(node: ast.AST, binding: _Binding, *, cell: _Cell) -> bool:
+    """Whether `node`, in `cell`, surely ran before `binding` gave its name a
+    value: in the binding's scope, and in an earlier cell, or earlier in the
+    binding's cell (`_follows`) outside any loop around the binding. Code in
+    a function runs when it is called, a function's body after its
+    parameters get their values, and code a cell passes to exec() later than
+    all, so none of those counts."""
+    if cell.scope_of(node) is not binding.scope or binding.cell.host_line is not None:
+        return False
+    if cell is not binding.cell:
+        return cell.index < binding.cell.index
+    if binding.how == "param" or _follows(node=node, value=binding.value):
+        return False
+    current = cell.parents.get(binding.value)
+    while current is not None and current is not binding.scope:
+        if isinstance(current, (ast.For, ast.AsyncFor, ast.While)) and _inside(node, current, cell):
+            return False
+        current = cell.parents.get(current)
+    return True
+
+
 class _Reader:
     """Reads one cell against the conversation's earlier cells."""
 
@@ -1256,6 +1680,7 @@ class _Reader:
         self._cells_by_node: dict[ast.AST, _Cell] = {}
         self.imports: dict[str, str] = {}
         self.functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+        self.classes: dict[str, ast.ClassDef] = {}
         # The names each lambda is bound to, by the lambda's id.
         self.lambda_names: dict[int, list[str]] = {}
         for cell in cells:
@@ -1263,8 +1688,19 @@ class _Reader:
             self._cells_by_node.update(dict.fromkeys(cell.parents, cell))
             self.imports.update(cell.imports)
             self.functions.update(cell.functions)
+            self.classes.update(cell.classes)
             self.lambda_names.update(cell.lambda_names)
         self.function_names = {*self.functions, *(n for names in self.lambda_names.values() for n in names)}
+        # The names any cell binds, and the members the pad's classes define:
+        # a call through any other name or attribute reaches no pad function.
+        self.bound_names = {name for cell in cells for name in cell.bindings}
+        self.method_names: set[str] = set()
+        for cls in self.classes.values():
+            for item in cls.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    self.method_names.add(item.name)
+                elif isinstance(item, ast.Assign):
+                    self.method_names.update(t.id for t in item.targets if isinstance(t, ast.Name))
         self.attaches = any(cell.attaches for cell in cells)
         self._held: dict[tuple[int, str, tuple[tuple[int, str, int], ...]], tuple[str, ...]] = {}
         # The code behind each numbered placeholder, None for a part with no
@@ -1281,6 +1717,10 @@ class _Reader:
         # for one it can't read; and the call its return value goes to.
         self.param_args: dict[tuple[int, str], _Arg | None] = {}
         self.returns_to: dict[int, ast.AST] = {}
+        # What the pad's cells write (`_made`), for a snapshot past its cap.
+        self.made: _Made | None = None
+        # What this check read from disk for a glob, once per pattern and folder.
+        self.disk: _DiskReads = {}
         # The folders the pad's code may run in, relative to the project or
         # absolute, the project itself first; unknown once a cell changes into
         # one the check can't place.
@@ -1304,11 +1744,11 @@ class _Reader:
         """The placeholder for a part the code picks at run time: `node`'s
         own number, so `show_holes` can put its code back."""
         if node is not None and id(node) in self._hole_numbers:
-            return f"{_HOLE}{self._hole_numbers[id(node)]}_"
+            return f"{_HOLE}{self._hole_numbers[id(node)]}{_HOLE_END}"
         self._holes.append(node)
         if node is not None:
             self._hole_numbers[id(node)] = len(self._holes) - 1
-        return f"{_HOLE}{len(self._holes) - 1}_"
+        return f"{_HOLE}{len(self._holes) - 1}{_HOLE_END}"
 
     def show_holes(self, text: str) -> str:
         """`text` with each numbered placeholder replaced by the code that
@@ -1328,13 +1768,13 @@ class _Reader:
         return _NUMBERED_HOLE.sub(code, text)
 
     def statements_held(self, name: str, binding: _Binding) -> tuple[str, ...]:
-        """The write statements `binding` gives `name`, read once per check
-        and set of call arguments."""
+        """Every statement of each text `binding` gives `name` that holds a
+        write, read once per check and set of call arguments."""
         passed = tuple(sorted((k[0], k[1], id(a.node) if a else 0) for k, a in self.param_args.items()))
         key = (id(binding), name, passed)
         if key not in self._held:
             texts = _held_texts(name, binding, self, depth=0)
-            self._held[key] = tuple(s for t in texts for s in write_statements(t))
+            self._held[key] = tuple(s for t in texts if write_statements(t) for s in _quoted_statements(t))
         return self._held[key]
 
     def changed_into(
@@ -1367,12 +1807,13 @@ class _Reader:
         return func
 
     @contextmanager
-    def calling(self, func: Function, call: ast.Call | None) -> Iterator[None]:
-        """Read `func`'s parameters as the arguments `call` passes, and its
-        return value as going to `call`. With no call (the function passed on
-        as a value), every parameter is one the check can't read."""
+    def calling(self, func: Function, call: ast.Call | None, *, bound: ast.AST | None = None) -> Iterator[None]:
+        """Read `func`'s parameters as the arguments `call` passes, after
+        `bound` for a method's first, and its return value as going to `call`.
+        With no call (the function passed on as a value), every other
+        parameter is one the check can't read."""
         passed = _call_arguments(func, call, call_cell=self.cell_of(call) if call else self.current,
-                                 func_cell=self.cell_of(func))
+                                 func_cell=self.cell_of(func), bound=bound)
         saved = (dict(self.param_args), dict(self.returns_to))
         self.param_args.update({(id(func), name): arg for name, arg in passed.items()})
         if call is not None:
@@ -1400,6 +1841,234 @@ class _Reader:
             return str(value)
         return None
 
+    def callees(self, *, node: ast.expr, call: ast.Call | None, use: ast.expr, depth: int = 0) -> list[_Callee]:
+        """The functions and lambdas an earlier cell defined that calling
+        `node` with `call` runs: one a name, an alias, a list or dict, a
+        `functools.partial` or a function's return value holds, and a method
+        of an earlier cell's class, called on the class, an instance, `self`
+        or the call that makes one (`__init__`, `__call__`). A method called
+        on something the check can't place counts in every earlier class
+        that defines it."""
+        if depth > 6:
+            return []
+        if isinstance(node, ast.Lambda):
+            return [_Callee(func=node, call=call, use=use)] if self.cell_of(node).index < self.current.index else []
+        if isinstance(node, ast.Name):
+            if node.id in self.function_names:
+                func = self.earlier_function(node)
+                if func is not None:
+                    return [_Callee(func=func, call=call, use=use)]
+            cls = self._earlier_class(node=node)
+            if cls is not None:
+                # Calling a class runs its __init__ on the new instance.
+                return self._methods(cls=cls, name="__init__", bound=call or node, call=call, use=use)
+            if node.id not in self.bound_names:
+                return []
+            return [c for b in self.bindings_of(node.id, node=node) if b.how == "value"
+                    for c in self.callees(node=b.value, call=call, use=use, depth=depth + 1)]
+        if isinstance(node, ast.Subscript):
+            items = self._items_of(node=node.value, key=node.slice, depth=depth + 1) or []
+            return [c for item in items for c in self.callees(node=item, call=call, use=use, depth=depth + 1)]
+        if isinstance(node, ast.Attribute) and node.attr in self.method_names:
+            receiver = node.value
+            if isinstance(receiver, ast.Name) and receiver.id in self.imports:
+                return []
+            cls = self._earlier_class(node=receiver)
+            if cls is not None:
+                return self._methods(cls=cls, name=node.attr, bound=receiver, on_class=True, call=call, use=use)
+            classes = self._instance_classes(node=receiver, depth=depth + 1)
+            if classes is None:
+                classes = list(self.classes.values())
+            return [c for k in classes for c in self._methods(cls=k, name=node.attr, bound=receiver, call=call, use=use)]
+        if isinstance(node, ast.Call):
+            if self.dotted(node.func) == "functools.partial" and node.args:
+                made = None if call is None else _partial_call(partial=node, call=call)
+                return self.callees(node=node.args[0], call=made, use=use, depth=depth + 1)
+            cls = self._earlier_class(node=node.func)
+            if cls is not None:
+                # An instance called: its __call__.
+                return self._methods(cls=cls, name="__call__", bound=node, call=call, use=use)
+            # What a function returns, called.
+            return [c for made in self.callees(node=node.func, call=node, use=use, depth=depth + 1)
+                    for ret in self._returns(func=made.func)
+                    for c in self.callees(node=ret, call=call, use=use, depth=depth + 1)]
+        return []
+
+    def _earlier_class(self, *, node: ast.AST) -> ast.ClassDef | None:
+        """The class an earlier cell defined that the name `node` reads."""
+        if not isinstance(node, ast.Name):
+            return None
+        cls = self.classes.get(node.id)
+        if cls is None or self.cell_of(cls).index >= self.current.index:
+            return None
+        cell = self.cell_of(node)
+        scopes = cell.scopes_around(node)
+        if any(b.scope in scopes for b in cell.bindings.get(node.id, ())):
+            # A local name, such as a parameter, shadows the pad's class.
+            return None
+        return cls
+
+    def _methods(
+        self, *, cls: ast.ClassDef, name: str, bound: ast.AST, call: ast.Call | None, use: ast.expr,
+        on_class: bool = False, depth: int = 0,
+    ) -> list[_Callee]:
+        """`cls`'s method `name`, or the one a base class an earlier cell
+        defined gives it. Its first parameter gets `bound`, except in a static
+        method, or in a plain one called on the class (`on_class`)."""
+        func = _class_member(cls=cls, name=name)
+        if func is not None:
+            if self.cell_of(func).index >= self.current.index:
+                return []
+            kind = _method_kind(func=func, cell=self.cell_of(func))
+            gets_bound = kind == "class" or kind == "plain" and not on_class
+            return [_Callee(func=func, call=call, use=use, bound=bound if gets_bound else None)]
+        for base in cls.bases:
+            parent = self._earlier_class(node=base)
+            if parent is not None and parent is not cls and depth < 6:
+                found = self._methods(cls=parent, name=name, bound=bound, call=call, use=use, on_class=on_class, depth=depth + 1)
+                if found:
+                    return found
+        return []
+
+    def _returns(self, *, func: Function) -> list[ast.expr]:
+        """What `func` itself returns: a lambda's body, or the value of each
+        return statement in the function, not in a function inside it."""
+        if isinstance(func, ast.Lambda):
+            return [func.body]
+        cell = self.cell_of(func)
+        return [n.value for n in ast.walk(func)
+                if isinstance(n, ast.Return) and n.value is not None and cell.scope_of(n) is func]
+
+    def _items_of(self, *, node: ast.AST, key: ast.AST | None, depth: int) -> list[ast.AST] | None:
+        """The elements of the list, tuple, set or dict values `node` holds,
+        with what the pad adds to it, only the one a literal `key` names when
+        the literal says which; None when the check can't place them."""
+        if depth > 6:
+            return None
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            elements = [e.value if isinstance(e, ast.Starred) else e for e in node.elts]
+            if (isinstance(key, ast.Constant) and type(key.value) is int and not isinstance(node, ast.Set)
+                    and -len(elements) <= key.value < len(elements)):
+                return [elements[key.value]]
+            return elements
+        if isinstance(node, ast.Dict):
+            if isinstance(key, ast.Constant) and all(isinstance(k, ast.Constant) for k in node.keys):
+                hits = [v for k, v in zip(node.keys, node.values) if k.value == key.value]
+                if hits:
+                    return hits
+            return list(node.values)
+        if isinstance(node, ast.Name):
+            out: list[ast.AST] = []
+            for b in self.bindings_of(node.id, node=node):
+                got = self._items_of(node=b.value, key=key, depth=depth + 1) if b.how == "value" else None
+                grown = self.list_growth(name=node.id, binding=b) if got is not None else _UNKNOWN
+                if got is None or isinstance(grown, _Unknown):
+                    return None
+                out += got + [g.value for g, _ in grown]
+            return out
+        if isinstance(node, ast.Call) and self.dotted(node.func) in ("dict", "list", "tuple"):
+            # A dict of keywords, or a list or tuple made from another.
+            hits = [k.value for k in node.keywords if isinstance(key, ast.Constant) and k.arg == key.value]
+            if hits:
+                return hits
+            out = [k.value for k in node.keywords]
+            for arg in node.args:
+                got = self._items_of(node=arg, key=None, depth=depth + 1)
+                if got is None:
+                    return None
+                out += got
+            return out
+        if isinstance(node, ast.Call):
+            made = self.callees(node=node.func, call=node, use=node, depth=depth + 1)
+            if not made:
+                return None
+            out = []
+            for callee in made:
+                for ret in self._returns(func=callee.func):
+                    got = self._items_of(node=ret, key=key, depth=depth + 1)
+                    if got is None:
+                        return None
+                    out += got
+            return out
+        return None
+
+    def _instance_classes(self, *, node: ast.AST, depth: int) -> list[ast.ClassDef] | None:
+        """The earlier cells' classes `node` holds an instance of: one made by
+        calling the class, held in a name, a list or dict, or `self` in a
+        method. None when the check can't place what `node` holds."""
+        if depth > 6:
+            return None
+        if isinstance(node, ast.Call):
+            cls = self._earlier_class(node=node.func)
+            if cls is not None:
+                return [cls]
+            if isinstance(node.func, ast.Name) and node.func.id == "super":
+                return None
+            # A pad function's return value may be an instance; any other call's isn't.
+            return None if self.callees(node=node.func, call=node, use=node, depth=depth + 1) else []
+        if isinstance(node, ast.Name):
+            if node.id in self.imports:
+                return []
+            arg = self.argument_of(node)
+            if arg is not None:
+                return self._instance_classes(node=arg.node, depth=depth + 1)
+            found = self.bindings_of(node.id, node=node)
+            if not found:
+                return None
+            out: list[ast.ClassDef] = []
+            for b in found:
+                if b.how == "value":
+                    got = self._instance_classes(node=b.value, depth=depth + 1)
+                elif b.how == "element":
+                    got = self._element_classes(items=self._items_of(node=b.value, key=None, depth=depth + 1), depth=depth)
+                elif b.how == "param":
+                    got = self._self_class(func=b.value, param=node.id)
+                else:
+                    got = None
+                if got is None:
+                    return None
+                out += got
+            return out
+        if isinstance(node, ast.Subscript):
+            return self._element_classes(items=self._items_of(node=node.value, key=node.slice, depth=depth + 1), depth=depth)
+        if isinstance(node, (ast.Constant, ast.JoinedStr, ast.List, ast.Tuple, ast.Set, ast.Dict,
+                             ast.ListComp, ast.SetComp, ast.DictComp, ast.BinOp, ast.Compare)):
+            return []
+        return None
+
+    def _element_classes(self, *, items: list[ast.AST] | None, depth: int) -> list[ast.ClassDef] | None:
+        if items is None:
+            return None
+        out: list[ast.ClassDef] = []
+        for item in items:
+            got = self._instance_classes(node=item, depth=depth + 1)
+            if got is None:
+                return None
+            out += got
+        return out
+
+    def _self_class(self, *, func: ast.AST, param: str) -> list[ast.ClassDef] | None:
+        """`[the class]` when `param` is the first parameter of a method,
+        `self`; None for any other parameter, which the check can't place."""
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return None
+        cls = self.cell_of(func).parents.get(func)
+        first = [*func.args.posonlyargs, *func.args.args][:1]
+        if isinstance(cls, ast.ClassDef) and first and first[0].arg == param:
+            return [cls]
+        return None
+
+    def partial_of(self, *, node: ast.expr) -> ast.Call | None:
+        """The `functools.partial(f, ...)` call `node` is, or a name holds."""
+        if isinstance(node, ast.Name):
+            if node.id not in self.bound_names:
+                return None
+            values = [b.value for b in self.bindings_of(node.id, node=node) if b.how == "value"]
+        else:
+            values = [node]
+        return next((v for v in values if isinstance(v, ast.Call) and v.args
+                     and self.dotted(v.func) == "functools.partial"), None)
+
     # ── names ────────────────────────────────────────────────────────────
 
     def dotted(self, node: ast.AST) -> str:
@@ -1417,10 +2086,11 @@ class _Reader:
         """What `name` holds where `node` reads it.
 
         Inside a function, the function's own bindings first. At module level,
-        this cell's bindings before the read, else the latest earlier cell's.
-        A function body runs when it is called, so it sees every cell's module
-        bindings, the latest first. A cell that binds the name only under an
-        if, loop or try doesn't hide an older binding: both count.
+        this cell's bindings before the read, else the latest earlier cell's,
+        each from the last one that surely ran. A function body runs when it
+        is called, so it sees every cell's module bindings, the latest first.
+        A cell that binds the name only under an if, loop or try doesn't hide
+        an older binding: both count.
         """
         cell = self.cell_of(node)
         scopes = cell.scopes_around(node)
@@ -1433,7 +2103,9 @@ class _Reader:
         else:
             line = getattr(node, "lineno", 0)
             here = [b for b in self._module_bindings(cell, name) if b.line <= line]
-            layers = iter([here, *(self._module_bindings(c, name) for c in reversed(self.cells[: cell.index]))])
+            layers = iter([_since_last_sure(here, name=name), *(
+                _since_last_sure(self._module_bindings(c, name), name=name) for c in reversed(self.cells[: cell.index])
+            )])
         found: list[_Binding] = []
         for layer in layers:
             found += layer
@@ -1565,14 +2237,78 @@ class _Reader:
         return out
 
     def growth(self, name: str, binding: _Binding) -> list[tuple[_Growth, _Cell]]:
-        """Each place the pad adds to what `binding` gives `name`: in any cell
-        for a module-level name, in its own function for a local one."""
+        """Each place the pad adds to what `binding` gives `name` that can run
+        after it binds it: in any cell for a module-level name, in its own
+        function for a local one. An addition that surely ran before the
+        binding (`_ran_before`) grew the value the name held then, so it
+        doesn't count."""
         out = []
         for cell in self.cells if binding.scope is None else [binding.cell]:
             for grown in cell.grows.get(name, ()):
-                if self._binding_scope(cell, grown.site, name) is binding.scope:
+                if self._binding_scope(cell, grown.site, name) is binding.scope and not _ran_before(
+                    grown.site, binding, cell=cell,
+                ):
                     out.append((grown, cell))
         return out
+
+    def list_growth(self, *, name: str, binding: _Binding, depth: int = 0) -> list[tuple[_Growth, _Cell]] | _Unknown:
+        """`growth` for a list or set, which the pad changes in place: also
+        what it adds through another name bound to it, as `b` in `b = a`, and
+        what a pad function adds to the parameter a call passes it as.
+        Unknown when such a function passes the parameter on."""
+        out = self.growth(name, binding)
+        if depth > 3:
+            return out
+        for cell in self.cells if binding.scope is None else [binding.cell]:
+            for alias in cell.aliases.get(name, ()):
+                for b in cell.bindings.get(alias, ()):
+                    if (b.how == "value" and isinstance(b.value, ast.Name) and b.value.id == name
+                            and self._binding_scope(cell, b.value, name) is binding.scope
+                            and not _ran_before(b.value, binding, cell=cell)):
+                        more = self.list_growth(name=alias, binding=b, depth=depth + 1)
+                        if isinstance(more, _Unknown):
+                            return more
+                        out += more
+            for call in cell.passed.get(name, ()):
+                if self._binding_scope(cell, call, name) is not binding.scope or _ran_before(call, binding, cell=cell):
+                    continue
+                method = isinstance(call.func, ast.Attribute)
+                for func in self._pad_callables(node=call.func):
+                    # A method gets the list as the parameter after its first or,
+                    # called on the class, as the one it is passed for.
+                    for bound in (None, call.func.value) if method else (None,):
+                        passed = _call_arguments(func, call, call_cell=cell, func_cell=self.cell_of(func), bound=bound)
+                        for param, arg in passed.items():
+                            if arg is not None and isinstance(arg.node, ast.Name) and arg.node.id == name:
+                                filled = self._filled(func=func, param=param)
+                                if isinstance(filled, _Unknown):
+                                    return filled
+                                out += filled
+        return out
+
+    def _pad_callables(self, *, node: ast.expr) -> list[Function]:
+        """The pad's functions and lambdas a call to the name `node` runs, or
+        to the method `node` names, in every pad class that defines it."""
+        if isinstance(node, ast.Attribute) and node.attr in self.method_names:
+            members = (_class_member(cls=cls, name=node.attr) for cls in self.classes.values())
+            return [m for m in members if m is not None]
+        if not isinstance(node, ast.Name) or node.id not in self.function_names:
+            return []
+        lambdas = [b.value for b in self.bindings_of(node.id, node=node)
+                   if b.how == "value" and isinstance(b.value, ast.Lambda)]
+        func = self.functions.get(node.id)
+        return lambdas or ([func] if func is not None else [])
+
+    def _filled(self, *, func: Function, param: str) -> list[tuple[_Growth, _Cell]] | _Unknown:
+        """What `func` adds to the list its parameter `param` holds; unknown
+        when it passes the parameter on to another pad function or method,
+        which may."""
+        cell = self.cell_of(func)
+        if any(self._binding_scope(cell, call, param) is func and self._pad_callables(node=call.func)
+               for call in cell.passed.get(param, ())):
+            return _UNKNOWN
+        return [(grown, cell) for grown in cell.grows.get(param, ())
+                if self._binding_scope(cell, grown.site, param) is func]
 
     @staticmethod
     def _binding_scope(cell: _Cell, node: ast.AST, name: str) -> ast.AST | None:
@@ -1585,15 +2321,18 @@ class _Reader:
     def _grown_paths(
         self, name: str, binding: _Binding, base: list[str], *, use: ast.AST, depth: int,
     ) -> list[str] | _Unknown:
-        """`base` with what the pad adds to it: each element appended,
-        extended or added to a list or set, and a path built on with `+=` or
-        `/=`. The unbuilt path stays too unless the addition surely ran
-        before `use`: earlier in its cell and not under a branch or loop, or
-        in an earlier cell."""
+        """`base` with what the pad adds to it after `binding`: each element
+        appended, extended or added to a list or set, and a path built on with
+        `+=` or `/=`. The unbuilt path stays too unless the addition surely
+        ran before `use`: earlier in its cell or in an earlier cell, in the
+        binding's own scope and not under a branch or loop."""
         out = list(base)
         sequence = self.is_sequence(binding.value, cell=binding.cell)
         here = self.cell_of(use)
-        for grown, cell in self.growth(name, binding):
+        growth = self.list_growth(name=name, binding=binding) if sequence else self.growth(name, binding)
+        if isinstance(growth, _Unknown):
+            return growth
+        for grown, cell in growth:
             got = self.paths(grown.value, cell=cell, depth=depth + 1)
             if isinstance(got, _Unknown):
                 if sequence:
@@ -1604,7 +2343,9 @@ class _Reader:
                 continue
             built = [_join(b, p) if grown.how == "join" else b + p for b in out for p in got]
             ran = cell.index < here.index or cell is here and grown.site.lineno < getattr(use, "lineno", 0)
-            sure = ran and not cell._under_branch(grown.site, scope=binding.scope)
+            # One in a function runs only if it is called.
+            in_order = cell.scope_of(grown.site) is binding.scope
+            sure = ran and in_order and not cell._under_branch(grown.site, scope=binding.scope)
             out = built if sure else out + built
             if len(out) > 256:
                 return _UNKNOWN
@@ -1753,7 +2494,8 @@ class _Reader:
 
     def is_local_handle(self, node: ast.AST, *, depth: int = 0) -> bool:
         """Whether `node` is an in-process DuckDB or SQLite handle, which
-        changes no database outside the pad unless the pad ATTACHes one."""
+        changes no database outside the pad unless the pad ATTACHes one
+        outside the process."""
         if self.attaches or depth > 6:
             return False
         if isinstance(node, ast.Name):
@@ -1815,18 +2557,22 @@ def _join(a: str, b: str) -> str:
 
 
 def _call_arguments(
-    func: Function, call: ast.Call | None, *, call_cell: _Cell, func_cell: _Cell,
+    func: Function, call: ast.Call | None, *, call_cell: _Cell, func_cell: _Cell, bound: ast.AST | None = None,
 ) -> dict[str, _Arg | None]:
     """What `call` passes for each of `func`'s parameters, a parameter's
     default when it passes nothing, None for one the check can't read: past
-    a `*args` or `**kwargs`, or with no call at all."""
+    a `*args` or `**kwargs`, or with no call at all. With `bound`, a
+    method's first parameter gets it and the call's arguments fill the rest."""
     a = func.args
     positional = [*a.posonlyargs, *a.args]
     defaults = dict(zip([p.arg for p in positional][len(positional) - len(a.defaults):], a.defaults, strict=True))
     defaults.update({p.arg: d for p, d in zip(a.kwonlyargs, a.kw_defaults, strict=True) if d is not None})
     out: dict[str, _Arg | None] = {}
+    if bound is not None and positional:
+        out[positional[0].arg] = _Arg(node=bound, cell=call_cell)
+        positional = positional[1:]
     if call is None:
-        return {p.arg: None for p in (*positional, *a.kwonlyargs)}
+        return {**out, **{p.arg: None for p in (*positional, *a.kwonlyargs)}}
     starred = next((i for i, x in enumerate(call.args) if isinstance(x, ast.Starred)), len(call.args))
     spread = any(k.arg is None for k in call.keywords)
     keywords = {k.arg: k.value for k in call.keywords if k.arg is not None}
@@ -1842,6 +2588,14 @@ def _call_arguments(
         else:
             out[p.arg] = None
     return out
+
+
+def _partial_call(*, partial: ast.Call, call: ast.Call) -> ast.Call:
+    """The call `call` makes through `partial`, a `functools.partial(f, ...)`:
+    `f` given the partial's arguments, then the call's."""
+    made = ast.Call(func=partial.args[0], args=[*partial.args[1:], *call.args],
+                    keywords=[*partial.keywords, *call.keywords])
+    return ast.copy_location(made, call)
 
 
 def _with_part(path: str, method: str, part: str) -> str:
@@ -1961,16 +2715,27 @@ def _argument_text(arg: ast.AST | None, reader: _Reader, *, parts: list[ast.AST]
     return _sql_text(arg, reader, parts=parts, depth=depth + 1)
 
 
+def _item(node: ast.AST, key: str | int) -> ast.Subscript:
+    """`node[key]`: the code that fills in one field from a tuple or mapping
+    the code builds at run time."""
+    return ast.Subscript(value=node, slice=ast.Constant(value=key), ctx=ast.Load())
+
+
 def _percent_text(template: str, right: ast.AST, reader: _Reader, *, parts: list[ast.AST], depth: int) -> str:
-    """`template % right`, each literal argument put in its place; the rest
-    stay placeholders."""
+    """`template % right`, each literal argument put in its place and each
+    other one a placeholder for the code that fills it in."""
+    fields = [m for m in _PERCENT.finditer(template) if m.group(2) != "%"]
     if isinstance(right, ast.Dict):
         named = {k.value: v for k, v in zip(right.keys, right.values)
                  if isinstance(k, ast.Constant) and isinstance(k.value, str)}
         positional: list[ast.AST] = []
-    else:
+    elif isinstance(right, ast.Tuple) or len(fields) == 1 and fields[0].group(1) is None:
         named = {}
         positional = list(right.elts) if isinstance(right, ast.Tuple) else [right]
+    else:
+        # A tuple or mapping the code builds at run time: each field is one item of it.
+        named = {m.group(1): _item(right, m.group(1)) for m in fields if m.group(1) is not None}
+        positional = [_item(right, i) for i in range(sum(m.group(1) is None for m in fields))]
     position = 0
 
     def fill(m: re.Match[str]) -> str:
@@ -1984,14 +2749,15 @@ def _percent_text(template: str, right: ast.AST, reader: _Reader, *, parts: list
             arg = positional[position] if position < len(positional) else None
             position += 1
         value = _argument_text(arg, reader, parts=parts, depth=depth)
-        return m.group() if value is None else value
+        return reader.hole(arg) if value is None else value
 
     return _PERCENT.sub(fill, template)
 
 
 def _format_text(template: str, call: ast.Call, reader: _Reader, *, parts: list[ast.AST], depth: int) -> str:
-    """`template.format(...)`, each literal argument put in its place; the
-    rest stay placeholders."""
+    """`template.format(...)`, each literal argument put in its place and
+    each other one a placeholder for the code that fills it in, or for no
+    code when the field takes an attribute or item of it."""
     pieces: list[str] = []
     position = 0
     try:
@@ -2011,10 +2777,12 @@ def _format_text(template: str, call: ast.Call, reader: _Reader, *, parts: list[
             arg = call.args[int(key)] if int(key) < len(call.args) else None
         else:
             arg = next((k.value for k in call.keywords if k.arg == key), None)
-        value = _argument_text(arg, reader, parts=parts, depth=depth) if field == key else None
-        if value is None:
-            value = "{" + field + ("!" + conversion if conversion else "") + (":" + spec if spec else "") + "}"
-        pieces.append(value)
+        if field != key or arg is None:
+            pieces.append(reader.hole(None))
+            continue
+        # A conversion or format spec changes the literal's text, so it shows as code.
+        value = None if conversion or spec else _argument_text(arg, reader, parts=parts, depth=depth)
+        pieces.append(reader.hole(arg) if value is None else value)
     return "".join(pieces)
 
 
@@ -2057,7 +2825,7 @@ def _list_items(name: str, binding: _Binding) -> list[ast.AST | None] | None:
         return None
     cell = binding.cell
     for call in cell.additions.get(name, ()):
-        if cell.scope_of(call) is not binding.scope or not call.args:
+        if cell.scope_of(call) is not binding.scope or not call.args or _ran_before(call, binding, cell=cell):
             continue
         added = call.args[-1]
         if call.func.attr != "extend":
@@ -2070,8 +2838,9 @@ def _list_items(name: str, binding: _Binding) -> list[ast.AST | None] | None:
 
 
 def _name_statements(use: ast.Name, reader: _Reader, *, root: ast.AST | None = None) -> tuple[str, ...]:
-    """The write statements a name holds where this cell reads it, when an
-    earlier cell bound it or this cell builds it up with `+=` or `.append`.
+    """The statements of each text with a write a name holds where this cell
+    reads it, when an earlier cell bound it or this cell builds it up with
+    `+=` or `.append`.
     The literal pass reads every other binding where it is written.
 
     With `root`, an earlier cell's function read for a call: a binding outside
@@ -2108,7 +2877,8 @@ def _held_texts(name: str, binding: _Binding, reader: _Reader, *, depth: int) ->
     if binding.how != "value":
         return []
     cell = binding.cell
-    nodes = [binding.value, *(a.value for a in cell.augments.get(name, ()) if cell.scope_of(a) is binding.scope)]
+    nodes = [binding.value, *(a.value for a in cell.augments.get(name, ())
+                              if cell.scope_of(a) is binding.scope and not _ran_before(a, binding, cell=cell))]
     pieces = [_sql_text(n, reader, depth=depth + 1) for n in nodes]
     if all(p is None for p in pieces):
         return []
@@ -2177,6 +2947,99 @@ def _loads_in(nodes: Sequence[ast.AST], name: str) -> list[ast.AST]:
             if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Load)]
 
 
+def _target_names(target: ast.AST) -> list[str] | None:
+    """The names a loop's target binds, as in `for i, (a, b) in ...`; None
+    when it binds anything else, such as an attribute."""
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, ast.Starred):
+        return _target_names(target.value)
+    if not isinstance(target, (ast.Tuple, ast.List)):
+        return None
+    names: list[str] = []
+    for elt in target.elts:
+        inner = _target_names(elt)
+        if inner is None:
+            return None
+        names += inner
+    return names
+
+
+def _stored_name(target: ast.AST) -> str | None:
+    """The name an assignment stores into: `x`, or `df` for `df['sql']` or
+    `cfg.sql`; None for anything else, such as a tuple."""
+    while isinstance(target, (ast.Subscript, ast.Attribute)):
+        target = target.value
+    return target.id if isinstance(target, ast.Name) else None
+
+
+def _built_here(name: str, *, at: ast.AST, reader: _Reader) -> bool:
+    """Whether `name` holds, where `at` stores into an entry or attribute of
+    it, an object the pad built that no other name can hold: a literal, a
+    comprehension, or what a `_FRESH_CALLS` call or `.copy()` returns, and
+    every read of it in the pad reads an entry or attribute of it or shows it."""
+
+    def fresh(value: ast.AST) -> bool:
+        if isinstance(value, (ast.Dict, ast.List, ast.Set, ast.ListComp, ast.DictComp, ast.SetComp)):
+            return True
+        return isinstance(value, ast.Call) and (
+            reader.dotted(value.func) in _FRESH_CALLS
+            or isinstance(value.func, ast.Attribute) and value.func.attr == "copy"
+        )
+
+    found = reader.bindings_of(name, node=at)
+    if not found or not all(b.how == "value" and fresh(b.value) for b in found):
+        return False
+    for cell in reader.cells:
+        for use in cell.loads.get(name, ()):
+            parent = cell.parents.get(use)
+            if isinstance(parent, (ast.Attribute, ast.Subscript)) and parent.value is use:
+                continue
+            if isinstance(parent, ast.Call) and use in parent.args and _is_harmless_call(parent, reader):
+                continue
+            return False
+    return True
+
+
+def _mapping_call(func: Function, cell: _Cell, reader: _Reader) -> ast.Call | None:
+    """The map(), filter() or DataFrame apply() a lambda is passed to: what
+    the lambda returns goes on in what that call returns."""
+    if not isinstance(func, ast.Lambda):
+        return None
+    call = cell.parents.get(func)
+    if isinstance(call, ast.keyword):
+        call = cell.parents.get(call)
+    if not isinstance(call, ast.Call) or call.func is func:
+        return None
+    if reader.dotted(call.func) in _MAPPERS or isinstance(call.func, ast.Attribute) and (
+        call.func.attr in _MAPPER_METHODS
+    ):
+        return call
+    return None
+
+
+def _own_calls(func: Function, cell: _Cell, reader: _Reader) -> list[ast.Call] | None:
+    """Each call of a function or named lambda the checked cells define, in
+    the checked cells; None when its return value may go anywhere else: an
+    earlier cell's, a method, a decorated one, or one passed on by name."""
+    if cell.index < reader.current.index or isinstance(cell.scope_of(func), ast.ClassDef):
+        return None
+    if isinstance(func, ast.Lambda):
+        names = cell.lambda_names.get(id(func), [])
+    else:
+        names = [] if func.decorator_list else [func.name]
+    if not names:
+        return None
+    calls: list[ast.Call] = []
+    for checked in reader.cells[reader.current.index:]:
+        for use in (u for n in names for u in checked.loads.get(n, ())):
+            call = checked.parents.get(use)
+            if not (isinstance(call, ast.Call) and call.func is use):
+                return None
+            calls.append(call)
+    return calls
+
+
 def _reaches_a_runner(
     node: ast.AST, reader: _Reader, *, depth: int = 0, followed: set[int] | None = None,
 ) -> bool:
@@ -2210,16 +3073,43 @@ def _reaches_a_runner(
             uses = [u for u in uses if not (
                 reader.cell_of(u) is cell and isinstance(u, ast.Name) and _name_statements(u, reader)
             )]
+        given = {id(b) for n in names for b in reader.bindings_of(n, node=at)} if cell.scope_of(at) is None else set()
+        if given:
+            # A read in the cell after the name is bound again gets the new value.
+            uses = [u for u in uses if not (
+                isinstance(u, ast.Name) and reader.cell_of(u) is cell and cell.scope_of(u) is None
+                and _reads_another(reader.bindings_of(u.id, node=u), given)
+            )]
         return via(uses)
+
+    def into(func: ast.AST, call: ast.Call) -> bool:
+        """Where the items `call` hands `func` go: into a lambda's first
+        parameter, and for filter() into what `call` returns; through str()
+        or a str method into what `call` returns; anywhere for any other."""
+        if isinstance(func, ast.Lambda):
+            params = [*func.args.posonlyargs, *func.args.args]
+            return bool(params) and via(_loads_in([func.body], params[0].arg)) or (
+                reader.dotted(call.func) == "filter" and on(call)
+            )
+        if reader.dotted(func) in _SQL_WRAPPERS or reader.dotted(func) in _PASS_THROUGH or (
+            isinstance(func, ast.Attribute) and reader.dotted(func.value) == "str" and func.attr in _STR_METHODS
+        ):
+            return on(call)
+        return True
 
     if parent is None or isinstance(parent, ast.Expr):
         return False
     if isinstance(parent, ast.Return) or isinstance(parent, ast.Lambda) and node is parent.body:
         # A function's return value: it goes where the call being read sends
-        # it, and anywhere at all for any other call.
+        # it; for a lambda map() or apply() calls, into what that returns;
+        # for a function the checked cells define, to each call of it there;
+        # and anywhere at all for any other.
         func = parent if isinstance(parent, ast.Lambda) else cell.scope_of(parent)
-        call = reader.returns_to.get(id(func))
-        return True if call is None else on(call)
+        call = reader.returns_to.get(id(func)) or _mapping_call(func, cell, reader)
+        if call is not None:
+            return on(call)
+        calls = _own_calls(func, cell, reader)
+        return True if calls is None else via(calls)
     if isinstance(parent, (ast.JoinedStr, ast.FormattedValue, ast.BinOp, ast.BoolOp, ast.Starred,
                            ast.List, ast.Tuple, ast.Set, ast.Dict,
                            ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
@@ -2227,27 +3117,37 @@ def _reaches_a_runner(
     if isinstance(parent, ast.IfExp):
         return node is not parent.test and on(parent)
     if isinstance(parent, ast.Subscript):
-        return node is parent.value and on(parent)
+        # Storing into an entry of it reads nothing out of it.
+        return node is parent.value and not isinstance(parent.ctx, (ast.Store, ast.Del)) and on(parent)
     if isinstance(parent, ast.comprehension):
         if node is not parent.iter:
             return False
-        if not isinstance(parent.target, ast.Name):
+        names = _target_names(parent.target)
+        if names is None:
             return True
         comp = cell.parents[parent]
         body = [comp.key, comp.value] if isinstance(comp, ast.DictComp) else [comp.elt]
-        return via(_loads_in(body, parent.target.id))
+        body += [g.iter for g in comp.generators[comp.generators.index(parent) + 1:]]
+        return via([u for n in names for u in _loads_in(body, n)])
     if isinstance(parent, (ast.For, ast.AsyncFor)):
-        if node is not parent.iter or not isinstance(parent.target, ast.Name):
+        names = _target_names(parent.target) if node is parent.iter else None
+        if names is None:
             return True
-        return via(_loads_in(parent.body, parent.target.id))
+        return via([u for n in names for u in _loads_in(parent.body, n)])
     if isinstance(parent, ast.Attribute):
-        if parent.attr in _ADDERS:
-            # Adding to a list: the list's own uses carry the item.
+        if parent.attr in _ADDERS or isinstance(parent.ctx, (ast.Store, ast.Del)):
+            # Adding to a list, or setting an attribute: the value's own uses
+            # carry what it holds.
             return False
-        if parent.attr in _STR_METHODS or parent.attr == "join":
-            call = cell.parents.get(parent)
-            return on(call if isinstance(call, ast.Call) else parent)
-        return True
+        call = cell.parents.get(parent)
+        called = isinstance(call, ast.Call) and call.func is parent
+        if parent.attr in _MAPPER_METHODS and called:
+            return not call.args or into(call.args[0], call)
+        if parent.attr in _STR_METHODS or parent.attr == "join" or parent.attr in _CARRIERS:
+            return on(call if called else parent)
+        if called:
+            return True  # any other method may run it
+        return on(parent)  # a field, such as a row's `r.days`, carries what it holds on
     if isinstance(parent, ast.keyword):
         node, parent = parent, cell.parents.get(parent)
     if isinstance(parent, ast.Call):
@@ -2256,6 +3156,8 @@ def _reaches_a_runner(
         name = reader.dotted(parent.func)
         if name in _SQL_WRAPPERS or name in _PASS_THROUGH:
             return on(parent)
+        if name in ("map", "filter") and len(parent.args) > 1 and node is not parent.args[0]:
+            return into(parent.args[0], parent)
         func = parent.func
         if isinstance(func, ast.Attribute) and func.attr == "join":
             joined = _sql_text(parent, reader) if reader.cell_of(parent).index >= reader.current.index else None
@@ -2272,35 +3174,106 @@ def _reaches_a_runner(
         return not (_is_harmless_call(parent, reader) or _executes_on_local(parent, reader))
     if isinstance(parent, (ast.Assign, ast.AnnAssign, ast.NamedExpr, ast.AugAssign)):
         targets = parent.targets if isinstance(parent, ast.Assign) else [parent.target]
-        if any(not isinstance(t, ast.Name) for t in targets):
-            return True
-        return via_names({t.id for t in targets}, at=parent)
+        # Into a name, or an entry or attribute of one such as df['sql'] when
+        # no other name holds what it does: the name's uses carry it on.
+        names: set[str] = set()
+        for t in targets:
+            stored = _stored_name(t)
+            if stored is None or not isinstance(t, ast.Name) and not _built_here(stored, at=t, reader=reader):
+                return True
+            names.add(stored)
+        return via_names(names, at=parent)
     if isinstance(parent, (ast.Compare, ast.UnaryOp, ast.If, ast.While, ast.Assert)):
         return False
     return True
 
 
-def _values_text(call: ast.Call) -> str:
-    """The parameters a call passes with its statement, whole and scrubbed."""
-    if len(call.args) > 1 and isinstance(call.args[1], (ast.Tuple, ast.List, ast.Dict)):
+# The keywords that pass a statement's parameters: psycopg2's vars, psycopg's
+# and pandas' params, SQLAlchemy's and sqlite3's parameters, PyMySQL's args.
+_VALUES_KEYWORDS = frozenset({"vars", "params", "parameters", "args"})
+
+
+def _values_text(call: ast.Call, *, reader: _Reader) -> str:
+    """The parameters a call passes with its statement, whole: a literal, the
+    tuple literal a name holds, or else a placeholder for the code."""
+    given = next((k.value for k in call.keywords if k.arg in _VALUES_KEYWORDS), None)
+    if given is None and len(call.args) > 1 and isinstance(call.func, ast.Attribute) and call.func.attr in _EXECUTE:
+        given = call.args[1]
+    if isinstance(given, ast.Name):
+        # Only a tuple: a list or dict can change after it is bound.
+        found = reader.bindings_of(given.id, node=given)
+        if (len(found) == 1 and found[0].how == "value" and isinstance(found[0].value, ast.Tuple)
+                and not reader.growth(given.id, found[0])):
+            given = found[0].value
+    if isinstance(given, (ast.Tuple, ast.List, ast.Dict)):
         try:
-            return scrub_output(ast.unparse(call.args[1]))
+            return ast.unparse(given)
         except Exception:
             return ""
-    return ""
+    return "" if given is None else reader.hole(given)
+
+
+def _card_lines(text: str) -> str:
+    """`text` line by line, as the card quotes it. Each line loses its
+    trailing space and the lines after the first lose the indentation they
+    share, so a `--` comment keeps to its own line. A line break inside a
+    quoted literal, quoted name or block comment stays as written, with the
+    spaces around it."""
+    kept = [m.span() for m in _TOKEN.finditer(text)
+            if m.lastgroup in ("comment", "text", "name") and ("\n" in m.group() or "\r" in m.group())]
+    lines: list[str] = []
+    begin = k = 0
+    for m in _LINE_BREAK.finditer(text):
+        while k < len(kept) and kept[k][1] <= m.start():
+            k += 1
+        if k < len(kept) and kept[k][0] < m.start():
+            continue
+        lines.append(text[begin:m.start()])
+        begin = m.end()
+    lines.append(text[begin:])
+    rest = [line.rstrip() for line in lines[1:]]
+    margin = os.path.commonprefix([line[:len(line) - len(line.lstrip(" \t"))] for line in rest if line])
+    return "\n".join([lines[0].rstrip(), *(line[len(margin):] for line in rest)])
+
+
+# A line break and the spaces and tabs around it.
+_BREAK_RUN = re.compile(r"([ \t]*(?:\r\n|\r|\n)[ \t]*)")
+# Each key whose value `scrub_output` reads only on the key's own line (an
+# access, refresh or id token, a client secret) holds one of these words.
+_TOKEN_KEY_WORD = re.compile("token|secret", re.I)
+
+
+def _scrub(text: str) -> str:
+    """`text` scrubbed, a token value on the line after its key included.
+    `scrub_output` reads a key and its value across spaces and tabs only, so
+    a second pass reads each line break, with the spaces around it, as a tab
+    and then puts the line breaks back."""
+    scrubbed = scrub_output(text)
+    pieces = _BREAK_RUN.split(scrubbed)
+    if len(pieces) == 1 or not _TOKEN_KEY_WORD.search(scrubbed):
+        return scrubbed
+    lines, breaks = pieces[0::2], pieces[1::2]
+    parts = scrub_output("\t".join(lines)).split("\t")
+    sizes = [line.count("\t") + 1 for line in lines]
+    if len(parts) != sum(sizes):
+        # A redaction took a line break with it: the breaks it left can't be placed.
+        return "\n".join(parts)
+    out: list[str] = []
+    taken = 0
+    for size, brk in zip(sizes, [*breaks, ""], strict=True):
+        out.append("\t".join(parts[taken:taken + size]) + brk)
+        taken += size
+    return "".join(out)
 
 
 def _sql_write(text: str, *, reader: _Reader, values: str = "", line: int) -> SqlWrite:
-    """One statement as the card quotes it: whole, scrubbed, and line by line.
-    Each line loses its trailing space and the lines after the first lose the
-    indentation they share, so a `--` comment keeps to its own line and a
-    literal keeps its spaces. A part the code picks at run time shows as that
-    code, in braces."""
-    head, *rest = reader.show_holes(text).splitlines() or [""]
-    lines = [head.rstrip(), *(r.rstrip() for r in textwrap.dedent("\n".join(rest)).splitlines())]
+    """One statement as the card quotes it: whole, scrubbed, and line by line
+    (`_card_lines`). A part the code picks at run time shows as that code,
+    in braces."""
     return SqlWrite(
-        statement=scrub_output("\n".join(lines)), values=values, line=line,
-        run_time_parts=_NUMBERED_HOLE.search(text) is not None,
+        statement=_scrub(reader.show_holes(_card_lines(text))),
+        values=_scrub(reader.show_holes(values)) if values else "",
+        line=line, run_time_parts=any(_NUMBERED_HOLE.search(t) for t in (text, values)),
     )
 
 
@@ -2314,7 +3287,9 @@ def _sql_findings(
 
     def add(statements: Sequence[str], node: ast.AST) -> None:
         parent = cell.parents.get(node)
-        values = _values_text(parent) if isinstance(parent, ast.Call) else ""
+        if isinstance(parent, ast.keyword):
+            parent = cell.parents.get(parent)
+        values = _values_text(parent, reader=reader) if isinstance(parent, ast.Call) else ""
         line = report.line if report else cell.host_line or getattr(node, "lineno", 0)
         out.extend(_sql_write(s, reader=reader, values=values, line=line) for s in statements)
 
@@ -2329,9 +3304,10 @@ def _sql_findings(
         read.update(id(p) for p in parts)
         if text is None:
             continue
-        statements = write_statements(text)
-        if statements and _reaches_a_runner(node, reader):
-            add(statements, node)
+        # A string that holds a write is held whole: the card quotes every
+        # statement in it, since one Approve runs them all.
+        if write_statements(text) and _reaches_a_runner(node, reader):
+            add(_quoted_statements(text), node)
     # A name an earlier cell bound to a statement, or one this cell builds up.
     for uses in cell.loads.values():
         for use in uses:
@@ -2377,6 +3353,44 @@ class _Targets(BaseModel):
 
 
 @dataclass(frozen=True)
+class _Made:
+    """What the pad's cells write, read for a snapshot past its cap: the path
+    patterns of writes that leave a file new (`created`) and of writes that
+    keep what a file held (`kept`: an append, `os.utime`, `Path.touch`),
+    unknown once one of those has a path the check can't read; and the
+    folders they may run in."""
+
+    created: tuple[str, ...]
+    kept: tuple[str, ...] | _Unknown
+    cwds: Sequence[str] | _Unknown
+
+    def new(self, *, snap: ProjectSnapshot, rel: str) -> bool:
+        """Whether the cells made `rel` new: a write that leaves a file new
+        names it, and no write that keeps what a file held can."""
+        if isinstance(self.kept, _Unknown):
+            return False
+        return self._names(patterns=self.created, snap=snap, rel=rel) and not self._names(patterns=self.kept, snap=snap, rel=rel)
+
+    def _names(self, *, patterns: Sequence[str], snap: ProjectSnapshot, rel: str) -> bool:
+        key = snap.key(rel)
+        for raw in patterns:
+            pattern = raw.replace("\\", "/")
+            if _TEMP_PATH in pattern:
+                continue
+            if os.path.isabs(pattern):
+                candidates = [pattern]
+            elif isinstance(self.cwds, _Unknown):
+                candidates = ["**/" + _without_parents(pattern)]
+            else:
+                candidates = [_join(c, pattern) for c in self.cwds]
+            for candidate in candidates:
+                found = _relative(candidate, snap)
+                if found is not None and glob_match(key, snap.key(found)):
+                    return True
+        return False
+
+
+@dataclass(frozen=True)
 class _Report:
     """Where a change made inside an earlier cell's function is reported:
     the line of the call in the checked cell, and that line's text."""
@@ -2403,11 +3417,15 @@ def _locate(
     *,
     cwds: Sequence[str] | _Unknown,
     files_only: bool = False,
+    made: _Made | None = None,
+    disk: _DiskReads | None = None,
 ) -> _Targets:
     """The snapshot entries `patterns` name. A relative pattern counts from
     each folder in `cwds`, or from under any folder of either root when the
     check can't place them. With `files_only`, for a delete that can't
-    remove a folder, the folders a listing names drop out."""
+    remove a folder, the folders a listing names drop out. `made` reads a
+    snapshot past its cap (`ProjectSnapshot.named`), and `disk` is the
+    check's reads from disk (`ProjectSnapshot.matching`)."""
     if isinstance(patterns, _Unknown):
         return _Targets(unknown=True)
     hits: list[str] = []
@@ -2425,7 +3443,7 @@ def _locate(
                 unknown = True
                 continue
             for snap in snapshots:
-                hits += _card_paths(snap, snap.matching(pattern="**/" + rest), files_only=files_only)
+                hits += _card_paths(snap, snap.matching(pattern="**/" + rest, made=made, disk=disk), files_only=files_only)
             continue
         candidates = [pattern] if os.path.isabs(pattern) else [_join(c, pattern) for c in cwds]
         for candidate in candidates:
@@ -2441,9 +3459,9 @@ def _locate(
                 if rel == "" or _above(rel):
                     whole.add(snap.label)
                 elif any(ch in rel for ch in "*?["):
-                    hits += _card_paths(snap, snap.matching(pattern=rel), files_only=files_only)
+                    hits += _card_paths(snap, snap.matching(pattern=rel, made=made, disk=disk), files_only=files_only)
                 else:
-                    named = snap.named(rel=rel)
+                    named = snap.named(rel=rel, made=made)
                     hits += _card_paths(snap, [named] if named is not None else [], files_only=False)
     return _Targets(
         paths=tuple(dict.fromkeys(hits)),
@@ -2574,6 +3592,48 @@ def _written_target(call: ast.Call, reader: _Reader, cell: _Cell) -> ast.AST | N
     return _overwrite_target(call, reader)
 
 
+def _keeps_contents(*, call: ast.Call, reader: _Reader) -> bool:
+    """Whether a write keeps what its file held: an open to append or to
+    update in place, or a writer given `mode="a"`."""
+    mode: ast.AST | None = None
+    if reader.dotted(call.func) in ("open", "io.open"):
+        mode = call.args[1] if len(call.args) > 1 else None
+    elif isinstance(call.func, ast.Attribute) and call.func.attr == "open":
+        mode = call.args[0] if call.args else None
+    mode = next((k.value for k in call.keywords if k.arg == "mode"), mode)
+    text = mode.value if isinstance(mode, ast.Constant) and isinstance(mode.value, str) else ""
+    return "a" in text or "+" in text and not set(text) & set("wx")
+
+
+def _made(*, reader: _Reader) -> _Made:
+    """What the pad's cells write, every cell's writes read where they are
+    written: the files a write leaves new, and those an append, `os.utime`
+    or `Path.touch` keeps."""
+    created: list[str] = []
+    kept: list[str] | _Unknown = []
+    for cell in reader.cells:
+        for call in cell.calls:
+            name = reader.dotted(call.func)
+            method = call.func.attr if isinstance(call.func, ast.Attribute) else ""
+            if name == "os.utime":
+                target, keeps = _target_arg(call, keywords=("path",)), True
+            elif method == "touch":
+                target, keeps = call.func.value, True
+            else:
+                target = _written_target(call, reader, cell)
+                keeps = target is not None and _keeps_contents(call=call, reader=reader)
+            if target is None:
+                continue
+            got = reader.paths(target, cell=cell)
+            if not keeps:
+                created += [] if isinstance(got, _Unknown) else got
+            elif isinstance(got, _Unknown) or isinstance(kept, _Unknown):
+                kept = _UNKNOWN
+            else:
+                kept += got
+    return _Made(created=tuple(created), kept=kept if isinstance(kept, _Unknown) else tuple(kept), cwds=reader.cwds)
+
+
 def _is_path_rename(call: ast.Call, reader: _Reader, cell: _Cell) -> bool:
     """`.rename(x)` and `.replace(x)` on a pathlib path, not a DataFrame's or a str's."""
     receiver = call.func.value
@@ -2611,9 +3671,14 @@ def _runs_whenever(node: ast.AST, stmt: ast.stmt, cell: _Cell) -> bool:
     return child is stmt
 
 
-def _may_leave(stmt: ast.stmt) -> bool:
-    """Whether `stmt` can return, raise, break or continue past what follows it."""
-    return any(isinstance(n, (ast.Return, ast.Raise, ast.Break, ast.Continue)) for n in ast.walk(stmt))
+def _may_leave(stmt: ast.stmt, *, reader: _Reader) -> bool:
+    """Whether `stmt` can return, raise, break, continue, fail an assert or
+    end the process past what follows it."""
+    return any(
+        isinstance(n, (ast.Return, ast.Raise, ast.Break, ast.Continue, ast.Assert))
+        or isinstance(n, ast.Call) and reader.dotted(n.func) in _EXITS
+        for n in ast.walk(stmt)
+    )
 
 
 class _FileFinder:
@@ -2636,7 +3701,8 @@ class _FileFinder:
     def locate(
         self, got: list[str] | _Unknown, *, cwds: Sequence[str] | _Unknown | None = None, files_only: bool = False,
     ) -> _Targets:
-        return _locate(got, self.snapshots, cwds=self.reader.cwds if cwds is None else cwds, files_only=files_only)
+        return _locate(got, self.snapshots, cwds=self.reader.cwds if cwds is None else cwds, files_only=files_only,
+                       made=self.reader.made, disk=self.reader.disk)
 
     def add(self, action: Literal["delete", "rename", "move", "overwrite"], targets: _Targets, node: ast.AST) -> None:
         if not targets.found():
@@ -2661,8 +3727,14 @@ class _FileFinder:
                     name = reader.dotted(node)
                     self.add("delete" if name in _DELETE_FUNCS else _MOVE_FUNCS[name], _Targets(unknown=True), node)
                 continue
+            if self.lookup(node=node):
+                continue
             if not isinstance(node, ast.Call):
                 continue
+            partial = reader.partial_of(node=node.func) if isinstance(node.func, (ast.Name, ast.Call)) else None
+            if partial is not None:
+                # A call through functools.partial, read as the call it makes.
+                node = _partial_call(partial=partial, call=node)
             name = reader.dotted(node.func)
             method = node.func.attr if isinstance(node.func, ast.Attribute) else ""
             if name in _DELETE_FUNCS:
@@ -2695,6 +3767,55 @@ class _FileFinder:
                 if target is not None:
                     self.note_overwrite_target(target, node)
 
+    def lookup(self, *, node: ast.AST) -> bool:
+        """Whether `node` is a lookup `_plain_lookup` can't read, on a module,
+        class or path that holds a delete, a move or a shell call:
+        `getattr(m, name)` with a name that isn't a literal, `vars(m)[name]`
+        or `m.__dict__[name]`. Each text the name can hold is read as the call
+        it reaches; a name the check can't read is a delete picked when it
+        runs."""
+        reader, cell = self.reader, self.cell
+        receiver: ast.AST | None = None
+        key: ast.AST | None = None
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr"
+                and len(node.args) in (2, 3)):
+            receiver, key = node.args[0], node.args[1]
+        elif isinstance(node, ast.Subscript):
+            inner = node.value
+            if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name) and inner.func.id == "vars"
+                    and len(inner.args) == 1):
+                receiver, key = inner.args[0], node.slice
+            elif isinstance(inner, ast.Attribute) and inner.attr == "__dict__":
+                receiver, key = inner.value, node.slice
+        if receiver is None or key is None:
+            return False
+        module = reader.dotted(receiver)
+        on_path = module not in _LOOKUP_MODULES and reader.is_path(receiver, cell=cell)
+        if module not in _LOOKUP_MODULES and not on_path:
+            return False
+        parent = cell.parents.get(node)
+        call = parent if isinstance(parent, ast.Call) and parent.func is node else None
+        names = reader.paths(key, cell=cell)
+        if isinstance(names, _Unknown) or any(ch in n for n in names for ch in "*?["):
+            self.add("delete", _Targets(unknown=True), node)
+            return True
+        for name in names:
+            full = f"pathlib.Path.{name}" if on_path else f"{module}.{name}"
+            if call is None:
+                if full in _DELETE_FUNCS or full in _MOVE_FUNCS or full in _SHELL_FUNCS:
+                    self.add("delete" if full not in _MOVE_FUNCS else _MOVE_FUNCS[full], _Targets(unknown=True), node)
+            elif full in _DELETE_FUNCS:
+                target = receiver if on_path else _target_arg(call, keywords=("path", "self"))
+                if target is not None:
+                    self.delete(target, call, files_only=full in _FILE_DELETES)
+            elif full in _MOVE_FUNCS:
+                source = receiver if on_path else _target_arg(call, keywords=("src", "self"))
+                if source is not None:
+                    self.add(_MOVE_FUNCS[full], self.locate(self.paths(source)), call)
+            elif full in _SHELL_FUNCS:
+                self.shell(call)
+        return True
+
     def delete(self, target: ast.AST, call: ast.Call, *, files_only: bool) -> None:
         """A delete; an overwrite when a write to the same path follows it."""
         got = self.paths(target)
@@ -2705,7 +3826,7 @@ class _FileFinder:
         """The paths written after `call` on every path through the code: by a
         later statement of its block, or of a block around it up to its
         function, that writes whenever it runs. A statement that can return,
-        raise, break or continue ends the search."""
+        raise, break, continue, fail an assert or exit ends the search."""
         cell = self.cell
         node: ast.AST | None = call
         while node is not None and not isinstance(node, ast.stmt):
@@ -2719,7 +3840,7 @@ class _FileFinder:
                           if isinstance(b, list) and node in b), [])
             later_ones = block[block.index(node) + 1:] if node in block else []
             for later in later_ones:
-                if _may_leave(later):
+                if _may_leave(later, reader=self.reader):
                     return written
                 for inner in ast.walk(later):
                     target = _written_target(inner, self.reader, cell) if isinstance(inner, ast.Call) else None
@@ -2828,12 +3949,14 @@ def _shell_steps(call: ast.Call, reader: _Reader, *, cwds: Sequence[str] | _Unkn
             None if index else _target_arg(call, keywords=("args", "cmd", "command"))
         )
         commands = [] if arg is None else _commands(arg, reader)
+    given = next((k.value for k in call.keywords if k.arg == "input"), None)
+    stdin = None if given is None else _sql_text(given, reader)
     out: list[_ShellStep] = []
     for command in commands:
         if isinstance(command, str):
             out += _script_steps(command, cwds=cwds, depth=0)
         else:
-            out += _words_steps(command, cwds=cwds, depth=0)
+            out += _words_steps(command, cwds=cwds, depth=0, stdin=stdin)
     return out
 
 
@@ -2843,6 +3966,9 @@ def _commands(node: ast.AST, reader: _Reader, *, depth: int = 0) -> list[str | l
         return []
     if isinstance(node, (ast.List, ast.Tuple)):
         return [[_command_word(e, reader) for e in node.elts]]
+    words_made = _word_lists(node=node, reader=reader, depth=depth)
+    if words_made is not None:
+        return list(words_made)
     if isinstance(node, ast.Name):
         arg = reader.argument_of(node)
         if arg is not None:
@@ -2853,17 +3979,54 @@ def _commands(node: ast.AST, reader: _Reader, *, depth: int = 0) -> list[str | l
                 # What each call of the function passes for it.
                 for site in reader.call_sites(b.value, node.id):
                     out += [] if site is None else _commands(site.node, reader, depth=depth + 1)
-            elif b.how == "value" and isinstance(b.value, (ast.List, ast.Tuple)):
-                words = [_command_word(e, reader) for e in b.value.elts]
-                if reader.growth(node.id, b):
-                    # Words the cell adds to the list.
-                    words.append(_NOT_LITERAL)
-                out.append(words)
+            elif b.how == "value" and (
+                isinstance(b.value, (ast.List, ast.Tuple)) or _word_lists(node=b.value, reader=reader, depth=depth) is not None
+            ):
+                grown = reader.list_growth(name=node.id, binding=b)
+                for words in _commands(b.value, reader, depth=depth + 1):
+                    if isinstance(words, list) and (isinstance(grown, _Unknown) or grown):
+                        # Words the cell adds to the list.
+                        words = [*words, _NOT_LITERAL]
+                    out.append(words)
             else:
                 out += _held_texts(node.id, b, reader, depth=0)
         return out
     text = _sql_text(node, reader)
     return [] if text is None else [text]
+
+
+def _word_lists(*, node: ast.AST, reader: _Reader, depth: int) -> list[list[str]] | None:
+    """The word lists an expression that builds one can give a command:
+    `text.split()`, `shlex.split(text)`, or lists added with `+`, a part the
+    check can't read one word it can't read. None for any other expression."""
+    shell_split = isinstance(node, ast.Call) and bool(node.args) and reader.dotted(node.func) == "shlex.split"
+    if shell_split or isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "split":
+        source = node.args[0] if shell_split else node.func.value
+        sep: str | None = None
+        if node.args and not shell_split:
+            given = node.args[0]
+            literal = isinstance(given, ast.Constant) and isinstance(given.value, str) and given.value
+            sep = given.value if literal else _NOT_LITERAL
+        texts = [c for c in _commands(source, reader, depth=depth + 1) if isinstance(c, str)]
+        if not texts or sep == _NOT_LITERAL:
+            return [[_NOT_LITERAL]]
+        out: list[list[str]] = []
+        for text in texts:
+            try:
+                out.append(shlex.split(text) if shell_split else text.split(sep))
+            except ValueError:
+                out.append(text.split())
+        return out
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add) and (
+        reader.is_sequence(node.left, cell=reader.cell_of(node))
+        or reader.is_sequence(node.right, cell=reader.cell_of(node))
+    ):
+        sides = []
+        for side in (node.left, node.right):
+            lists = [c for c in _commands(side, reader, depth=depth + 1) if isinstance(c, list)]
+            sides.append(lists or [[_NOT_LITERAL]])
+        return [left + right for left in sides[0] for right in sides[1]]
+    return None
 
 
 def _command_word(node: ast.AST, reader: _Reader) -> str:
@@ -2943,22 +4106,36 @@ def _command_words(words: list[str]) -> tuple[list[str], bool]:
             from_input = from_input or head == "xargs"
             out.pop(0)
             while out and out[0].startswith("-"):
-                if out.pop(0) in _VALUE_FLAGS and out:
+                flag = out.pop(0)
+                if (flag in _VALUE_FLAGS or flag in _PREFIX_VALUE_FLAGS.get(head, ())) and out:
                     out.pop(0)
+            del out[:_PREFIX_OPERANDS.get(head, 0)]
         else:
             break
     return out, from_input
 
 
-def _words_steps(words: list[str], *, cwds: Sequence[str] | _Unknown, depth: int) -> list[_ShellStep]:
-    """The delete or move one command runs."""
+def _words_steps(
+    words: list[str], *, cwds: Sequence[str] | _Unknown, depth: int, stdin: str | None = None,
+) -> list[_ShellStep]:
+    """The delete or move one command runs. `stdin` is the text the call
+    gives the command as its input, when the check can read it."""
     words, from_input = _command_words(words)
     if not words:
         return []
     verb, args = words[0].rsplit("/", 1)[-1], words[1:]
+    picked = [_ShellStep(action="delete", operands=(_NOT_LITERAL,), cwds=cwds, files_only=False)]
+    if "$" in verb or "`" in verb:
+        # A command the shell picks when it runs, as in $(which rm) or $RM.
+        return picked
     if verb in _SHELLS:
         script = next((args[i + 1] for i, a in enumerate(args[:-1])
                        if a.startswith("-") and not a.startswith("--") and "c" in a), None)
+        if script is None and ("-s" in args or not [a for a in args if not a.startswith("-")]):
+            # The script comes from the shell's input, piped in or passed as `input=`.
+            script = stdin
+            if script is None:
+                return picked
         return [] if script is None or depth >= 4 else _script_steps(script, cwds=cwds, depth=depth + 1)
     if verb == "git":
         while args and args[0].startswith("-"):
@@ -3015,8 +4192,13 @@ def _split_flags(args: list[str], *, takes_target: bool) -> tuple[list[str], lis
             target_dir = value if word in ("-t", "--target-directory") else target_dir
         elif takes_target and word.startswith("--target-directory="):
             target_dir = word.split("=", 1)[1]
-        elif takes_target and word.startswith("-t") and len(word) > 2:
-            target_dir = word[2:]
+        elif takes_target and re.match(r"-[^-]*[tS]", word):
+            # A cluster such as -tDIR, -vt DIR or -fS.bak: the first of t and S
+            # takes the rest of the word, or the next word.
+            at = next(i for i, ch in enumerate(word) if i and ch in "tS")
+            value = word[at + 1:] or next(words, None)
+            target_dir = value if word[at] == "t" else target_dir
+            flags.append(word[:at])
         elif word.startswith("-") and word != "-":
             flags.append(word)
         else:
@@ -3027,12 +4209,15 @@ def _split_flags(args: list[str], *, takes_target: bool) -> tuple[list[str], lis
 # ── Entry point ───────────────────────────────────────────────────────────
 
 def _plain_lookup(call: ast.Call) -> ast.expr:
-    """`getattr(x, "name")` as `x.name`, and `__import__("os")` or
+    """`getattr(x, "name")` as `x.name`, also with a constant default as in
+    `getattr(x, "name", None)`, and `__import__("os")` or
     `importlib.import_module("os")` as `os`, so a call made through one is
     read like the plain spelling; any other call as it is."""
     func, args = call.func, call.args
     named = bool(args) and isinstance(args[-1], ast.Constant) and isinstance(args[-1].value, str)
-    if isinstance(func, ast.Name) and func.id == "getattr" and len(args) == 2 and named and not call.keywords:
+    attr = len(args) in (2, 3) and isinstance(args[1], ast.Constant) and isinstance(args[1].value, str)
+    if (isinstance(func, ast.Name) and func.id == "getattr" and attr and not call.keywords
+            and (len(args) == 2 or isinstance(args[2], ast.Constant))):
         return ast.copy_location(ast.Attribute(value=args[0], attr=args[1].value, ctx=ast.Load()), call)
     importer = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else ""
     if importer in ("__import__", "import_module") and len(args) == 1 and named and args[0].value:
@@ -3079,39 +4264,57 @@ def _read_cell(*, code: str, index: int) -> _Cell | None:
         return None
 
 
+@dataclass(eq=False)
+class _CachedCell:
+    """One earlier cell `_EarlierCells` keeps, and when a check last read it."""
+
+    cell: _Cell | None
+    read_at: float
+
+
 class _EarlierCells:
     """Earlier cells, each parsed once per process instead of once per check.
 
     Every check reads all of the conversation's earlier cells, hundreds in a
     long one, and they don't change from one check to the next. A cell is
     keyed by its code and its place among the parsed cells, since what it
-    records holds both. Once the cached code passes `budget` characters, the
-    cells read least recently go first. Checks run in worker threads, so a
-    lock guards the table.
+    records holds both. A cell that would take the cached code past `budget`
+    characters makes room only from cells no check has read for `idle`
+    seconds, those read least recently first, and otherwise isn't kept. A
+    check reads the cells in order, so dropping the oldest for the newest
+    would leave the next check nothing to find. Checks run in worker
+    threads, so a lock guards the table.
     """
 
-    def __init__(self, *, budget: int) -> None:
+    def __init__(self, *, budget: int, idle: float = 600.0) -> None:
         self._budget = budget
+        self._idle = idle
         self._size = 0
-        self._cells: OrderedDict[tuple[str, int], _Cell | None] = OrderedDict()
+        self._cells: OrderedDict[tuple[str, int], _CachedCell] = OrderedDict()
         self._lock = threading.Lock()
 
     def get(self, *, code: str, index: int) -> _Cell | None:
         key = (code, index)
         with self._lock:
-            if key in self._cells:
+            cached = self._cells.get(key)
+            if cached is not None:
+                cached.read_at = time.monotonic()
                 self._cells.move_to_end(key)
-                return self._cells[key]
+                return cached.cell
         cell = _read_cell(code=code, index=index)
         if len(code) > self._budget:
             return cell
         with self._lock:
-            if key not in self._cells:
-                self._cells[key] = cell
-                self._size += len(code)
-            while self._size > self._budget:
-                (old, _), _ = self._cells.popitem(last=False)
+            now = time.monotonic()
+            while self._cells and self._size + len(code) > self._budget:
+                (old, _), oldest = next(iter(self._cells.items()))
+                if now - oldest.read_at < self._idle:
+                    break
+                self._cells.popitem(last=False)
                 self._size -= len(old)
+            if key not in self._cells and self._size + len(code) <= self._budget:
+                self._cells[key] = _CachedCell(cell=cell, read_at=now)
+                self._size += len(code)
         return cell
 
 
@@ -3147,19 +4350,23 @@ def _exec_cells(host: _Cell, *, index: int) -> list[_Cell]:
     return out
 
 
-def _earlier_function_uses(
-    reader: _Reader, root: ast.AST, cell: _Cell,
-) -> Iterator[tuple[Function, ast.Call | None, ast.Name]]:
+def _earlier_function_uses(reader: _Reader, root: ast.AST, cell: _Cell) -> Iterator[_Callee]:
     """Each place in `root` that calls a function or lambda an earlier cell
-    defined, with the call, or passes one on as a value, with None."""
+    defined, or passes one on as a value: by its name anywhere, or through
+    whatever else `_Reader.callees` reads where it is called or passed to a
+    call."""
     for node in ast.walk(root):
-        if not (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
-                and node.id in reader.function_names):
+        if not (isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)) and isinstance(node.ctx, ast.Load)):
             continue
-        func = reader.earlier_function(node)
-        if func is not None:
-            parent = cell.parents.get(node)
-            yield func, parent if isinstance(parent, ast.Call) and parent.func is node else None, node
+        parent = cell.parents.get(node)
+        call = parent if isinstance(parent, ast.Call) and parent.func is node else None
+        if isinstance(node, ast.Name) and node.id in reader.function_names:
+            func = reader.earlier_function(node)
+            if func is not None:
+                yield _Callee(func=func, call=call, use=node)
+                continue
+        if call is not None or isinstance(parent, ast.Call) and node in parent.args:
+            yield from reader.callees(node=node, call=call, use=node)
 
 
 def find_cell_writes(
@@ -3191,23 +4398,27 @@ def find_cell_writes(
     ran = _exec_cells(current, index=len(cells))
     cells += ran
     reader = _Reader(cells, current=current)
+    if any(not s.complete for s in snapshots):
+        reader.made = _made(reader=reader)
     sql: list[SqlWrite] = []
     files: list[FileChange] = []
 
-    def read_function(func: Function, call: ast.Call | None, *, report: _Report, chain: tuple[int, ...]) -> None:
+    def read_function(callee: _Callee, *, report: _Report, chain: tuple[int, ...]) -> None:
+        func = callee.func
         if id(func) in chain or len(chain) >= _CALL_DEPTH:
             return
         home = reader.cell_of(func)
-        with reader.calling(func, call):
+        with reader.calling(func, callee.call, bound=callee.bound):
             sql.extend(_sql_findings(reader, home, root=func, report=report))
             files.extend(_file_findings(reader, home, snapshots, root=func, report=report))
-            for inner, inner_call, _use in _earlier_function_uses(reader, func, home):
-                read_function(inner, inner_call, report=report, chain=(*chain, id(func)))
+            for inner in _earlier_function_uses(reader, func, home):
+                read_function(inner, report=report, chain=(*chain, id(func)))
 
     for cell in (current, *ran):
         sql += _sql_findings(reader, cell)
         files += _file_findings(reader, cell, snapshots)
-        for func, call, use in _earlier_function_uses(reader, cell.tree, cell):
+        for callee in _earlier_function_uses(reader, cell.tree, cell):
+            use = callee.use
             report = _Report(line=cell.host_line or use.lineno, call=scrub_output(cell.source(use)))
-            read_function(func, call, report=report, chain=())
+            read_function(callee, report=report, chain=())
     return CellWrites(sql=tuple(sorted(sql, key=lambda w: w.line)), files=tuple(files))
