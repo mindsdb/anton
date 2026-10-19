@@ -107,18 +107,20 @@ that used `_llm.plan()` uses `generate_object`.
 `ChatSystemPromptBuilder.build(...)` concatenates, in order:
 
 1. **prefix** (from `SystemPromptContext`)
-2. The base `CHAT_SYSTEM_PROMPT` (runtime identity, visualization rules,
-   current datetime)
+2. The base `CHAT_SYSTEM_PROMPT` (runtime identity, visualization rules)
 3. **Tool prompts** — optional `ToolDef.prompt` fragments
-4. **Memory context** — `cortex.build_memory_context()` output
-5. **Project context** — `anton.md` (after memory, so user instructions win)
-6. Self-awareness context (legacy) and datasource context
-7. **Procedural memory section** — one line per skill from
+4. **Procedural memory section** — one line per skill from
    `SkillStore.list_summaries()`, telling the LLM to call `recall_skill(label)`
-8. **suffix**
+5. **Project context** — `anton.md`
+6. Self-awareness context (legacy) and datasource context
+7. **suffix**
+8. **Memory context** — `cortex.build_memory_context()` output, the operator's
+   read-only layer first when the host passes one
+9. Workspace discovery
 
-Order matters: later sections carry more influence, which is why `anton.md`
-lands after the memory sections.
+Items 5 to 9 follow a session marker. Everything above memory stays byte-stable
+across turns, so the provider's prompt cache holds it; memory and workspace
+discovery change every turn, so they ride the tail.
 
 ## Trace headers
 

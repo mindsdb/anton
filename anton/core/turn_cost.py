@@ -127,6 +127,9 @@ class TurnCost:
     # note below on stamped-at-open fields). Handback terminals don't need it:
     # their ended_by already distinguishes them.
     verification_skipped: bool = False
+    # A model call this turn ended with the provider's content filter. The
+    # turn books ended_by="content_filter" unless it was cancelled or failed.
+    content_filtered: bool = False
     # One-time grace(s) granted this turn: "", "round", "ceiling", or
     # "ceiling,round" — alphabetical, not firing order (see `_record_grace`).
     # Without this a turn that used a grace and finished is

@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from anton.core.artifacts.store import BACKEND_LOG_FILENAME
+from anton.core.backends.sandbox import BACKENDS_OFF_MESSAGE, cell_sandbox_of
 from anton.utils.datasources import scrub_output
 
 
@@ -124,6 +125,10 @@ def build_backend_env(
 
     A non-None `ds_env` replaces the inherited DS_* entirely, so the backend
     sees only the datasources it declared.
+
+    Bytecode writes are off: the backend runs with the artifact folder as cwd
+    and on sys.path, so its local imports would leave `__pycache__` in the
+    artifact.
     """
     env = {**os.environ}
     # Before the strip, so a caller's DS_* survive only when ds_env is None;
@@ -136,6 +141,7 @@ def build_backend_env(
     isolated = _anton_state_pythonpath_dir()
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = isolated + (os.pathsep + existing if existing else "")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
 
 
@@ -168,6 +174,10 @@ class ScratchpadPoolLike(Protocol):
     Both `anton.core.backends.ScratchpadManager` and cowork's module-level
     pool wrapper satisfy this — the launcher stays decoupled from either
     concrete implementation.
+
+    A pool may also carry `cell_sandbox`, the session's sandbox policy. It is
+    optional, so callers read it with `sandbox.cell_sandbox_of()`: a pool
+    without the attribute runs agent code unlocked.
     """
 
     async def venv_python(self, name: str) -> str | None: ...
@@ -220,7 +230,13 @@ async def launch_artifact_backend(
     ones are dropped first, so a connection the artifact did not declare (or
     one a concurrent turn injected) cannot reach it. Callers that still route
     `DS_*` through `extra_env` keep the old merge-only behaviour.
+
+    A pool with a sandbox policy gets `BACKENDS_OFF_MESSAGE` back before the
+    pool is touched: a backend is a long-lived server running agent code,
+    which the sandbox does not start.
     """
+    if cell_sandbox_of(scratchpad_pool) is not None:
+        return BACKENDS_OFF_MESSAGE
     extra_args = list(extra_args or [])
     folder = artifact_folder
 

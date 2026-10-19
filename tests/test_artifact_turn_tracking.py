@@ -210,7 +210,15 @@ async def test_housekeeping_only_mtime_bump_is_not_an_edit(session, root):
 
 @pytest.mark.parametrize(
     "rel",
-    [".anton_state.db-wal", "backend.log", "prd.md", ".revisions/r1.json"],
+    [
+        ".anton_state.db-wal",
+        "backend.log",
+        "prd.md",
+        ".revisions/r1.json",
+        "__pycache__/backend.cpython-313.pyc",
+        "routes/__pycache__/x.cpython-313.pyc",
+        "stray.pyc",
+    ],
 )
 async def test_non_content_write_is_not_an_edit(session, root, rel):
     """A running backend writes its SQLite store and log into the artifact
@@ -273,7 +281,7 @@ def test_lint_walk_skips_revision_blobs(tmp_path, monkeypatch):
     index = folder / "index.html"
     index.write_text("<html></html>")
     monkeypatch.setattr(
-        th, "_artifact_linters", lambda: {".html": lambda p: [f"bad {p.name}"]}
+        th, "_artifact_linters", lambda *, cell_sandbox: {".html": lambda p: [f"bad {p.name}"]}
     )
 
     messages = lint_changed_artifact_files(Store(), {"art": 0.0})

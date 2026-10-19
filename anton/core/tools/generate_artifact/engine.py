@@ -31,7 +31,10 @@ import httpx2 as httpx
 
 from anton.core.artifacts.internal_files import API_SPEC_FILENAME, PRD_FILENAME
 from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
+from anton.core.backends.sandbox import cell_sandbox_of
+from anton.utils.datasources import scrub_credentials
 from anton.core.llm.structured import looks_truncated
+from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS
 
 from . import sub_tools
 from .debug_trace import NullTrace
@@ -541,7 +544,9 @@ async def generate(
     # gets the strict reading, not a permissive one.
     ws_base = getattr(getattr(session, "_workspace", None), "base", None)
     kept, dropped = resolve_attachments(
-        attachments, workspace=ws_base if isinstance(ws_base, Path) else None
+        attachments,
+        workspace=ws_base if isinstance(ws_base, Path) else None,
+        policy=cell_sandbox_of(getattr(session, "_scratchpads", None)),
     )
     state.attachments = kept
     if kept or dropped:
@@ -856,9 +861,10 @@ async def _run_loop(
 
     Returns a result dict ``{files_written, rounds_used, summary,
     scratchpad_execs}`` on success, or a plain error string on failure.
-    ``scratchpad_execs`` records every scratchpad ``exec`` the loop made —
-    ``{name, code, output}`` per call — so callers can hand the exact
-    data-access code that ran to later FSM steps.
+    ``scratchpad_execs`` records every scratchpad ``exec`` the loop ran —
+    ``{name, code, output}`` per call, leaving out a cell that never ran
+    (``CELL_NOT_RUN_REASONS``) — so callers can hand the exact data-access
+    code that ran to later FSM steps.
 
     ``spend``, when given, is the run's `SpendGuard`. Once the turn's ceiling
     is reached the loop tells the model to close its file and stop, and gives
@@ -1056,15 +1062,21 @@ async def _run_loop(
                 result_blocks.append(sub_tools.tool_result(tc.id, msg))
             elif name == "read_text_file":
                 outcome = await _read_for_generator(session, artifact_path, inp)
-                result_blocks.append(sub_tools.tool_result(tc.id, outcome.content))
+                # The filter the main loop gives read_text_file results, so a
+                # saved secret in a read file reaches the builder as its marker.
+                result_blocks.append(sub_tools.tool_result(tc.id, scrub_credentials(outcome.content)))
             elif name == "scratchpad":
                 # Full scratchpad access: the sub-generator pulls or rebuilds
                 # the data described in the brief's `## Data` section. Lazy
                 # import avoids a tool_handlers <-> generate_artifact cycle.
                 from anton.core.tools.tool_handlers import handle_scratchpad
 
-                content = sub_tools.unwrap_outcome(await handle_scratchpad(session, inp))
-                if inp.get("action") == "exec":
+                outcome = await handle_scratchpad(session, inp)
+                content = sub_tools.unwrap_outcome(outcome)
+                # A cell that never ran, such as a write the user didn't
+                # approve, is no data-access code for later steps to reuse.
+                ran = getattr(outcome, "reason", "") not in CELL_NOT_RUN_REASONS
+                if inp.get("action") == "exec" and ran:
                     scratchpad_execs.append(
                         {
                             "name": str(inp.get("name") or ""),

@@ -9,6 +9,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 from anton.core.tools.tool_defs import ToolDef
+from anton.utils.datasources import _SCRUB_MARKER
 
 
 if TYPE_CHECKING:
@@ -20,11 +21,12 @@ SECRET_NAME_TOKENS = (
     "password", "secret", "token", "api_key", "key",
     "auth", "credential", "private",
 )
-# All marker forms `scrub_credentials` emits: [DS_*] for vault secrets,
-# [<ENV_VAR>] labels for provider keys, [REDACTED_API_KEY] for shape matches.
-# User messages are scrubbed too, so the model may see these and echo them
-# back as known_variables — they must never be saved as real credentials.
-SCRUBBED_VALUE_RE = re.compile(r"^\[(?:DS_\w+|[A-Z][A-Z0-9_]*)\]$")
+# All marker forms the scrub emits: [DS_*] for vault secrets, [<ENV_VAR>]
+# labels for provider keys, [REDACTED_API_KEY] and [REDACTED_TOKEN] for shape
+# matches. User messages are scrubbed too, so the model may see these and echo
+# them back as known_variables. A value holding one anywhere, whole or inside a
+# DSN or a base64 header, is not a real credential and is never saved.
+SCRUBBED_VALUE_RE = re.compile(_SCRUB_MARKER)
 
 
 def looks_secret(field_name: str) -> bool:
@@ -85,9 +87,10 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     resolved_from_vault = []
     dropped_scrubbed = []
     for k, v in list(known_variables.items()):
-        if not SCRUBBED_VALUE_RE.match(v):
+        if not SCRUBBED_VALUE_RE.search(v):
             continue
-        resolved = unscrub_marker(vault, v)
+        # Only a value that is a marker alone names a vaulted field to reuse.
+        resolved = unscrub_marker(vault, v) if SCRUBBED_VALUE_RE.fullmatch(v) else None
         if resolved:
             known_variables[k] = resolved
             resolved_from_vault.append(k)
@@ -100,9 +103,9 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
         console.print()
         console.print(
             f"[anton.warning](anton)[/] Ignoring scrubbed-placeholder values "
-            f"for {', '.join(dropped_scrubbed)} — those bracketed strings are "
-            f"scrub-markers, not real credentials. Pass the actual secret "
-            f"values instead."
+            f"for {', '.join(dropped_scrubbed)}: each is or holds a bracketed "
+            f"scrub-marker, which stands where a secret was hidden, so it is "
+            f"not a real credential. Pass the actual secret values instead."
         )
     if resolved_from_vault:
         console.print()
@@ -277,8 +280,9 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
         if dropped_scrubbed:
             note = (
                 f" Scrubbed-placeholder values for "
-                f"{', '.join(sorted(dropped_scrubbed))} were ignored — those "
-                f"are not real credentials; pass the actual secret values "
+                f"{', '.join(sorted(dropped_scrubbed))} were ignored: each is "
+                f"or holds a bracketed scrub-marker where a secret was hidden, "
+                f"so it is not a real credential. Pass the actual secret values "
                 f"instead."
             )
         return (
