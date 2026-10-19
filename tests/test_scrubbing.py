@@ -289,9 +289,10 @@ class TestEncodedSavedSecrets:
         _save_secrets({SECRET_LABEL: "Hunter2!"})
         assert scrub_credentials("pw=Hunter2!x") == f"pw=[{SECRET_LABEL}]x"
 
-    def test_a_short_saved_secret_is_hidden_url_encoded(self):
-        _save_secrets({SECRET_LABEL: "p@ss!"})
-        result = scrub_credentials("postgresql://app:p%40ss%21@db:5432/prod")
+    @pytest.mark.parametrize("encode", [urllib.parse.quote, urllib.parse.quote_plus], ids=["quote", "quote-plus"])
+    def test_a_short_saved_secret_is_hidden_in_both_url_forms(self, encode):
+        _save_secrets({SECRET_LABEL: "p@s w!"})
+        result = scrub_credentials(f"postgresql://app:{encode('p@s w!')}@db:5432/prod")
         assert result == f"postgresql://app:[{SECRET_LABEL}]@db:5432/prod"
 
     def test_base64_is_matched_from_five_bytes(self):
@@ -308,21 +309,47 @@ class TestEncodedSavedSecrets:
         set_ds_env_values({"DS_A_PROD__PASSWORD": "abc", "DS_CUSTOM_PROD__TOKEN": "abc-defghijk"})
         assert scrub_credentials("tok=abc-defghijk") == "tok=[DS_CUSTOM_PROD__TOKEN]"
 
+    @pytest.mark.parametrize("encode", [
+        urllib.parse.quote,
+        urllib.parse.quote_plus,
+        lambda value: base64.b64encode(value.encode()).decode(),
+    ], ids=["quote", "quote-plus", "base64"])
     @pytest.mark.parametrize(
         "label",
         ["DS_PG_PROD__PASSWORD", "DS_CUSTOM_PROD__TOKEN", "ANTON_MINDS_API_KEY"],
         ids=["saved-secret", "unknown-ds-var", "provider-key"],
     )
-    def test_every_kind_of_exact_value_is_hidden_in_base64(self, label, monkeypatch):
-        value = "Zt7/Q8+Q8Q8Q8Q8Q8"
+    def test_every_kind_of_exact_value_is_hidden_encoded(self, label, encode, monkeypatch):
+        """`quote` keeps `/` and writes a space as `%20`; `quote_plus` encodes `/` and writes `+`."""
+        value = "Zt7/Q8+Q8 Q8Q8Q8Q8"
         if label == "ANTON_MINDS_API_KEY":
             monkeypatch.setenv(label, value)
         elif label == "DS_PG_PROD__PASSWORD":
             _save_secrets({label: value})
         else:
             set_ds_env_values({label: value})
-        printed = base64.b64encode(value.encode()).decode()
-        assert scrub_credentials(f"auth={printed}&page=2") == f"auth=[{label}]&page=2"
+        assert scrub_credentials(f"auth={encode(value)}&page=2") == f"auth=[{label}]&page=2"
+
+    def test_a_saved_value_is_not_matched_inside_a_marker_this_scrub_wrote(self):
+        """The password goes first; `custom_prod` then folds onto `CUSTOM_PROD` in its marker's label."""
+        _DS_SECRET_VARS.add("DS_CUSTOM_PROD__PASSWORD")
+        _DS_KNOWN_VARS.add("DS_CUSTOM_PROD__PASSWORD")
+        set_ds_env_values({"DS_CUSTOM_PROD__PASSWORD": "Tr0ub4dor&3horse", "DS_CUSTOM_PROD__DATABASE": "custom_prod"})
+        result = scrub_credentials("connecting to custom_prod with Tr0ub4dor&3horse")
+        assert result == "connecting to [DS_CUSTOM_PROD__DATABASE] with [DS_CUSTOM_PROD__PASSWORD]"
+
+    def test_a_marker_from_an_earlier_scrub_is_left_alone(self):
+        """Replayed history already holds markers; a value folding onto one's label is not in it."""
+        set_ds_env_values({"DS_CUSTOM_PROD__DATABASE": "custom_prod"})
+        text = "earlier: [DS_CUSTOM_PROD__PASSWORD] and [REDACTED_TOKEN]; now custom_prod"
+        assert scrub_credentials(text) == (
+            "earlier: [DS_CUSTOM_PROD__PASSWORD] and [REDACTED_TOKEN]; now [DS_CUSTOM_PROD__DATABASE]"
+        )
+
+    def test_a_secret_holding_a_marker_shaped_run_is_still_hidden(self):
+        """`p[A]ss` holds what looks like a marker; a match that holds it whole is the secret."""
+        _save_secrets({SECRET_LABEL: "p[A]ss-w0rd!x"})
+        assert scrub_credentials("pw=p[A]ss-w0rd!x;") == f"pw=[{SECRET_LABEL}];"
 
     def test_ordinary_output_and_code_are_left_alone(self):
         _save_secrets({

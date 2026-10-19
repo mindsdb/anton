@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import bisect
 import functools
 import html
 import json
@@ -436,6 +437,46 @@ class _SecretForms:
     literal_forms: tuple[str, ...]
 
 
+class _MarkerSpans:
+    """Where the scrub markers in one text start and end.
+
+    A saved value can turn up inside a marker's label in another case, such
+    as `custom_prod` in `[DS_CUSTOM_PROD__PASSWORD]`; such a match is part of
+    the marker, not a secret. A match that holds a whole marker-shaped run,
+    such as a password `p[A]ss`, is still the secret.
+    """
+
+    def __init__(self, text: str) -> None:
+        """Find every marker in `text`, by the grammar the connect flow refuses; markers never overlap."""
+        # Importing anton.tools loads this module, so a top-level import would be circular.
+        from anton.tools import SCRUBBED_VALUE_RE
+
+        spans = [found.span() for found in SCRUBBED_VALUE_RE.finditer(text)]
+        self.starts = [start for start, _ in spans]
+        self.ends = [end for _, end in spans]
+
+    def cuts(self, start: int, end: int) -> bool:
+        """Return whether `text[start:end]` starts or ends strictly inside a marker."""
+        return self._inside(start) or self._inside(end)
+
+    def _inside(self, position: int) -> bool:
+        index = bisect.bisect_left(self.starts, position) - 1
+        return index >= 0 and position < self.ends[index]
+
+
+def _redact_outside_markers(
+    pattern: re.Pattern[str], replacement: str, text: str, markers: _MarkerSpans
+) -> tuple[str, int]:
+    """Replace each match of `pattern` in `text` with `replacement`, except one that cuts into a marker.
+
+    `markers` are the markers in `text`, from an earlier scrub or from this
+    one. Returns the new text and the number of matches, replaced or not.
+    """
+    return pattern.subn(
+        lambda found: found.group() if markers.cuts(*found.span()) else replacement, text
+    )
+
+
 def _hex_pattern(number: int, width: int) -> str:
     """Return a pattern for `number` written in at least `width` hex digits of either case."""
     return "".join(
@@ -585,12 +626,13 @@ def scrub_credentials(text: str) -> str:
         value, conservatively.
       * Provider credentials (ENG-463): the values of _PROVIDER_SECRET_VARS.
     Each value is matched in every form `_secret_forms` builds: as printed,
-    URL-encoded, escaped, or in base64. Then anything matching a well-known
-    key shape (_SECRET_KEY_PATTERN) is redacted, so a raw `mdb_`/`sk-`/`AIza`/
-    `AQ.` key can't reach model context via a tool result, traceback, or
-    settings echo.
+    URL-encoded, escaped, or in base64, but never inside a marker already in
+    the text. Then anything matching a well-known key shape
+    (_SECRET_KEY_PATTERN) is redacted, so a raw `mdb_`/`sk-`/`AIza`/`AQ.` key
+    can't reach model context via a tool result, traceback, or settings echo.
     """
     lowered: str | None = None
+    markers: _MarkerSpans | None = None
     for secret in _exact_secrets():
         forms = _secret_forms(secret.value)
         if forms.anchors:
@@ -599,9 +641,11 @@ def scrub_credentials(text: str) -> str:
             haystack = lowered if forms.folded else text
             if not any(anchor in haystack for anchor in forms.anchors):
                 continue
-        text, count = forms.pattern.subn(f"[{secret.label}]", text)
+        if markers is None:
+            markers = _MarkerSpans(text)
+        text, count = _redact_outside_markers(forms.pattern, f"[{secret.label}]", text, markers)
         if count:
-            lowered = None
+            lowered = markers = None
     text = _SECRET_KEY_PATTERN.sub("[REDACTED_API_KEY]", text)
     return text
 
