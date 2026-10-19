@@ -43,11 +43,22 @@ class CoreSettings(BaseSettings):
     verifier_jev_timeout_s: float = 2.0
     # Minimum probability of Jev's COMPLETE/WAITING for it to decide without the LLM.
     verifier_jev_min_p: float = 0.8
-    # Hold a scratchpad cell that changes a database, or deletes, renames or
-    # moves a file that existed when the turn began, until the user picks
-    # Approve; anything else refuses the cell. ANTON_WRITE_APPROVAL. Off by
-    # default: the host that needs it turns it on.
+    # Hold a scratchpad cell that changes a database; deletes, renames, moves
+    # or overwrites a file that existed when the turn began; or sends an HTTP
+    # PUT, PATCH or DELETE, until the user picks Approve; anything else
+    # refuses the cell. ANTON_WRITE_APPROVAL. Off by default: the host that
+    # needs it turns it on.
     write_approval: bool = False
+    # HTTP endpoints that count as writes under `write_approval`, whatever
+    # their method, so a POST that changes data is held too
+    # (ANTON_WRITE_APPROVAL_HTTP). Entries separated by newlines or commas,
+    # each a method (or * for any) and a URL glob, as in
+    # "POST https://maestro.example.com/api/*/orders/*". In the glob, * is any
+    # text within one path segment and ** any text; it is matched, ignoring
+    # case, against the request's URL without its query string. A part of the
+    # URL the code picks when it runs matches whatever it could fill. A bad
+    # entry is skipped with a WARNING.
+    write_approval_http: str = ""
     # Per-turn spend ceiling in RAW tokens — input + output + cache_read +
     # cache_creation, i.e. `TurnCost.total_tokens` (ENG-1286). 0 disables it.
     #

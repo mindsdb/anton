@@ -1,6 +1,7 @@
-"""With `write_approval` on, a cell that changes connected data, or deletes or
-renames a file the project held when the turn began, waits for the user's
-Approve, and anything else refuses it.
+"""With `write_approval` on, a cell that changes connected data; deletes,
+renames or overwrites a file the project held when the turn began; or sends an
+HTTP PUT, PATCH or DELETE, or a request to an endpoint the operator lists,
+waits for the user's Approve, and anything else refuses it.
 
 Before this, such a cell ran in the same turn with no question: asked to move
 a supplier's lead time, the agent ran the UPDATE 6 times in 6; asked to rename
@@ -58,6 +59,13 @@ UPDATE_CELL = (
     "conn.commit()\n"
 )
 RENAME_CELL = "import os\nos.rename('report.pdf', 'old.pdf')\n"
+PUT_CELL = (
+    "import requests\n"
+    "r = requests.put('https://erp.example.com/api/suppliers/S005', json={'lead_time_days': 21})\n"
+    "print(r.status_code)\n"
+)
+MAESTRO_RULE = "POST https://maestro.example.com/api/*/orders/*"
+MAESTRO_POST = "import requests\nrequests.post('https://maestro.example.com/api/v2/orders/9', json={'qty': 5})\n"
 
 APPROVE = AskAnswer(status="answered", values=("approve",))
 CANCEL = AskAnswer(status="answered", values=("cancel",))
@@ -216,14 +224,14 @@ class _TurnSeen:
 
 
 def _session(
-    project: Path, *cells: str, write_approval: bool = True, packages: tuple[str, ...] = (),
+    project: Path, *cells: str, write_approval: bool = True, packages: tuple[str, ...] = (), http: str = "",
 ) -> _Harness:
     workspace = MagicMock(base=project)
     workspace.artifacts_dir = project / "artifacts"
     session = ChatSession(ChatSessionConfig(
         llm_client=_llm(*cells, packages=packages),
         workspace=workspace,
-        settings=CoreSettings(write_approval=write_approval),
+        settings=CoreSettings(write_approval=write_approval, write_approval_http=http),
     ))
     pad = _Pad()
     session._scratchpads.get_or_create = AsyncMock(return_value=pad)
@@ -405,6 +413,73 @@ async def test_a_rename_without_approve_never_runs(project, answer):
     assert harness.pad.ran == []
 
 
+# ── HTTP ──────────────────────────────────────────────────────────────────
+
+async def test_a_put_waits_for_approve_and_names_the_method_the_url_and_the_call(project):
+    harness = _session(project, PUT_CELL)
+    seen = await _run(harness=harness, answers=[APPROVE])
+    assert len(seen.cards) == 1 and seen.ran_before == [0]
+    prompt = seen.cards[0].request.prompt
+    assert (
+        "This step would send PUT to:\n\n```\nhttps://erp.example.com/api/suppliers/S005\n```\n\n"
+        "```\nr = requests.put('https://erp.example.com/api/suppliers/S005', json={'lead_time_days': 21})\n```"
+    ) in prompt, "the call is quoted with the line it sits on"
+    assert harness.pad.ran == [PUT_CELL]
+
+
+async def test_a_put_without_approve_never_runs_and_the_refusal_names_it(project):
+    harness = _session(project, PUT_CELL)
+    await _run(harness=harness, answers=[CANCEL])
+    assert harness.pad.ran == []
+    assert (
+        "Not run: this step would send PUT to `https://erp.example.com/api/suppliers/S005`."
+        in _history_text(harness.session)
+    )
+
+
+async def test_a_post_to_an_endpoint_the_setting_lists_waits_for_approve(project):
+    harness = _session(project, MAESTRO_POST, http=MAESTRO_RULE)
+    seen = await _run(harness=harness, answers=[CANCEL])
+    assert len(seen.cards) == 1
+    assert "This step would send POST to:\n\n```\nhttps://maestro.example.com/api/v2/orders/9\n```" in (
+        seen.cards[0].request.prompt
+    )
+    assert harness.pad.ran == []
+
+
+async def test_a_post_the_setting_does_not_list_runs_with_no_card(project):
+    elsewhere = MAESTRO_POST.replace("/orders/9", "/forecasts/9")
+    harness = _session(project, elsewhere, MAESTRO_POST, http=MAESTRO_RULE)
+    seen = await _run(harness=harness, answers=[CANCEL])
+    assert len(seen.cards) == 1, "only the listed endpoint asks"
+    assert harness.pad.ran == [elsewhere]
+
+
+async def test_the_setting_reads_its_environment_variable(project, monkeypatch):
+    monkeypatch.setenv("ANTON_WRITE_APPROVAL_HTTP", f"{MAESTRO_RULE}\nDELETE https://hooks.example.com/**")
+    workspace = MagicMock(base=project)
+    workspace.artifacts_dir = project / "artifacts"
+    session = ChatSession(ChatSessionConfig(
+        llm_client=_llm(), workspace=workspace, settings=CoreSettings(write_approval=True),
+    ))
+    try:
+        assert [(r.method, r.url_glob) for r in session._write_gate.http_rules] == [
+            ("POST", "https://maestro.example.com/api/*/orders/*"), ("DELETE", "https://hooks.example.com/**"),
+        ]
+    finally:
+        await session.close()
+
+
+async def test_a_bad_entry_in_the_setting_is_skipped_with_one_warning(project, caplog):
+    with caplog.at_level(logging.WARNING, logger="anton.core.utils.write_check"):
+        harness = _session(project, MAESTRO_POST, http=f"{MAESTRO_RULE}, POST")
+    warned = [r.getMessage() for r in caplog.records
+              if r.name == "anton.core.utils.write_check" and r.levelno == logging.WARNING]
+    assert warned == ["write approval: skipped the HTTP write entry 'POST': an entry is a method and a URL"]
+    seen = await _run(harness=harness, answers=[CANCEL])
+    assert len(seen.cards) == 1, "the good entry still holds"
+
+
 # ── One unanswered card ───────────────────────────────────────────────────
 
 async def test_after_a_timeout_later_cells_in_the_turn_are_refused_without_a_card(project):
@@ -469,7 +544,12 @@ async def test_stop_while_the_card_waits_runs_nothing_and_logs_stopped(project, 
     "con.execute(\"CREATE TABLE stock AS SELECT * FROM read_csv('stock.csv')\")\n",
     "open('summary.md', 'w').write('One line.')\n",
     "import os\nopen('summary.md.tmp', 'w').write('x')\nos.replace('summary.md.tmp', 'summary.md')\n",
-], ids=["select", "duckdb-from-csv", "new-file", "temp-renamed-into-place"])
+    "import matplotlib.pyplot as plt\nplt.bar(['A'], [1])\nplt.savefig('charts/stock_by_site.png')\n",
+    "import requests\nr = requests.get('https://erp.example.com/api/suppliers', params={'late': 1})\n",
+    "import requests\nr = requests.post('https://erp.example.com/api/search', json={'q': 'late suppliers'})\n",
+    "import pandas as pd\npd.read_csv('stock.csv').to_csv('stock.csv', mode='a', header=False)\n",
+], ids=["select", "duckdb-from-csv", "new-file", "temp-renamed-into-place", "new-chart", "get", "plain-post",
+        "append"])
 async def test_read_only_work_and_new_files_raise_no_card(project, code):
     harness = _session(project, code)
     seen = await _run(harness=harness, answers=[])
@@ -596,13 +676,55 @@ async def test_each_decision_is_logged_without_the_code(project, caplog):
     assert "suppliers" not in caplog.text, "the log line holds kinds and counts, never the statement"
 
 
-async def test_an_overwrite_runs_with_no_card_and_is_logged_not_held(project, caplog):
+async def test_an_overwrite_of_an_existing_file_waits_and_names_it(project, caplog):
     elicitor = _AnswersAtOnce(answer=CANCEL)
     session = await _gated_session(project, elicitor=elicitor)
     with caplog.at_level(logging.WARNING, logger=GATE_LOG):
         outcome = await _hold()(session, pad=_Pad(), code="open('report.pdf', 'w').write('x')")
+    assert outcome is not None and outcome.reason == "write_not_approved"
+    assert "This step would overwrite:\n\n```\nreport.pdf\n```" in elicitor.prompts[0]
+    assert "Not run: this step would overwrite `report.pdf`." in outcome.content
+    assert _decisions(caplog) == ['{"kinds":["overwrite"],"count":1,"status":"cancelled"}']
+
+
+@pytest.mark.parametrize("code, kinds", [
+    ("open('stock.csv', 'a').write('B,2\\n')", '["append"]'),
+    ("import os\nos.makedirs('.anton/artifacts/dash', exist_ok=True)\n"
+     "open('.anton/artifacts/dash/index.html', 'w').write('<h1>v2</h1>')", '["overwrite"]'),
+], ids=["append", "artifact-rebuild"])
+async def test_an_append_or_an_overwrite_of_the_agents_own_file_runs_and_is_logged_not_held(
+    project, caplog, code, kinds,
+):
+    (project / ".anton" / "artifacts" / "dash").mkdir(parents=True)
+    (project / ".anton" / "artifacts" / "dash" / "index.html").write_text("<h1>v1</h1>")
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    with caplog.at_level(logging.WARNING, logger=GATE_LOG):
+        outcome = await _hold()(session, pad=_Pad(), code=code)
     assert outcome is None and elicitor.asked == 0
-    assert _decisions(caplog) == ['{"kinds":["overwrite"],"count":1,"status":"not_held"}']
+    assert _decisions(caplog) == ['{"kinds":' + kinds + ',"count":1,"status":"not_held"}']
+
+
+async def test_a_cell_that_changes_nothing_existing_logs_nothing(project, caplog):
+    """A new file is no decision, so it writes no log line."""
+    session = await _gated_session(project, elicitor=_AnswersAtOnce(answer=CANCEL))
+    with caplog.at_level(logging.WARNING, logger=GATE_LOG):
+        assert await _hold()(session, pad=_Pad(), code="open('new_summary.md', 'w').write('x')") is None
+    assert _decisions(caplog) == []
+
+
+async def test_rewriting_a_file_an_earlier_cell_wrote_raises_no_card(project):
+    """The earlier cell ran in an earlier turn, so this turn began with its file."""
+    (project / "summary.md").write_text("first draft")
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    pad = _Pad()
+    pad.cells.append(Cell(code="open('summary.md', 'w').write('first draft')", stdout="", stderr="", error=None))
+    assert await _hold()(session, pad=pad, code="open('summary.md', 'w').write('second draft')") is None
+    assert elicitor.asked == 0
+    assert await _hold()(session, pad=_Pad(), code="open('summary.md', 'w').write('second draft')") is not None, (
+        "a pad with no such earlier cell is held"
+    )
 
 
 async def test_an_earlier_cells_connection_still_counts(project):

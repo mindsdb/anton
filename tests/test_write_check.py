@@ -7,6 +7,7 @@ it must hold and cells, often the same call shape, it must not.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import time
@@ -16,10 +17,14 @@ import pytest
 
 from anton.core.utils.scratchpad import _card_prompt, _code_span, _fence, _refusal
 from anton.core.utils.write_check import (
+    CallWrite,
     CellWrites,
     FileChange,
+    HttpWrite,
+    HttpWriteRule,
     find_cell_writes,
     glob_match,
+    parse_http_write_rules,
     snapshot_project_files,
     write_statements,
 )
@@ -176,6 +181,34 @@ def _fenced(card: str) -> list[str]:
     "SELECT id INTO",
     "DELETE FROM t WHERE x = 1.",
     "MERGE INTO t USING s \ue0000\ue001",
+    # Stored procedures and side effects: a procedure can change anything.
+    "CALL refresh_totals()",
+    "CALL refresh_totals",
+    "call refresh_totals(1, 2)",
+    "EXEC dbo.usp_rebuild_index",
+    "EXEC usp_update_prices @region = 'EMEA'",
+    "EXECUTE my_plan(1, 2)",
+    "EXEC @status = dbo.usp_run",
+    "EXEC (@sql)",
+    # SELECT of a side-effecting function.
+    "SELECT setval('orders_id_seq', 1000)",
+    "select nextval('orders_id_seq')",
+    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle'",
+    "SELECT pg_cancel_backend(123)",
+    "SELECT pg_reload_conf()",
+    "SELECT lo_unlink(12345)",
+    "SELECT lo_import('/etc/passwd')",
+    "SELECT dblink_exec('conn', 'DELETE FROM t')",
+    "SELECT pg_advisory_lock(1)",
+    "SELECT set_config('statement_timeout', '0', false)",
+    "SELECT GET_LOCK('lock1', 10)",
+    "SELECT my_seq.NEXTVAL FROM dual",
+    "WITH s AS (SELECT setval('q', 1)) SELECT * FROM s",
+    "SELECT count(*) FROM (SELECT pg_cancel_backend(1)) x",
+    "SELECT * FROM t INTO OUTFILE '/tmp/dump.csv'",
+    "SELECT * INTO DUMPFILE '/tmp/one.bin' FROM t",
+    "COPY t TO '/tmp/out.csv'",
+    "COPY (SELECT * FROM t) TO PROGRAM 'gzip > /tmp/t.gz'",
 ])
 def test_write_statements(sql):
     assert write_statements(sql)
@@ -260,6 +293,20 @@ def test_each_write_in_one_string_is_its_own_statement():
     "## Next steps\n\nDelete orders where the quantity is zero.\n\nReview S005.",
     "Hi Dana,\nDelete rows where qty is 0 before Friday.\nThanks",
     "<script>\nfunction reset() {\n  delete params.page;\n}\n</script>",
+    # A plain read of ordinary functions stays free.
+    "SELECT count(*), now(), sum(qty) FROM orders",
+    "SELECT max(lead_time), avg(price) FROM suppliers",
+    "SELECT nextval FROM settings",
+    "COPY (SELECT * FROM t) TO STDOUT",
+    # A capitalized verb, or a lowercase one not before `name(`, reads as prose.
+    "Call the supplier about the late order",
+    "Call refresh when the data lands",
+    "execute the migration plan next week",
+    "exec summary of the quarter",
+    "Execute order 66",
+    "CALL VOLUME BY HOUR",
+    "EXEC summary attached",
+    "Copy the chart to the deck",
 ])
 def test_reads_and_prose(text):
     assert write_statements(text) == ()
@@ -846,11 +893,478 @@ def test_cells_that_change_no_existing_file(code, snap):
     "import os\nopen('summary.md.tmp', 'w').write('x')\nos.replace('summary.md.tmp', 'summary.md')",
     "import os\nif os.path.exists('summary.md'):\n    os.remove('summary.md')\nwith open('summary.md', 'w') as f:\n    f.write('new')",
     "import os\nos.remove('summary.md')\nos.replace('summary.md.tmp', 'summary.md')",
-])
-def test_an_overwrite_is_reported_not_held(code, snap):
+], ids=["open-w", "delete-then-write", "unlink-then-write-text", "temp-renamed-onto-it", "exists-remove-write",
+        "delete-then-replace"])
+def test_an_overwrite_of_a_file_the_turn_began_with_is_held_and_named_once(code, snap):
+    """A delete that a write always follows is the overwrite, and the write
+    after it names the same file, so the card names it once."""
     writes = find_cell_writes(code=code, earlier_code=(), snapshots=(snap,))
+    assert writes.needs_approval()
+    assert [(c.action, c.paths) for c in writes.held_files] == [("overwrite", ("summary.md",))]
+    assert "This step would overwrite:\n\n```\nsummary.md\n```" in _card_prompt(writes)
+
+
+# ── Overwrites ────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def office(tmp_path: Path, monkeypatch):
+    """A project of the files an analyst's turn rewrites."""
+    for rel in ("stock.csv", "orders.parquet", "budget.xlsx", "memo.docx", "deck.pptx", "chart.png",
+                "log.txt", "warehouse.db", "analytics.duckdb", "docs/a.pdf",
+                ".anton/artifacts/dash/index.html", ".anton/skill_drafts/weekly/SKILL.md"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("x")
+    monkeypatch.chdir(tmp_path)
+    return snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+
+
+def _changes(code: str, snapshot, *, earlier=()) -> list[tuple[str, tuple[str, ...], bool]]:
+    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(snapshot,))
+    return [(c.action, c.paths, c.held) for c in writes.files]
+
+
+PD = "import pandas as pd\ndf = pd.read_csv('stock.csv')\n"
+
+
+@pytest.mark.parametrize("code, path", [
+    ("open('stock.csv', 'w').write('x')", "stock.csv"),
+    ("open('stock.csv', 'w+').write('x')", "stock.csv"),
+    ("open('stock.csv', 'wb').write(b'x')", "stock.csv"),
+    ("open('stock.csv', 'r+').write('x')", "stock.csv"),
+    ("open('stock.csv', mode='rb+').write(b'x')", "stock.csv"),
+    ("open(file='stock.csv', mode='w').write('x')", "stock.csv"),
+    ("with open('stock.csv', 'w', newline='') as f:\n    f.write('x')", "stock.csv"),
+    ("from pathlib import Path\nPath('stock.csv').write_text('x')", "stock.csv"),
+    ("from pathlib import Path\nPath('chart.png').write_bytes(b'x')", "chart.png"),
+    ("from pathlib import Path\nwith Path('stock.csv').open('w') as f:\n    f.write('x')", "stock.csv"),
+    (PD + "df.to_csv('stock.csv', index=False)", "stock.csv"),
+    (PD + "df.to_csv(path_or_buf='stock.csv')", "stock.csv"),
+    (PD + "df.to_excel('budget.xlsx', sheet_name='Q3')", "budget.xlsx"),
+    (PD + "df.to_parquet('orders.parquet')", "orders.parquet"),
+    (PD + "df.to_json('log.txt', orient='records')", "log.txt"),
+    (PD + "df.to_feather('orders.parquet')", "orders.parquet"),
+    (PD + "df.to_pickle('log.txt')", "log.txt"),
+    (PD + "df.to_html('log.txt')", "log.txt"),
+    (PD + "with pd.ExcelWriter('budget.xlsx') as w:\n    df.to_excel(w, sheet_name='A')", "budget.xlsx"),
+    ("import matplotlib.pyplot as plt\nplt.savefig('chart.png', dpi=150)", "chart.png"),
+    ("import matplotlib.pyplot as plt\nfig, ax = plt.subplots()\nfig.savefig(fname='chart.png')", "chart.png"),
+    ("import shutil\nshutil.copy('docs/a.pdf', 'chart.png')", "chart.png"),
+    ("import shutil\nshutil.copy2('docs/a.pdf', 'chart.png')", "chart.png"),
+    ("import shutil\nshutil.copyfile('docs/a.pdf', 'chart.png')", "chart.png"),
+    ("import os\nos.replace('new.csv', 'stock.csv')", "stock.csv"),
+    ("import os\nos.rename('new.csv', 'stock.csv')", "stock.csv"),
+    ("import shutil\nshutil.move('new.csv', 'stock.csv')", "stock.csv"),
+    ("import json\njson.dump({'a': 1}, open('log.txt', 'w'))", "log.txt"),
+    ("import pickle\nwith open('log.txt', 'wb') as f:\n    pickle.dump({'a': 1}, f)", "log.txt"),
+    ("import openpyxl\nwb = openpyxl.load_workbook('budget.xlsx')\nwb['A']['B2'] = 7\nwb.save('budget.xlsx')", "budget.xlsx"),
+    ("from docx import Document\nd = Document('memo.docx')\nd.add_paragraph('x')\nd.save('memo.docx')", "memo.docx"),
+    ("from pptx import Presentation\np = Presentation('deck.pptx')\np.save('deck.pptx')", "deck.pptx"),
+    ("import glob, pandas as pd\nfor f in glob.glob('*.csv'):\n    pd.read_csv(f).dropna().to_csv(f, index=False)",
+     "stock.csv"),
+    ("import os\nos.chdir('docs')\nopen('a.pdf', 'wb').write(b'x')", "docs/a.pdf"),
+], ids=["w", "w+", "wb", "r+", "rb+-keyword", "file-keyword", "with-open", "write_text", "write_bytes",
+        "path-open", "to_csv", "to_csv-keyword", "to_excel", "to_parquet", "to_json", "to_feather", "to_pickle",
+        "to_html", "excel-writer", "savefig", "fig-savefig-keyword", "copy", "copy2", "copyfile", "replace-onto",
+        "rename-onto", "move-onto", "json-dump", "pickle-dump",
+        "openpyxl-save", "docx-save", "pptx-save", "glob-rewrite-in-place", "after-chdir"])
+def test_every_write_that_replaces_a_file_the_turn_began_with_is_held(code, path, office):
+    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(office,))
+    assert ("overwrite", (path,)) in [(c.action, c.paths) for c in writes.held_files]
+    assert f"This step would overwrite:\n\n```\n{path}\n```" in _card_prompt(writes)
+
+
+@pytest.mark.parametrize("code", [
+    "open('log.txt', 'a').write('x')",
+    "open('log.txt', 'a+').write('x')",
+    "open('log.txt', 'ab').write(b'x')",
+    "from pathlib import Path\nwith Path('log.txt').open('a') as f:\n    f.write('x')",
+    PD.replace("stock.csv", "log.txt") + "df.to_csv('log.txt', mode='a', header=False)",
+    PD + "with pd.ExcelWriter('budget.xlsx', mode='a', if_sheet_exists='new') as w:\n    df.to_excel(w)",
+], ids=["a", "a+", "ab", "path-open-a", "to_csv-append", "excel-writer-append"])
+def test_an_append_is_reported_but_not_held(code, office):
+    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(office,))
     assert not writes.needs_approval()
-    assert [c.action for c in writes.files] and {c.action for c in writes.files} == {"overwrite"}
+    assert [(c.action, c.held) for c in writes.files] == [("append", False)]
+
+
+def test_an_exclusive_create_is_no_overwrite(office):
+    """`x` fails on a file that exists, so it can't replace one."""
+    assert _changes("open('stock.csv', 'x').write('x')", office) == []
+
+
+@pytest.mark.parametrize("code, path", [
+    ("open('.anton/artifacts/dash/index.html', 'w').write('<h1>v2</h1>')", ".anton/artifacts/dash/index.html"),
+    ("from pathlib import Path\nPath('.anton/skill_drafts/weekly/SKILL.md').write_text('v2')",
+     ".anton/skill_drafts/weekly/SKILL.md"),
+    ("import os\nopen('.anton/artifacts/dash/index.html.tmp', 'w').write('v2')\n"
+     "os.replace('.anton/artifacts/dash/index.html.tmp', '.anton/artifacts/dash/index.html')",
+     ".anton/artifacts/dash/index.html"),
+], ids=["artifact", "skill-draft", "artifact-temp-renamed-into-place"])
+def test_an_overwrite_under_the_agents_folders_is_not_held(code, path, office):
+    assert _changes(code, office) == [("overwrite", (path,), False)]
+
+
+def test_the_clis_output_folder_is_one_of_the_agents_folders(tmp_path, monkeypatch):
+    """`.anton/output` holds what the CLI makes when it has no artifacts: a
+    rewrite there is the agent's own, and a delete is still held."""
+    (tmp_path / ".anton" / "output").mkdir(parents=True)
+    (tmp_path / ".anton" / "output" / "q3.html").write_text("x")
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    assert _changes("open('.anton/output/q3.html', 'w').write('v2')", snap) == [
+        ("overwrite", (".anton/output/q3.html",), False)
+    ]
+    assert _files("import os\nos.remove('.anton/output/q3.html')", (snap,)) == [("delete", (".anton/output/q3.html",))]
+
+
+@pytest.mark.parametrize("earlier, code, path", [
+    ("open('log.txt', 'w').write('first')", "open('log.txt', 'w').write('second')", "log.txt"),
+    ("import matplotlib.pyplot as plt\nplt.savefig('chart.png')", "import matplotlib.pyplot as plt\nplt.savefig('chart.png')",
+     "chart.png"),
+    ("def save(df, name):\n    df.to_csv(name, index=False)\nsave(df, 'stock.csv')",
+     PD + "df.to_csv('stock.csv', index=False)", "stock.csv"),
+    ("import os\nopen('stock.csv.tmp', 'w').write('x')\nos.replace('stock.csv.tmp', 'stock.csv')",
+     "import os\nopen('stock.csv.tmp', 'w').write('y')\nos.replace('stock.csv.tmp', 'stock.csv')", "stock.csv"),
+    ("import sqlite3\nc = sqlite3.connect('warehouse.db')\nc.execute('CREATE TABLE t (a int)')",
+     "import sqlite3\nc = sqlite3.connect('warehouse.db')\nc.execute('INSERT INTO t VALUES (1)')", "warehouse.db"),
+    ("import pandas as pd\nfor f in ['stock', 'log']:\n    pd.DataFrame().to_csv(f + suffix)",
+     PD + "df.to_csv('stock.csv')", "stock.csv"),
+], ids=["open", "savefig", "earlier-helper-called-earlier", "temp-renamed-into-place", "database",
+        "earlier-name-picked-at-run-time"])
+def test_rewriting_a_file_an_earlier_cell_wrote_is_not_held(earlier, code, path, office):
+    """The earlier cell ran in an earlier turn, so the file is in this turn's snapshot."""
+    assert _changes(code, office, earlier=(earlier,)) == [("overwrite", (path,), False)]
+    assert _changes(code, office) == [("overwrite", (path,), True)], "with no earlier cell it is held"
+
+
+@pytest.mark.parametrize("earlier", [
+    "import pandas as pd\ndf = pd.read_csv('stock.csv')",
+    "open('stock.csv', 'a').write('x')",
+    "def save(df, name):\n    df.to_csv(name, index=False)",
+], ids=["only-read", "only-appended", "helper-not-called-earlier"])
+def test_a_file_an_earlier_cell_did_not_write_is_still_held(earlier, office):
+    """The last: the earlier cells' writes are read against the earlier
+    cells alone, so this cell's own call doesn't make the file the agent's."""
+    code = "save(df, 'stock.csv')" if "def save" in earlier else PD + "df.to_csv('stock.csv')"
+    assert ("overwrite", ("stock.csv",), True) in _changes(code, office, earlier=(earlier,))
+
+
+@pytest.mark.parametrize("earlier", [
+    ("def save():\n    df.to_csv('stock.csv')",),
+    ("save = lambda: df.to_csv('stock.csv')",),
+    ("def save():\n    df.to_csv('stock.csv')\ndef report():\n    save()",),
+    ("if False:\n    df.to_csv('stock.csv')",),
+    ("if 0:\n    df.to_csv('stock.csv')",),
+    ("while False:\n    df.to_csv('stock.csv')",),
+    ("if True:\n    pass\nelse:\n    df.to_csv('stock.csv')",),
+    ("def save():\n    df.to_csv('log.txt')\nsave()", "def save():\n    df.to_csv('stock.csv')"),
+], ids=["uncalled-def", "uncalled-lambda", "called-only-by-an-uncalled-def", "if-false", "if-0", "while-false",
+        "else-of-if-true", "def-redefined-after-the-call"])
+def test_a_write_that_never_ran_in_an_earlier_cell_leaves_the_file_held(earlier, office):
+    """The earlier cells are read as code, not as what ran: a write in a
+    function no cell calls, or in a branch that never runs, never touched
+    the user's stock.csv, so rewriting it still waits for approval."""
+    assert _changes(PD + "df.to_csv('stock.csv')", office, earlier=earlier) == [("overwrite", ("stock.csv",), True)]
+
+
+@pytest.mark.parametrize("earlier", [
+    ("def save():\n    df.to_csv('stock.csv')\nsave()",),
+    ("def save():\n    df.to_csv('stock.csv')", "save()"),
+    ("save = lambda: df.to_csv('stock.csv')\nsave()",),
+    ("def save():\n    df.to_csv('stock.csv')\ndef report():\n    save()\nreport()",),
+    ("def save():\n    df.to_csv('stock.csv')\nif ready:\n    save()",),
+    ("class Store:\n    def save(self):\n        df.to_csv('stock.csv')\nStore().save()",),
+], ids=["called-in-its-cell", "called-in-a-later-cell", "called-lambda", "called-through-another-function",
+        "called-under-an-if", "called-method"])
+def test_a_write_in_a_function_an_earlier_cell_called_makes_the_file_the_agents(earlier, office):
+    assert _changes(PD + "df.to_csv('stock.csv')", office, earlier=earlier) == [("overwrite", ("stock.csv",), False)]
+
+
+@pytest.mark.parametrize("code", [
+    "open('new_report.md', 'w').write('x')",
+    "import matplotlib.pyplot as plt\nplt.savefig('charts/sales_by_site.png')",
+    PD + "df.to_excel('stock_summary.xlsx')",
+    "import os\nopen('report.md.tmp', 'w').write('x')\nos.replace('report.md.tmp', 'report.md')",
+    "open(os.environ['OUT'], 'w').write('x')",
+    "import shutil\nshutil.copy('stock.csv', 'docs')",
+], ids=["new-file", "new-chart", "new-workbook", "temp-renamed-into-a-new-file", "root-the-check-cant-place",
+        "copy-into-a-folder"])
+def test_a_write_to_a_file_the_turn_did_not_begin_with_is_no_change(code, office):
+    assert _changes(code, office) == []
+
+
+@pytest.mark.parametrize("code", [
+    PD + "from datetime import date\ndf.to_csv(f'exports/orders_{date.today():%Y-%m-%d}.csv', index=False)",
+    "import matplotlib.pyplot as plt\nfor site, g in df.groupby('site'):\n    plt.savefig(f'charts/stock_{site}.png')",
+    "out = 'exports/orders_'\nout += stamp\nopen(out + '.csv', 'w').write('x')",
+    "import os\nopen(os.path.join('exports', name), 'w').write('x')",
+], ids=["dated-export", "chart-per-site", "built-up-name", "joined-name"])
+def test_a_write_to_a_name_the_code_picks_when_it_runs_counts_as_a_new_file(code, tmp_path, monkeypatch):
+    """Older files the name could match are there, and none is held: a dated
+    export or a chart per site is a new file."""
+    for rel in ("exports/orders_2026-10-01.csv", "charts/stock_A.png"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("x")
+    monkeypatch.chdir(tmp_path)
+    snapshot = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    assert _changes(code, snapshot) == []
+
+
+@pytest.mark.parametrize("code, path", [
+    ("import os, pandas as pd\nfor name in os.listdir('docs'):\n    pd.DataFrame().to_csv(os.path.join('docs', name))",
+     "docs/a.pdf"),
+    ("from pathlib import Path\nfor p in Path('docs').iterdir():\n    p.write_text('x')", "docs/a.pdf"),
+    ("import os\nos.remove(f'stock{suffix}.csv')", "stock.csv"),
+], ids=["listdir-rewrite", "iterdir-rewrite", "delete-with-a-run-time-part"])
+def test_a_listing_still_names_files_that_exist_and_a_delete_any_it_could_name(code, path, office):
+    """A listing's wildcard names files the folder holds, so rewriting them
+    is held; a delete with a part picked at run time still is too."""
+    assert any(held and path in paths for _, paths, held in _changes(code, office))
+
+
+# ── SQLite and DuckDB files ───────────────────────────────────────────────
+
+@pytest.mark.parametrize("code, path", [
+    ("import sqlite3\nc = sqlite3.connect('warehouse.db')\nc.execute('DELETE FROM orders WHERE qty = 0')\nc.commit()",
+     "warehouse.db"),
+    ("import sqlite3\nwith sqlite3.connect('warehouse.db') as c:\n    c.cursor().execute('UPDATE t SET a = 1')",
+     "warehouse.db"),
+    ("import sqlite3\ncon = sqlite3.connect(database='warehouse.db')\ncur = con.cursor()\n"
+     "cur.executemany('INSERT INTO t VALUES (?)', rows)", "warehouse.db"),
+    ("import sqlite3\nc = sqlite3.connect('warehouse.db')\nc.executescript('DROP TABLE t; CREATE TABLE t (a int);')",
+     "warehouse.db"),
+    ("import duckdb\ncon = duckdb.connect('analytics.duckdb')\ncon.execute(\"CREATE TABLE s AS SELECT * FROM 'stock.csv'\")",
+     "analytics.duckdb"),
+    ("import duckdb\ncon = duckdb.connect('analytics.duckdb')\ncon.sql('DELETE FROM s WHERE qty < 0')",
+     "analytics.duckdb"),
+    ("import duckdb\nq = 'UPDATE s SET qty = 0'\nduckdb.connect('analytics.duckdb').execute(q)", "analytics.duckdb"),
+    ("import duckdb\ncon = duckdb.connect('analytics.duckdb')\ndef run(s):\n    con.execute(s)\nrun('DELETE FROM s')",
+     "analytics.duckdb"),
+    ("import pandas as pd, sqlite3\nc = sqlite3.connect('warehouse.db')\ndf.to_sql('stock', c, if_exists='replace')",
+     "warehouse.db"),
+    ("from sqlalchemy import create_engine, text\ne = create_engine('sqlite:///warehouse.db')\n"
+     "with e.begin() as c:\n    c.execute(text('DELETE FROM orders'))", "warehouse.db"),
+], ids=["sqlite-delete", "with-cursor", "keyword-executemany", "executescript", "duckdb-create", "duckdb-sql",
+        "statement-in-a-name", "local-helper", "to_sql", "sqlalchemy-sqlite-url"])
+def test_a_write_to_a_database_file_the_turn_began_with_is_held_as_its_overwrite(code, path, office):
+    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(office,))
+    assert [(c.action, c.paths) for c in writes.held_files] == [("overwrite", (path,))]
+    assert writes.sql == (), "the SQL check still lets an in-process handle through"
+
+
+@pytest.mark.parametrize("code", [
+    "import sqlite3\nc = sqlite3.connect('warehouse.db')\nprint(c.execute('SELECT * FROM orders').fetchall())",
+    "import sqlite3\nc = sqlite3.connect(':memory:')\nc.execute('CREATE TABLE t (a int)')",
+    "import sqlite3\nc = sqlite3.connect('scratch.db')\nc.execute('CREATE TABLE t (a int)')",
+    "import duckdb\ncon = duckdb.connect()\ncon.execute(\"CREATE TABLE s AS SELECT * FROM 'stock.csv'\")",
+    "import duckdb\ncon = duckdb.connect('analytics.duckdb', read_only=True)\ncon.execute('CREATE TABLE x AS SELECT 1')",
+    "import sqlite3\nc = sqlite3.connect('file:warehouse.db?mode=ro', uri=True)\nc.execute('DELETE FROM t')",
+    "import duckdb\nduckdb.sql(\"CREATE TABLE s AS SELECT * FROM 'stock.csv'\")",
+], ids=["select", "memory", "new-file", "duckdb-memory", "duckdb-read-only", "sqlite-read-only-uri", "duckdb-module"])
+def test_a_database_handle_that_writes_no_file_the_turn_began_with_is_free(code, office):
+    assert not find_cell_writes(code=code, earlier_code=(), snapshots=(office,)).needs_approval()
+
+
+@pytest.fixture
+def databases(tmp_path: Path, monkeypatch):
+    """A project that began the turn with a DuckDB and a SQLite file."""
+    for rel in ("stock.csv", "scratch.duckdb", "scratch.db"):
+        (tmp_path / rel).write_text("x")
+    monkeypatch.chdir(tmp_path)
+    return snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+
+
+DUCK_AGAIN = "import duckdb\nduckdb.connect('scratch.duckdb').execute('INSERT INTO t VALUES (1)')"
+SQLITE_AGAIN = "import sqlite3\nsqlite3.connect('scratch.db').execute('INSERT INTO t VALUES (1)')"
+
+
+@pytest.mark.parametrize("earlier, code, path", [
+    ("import duckdb\ncon = duckdb.connect('scratch.duckdb'); "
+     "con.execute(\"CREATE TABLE t AS SELECT * FROM read_csv('stock.csv')\")", DUCK_AGAIN, "scratch.duckdb"),
+    ("import sqlite3\ncon = sqlite3.connect('scratch.db'); con.execute('CREATE TABLE t (a int)')",
+     SQLITE_AGAIN, "scratch.db"),
+], ids=["duckdb", "sqlite"])
+def test_a_database_file_an_earlier_turn_made_takes_no_card_when_written_again(earlier, code, path, databases):
+    """The earlier cell connected to the file and wrote to it in an earlier
+    turn, so this turn began with it."""
+    assert _changes(code, databases, earlier=(earlier,)) == [("overwrite", (path,), False)]
+
+
+@pytest.mark.parametrize("engine, path, code", [
+    ("duckdb", "scratch.duckdb", DUCK_AGAIN),
+    ("sqlite3", "scratch.db", SQLITE_AGAIN),
+], ids=["duckdb", "sqlite"])
+@pytest.mark.parametrize("earlier", [
+    "",
+    "con = {engine}.connect('{path}')\nprint(con.execute('SELECT count(*) FROM t').fetchall())",
+    "con = {engine}.connect('other_{path}')\ncon.execute('CREATE TABLE t (a int)')",
+    "con = {engine}.connect('{path}')\nif False:\n    con.execute('CREATE TABLE t (a int)')",
+    "def load():\n    {engine}.connect('{path}').execute('CREATE TABLE t (a int)')",
+], ids=["no-earlier-cell", "only-read", "wrote-another-file", "write-under-if-false", "write-in-an-uncalled-def"])
+def test_a_database_file_no_earlier_cell_wrote_is_still_held(earlier, engine, path, code, databases):
+    """No earlier cell connected to the file and wrote to it, so the turn
+    began with the user's file and the user's data is in it: a write still
+    waits."""
+    cells = (f"import {engine}\n" + earlier.format(engine=engine, path=path),) if earlier else ()
+    assert _changes(code, databases, earlier=cells) == [("overwrite", (path,), True)]
+
+
+# ── HTTP ──────────────────────────────────────────────────────────────────
+
+def _requests(code: str, *, earlier=(), rules=()) -> list[tuple[str, str]]:
+    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(), http_rules=rules)
+    return [(w.method, w.url) for w in writes.http]
+
+
+URL = "https://erp.example.com/api/orders/42"
+
+
+@pytest.mark.parametrize("code, method", [
+    (f"import requests\nrequests.put({URL!r}, json={{'qty': 5}})", "PUT"),
+    (f"import requests\nrequests.patch({URL!r}, json={{'qty': 5}})", "PATCH"),
+    (f"import requests\nrequests.delete({URL!r})", "DELETE"),
+    (f"import requests\nrequests.request('PUT', {URL!r}, json={{}})", "PUT"),
+    (f"import requests\nrequests.request(method='delete', url={URL!r})", "DELETE"),
+    (f"from requests import put\nput({URL!r})", "PUT"),
+    (f"import requests\ns = requests.Session()\ns.headers['X'] = 'y'\ns.patch({URL!r})", "PATCH"),
+    (f"import requests\nwith requests.Session() as s:\n    s.delete({URL!r})", "DELETE"),
+    (f"import requests\nrequests.Session().request('PUT', {URL!r})", "PUT"),
+    (f"import httpx\nhttpx.put({URL!r})", "PUT"),
+    (f"import httpx\nc = httpx.Client(timeout=10)\nc.delete({URL!r})", "DELETE"),
+    (f"import httpx\nasync with httpx.AsyncClient() as c:\n    await c.patch({URL!r})", "PATCH"),
+    (f"import httpx\nwith httpx.stream('PUT', {URL!r}) as r:\n    pass", "PUT"),
+    (f"import httpx\nreq = httpx.Request('DELETE', {URL!r})", "DELETE"),
+    (f"import urllib.request\nreq = urllib.request.Request({URL!r}, data=b'{{}}', method='PUT')\n"
+     "urllib.request.urlopen(req)", "PUT"),
+    (f"from urllib.request import Request, urlopen\nurlopen(Request({URL!r}, method='DELETE'))", "DELETE"),
+    ("import requests\ndef make():\n    s = requests.Session()\n    return s\napi = make()\n"
+     f"api.put({URL!r})", "PUT"),
+    (f"import requests\nfor m in ['GET', 'DELETE']:\n    requests.request(m, {URL!r})", "DELETE"),
+], ids=["put", "patch", "delete", "request", "request-keywords", "from-import", "session", "with-session",
+        "session-request", "httpx", "httpx-client", "async-client", "httpx-stream", "httpx-request",
+        "urllib-request", "urllib-request-inline", "session-from-a-helper", "method-from-a-loop"])
+def test_a_put_patch_or_delete_is_held(code, method):
+    assert _requests(code) == [(method, URL)]
+
+
+@pytest.mark.parametrize("code", [
+    f"import requests\nr = requests.get({URL!r}, params={{'site': 'A'}})",
+    f"import requests\nr = requests.post({URL!r}, json={{'query': 'stock by site'}})",
+    f"import requests\nrequests.head({URL!r})",
+    f"import requests\nrequests.request('GET', {URL!r})",
+    f"import httpx\nwith httpx.Client() as c:\n    c.post({URL!r}, json={{}})",
+    f"import urllib.request\nurllib.request.urlopen({URL!r})",
+    f"import urllib.request\nurllib.request.urlopen({URL!r}, data=b'q=1')",
+    "cache = {}\ncache.get('a')\nqueue.delete('job-1')\nredis.put('k', 'v')",
+    "from sqlalchemy.orm import Session\nwith Session(engine) as s:\n    s.delete(row)",
+    f"import requests\ndef call(method, url):\n    return requests.request(method, url)\ncall('GET', {URL!r})",
+    "import requests\ndef call(method, url):\n    return requests.request(method, url)",
+], ids=["get", "post", "head", "request-get", "httpx-post", "urlopen", "urlopen-data", "other-objects",
+        "orm-session", "helper-called-with-get", "helper-never-called"])
+def test_a_read_or_a_plain_post_is_no_write(code):
+    assert _requests(code) == []
+
+
+def test_the_card_names_the_method_the_url_and_the_call():
+    code = ("import requests\nBASE = 'https://erp.example.com/api'\n"
+            "for r in rows:\n    requests.put(f'{BASE}/orders/{r.id}', json={'qty': r.qty})")
+    writes = find_cell_writes(code=code, earlier_code=(), snapshots=())
+    card = _card_prompt(writes)
+    assert "This step would send PUT to:" in card
+    assert _fenced(card) == ["https://erp.example.com/api/orders/{r.id}",
+                             "requests.put(f'{BASE}/orders/{r.id}', json={'qty': r.qty})"]
+    assert "A part in braces, `{...}`, is the code that fills in that value when the step runs." in card
+
+
+def test_a_method_the_code_picks_when_it_runs_is_held_and_shown_as_code():
+    writes = find_cell_writes(code=f"import requests\nrequests.request(row['verb'], {URL!r})",
+                              earlier_code=(), snapshots=())
+    assert [(w.method, w.url) for w in writes.http] == [("{row['verb']}", URL)]
+    assert "This step would send `{row['verb']}` to:" in _card_prompt(writes)
+
+
+def test_a_client_base_url_is_joined_to_a_relative_path():
+    code = "import httpx\nc = httpx.Client(base_url='https://erp.example.com/api/')\nc.delete('/orders/42')"
+    assert _requests(code) == [("DELETE", URL)]
+
+
+def test_a_request_in_an_earlier_function_is_held_at_the_call():
+    earlier = ("import requests\ndef cancel(order_id):\n"
+               "    requests.delete(f'https://erp.example.com/api/orders/{order_id}')",)
+    writes = find_cell_writes(code="cancel(42)", earlier_code=earlier, snapshots=())
+    assert [(w.method, w.url, w.line, w.call) for w in writes.http] == [("DELETE", URL, 1, "cancel(42)")]
+
+
+def test_a_token_in_the_url_is_scrubbed():
+    token = "ya29." + "a" * 30
+    writes = find_cell_writes(code=f"import requests\nrequests.delete('https://x.example.com/a?access_token={token}')",
+                              earlier_code=(), snapshots=())
+    assert token not in writes.http[0].url and token not in _card_prompt(writes)
+
+
+def test_a_url_with_a_character_that_does_not_show_as_itself_is_named_with_escapes():
+    """As a path is: a text direction override in the URL can't reorder what the card shows."""
+    writes = find_cell_writes(code="import requests\nrequests.put('https://x.example.com/a\\u202eb')",
+                              earlier_code=(), snapshots=())
+    card = _card_prompt(writes)
+    assert "'https://x.example.com/a\\u202eb'" in card and "A name in quotes is written with escapes" in card
+    assert "`'https://x.example.com/a\\u202eb'`" in _refusal(writes, "cancelled").content
+
+
+# ── HTTP endpoints the operator lists ─────────────────────────────────────
+
+MAESTRO = "POST https://maestro.example.com/api/*/orders/*"
+
+
+@pytest.mark.parametrize("url, held", [
+    ("'https://maestro.example.com/api/v2/orders/9'", True),
+    ("'https://MAESTRO.example.com/api/v2/orders/9?dry_run=0'", True),
+    ("f'https://maestro.example.com/api/{version}/orders/{order_id}'", True),
+    ("f'{MAESTRO_BASE}/orders/{order_id}'", True),
+    ("url", True),
+    ("'https://maestro.example.com/api/v2/orders'", False),
+    ("'https://maestro.example.com/api/v2/orders/9/lines'", False),
+    ("'https://maestro.example.com/api/v2/forecasts/9'", False),
+    ("f'https://other.example.com/api/{version}/orders/{order_id}'", False),
+], ids=["literal", "case-and-query", "run-time-segments", "run-time-base", "run-time-whole-url",
+        "too-short", "star-stays-in-one-segment", "other-path", "other-host"])
+def test_a_post_to_a_listed_endpoint_is_held(url, held):
+    rules = parse_http_write_rules(MAESTRO)
+    code = f"import requests\nrequests.post({url}, json=order)"
+    assert bool(_requests(code, rules=rules)) is held
+    assert _requests(code) == [], "with no rule a POST is free"
+
+
+def test_a_rule_names_its_method_or_any():
+    rules = parse_http_write_rules("GET https://maestro.example.com/api/**\n* https://hooks.example.com/**")
+    assert _requests("import requests\nrequests.get('https://maestro.example.com/api/v2/orders/9/lines')",
+                     rules=rules) == [("GET", "https://maestro.example.com/api/v2/orders/9/lines")]
+    assert _requests("import requests\nrequests.post('https://maestro.example.com/api/v2/orders')", rules=rules) == []
+    assert _requests("import requests\nrequests.head('https://hooks.example.com/x')", rules=rules) == [
+        ("HEAD", "https://hooks.example.com/x")
+    ]
+
+
+def test_a_rule_matches_the_url_without_its_query_string():
+    rules = parse_http_write_rules("POST https://maestro.example.com/api/jobs")
+    url = "https://maestro.example.com/api/jobs?run=1&next=/home"
+    assert _requests(f"import requests\nrequests.post({url!r})", rules=rules) == [("POST", url)]
+
+
+def test_http_write_rules_parse_entries_and_skip_bad_ones_with_a_warning(caplog):
+    text = f"{MAESTRO}\n  , delete https://x.example.com/* ,\nhttps://no-method.example.com/*\nPUTT https://x/*\nGET a b"
+    with caplog.at_level(logging.WARNING, logger="anton.core.utils.write_check"):
+        rules = parse_http_write_rules(text)
+    assert rules == (
+        HttpWriteRule(method="POST", url_glob="https://maestro.example.com/api/*/orders/*"),
+        HttpWriteRule(method="DELETE", url_glob="https://x.example.com/*"),
+    )
+    warned = [r.getMessage() for r in caplog.records
+              if r.name == "anton.core.utils.write_check" and r.levelno == logging.WARNING]
+    assert len(warned) == 3
+    for entry, message in zip(("https://no-method.example.com/*", "PUTT https://x/*", "GET a b"), warned, strict=True):
+        assert message.startswith(f"write approval: skipped the HTTP write entry {entry!r}")
+    assert parse_http_write_rules("") == ()
 
 
 @pytest.mark.parametrize("code", [
@@ -1120,13 +1634,25 @@ def test_shell_deletes_and_moves_in_every_form(code, expected, snap):
     ("import os\nvars(os)['remove']('report.pdf')", [("delete", ("report.pdf",))]),
     ("import os\nos.__dict__['remove']('report.pdf')", [("delete", ("report.pdf",))]),
     ("import os\ngetattr(os, os.environ['FN'])('report.pdf')", [("delete", ())]),
+    ("import os\ngetattr(os, 'rem' + suffix)('report.pdf')", [("delete", ())]),
     ("import os\nfor n in ['exists']:\n    print(getattr(os.path, n)('report.pdf'))", []),
 ], ids=["getattr-os", "getattr-shutil", "getattr-value", "dunder-import", "Path.unlink-unbound",
         "Path.rename-unbound", "Path.unlink-loop", "map-Path.unlink", "Path.rmdir-unbound", "getattr-default",
         "getattr-named-by-a-name", "getattr-named-by-a-sum", "vars", "dunder-dict", "getattr-unread-name",
-        "getattr-on-os-path"])
+        "getattr-named-at-run-time", "getattr-on-os-path"])
 def test_a_delete_reached_by_name_or_unbound_is_held(code, expected, snap):
     assert _files(code, (snap,)) == expected
+
+
+@pytest.mark.parametrize("code", [
+    "import os\nfn = 'replace'\ngetattr(os, fn)('new.tmp', 'stock.csv')",
+    "import shutil\nfn = 'copy'\ngetattr(shutil, fn)('new.csv', 'stock.csv')",
+    "import shutil\nvars(shutil)['copyfile']('new.csv', 'stock.csv')",
+    "from pathlib import Path\nfn = 'replace'\ngetattr(Path('new.tmp'), fn)('stock.csv')",
+], ids=["os-replace", "shutil-copy", "vars-copyfile", "path-replace"])
+def test_a_move_or_copy_reached_by_name_overwrites_what_it_lands_on(code, snap):
+    """As the plain call does: the file it lands on, one the turn began with, is replaced."""
+    assert _files(code, (snap,)) == [("overwrite", ("stock.csv",))]
 
 
 def test_a_listing_names_files_before_folders_and_host_folders_last(snap):
@@ -1390,13 +1916,19 @@ def test_a_statement_picked_at_run_time_after_a_semicolon_is_on_the_card(code, f
     assert "A part in braces, `{...}`, is the code that fills in that value when the step runs." in card
 
 
-@pytest.mark.parametrize("write, overwritten", [
-    ("open('report.pdf', 'w').write('gone')", "report.pdf"),
-    ("Path('summary.md').write_text('')", "summary.md"),
-])
-def test_an_overwrite_beside_a_held_delete_is_on_the_card(write, overwritten, snap):
+@pytest.mark.parametrize("write, lead, overwritten", [
+    ("open('report.pdf', 'w').write('gone')", "This step would overwrite:", "report.pdf"),
+    ("Path('summary.md').write_text('')", "This step would overwrite:", "summary.md"),
+    ("open('.anton/artifacts/dash/index.html', 'w').write('v2')", "This step would also overwrite:",
+     ".anton/artifacts/dash/index.html"),
+    ("open('summary.md', 'a').write('more')", "This step would also append to:", "summary.md"),
+], ids=["held-open", "held-write-text", "agents-own-file", "append"])
+def test_an_overwrite_beside_a_held_delete_is_on_the_card(write, lead, overwritten, snap):
+    """A held overwrite is named as any held change is. An append, or an
+    overwrite of the agent's own file, raises no card on its own, but the
+    Approve runs it too, so the card names it as well."""
     card = _card(f"import os\nfrom pathlib import Path\nos.remove('stock.csv')\n{write}", snap)
-    assert "This step would delete:" in card and "This step would also overwrite:" in card
+    assert "This step would delete:" in card and lead in card
     assert _fenced(card) == ["stock.csv", overwritten]
 
 
@@ -1530,12 +2062,27 @@ def test_cowork_s_math_pass_skips_every_fence_on_the_card(tmp_path, monkeypatch,
     assert card.count("~~~") == 2, "a run of three tildes in a name can't end the tilde fence"
 
 
-def test_the_refusal_names_the_first_paths_and_the_card_names_them_all():
+@pytest.mark.parametrize("action", ["delete", "overwrite"])
+def test_the_refusal_names_the_first_paths_and_the_card_names_them_all(action):
     paths = tuple(f"many/f_{i:05d}.csv" for i in range(25))
-    writes = CellWrites(files=(FileChange(action="delete", paths=paths, call="os.remove(f)", line=3),))
+    writes = CellWrites(files=(FileChange(action=action, paths=paths, call="os.remove(f)", line=3),))
     refusal = _refusal(writes, "cancelled").content
     assert "`many/f_00019.csv` and 5 more." in refusal and "f_00020" not in refusal
     assert _fenced(_card_prompt(writes)) == ["\n".join(paths)]
+
+
+def test_the_refusal_names_the_first_requests_and_data_changes_and_the_card_names_them_all():
+    urls = [f"https://erp.example.com/api/s/{i:05d}" for i in range(25)]
+    requests = CellWrites(http=tuple(
+        HttpWrite(method="PUT", url=url, call=f"requests.put({url!r})", line=i) for i, url in enumerate(urls)
+    ))
+    refusal = _refusal(requests, "cancelled").content
+    assert "`https://erp.example.com/api/s/00019`; send 5 more such requests." in refusal
+    assert "s/00020" not in refusal and all(url in _fenced(_card_prompt(requests)) for url in urls)
+    calls = CellWrites(calls=tuple(CallWrite(via="redis", call=f"r.set('k{i:05d}', 1)", line=i) for i in range(25)))
+    refusal = _refusal(calls, "cancelled").content
+    assert "`r.set('k00019', 1)`; make 5 more such data changes." in refusal and "k00020" not in refusal
+    assert _card_prompt(calls).count("This step would change data in Redis:") == 25
 
 
 def test_fences_and_code_spans_take_linear_time():
@@ -1677,6 +2224,50 @@ def test_past_the_cap_only_a_file_the_pads_cells_made_is_new(tmp_path, monkeypat
     assert touched in listed[0][1] and new not in listed[0][1]
 
 
+def test_past_the_cap_a_file_a_cell_wrote_under_a_name_picked_at_run_time_is_new(tmp_path, monkeypatch):
+    """A part of the name the code picks when it runs names any file there,
+    as a `*` does."""
+    names = [f"d{d}/f{i}.csv" for d in range(6) for i in range(5)]
+    for rel in names:
+        (tmp_path / rel).parent.mkdir(exist_ok=True)
+        (tmp_path / rel).write_text("x")
+    taken_at = time.time()
+    capped = snapshot_project_files(root=tmp_path, label="project", taken_at=taken_at, cap=10)
+    folder = next(rel for rel in names if rel not in capped.files).split("/")[0]
+    new = f"{folder}/new.csv"
+    (tmp_path / new).write_text("x")
+    os.utime(tmp_path / new, (taken_at + 5, taken_at + 5))
+    monkeypatch.chdir(tmp_path)
+    remove = f"import os\nos.remove({new!r})"
+    assert _held(remove, capped), "with no cells read, a path the walk didn't record counts"
+    assert not _held(remove, capped, earlier=(f"open(f'{folder}/{{name}}.csv', 'w').write('x')",))
+
+
+def test_past_the_cap_an_overwrite_of_a_file_the_turn_changed_is_held_unless_a_cell_made_it(tmp_path, monkeypatch):
+    """The cap rule deletes follow: a file the walk didn't record that the
+    turn changed counts as one it began with, unless a cell's write left it
+    new. An append keeps what the file held."""
+    names = [f"d{d}/f{i}.csv" for d in range(6) for i in range(5)]
+    for rel in names:
+        (tmp_path / rel).parent.mkdir(exist_ok=True)
+        (tmp_path / rel).write_text("x")
+    taken_at = time.time()
+    capped = snapshot_project_files(root=tmp_path, label="project", taken_at=taken_at, cap=10)
+    folder = next(rel for rel in names if rel not in capped.files).split("/")[0]
+    touched = next(rel for rel in names if rel.startswith(folder + "/") and rel not in capped.files)
+    new = f"{folder}/new.csv"
+    (tmp_path / new).write_text("x")
+    for rel in (touched, new):
+        os.utime(tmp_path / rel, (taken_at + 5, taken_at + 5))
+    monkeypatch.chdir(tmp_path)
+    appended = (f"open({touched!r}, 'a').write('x')",)
+    assert _changes(f"open({touched!r}, 'w').write('y')", capped, earlier=appended) == [
+        ("overwrite", (touched,), True)
+    ]
+    made = (f"open({new!r}, 'w').write('x')",)
+    assert not _held(f"import pandas as pd\npd.DataFrame().to_csv({new!r})", capped, earlier=made)
+
+
 def test_an_unreadable_folder_fails_the_snapshot_closed(tmp_path):
     locked = tmp_path / "locked"
     locked.mkdir()
@@ -1701,3 +2292,186 @@ def test_glob_match_keeps_star_within_a_folder():
     assert not glob_match("docs/a.pdf", "*.pdf")
     assert glob_match("docs/a.pdf", "**/*.pdf")
     assert glob_match("a.pdf", "**/*.pdf")
+
+
+# ── SQL hidden in a decoded literal ─────────────────────────────────────────
+#
+# A write encoded in base64, base32, base16, hex or rot13 and decoded at run
+# time is decoded now and checked like any SQL text.
+
+# "UPDATE suppliers SET a = 1 WHERE id = 5" in each encoding.
+_HIDDEN = "UPDATE suppliers SET a = 1 WHERE id = 5"
+_B64 = "VVBEQVRFIHN1cHBsaWVycyBTRVQgYSA9IDEgV0hFUkUgaWQgPSA1"
+_B32 = "KVIEIQKUIUQHG5LQOBWGSZLSOMQFGRKUEBQSAPJAGEQFOSCFKJCSA2LEEA6SANI="
+_B16 = "55504441544520737570706C69657273205345542061203D2031205748455245206964203D2035"
+_HEX = "55504441544520737570706c69657273205345542061203d2031205748455245206964203d2035"
+_ROT13 = "HCQNGR fhccyvref FRG n = 1 JURER vq = 5"
+
+
+@pytest.mark.parametrize("code", [
+    PG + f"import base64\ncur.execute(base64.b64decode('{_B64}').decode())",
+    PG + f"import base64\ncur.execute(base64.b64decode(b'{_B64}'))",
+    PG + f"import base64\ncur.execute(base64.urlsafe_b64decode('{_B64}').decode())",
+    PG + f"import base64\ncur.execute(base64.b32decode('{_B32}').decode())",
+    PG + f"import base64\ncur.execute(base64.b16decode('{_B16}').decode())",
+    PG + f"cur.execute(bytes.fromhex('{_HEX}').decode())",
+    PG + f"import codecs\ncur.execute(codecs.decode('{_HEX}', 'hex').decode())",
+    PG + f"import codecs\ncur.execute(codecs.decode('{_ROT13}', 'rot13'))",
+], ids=["b64", "b64-bytes", "urlsafe-b64", "b32", "b16", "bytes-fromhex", "codecs-hex", "codecs-rot13"])
+def test_a_write_hidden_in_a_decoded_literal_is_checked(code, snap):
+    assert _held(code, snap)
+
+
+def test_a_decoded_literal_is_quoted_on_the_card(snap):
+    code = PG + f"import base64\ncur.execute(base64.b64decode('{_B64}').decode())"
+    assert _statements(code, snap) == ["UPDATE suppliers SET a = 1 WHERE id = 5"]
+    assert _fenced(_card(code, snap)) == ["UPDATE suppliers SET a = 1 WHERE id = 5"]
+
+
+@pytest.mark.parametrize("code", [
+    # A decoded non-SQL payload stays free.
+    PG + "import base64\nmsg = base64.b64decode('aGVsbG8gd29ybGQ=').decode()\nprint(msg)",
+    # An unknown encoding isn't read.
+    PG + "import codecs\ncur.execute(codecs.decode('a2V5', 'base85'))",
+    # A decoded statement only printed stays free.
+    PG + f"import base64\nprint(base64.b64decode('{_B64}').decode())",
+])
+def test_a_decoded_literal_that_is_no_write_stays_free(code, snap):
+    assert not _held(code, snap)
+
+
+# ── SQL read from a file ────────────────────────────────────────────────────
+
+@pytest.fixture
+def sql_files(tmp_path: Path, monkeypatch):
+    (tmp_path / "fix.sql").write_text(
+        "UPDATE suppliers SET lead_time_days = 21 WHERE supplier_id = 'S005';\nDELETE FROM orders WHERE id = 3;"
+    )
+    (tmp_path / "read.sql").write_text("SELECT name FROM suppliers ORDER BY 1")
+    (tmp_path / "big.sql").write_text("UPDATE t SET a = 1;\n" * 80_000)
+    assert (tmp_path / "big.sql").stat().st_size > 1_000_000
+    monkeypatch.chdir(tmp_path)
+    return snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+
+
+@pytest.mark.parametrize("code", [
+    PG + "cur.execute(open('fix.sql').read())",
+    PG + "from pathlib import Path\ncur.execute(Path('fix.sql').read_text())",
+    PG + "sql = open('fix.sql').read()\ncur.execute(sql)",
+], ids=["open-read", "path-read_text", "named"])
+def test_sql_read_from_a_file_is_checked(code, sql_files):
+    assert _held(code, sql_files)
+    assert _statements(code, sql_files) == [
+        "UPDATE suppliers SET lead_time_days = 21 WHERE supplier_id = 'S005'",
+        "DELETE FROM orders WHERE id = 3",
+    ]
+
+
+def test_a_read_only_sql_file_raises_no_card(sql_files):
+    assert not _held(PG + "cur.execute(open('read.sql').read())", sql_files)
+    assert not _held(PG + "from pathlib import Path\ncur.execute(Path('missing.sql').read_text())", sql_files)
+
+
+def test_a_sql_file_past_the_cap_is_held_unchecked(sql_files):
+    writes = find_cell_writes(code=PG + "cur.execute(open('big.sql').read())",
+                              earlier_code=(), snapshots=(sql_files,))
+    assert writes.needs_approval()
+    assert [c.via for c in writes.calls] == ["sql_file"]
+    assert writes.sql == ()
+    card = _card_prompt(writes)
+    assert "This step would run a SQL file too big to check:" in card
+    assert "open('big.sql').read()" in card
+
+
+# ── Writes with no SQL text: procedures, SQLAlchemy, non-SQL stores ─────────
+
+@pytest.mark.parametrize("code, via", [
+    (PG + "cur.callproc('refresh_totals', [1, 2])", "procedure"),
+    ("from sqlalchemy import insert\nwith engine.begin() as c:\n    c.execute(insert(users), rows)", "sqlalchemy"),
+    ("from sqlalchemy import update\nsession.execute(update(User).where(User.id == 1).values(a = 2))", "sqlalchemy"),
+    ("conn.execute(suppliers.delete())", "sqlalchemy"),
+    ("from sqlalchemy import delete\nstmt = delete(User)\nconn.execute(stmt)", "sqlalchemy"),
+    ("users.drop(engine)", "sqlalchemy"),
+    ("users.create(bind=engine)", "sqlalchemy"),
+    ("Base.metadata.drop_all(engine)", "sqlalchemy"),
+    ("meta.create_all(engine)", "sqlalchemy"),
+    ("session.query(User).filter(User.id == 1).delete()", "sqlalchemy"),
+    ("session.query(User).update({'a': 1})", "sqlalchemy"),
+    ("session.add(User(id = 1))\nsession.commit()", "sqlalchemy"),
+    ("session.add_all(objs)\nsession.flush()", "sqlalchemy"),
+    ("s = Session()\ns.merge(obj)\ns.commit()", "sqlalchemy"),
+    ("session.bulk_save_objects(objs)\nsession.commit()", "sqlalchemy"),
+    ("db.users.insert_one({'a': 1})", "mongodb"),
+    ("coll.update_many({}, {'$set': {'a': 1}})", "mongodb"),
+    ("db.users.drop_collection()", "mongodb"),
+    ("client.drop_database('prod')", "mongodb"),
+    ("import pymongo\nclient = pymongo.MongoClient()\ndb = client['prod']\ncol = db['users']\ncol.drop()", "mongodb"),
+    ("table.put_item(Item = {'id': '1'})", "dynamodb"),
+    ("table.batch_write_item(RequestItems = {})", "dynamodb"),
+    ("client.delete_table(TableName = 't')", "dynamodb"),
+    ("import redis\nr = redis.Redis()\nr.set('k', 'v')", "redis"),
+    ("import redis\nr = redis.from_url('redis://x')\nr.delete('k')", "redis"),
+    ("from redis import StrictRedis\nr = StrictRedis()\nr.flushall()", "redis"),
+    ("es.delete_by_query(index = 'i', body = {})", "elasticsearch"),
+    ("es.indices.delete(index = 'i')", "elasticsearch"),
+    ("from elasticsearch import Elasticsearch\nes = Elasticsearch()\nes.index(index = 'i', document = {})", "elasticsearch"),
+], ids=["callproc", "sa-insert", "sa-update-session", "sa-table-delete", "sa-named-construct",
+        "sa-table-drop", "sa-table-create", "sa-drop-all", "sa-create-all", "sa-query-delete",
+        "sa-query-update", "sa-add-commit", "sa-add-all-flush", "sa-merge-commit", "sa-bulk-save",
+        "mongo-insert-one", "mongo-update-many", "mongo-drop-collection", "mongo-drop-database",
+        "mongo-collection-drop", "dynamo-put-item", "dynamo-batch-write", "dynamo-delete-table",
+        "redis-set", "redis-from-url-delete", "redis-flushall", "es-delete-by-query",
+        "es-indices-delete", "es-index"])
+def test_a_write_with_no_sql_text_is_held(code, via, snap):
+    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(snap,))
+    assert writes.needs_approval()
+    assert [c.via for c in writes.calls] == [via]
+
+
+@pytest.mark.parametrize("code", [
+    # Read-only work on the same libraries stays free.
+    "import pandas as pd\ndf = pd.read_csv('stock.csv')\ndf = df.drop(columns=['a'])",
+    "import pandas as pd\ndf = pd.read_csv('stock.csv')\ndf.set_index('site')",
+    "list(db.users.find({'a': 1}))",
+    "list(coll.aggregate([{'$match': {}}]))",
+    "from sqlalchemy import select\nconn.execute(select(User).where(User.id == 1))",
+    "r.get('k')",
+    "import redis\nr = redis.Redis()\nr.get('k')",
+    "es.search(index = 'i', body = {})",
+    # Generic method names on an unknown receiver stay free (pandas, dicts, sets).
+    "obj.set('a', 1)",
+    "obj.delete()",
+    "obj.update({'a': 1})",
+    "d = {}\nd.update({'a': 1})",
+    "s = set()\ns.update([1, 2])",
+    "df.insert(0, 'col', vals)",
+    # callproc on an in-process handle stays free.
+    "import sqlite3\nc = sqlite3.connect(':memory:')\nc.callproc('p')",
+    # A session add with no commit or flush in the cell stays free.
+    "session.add(User(id = 1))",
+], ids=["pandas-drop", "pandas-set-index", "pymongo-find", "pymongo-aggregate", "sqlalchemy-select",
+        "redis-get-unknown", "redis-get-client", "es-search", "unknown-set", "unknown-delete",
+        "unknown-update", "dict-update", "set-update", "df-insert",
+        "callproc-local", "session-add-no-commit"])
+def test_read_only_calls_on_the_same_libraries_stay_free(code, snap):
+    assert not _held(code, snap)
+
+
+def test_a_sqlalchemy_write_quotes_the_code_line_on_the_card(snap):
+    writes = find_cell_writes(code="conn.execute(suppliers.delete())", earlier_code=(), snapshots=(snap,))
+    card = _card_prompt(writes)
+    assert "This step would change data through SQLAlchemy:" in card
+    assert _fenced(card) == ["conn.execute(suppliers.delete())"]
+
+
+def test_a_store_write_quotes_the_code_line_on_the_card(snap):
+    writes = find_cell_writes(code="db.users.insert_one({'id': 1})", earlier_code=(), snapshots=(snap,))
+    card = _card_prompt(writes)
+    assert "This step would change data in MongoDB:" in card
+    assert _fenced(card) == ["db.users.insert_one({'id': 1})"]
+
+
+def test_a_call_write_inside_an_earlier_function_is_held_at_the_call(snap):
+    earlier = ("def wipe(coll):\n    coll.delete_many({})",)
+    writes = find_cell_writes(code="wipe(users)", earlier_code=earlier, snapshots=(snap,))
+    assert [(c.via, c.line, c.call) for c in writes.calls] == [("mongodb", 1, "wipe(users)")]
