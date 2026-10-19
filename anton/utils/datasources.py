@@ -230,9 +230,11 @@ _TOKEN_KEY = (
     r"(?i:access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret)"
 )
 # A marker this module writes in place of a secret: `[DS_...]` and provider labels
-# from `scrub_credentials`, `[REDACTED_API_KEY]` and `[REDACTED_TOKEN]`. The same
-# grammar as `SCRUBBED_VALUE_RE` in `anton/tools.py`.
-_SCRUB_MARKER = r"\[(?:DS_\w+|[A-Z][A-Z0-9_]*)\]"
+# from `scrub_credentials`, `[REDACTED_API_KEY]` and `[REDACTED_TOKEN]`. Every one
+# holds an underscore, so a bracketed run without one, such as the `[Q]` in a
+# password `x7[Q]abc`, is not a marker. `SCRUBBED_VALUE_RE` in `anton/tools.py`
+# is built from it.
+_SCRUB_MARKER = r"\[(?:DS_\w+|[A-Z][A-Z0-9]*_[A-Z0-9_]*)\]"
 # A quoted value with no quote, backslash or space, unless it is a whole marker; for
 # Bearer values and code-like token values. Clipped output may lack the closing quote.
 _NARROW_QUOTED_VALUE = (
@@ -448,6 +450,7 @@ _BASE64_ANCHOR_PATTERN = re.compile(r"[A-Za-z0-9]+")
 _BASE64_CHAR = r"[A-Za-z0-9+/_-]"
 _BASE64_PADDING = r"(?:=|%3[Dd]){0,2}"
 _TO_URLSAFE_BASE64 = str.maketrans("+/", "-_")
+_SCRUB_MARKER_PATTERN = re.compile(_SCRUB_MARKER)
 
 
 @dataclass(frozen=True)
@@ -479,25 +482,27 @@ class _MarkerSpans:
     A saved value can turn up inside a marker's label in another case, such
     as `custom_prod` in `[DS_CUSTOM_PROD__PASSWORD]`; such a match is part of
     the marker, not a secret. A match that holds a whole marker-shaped run,
-    such as a password `p[A]ss`, is still the secret.
+    such as a password `p[A_B]ss`, is still the secret.
     """
 
     def __init__(self, text: str) -> None:
-        """Find every marker in `text`, by the grammar the connect flow refuses; markers never overlap."""
-        # Importing anton.tools loads this module, so a top-level import would be circular.
-        from anton.tools import SCRUBBED_VALUE_RE
-
-        spans = [found.span() for found in SCRUBBED_VALUE_RE.finditer(text)]
+        """Find every marker in `text`; markers never overlap one another."""
+        spans = [found.span() for found in _SCRUB_MARKER_PATTERN.finditer(text)]
         self.starts = [start for start, _ in spans]
         self.ends = [end for _, end in spans]
 
     def cuts(self, start: int, end: int) -> bool:
-        """Return whether `text[start:end]` starts or ends strictly inside a marker."""
-        return self._inside(start) or self._inside(end)
+        """Return whether `text[start:end]` starts or ends strictly inside a marker, short of its whole label.
 
-    def _inside(self, position: int) -> bool:
-        index = bisect.bisect_left(self.starts, position) - 1
-        return index >= 0 and position < self.ends[index]
+        A match that is a marker's whole label is a secret printed in brackets,
+        such as `[PROD_DB_PASS_2024]`: a label is a variable name, which a
+        saved value almost never equals.
+        """
+        for position in (start, end):
+            index = bisect.bisect_left(self.starts, position) - 1
+            if index >= 0 and position < self.ends[index]:
+                return (start, end) != (self.starts[index] + 1, self.ends[index] - 1)
+        return False
 
 
 def _redact_outside_markers(

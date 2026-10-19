@@ -552,7 +552,9 @@ class TestNonInteractiveSave:
         "postgresql://admin:[DS_POSTGRES_ABC12345__PASSWORD]@db2.example.com:5432/analytics",
         "[DS_POSTGRES_ABC12345__PASSWORD]-rotated",
         "s3cr3t-[REDACTED_API_KEY]",
-    ], ids=["base64-header", "dsn", "marker-then-text", "redacted-inside"])
+        "Bearer [REDACTED_TOKEN]",
+        "key=[OPENAI_API_KEY]",
+    ], ids=["base64-header", "dsn", "marker-then-text", "redacted-inside", "token-inside", "provider-label-inside"])
     async def test_a_value_holding_a_marker_is_dropped_not_saved_or_resolved(
         self, vault_dir, value
     ):
@@ -598,6 +600,33 @@ class TestNonInteractiveSave:
         assert "password" in printed
         assert "holds a bracketed scrub-marker" in printed
         assert "Reusing the existing vaulted value" not in printed
+
+    @pytest.mark.asyncio
+    async def test_a_password_holding_a_bracketed_capital_is_saved(self, vault_dir):
+        """`[Q]` has no underscore, so `x7[Q]abc` is a real password, not one holding a marker."""
+        session = _make_session(vault_dir)
+        with _patch_test_ok():
+            await handle_connect_datasource(
+                session,
+                {
+                    "engine": "postgres",
+                    "known_variables": {
+                        "host": "db.example.com",
+                        "database": "sales",
+                        "user": "admin",
+                        "password": "x7[Q]abc",
+                    },
+                },
+            )
+        conns = session._data_vault.list_connections()
+        assert len(conns) == 1
+        assert session._data_vault.load("postgres", conns[0]["name"])["password"] == "x7[Q]abc"
+        printed = " ".join(
+            str(c.args[0])
+            for c in session._console.print.call_args_list
+            if c.args
+        )
+        assert "scrubbed-placeholder" not in printed
 
     @pytest.mark.asyncio
     async def test_yolo_dedups_matching_connection(self, vault_dir):

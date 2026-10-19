@@ -349,9 +349,46 @@ class TestEncodedSavedSecrets:
         )
 
     def test_a_secret_holding_a_marker_shaped_run_is_still_hidden(self):
-        """`p[A]ss` holds what looks like a marker; a match that holds it whole is the secret."""
-        _save_secrets({SECRET_LABEL: "p[A]ss-w0rd!x"})
-        assert scrub_credentials("pw=p[A]ss-w0rd!x;") == f"pw=[{SECRET_LABEL}];"
+        """`p[A_B]ss` holds what looks like a marker; a match that holds it whole is the secret."""
+        _save_secrets({SECRET_LABEL: "p[A_B]ss-w0rd!x"})
+        assert scrub_credentials("pw=p[A_B]ss-w0rd!x;") == f"pw=[{SECRET_LABEL}];"
+
+    def test_a_password_holding_a_bracketed_capital_is_hidden(self):
+        """`[Q]` has no underscore, so it is part of the password, not a marker."""
+        _save_secrets({SECRET_LABEL: "x7[Q]abc"})
+        assert scrub_credentials("pw x7[Q]abc ok") == f"pw [{SECRET_LABEL}] ok"
+
+    @pytest.mark.parametrize("secret", ["HUNTER2X9Q", "PROD_DB_PASS_2024"], ids=["no-underscore", "marker-shaped"])
+    def test_a_secret_printed_inside_brackets_is_hidden(self, secret):
+        """`[HUNTER2X9Q]` is no marker. `[PROD_DB_PASS_2024]` is marker-shaped, but the match is its
+        whole label, and a label is a variable name, not a saved value."""
+        _save_secrets({SECRET_LABEL: secret})
+        assert scrub_credentials(f"login [{secret}] failed") == f"login [[{SECRET_LABEL}]] failed"
+
+    def test_every_marker_the_scrub_writes_is_a_marker(self, monkeypatch):
+        """Each label the scrub writes holds an underscore, so the narrower grammar still knows it."""
+        _save_secrets({"DS_POSTGRES_PROD__PASSWORD": "Tr0ub4dor&3horse", "DS_PASSWORD": "flat-secret-1"})
+        provider_values = {key: f"provkey-{index}-Zt7Q8Q8Q8" for index, key in enumerate(_PROVIDER_SECRET_VARS)}
+        for key, value in provider_values.items():
+            monkeypatch.setenv(key, value)
+        text = " | ".join([
+            "Tr0ub4dor&3horse",
+            "flat-secret-1",
+            *provider_values.values(),
+            "mdb_AAAAAAAAAA.BBBBBBBBBBBBCCCC",
+            f"access_token={OPAQUE_TOKEN}",
+        ])
+        markers = re.findall(r"\[[^\[\]\s]+\]", scrub_output(text))
+
+        assert set(markers) == {
+            "[DS_POSTGRES_PROD__PASSWORD]",
+            "[DS_PASSWORD]",
+            *(f"[{key}]" for key in _PROVIDER_SECRET_VARS),
+            "[REDACTED_API_KEY]",
+            "[REDACTED_TOKEN]",
+        }
+        for marker in markers:
+            assert SCRUBBED_VALUE_RE.fullmatch(marker)
 
     def test_ordinary_output_and_code_are_left_alone(self):
         _save_secrets({

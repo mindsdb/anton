@@ -9,6 +9,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 from anton.core.tools.tool_defs import ToolDef
+from anton.utils.datasources import _SCRUB_MARKER
 
 
 if TYPE_CHECKING:
@@ -25,7 +26,7 @@ SECRET_NAME_TOKENS = (
 # matches. User messages are scrubbed too, so the model may see these and echo
 # them back as known_variables. A value holding one anywhere, whole or inside a
 # DSN or a base64 header, is not a real credential and is never saved.
-SCRUBBED_VALUE_RE = re.compile(r"\[(?:DS_\w+|[A-Z][A-Z0-9_]*)\]")
+SCRUBBED_VALUE_RE = re.compile(_SCRUB_MARKER)
 
 
 def looks_secret(field_name: str) -> bool:
