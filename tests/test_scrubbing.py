@@ -1332,6 +1332,58 @@ class TestRegistrationFromInsideAToolCall:
         assert "turn-a-pw" in out_b
 
 
+class TestARemovedValueStaysHiddenForItsTurn:
+    """ENG-3305: a pad keeps the DS_* values it started with until the turn
+    ends. A connection removed or edited mid-turn, followed by a rebuild in
+    the same turn, must not let the old value print in clear."""
+
+    @pytest.mark.parametrize("change", ["delete", "edit"])
+    async def test_a_value_held_at_turn_start_is_hidden_after_a_mid_turn_rebuild(
+        self, tmp_path, change
+    ):
+        from anton.core.datasources.data_vault import LocalDataVault
+        from anton.core.datasources.datasource_registry import DatasourceRegistry
+        from anton.utils.datasources import (
+            begin_ds_turn_scope,
+            register_secret_vars,
+            restore_namespaced_env,
+            save_connection,
+        )
+
+        postgres = DatasourceRegistry().get("postgres")
+        vault = LocalDataVault(vault_dir=tmp_path / "vault")
+        vault.save("postgres", "x", {"host": "db", "password": "old-x-password"})
+
+        # What turn_stream() does before dispatching any tool.
+        begin_ds_turn_scope()
+        restore_namespaced_env(vault)
+
+        # In another tab, the user removes or edits X while the turn runs.
+        if change == "delete":
+            vault.delete("postgres", "x")
+        else:
+            vault.save("postgres", "x", {"host": "db", "password": "new-x-password"})
+
+        # The agent connects another source: the connect tool's test, then its save.
+        async def connect_tool() -> None:
+            credentials = {"host": "db", "password": "y-password"}
+            register_secret_vars(postgres)
+            set_ds_env_values({f"DS_{k.upper()}": v for k, v in credentials.items()})
+            restore_namespaced_env(vault)
+            save_connection(vault, postgres, "y", credentials)
+
+        await asyncio.create_task(connect_tool())
+
+        result = scrub_output("a cell printed old-x-password")
+        assert "old-x-password" not in result
+        assert "[DS_POSTGRES_X__PASSWORD]" in result
+
+        # The next turn starts from its own vault only.
+        begin_ds_turn_scope()
+        restore_namespaced_env(vault)
+        assert "old-x-password" in scrub_output("a cell printed old-x-password")
+
+
 class TestTheTurnBoundaryOpensTheScope:
     """A host that registers nothing up front still has to scrub a credential
     the user hands over mid-turn. The turn boundary is what guarantees it."""

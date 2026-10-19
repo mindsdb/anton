@@ -177,6 +177,7 @@ def begin_ds_turn_scope() -> None:
     _DS_SECRET_VARS.begin_scope()
     _DS_KNOWN_VARS.begin_scope()
     _ds_env_values.begin_scope()
+    _held_exact_secrets.set({})
 
 
 def set_ds_env_values(values: dict[str, str]) -> None:
@@ -186,6 +187,7 @@ def set_ds_env_values(values: dict[str, str]) -> None:
     untouched.
     """
     _ds_env_values.set(values)
+    _hold_exact_secrets()
 
 
 # Provider credential env vars injected into the scratchpad execution env for
@@ -339,6 +341,7 @@ def _reset_registered_ds_vars() -> None:
     _DS_SECRET_VARS.reset()
     _DS_KNOWN_VARS.reset()
     _ds_env_values.reset()
+    _held_exact_secrets.set(None)
 
 
 def parse_connection_slug(
@@ -455,6 +458,23 @@ class _ExactSecret:
 
     label: str
     value: str
+
+
+# Every value this turn has hidden by value, keyed by value. A pad keeps the DS_*
+# values it started with until the turn ends, so a rebuild that no longer lists one
+# (its connection removed or edited mid-turn) must not stop hiding it. Opened by
+# begin_ds_turn_scope and mutated in place, like the registries above.
+_held_exact_secrets: ContextVar[dict[str, _ExactSecret] | None] = ContextVar(
+    "held_exact_secrets", default=None
+)
+
+
+def _hold_exact_secrets() -> None:
+    """Keep hiding, until this turn ends, every value the turn hides by value now."""
+    held = _held_exact_secrets.get()
+    if held is not None:
+        for secret in _exact_secrets():
+            held.setdefault(secret.value, secret)
 
 
 @dataclass(frozen=True)
@@ -646,8 +666,9 @@ def _exact_secrets() -> list[_ExactSecret]:
     """Return the values `scrub_credentials` hides by value this turn, longest first.
 
     Every registered secret, unknown DS_* values over `_SHORT_SECRET_MAX`
-    characters, and provider keys over it. Longest first, so a value that
-    holds a shorter one goes whole; values of one length keep that order, so a
+    characters, provider keys over it, and any value the turn held earlier and
+    the current map no longer has. Longest first, so a value that holds a
+    shorter one goes whole; values of one length keep that order, so a
     registered secret's label wins.
     """
     secrets = [_ExactSecret(key, _ds_env_values.get(key)) for key in _DS_SECRET_VARS]
@@ -661,6 +682,11 @@ def _exact_secrets() -> list[_ExactSecret]:
         value = os.environ.get(key, "")
         if len(value) > _SHORT_SECRET_MAX:
             secrets.append(_ExactSecret(key, value))
+    live = {secret.value for secret in secrets}
+    secrets += [
+        secret for value, secret in (_held_exact_secrets.get() or {}).items()
+        if value not in live
+    ]
     return sorted(
         (secret for secret in secrets if secret.value),
         key=lambda secret: len(secret.value),
@@ -1400,7 +1426,9 @@ def restore_namespaced_env(vault: DataVault) -> None:
     only, and reach a subprocess through its own env (the scratchpad manager
     derives them from the same vault). Two turns on different vaults can run
     at once without seeing each other's credentials, and a connection this
-    turn has disabled cannot be reinstated by another turn.
+    turn has disabled cannot be reinstated by another turn. A value the turn
+    already hid stays hidden until the turn ends, even when the vault no
+    longer lists it, because the turn's pads still hold it.
     """
     # Kept so a failed rebuild restores what the turn had rather than leaving
     # it with nothing, which would silently turn scrubbing off for the turn.
@@ -1458,6 +1486,7 @@ def _rebuild_ds_registries(vault: DataVault) -> None:
                 engine, name, exc_info=True,
             )
     _ds_env_values.set(env_values)
+    _hold_exact_secrets()
 
 
 def find_matching_connection(
