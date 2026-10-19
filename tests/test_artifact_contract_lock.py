@@ -455,7 +455,7 @@ RULES: tuple[Rule, ...] = (
 )
 
 # Infrastructure failures: the generator cannot comply with them, so they have no
-# prompt marker. Six of the seven are emitted by the VerifyResult constructor
+# prompt marker. Seven of the eight are emitted by the VerifyResult constructor
 # rather than .append — which is why the walk must cover both forms.
 ALLOWLIST: tuple[str, ...] = (
     "backend.py failed to import in the venv: ",
@@ -463,6 +463,7 @@ ALLOWLIST: tuple[str, ...] = (
     "Dependency install failed:\n",
     "Scratchpad venv Python is unavailable (remote runtime?).",
     "backend.py failed to compile:\n",
+    "backend.py compile timed out after ",
     "backend.py import timed out after ",
     "backend introspection produced no JSON. stderr:\n",
 )

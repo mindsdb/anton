@@ -83,12 +83,15 @@ Files are human-readable markdown; metadata hides in HTML comments:
 ## `cortex.py` — the executive coordinator
 
 The Cortex manages two `Hippocampus` instances (global + project) and is the
-encoding endpoint everything routes through.
+encoding endpoint everything routes through. A host can also pass a third,
+read-only one an operator manages (`managed_hc`): its rules, lessons and
+scratchpad wisdom are read ahead of the person's own, nothing writes it, and its
+budgets add to the totals below.
 
 | Method | Purpose |
 |---|---|
-| `build_memory_context()` | Assemble memories for system-prompt injection (~5800-token budget) |
-| `get_scratchpad_context()` | Combine scratchpad wisdom from both scopes for the tool-description injection — the channel cerebellum lessons flow through |
+| `build_memory_context()` | Assemble memories for system-prompt injection (~5800-token budget, plus the operator layer's when there is one) |
+| `get_scratchpad_context()` | Combine scratchpad wisdom from both scopes, after the operator's layer when there is one, for the tool-description injection — the channel cerebellum lessons flow through |
 | `encode(engrams)` | Route engrams to the right hippocampus by scope. Called by `memorize`, the consolidator, the cerebellum, and the ACC |
 | `encoding_gate(engram)` | Mode-dependent check: does this engram need user confirmation? |
 | `needs_compaction()` / `compact_all()` | Threshold check + LLM-assisted dedup/merge via `generate_object_code(_CompactionResult, ...)` |
@@ -160,8 +163,9 @@ JSONL bloat, and a **toggle** (`ANTON_EPISODIC_MEMORY`, default on).
 **Moment A — system prompt (strategic retrieval).** At turn start,
 `cortex.build_memory_context()` assembles labeled sections
 (`## Your Memory — Identity`, `## Your Memory — Global Rules`, ...) so the LLM
-knows these are its own memories, not user instructions. `anton.md` is
-injected *after* memory, giving user instructions higher priority.
+knows these are its own memories, not user instructions. `anton.md` comes
+earlier, ahead of memory: memory changes every turn, so it rides the tail of
+the prompt, followed only by workspace discovery (`prompt_builder.py`).
 **Moment B — scratchpad tool description (procedural priming).** When
 scratchpads are active, `cortex.get_scratchpad_context()` appends relevant
 lessons to the scratchpad tool's description — the LLM sees them exactly when
@@ -183,7 +187,12 @@ rule/lesson isn't billed twice per call.
 | Topic files | Cortical association | Unlimited | On demand |
 | Skill procedures | Striatum (full skills) | Variable | On demand (`recall_skill`) |
 | Episodic recall | MTL episodic | Variable | On demand (`recall`) |
-| **Total in prompt** | **Working memory** | **~5800 tokens + ~50/skill** | ~3% of 200K context |
+| **Total in prompt** | **Working memory** | **~5800 tokens + ~50/skill, plus the operator layer's budgets** | ~3% of 200K context |
+
+With the operator's read-only layer (`managed_hc`), its own budgets add to these
+totals: about 1000 tokens of lessons, its rules (always and never in full,
+when-rules through the same relevance filter as the person's), and about 2000
+tokens of scratchpad wisdom.
 
 ## The `memorize` tool
 

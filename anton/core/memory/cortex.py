@@ -14,7 +14,9 @@ systems to provide coherent context. The Cortex class mirrors both:
   - encoding_gate() → encoding gate modulated by the memory mode
 
 The Cortex coordinates two HippocampusProtocol instances (global + project scope),
-like how the PFC coordinates retrieval from multiple brain memory systems.
+like how the PFC coordinates retrieval from multiple brain memory systems. A host
+can add a third, read-only one (`managed_hc`): rules and lessons an operator
+manages, read ahead of the person's own and never written.
 """
 
 from __future__ import annotations
@@ -32,8 +34,7 @@ from anton.core.llm.structured import (
     generate_with_truncation_retry,
     no_preamble_instruction,
 )
-from anton.core.memory.base import HippocampusProtocol
-from anton.core.memory.base import Engram
+from anton.core.memory.base import Engram, HippocampusProtocol, LearnedMemoryScope, MemoryPresence
 from anton.core.memory.hippocampus import Hippocampus
 
 if TYPE_CHECKING:
@@ -61,6 +62,38 @@ logger = logging.getLogger(__name__)
 #     observation to count).
 _RULE_RETRIEVAL_TAG = "rule-retrieval"
 _RULE_RETRIEVAL_MAX_TOKENS = 4096
+
+
+def learned_memory_notice(
+    scope: LearnedMemoryScope, presence: MemoryPresence = "unavailable"
+) -> str:
+    """Explain only the learned-memory state the host and store establish."""
+    if scope == "off":
+        status = "Learned memory is off. Stored memories are not read for this turn; their contents are unknown."
+    elif scope == "unavailable":
+        status = "Personal learned memory is unavailable for this turn. Do not claim that the user's saved memory is empty."
+    elif scope == "shared":
+        status = (
+            "Learned memory is shared across people, not a private profile of this user. "
+            "Do not attribute shared entries to this user without evidence. "
+        )
+        status += {
+            "empty": "The shared store has no saved memories.",
+            "present": "The shared store contains saved memories; retrieval may omit entries.",
+            "unavailable": "The shared store's saved contents could not be verified.",
+        }[presence]
+    else:
+        status = {
+            "empty": "Personal learned memory is on. No personal memories are saved in the user's global or current project store yet.",
+            "present": "Personal learned memory is on and contains saved memories. Retrieval may omit entries, so an empty context does not mean nothing is saved.",
+            "unavailable": "Personal learned memory is on, but its saved contents could not be verified. Do not claim that nothing is saved.",
+        }[presence]
+    return (
+        "## Learned memory status\n" + status + "\n"
+        "Product instructions and operator-managed rules are not remembered user preferences. "
+        "Do not present them as facts learned about the user."
+    )
+
 
 # Built once: `AntonSettings()` reads the environment, and while this call site
 # is rare it sits on the latency-critical prompt-assembly path.
@@ -174,6 +207,11 @@ class Cortex:
     Manages two HippocampusProtocol instances (global + project scope), decides what
     memories to load into working memory (the context window), and gates
     encoding based on the current memory mode (the neuromodulatory setting).
+
+    An optional third store, `managed_hc`, is read-only: its rules, lessons and
+    scratchpad wisdom are read ahead of the person's own, and nothing here writes
+    it. `encode`, compaction, vacuum, identity extraction and the project-profile
+    move name only `global_hc` and `project_hc`.
     """
 
     def __init__(
@@ -183,8 +221,10 @@ class Cortex:
         mode: str = "autopilot",
         llm_client: LLMClient | None = None,
         episodic: EpisodicMemory | None = None,
+        *,
+        managed_hc: HippocampusProtocol | None = None,
     ) -> None:
-        """Initialize the executive with two hippocampal stores.
+        """Initialize the executive with the global and project stores, plus an optional read-only managed store.
 
         Args:
             global_hc: Memory store for cross-project memories (global scope)
@@ -192,41 +232,66 @@ class Cortex:
             mode: Memory mode — autopilot|copilot|off (encoding gate)
             llm_client: For LLM-assisted operations (profile extraction, compaction)
             episodic: For logging memory_read/memory_write events per session
+            managed_hc: Read-only store an operator manages. Its rules and
+                lessons are read ahead of the person's own; its profile is
+                never read, and nothing writes it.
         """
         self.global_hc = global_hc
         self.project_hc = project_hc
+        self.managed_hc = managed_hc
         self.mode = mode
         self._llm = llm_client
         self._episodic = episodic
         self._seen_texts: set[str] = set()
         self._turn_count = 0
 
-        # One-time migration: identity is singular and global. Any entries that
-        # landed in project scope from the old encode() bug are merged upward.
-        # Global wins on key conflicts — orphaned entries are likely stale
-        # (the bug wrote them; the user may have since corrected to global),
-        # so we only import keys that don't already exist globally.
+        self._move_project_identity()
+
+    def _move_project_identity(self) -> None:
+        """Move identity lines that landed in project scope up to `global_hc`.
+
+        One-time migration: identity is singular and global. Any entries that
+        landed in project scope from the old encode() bug are merged upward.
+        Global wins on key conflicts — orphaned entries are likely stale
+        (the bug wrote them; the user may have since corrected to global),
+        so we only import keys that don't already exist globally.
+
+        The target is always `global_hc`, never `managed_hc`. This runs on
+        every construction, and a host builds a Cortex per turn, so a global
+        tier that can't be written must not fail the turn: the move is logged
+        and skipped, and the project lines stay for a later turn.
+        """
         orphaned = [e.text for e in self.project_hc.get_identities()]
-        if orphaned:
-            existing_global_keys = {
-                e.text.split(":", 1)[0].strip().lower()
-                for e in self.global_hc.get_identities()
-                if ":" in e.text
-            }
-            to_migrate = [
-                fact
-                for fact in orphaned
-                if not (
-                    ":" in fact
-                    and fact.split(":", 1)[0].strip().lower() in existing_global_keys
-                )
-            ]
+        if not orphaned:
+            return
+        existing_global_keys = {
+            e.text.split(":", 1)[0].strip().lower()
+            for e in self.global_hc.get_identities()
+            if ":" in e.text
+        }
+        to_migrate = [
+            fact
+            for fact in orphaned
+            if not (
+                ":" in fact
+                and fact.split(":", 1)[0].strip().lower() in existing_global_keys
+            )
+        ]
+        try:
             if to_migrate:
                 self.global_hc.rewrite_identity(to_migrate)
             self.project_hc.clear_identity()
+        except OSError as exc:
+            # Type name only; the message can quote a path under the person's
+            # memory folder.
+            logger.warning("memory: project profile not moved (%s)", type(exc).__name__)
 
     # ~6000 chars ≈ ~1500 tokens — above this, use LLM to filter rules
     _RULES_BUDGET_CHARS = 6000
+
+    # Each lesson tier — the operator's and each of the person's — gets this
+    # budget, counted apart from the others.
+    _LESSONS_BUDGET_TOKENS = 1000
 
     _RULES_RETRIEVAL_PROMPT = """\
 Given the user's current message, select only the conditional (When/If) rules that are \
@@ -235,7 +300,29 @@ If all rules are relevant, return them all. If none are relevant, return "NONE".
 Do NOT add, modify, or summarize rules — return them verbatim.
 """
 
-    async def build_memory_context(self, user_message: str = "") -> str:
+    # Rendering first doesn't tell the model which tier wins, so the first
+    # Operator Memory heading says it.
+    _OPERATOR_PRECEDENCE = (
+        "The operator's rules and lessons apply to everyone and win over Your Memory "
+        "when the two conflict."
+    )
+
+    def _learned_memory_presence(self) -> MemoryPresence:
+        """An older/custom store without an unfiltered read reports unknown."""
+        try:
+            states = [
+                getattr(store, "memory_presence")()
+                for store in (self.global_hc, self.project_hc)
+            ]
+        except Exception:
+            return "unavailable"
+        if any(state not in ("empty", "present") for state in states):
+            return "unavailable"
+        return "present" if "present" in states else "empty"
+
+    async def build_memory_context(
+        self, user_message: str = "", *, learned_memory_scope: LearnedMemoryScope | None = None
+    ) -> str:
         """Assemble memories for the system prompt — the 'working memory' load.
 
         Like the dlPFC performing strategic retrieval: selects what enters
@@ -244,55 +331,105 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         Args:
             user_message: Current user message for cue-dependent retrieval.
                 When rules exceed the token budget, only relevant rules are loaded.
+            learned_memory_scope: Host-declared scope for a self-hosted turn.
+                None preserves the existing prompt. Off or unavailable skips
+                learned stores while still reading the operator's managed layer.
         """
         sections: list[str] = []
+        read_learned = learned_memory_scope not in ("off", "unavailable")
+        if learned_memory_scope is not None:
+            presence = self._learned_memory_presence() if read_learned else "unavailable"
+            sections.append(learned_memory_notice(learned_memory_scope, presence))
+        memory_label = "Shared Memory" if learned_memory_scope == "shared" else "Your Memory"
+        operator_precedence = self._OPERATOR_PRECEDENCE.replace("Your Memory", memory_label)
 
-        # 1. Identity (global only — identity is singular)
-        identity = self.global_hc.recall_identities()
-        if identity:
-            sections.append(f"## Your Memory — Identity\n{identity}")
+        # Identity (global only — identity is singular). Read before the rule
+        # filters below await, as it always has been; it renders after the
+        # operator's sections.
+        identity = self.global_hc.recall_identities() if read_learned else ""
 
-        # 2. Global rules (with smart retrieval). get_rules(exclude_scratchpad_when=True)
-        # drops scratchpad-related "when" rules — those are already injected
-        # into the scratchpad tool description by get_scratchpad_context(),
-        # and showing them here too would double their token cost.
-        # 3. Project rules (with smart retrieval) — same scratchpad exclusion.
-        # Both filters can be a model call, and the user waits on them before
-        # the first reply token, so they run concurrently.
-        global_engrams, project_engrams = await asyncio.gather(
+        # Rules (with smart retrieval) for the operator's layer, then global,
+        # then project. get_rules(exclude_scratchpad_when=True) drops
+        # scratchpad-related "when" rules — those are already injected into the
+        # scratchpad tool description by get_scratchpad_context(), and showing
+        # them here too would double their token cost. Each tier's filter can be
+        # a model call, and the user waits on them before the first reply
+        # token, so they run concurrently. An empty tier returns at once with
+        # no model call.
+        managed_rules = (
+            self.managed_hc.get_rules(exclude_scratchpad_when=True)
+            if self.managed_hc is not None
+            else []
+        )
+        managed_engrams, global_engrams, project_engrams = await asyncio.gather(
+            self._retrieve_relevant_rules(managed_rules, user_message),
             self._retrieve_relevant_rules(
-                self.global_hc.get_rules(exclude_scratchpad_when=True), user_message
+                self.global_hc.get_rules(exclude_scratchpad_when=True) if read_learned else [],
+                user_message,
             ),
             self._retrieve_relevant_rules(
-                self.project_hc.get_rules(exclude_scratchpad_when=True), user_message
+                self.project_hc.get_rules(exclude_scratchpad_when=True) if read_learned else [],
+                user_message,
             ),
         )
+
+        # 1. Operator rules and lessons, ahead of everything the person's own
+        # tiers hold. The first operator heading carries the precedence line.
+        # The lessons get the same budget as each of the person's tiers,
+        # counted apart from theirs.
+        if managed_engrams:
+            sections.append(
+                f"## Operator Memory — Rules\n{operator_precedence}\n"
+                f"{self._format_rules_engrams(managed_engrams)}"
+            )
+        if self.managed_hc is not None:
+            managed_lessons = self.managed_hc.recall_lessons(
+                token_budget=self._LESSONS_BUDGET_TOKENS, exclude_scratchpad=True
+            )
+            if managed_lessons:
+                precedence = "" if managed_engrams else f"{operator_precedence}\n"
+                sections.append(f"## Operator Memory — Lessons\n{precedence}{managed_lessons}")
+
+        if not read_learned:
+            return "\n\n" + "\n\n".join(sections)
+
+        # 2. Identity
+        if identity:
+            sections.append(f"## {memory_label} — Identity\n{identity}")
+
+        # 3. Global rules, then 4. project rules.
         if global_engrams:
             sections.append(
-                f"## Your Memory — Global Rules\n{self._format_rules_engrams(global_engrams)}"
+                f"## {memory_label} — Global Rules\n{self._format_rules_engrams(global_engrams)}"
             )
         if project_engrams:
             sections.append(
-                f"## Your Memory — Project Rules\n{self._format_rules_engrams(project_engrams)}"
+                f"## {memory_label} — Project Rules\n{self._format_rules_engrams(project_engrams)}"
             )
             for engram in project_engrams:
                 self._log_read_engram(engram)
 
-        # 4. Global lessons. recall_lessons() excludes scratchpad-related
+        # 5. Global lessons. recall_lessons() excludes scratchpad-related
         # entries internally — same reasoning as the rules exclusion above.
-        global_lessons = self.global_hc.recall_lessons(token_budget=1000, exclude_scratchpad=True)
+        global_lessons = self.global_hc.recall_lessons(
+            token_budget=self._LESSONS_BUDGET_TOKENS, exclude_scratchpad=True
+        )
         if global_lessons:
-            sections.append(f"## Your Memory — Global Lessons\n{global_lessons}")
+            sections.append(f"## {memory_label} — Global Lessons\n{global_lessons}")
 
-        # 5. Project lessons — same scratchpad exclusion.
-        project_lessons = self.project_hc.recall_lessons(token_budget=1000, exclude_scratchpad=True)
+        # 6. Project lessons — same scratchpad exclusion.
+        project_lessons = self.project_hc.recall_lessons(
+            token_budget=self._LESSONS_BUDGET_TOKENS, exclude_scratchpad=True
+        )
         if project_lessons:
-            sections.append(f"## Your Memory — Project Lessons\n{project_lessons}")
+            sections.append(f"## {memory_label} — Project Lessons\n{project_lessons}")
             if self._episodic is not None:
-                for engram in self.project_hc.get_lessons(token_budget=1000, exclude_scratchpad=True):
+                for engram in self.project_hc.get_lessons(
+                    token_budget=self._LESSONS_BUDGET_TOKENS, exclude_scratchpad=True
+                ):
                     self._log_read_engram(engram)
 
-        # 6. Minds datasource context (auto-loaded if present)
+        # 7. Minds datasource context (auto-loaded if present)
         minds_topic = self.project_hc.recall_topic("minds-datasource")
         if minds_topic:
             sections.append(f"## Minds — Datasource Context\n{minds_topic}")
@@ -427,23 +564,39 @@ Do NOT add, modify, or summarize rules — return them verbatim.
             return early
         return mandatory + filtered_when
 
-    def get_scratchpad_context(self) -> str:
+    def get_scratchpad_context(self, *, learned_memory_scope: LearnedMemoryScope | None = None) -> str:
         """Retrieve procedural knowledge for scratchpad tool injection.
 
         Like the vmPFC integrating memories for action planning — combines
-        global + project scratchpad wisdom into a coherent set of guidelines.
+        the operator's, global and project scratchpad wisdom, in that order,
+        into a coherent set of guidelines.
+
+        When an operator layer contributes wisdom, its block is labeled so the
+        agent can tell which lines win on conflict, and the person's own wisdom
+        follows under its own label. With no operator wisdom the output is the
+        person's lines alone, unlabeled.
         """
-        parts: list[str] = []
+        managed_wisdom = (
+            self.managed_hc.recall_scratchpad_wisdom()
+            if self.managed_hc is not None
+            else ""
+        )
+        person_parts = [] if learned_memory_scope in ("off", "unavailable") else [
+            self.global_hc.recall_scratchpad_wisdom(),
+            self.project_hc.recall_scratchpad_wisdom(),
+        ]
+        person_wisdom = "\n".join(p for p in person_parts if p)
 
-        global_wisdom = self.global_hc.recall_scratchpad_wisdom()
-        if global_wisdom:
-            parts.append(global_wisdom)
+        if not managed_wisdom:
+            if person_wisdom and learned_memory_scope == "shared":
+                return f"Shared learned memory:\n{person_wisdom}"
+            return person_wisdom
 
-        project_wisdom = self.project_hc.recall_scratchpad_wisdom()
-        if project_wisdom:
-            parts.append(project_wisdom)
-
-        return "\n".join(parts)
+        labeled = f"Operator (applies to everyone, wins on conflict):\n{managed_wisdom}"
+        if person_wisdom:
+            label = "Shared learned memory" if learned_memory_scope == "shared" else "Your own"
+            labeled += f"\n{label}:\n{person_wisdom}"
+        return labeled
 
     async def encode(self, engrams: list[Engram]) -> list[str]:
         """Direct the hippocampus to encode new memories.

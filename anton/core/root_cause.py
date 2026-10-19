@@ -142,10 +142,16 @@ _SENTINEL_REASONS = {
     # A refused package spec (flag/URL/path-shaped entry) is the agent's own
     # bad argument, not an environment wall (ENG-1635).
     "package_install_rejected": (TIER_SELF, "invalid_argument"),
+    # A pad name that leads outside the venvs folder (absolute, `..`, NUL):
+    # the agent's own bad argument, and the message says which part.
+    "scratchpad_invalid_name": (TIER_SELF, "invalid_argument"),
     # The single-scratchpad guard's challenge to a NEW pad name. Guidance the
     # agent acts on by reusing the pad it already has (the outcome is even
     # `ok=True`), so it is the agent's own argument choice, never a wall.
     "new_scratchpad_challenged": (TIER_SELF, "invalid_argument"),
+    # A cell held for the user's approval and not approved. The user's call,
+    # never an environment wall; the model is told to report it, not retry.
+    "write_not_approved": (TIER_SELF, "invalid_argument"),
     # `read_image`, ENG-2248: both are the agent's own file choice, and both
     # messages tell it what to do instead (use a real image / resize).
     "not_an_image": (TIER_SELF, "invalid_argument"),
