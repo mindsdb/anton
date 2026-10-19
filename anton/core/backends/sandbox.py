@@ -303,6 +303,21 @@ class CellSandbox(BaseModel):
             dirs.append(self.shared_dir)
         return dirs
 
+    def allows_read(self, path: Path | str) -> bool:
+        """Whether the person's agent code may read ``path`` under this policy.
+
+        True when ``path``, once resolved, equals or sits below a grant. A grant
+        that is a link, or sits below one, admits nothing, since ``launch()``
+        skips it. The system paths ``rules()`` adds are not grants: a host-side
+        reader asks about the person's own files, never about /etc or /proc.
+        """
+        target = os.path.realpath(path)
+        return any(
+            _same_or_inside(target, str(grant))
+            for grant in self._grants()
+            if os.path.realpath(grant) == str(grant)
+        )
+
     def _fixed_env(self) -> dict[str, str]:
         home = str(self.home_dir)
         tmp = str(self.tmp_dir)

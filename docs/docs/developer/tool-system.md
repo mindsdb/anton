@@ -60,8 +60,8 @@ conditionally:
 | Tool | Registered when | Handler |
 |---|---|---|
 | `scratchpad` | Always | `handle_scratchpad` — exec/view/reset/remove/dump/install |
-| `read_image` | Always | `handle_read_image` — returns image content blocks |
-| `read_text_file` | Always | `handle_read_text_file` — a range of lines of a text file, under the read access policy (`file_access.py`) |
+| `read_image` | Always | `handle_read_image` — returns image content blocks; under a sandbox policy, only paths the person's cells may read (`CellSandbox.allows_read`) |
+| `read_text_file` | Always | `handle_read_text_file` — a range of lines of a text file, under the read access policy (`file_access.py`), held under a sandbox policy to what the person's cells may read (`file_access.under_policy`) |
 | `memorize` | Cortex (or legacy self-awareness) present | `handle_memorize` → `cortex.encode()` |
 | `recall` | Episodic memory enabled | `handle_recall` → `episodic.recall_formatted()` |
 | `recall_skill` | Always (no-op without skills) | `handle_recall_skill` → `SkillStore.load()` + counter |

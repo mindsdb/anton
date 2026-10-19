@@ -615,3 +615,29 @@ def test_chat_session_config_defaults_to_no_sandbox():
     from anton.core.session import ChatSessionConfig
 
     assert ChatSessionConfig(llm_client=MagicMock()).cell_sandbox is None
+
+
+def test_allows_read_is_the_grants_resolved_and_nothing_else(tmp_path):
+    for name in ("project", "home", "tmp", "shared", "skill", "project-evil", "outside"):
+        (tmp_path / name).mkdir()
+    (tmp_path / "notes.txt").write_text("x")
+    policy = CellSandbox(**_fields(
+        tmp_path,
+        shared_dir=tmp_path / "shared",
+        read_only_dirs=(tmp_path / "skill",),
+        read_only_files=(tmp_path / "notes.txt",),
+    ))
+    for granted in ("project", "home", "tmp", "shared", "skill"):
+        assert policy.allows_read(tmp_path / granted / "a" / "b.png")
+        assert policy.allows_read(tmp_path / granted)
+    assert policy.allows_read(tmp_path / "notes.txt")
+    # A sibling whose name starts with a grant's name is not inside it.
+    assert not policy.allows_read(tmp_path / "project-evil" / "b.png")
+    assert not policy.allows_read(tmp_path / "outside" / "b.png")
+    # The path is resolved here, whatever the caller passed.
+    (tmp_path / "project" / "link").symlink_to(tmp_path / "outside", target_is_directory=True)
+    assert not policy.allows_read(tmp_path / "project" / "link" / "b.png")
+    assert not policy.allows_read(tmp_path / "project" / ".." / "outside" / "b.png")
+    # The system paths rules() adds are not grants.
+    assert not policy.allows_read("/etc/hosts")
+    assert not policy.allows_read("/usr/share")

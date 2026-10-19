@@ -31,6 +31,7 @@ import httpx2 as httpx
 
 from anton.core.artifacts.internal_files import API_SPEC_FILENAME, PRD_FILENAME
 from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
+from anton.core.backends.sandbox import cell_sandbox_of
 from anton.core.llm.structured import looks_truncated
 
 from . import sub_tools
@@ -541,7 +542,9 @@ async def generate(
     # gets the strict reading, not a permissive one.
     ws_base = getattr(getattr(session, "_workspace", None), "base", None)
     kept, dropped = resolve_attachments(
-        attachments, workspace=ws_base if isinstance(ws_base, Path) else None
+        attachments,
+        workspace=ws_base if isinstance(ws_base, Path) else None,
+        policy=cell_sandbox_of(getattr(session, "_scratchpads", None)),
     )
     state.attachments = kept
     if kept or dropped:

@@ -406,6 +406,7 @@ async def test_public_generate_delegates_to_run(tmp_path: Path, monkeypatch):
     from anton.core.tools.generate_artifact import generate as public_generate
 
     session = AsyncMock()
+    session._scratchpads.cell_sandbox = None
     captured = {}
     async def fake_run(state, *, entry):
         captured["type"] = state.artifact_type
@@ -493,6 +494,7 @@ def test_known_connection_hints_give_ready_env_prefixes():
             ]
 
     session = AsyncMock()
+    session._scratchpads.cell_sandbox = None
     session._data_vault = _Vault()
     assert orchestrator._known_connection_hints(session) == [
         "hubspot-main → DS_HUBSPOT_MAIN__<FIELD>",
@@ -847,6 +849,7 @@ def test_public_data_sources_skill_is_loaded_from_the_store():
             return _Skill()
 
     session = AsyncMock()
+    session._scratchpads.cell_sandbox = None
     store = _Store()
     session._skill_store = store
 
@@ -875,6 +878,7 @@ def test_public_data_sources_skill_is_defensive():
             return None
 
     session = AsyncMock()
+    session._scratchpads.cell_sandbox = None
     session._skill_store = _MissingStore()
     assert orchestrator._public_data_sources_skill(session) == ""
 

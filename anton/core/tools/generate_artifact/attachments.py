@@ -37,6 +37,12 @@ import mimetypes
 import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+from anton.core.tools import file_access
+
+if TYPE_CHECKING:
+    from anton.core.backends.sandbox import CellSandbox
 
 # Suffixes the gathering step reads as data rather than ships as an asset.
 DATA_SUFFIXES: frozenset[str] = frozenset({
@@ -144,14 +150,15 @@ def refusal_reason(resolved: Path, workspace: Path | None) -> str | None:
 
 
 def resolve_attachments(
-    paths, *, workspace: Path | None = None
+    paths, *, workspace: Path | None = None, policy: "CellSandbox | None" = None
 ) -> tuple[list[Attachment], list[str]]:
     """Turn the tool's `attachments` argument into records, dropping what is
     not a readable, attachable file. Returns (kept, reasons for the dropped
     ones).
 
     `workspace` is the session's workspace base; `refusal_reason` says which
-    paths pass. Duplicates collapse on the resolved path. Nothing here
+    paths pass, held under a sandbox `policy` to what the person's own cells
+    may read (`file_access.under_policy`). Duplicates collapse on the resolved path. Nothing here
     raises: a wrong path is the calling agent's mistake, recorded in the
     trace, and must not cost the run.
     """
@@ -172,7 +179,9 @@ def resolve_attachments(
         except OSError as exc:
             dropped.append(f"{text}: {exc.__class__.__name__}")
             continue
-        reason = refusal_reason(resolved, workspace)
+        reason = file_access.under_policy(
+            refusal_reason(resolved, workspace), resolved, policy, outside=REFUSED_OUTSIDE
+        )
         if reason is not None:
             dropped.append(f"{text}: {reason}")
             continue

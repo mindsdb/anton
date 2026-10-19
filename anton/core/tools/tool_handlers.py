@@ -1237,8 +1237,11 @@ async def handle_read_image(
             ok=False, reason="missing_name",
         )
 
+    # Set only by a multi-person host (Cowork with the Landlock sandbox).
+    # The desktop, the CLI and the cloud pod carry none and read as before.
+    policy = cell_sandbox_of(getattr(session, "_scratchpads", None))
     try:
-        path = Path(file_path).expanduser()
+        path = _expand_home(file_path, policy)
         if not path.is_absolute():
             # Resolve relative paths against the project workspace (where
             # artifacts/decks live), not the process cwd. Under the desktop
@@ -1249,11 +1252,29 @@ async def handle_read_image(
             base = getattr(getattr(session, "_workspace", None), "base", None)
             root = Path(base) if base else Path.cwd()
             path = (root / path).resolve()
-    except OSError as exc:
+        if policy is not None:
+            path = path.resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
         # Tier 2: the model supplied a path that will not parse.
         return ToolOutcome(
             content=f"Error: invalid path '{file_path}': {exc}",
             ok=False, reason="invalid_type",
+        )
+
+    if policy is not None and not policy.allows_read(path):
+        # This process runs outside the sandbox, so it admits only what the
+        # person's own cells may read. Checked before the file is looked at,
+        # and worded without the resolved path, so the reply is the same
+        # whether another person's file exists or not.
+        return ToolOutcome(
+            content=(
+                f"Error: access denied: {file_path} is outside the files this "
+                "conversation may read (the project, the scratchpad's home and "
+                "temp folders, the shared folder and the conversation's "
+                "attachments). If the user wants you to see this image, ask "
+                "them to attach it to the conversation."
+            ),
+            ok=False, reason="access_denied",
         )
 
     if not path.is_file():
@@ -1325,9 +1346,11 @@ async def handle_read_image(
 
     summary = f"Loaded {path.name} ({human_size(len(raw))})."
     try:
+        import io
         from PIL import Image as _PILImage
 
-        with _PILImage.open(path) as im:
+        # The bytes already read, not a second open of the path.
+        with _PILImage.open(io.BytesIO(raw)) as im:
             summary = f"Loaded {path.name} ({im.width}x{im.height}, {human_size(len(raw))})."
     except Exception:
         pass
@@ -1358,6 +1381,18 @@ async def handle_read_image(
         ],
         ok=True,
     )
+
+
+def _expand_home(file_path: str, policy: "CellSandbox | None") -> Path:
+    """`file_path` with `~` expanded to the HOME the person's cells run with.
+
+    Under a policy the process HOME is the server's, which holds every
+    person's space; the cell's HOME is the policy's. Without one, `~` is the
+    process HOME as before.
+    """
+    if policy is not None and (file_path == "~" or file_path.startswith("~/")):
+        return policy.home_dir / file_path[1:].lstrip("/")
+    return Path(file_path).expanduser()
 
 
 def _read_roots(session: "ChatSession") -> "tuple[Path, tuple[Path, ...]]":
@@ -1447,8 +1482,9 @@ def _read_text_file(
     from anton.core.tools import file_access, text_file
 
     base, owned_roots = _read_roots(session)
+    policy = cell_sandbox_of(getattr(session, "_scratchpads", None))
     try:
-        path = Path(raw).expanduser()
+        path = _expand_home(raw, policy)
         if not path.is_absolute():
             path = base / path
         resolved = path.resolve()
@@ -1458,11 +1494,17 @@ def _read_text_file(
         )
     shown = _shown_path(path, display_root)
 
-    refusal = file_access.read_refusal(resolved, workspace=base, owned_roots=owned_roots)
+    refusal = file_access.under_policy(
+        file_access.read_refusal(resolved, workspace=base, owned_roots=owned_roots),
+        resolved, policy, outside=file_access.REFUSED_OUTSIDE,
+    )
     if refusal is not None:
         _log.debug("read_text_file refused %s: %s", resolved, refusal)
         resolved_shown = _shown_path(resolved, display_root)
-        where = shown if resolved_shown == shown else f"{shown} (it resolves to {resolved_shown})"
+        # Under a policy the target can be another person's file: name only
+        # the path as given.
+        same = resolved_shown == shown or policy is not None
+        where = shown if same else f"{shown} (it resolves to {resolved_shown})"
         message = f"Error: access denied: {where} is {refusal}."
         if refusal == file_access.REFUSED_OUTSIDE:
             message += (
