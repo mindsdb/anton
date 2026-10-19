@@ -696,6 +696,24 @@ async def test_an_unresolvable_path_is_reported_without_ending_the_run(tmp_path:
     assert "invalid path" in content, content
 
 
+async def test_a_saved_key_in_a_read_file_reaches_the_builder_as_its_marker(tmp_path: Path, monkeypatch):
+    """The main loop's filter for read_text_file results runs here too."""
+    key = "mdb_dI2OzIgO.5t7QUxqGPdgrdg2wNwvFFDTUHPyYUZRH"
+    monkeypatch.setenv("ANTON_MINDS_API_KEY", key)
+    (tmp_path / "config.js").write_text(f'const KEY = "{key}";\n')
+    content = await _read_result_through_the_loop(tmp_path, "config.js")
+    assert key not in content
+    assert "[ANTON_MINDS_API_KEY]" in content
+
+
+async def test_the_builder_reads_its_own_ids_as_written(tmp_path: Path):
+    """`task-` and `risk-` ids are words, not `sk-` keys."""
+    line = '<div id="task-completion-rate-chart" class="risk-assessment-summary-panel"></div>'
+    (tmp_path / "index.html").write_text(line + "\n")
+    content = await _read_result_through_the_loop(tmp_path, "index.html")
+    assert line in content, content
+
+
 async def _read_result_through_the_loop(tmp_path: Path, path: str) -> str:
     """Run one `read_text_file` call through the write loop; return its tool result."""
     from types import SimpleNamespace

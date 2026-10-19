@@ -32,6 +32,7 @@ import httpx2 as httpx
 from anton.core.artifacts.internal_files import API_SPEC_FILENAME, PRD_FILENAME
 from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
 from anton.core.backends.sandbox import cell_sandbox_of
+from anton.utils.datasources import scrub_credentials
 from anton.core.llm.structured import looks_truncated
 
 from . import sub_tools
@@ -1059,7 +1060,9 @@ async def _run_loop(
                 result_blocks.append(sub_tools.tool_result(tc.id, msg))
             elif name == "read_text_file":
                 outcome = await _read_for_generator(session, artifact_path, inp)
-                result_blocks.append(sub_tools.tool_result(tc.id, outcome.content))
+                # The filter the main loop gives read_text_file results, so a
+                # saved secret in a read file reaches the builder as its marker.
+                result_blocks.append(sub_tools.tool_result(tc.id, scrub_credentials(outcome.content)))
             elif name == "scratchpad":
                 # Full scratchpad access: the sub-generator pulls or rebuilds
                 # the data described in the brief's `## Data` section. Lazy

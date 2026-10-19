@@ -174,6 +174,27 @@ class TestScrubProviderKeys:
         assert key not in result
         assert "&pageSize=100" in result
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            '<div id="task-completion-rate-chart" class="risk-assessment-summary-panel">',
+            "getElementById('disk-usage-percentage-chart')",
+            ".mask-image-gradient-overlay { opacity: 0.5; }",
+            "desk-booking-calendar-widget",
+            "@app.get('/api/task-assignments-by-owner')",
+        ],
+    )
+    def test_a_word_running_into_a_key_prefix_is_not_a_key(self, text):
+        """`task-`, `risk-`, `desk-`: a letter before `sk-` means a longer word."""
+        assert scrub_credentials(text) == text
+
+    @pytest.mark.parametrize("before", ['"', "'", "=", "(", " ", "\n", "Bearer ", "key:"])
+    def test_a_key_after_punctuation_or_space_is_still_scrubbed(self, before):
+        key = "sk-proj-abcdefghij1234567890XYZ"
+        result = scrub_credentials(f"{before}{key}")
+        assert key not in result
+        assert "[REDACTED_API_KEY]" in result
+
     def test_short_sk_and_base_url_left_readable(self, monkeypatch):
         """Short `sk-` strings and non-secret base URLs are not over-redacted."""
         monkeypatch.setenv("ANTON_OPENAI_BASE_URL", "https://api.openai.com/v1")

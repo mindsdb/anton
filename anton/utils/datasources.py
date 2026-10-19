@@ -203,12 +203,16 @@ _PROVIDER_SECRET_VARS: tuple[str, ...] = (
 # Well-known provider key formats — scrubbed by shape so a key is redacted even
 # when it didn't come from one of our env vars (e.g. the model already emitted
 # it, or it arrived via an unexpected path). Length floors keep this from
-# matching short incidental `sk-`/`mdb_` strings.
+# matching short incidental `sk-`/`mdb_` strings. A letter or digit right before
+# the prefix means a longer word, such as `task-completion-rate` or
+# `risk-assessment-panel`, not a key.
 _SECRET_KEY_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?:"
     r"mdb_[A-Za-z0-9._-]{10,}"   # MindsHub
     r"|sk-[A-Za-z0-9_-]{20,}"    # OpenAI / Anthropic (sk-, sk-proj-, sk-ant-)
     r"|AIza[A-Za-z0-9_-]{30,}"   # Google standard key
     r"|AQ\.[A-Za-z0-9._-]{50}"   # Google authorization key (AI Studio, 2026+)
+    r")"
 )
 
 # Output only: user input and published artifacts keep _SECRET_KEY_PATTERN,
