@@ -47,9 +47,11 @@ def _usage_record(*, role: str | None, model: str | None, served_model: str | No
                   cache_creation: int) -> dict:
     """One call's usage, named by the conversation, turn and tags of the current trace."""
     ctx = get_trace_context()
+    metadata = (ctx.metadata or {}) if ctx else {}
     return {
-        "conversation": ctx.session_id if ctx else None,
-        "turn": (ctx.metadata or {}).get("turn") if ctx else None,
+        # End-of-turn work runs detached from the session, its conversation in the metadata.
+        "conversation": (ctx.session_id or metadata.get("conversation_id")) if ctx else None,
+        "turn": metadata.get("turn"),
         "tags": list(ctx.tags) if ctx else [],
         "role": role,
         "model": model,

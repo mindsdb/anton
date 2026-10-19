@@ -22,6 +22,7 @@ from anton.core.llm.provider import LLMProvider, LLMResponse, TransientProviderE
 from anton.core.llm.tracing import (
     TraceContext,
     call_role,
+    detached_from_session,
     reset_trace_context,
     set_trace_context,
 )
@@ -117,6 +118,21 @@ async def test_a_completed_chat_call_logs_its_conversation_turn_role_and_tokens(
         "model": "alias-model", "served_model": "served-model",
         "input": 20, "output": 16, "cache_read": 100, "cache_creation": 0,
     }]
+
+
+async def test_a_call_detached_from_the_session_still_names_its_conversation(usage_log):
+    """End-of-turn memory work runs outside the session; the eval still has to
+    put its tokens on the right task and turn."""
+    turn = TraceContext(session_id="conv-17", metadata={"turn": "4"})
+    token = set_trace_context(detached_from_session(turn))
+    try:
+        with _openai(AsyncMock(return_value=_chat_response(content="Hello"))) as provider:
+            await provider.complete(model="m", system="s", messages=MESSAGES)
+    finally:
+        reset_trace_context(token)
+
+    (line,) = usage_log()
+    assert (line["conversation"], line["turn"]) == ("conv-17", "4")
 
 
 async def test_a_billed_chat_call_is_logged_even_when_its_empty_reply_raises(usage_log):
