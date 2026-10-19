@@ -282,6 +282,11 @@ class GenState:
     # `announce_brief` sent it in this call, or (acting first) an earlier turn
     # showed it — set by `orchestrator.run` from the entry. Not persisted.
     brief_shown: bool = False
+    # A gathering question timed out. The user is away, so the brief is
+    # written but not shown for confirmation: the run hands back
+    # `needs_confirmation`, and their late answer to the still-open card
+    # arrives as a repeat call carrying it. Not persisted.
+    question_unanswered: bool = False
     # Installed by the entry point. None on the bench harness and in unit
     # tests that construct a state directly, so every read goes through
     # `winding_down()`.

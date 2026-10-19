@@ -818,9 +818,10 @@ ASK_USER_TOOL = ToolDef(
         'Returns {"status":"answered","values":["<value>"]} — or "text" when the '
         'user typed their own answer instead of picking, possibly alongside '
         '"values". Other statuses: "cancelled" (the user declined to answer), '
-        '"timeout", "error". On cancelled/timeout/error do NOT call this tool '
-        "again for the same question: either proceed on an assumption you state "
-        "out loud, or ask in plain text and end your turn.\n\n"
+        '"timeout", "error". On cancelled/timeout do NOT call this tool again '
+        "and do NOT act on an assumed answer: end your turn and say the "
+        "question is still waiting for them. Their answer arrives as their "
+        "next message. On error, ask in plain text and end your turn.\n\n"
         "Ask one question at a time."
     ),
     # This is where the carve-out from CONVERSATION DISCIPLINE's "never ask and
@@ -841,8 +842,9 @@ ASK_USER_TOOL = ToolDef(
         "answer arrives inside the current turn, so continue with it immediately. "
         "Open-ended questions still go in plain text with the turn ended. Ask one "
         "question at a time either way. If `ask_user` comes back cancelled, "
-        "timeout or error, do not re-ask: proceed on an assumption you state out "
-        "loud, or ask in plain text and end your turn."
+        "timeout or error, do not re-ask and do not act on an assumed answer — "
+        "for an approval, that assumption is the approval. End your turn and "
+        "say the question is still open."
     ),
     input_schema={
         "type": "object",

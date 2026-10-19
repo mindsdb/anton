@@ -194,6 +194,8 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 # reaching here means there is a question left to spend.
                 outcome = await sub_tools.dispatch_ask_user(state.session, inp)
                 questions_asked += 1
+                if outcome["status"] == "timeout":
+                    state.question_unanswered = True
                 state.record_qa(outcome["question"], outcome["answer_summary"])
                 state.trace_log.node(
                     "ask_user", outcome["status"],

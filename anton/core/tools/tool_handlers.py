@@ -702,12 +702,14 @@ _STATUS_INSTRUCTIONS = {
         "NOT build the artifact by hand — report back to the user."
     ),
     "needs_confirmation": (
-        "A brief was drafted but the user could not be asked to confirm it. "
+        "A brief was drafted but the user could not be asked to confirm it, "
+        "or did not answer in time. "
         "Show `brief_summary` to the user. If they agree, call this tool "
         "again with the SAME `user_request` — the repeat call is the "
         "confirmation and the pipeline continues from where it stopped. If "
-        "they ask for a change, call again with the same `user_request` and "
-        "the change in `agent_understanding`. If they decline, do not call "
+        "they ask for a change or answer an open question, call again with "
+        "the same `user_request` and that in `agent_understanding`. If they "
+        "decline, do not call "
         "again."
     ),
     "stopped_over_budget": (
@@ -2019,9 +2021,24 @@ _ASK_USER_UNAVAILABLE = (
     "end your turn."
 )
 _ASK_USER_LIMIT = (
-    "Question limit reached for this turn; proceed on a stated assumption "
-    "instead of asking again."
+    "Question limit reached for this turn. Do not act on an assumed answer: "
+    "ask in plain text and end your turn."
 )
+# Read by the model in place of an answer. "Proceed on a stated assumption"
+# turned an unanswered approval into the approval itself, so both say to stop.
+# The card stays answerable after the turn, and the answer comes back as the
+# user's next message.
+_ASK_USER_UNANSWERED = {
+    "timeout": (
+        "The user has not answered yet. Do not act on an assumed answer. End "
+        "your turn now and say the question is still waiting for them; their "
+        "answer will arrive as their next message."
+    ),
+    "cancelled": (
+        "The user skipped this question. Do not act on an assumed answer. End "
+        "your turn and say what you need from them to continue."
+    ),
+}
 
 
 def _ask_user_telemetry_settings(session: "ChatSession"):
@@ -2077,8 +2094,8 @@ async def handle_ask_user(session: "ChatSession", tc_input: dict) -> str:
         return _status("error", _ASK_USER_LIMIT)
     if answer.status == "unavailable":
         return _status("error", _ASK_USER_UNAVAILABLE)
-    if answer.status in ("cancelled", "timeout"):
-        return _status(answer.status)
+    if answer.status in _ASK_USER_UNANSWERED:
+        return _status(answer.status, _ASK_USER_UNANSWERED[answer.status])
 
     if answer.status == "answered":
         extra: dict = {}
