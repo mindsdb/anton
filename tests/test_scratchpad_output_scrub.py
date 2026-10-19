@@ -11,6 +11,7 @@ which is the model's own text and is not scrubbed.
 """
 from __future__ import annotations
 
+import base64
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -413,6 +414,19 @@ def test_salvage_ending_partway_through_a_secret_withholds_the_part(tmp_path, re
 
     for start in range(25):
         assert secret[start : start + 8] not in salvaged
+    assert salvaged.startswith("(truncated to most recent output)\n")
+    assert salvaged.endswith("x ")
+
+
+def test_salvage_ending_partway_through_a_base64_secret_withholds_the_part(tmp_path):
+    """A secret printed in base64 and cut is withheld like one printed as typed."""
+    secret = _secret_of(33)
+    _save_password(tmp_path, secret)
+    printed = base64.b64encode(secret.encode()).decode()
+    salvaged = _salvage_tail(["x" * 8159 + " " + printed[:40]], False)
+
+    for start in range(33):
+        assert printed[start : start + 8] not in salvaged
     assert salvaged.startswith("(truncated to most recent output)\n")
     assert salvaged.endswith("x ")
 
