@@ -113,6 +113,7 @@ from anton.core.utils.scratchpad import (
     format_cell_result,
     observe_scratchpad_cell,
 )
+from anton.core.utils.write_check import parse_http_write_rules
 # Artifact-edit tracking + lint and the scratchpad observer hooks: shared with
 # handle_scratchpad's own exec branch (tool_handlers.py) rather than duplicated
 # here, since this inline streaming exec bypasses that handler entirely.
@@ -2008,12 +2009,16 @@ class ChatSession:
         # Seconds spent waiting on humans during the current tool dispatch,
         # subtracted from the tool's reported elapsed time.
         self.answer_wait_s = 0.0
-        # Holds a cell that changes a database or existing files until the
-        # user approves it (`hold_unapproved_write`). Only when the host turns
-        # `write_approval` on; `is True` so a MagicMock settings object reads off.
-        self._write_gate: WriteGate | None = (
-            WriteGate() if getattr(s, "write_approval", False) is True else None
-        )
+        # Holds a cell that changes a database, existing files, or data behind
+        # an HTTP API until the user approves it (`hold_unapproved_write`).
+        # Only when the host turns `write_approval` on; `is True` so a
+        # MagicMock settings object reads off.
+        self._write_gate: WriteGate | None = None
+        if getattr(s, "write_approval", False) is True:
+            listed = getattr(s, "write_approval_http", "")
+            self._write_gate = WriteGate(
+                http_rules=parse_http_write_rules(listed if isinstance(listed, str) else ""),
+            )
 
         coding_provider = config.llm_client.coding_provider
         coding_conn = coding_provider.export_connection_info()

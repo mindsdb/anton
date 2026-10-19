@@ -17,6 +17,7 @@ from anton.core.tools.registry import ToolOutcome
 from anton.core.utils.write_check import (
     CellWrites,
     FileChange,
+    HttpWriteRule,
     ProjectSnapshot,
     find_cell_writes,
     snapshot_project_files,
@@ -46,7 +47,8 @@ _WHY = {
     "error": "the approval request failed",
     "unanswered_earlier": "an earlier approval request in this turn went unanswered",
 }
-# Paths the refusal names for one file change; the card names every one.
+# What the refusal names of one list: a file change's paths, the requests,
+# or the data changes with no SQL text. The card names every one.
 _REFUSAL_PATHS = 20
 _TILDE_RUN = re.compile("~{3,}")
 _BACKTICK_RUN = re.compile("`+")
@@ -54,10 +56,13 @@ _BACKTICK_RUN = re.compile("`+")
 
 @dataclass
 class WriteGate:
-    """Per-session state for holding cells that change a database or existing files.
+    """Per-session state for holding cells that change a database, existing
+    files, or data behind an HTTP API.
 
     Present on a session only when the host turns the setting on. `begin_turn`
     records what the project and shared folders held when the turn began.
+    `http_rules` are the endpoints the operator lists as writes
+    (`write_approval_http`).
     """
 
     snapshots: tuple[ProjectSnapshot, ...] = ()
@@ -65,6 +70,7 @@ class WriteGate:
     # refused without a new card, so an unattended turn doesn't wait out the
     # timeout once per cell.
     unanswered: bool = False
+    http_rules: tuple[HttpWriteRule, ...] = ()
 
     async def begin_turn(self, *, manager: ScratchpadManager) -> None:
         self.unanswered = False
@@ -141,6 +147,34 @@ def _wholes(change: FileChange) -> str:
     return " and ".join(wholes)
 
 
+# How each call-write reads on the card and in the refusal.
+_CALL_VIA = {
+    "procedure": "run a stored procedure",
+    "sqlalchemy": "change data through SQLAlchemy",
+    "mongodb": "change data in MongoDB",
+    "dynamodb": "change data in DynamoDB",
+    "redis": "change data in Redis",
+    "elasticsearch": "change data in Elasticsearch",
+    "sql_file": "run a SQL file too big to check",
+}
+
+
+def _describe_calls(writes: CellWrites) -> list[str]:
+    """The first held data changes with no SQL text, for the refusal: what
+    each does and the code line it does it in. The card names every one."""
+    out = [f"{_CALL_VIA[call.via]} in {_code_span(call.call)}" for call in writes.calls[:_REFUSAL_PATHS]]
+    more = len(writes.calls) - _REFUSAL_PATHS
+    return out + ([f"make {more} more such data changes"] if more > 0 else [])
+
+
+def _describe_requests(writes: CellWrites) -> list[str]:
+    """The first held requests, for the refusal: the method and the URL.
+    The card names every one."""
+    out = [f"send {write.method} to {_code_span(_shown_path(write.url))}" for write in writes.http[:_REFUSAL_PATHS]]
+    more = len(writes.http) - _REFUSAL_PATHS
+    return out + ([f"send {more} more such requests"] if more > 0 else [])
+
+
 def _describe_files(writes: CellWrites) -> list[str]:
     """Each held file change for the refusal: the first paths it names, or
     the code that picks the path when it runs. The card names every path."""
@@ -162,7 +196,9 @@ def _summary(writes: CellWrites) -> str:
     parts = []
     if writes.sql:
         parts.append("change data in a connected source")
+    parts += _describe_calls(writes)
     parts += _describe_files(writes)
+    parts += _describe_requests(writes)
     if writes.unchecked:
         parts.append("run code the check couldn't read")
     return "; ".join(parts)
@@ -182,10 +218,16 @@ def _file_lines(change: FileChange, *, lead: str) -> list[str]:
     return lines
 
 
+def _http_method(method: str) -> str:
+    """A request's method as the card's prose names it: as it is, or as code
+    when the code picks it when it runs."""
+    return method if method.isalpha() else _code_span(_inert(method))
+
+
 def _card_prompt(writes: CellWrites) -> str:
-    """The card: every statement and every file change the step would make,
-    whole, since one Approve runs them all. Statements, paths and code go in
-    fences, so Cowork's Markdown shows them as written."""
+    """The card: every statement, file change and request the step would
+    make, whole, since one Approve runs them all. Statements, paths, URLs and
+    code go in fences, so Cowork's Markdown shows them as written."""
     lines = ["**Approve this change?**", ""]
     if writes.sql:
         lines += ["This step would change data in a connected source:", ""]
@@ -194,12 +236,22 @@ def _card_prompt(writes: CellWrites) -> str:
             lines += [_fence(text), ""]
         if any(write.run_time_parts for write in writes.sql):
             lines += ["A part in braces, `{...}`, is the code that fills in that value when the step runs.", ""]
+    for call in writes.calls:
+        lines += [f"This step would {_CALL_VIA[call.via]}:", "", _fence(call.call), ""]
     for change in writes.held_files:
         lines += _file_lines(change, lead=f"This step would {change.action}")
-    # An overwrite raises no card on its own, but the Approve runs it too.
-    for change in writes.overwrites:
-        lines += _file_lines(change, lead="This step would also overwrite")
-    if any(_shown_path(p) != p for change in writes.files for p in change.paths):
+    # An append, or an overwrite of a file the agent owns, raises no card on
+    # its own, but the Approve runs it too.
+    for change in writes.not_held_files:
+        also = "append to" if change.action == "append" else change.action
+        lines += _file_lines(change, lead=f"This step would also {also}")
+    for request in writes.http:
+        lines += [f"This step would send {_http_method(request.method)} to:", "", _fence(_shown_path(request.url)), "",
+                  _fence(request.call), ""]
+    if any(r.run_time_parts for r in writes.http) and not any(w.run_time_parts for w in writes.sql):
+        lines += ["A part in braces, `{...}`, is the code that fills in that value when the step runs.", ""]
+    shown = [*(p for change in writes.files for p in change.paths), *(r.url for r in writes.http)]
+    if any(_shown_path(p) != p for p in shown):
         lines += ["A name in quotes is written with escapes, as Python writes it: `\\n` is a line break "
                   "and `\\\\` a backslash.", ""]
     if writes.unchecked:
@@ -217,7 +269,7 @@ def _refusal(writes: CellWrites, cause: RefusalCause) -> ToolOutcome:
             f"Not run: this step would {_summary(writes)}. That needs the user's approval, "
             f"and {_WHY[cause]}. Nothing in this cell ran. The user didn't approve this "
             "change, so it must not be made another way: don't rewrite the cell, build the "
-            "statement or path at run time, or use another tool for it. Tell the user what "
+            "statement, path or URL at run time, or use another tool for it. Tell the user what "
             "the step would change and that it needs their approval."
         ),
         ok=True,
@@ -258,18 +310,24 @@ async def _ask_approval(session: ChatSession, writes: CellWrites) -> RefusalCaus
 
 
 def _log_decision(*, writes: CellWrites, status: DecisionStatus) -> None:
-    decision = WriteApprovalDecision(
-        kinds=writes.kinds(), count=len(writes.sql) + len(writes.files), status=status,
-    )
+    """Log what came of a cell: for one that ran with no card, the changes
+    it was let make (appends, and overwrites of the agent's own files);
+    otherwise what its card held."""
+    if status == "not_held":
+        kinds = tuple(sorted({f.action for f in writes.not_held_files}))
+        count = len(writes.not_held_files)
+    else:
+        kinds, count = writes.kinds(), len(writes.sql) + len(writes.calls) + len(writes.held_files) + len(writes.http)
+    decision = WriteApprovalDecision(kinds=kinds, count=count, status=status)
     # WARNING: hosts log at WARNING by default, and this line is the record of
     # a held write.
     logger.warning("write approval: %s", decision.model_dump_json())
 
 
 async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> ToolOutcome | None:
-    """Hold a cell that changes a database or existing files until the user
-    approves it. None when the cell may run; otherwise the refusal to return
-    in its place, before any of it runs.
+    """Hold a cell that changes a database, existing files, or data behind
+    an HTTP API until the user approves it. None when the cell may run;
+    otherwise the refusal to return in its place, before any of it runs.
 
     Only sessions with a `WriteGate` (the `write_approval` setting) check
     anything. A check that fails asks too, since it can't clear the cell.
@@ -286,14 +344,14 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
     try:
         writes = await asyncio.to_thread(
             find_cell_writes,
-            code=code, earlier_code=earlier, snapshots=gate.snapshots,
+            code=code, earlier_code=earlier, snapshots=gate.snapshots, http_rules=gate.http_rules,
         )
     except Exception as exc:
         # The type only, as for a failed question.
         logger.warning("write approval: the check failed (%s)", type(exc).__name__)
         writes = CellWrites(unchecked=True)
     if not writes.needs_approval():
-        if writes.overwrites:
+        if writes.not_held_files:
             _log_decision(writes=writes, status="not_held")
         return None
     try:

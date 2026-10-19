@@ -18,7 +18,20 @@ What it finds:
   statement only printed, logged or written to a file doesn't count, and
   neither does one run on an in-process DuckDB or SQLite handle. Any other
   handle, known or not, counts. ``to_sql`` into a database that isn't
-  in-process counts too.
+  in-process counts too. A statement hidden in a base64, base32, base16, hex
+  or rot13 literal that the cell decodes, or read from a literal-path SQL
+  file that exists (up to 1 MB), is decoded or read now and checked too.
+  CALL, EXEC and EXECUTE, a SELECT of a side-effecting function (``setval``,
+  ``pg_terminate_backend``, ``dblink_exec``, ``GET_LOCK`` and friends), a
+  SELECT ... INTO OUTFILE and a COPY ... TO a file all count.
+- **Data changes with no SQL text to quote**: a ``cursor.callproc``, a
+  SQLAlchemy Core or ORM write (``insert``/``update``/``delete`` constructs
+  passed to ``execute``, ``Table.drop``/``create`` and ``MetaData``'s
+  ``drop_all``/``create_all`` with an engine, ``session.query(...).delete()``,
+  and ``session.add``/``merge`` and the like with a commit or flush in the
+  cell), a non-SQL store's own method (pymongo, boto3 DynamoDB, a Redis
+  client, an Elasticsearch client), or a SQL file past the 1 MB cap, held
+  unchecked. The card quotes the line.
 - **Deletes, renames and moves** of a file or folder that was in the project
   folder (artifacts and the host's own files under ``.anton`` included) or the
   shared folder when the turn began, either folder itself included. The call
@@ -31,56 +44,85 @@ What it finds:
   from every folder the pad changes into. A target the code picks when it
   runs, from a root the check can't place, counts as well, because the check
   can't rule it out.
-- Both kinds inside a **function, lambda or method an earlier cell
+- **Overwrites** of a file that existed when the turn began: ``open`` in a
+  ``w``, ``w+`` or ``r+`` mode, ``Path.write_text`` and ``write_bytes``, a
+  pandas ``to_csv``, ``to_excel``, ``to_parquet``, ``to_json``,
+  ``to_feather``, ``to_pickle`` or ``to_html``, a ``pd.ExcelWriter``, a chart's
+  ``savefig``, any ``.save(path)`` (openpyxl, docx, pptx), a copy, rename,
+  replace or move onto it, a delete that a write to the same path follows on
+  every path through the code, and a write statement or ``to_sql`` on an
+  in-process SQLite or DuckDB handle that opens it. An append, and an
+  overwrite of a file the agent owns (one under ``.anton/artifacts``,
+  ``.anton/skill_drafts`` or ``.anton/output``, or one an earlier cell in the
+  conversation wrote), are reported but not held. ``open`` in an ``x`` mode
+  can't replace a file, so it isn't one.
+- **HTTP writes** through requests, httpx (their module functions, a
+  Session's or Client's methods, ``.request(method, ...)``) and urllib: every
+  PUT, PATCH and DELETE, a request whose method the code picks when it runs,
+  and any request whose method and URL match an endpoint the operator lists
+  (``HttpWriteRule``). A plain GET or POST isn't one, since many business APIs
+  read through POST.
+- All of these inside a **function, lambda or method an earlier cell
   defined**, at each place this cell calls it or passes it on, with its
   parameters read from the call: by its name, through an instance or the
   class, a list or dict that holds it, a ``functools.partial`` of it, or a
   function that returns it.
 
-What it can't find: a statement or path with no literal behind it, a stored
-procedure or function call (CALL, EXEC, SELECT f()) unless it is given the
-statement it runs as a literal, a write with no SQL text other than
-``to_sql``, a write through an HTTP or other non-SQL API, a shell command it
-can't read at all, and code in a module or script the cell imports or runs.
-An overwrite of an existing file's contents is reported as ``overwrite`` and
-isn't held, and so is a delete that a write to the same path follows on every
-path through the code.
+What it can't find: a statement or path with no literal behind it, a plain
+procedure call the check can't tie to a write it runs, a write through an API
+other than HTTP PUT, PATCH or DELETE or an operator-listed endpoint (aiohttp,
+an SDK such as boto3 outside DynamoDB), a store method on a receiver the check
+can't place, a shell command it can't read at all, a shell redirect or ``cp``
+onto an existing file, an overwrite whose path the code picks from a root the
+check can't place, and code in a module or script the cell imports or runs.
+An overwrite through a name the code picks when it runs, as in
+``f"exports/orders_{date.today()}.csv"``, counts as a new file, unless a
+listing (``glob``, ``os.listdir``, ``iterdir``) gave the name.
 """
 
 from __future__ import annotations
 
 import ast
 import fnmatch
+import logging
 import os
 import posixpath
 import re
 import shlex
+import stat
 import string
 import textwrap
 import threading
 import time
 import warnings
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from anton.core.backends.wire import heal_surrogate_source
 from anton.utils.datasources import scrub_output
 
 __all__ = [
+    "CallVia",
+    "CallWrite",
     "CellWrites",
     "FileChange",
+    "HttpWrite",
+    "HttpWriteRule",
     "ProjectSnapshot",
     "SqlWrite",
     "find_cell_writes",
+    "parse_http_write_rules",
     "snapshot_project_files",
     "write_statements",
 ]
+
+logger = logging.getLogger(__name__)
 
 # Folders recorded as entries but not walked: big, and never the agent's
 # answer. A path under one still counts as one that existed.
@@ -115,12 +157,29 @@ class SqlWrite(BaseModel):
     run_time_parts: bool = False
 
 
-class FileChange(BaseModel):
-    """One delete, rename, move or overwrite of an existing file."""
+# How a `CallWrite` changes data: a stored procedure, a SQLAlchemy construct
+# or session, a non-SQL store's own client, or SQL read from a file the check
+# couldn't read before the cell runs.
+CallVia = Literal["procedure", "sqlalchemy", "mongodb", "dynamodb", "redis", "elasticsearch", "sql_file"]
+
+
+class CallWrite(BaseModel):
+    """One call that changes data with no SQL text to quote: the card quotes
+    its code, scrubbed."""
 
     model_config = ConfigDict(frozen=True)
 
-    action: Literal["delete", "rename", "move", "overwrite"]
+    via: CallVia
+    call: str
+    line: int
+
+
+class FileChange(BaseModel):
+    """One delete, rename, move, overwrite or append of an existing file."""
+
+    model_config = ConfigDict(frozen=True)
+
+    action: Literal["delete", "rename", "move", "overwrite", "append"]
     # Snapshot paths, the shared folder's prefixed with "shared folder: ".
     # Empty when the code picks the path when it runs.
     paths: tuple[str, ...] = ()
@@ -128,6 +187,75 @@ class FileChange(BaseModel):
     whole_shared: bool = False
     call: str
     line: int
+    # False for a change that runs with no card and is logged as not held:
+    # an append, or an overwrite of a file the agent owns.
+    held: bool = True
+
+
+class HttpWrite(BaseModel):
+    """One HTTP request that may change data on a server, as the card names it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    # Upper case, or the code that picks it in braces, such as `{verb}`.
+    method: str
+    # Scrubbed, a part picked at run time shown as its code in braces.
+    url: str
+    call: str
+    line: int
+    run_time_parts: bool = False
+
+
+_HTTP_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"})
+
+
+class HttpWriteRule(BaseModel):
+    """One endpoint the operator lists as a write: a request whose method and
+    URL match it is held, a POST or GET included. `method` is upper case, or
+    `*` for any. In `url_glob`, `*` stands for any text within one path
+    segment, `**` for any text, and `?` for one character other than `/`;
+    it is matched, ignoring case, against the request's URL without its
+    query string (`_url_could_match`)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    method: str
+    url_glob: str
+
+    @field_validator("method")
+    @classmethod
+    def _known_method(cls, value: str) -> str:
+        method = value.upper()
+        if method != "*" and method not in _HTTP_METHODS:
+            raise ValueError(f"the method must be * or one of {', '.join(sorted(_HTTP_METHODS))}")
+        return method
+
+    @field_validator("url_glob")
+    @classmethod
+    def _one_word(cls, value: str) -> str:
+        if not value or any(ch.isspace() for ch in value):
+            raise ValueError("the URL must be one word")
+        return value
+
+
+def parse_http_write_rules(text: str) -> tuple[HttpWriteRule, ...]:
+    """The rules in the `write_approval_http` setting: entries separated by
+    newlines or commas, each a method and a URL glob, as in
+    `POST https://maestro.example.com/api/*/orders/*`. A bad entry is skipped
+    with a WARNING that names it."""
+    rules: list[HttpWriteRule] = []
+    for entry in (e.strip() for e in re.split(r"[\n,]", text)):
+        if not entry:
+            continue
+        words = entry.split()
+        try:
+            if len(words) != 2:
+                raise ValueError("an entry is a method and a URL")
+            rules.append(HttpWriteRule(method=words[0], url_glob=words[1]))
+        except (ValidationError, ValueError) as exc:
+            reason = exc.errors()[0]["msg"] if isinstance(exc, ValidationError) else str(exc)
+            logger.warning("write approval: skipped the HTTP write entry %r: %s", entry, reason)
+    return tuple(rules)
 
 
 class CellWrites(BaseModel):
@@ -136,23 +264,29 @@ class CellWrites(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     sql: tuple[SqlWrite, ...] = ()
+    calls: tuple[CallWrite, ...] = ()
     files: tuple[FileChange, ...] = ()
+    http: tuple[HttpWrite, ...] = ()
     unchecked: bool = False
 
     @property
     def held_files(self) -> tuple[FileChange, ...]:
-        return tuple(f for f in self.files if f.action != "overwrite")
+        return tuple(f for f in self.files if f.held)
 
     @property
-    def overwrites(self) -> tuple[FileChange, ...]:
-        return tuple(f for f in self.files if f.action == "overwrite")
+    def not_held_files(self) -> tuple[FileChange, ...]:
+        return tuple(f for f in self.files if not f.held)
 
     def needs_approval(self) -> bool:
-        return bool(self.sql or self.held_files or self.unchecked)
+        return bool(self.sql or self.calls or self.held_files or self.http or self.unchecked)
 
     def kinds(self) -> tuple[str, ...]:
+        """What the card holds, for the log."""
         kinds = ["sql"] if self.sql else []
-        kinds += sorted({f.action for f in self.files})
+        kinds += sorted({c.via for c in self.calls})
+        kinds += sorted({f.action for f in self.held_files})
+        if self.http:
+            kinds.append("http")
         if self.unchecked:
             kinds.append("unchecked")
         return tuple(kinds)
@@ -232,6 +366,26 @@ class ProjectSnapshot(BaseModel):
 
     def is_dir(self, *, rel: str) -> bool:
         return self.recorded(rel=rel) in self.dirs
+
+    def file_at_start(self, *, rel: str, made: _Made | None = None) -> str | None:
+        """The name a card gives `rel` when it was a file at turn start: its
+        recorded spelling, or, where the walk didn't record it (under an
+        unwalked folder, past the cap, or after a failed walk), `rel` when a
+        file is there, unless the turn changed it and `made`, what the pad's
+        cells write, made it new (`named`). None for a folder or a new file."""
+        found = self.recorded(rel=rel)
+        if found is not None:
+            return found if found in self.files else None
+        if not (self.failed or not self.complete or self._under_unwalked(rel)):
+            return None
+        try:
+            st = (self.root / rel).stat()
+        except OSError:
+            return None
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        changed = st.st_mtime >= self.taken_at
+        return None if changed and made is not None and made.new(snap=self, rel=rel) else rel
 
     def matching(self, *, pattern: str, made: _Made | None = None, disk: _DiskReads | None = None) -> list[str]:
         """Snapshot paths a glob-style pattern names, `*` within one folder and
@@ -507,6 +661,22 @@ _PRIVILEGE_WORDS = frozenset({
     "ALL", "UNLIMITED", "USAGE", "READ", "WRITE",
 })
 _EXPLAINED = frozenset({"SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE", "REPLACE", "UPSERT"})
+# Procedures that run the SQL text they are given: the check reads that text.
+_SQL_RUNNERS = frozenset({"POSTGRES_EXECUTE", "MYSQL_EXECUTE", "SP_EXECUTESQL", "IMMEDIATE"})
+# Functions a SELECT can call that change data, the server's state or its files.
+_SIDE_EFFECTS = frozenset({
+    # Postgres
+    "SETVAL", "NEXTVAL", "SET_CONFIG", "PG_TERMINATE_BACKEND", "PG_CANCEL_BACKEND", "PG_RELOAD_CONF",
+    "PG_ROTATE_LOGFILE", "PG_SWITCH_WAL", "PG_PROMOTE", "PG_STAT_RESET", "PG_CREATE_RESTORE_POINT",
+    "PG_CREATE_LOGICAL_REPLICATION_SLOT", "PG_CREATE_PHYSICAL_REPLICATION_SLOT", "PG_DROP_REPLICATION_SLOT",
+    "PG_FILE_WRITE", "LO_UNLINK", "LO_IMPORT", "LO_EXPORT", "LO_CREATE", "LO_FROM_BYTEA", "LO_PUT",
+    "DBLINK_EXEC", "PG_ADVISORY_LOCK", "PG_ADVISORY_LOCK_SHARED", "PG_ADVISORY_XACT_LOCK",
+    "PG_ADVISORY_XACT_LOCK_SHARED", "PG_TRY_ADVISORY_LOCK", "PG_TRY_ADVISORY_LOCK_SHARED",
+    "PG_TRY_ADVISORY_XACT_LOCK", "PG_TRY_ADVISORY_XACT_LOCK_SHARED", "PG_ADVISORY_UNLOCK",
+    "PG_ADVISORY_UNLOCK_SHARED", "PG_ADVISORY_UNLOCK_ALL",
+    # MySQL
+    "GET_LOCK", "RELEASE_LOCK", "RELEASE_ALL_LOCKS",
+})
 # Stands in for an f-string placeholder or a name in a `+` chain. The reader
 # numbers each one between two private-use characters, which source text
 # doesn't hold, so the card can show the code that fills it in and never
@@ -525,13 +695,15 @@ class _Token:
     written), "name" (a quoted, backticked or bracketed name), "hole" (a part
     picked at run time), "text" (a quoted literal), "group" (a parenthesized
     part: `text` its first word, `words` every word and `texts` every quoted
-    literal in it) or "punct" (any other character).
+    literal in it) or "punct" (any other character). `glued` means no space
+    separates it from the token before it, as in `refresh(1)`.
     """
 
     kind: Literal["word", "name", "hole", "text", "group", "punct"]
     text: str
     raw: str = ""
     line_start: bool = False
+    glued: bool = False
     words: tuple[str, ...] = ()
     texts: tuple[str, ...] = ()
 
@@ -553,17 +725,18 @@ def _statements(text: str, *, hash_comments: bool = False) -> Iterator[_Statemen
     inner: list[str] = []
     inner_texts: list[str] = []
     depth = 0
-    group_line_start = False
+    group_line_start = group_glued = False
     start = end = 0
     gap_from = 0
 
     def close_group() -> None:
         tokens.append(_Token(kind="group", text=inner[0] if inner else "", line_start=group_line_start,
-                             words=tuple(inner), texts=tuple(inner_texts)))
+                             glued=group_glued, words=tuple(inner), texts=tuple(inner_texts)))
 
     for m in (_HASH_COMMENT_TOKEN if hash_comments else _TOKEN).finditer(text):
         kind = m.lastgroup
         line_start = _LINE_BREAK.search(text, gap_from, m.start()) is not None
+        glued = gap_from == m.start()
         gap_from = m.end()
         if kind == "comment":
             continue
@@ -579,7 +752,7 @@ def _statements(text: str, *, hash_comments: bool = False) -> Iterator[_Statemen
         end = m.end()
         if kind == "open":
             if not depth:
-                inner, inner_texts, group_line_start = [], [], line_start
+                inner, inner_texts, group_line_start, group_glued = [], [], line_start, glued
             depth += 1
         elif kind == "close":
             if depth:
@@ -949,7 +1122,7 @@ def _with_writes(tokens: Sequence[_Token]) -> bool:
             j += 1
         if j >= len(tokens) or tokens[j].kind != "group":
             return False
-        if tokens[j].text in _DML:
+        if tokens[j].text in _DML or _SIDE_EFFECTS & set(tokens[j].words):
             return True
         j += 1
         if not _punct(tokens, j, ","):
@@ -958,7 +1131,33 @@ def _with_writes(tokens: Sequence[_Token]) -> bool:
     return _writes(tokens[j:])
 
 
+def _select_writes(tokens: Sequence[_Token]) -> bool:
+    """SELECT ... INTO a new table or a server file, or a SELECT that calls a
+    function that changes something."""
+    return _select_into(tokens) or _calls_side_effect(tokens)
+
+
+def _calls_side_effect(tokens: Sequence[_Token]) -> bool:
+    """Whether a statement calls a function in `_SIDE_EFFECTS`, at its top
+    level or in a parenthesized part, takes a sequence's `.NEXTVAL`, or gives
+    dblink a write as a quoted literal."""
+    for k, t in enumerate(tokens):
+        if t.kind == "group" and _SIDE_EFFECTS & set(t.words):
+            return True
+        if t.kind != "word":
+            continue
+        called = k + 1 < len(tokens) and tokens[k + 1].kind == "group"
+        if called and t.text in _SIDE_EFFECTS or t.text == "NEXTVAL" and _punct(tokens, k - 1, "."):
+            return True
+        if called and t.text == "DBLINK" and any(write_statements(_unquoted(s)) for s in tokens[k + 1].texts):
+            return True
+    return False
+
+
 def _select_into(tokens: Sequence[_Token]) -> bool:
+    # MySQL writes a file on the database server, wherever the INTO sits.
+    if any(_word(tokens, i) == "INTO" and _word(tokens, i + 1) in ("OUTFILE", "DUMPFILE") for i in range(len(tokens))):
+        return True
     into = next((i for i in range(len(tokens)) if _word(tokens, i) == "INTO"), None)
     if into is None:
         return False
@@ -968,9 +1167,8 @@ def _select_into(tokens: Sequence[_Token]) -> bool:
     # A variable (@v, :v) or a T-SQL temp table (#t) holds nothing that lasts.
     if _punct(tokens, into + 1, "@#:") or _word(tokens, into + 1) in _TEMP:
         return False
-    if into + 1 == len(tokens) and not _sentence_case(tokens[0]) or _word(tokens, into + 1) in ("OUTFILE", "DUMPFILE"):
-        # The table comes after the text ends; MySQL writes a file on the
-        # database's server.
+    if into + 1 == len(tokens) and not _sentence_case(tokens[0]):
+        # The table comes after the text ends.
         return True
     i = into + 1
     while _word(tokens, i) in ("UNLOGGED", "TABLE"):
@@ -986,7 +1184,13 @@ def _select_into(tokens: Sequence[_Token]) -> bool:
 def _copy_writes(tokens: Sequence[_Token]) -> bool:
     """COPY [INTO] t FROM a file, STDIN, a program, a stage, a query or a
     placeholder, not prose such as "Copy data from the March export"; into a
-    Snowflake stage, from any table."""
+    Snowflake stage, from any table; or Postgres's COPY ... TO a file or
+    program on the database server."""
+    to = next((k for k in range(1, len(tokens)) if _word(tokens, k) == "TO"), None)
+    if to is not None and not _sentence_case(tokens[0]) and (
+        to + 1 < len(tokens) and tokens[to + 1].kind == "text" or _word(tokens, to + 1) == "PROGRAM"
+    ):
+        return True
     i = 2 if _word(tokens, 1) == "INTO" else 1
     stage = _punct(tokens, i, "@")
     if stage:
@@ -1067,11 +1271,43 @@ def _do_writes(tokens: Sequence[_Token]) -> bool:
 
 
 def _call_writes(tokens: Sequence[_Token]) -> bool:
-    """CALL, EXEC or EXECUTE given a write as a quoted literal, as DuckDB's
-    postgres_execute, T-SQL's sp_executesql and Snowflake's EXECUTE
-    IMMEDIATE take one. A plain procedure call stays unread."""
+    """CALL, EXEC or EXECUTE. A procedure can change anything, so a call
+    counts, except one that runs SQL text the check reads instead (DuckDB's
+    postgres_execute, T-SQL's sp_executesql and EXEC ('...'), EXECUTE
+    IMMEDIATE) and DuckDB's pragma and catalog functions.
+
+    A lowercase verb counts only before `name(`: `call volume` and
+    `execute the plan` are prose. A capitalized one never does."""
+    if _sentence_case(tokens[0]):
+        return False
+    i = 4 if _punct(tokens, 1, "@") and _punct(tokens, 3, "=") else 1  # T-SQL's EXEC @status = p
+    if i < len(tokens) and tokens[i].kind == "group":
+        return _runs_writes(tokens[i:])
+    if _punct(tokens, i, "@"):
+        return tokens[0].raw.isupper()  # T-SQL's EXEC @procedure: picked when it runs
+    j = _name_end(tokens, i)
+    if j is None:
+        return False
+    name = tokens[j - 1].text.upper()
+    if name in _SQL_RUNNERS:
+        return _runs_writes(tokens[j:])
+    if name.startswith(("PRAGMA_", "DUCKDB_")):
+        return False
+    if j < len(tokens) and tokens[j].kind == "group" and tokens[j].glued:
+        return True
+    if not tokens[0].raw.isupper():
+        return False
+    # MySQL's CALL p, or T-SQL's EXEC p @a = 1, 'x', 2.
+    return j == len(tokens) or tokens[j].kind in ("group", "hole", "text") or (
+        tokens[j].kind == "punct" and (tokens[j].text in "@-" or tokens[j].text.isdigit())
+    )
+
+
+def _runs_writes(tokens: Sequence[_Token]) -> bool:
+    """Whether the SQL text a runner is given writes: one of its quoted
+    literals does, or it has none, so what it runs is picked when it runs."""
     literals = [t.text for t in tokens if t.kind == "text"] + [s for t in tokens for s in t.texts]
-    return any(write_statements(_unquoted(s)) for s in literals)
+    return not literals or any(write_statements(_unquoted(s)) for s in literals)
 
 
 def _unquoted(literal: str) -> str:
@@ -1095,7 +1331,7 @@ _RULES: dict[str, Callable[[Sequence[_Token]], bool]] = {
     "GRANT": _grant_writes,
     "REVOKE": _grant_writes,
     "WITH": _with_writes,
-    "SELECT": _select_into,
+    "SELECT": _select_writes,
     "COPY": _copy_writes,
     "EXPLAIN": _explain_writes,
     "LOAD": _load_writes,
@@ -1258,8 +1494,8 @@ _MOVE_FUNCS = {
     "pathlib.PosixPath.rename": "rename", "pathlib.PosixPath.replace": "rename",
 }
 _COPY_FUNCS = frozenset({"shutil.copy", "shutil.copy2", "shutil.copyfile"})
-# Modules and classes that hold a delete, a move or a shell call, for a
-# lookup by a name the check computes (`_FileFinder.lookup`).
+# Modules and classes that hold a delete, a move, a copy or a shell call, for
+# a lookup by a name the check computes (`_FileFinder.lookup`).
 _LOOKUP_MODULES = frozenset({
     "os", "shutil", "pathlib", "pathlib.Path", "pathlib.PosixPath", "send2trash", "subprocess",
 })
@@ -1304,9 +1540,15 @@ _SHELL_SEPARATORS = frozenset({";", "&&", "||", "|", "&", "(", ")", "|&", ";;"})
 _CWD_LIMIT = 16
 # Calls into earlier cells' functions followed from one call in this cell.
 _CALL_DEPTH = 4
-_WRITER_METHODS = frozenset({
-    "write_text", "write_bytes", "to_csv", "to_excel", "to_parquet", "to_json", "savefig",
-})
+# Methods that write the file their first argument names, and the keywords
+# that can name it instead.
+_WRITER_METHODS = {
+    "to_csv": ("path_or_buf",), "to_json": ("path_or_buf",), "to_excel": ("excel_writer",),
+    "to_parquet": ("path",), "to_feather": ("path",), "to_pickle": ("path",), "to_html": ("buf",),
+    "savefig": ("fname",), "save": ("filename", "fp", "path", "file"),
+}
+# Folders under the project whose files are the agent's own output.
+_AGENT_FOLDERS = tuple(f".anton/{name}/" for name in sorted(_ANTON_WALKED))
 _PATH_TYPES = frozenset({"pathlib.Path", "pathlib.PurePath", "pathlib.PosixPath", "pathlib.PurePosixPath"})
 _PATH_MAKERS = frozenset({"glob", "rglob", "iterdir", "resolve", "absolute", "with_suffix",
                           "with_name", "with_stem", "joinpath", "expanduser"})
@@ -1326,6 +1568,12 @@ class _Unknown:
 
 _UNKNOWN = _Unknown()
 _TEMP_PATH = "\x00temp"
+# Stands in for a part of a path the code picks when it runs from a value the
+# check can't read, as in f"orders_{date.today()}.csv". `_locate` reads it as
+# `*`; for an overwrite it makes the path a new file (`_FileFinder.overwrite`).
+# A listing's own wildcard, as from glob() or os.listdir(), stays `*`: it
+# names files that exist.
+_RUN_TIME_PART = "\x01"
 # Stands in for a literal-command operand that isn't a literal.
 _NOT_LITERAL = "\x00"
 _PARAM_DEPTH = 5
@@ -1535,11 +1783,8 @@ class _Cell:
         """Whether `node` sits in a branch that never runs, as under `if False:`."""
         child, parent = node, self.parents.get(node)
         while parent is not None:
-            if isinstance(parent, (ast.If, ast.While)) and isinstance(parent.test, ast.Constant):
-                if child in parent.body and not parent.test.value:
-                    return True
-                if isinstance(parent, ast.If) and child in parent.orelse and parent.test.value:
-                    return True
+            if _never_runs(parent=parent, child=child):
+                return True
             child, parent = parent, self.parents.get(parent)
         return False
 
@@ -1590,6 +1835,31 @@ def _inside(node: ast.AST, ancestor: ast.AST, cell: _Cell) -> bool:
             return True
         current = cell.parents.get(current)
     return False
+
+
+def _never_runs(*, parent: ast.AST, child: ast.AST) -> bool:
+    """Whether `child` sits in a branch of `parent` that never runs: the body
+    of an if or while whose test is a constant false (`if False:`, `if 0:`,
+    `while False:`), or the else of an if whose test is a constant true."""
+    if not (isinstance(parent, (ast.If, ast.While)) and isinstance(parent.test, ast.Constant)):
+        return False
+    if child in parent.body:
+        return not parent.test.value
+    return isinstance(parent, ast.If) and child in parent.orelse and bool(parent.test.value)
+
+
+def _nodes_that_run(root: ast.AST) -> Iterator[ast.AST]:
+    """The nodes of `root`, in `ast.walk` order, that run when `root` runs.
+    Code under an if, loop, try or with counts. A function or lambda defined
+    inside `root` runs only when called, so its code doesn't count, and nor
+    does code in a branch that never runs (`_never_runs`)."""
+    todo = deque([root])
+    while todo:
+        node = todo.popleft()
+        if node is not root and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        todo.extend(c for c in ast.iter_child_nodes(node) if not _never_runs(parent=node, child=c))
+        yield node
 
 
 def _class_member(*, cls: ast.ClassDef, name: str) -> Function | None:
@@ -1674,9 +1944,11 @@ def _ran_before(node: ast.AST, binding: _Binding, *, cell: _Cell) -> bool:
 class _Reader:
     """Reads one cell against the conversation's earlier cells."""
 
-    def __init__(self, cells: list[_Cell], *, current: _Cell) -> None:
+    def __init__(self, cells: list[_Cell], *, current: _Cell, project_root: Path | None = None) -> None:
         self.cells = cells
         self.current = current
+        # The turn's project root, to read a literal relative SQL-file path.
+        self.project_root = project_root
         self._cells_by_node: dict[ast.AST, _Cell] = {}
         self.imports: dict[str, str] = {}
         self.functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
@@ -2150,7 +2422,7 @@ class _Reader:
                 if isinstance(inner, _Unknown) or _TEMP_PATH in inner:
                     if parts == [""]:
                         return inner
-                    inner = ["*"]
+                    inner = [_RUN_TIME_PART]
                 parts = [p + i for p in parts for i in inner]
             return parts
         if isinstance(node, ast.BinOp):
@@ -2164,7 +2436,7 @@ class _Reader:
                 # Two lists added: each element of either.
                 return right if isinstance(right, _Unknown) else left + right
             if isinstance(right, _Unknown):
-                right = ["*"]
+                right = [_RUN_TIME_PART]
             if isinstance(node.op, ast.Div):
                 return [_join(a, b) for a in left for b in right]
             if isinstance(node.op, ast.Add):
@@ -2337,7 +2609,7 @@ class _Reader:
             if isinstance(got, _Unknown):
                 if sequence:
                     return got
-                got = ["*"]
+                got = [_RUN_TIME_PART]
             if sequence:
                 out += got
                 continue
@@ -2400,7 +2672,7 @@ class _Reader:
                 return out
             for a in args[1:]:
                 more = self.paths(a, cell=cell, depth=depth + 1)
-                more = ["*"] if isinstance(more, _Unknown) else more
+                more = [_RUN_TIME_PART] if isinstance(more, _Unknown) else more
                 out = [_join(p, m) for p in out for m in more]
             return out
         if name in ("os.path.abspath", "os.path.realpath", "os.path.normpath",
@@ -2442,12 +2714,12 @@ class _Reader:
                 out = base
                 for a in args:
                     more = self.paths(a, cell=cell, depth=depth + 1)
-                    more = ["*"] if isinstance(more, _Unknown) else more
+                    more = [_RUN_TIME_PART] if isinstance(more, _Unknown) else more
                     out = [_join(p, m) for p in out for m in more]
                 return out
             if method in ("with_name", "with_suffix", "with_stem"):
                 part = self.paths(args[0], cell=cell, depth=depth + 1) if args else _UNKNOWN
-                parts = ["*"] if isinstance(part, _Unknown) else part
+                parts = [_RUN_TIME_PART] if isinstance(part, _Unknown) else part
                 return [_with_part(b, method, p) for b in base for p in parts]
         return _UNKNOWN
 
@@ -2543,6 +2815,36 @@ class _Reader:
                  and isinstance(n.func, ast.Attribute) and n.func.attr in _EXECUTE]
         return bool(calls) and all(self.is_local_handle(c.func.value) for c in calls)
 
+    # ── SQL read from a file ───────────────────────────────────────────────
+
+    def read_sql_file(self, path: str) -> str | None:
+        """The text of the file a literal path names, read at check time to
+        check its statements; None when no file sits there.
+
+        An absolute path is read as it is, a relative one from the turn's
+        project root. Past the 1 MB cap it reads as None here, and
+        `oversized_sql_file` holds the read unchecked instead.
+        """
+        if self.project_root is None and not os.path.isabs(path):
+            return None
+        full = Path(path) if os.path.isabs(path) else self.project_root / path
+        try:
+            if not full.is_file() or full.stat().st_size > _SQL_FILE_CAP:
+                return None
+            return full.read_text(errors="replace")
+        except OSError:
+            return None
+
+    def oversized_sql_file(self, path: str) -> bool:
+        """Whether a literal path names a file past the 1 MB cap."""
+        if self.project_root is None and not os.path.isabs(path):
+            return False
+        full = Path(path) if os.path.isabs(path) else self.project_root / path
+        try:
+            return full.is_file() and full.stat().st_size > _SQL_FILE_CAP
+        except OSError:
+            return False
+
 
 def _is_motherduck(database: str) -> bool:
     return database.lower().startswith(("md:", "motherduck:"))
@@ -2615,6 +2917,71 @@ def _with_part(path: str, method: str, part: str) -> str:
 
 _PERCENT = re.compile(r"%(?:\((\w+)\))?[-#0 +]*(?:\d+|\*)?(?:\.\d+)?([diouxXeEfFgGcrsa%])")
 
+# Calls that decode a literal into text at run time: the check decodes it now
+# and checks its statements, so SQL hidden in one still shows.
+_DECODERS = frozenset({
+    "base64.b64decode", "base64.standard_b64decode", "base64.urlsafe_b64decode",
+    "base64.b32decode", "base64.b16decode", "bytes.fromhex", "codecs.decode",
+})
+# Encodings `codecs.decode(literal, enc)` is read through, text in and out.
+_CODEC_ENCODINGS = frozenset({"hex", "hex_codec", "rot13", "rot_13", "rot-13", "base64", "base_64", "base64_codec"})
+# A SQL file read whole past this many bytes is held unchecked, not read.
+_SQL_FILE_CAP = 1_000_000
+_FILE_READERS = frozenset({"read", "read_text"})
+_OPEN_CALLS = frozenset({"open", "io.open"})
+
+
+def _decoded_text(name: str, literal: ast.AST, encoding: ast.AST | None) -> str | None:
+    """`name(literal)` decoded at check time, as the cell would decode it; None
+    when `literal` isn't a string or bytes literal, or the decode fails."""
+    import base64
+    import codecs
+
+    if not (isinstance(literal, ast.Constant) and isinstance(literal.value, (str, bytes))):
+        return None
+    value = literal.value
+    try:
+        if name == "bytes.fromhex":
+            return bytes.fromhex(value if isinstance(value, str) else value.decode()).decode("utf-8", "replace")
+        if name == "codecs.decode":
+            enc = encoding.value if isinstance(encoding, ast.Constant) and isinstance(encoding.value, str) else ""
+            if enc.lower().replace("-", "_") not in {e.replace("-", "_") for e in _CODEC_ENCODINGS}:
+                return None
+            got = codecs.decode(value, enc)
+            return got if isinstance(got, str) else got.decode("utf-8", "replace")
+        fn = {
+            "base64.b64decode": base64.b64decode, "base64.standard_b64decode": base64.standard_b64decode,
+            "base64.urlsafe_b64decode": base64.urlsafe_b64decode,
+            "base64.b32decode": base64.b32decode, "base64.b16decode": base64.b16decode,
+        }[name]
+        return fn(value).decode("utf-8", "replace")
+    except (ValueError, TypeError, UnicodeError, LookupError, KeyError):
+        return None
+
+
+def _file_path_literal(node: ast.AST, reader: _Reader) -> str | None:
+    """The literal path `open('x')` or `Path('x')` names; None otherwise."""
+    if not isinstance(node, ast.Call) or not node.args:
+        return None
+    name = reader.dotted(node.func)
+    if name in _OPEN_CALLS or name in _PATH_TYPES:
+        arg = node.args[0]
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            return arg.value
+    return None
+
+
+def _sql_file_path(node: ast.Call, reader: _Reader) -> str | None:
+    """The literal path a file read names: `open('x').read()` or
+    `Path('x').read_text()`; None when the call isn't one."""
+    if not (isinstance(node.func, ast.Attribute) and node.func.attr in _FILE_READERS and not node.args):
+        return None
+    receiver = node.func.value
+    if node.func.attr == "read" and not (isinstance(receiver, ast.Call)
+                                         and reader.dotted(receiver.func) in _OPEN_CALLS):
+        return None
+    return _file_path_literal(receiver, reader)
+
 
 def _sql_text(
     node: ast.AST, reader: _Reader, *, parts: list[ast.AST] | None = None, depth: int = 0,
@@ -2685,8 +3052,20 @@ def _chain_text(node: ast.BinOp, reader: _Reader, *, parts: list[ast.AST], depth
 
 
 def _call_text(node: ast.Call, reader: _Reader, *, parts: list[ast.AST], depth: int) -> str | None:
-    if reader.dotted(node.func) in _SQL_WRAPPERS and node.args:
+    name = reader.dotted(node.func)
+    if name in _SQL_WRAPPERS and node.args:
         return _sql_text(node.args[0], reader, parts=parts, depth=depth + 1)
+    if name in _DECODERS and node.args:
+        decoded = _decoded_text(name, node.args[0], node.args[1] if len(node.args) > 1 else None)
+        if decoded is not None:
+            parts.append(node)
+            return decoded
+    path = _sql_file_path(node, reader)
+    if path is not None:
+        text = reader.read_sql_file(path)
+        if text is not None:
+            parts.append(node)
+        return text
     if not isinstance(node.func, ast.Attribute):
         return None
     method = node.func.attr
@@ -3335,6 +3714,219 @@ def _sql_findings(
     return out
 
 
+# ── Call findings (no SQL text) ─────────────────────────────────────────────
+
+# pymongo methods distinctive enough to hold on any receiver.
+_MONGO_WRITES = frozenset({
+    "insert_one", "insert_many", "update_one", "update_many", "replace_one", "delete_one", "delete_many",
+    "bulk_write", "find_one_and_update", "find_one_and_replace", "find_one_and_delete",
+    "drop_collection", "drop_database",
+})
+# boto3 DynamoDB writes, distinctive enough to hold on any receiver.
+_DYNAMO_WRITES = frozenset({
+    "put_item", "update_item", "delete_item", "batch_write_item", "transact_write_items",
+    "delete_table", "create_table",
+})
+# Elasticsearch writes distinctive enough to hold on any receiver.
+_ES_DISTINCT = frozenset({"delete_by_query", "update_by_query"})
+# Redis writes, held only on a redis client, since the names are shared.
+_REDIS_WRITES = frozenset({
+    "flushdb", "flushall", "set", "delete", "hset", "hdel", "lpush", "rpush",
+    "sadd", "srem", "zadd", "zrem", "expire", "incr",
+})
+# Elasticsearch writes held only on an Elasticsearch client, since the names are shared.
+_ES_WRITES = frozenset({"index", "delete", "update", "bulk"})
+# SQLAlchemy session writes that take effect on a commit or flush in the cell.
+_SA_SESSION_WRITES = frozenset({"add", "add_all", "delete", "merge", "bulk_save_objects"})
+_SA_CONSTRUCTS = frozenset({"insert", "update", "delete"})
+_SA_SESSION_MAKERS = frozenset({
+    "Session", "sessionmaker", "scoped_session", "async_sessionmaker", "AsyncSession",
+})
+_ENGINE_NAMES = frozenset({"engine", "conn", "connection", "bind", "con", "e", "eng", "cx"})
+_ENGINE_MAKERS = frozenset({"sqlalchemy.create_engine", "create_engine"})
+
+
+def _constructor_kind(name: str) -> CallVia | None:
+    """The store a constructor opens: `redis`, `elasticsearch` or `mongodb`."""
+    parts = name.split(".")
+    last = parts[-1]
+    if "redis" in parts and last in ("Redis", "StrictRedis", "from_url"):
+        return "redis"
+    if "elasticsearch" in parts and last in ("Elasticsearch", "AsyncElasticsearch"):
+        return "elasticsearch"
+    if last == "MongoClient":
+        return "mongodb"
+    return None
+
+
+def _client_kind(node: ast.AST, reader: _Reader, *, depth: int = 0) -> CallVia | None:
+    """The store a receiver belongs to, followed through subscripts, attribute
+    chains, bindings and call arguments to the constructor that opened it."""
+    if depth > 8:
+        return None
+    if isinstance(node, ast.Call):
+        kind = _constructor_kind(reader.dotted(node.func))
+        if kind is not None:
+            return kind
+        return _client_kind(node.func.value, reader, depth=depth + 1) if isinstance(node.func, ast.Attribute) else None
+    if isinstance(node, (ast.Subscript, ast.Attribute)):
+        return _client_kind(node.value, reader, depth=depth + 1)
+    if isinstance(node, ast.Name):
+        arg = reader.argument_of(node)
+        if arg is not None:
+            return _client_kind(arg.node, reader, depth=depth + 1)
+        for b in reader.bindings_of(node.id, node=node):
+            if b.how in ("value", "context", "element"):
+                kind = _client_kind(b.value, reader, depth=depth + 1)
+                if kind is not None:
+                    return kind
+    return None
+
+
+def _is_sa_construct(arg: ast.AST, reader: _Reader, *, depth: int = 0) -> bool:
+    """Whether `arg` is a SQLAlchemy `insert`/`update`/`delete` construct or a
+    `table.insert()`/`update()`/`delete()`, directly, through a name, or at the
+    base of a `.where(...).values(...)` builder chain."""
+    if depth > 8:
+        return False
+    if isinstance(arg, ast.Call):
+        parts = reader.dotted(arg.func).split(".")
+        if parts[0] == "sqlalchemy" and parts[-1] in _SA_CONSTRUCTS:
+            return True
+        if isinstance(arg.func, ast.Attribute):
+            if arg.func.attr in _SA_CONSTRUCTS and not arg.args and not arg.keywords:
+                return True
+            return _is_sa_construct(arg.func.value, reader, depth=depth + 1)
+        return False
+    if isinstance(arg, ast.Name):
+        return any(b.how == "value" and _is_sa_construct(b.value, reader, depth=depth + 1)
+                   for b in reader.bindings_of(arg.id, node=arg))
+    return False
+
+
+def _engine_arg(call: ast.Call, reader: _Reader) -> bool:
+    """Whether `.drop(x)`/`.create(x)` passes an engine or connection, so it is
+    a SQLAlchemy table drop or create, not a DataFrame's `.drop('col')`."""
+    arg = call.args[0] if call.args else next(
+        (k.value for k in call.keywords if k.arg in ("bind", "engine", "con", "connection")), None
+    )
+    if isinstance(arg, ast.Name):
+        if arg.id.lower() in _ENGINE_NAMES:
+            return True
+        return any(b.how == "value" and isinstance(b.value, ast.Call)
+                   and reader.dotted(b.value.func) in _ENGINE_MAKERS
+                   for b in reader.bindings_of(arg.id, node=arg))
+    if isinstance(arg, ast.Call):
+        return reader.dotted(arg.func) in _ENGINE_MAKERS
+    return False
+
+
+def _is_sa_session(node: ast.AST, reader: _Reader, *, depth: int = 0) -> bool:
+    """Whether `node` is a SQLAlchemy session: a name that reads as one, or a
+    value a session maker gave."""
+    if depth > 6:
+        return False
+    if isinstance(node, ast.Name):
+        if "sess" in node.id.lower():
+            return True
+        arg = reader.argument_of(node)
+        if arg is not None:
+            return _is_sa_session(arg.node, reader, depth=depth + 1)
+        return any(b.how in ("value", "context") and _is_sa_session(b.value, reader, depth=depth + 1)
+                   for b in reader.bindings_of(node.id, node=node))
+    if isinstance(node, ast.Call):
+        if reader.dotted(node.func).split(".")[-1] in _SA_SESSION_MAKERS:
+            return True
+        # A session a maker built, as in `sessionmaker(engine)()`.
+        return isinstance(node.func, ast.Call) and _is_sa_session(node.func, reader, depth=depth + 1)
+    return False
+
+
+def _sqlalchemy_write(call: ast.Call, reader: _Reader, *, commits: bool) -> bool:
+    func = call.func
+    if not isinstance(func, ast.Attribute):
+        return False
+    method, recv = func.attr, func.value
+    if method in _EXECUTE and call.args and not reader.is_local_handle(recv):
+        return _is_sa_construct(call.args[0], reader)
+    if method in ("drop_all", "create_all") and (call.args or call.keywords):
+        return True
+    if method in ("drop", "create") and _engine_arg(call, reader):
+        return True
+    if method in ("delete", "update") and _on_a_query(recv):
+        return True
+    return method in _SA_SESSION_WRITES and commits and _is_sa_session(recv, reader)
+
+
+def _on_a_query(node: ast.AST) -> bool:
+    """Whether `node` is a `session.query(...)`, down a `.filter(...)` chain."""
+    while isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        if node.func.attr == "query":
+            return True
+        node = node.func.value
+    return False
+
+
+def _call_write_kind(call: ast.Call, reader: _Reader, *, commits: bool) -> CallVia | None:
+    """What a call changes with no SQL text to quote, or None when it changes
+    nothing the check holds."""
+    func = call.func
+    if not isinstance(func, ast.Attribute):
+        return None
+    method, recv = func.attr, func.value
+    if method == "callproc" and not reader.is_local_handle(recv):
+        return "procedure"
+    if method in _MONGO_WRITES:
+        return "mongodb"
+    if method == "drop" and _client_kind(recv, reader) == "mongodb":
+        return "mongodb"
+    if method in _DYNAMO_WRITES:
+        return "dynamodb"
+    if method in _ES_DISTINCT:
+        return "elasticsearch"
+    if method == "delete" and isinstance(recv, ast.Attribute) and recv.attr == "indices":
+        return "elasticsearch"
+    if method in _REDIS_WRITES or method in _ES_WRITES:
+        kind = _client_kind(recv, reader)
+        if kind == "redis" and method in _REDIS_WRITES:
+            return "redis"
+        if kind == "elasticsearch" and method in _ES_WRITES:
+            return "elasticsearch"
+    return "sqlalchemy" if _sqlalchemy_write(call, reader, commits=commits) else None
+
+
+def _call_findings(
+    reader: _Reader, cell: _Cell, *, root: ast.AST | None = None, report: _Report | None = None,
+) -> list[CallWrite]:
+    """The data changes a cell makes with no SQL text to quote: a stored
+    procedure, a SQLAlchemy construct, a non-SQL store's own method, or SQL
+    read from a file too big to check. With `root`, the ones a function of the
+    cell makes, reported at `report`, the call in the checked cell."""
+    top = cell.tree if root is None else root
+    commits = any(
+        isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in ("commit", "flush")
+        for n in ast.walk(top)
+    )
+    out: list[CallWrite] = []
+
+    def add(via: CallVia, node: ast.AST) -> None:
+        line = report.line if report else cell.host_line or getattr(node, "lineno", 0)
+        call = report.call if report else scrub_output(cell.source(node))
+        out.append(CallWrite(via=via, call=call, line=line))
+
+    for node in ast.walk(top):
+        if not isinstance(node, ast.Call):
+            continue
+        via = _call_write_kind(node, reader, commits=commits)
+        if via is not None:
+            add(via, node)
+        elif isinstance(node.func, ast.Attribute) and node.func.attr in _FILE_READERS:
+            path = _sql_file_path(node, reader)
+            if path is not None and reader.oversized_sql_file(path) and _reaches_a_runner(node, reader):
+                add("sql_file", node)
+    return out
+
+
 # ── File findings ─────────────────────────────────────────────────────────
 
 class _Targets(BaseModel):
@@ -3384,7 +3976,8 @@ class _Made:
             else:
                 candidates = [_join(c, pattern) for c in self.cwds]
             for candidate in candidates:
-                found = _relative(candidate, snap)
+                # A part picked at run time names any text, as in `_locate`.
+                found = _relative(candidate.replace(_RUN_TIME_PART, "*"), snap)
                 if found is not None and glob_match(key, snap.key(found)):
                     return True
         return False
@@ -3417,17 +4010,20 @@ def _locate(
     *,
     cwds: Sequence[str] | _Unknown,
     files_only: bool = False,
+    existing_files: bool = False,
     made: _Made | None = None,
     disk: _DiskReads | None = None,
 ) -> _Targets:
     """The snapshot entries `patterns` name. A relative pattern counts from
     each folder in `cwds`, or from under any folder of either root when the
     check can't place them. With `files_only`, for a delete that can't
-    remove a folder, the folders a listing names drop out. `made` reads a
-    snapshot past its cap (`ProjectSnapshot.named`), and `disk` is the
-    check's reads from disk (`ProjectSnapshot.matching`)."""
+    remove a folder, the folders a listing names drop out. With
+    `existing_files`, for an overwrite, only the files the turn began with
+    count: a write can't replace a folder, a root, or a file the turn made.
+    `made` reads a snapshot past its cap (`ProjectSnapshot.named`), and
+    `disk` is the check's reads from disk (`ProjectSnapshot.matching`)."""
     if isinstance(patterns, _Unknown):
-        return _Targets(unknown=True)
+        return _Targets(unknown=not existing_files)
     hits: list[str] = []
     whole: set[str] = set()
     unknown = False
@@ -3436,17 +4032,20 @@ def _locate(
         pattern = raw.replace("\\", "/")
         if _TEMP_PATH in pattern:
             continue
+        pattern = pattern.replace(_RUN_TIME_PART, "*")
         if not os.path.isabs(pattern) and isinstance(cwds, _Unknown):
             # From a folder the check can't place: under any folder of either root.
             rest = _without_parents(pattern)
             if not rest:
-                unknown = True
+                unknown = not existing_files
                 continue
             for snap in snapshots:
-                hits += _card_paths(snap, snap.matching(pattern="**/" + rest, made=made, disk=disk), files_only=files_only)
+                hits += _card_paths(snap, snap.matching(pattern="**/" + rest, made=made, disk=disk),
+                                    files_only=files_only, existing_files=existing_files, made=made)
             continue
         candidates = [pattern] if os.path.isabs(pattern) else [_join(c, pattern) for c in cwds]
         for candidate in candidates:
+            candidate = candidate.replace(_RUN_TIME_PART, "*")
             if project is not None and not os.path.isabs(candidate) and (
                 posixpath.normpath(candidate).startswith("../")
             ):
@@ -3457,12 +4056,15 @@ def _locate(
                 if rel is None or rel.startswith("../") and not _above(rel):
                     continue
                 if rel == "" or _above(rel):
-                    whole.add(snap.label)
+                    if not existing_files:
+                        whole.add(snap.label)
                 elif any(ch in rel for ch in "*?["):
-                    hits += _card_paths(snap, snap.matching(pattern=rel, made=made, disk=disk), files_only=files_only)
+                    hits += _card_paths(snap, snap.matching(pattern=rel, made=made, disk=disk),
+                                        files_only=files_only, existing_files=existing_files, made=made)
                 else:
                     named = snap.named(rel=rel, made=made)
-                    hits += _card_paths(snap, [named] if named is not None else [], files_only=False)
+                    hits += _card_paths(snap, [named] if named is not None else [], files_only=False,
+                                        existing_files=existing_files, made=made)
     return _Targets(
         paths=tuple(dict.fromkeys(hits)),
         whole_project="project" in whole,
@@ -3471,9 +4073,16 @@ def _locate(
     )
 
 
-def _card_paths(snap: ProjectSnapshot, found: list[str], *, files_only: bool) -> list[str]:
-    """Snapshot paths as a card names them, the shared folder's prefixed."""
+def _card_paths(
+    snap: ProjectSnapshot, found: list[str], *, files_only: bool, existing_files: bool = False,
+    made: _Made | None = None,
+) -> list[str]:
+    """Snapshot paths as a card names them, the shared folder's prefixed.
+    With `existing_files`, only the files the turn began with, `made` read
+    as `ProjectSnapshot.file_at_start` reads it."""
     prefix = "" if snap.label == "project" else "shared folder: "
+    if existing_files:
+        found = [f for f in (snap.file_at_start(rel=p, made=made) for p in found) if f is not None]
     return [prefix + p for p in found if not (files_only and snap.is_dir(rel=p))]
 
 
@@ -3540,37 +4149,69 @@ def _target_arg(call: ast.Call, *, keywords: tuple[str, ...]) -> ast.AST | None:
     return next((k.value for k in call.keywords if k.arg in keywords), None)
 
 
-def _open_mode_writes(call: ast.Call) -> bool:
-    mode = call.args[1] if len(call.args) > 1 else next(
-        (k.value for k in call.keywords if k.arg == "mode"), None
-    )
-    return isinstance(mode, ast.Constant) and isinstance(mode.value, str) and any(
-        c in mode.value for c in "wax"
-    )
+def _keyword(call: ast.Call, name: str) -> ast.AST | None:
+    return next((k.value for k in call.keywords if k.arg == name), None)
 
 
-def _open_mode_writes_method(call: ast.Call) -> bool:
-    mode = call.args[0] if call.args else next(
-        (k.value for k in call.keywords if k.arg == "mode"), None
-    )
-    return isinstance(mode, ast.Constant) and isinstance(mode.value, str) and any(
-        c in mode.value for c in "wax"
-    )
+@dataclass(frozen=True)
+class _FileWrite:
+    """A call that writes a file: the node that names the file, and whether
+    the call replaces what the file holds, adds to it, or only creates it,
+    failing when it exists."""
+
+    target: ast.AST
+    kind: Literal["replace", "append", "create"]
 
 
-def _overwrite_target(call: ast.Call, reader: _Reader) -> ast.AST | None:
-    name = reader.dotted(call.func)
-    if name in ("open", "io.open") and call.args and _open_mode_writes(call):
-        return call.args[0]
-    if isinstance(call.func, ast.Attribute):
-        method = call.func.attr
-        if method in ("write_text", "write_bytes"):
-            return call.func.value
-        if method == "open" and _open_mode_writes_method(call):
-            return call.func.value
-        if method in _WRITER_METHODS and call.args:
-            return call.args[0]
+_MODE = re.compile(r"[rwxabtU+]{1,5}")
+
+
+def _mode_kind(
+    mode: ast.AST | None, *, absent: str, unread: str,
+) -> Literal["replace", "append", "create"] | None:
+    """What a file mode does to an existing file: `w` and `r+` replace what
+    it holds, `a` adds to it, `x` only creates a file; None for a read.
+    `absent` is the mode when the call passes none, `unread` when it passes
+    one the check can't read."""
+    if mode is None:
+        text = absent
+    elif isinstance(mode, ast.Constant) and isinstance(mode.value, str) and _MODE.fullmatch(mode.value):
+        text = mode.value
+    else:
+        text = unread
+    if "a" in text:
+        return "append"
+    if "x" in text:
+        return "create"
+    if "w" in text or "+" in text:
+        return "replace"
     return None
+
+
+def _file_write(call: ast.Call, reader: _Reader) -> _FileWrite | None:
+    """The file `call` writes into: one it opens for writing, a
+    `Path.write_text`, a DataFrame or chart writer, a `pd.ExcelWriter`, or a
+    `.save(path)`."""
+    name = reader.dotted(call.func)
+    method = call.func.attr if isinstance(call.func, ast.Attribute) else ""
+    if name in ("open", "io.open"):
+        target = _target_arg(call, keywords=("file",))
+        mode = call.args[1] if len(call.args) > 1 else _keyword(call, "mode")
+        kind = _mode_kind(mode, absent="r", unread="r")
+    elif name == "pandas.ExcelWriter":
+        target = _target_arg(call, keywords=("path",))
+        kind = _mode_kind(_keyword(call, "mode"), absent="w", unread="w")
+    elif method in ("write_text", "write_bytes"):
+        target, kind = call.func.value, "replace"
+    elif method == "open":
+        target = call.func.value
+        kind = _mode_kind(_target_arg(call, keywords=("mode",)), absent="r", unread="r")
+    elif method in _WRITER_METHODS:
+        target = _target_arg(call, keywords=_WRITER_METHODS[method])
+        kind = _mode_kind(_keyword(call, "mode"), absent="w", unread="w")
+    else:
+        return None
+    return None if target is None or kind is None else _FileWrite(target=target, kind=kind)
 
 
 def _move_destination(call: ast.Call) -> ast.AST | None:
@@ -3580,7 +4221,7 @@ def _move_destination(call: ast.Call) -> ast.AST | None:
 
 
 def _written_target(call: ast.Call, reader: _Reader, cell: _Cell) -> ast.AST | None:
-    """The path `call` writes: a file it opens for writing, or the
+    """The path `call` writes: a file it writes into or creates, or the
     destination of a rename, move or copy."""
     name = reader.dotted(call.func)
     if name in _MOVE_FUNCS or name in _COPY_FUNCS:
@@ -3589,7 +4230,8 @@ def _written_target(call: ast.Call, reader: _Reader, cell: _Cell) -> ast.AST | N
         _is_path_rename(call, reader, cell)
     ):
         return call.args[0] if call.args else next((k.value for k in call.keywords if k.arg == "target"), None)
-    return _overwrite_target(call, reader)
+    write = _file_write(call, reader)
+    return None if write is None else write.target
 
 
 def _keeps_contents(*, call: ast.Call, reader: _Reader) -> bool:
@@ -3681,30 +4323,173 @@ def _may_leave(stmt: ast.stmt, *, reader: _Reader) -> bool:
     )
 
 
+def _database_file(database: str) -> list[str]:
+    """The file a SQLite or DuckDB database name opens: none for `:memory:`,
+    a MotherDuck database, or a read-only or in-memory `file:` URI."""
+    if database.startswith("file:"):
+        database, _, query = database[len("file:"):].partition("?")
+        if re.search(r"(?:^|&)mode=(?:ro|memory)(?:&|$)", query):
+            return []
+    else:
+        database = database.partition("?")[0]
+    if database in ("", ":memory:") or database.startswith(":memory:") or _is_motherduck(database):
+        return []
+    return [database]
+
+
+def _database_files(node: ast.AST, reader: _Reader, *, depth: int = 0) -> list[str]:
+    """The files an in-process SQLite or DuckDB handle may open, as the code
+    spells them, followed the way `_Reader.is_local_handle` follows a handle:
+    none for an in-memory or read-only one."""
+    if depth > 6:
+        return []
+    if isinstance(node, ast.Name):
+        return [f for b in reader.bindings_of(node.id, node=node) if b.how in ("value", "context")
+                for f in _database_files(b.value, reader, depth=depth + 1)]
+    if not isinstance(node, ast.Call):
+        return []
+    name = reader.dotted(node.func)
+    if name in ("duckdb.connect", "sqlite3.connect"):
+        target = node.args[0] if node.args else next(
+            (k.value for k in node.keywords if k.arg in ("database", "path")), None
+        )
+        read_only = _keyword(node, "read_only")
+        if isinstance(read_only, ast.Constant) and read_only.value is True:
+            return []
+        if not (isinstance(target, ast.Constant) and isinstance(target.value, str)):
+            return []
+        return _database_file(target.value)
+    if name in ("sqlalchemy.create_engine", "create_engine") and node.args:
+        url = node.args[0]
+        if not (isinstance(url, ast.Constant) and isinstance(url.value, str)):
+            return []
+        scheme, sep, rest = url.value.partition("://")
+        if not sep or scheme.split("+")[0] not in ("sqlite", "duckdb"):
+            return []
+        # `sqlite:///a.db` names a.db, `sqlite:////tmp/a.db` names /tmp/a.db.
+        return _database_file(rest[1:] if rest.startswith("/") else rest)
+    if isinstance(node.func, ast.Attribute) and node.func.attr in ("cursor", "connect", "begin", "raw_connection"):
+        return _database_files(node.func.value, reader, depth=depth + 1)
+    if isinstance(node.func, ast.Name) and node.func.id in reader.functions:
+        return [f for n in ast.walk(reader.functions[node.func.id]) if isinstance(n, ast.Return) and n.value is not None
+                for f in _database_files(n.value, reader, depth=depth + 1)]
+    return []
+
+
+def _holds_a_write(node: ast.AST, reader: _Reader, *, depth: int = 0) -> bool:
+    """Whether the statement `node` holds writes: written out, held in a
+    name, or passed in as a parameter."""
+    text = _sql_text(node, reader)
+    if text is not None:
+        return bool(write_statements(text))
+    if not isinstance(node, ast.Name) or depth > 4:
+        return False
+    for b in reader.bindings_of(node.id, node=node):
+        if b.how != "param":
+            if reader.statements_held(node.id, b):
+                return True
+            continue
+        key = (id(b.value), node.id)
+        args = [reader.param_args[key]] if key in reader.param_args else reader.call_sites(b.value, node.id)
+        if any(a is not None and _holds_a_write(a.node, reader, depth=depth + 1) for a in args):
+            return True
+    return False
+
+
+class _OwnedFiles:
+    """The files the turn began with that the agent owns, so it may rewrite
+    them with no card: those under `.anton/artifacts`, `.anton/skill_drafts`
+    and `.anton/output` (`_AGENT_FOLDERS`), and those a write that ran in an
+    earlier cell of the conversation replaced. The earlier cells are read the
+    first time a check asks, since most cells overwrite nothing."""
+
+    def __init__(self, earlier: list[_Cell], snapshots: Sequence[ProjectSnapshot]) -> None:
+        self._earlier = earlier
+        self._snapshots = snapshots
+        self._written: frozenset[str] | None = None
+
+    def owns(self, path: str) -> bool:
+        """Whether the agent owns `path`, a snapshot path as a card names it."""
+        if path.startswith(_AGENT_FOLDERS):
+            return True
+        if self._written is None:
+            self._written = self._earlier_writes()
+        return path in self._written
+
+    def _earlier_writes(self) -> frozenset[str]:
+        """The files earlier cells overwrote, read the way the checked cell
+        is, against the earlier cells alone. Only a write that ran counts:
+        one in a cell's own code (`_nodes_that_run`), or in a function or
+        lambda that code calls, defined before the call. A function no cell
+        calls, one only passed on as a value, or a write under `if False:`
+        makes no file the agent's, and nor does an append."""
+        if not self._earlier:
+            return frozenset()
+        # Read from an empty cell after them all, so every earlier cell's
+        # functions count as earlier ones (`_Reader.earlier_function`).
+        after = _Cell(ast.Module(body=[], type_ignores=[]), "", len(self._earlier))
+        reader = _Reader([*self._earlier, after], current=after)
+        changes: list[FileChange] = []
+
+        def read_function(callee: _Callee, *, cell: _Cell, at: ast.AST, chain: tuple[int, ...]) -> None:
+            """`callee`, called from the code of `cell` at `at`, read for
+            what it overwrites, and each function it calls in turn."""
+            func = callee.func
+            if callee.call is None or id(func) in chain or len(chain) >= _CALL_DEPTH:
+                return
+            home = reader.cell_of(func)
+            if not (home.index < cell.index or home is cell and _follows(node=at, value=func)):
+                # A definition after the call: the call ran an older one, or none.
+                return
+            with reader.calling(func, callee.call, bound=callee.bound):
+                changes.extend(_file_findings(reader, home, self._snapshots, owned=None, root=func))
+                for inner in _earlier_function_uses(reader, func, home, ran_only=True):
+                    read_function(inner, cell=cell, at=at, chain=(*chain, id(func)))
+
+        for cell in self._earlier:
+            changes += _file_findings(reader, cell, self._snapshots, owned=None)
+            for callee in _earlier_function_uses(reader, cell.tree, cell, ran_only=True):
+                read_function(callee, cell=cell, at=callee.use, chain=())
+        return frozenset(path for change in changes if change.action == "overwrite" for path in change.paths)
+
+
 class _FileFinder:
     """Collects the file changes code in one cell makes. With a report, the
     code is an earlier cell's function, read for one call in the checked
-    cell, and each change is reported at that call."""
+    cell, and each change is reported at that call. With `owned`, the cell is
+    the checked one: an overwrite of a file the agent owns is reported but
+    not held. Without it, the cell is an earlier one, or a function it calls,
+    read for the files it overwrote (`_OwnedFiles`) in only the code that
+    runs when it runs (`_nodes_that_run`)."""
 
     def __init__(
         self, reader: _Reader, snapshots: Sequence[ProjectSnapshot], *, cell: _Cell, report: _Report | None,
+        owned: _OwnedFiles | None,
     ) -> None:
         self.reader = reader
         self.snapshots = snapshots
         self.cell = cell
         self.report = report
+        self.owned = owned
         self.out: list[FileChange] = []
+        # Files already reported as overwritten, so a delete and the write
+        # that follows it name a file once.
+        self.overwritten: set[str] = set()
 
     def paths(self, node: ast.AST) -> list[str] | _Unknown:
         return self.reader.paths(node, cell=self.cell)
 
     def locate(
         self, got: list[str] | _Unknown, *, cwds: Sequence[str] | _Unknown | None = None, files_only: bool = False,
+        existing_files: bool = False,
     ) -> _Targets:
         return _locate(got, self.snapshots, cwds=self.reader.cwds if cwds is None else cwds, files_only=files_only,
-                       made=self.reader.made, disk=self.reader.disk)
+                       existing_files=existing_files, made=self.reader.made, disk=self.reader.disk)
 
-    def add(self, action: Literal["delete", "rename", "move", "overwrite"], targets: _Targets, node: ast.AST) -> None:
+    def add(
+        self, action: Literal["delete", "rename", "move", "overwrite", "append"], targets: _Targets, node: ast.AST,
+        *, held: bool = True,
+    ) -> None:
         if not targets.found():
             return
         if self.report is not None:
@@ -3713,12 +4498,12 @@ class _FileFinder:
             line, call = self.cell.host_line or getattr(node, "lineno", 0), scrub_output(self.cell.source(node))
         self.out.append(FileChange(
             action=action, paths=targets.paths, whole_project=targets.whole_project,
-            whole_shared=targets.whole_shared, call=call, line=line,
+            whole_shared=targets.whole_shared, call=call, line=line, held=held,
         ))
 
     def walk(self, root: ast.AST) -> None:
         reader, cell = self.reader, self.cell
-        for node in ast.walk(root):
+        for node in ast.walk(root) if self.owned is not None else _nodes_that_run(root):
             if isinstance(node, ast.Attribute) and reader.dotted(node) in (*_DELETE_FUNCS, *_MOVE_FUNCS):
                 parent = cell.parents.get(node)
                 if not (isinstance(parent, ast.Call) and parent.func is node):
@@ -3761,15 +4546,17 @@ class _FileFinder:
                     (k.value for k in node.keywords if k.arg == "target"), None
                 )
                 if dest is not None:
-                    self.note_overwrite_target(dest, node)
+                    self.overwrite(self.paths(dest), node)
+            elif method in _EXECUTE or method in _READ_SQL or method == "to_sql":
+                self.database_write(node)
             else:
-                target = _overwrite_target(node, reader)
-                if target is not None:
-                    self.note_overwrite_target(target, node)
+                write = _file_write(node, reader)
+                if write is not None and write.kind != "create":
+                    self.overwrite(self.paths(write.target), node, append=write.kind == "append")
 
     def lookup(self, *, node: ast.AST) -> bool:
         """Whether `node` is a lookup `_plain_lookup` can't read, on a module,
-        class or path that holds a delete, a move or a shell call:
+        class or path that holds a delete, a move, a copy or a shell call:
         `getattr(m, name)` with a name that isn't a literal, `vars(m)[name]`
         or `m.__dict__[name]`. Each text the name can hold is read as the call
         it reaches; a name the check can't read is a delete picked when it
@@ -3796,7 +4583,7 @@ class _FileFinder:
         parent = cell.parents.get(node)
         call = parent if isinstance(parent, ast.Call) and parent.func is node else None
         names = reader.paths(key, cell=cell)
-        if isinstance(names, _Unknown) or any(ch in n for n in names for ch in "*?["):
+        if isinstance(names, _Unknown) or any(ch in n for n in names for ch in "*?[" + _RUN_TIME_PART):
             self.add("delete", _Targets(unknown=True), node)
             return True
         for name in names:
@@ -3812,6 +4599,14 @@ class _FileFinder:
                 source = receiver if on_path else _target_arg(call, keywords=("src", "self"))
                 if source is not None:
                     self.add(_MOVE_FUNCS[full], self.locate(self.paths(source)), call)
+                # What it lands on is overwritten, as `walk` reads the plain call.
+                dest = _target_arg(call, keywords=("target",)) if on_path else None
+                if dest is not None:
+                    self.overwrite(self.paths(dest), call)
+                elif not on_path:
+                    self.note_overwrite(call)
+            elif full in _COPY_FUNCS:
+                self.note_overwrite(call)
             elif full in _SHELL_FUNCS:
                 self.shell(call)
         return True
@@ -3820,7 +4615,52 @@ class _FileFinder:
         """A delete; an overwrite when a write to the same path follows it."""
         got = self.paths(target)
         rewritten = not isinstance(got, _Unknown) and bool(got) and set(got) <= self.written_after(call)
-        self.add("overwrite" if rewritten else "delete", self.locate(got, files_only=files_only), call)
+        if rewritten:
+            self.overwrite(got, call)
+        else:
+            self.add("delete", self.locate(got, files_only=files_only), call)
+
+    def overwrite(self, got: list[str] | _Unknown, call: ast.Call, *, append: bool = False) -> None:
+        """A write into the files `got` names that the turn began with: held
+        as an overwrite unless the agent owns the file. With `append`, the
+        write adds to the file, and is reported but not held. A path from a
+        root the check can't place counts as a new file, and so, in the
+        checked cell, does one with a part the code picks when it runs, as a
+        dated export or a chart per site has."""
+        if isinstance(got, _Unknown):
+            return
+        if self.owned is not None:
+            got = [p for p in got if _RUN_TIME_PART not in p]
+        found = [p for p in self.locate(got, existing_files=True).paths if append or p not in self.overwritten]
+        if append:
+            self.add("append", _Targets(paths=tuple(found)), call, held=False)
+            return
+        self.overwritten.update(found)
+        owned = tuple(p for p in found if self.owned is not None and self.owned.owns(p))
+        self.add("overwrite", _Targets(paths=tuple(p for p in found if p not in owned)), call)
+        self.add("overwrite", _Targets(paths=owned), call, held=False)
+
+    def database_write(self, call: ast.Call) -> None:
+        """A write statement, or `to_sql`, on an in-process SQLite or DuckDB
+        handle that opens a file: an overwrite of that file. The SQL check
+        lets every in-process handle through (`_executes_on_local`)."""
+        method = call.func.attr
+        if method == "to_sql":
+            handle = call.args[1] if len(call.args) > 1 else _keyword(call, "con")
+            statement = None
+        elif method in _READ_SQL:
+            handle = call.args[1] if len(call.args) > 1 else _keyword(call, "con")
+            statement = _target_arg(call, keywords=("sql",))
+        else:
+            handle = call.func.value
+            statement = _target_arg(call, keywords=("sql", "query", "statement", "sql_script", "operation"))
+        if handle is None or method != "to_sql" and statement is None:
+            return
+        files = _database_files(handle, self.reader)
+        if not files or not self.reader.is_local_handle(handle):
+            return
+        if statement is None or _holds_a_write(statement, self.reader):
+            self.overwrite(list(files), call)
 
     def written_after(self, call: ast.Call) -> set[str]:
         """The paths written after `call` on every path through the code: by a
@@ -3853,8 +4693,8 @@ class _FileFinder:
         return written
 
     def note_overwrite(self, call: ast.Call) -> None:
-        """A move or copy onto an existing file, logged as an overwrite. A
-        folder destination takes the source's name."""
+        """A move or copy onto an existing file, an overwrite of it. A folder
+        destination takes the source's name."""
         dest = _move_destination(call)
         if dest is None:
             return
@@ -3872,22 +4712,7 @@ class _FileFinder:
                     break
             else:
                 expanded.append(d)
-        self.record_overwrite(expanded, call)
-
-    def note_overwrite_target(self, node: ast.AST, call: ast.Call) -> None:
-        got = self.paths(node)
-        if not isinstance(got, _Unknown):
-            self.record_overwrite(got, call)
-
-    def record_overwrite(self, patterns: list[str], call: ast.Call) -> None:
-        hits = []
-        for pattern in patterns:
-            for snap in self.snapshots:
-                rel = _relative(pattern, snap)
-                if rel and not rel.startswith("..") and snap.is_file(rel=rel):
-                    hits += _card_paths(snap, [snap.recorded(rel=rel) or rel], files_only=False)
-        if hits:
-            self.add("overwrite", _Targets(paths=tuple(dict.fromkeys(hits))), call)
+        self.overwrite(expanded, call)
 
     def shell(self, call: ast.Call) -> None:
         """Each rm, mv and the like a shell command runs. One whose operand
@@ -3913,14 +4738,17 @@ def _file_findings(
     cell: _Cell,
     snapshots: Sequence[ProjectSnapshot],
     *,
+    owned: _OwnedFiles | None,
     root: ast.AST | None = None,
     report: _Report | None = None,
 ) -> list[FileChange]:
     """The file changes `cell` makes; with `root`, the ones a function of
-    that cell makes, reported at `report`, the call in the checked cell."""
+    that cell makes, reported at `report`, the call in the checked cell.
+    `owned` is None for an earlier cell read for what it overwrote, as
+    `_FileFinder` says."""
     if not snapshots or all(s.is_empty() for s in snapshots):
         return []
-    finder = _FileFinder(reader, snapshots, cell=cell, report=report)
+    finder = _FileFinder(reader, snapshots, cell=cell, report=report, owned=owned)
     finder.walk(cell.tree if root is None else root)
     return finder.out
 
@@ -4206,6 +5034,273 @@ def _split_flags(args: list[str], *, takes_target: bool) -> tuple[list[str], lis
     return flags, operands, target_dir
 
 
+# ── HTTP ──────────────────────────────────────────────────────────────────
+
+_HTTP_LIBRARIES = frozenset({"requests", "httpx"})
+_HTTP_VERBS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
+# Calls that take the method as their first argument and the URL as their second.
+_HTTP_ANY_VERB = frozenset({"request", "stream", "Request"})
+_HTTP_CLIENTS = frozenset({
+    "requests.Session", "requests.session", "requests.sessions.Session", "httpx.Client", "httpx.AsyncClient",
+})
+# Methods held with no rule: the ones that change or remove what a URL names.
+_HELD_METHODS = frozenset({"PUT", "PATCH", "DELETE"})
+_URL_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
+# A URL glob's wildcards, as `_url_could_match` reads them.
+_ONE, _SEGMENT, _ANY = "\x00?", "\x00*", "\x00**"
+
+
+@dataclass(frozen=True)
+class _HttpCall:
+    """A call that sends, or builds, an HTTP request: its method, named in
+    the call or as the node that picks it, the node that names its URL, and
+    the base URL its client joins a relative one to."""
+
+    method: str | ast.AST
+    url: ast.AST | None
+    base: ast.AST | None = None
+
+
+def _http_client(node: ast.AST, reader: _Reader, *, depth: int = 0) -> ast.Call | None:
+    """The requests Session or httpx Client call that made what `node`
+    holds, when it visibly holds one."""
+    if depth > 6:
+        return None
+    values: list[ast.AST] = []
+    if isinstance(node, ast.Call):
+        if reader.dotted(node.func) in _HTTP_CLIENTS:
+            return node
+        if isinstance(node.func, ast.Name) and node.func.id in reader.functions:
+            values = [n.value for n in ast.walk(reader.functions[node.func.id])
+                      if isinstance(n, ast.Return) and n.value is not None]
+    elif isinstance(node, ast.Name):
+        for b in reader.bindings_of(node.id, node=node):
+            if b.how in ("value", "context"):
+                values.append(b.value)
+            elif b.how == "param":
+                key = (id(b.value), node.id)
+                args = [reader.param_args[key]] if key in reader.param_args else reader.call_sites(b.value, node.id)
+                values += [a.node for a in args if a is not None]
+    for value in values:
+        client = _http_client(value, reader, depth=depth + 1)
+        if client is not None:
+            return client
+    return None
+
+
+def _is_urllib_request(node: ast.AST, reader: _Reader, *, depth: int = 0) -> bool:
+    if isinstance(node, ast.Call):
+        return reader.dotted(node.func) == "urllib.request.Request"
+    return isinstance(node, ast.Name) and depth < 6 and any(
+        b.how == "value" and _is_urllib_request(b.value, reader, depth=depth + 1)
+        for b in reader.bindings_of(node.id, node=node)
+    )
+
+
+def _given(node: ast.AST | None) -> ast.AST | None:
+    """`node`, or None when it is a literal None."""
+    return None if isinstance(node, ast.Constant) and node.value is None else node
+
+
+def _urllib_call(call: ast.Call, name: str, reader: _Reader) -> _HttpCall | None:
+    """urllib's `Request` or `urlopen`: its method is POST when it sends
+    data and GET when it doesn't, unless a `Request` names one."""
+    url = _target_arg(call, keywords=("url",))
+    if name.endswith("urlopen") and url is not None and _is_urllib_request(url, reader):
+        # The Request it opens is read where it is made.
+        return None
+    method = None
+    if name.endswith("Request"):
+        method = _given(call.args[5] if len(call.args) > 5 else _keyword(call, "method"))
+    data = _given(call.args[1] if len(call.args) > 1 else _keyword(call, "data"))
+    return _HttpCall(method=method or ("GET" if data is None else "POST"), url=url)
+
+
+def _http_call(call: ast.Call, reader: _Reader) -> _HttpCall | None:
+    """The request `call` sends or builds: a requests or httpx function or
+    `Request`, a Session's or Client's method, or urllib's `Request` or
+    `urlopen`."""
+    name = reader.dotted(call.func)
+    if name in ("urllib.request.Request", "urllib.request.urlopen"):
+        return _urllib_call(call, name, reader)
+    library, _, verb = name.rpartition(".")
+    base = None
+    if library not in _HTTP_LIBRARIES:
+        if not isinstance(call.func, ast.Attribute):
+            return None
+        verb = call.func.attr
+        if verb not in _HTTP_VERBS and verb not in ("request", "stream"):
+            return None
+        client = _http_client(call.func.value, reader)
+        if client is None:
+            return None
+        base = _keyword(client, "base_url")
+    if verb in _HTTP_VERBS:
+        return _HttpCall(method=verb.upper(), url=_target_arg(call, keywords=("url",)), base=base)
+    if verb not in _HTTP_ANY_VERB:
+        return None
+    method = _given(call.args[0] if call.args else _keyword(call, "method"))
+    url = call.args[1] if len(call.args) > 1 else _keyword(call, "url")
+    return None if method is None else _HttpCall(method=method, url=url, base=base)
+
+
+def _http_methods(node: ast.AST, reader: _Reader, *, depth: int = 0) -> list[str] | _Unknown:
+    """The methods `node` can name, in upper case; unknown when the code
+    picks one when it runs. A parameter of a function nothing calls names
+    none: the request is read where the function is called."""
+    if depth > 6:
+        return _UNKNOWN
+    if isinstance(node, ast.Constant):
+        return [node.value.upper()] if isinstance(node.value, str) else _UNKNOWN
+    if isinstance(node, ast.IfExp):
+        body = _http_methods(node.body, reader, depth=depth + 1)
+        orelse = _http_methods(node.orelse, reader, depth=depth + 1)
+        return _UNKNOWN if isinstance(body, _Unknown) or isinstance(orelse, _Unknown) else body + orelse
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("upper", "lower", "strip") and not node.args):
+        return _http_methods(node.func.value, reader, depth=depth + 1)
+    if not isinstance(node, ast.Name):
+        return _UNKNOWN
+    found = reader.bindings_of(node.id, node=node)
+    if not found:
+        return _UNKNOWN
+    out: list[str] = []
+    for b in found:
+        if b.how == "param":
+            key = (id(b.value), node.id)
+            args = [reader.param_args[key]] if key in reader.param_args else reader.call_sites(b.value, node.id)
+            values: list[ast.AST | None] = [None if a is None else a.node for a in args]
+        elif b.how == "value":
+            values = [b.value]
+        elif b.how == "element" and isinstance(b.value, (ast.List, ast.Tuple, ast.Set)):
+            values = list(b.value.elts)
+        else:
+            return _UNKNOWN
+        for value in values:
+            got = _UNKNOWN if value is None else _http_methods(value, reader, depth=depth + 1)
+            if isinstance(got, _Unknown):
+                return got
+            out += got
+    return out
+
+
+def _url_text(node: ast.AST, reader: _Reader, *, depth: int = 0) -> str:
+    """A URL's text, each part the code picks when it runs a numbered
+    placeholder (`_Reader.hole`). A name bound to one value, or a parameter
+    the call being read passes, is read through to it."""
+    if depth <= 8:
+        if isinstance(node, ast.Constant) and isinstance(node.value, (str, int, float)) and not isinstance(
+            node.value, bool
+        ):
+            return str(node.value)
+        if isinstance(node, ast.JoinedStr):
+            return "".join(
+                str(v.value) if isinstance(v, ast.Constant)
+                else _url_text(v.value, reader, depth=depth + 1)
+                if isinstance(v, ast.FormattedValue) and v.conversion == -1 and v.format_spec is None
+                else reader.hole(v)
+                for v in node.values
+            )
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            return _url_text(node.left, reader, depth=depth + 1) + _url_text(node.right, reader, depth=depth + 1)
+        if isinstance(node, ast.Name):
+            arg = reader.argument_of(node)
+            if arg is not None:
+                return _url_text(arg.node, reader, depth=depth + 1)
+            found = reader.bindings_of(node.id, node=node)
+            if len(found) == 1 and found[0].how == "value":
+                return _url_text(found[0].value, reader, depth=depth + 1)
+    return reader.hole(node)
+
+
+def _url_could_match(url: str, glob: str) -> bool:
+    """Whether `url`, a placeholder standing for any text, can match
+    `glob`, ignoring case and the URL's query string and fragment. In the
+    glob, `*` stands for text within one path segment, `**` for any text
+    and `?` for one character other than `/`."""
+    text: list[str | None] = []  # a character, or None for a part picked at run time
+    for i, part in enumerate(_NUMBERED_HOLE.split(url)):
+        if i % 2:
+            text.append(None)
+            continue
+        cut = re.search(r"[?#]", part)
+        text += list((part[:cut.start()] if cut else part).casefold())
+        if cut:
+            break
+    pattern: list[str] = []
+    for m in re.finditer(r"\*\*|\*|\?|.", glob.casefold(), re.S):
+        pattern.append({"**": _ANY, "*": _SEGMENT, "?": _ONE}.get(m.group(), m.group()))
+    # A walk over pairs of positions: (i, j) when some text takes the URL
+    # to `i` and the glob to `j` at once.
+    seen: set[tuple[int, int]] = set()
+    stack = [(0, 0)]
+    while stack:
+        i, j = stack.pop()
+        if (i, j) in seen:
+            continue
+        seen.add((i, j))
+        if i == len(text) and j == len(pattern):
+            return True
+        u = text[i] if i < len(text) else ""
+        g = pattern[j] if j < len(pattern) else ""
+        if i < len(text) and u is None:
+            stack.append((i + 1, j))  # the part stands for nothing
+        if g in (_SEGMENT, _ANY):
+            stack.append((i, j + 1))  # the wildcard stands for nothing
+        if i == len(text) or j == len(pattern):
+            continue
+        if u is None:
+            if g not in (_SEGMENT, _ANY):
+                stack.append((i, j + 1))  # the part supplies the glob's next character
+        elif g == _ANY or g == _SEGMENT and u != "/":
+            stack.append((i + 1, j))
+        elif g == _ONE and u != "/" or g == u:
+            stack.append((i + 1, j + 1))
+    return False
+
+
+def _http_findings(
+    reader: _Reader,
+    cell: _Cell,
+    *,
+    rules: Sequence[HttpWriteRule],
+    root: ast.AST | None = None,
+    report: _Report | None = None,
+) -> list[HttpWrite]:
+    """The requests `cell` sends that may change data on a server: every
+    PUT, PATCH and DELETE, one whose method the code picks when it runs, and
+    one that matches a rule in `rules`. With `root`, the ones a function of
+    that cell sends, reported at `report`, the call in the checked cell."""
+    out: list[HttpWrite] = []
+    for node in ast.walk(cell.tree if root is None else root):
+        if not isinstance(node, ast.Call):
+            continue
+        request = _http_call(node, reader)
+        if request is None:
+            continue
+        url = reader.hole(None) if request.url is None else _url_text(request.url, reader)
+        if request.base is not None and not (_URL_SCHEME.match(url) or _HOLE_MARK.match(url)):
+            url = _url_text(request.base, reader).rstrip("/") + "/" + url.lstrip("/")
+        if isinstance(request.method, str):
+            methods: list[str] | _Unknown = [request.method]
+        else:
+            methods = _http_methods(request.method, reader)
+        if isinstance(methods, _Unknown):
+            held = [reader.hole(request.method)]
+        else:
+            held = [m for m in dict.fromkeys(methods) if m in _HELD_METHODS or any(
+                r.method in ("*", m) and _url_could_match(url, r.url_glob) for r in rules
+            )]
+        line = report.line if report else cell.host_line or node.lineno
+        call = report.call if report else scrub_output(cell.source(node))
+        out += [
+            HttpWrite(method=reader.show_holes(method), url=_scrub(reader.show_holes(url)), call=call,
+                      line=line, run_time_parts=_NUMBERED_HOLE.search(method + url) is not None)
+            for method in held
+        ]
+    return out
+
+
 # ── Entry point ───────────────────────────────────────────────────────────
 
 def _plain_lookup(call: ast.Call) -> ast.expr:
@@ -4350,16 +5445,21 @@ def _exec_cells(host: _Cell, *, index: int) -> list[_Cell]:
     return out
 
 
-def _earlier_function_uses(reader: _Reader, root: ast.AST, cell: _Cell) -> Iterator[_Callee]:
+def _earlier_function_uses(
+    reader: _Reader, root: ast.AST, cell: _Cell, *, ran_only: bool = False,
+) -> Iterator[_Callee]:
     """Each place in `root` that calls a function or lambda an earlier cell
     defined, or passes one on as a value: by its name anywhere, or through
     whatever else `_Reader.callees` reads where it is called or passed to a
-    call."""
-    for node in ast.walk(root):
+    call. With `ran_only`, only the calls in code that runs when `root` runs
+    (`_nodes_that_run`): a function passed on as a value may never run."""
+    for node in _nodes_that_run(root) if ran_only else ast.walk(root):
         if not (isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)) and isinstance(node.ctx, ast.Load)):
             continue
         parent = cell.parents.get(node)
         call = parent if isinstance(parent, ast.Call) and parent.func is node else None
+        if ran_only and call is None:
+            continue
         if isinstance(node, ast.Name) and node.id in reader.function_names:
             func = reader.earlier_function(node)
             if func is not None:
@@ -4374,12 +5474,14 @@ def find_cell_writes(
     code: str,
     earlier_code: Sequence[str],
     snapshots: Sequence[ProjectSnapshot],
+    http_rules: Sequence[HttpWriteRule] = (),
 ) -> CellWrites:
     """What `code` would change, read against the conversation's earlier cells.
 
     A function or lambda an earlier cell defined is read again at each place
     this cell calls it or passes it on, with its parameters read from that
-    call, and what it would change is reported at that place.
+    call, and what it would change is reported at that place. A request that
+    matches one of `http_rules` counts as a write, whatever its method.
 
     A cell that doesn't parse returns nothing to hold: the runner compiles it
     the same way and refuses it before any of it runs.
@@ -4397,11 +5499,15 @@ def find_cell_writes(
     cells.append(current)
     ran = _exec_cells(current, index=len(cells))
     cells += ran
-    reader = _Reader(cells, current=current)
+    project = next((s for s in snapshots if s.label == "project"), None)
+    reader = _Reader(cells, current=current, project_root=project.root if project is not None else None)
     if any(not s.complete for s in snapshots):
         reader.made = _made(reader=reader)
+    owned = _OwnedFiles(cells[: current.index], snapshots)
     sql: list[SqlWrite] = []
+    calls: list[CallWrite] = []
     files: list[FileChange] = []
+    http: list[HttpWrite] = []
 
     def read_function(callee: _Callee, *, report: _Report, chain: tuple[int, ...]) -> None:
         func = callee.func
@@ -4410,15 +5516,24 @@ def find_cell_writes(
         home = reader.cell_of(func)
         with reader.calling(func, callee.call, bound=callee.bound):
             sql.extend(_sql_findings(reader, home, root=func, report=report))
-            files.extend(_file_findings(reader, home, snapshots, root=func, report=report))
+            calls.extend(_call_findings(reader, home, root=func, report=report))
+            files.extend(_file_findings(reader, home, snapshots, root=func, report=report, owned=owned))
+            http.extend(_http_findings(reader, home, rules=http_rules, root=func, report=report))
             for inner in _earlier_function_uses(reader, func, home):
                 read_function(inner, report=report, chain=(*chain, id(func)))
 
     for cell in (current, *ran):
         sql += _sql_findings(reader, cell)
-        files += _file_findings(reader, cell, snapshots)
+        calls += _call_findings(reader, cell)
+        files += _file_findings(reader, cell, snapshots, owned=owned)
+        http += _http_findings(reader, cell, rules=http_rules)
         for callee in _earlier_function_uses(reader, cell.tree, cell):
             use = callee.use
             report = _Report(line=cell.host_line or use.lineno, call=scrub_output(cell.source(use)))
             read_function(callee, report=report, chain=())
-    return CellWrites(sql=tuple(sorted(sql, key=lambda w: w.line)), files=tuple(files))
+    return CellWrites(
+        sql=tuple(sorted(sql, key=lambda w: w.line)),
+        calls=tuple(sorted(calls, key=lambda c: c.line)),
+        files=tuple(files),
+        http=tuple(sorted(http, key=lambda w: w.line)),
+    )
