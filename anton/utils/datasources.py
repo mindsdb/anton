@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import base64
 import functools
+import html
 import json
 import logging
 import os
 import re
 import shutil
+import urllib.parse
 import uuid
 import yaml
 from collections.abc import Collection, Mapping
@@ -379,86 +382,283 @@ def _register_unregistered_connection_vars(vault: DataVault, engine: str, name: 
             _DS_SECRET_VARS.add(key)
 
 
+# A saved value this long or shorter is hidden only as a whole word and in its
+# own case, so a short password does not hit ordinary text; a longer one is
+# hidden anywhere, ASCII case folded. Unknown DS_* and provider values this
+# short are not hidden at all.
+_SHORT_SECRET_MAX = 8
+# A value of at least this many UTF-8 bytes is hidden in base64 too; its
+# shortest base64 form is then 6 characters.
+_BASE64_MIN_BYTES = 5
+# A literal run shorter than this is in most text, so checking for it first
+# would only add work; the pattern runs instead.
+_ANCHOR_MIN_LENGTH = 4
+# Runs of characters every supported encoder prints as they are.
+_PLAIN_RUN_PATTERN = re.compile(r"[A-Za-z0-9._-]+")
+# A run of backslashes in a value doubles at each level of escaping, so it
+# matches a run of any length. It takes every backslash in a row, so the
+# escape of the character after it (JSON's `\u00e9` after an escaped
+# backslash) may start with none left.
+_VALUE_UNIT_PATTERN = re.compile(r"\\+|.", re.DOTALL)
+_BACKSLASH_RUN = r"(?:\\++|(?:%5[Cc])++)"
+_ESCAPE = r"\\++"
+_ESCAPE_AFTER_BACKSLASH_RUN = r"\\*+"
+_CONTROL_ESCAPES = {"\n": "n", "\r": "r", "\t": "t", "\b": "b", "\f": "f"}
+_HTML_ENTITY_NAMES = {"&": "amp", "<": "lt", ">": "gt", '"': "quot", "'": "apos"}
+# The two characters that differ between the standard and URL-safe alphabets.
+_BASE64_ALPHABET_CHARS = {"+": r"(?:%2[Bb]|[+-])", "/": r"(?:%2[Ff]|\\*+/|_)"}
+_BASE64_ANCHOR_PATTERN = re.compile(r"[A-Za-z0-9]+")
+_BASE64_CHAR = r"[A-Za-z0-9+/_-]"
+_BASE64_PADDING = r"(?:=|%3[Dd]){0,2}"
+_TO_URLSAFE_BASE64 = str.maketrans("+/", "-_")
+
+
+@dataclass(frozen=True)
+class _ExactSecret:
+    """A value `scrub_credentials` hides wherever it appears, and the label shown in its place."""
+
+    label: str
+    value: str
+
+
+@dataclass(frozen=True)
+class _SecretForms:
+    """The matcher for one saved value in every form `scrub_credentials` hides.
+
+    Every match of `pattern` contains one of `anchors`, lowercase when
+    `folded`; `anchors` is empty when one is shorter than `_ANCHOR_MIN_LENGTH`.
+    `literal_forms` are the concrete encoded strings, for the cut-edge helpers.
+    """
+
+    pattern: re.Pattern[str]
+    anchors: tuple[str, ...]
+    folded: bool
+    literal_forms: tuple[str, ...]
+
+
+def _hex_pattern(number: int, width: int) -> str:
+    """Return a pattern for `number` written in at least `width` hex digits of either case."""
+    return "".join(
+        f"[{digit}{digit.lower()}]" if digit.isalpha() else digit for digit in f"{number:0{width}X}"
+    )
+
+
+def _escaped_char_patterns(char: str, escape: str) -> list[str]:
+    """Return patterns for `char` written as a backslash escape, at any depth of escaping.
+
+    JSON writes `\\n` or `\\uXXXX` (two for a character past U+FFFF); Python's
+    `ascii()` writes `\\xXX`, `\\uXXXX` or `\\UXXXXXXXX`; a bytes repr writes
+    each UTF-8 byte as `\\xXX`. `escape` is the pattern for the backslashes.
+    """
+    code = ord(char)
+    patterns = []
+    if code < 0x20 or code > 0x7E or char in _HTML_ENTITY_NAMES:
+        utf16 = char.encode("utf-16-be")
+        patterns.append("".join(
+            escape + "u" + _hex_pattern(int.from_bytes(utf16[i : i + 2], "big"), 4)
+            for i in range(0, len(utf16), 2)
+        ))
+    if code > 0xFFFF:
+        patterns.append(escape + "U" + _hex_pattern(code, 8))
+    if code > 0x7F:
+        patterns.append("".join(escape + "x" + _hex_pattern(byte, 2) for byte in char.encode()))
+    if code < 0x20 or 0x7F <= code <= 0xFF:
+        patterns.append(escape + "x" + _hex_pattern(code, 2))
+    if char in _CONTROL_ESCAPES:
+        patterns.append(escape + _CONTROL_ESCAPES[char])
+    return patterns
+
+
+def _char_pattern(char: str, escape: str) -> str:
+    """Return a pattern for one value character as printed or as a supported encoder writes it.
+
+    A plain character stands for itself. Any other also matches a backslash
+    escape, an HTML entity, its UTF-8 `%XX` bytes, `+` for a space, and
+    itself after any backslashes. Longer forms come first, so `&amp;` is
+    taken whole rather than as `&`.
+    """
+    if _PLAIN_RUN_PATTERN.fullmatch(char):
+        return re.escape(char)
+    alternatives = _escaped_char_patterns(char, escape)
+    if char in _HTML_ENTITY_NAMES:
+        alternatives.append(f"&{_HTML_ENTITY_NAMES[char]};")
+    if char in _HTML_ENTITY_NAMES or ord(char) > 0x7E:
+        alternatives.append(f"&#0*{ord(char)};|&#[xX]0*{_hex_pattern(ord(char), 1)};")
+    alternatives.append("".join("%" + _hex_pattern(byte, 2) for byte in char.encode()))
+    if char == " ":
+        alternatives.append(r"\+")
+    alternatives.append(r"\\*+" + re.escape(char))
+    return "(?:" + "|".join(alternatives) + ")"
+
+
+def _value_pattern(value: str) -> str:
+    """Return a pattern for `value` as printed, URL-encoded, or JSON-, HTML- or backslash-escaped."""
+    parts = []
+    escape = _ESCAPE
+    for unit in _VALUE_UNIT_PATTERN.findall(value):
+        if unit[0] == "\\":
+            parts.append(_BACKSLASH_RUN)
+            escape = _ESCAPE_AFTER_BACKSLASH_RUN
+        else:
+            parts.append(_char_pattern(unit, escape))
+            escape = _ESCAPE
+    return "".join(parts)
+
+
+def _base64_cores(raw: bytes) -> list[str]:
+    """Return, for each byte offset modulo 3, the base64 characters that encode only `raw`.
+
+    A value inside a longer base64 string, such as the password in an HTTP
+    Basic header, starts at an offset set by what comes before it.
+    """
+    cores = []
+    for offset in range(3):
+        encoded = base64.b64encode(bytes(offset) + raw).decode()
+        cores.append(encoded[(4 * offset + 2) // 3 : 8 * (offset + len(raw)) // 6])
+    return cores
+
+
+def _base64_pattern(core: str, offset: int) -> str:
+    """Return a pattern for `core` in either alphabet, padded or not, percent-encoded or not.
+
+    It takes the character at each end that mixes the value's bits with a
+    neighbor's too, so none of the value's bits stay readable.
+    """
+    lead = _BASE64_CHAR + "?" if offset else ""
+    body = "".join(_BASE64_ALPHABET_CHARS.get(char, char) for char in core)
+    return lead + body + _BASE64_CHAR + "?" + _BASE64_PADDING
+
+
+@functools.lru_cache(maxsize=1024)
+def _secret_forms(value: str) -> _SecretForms:
+    """Build the matcher for `value` in every form `scrub_credentials` hides.
+
+    The forms are the value as printed, URL-encoded (`quote`, `quote_plus`, hex
+    of either case), JSON-, HTML- and backslash-escaped at any depth, and,
+    from `_BASE64_MIN_BYTES`, base64 at each byte offset in either alphabet.
+    Cached per value, since the same values come back on every call and every turn.
+    """
+    folded = len(value) > _SHORT_SECRET_MAX
+    body = _value_pattern(value)
+    if not folded:
+        # Only an edge that is a word character needs a non-word neighbor.
+        if re.match(r"\w", value[0]):
+            body = r"(?<!\w)" + body
+        if re.match(r"\w", value[-1]):
+            body += r"(?!\w)"
+    branches = [body]
+    anchors = [max(_PLAIN_RUN_PATTERN.findall(value), key=len, default="")]
+    literal_forms = [
+        value,
+        urllib.parse.quote(value, safe=""),
+        urllib.parse.quote_plus(value),
+        json.dumps(value)[1:-1],
+        html.escape(value),
+    ]
+    raw = value.encode()
+    if len(raw) >= _BASE64_MIN_BYTES:
+        for offset, core in enumerate(_base64_cores(raw)):
+            branches.append(_base64_pattern(core, offset))
+            anchors.append(max(_BASE64_ANCHOR_PATTERN.findall(core), key=len, default=""))
+            literal_forms += [core, core.translate(_TO_URLSAFE_BASE64)]
+    if folded:
+        anchors = [anchor.lower() for anchor in anchors]
+    if min(len(anchor) for anchor in anchors) < _ANCHOR_MIN_LENGTH:
+        anchors = []
+    return _SecretForms(
+        pattern=re.compile("|".join(branches), re.IGNORECASE | re.ASCII if folded else 0),
+        anchors=tuple(anchors),
+        folded=folded,
+        literal_forms=tuple(dict.fromkeys(literal_forms)),
+    )
+
+
 def scrub_credentials(text: str) -> str:
     """Remove secret values from scratchpad/tool output before it reaches the LLM.
 
-    Redacts, in order:
+    Redacts, longest value first:
       * DS_* values registered as secret via register_secret_vars (driven by
         DatasourceField.secret=true). Non-secret fields of known engines
         (DS_HOST, DS_PORT, DS_BASE_URL, …) stay readable so the LLM can reason
         about connection errors.
       * Unknown DS_* vars (custom engines not yet in the registry) — any long
         value, conservatively.
-      * Provider credentials (ENG-463): the values of _PROVIDER_SECRET_VARS,
-        then anything matching a well-known key shape (_SECRET_KEY_PATTERN), so
-        a raw `mdb_`/`sk-`/`AIza`/`AQ.` key can't reach model context via a tool
-        result, traceback, or settings echo.
+      * Provider credentials (ENG-463): the values of _PROVIDER_SECRET_VARS.
+    Each value is matched in every form `_secret_forms` builds: as printed,
+    URL-encoded, escaped, or in base64. Then anything matching a well-known
+    key shape (_SECRET_KEY_PATTERN) is redacted, so a raw `mdb_`/`sk-`/`AIza`/
+    `AQ.` key can't reach model context via a tool result, traceback, or
+    settings echo.
     """
-    for key in _DS_SECRET_VARS:
-        value = _ds_env_values.get(key)
-        if not value:
-            continue
-        text = re.sub(r'(?<!\w)' + re.escape(value) + r'(?!\w)', f'[{key}]', text)
-    for key, value in _ds_env_values.items():
-        if key in _DS_KNOWN_VARS:
-            continue
-        # Length guard only for unknown DS_* vars (not registered secrets).
-        # Unknown vars are matched heuristically — a short value like "on"
-        # or "true" in a DS_ENABLE_X var should not be scrubbed.
-        # Registered secret vars bypass this check entirely.
-        if not value or len(value) <= 8:
-            continue
-        text = text.replace(value, f"[{key}]")
-    # Provider keys: exact-value first (informative label), then by shape to
-    # catch any that didn't originate from one of our env vars.
-    for key in _PROVIDER_SECRET_VARS:
-        value = os.environ.get(key, "")
-        if not value or len(value) <= 8:
-            continue
-        text = re.sub(r'(?<!\w)' + re.escape(value) + r'(?!\w)', f'[{key}]', text)
+    lowered: str | None = None
+    for secret in _exact_secrets():
+        forms = _secret_forms(secret.value)
+        if forms.anchors:
+            if forms.folded and lowered is None:
+                lowered = text.lower()
+            haystack = lowered if forms.folded else text
+            if not any(anchor in haystack for anchor in forms.anchors):
+                continue
+        text, count = forms.pattern.subn(f"[{secret.label}]", text)
+        if count:
+            lowered = None
     text = _SECRET_KEY_PATTERN.sub("[REDACTED_API_KEY]", text)
     return text
 
 
-def _exact_secret_values() -> list[str]:
-    """Return the values `scrub_credentials` matches exactly this turn.
+def _exact_secrets() -> list[_ExactSecret]:
+    """Return the values `scrub_credentials` hides by value this turn, longest first.
 
-    Mirrors the value rules in `scrub_credentials`: every registered secret,
-    unknown DS_* values over 8 characters, and provider keys over 8 characters.
+    Every registered secret, unknown DS_* values over `_SHORT_SECRET_MAX`
+    characters, and provider keys over it. Longest first, so a value that
+    holds a shorter one goes whole; values of one length keep that order, so a
+    registered secret's label wins.
     """
-    values = [_ds_env_values.get(key) or "" for key in _DS_SECRET_VARS]
-    values += [
-        value for key, value in _ds_env_values.items()
-        if key not in _DS_KNOWN_VARS and value and len(value) > 8
+    secrets = [_ExactSecret(key, _ds_env_values.get(key)) for key in _DS_SECRET_VARS]
+    # Unknown DS_* vars are matched heuristically, so a short value such as
+    # "on" or "true" in a DS_ENABLE_X var stays.
+    secrets += [
+        _ExactSecret(key, value) for key, value in _ds_env_values.items()
+        if key not in _DS_KNOWN_VARS and len(value) > _SHORT_SECRET_MAX
     ]
-    values += [
-        value for value in (os.environ.get(key, "") for key in _PROVIDER_SECRET_VARS)
-        if len(value) > 8
-    ]
-    return [value for value in values if value]
+    for key in _PROVIDER_SECRET_VARS:
+        value = os.environ.get(key, "")
+        if len(value) > _SHORT_SECRET_MAX:
+            secrets.append(_ExactSecret(key, value))
+    return sorted(
+        (secret for secret in secrets if secret.value),
+        key=lambda secret: len(secret.value),
+        reverse=True,
+    )
+
+
+def _exact_secret_forms() -> list[str]:
+    """Return the concrete forms, as printed and encoded, of every value `scrub_credentials` hides by value."""
+    return [form for secret in _exact_secrets() for form in _secret_forms(secret.value).literal_forms]
 
 
 def longest_exact_secret() -> int:
-    """Return the length of the longest value `scrub_credentials` matches exactly this turn.
+    """Return the length of the longest form of any value `scrub_credentials` hides by value this turn.
 
     A caller that cuts output before scrubbing it needs this much text past the
-    cut for such a value to match whole. Counts only what the scrub matches, so
+    cut for such a form to match whole. Counts only what the scrub matches, so
     a long non-secret field does not hold output back. Returns 0 when there is none.
     """
-    return max((len(value) for value in _exact_secret_values()), default=0)
+    return max((len(form) for form in _exact_secret_forms()), default=0)
 
 
 def exact_secret_prefix_at_end(text: str) -> int:
     """Return the length of the longest end of `text` that starts, but does not complete, an exact-match secret.
 
-    Output cut mid-write can end partway through a secret, which the exact-value
-    scrub cannot see. Call it on scrubbed text, so a whole secret at the end is
-    already a placeholder. Returns 0 when the end starts no such value.
+    Output cut mid-write can end partway through a secret, or an encoded form
+    of one, which the exact-value scrub cannot see. Call it on scrubbed text,
+    so a whole secret at the end is already a placeholder. Returns 0 when the
+    end starts no such form.
     """
     longest = 0
-    for value in _exact_secret_values():
-        for length in range(min(len(value) - 1, len(text)), longest, -1):
-            if text.endswith(value[:length]):
+    for form in _exact_secret_forms():
+        for length in range(min(len(form) - 1, len(text)), longest, -1):
+            if text.endswith(form[:length]):
                 longest = length
                 break
     return longest
@@ -469,12 +669,12 @@ def exact_secret_suffix_at_start(text: str) -> int:
 
     The start-of-text counterpart of `exact_secret_prefix_at_end`, for output
     whose beginning was dropped. Call it on scrubbed text. Returns 0 when the
-    start ends no such value.
+    start ends no such form.
     """
     longest = 0
-    for value in _exact_secret_values():
-        for length in range(min(len(value) - 1, len(text)), longest, -1):
-            if text.startswith(value[-length:]):
+    for form in _exact_secret_forms():
+        for length in range(min(len(form) - 1, len(text)), longest, -1):
+            if text.startswith(form[-length:]):
                 longest = length
                 break
     return longest

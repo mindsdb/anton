@@ -2,19 +2,26 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import dataclasses
+import html
 import json
 import os
+import re
+import urllib.parse
 from unittest.mock import patch
 
 import pytest
 
 from anton.core.session import _scrub_user_input
 from anton.tools import SCRUBBED_VALUE_RE
+from anton.utils import datasources
 from anton.utils.datasources import (
     _DS_KNOWN_VARS,
     _DS_SECRET_VARS,
     _PROVIDER_SECRET_VARS,
     _reset_registered_ds_vars,
+    exact_secret_prefix_at_end,
+    exact_secret_suffix_at_start,
     longest_exact_secret,
     scrub_credentials,
     scrub_output,
@@ -47,11 +54,12 @@ def clean_ds_state():
 
 
 class TestLongestExactSecret:
-    """Counts exactly the values scrub_credentials matches by exact value."""
+    """Counts the longest form of the values scrub_credentials matches by exact value."""
 
     def test_counts_secret_unknown_and_provider_values_only(self, monkeypatch):
         """Secret fields, unknown DS_* over 8 chars and provider keys over 8
-        chars count; known non-secret fields and short values do not."""
+        chars count; known non-secret fields and short values do not. A plain
+        value's longest form is its base64, a third longer."""
         _DS_SECRET_VARS.add("DS_PG_PROD__PASSWORD")
         _DS_KNOWN_VARS.add("DS_PG_PROD__PASSWORD")
         _DS_KNOWN_VARS.add("DS_PG_PROD__HOST")
@@ -63,22 +71,32 @@ class TestLongestExactSecret:
         })
         for key in _PROVIDER_SECRET_VARS:
             monkeypatch.delenv(key, raising=False)
-        assert longest_exact_secret() == 30
+        assert longest_exact_secret() == len(base64.b64encode(b"u" * 30))
 
-        monkeypatch.setenv("OPENAI_API_KEY", "k" * 40)
-        assert longest_exact_secret() == 40
+        monkeypatch.setenv("OPENAI_API_KEY", "k" * 42)
+        assert longest_exact_secret() == len(base64.b64encode(b"k" * 42))
 
         monkeypatch.setenv("OPENAI_API_KEY", "k" * 8)
-        assert longest_exact_secret() == 30
+        assert longest_exact_secret() == len(base64.b64encode(b"u" * 30))
 
     def test_a_short_secret_field_counts(self, monkeypatch):
-        """Secret fields match at any length, unlike unknown and provider values."""
+        """Secret fields match at any length, unlike unknown and provider values.
+        Five bytes print as six whole base64 characters."""
         _DS_SECRET_VARS.add("DS_PG_PROD__PASSWORD")
         _DS_KNOWN_VARS.add("DS_PG_PROD__PASSWORD")
         set_ds_env_values({"DS_PG_PROD__PASSWORD": "p" * 5})
         for key in _PROVIDER_SECRET_VARS:
             monkeypatch.delenv(key, raising=False)
-        assert longest_exact_secret() == 5
+        assert longest_exact_secret() == 6
+
+    def test_counts_a_url_encoded_form_longer_than_the_value(self, monkeypatch):
+        """A cut must leave room for the longest form the scrub matches, here `%2F` per `/`."""
+        _DS_SECRET_VARS.add("DS_PG_PROD__PASSWORD")
+        _DS_KNOWN_VARS.add("DS_PG_PROD__PASSWORD")
+        set_ds_env_values({"DS_PG_PROD__PASSWORD": "/" * 12})
+        for key in _PROVIDER_SECRET_VARS:
+            monkeypatch.delenv(key, raising=False)
+        assert longest_exact_secret() == len("%2F" * 12)
 
     def test_is_zero_with_nothing_to_match(self, monkeypatch):
         """A known non-secret field, and unknown or provider values of 8 chars
@@ -130,6 +148,225 @@ class TestScrubCredentials:
         monkeypatch.setenv("DS_ENABLE_FEATURE", "on")
         result = scrub_credentials("flag=on active")
         assert "on" in result
+
+
+# A saved password with a character for each encoder to change: `&`, a space,
+# quotes, `/`, `<`, `>`, a backslash and a non-ASCII letter.
+ENCODED_SECRET = 'Tr0ub4dor&3 "horse"/<staple>\\é'
+SECRET_LABEL = "DS_PG_PROD__PASSWORD"
+
+# Each returns the encoded value alone, without the quotes around a literal.
+SECRET_ENCODERS = {
+    "quote": urllib.parse.quote,
+    "quote-everything": lambda value: urllib.parse.quote(value, safe=""),
+    "quote-plus": urllib.parse.quote_plus,
+    "lowercase-hex": lambda value: re.sub(
+        r"%[0-9A-F]{2}", lambda found: found.group().lower(), urllib.parse.quote(value, safe="")
+    ),
+    "json": lambda value: json.dumps(value)[1:-1],
+    "json-unicode": lambda value: json.dumps(value, ensure_ascii=False)[1:-1],
+    "json-in-json": lambda value: json.dumps(json.dumps(value))[3:-3],
+    "html": html.escape,
+    "repr": lambda value: repr(value)[1:-1],
+    "ascii": lambda value: ascii(value)[1:-1],
+    "bytes-repr": lambda value: repr(value.encode())[2:-1],
+    "backslash-before-each-symbol": lambda value: re.sub(r"([^A-Za-z0-9._-])", r"\\\1", value),
+}
+
+# Output that holds none of the saved values below, only near misses of them.
+ORDINARY_OUTPUT = """\
+rows = df.query("status == 'active'").head(20)
+{"user": "analyst", "host": "db.example.com", "port": 5432, "note": "tab\\there \\"quoted\\" \\u00e9"}
+<a href="/reports?q=revenue%20by%20region&amp;year=2024">Revenue &amp; costs &lt;draft&gt;</a>
+  File "C:\\\\Users\\\\analyst\\\\cell.py", line 3, in <module>
+ValueError: could not convert string to float: 'n/a'
+hint: Tr0ub4dor&3 is only its start; abc1234, xabc123, ABC123 and Hunter2 are other ids
+data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==
+"""
+
+
+def _save_secrets(values: dict[str, str]) -> None:
+    """Register each of `values` as this turn's saved secret under its key."""
+    for key in values:
+        _DS_SECRET_VARS.add(key)
+        _DS_KNOWN_VARS.add(key)
+    set_ds_env_values(values)
+
+
+def _secret_only_runs(blob: str, start: int, length: int) -> list[str]:
+    """Return each 6-character run of base64 `blob` that encodes only its bytes `start` to `start + length`."""
+    first, end = -(-8 * start // 6), 8 * (start + length) // 6
+    return [blob[index : index + 6] for index in range(first, end - 5)]
+
+
+class _CountingPattern:
+    """A compiled pattern that counts how often `subn` runs it."""
+
+    def __init__(self, pattern: re.Pattern[str]) -> None:
+        self.pattern = pattern
+        self.calls = 0
+
+    def subn(self, replacement: str, text: str) -> tuple[str, int]:
+        self.calls += 1
+        return self.pattern.subn(replacement, text)
+
+
+class TestEncodedSavedSecrets:
+    """A saved value goes in the forms encoders print it in, not only as typed (ENG-3428)."""
+
+    @pytest.fixture(autouse=True)
+    def no_provider_keys(self, monkeypatch):
+        for key in _PROVIDER_SECRET_VARS:
+            monkeypatch.delenv(key, raising=False)
+
+    @pytest.fixture
+    def pattern_runs(self, monkeypatch) -> dict[str, _CountingPattern]:
+        """Count, per saved value, how often scrub_credentials runs its pattern."""
+        counters: dict[str, _CountingPattern] = {}
+        build = datasources._secret_forms
+
+        def counting_forms(value: str):
+            forms = build(value)
+            counter = counters.setdefault(value, _CountingPattern(forms.pattern))
+            return dataclasses.replace(forms, pattern=counter)
+
+        monkeypatch.setattr(datasources, "_secret_forms", counting_forms)
+        return counters
+
+    @pytest.mark.parametrize("encode", list(SECRET_ENCODERS.values()), ids=list(SECRET_ENCODERS))
+    def test_an_encoded_saved_secret_is_hidden_whole(self, encode):
+        _save_secrets({SECRET_LABEL: ENCODED_SECRET})
+        assert scrub_credentials(f"pw={encode(ENCODED_SECRET)};") == f"pw=[{SECRET_LABEL}];"
+
+    @pytest.mark.parametrize("tail", [b"@db.example.com:5432", b""], ids=["inside", "at-the-end"])
+    @pytest.mark.parametrize("offset", [0, 1, 2])
+    @pytest.mark.parametrize("encode", [
+        base64.b64encode,
+        base64.urlsafe_b64encode,
+        lambda data: base64.urlsafe_b64encode(data).rstrip(b"="),
+    ], ids=["standard", "urlsafe", "urlsafe-unpadded"])
+    def test_a_saved_secret_inside_a_longer_base64_string_is_hidden(self, encode, offset, tail):
+        """As in an HTTP Basic header, where the user name sets which of three byte offsets the password starts at."""
+        _save_secrets({SECRET_LABEL: ENCODED_SECRET})
+        head = b"u" * (2 + offset) + b":"
+        blob = encode(head + ENCODED_SECRET.encode() + tail).decode()
+        result = scrub_credentials(f"Authorization: Basic {blob}")
+
+        for run in _secret_only_runs(blob, len(head), len(ENCODED_SECRET.encode())):
+            assert run not in result
+        assert result.startswith(f"Authorization: Basic {blob[:4]}")
+        assert result.endswith(blob[-4:] if tail else f"[{SECRET_LABEL}]")
+
+    def test_base64_percent_encoded_in_a_url_is_hidden(self):
+        _save_secrets({SECRET_LABEL: ENCODED_SECRET})
+        blob = base64.b64encode(b"zz" + ENCODED_SECRET.encode()).decode()
+        url = f"https://api.example.com/v1?auth={urllib.parse.quote(blob, safe='')}&page=2"
+        result = scrub_credentials(url)
+
+        for run in _secret_only_runs(blob, 2, len(ENCODED_SECRET.encode())):
+            assert run not in urllib.parse.unquote(result)
+        assert result.startswith("https://api.example.com/v1?auth=")
+        assert result.endswith(f"[{SECRET_LABEL}]&page=2")
+
+    @pytest.mark.parametrize("change_case", [str.upper, str.lower, str.swapcase])
+    def test_a_long_saved_secret_is_hidden_in_any_ascii_case(self, change_case):
+        _save_secrets({SECRET_LABEL: "Tr0ub4dor&3horse"})
+        assert scrub_credentials(f"pw={change_case('Tr0ub4dor&3horse')};") == f"pw=[{SECRET_LABEL}];"
+
+    def test_a_long_saved_secret_is_hidden_inside_a_word(self):
+        _save_secrets({SECRET_LABEL: "Tr0ub4dor&3horse"})
+        assert scrub_credentials("xTr0ub4dor&3horse_2") == f"x[{SECRET_LABEL}]_2"
+
+    def test_a_short_saved_secret_is_hidden_only_as_a_whole_word_in_its_own_case(self):
+        """Matching `abc123` inside other words or in another case would hit ordinary text."""
+        _save_secrets({SECRET_LABEL: "abc123"})
+        assert scrub_credentials("auth abc123 failed") == f"auth [{SECRET_LABEL}] failed"
+        for text in ["abc123_x", "xabc123", "abc1234", "ABC123", "Abc123"]:
+            assert scrub_credentials(text) == text
+
+    def test_a_short_saved_secret_ending_in_a_symbol_is_hidden_before_a_letter(self):
+        """Only an edge that is a word character needs a non-word neighbor."""
+        _save_secrets({SECRET_LABEL: "Hunter2!"})
+        assert scrub_credentials("pw=Hunter2!x") == f"pw=[{SECRET_LABEL}]x"
+
+    def test_a_short_saved_secret_is_hidden_url_encoded(self):
+        _save_secrets({SECRET_LABEL: "p@ss!"})
+        result = scrub_credentials("postgresql://app:p%40ss%21@db:5432/prod")
+        assert result == f"postgresql://app:[{SECRET_LABEL}]@db:5432/prod"
+
+    def test_base64_is_matched_from_five_bytes(self):
+        """Four bytes are five whole base64 characters, too few to tell from other text."""
+        _save_secrets({SECRET_LABEL: "abcd"})
+        assert scrub_credentials("id YWJjZA==") == "id YWJjZA=="
+        _save_secrets({SECRET_LABEL: "abc12"})
+        assert scrub_credentials("id YWJjMTI=") == f"id [{SECRET_LABEL}]"
+
+    def test_a_saved_value_holding_a_shorter_one_is_hidden_whole(self):
+        """Longest first, so the short secret does not cut the long one and leave its tail."""
+        _DS_SECRET_VARS.add("DS_A_PROD__PASSWORD")
+        _DS_KNOWN_VARS.add("DS_A_PROD__PASSWORD")
+        set_ds_env_values({"DS_A_PROD__PASSWORD": "abc", "DS_CUSTOM_PROD__TOKEN": "abc-defghijk"})
+        assert scrub_credentials("tok=abc-defghijk") == "tok=[DS_CUSTOM_PROD__TOKEN]"
+
+    @pytest.mark.parametrize(
+        "label",
+        ["DS_PG_PROD__PASSWORD", "DS_CUSTOM_PROD__TOKEN", "ANTON_MINDS_API_KEY"],
+        ids=["saved-secret", "unknown-ds-var", "provider-key"],
+    )
+    def test_every_kind_of_exact_value_is_hidden_in_base64(self, label, monkeypatch):
+        value = "Zt7/Q8+Q8Q8Q8Q8Q8"
+        if label == "ANTON_MINDS_API_KEY":
+            monkeypatch.setenv(label, value)
+        elif label == "DS_PG_PROD__PASSWORD":
+            _save_secrets({label: value})
+        else:
+            set_ds_env_values({label: value})
+        printed = base64.b64encode(value.encode()).decode()
+        assert scrub_credentials(f"auth={printed}&page=2") == f"auth=[{label}]&page=2"
+
+    def test_ordinary_output_and_code_are_left_alone(self):
+        _save_secrets({
+            SECRET_LABEL: ENCODED_SECRET,
+            "DS_API_PROD__TOKEN": "abc123",
+            "DS_MAIL_PROD__PASSWORD": "Hunter2!",
+        })
+        assert scrub_credentials(ORDINARY_OUTPUT) == ORDINARY_OUTPUT
+
+    def test_output_is_unchanged_with_no_saved_secrets(self):
+        text = (
+            ORDINARY_OUTPUT
+            + urllib.parse.quote(ENCODED_SECRET)
+            + "\n"
+            + base64.b64encode(ENCODED_SECRET.encode()).decode()
+        )
+        assert scrub_credentials(text) == text
+
+    def test_a_value_none_of_whose_anchors_appear_is_not_run(self, pattern_runs):
+        """The prefilter skips a value when no literal run of it or of its base64 is in the text."""
+        _save_secrets({SECRET_LABEL: ENCODED_SECRET})
+        unrelated = "SELECT count(*) FROM users WHERE active;\n" * 50
+        assert scrub_credentials(unrelated) == unrelated
+        assert pattern_runs[ENCODED_SECRET].calls == 0
+
+        near_miss = "TR0UB4DOR, but not the rest of it"
+        assert scrub_credentials(near_miss) == near_miss
+        assert pattern_runs[ENCODED_SECRET].calls == 1
+
+    def test_a_value_with_no_long_plain_run_is_always_run(self, pattern_runs):
+        """`a!b@c#d$e%f^` has no plain run of 4 characters, and a shorter run is in most text."""
+        _save_secrets({SECRET_LABEL: "a!b@c#d$e%f^"})
+        scrub_credentials("SELECT 1;")
+        assert pattern_runs["a!b@c#d$e%f^"].calls == 1
+
+    def test_output_ending_partway_through_a_base64_form_is_held_back(self):
+        _save_secrets({SECRET_LABEL: ENCODED_SECRET})
+        printed = base64.b64encode(ENCODED_SECRET.encode()).decode()
+        assert exact_secret_prefix_at_end(scrub_credentials("auth " + printed[:20])) == 20
+
+    def test_output_starting_partway_through_a_url_encoded_form_is_held_back(self):
+        _save_secrets({SECRET_LABEL: ENCODED_SECRET})
+        printed = urllib.parse.quote(ENCODED_SECRET, safe="")
+        assert exact_secret_suffix_at_start(scrub_credentials(printed[-20:] + " done")) == 20
 
 
 class TestScrubProviderKeys:
