@@ -899,11 +899,12 @@ async def _check_backend_syntax(
 ) -> str | None:
     """Compile `backend.py` with the backend's own interpreter.
 
-    Returns None when it compiles, else the error for `VerifyResult`. `-I`
-    keeps the artifact folder off sys.path, so a user `traceback.py` cannot
-    stand in for the stdlib module; `-B` disables bytecode writes regardless
-    of env. `-I` also drops an inherited `PYTHONUTF8`, so `-X utf8` keeps
-    stderr in UTF-8, which is how it is decoded here.
+    Returns None when it compiles, else the compiler's error text; raises
+    `asyncio.TimeoutError` when the sandbox bound kills it. `-I` keeps the
+    artifact folder off sys.path, so a user `traceback.py` cannot stand in for
+    the stdlib module; `-B` disables bytecode writes regardless of env. `-I`
+    also drops an inherited `PYTHONUTF8`, so `-X utf8` keeps stderr in UTF-8,
+    which is how it is decoded here.
     """
     check = await _spawn_check(
         policy=policy,
@@ -913,11 +914,11 @@ async def _check_backend_syntax(
     )
     finished = await _finish_check(check, timeout=_COMPILE_TIMEOUT if policy is not None else None)
     if finished is None:
-        return f"backend.py compile timed out after {_COMPILE_TIMEOUT:.0f}s."
+        raise asyncio.TimeoutError
     _, err = finished
     if check.proc.returncode == 0:
         return None
-    return f"backend.py failed to compile:\n{err.decode(errors='replace')}"
+    return err.decode(errors="replace")
 
 
 async def verify_backend(
@@ -969,9 +970,14 @@ async def verify_backend(
 
     policy = cell_sandbox_of(scratchpad_pool)
 
-    compile_error = await _check_backend_syntax(venv_python, artifact_path, policy=policy)
+    try:
+        compile_error = await _check_backend_syntax(venv_python, artifact_path, policy=policy)
+    except asyncio.TimeoutError:
+        return VerifyResult(errors=[f"backend.py compile timed out after {_COMPILE_TIMEOUT:.0f}s."]), \
+            _ds_keys(source)
     if compile_error is not None:
-        return VerifyResult(errors=[compile_error]), _ds_keys(source)
+        return VerifyResult(errors=[f"backend.py failed to compile:\n{compile_error}"]), \
+            _ds_keys(source)
 
     # Import + introspect in a subprocess with a timeout. The env matters:
     # `build_backend_env` puts `anton_state` on PYTHONPATH exactly like the
