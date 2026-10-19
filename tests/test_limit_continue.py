@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from anton.core.interaction.elicit import AskAnswer
 from anton.core.llm.provider import StreamAskUser, StreamTaskProgress
 from anton.core.session import (
@@ -111,8 +113,10 @@ async def test_the_question_states_what_continuing_costs(workspace):
     session.elicitor = elicitor
     await _run(session)
     request = elicitor.requests[0]
-    assert f"reached its limit of {CEILING:,} tokens per request" in request.prompt
-    assert "Max tokens per task" in request.prompt
+    assert request.prompt == (
+        f"This task reached its limit of {CEILING:,} tokens per request. "
+        "Continuing uses more tokens. Keep going?"
+    )
     assert [o.value for o in request.options] == ["continue", "stop"]
     assert f"{_LIMIT_CONTINUE_MULTIPLIER * CEILING:,}" in request.options[0].detail
     assert not request.allow_custom
@@ -221,6 +225,41 @@ async def test_the_hand_back_names_the_limit_and_how_to_continue(workspace):
     text = _history_text(session)
     assert f"reached its limit of {CEILING:,} tokens per request" in text
     assert 'replying \\"keep going\\" continues' in text or 'replying "keep going" continues' in text
+
+
+def _stopped_at_the_ceiling(workspace):
+    return _session(workspace, responses=[_tool_call(i) for i in range(1, 14)])
+
+
+def _stopped_at_the_round_cap(workspace):
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 9)], per_call=1_000)
+    session._max_tool_rounds = 3
+    return session
+
+
+@pytest.mark.parametrize(
+    "stopped,sentence",
+    [
+        (_stopped_at_the_ceiling, f"This task reached its limit of {CEILING:,} tokens per request."),
+        (_stopped_at_the_round_cap, "This task reached its limit of 3 steps per request."),
+    ],
+)
+async def test_the_limit_sentence_names_no_setting(workspace, stopped, sentence):
+    """Where the operator sets the limits, the user can't change them, so the
+    hand-back the model writes and the question both name the limit alone."""
+    session = stopped(workspace)
+    elicitor = _ScriptedElicitor(STOP_HERE)
+    session.elicitor = elicitor
+    await _run(session)
+    handbacks = [
+        m["content"]
+        for m in session._history
+        if isinstance(m.get("content"), str) and f'word for word: "{sentence}"' in m["content"]
+    ]
+    assert len(handbacks) == 1
+    assert "settings" not in handbacks[0]
+    assert elicitor.requests[0].prompt.startswith(f"{sentence} ")
+    assert "settings" not in elicitor.requests[0].prompt
 
 
 def test_a_yes_needs_a_quote_from_the_message():

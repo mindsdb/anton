@@ -34,6 +34,10 @@ class Engram:
         self.id = hashlib.sha256(self.text.encode("utf-8")).hexdigest()
 
 
+LearnedMemoryScope = Literal["personal", "shared", "off", "unavailable"]
+MemoryPresence = Literal["empty", "present", "unavailable"]
+
+
 @runtime_checkable
 class HippocampusProtocol(Protocol):
     """Structural protocol for a single-scope memory store.

@@ -21,7 +21,6 @@ from .provider import (
     StreamToolUseDelta,
     StreamToolUseEnd,
     StreamToolUseStart,
-    TokenLimitExceeded,
     ToolCall,
     TransientProviderError,
     Usage,
@@ -32,7 +31,6 @@ from .provider import (
     log_transient_provider_error,
     retry_after_seconds,
     compute_context_pressure,
-    origin_is_known_third_party,
     ensure_replayable_tool_call,
     mindshub_billing_stop,
     mindshub_model_restriction,
@@ -82,7 +80,6 @@ def _raise_for_status_error(
     classifier, and the generic "unavailable" copy is the last resort.
 
     - 401 → ProviderAuthError (canonical provider-credential refusal).
-    - 429 WITH a quota ``detail`` → TokenLimitExceeded (keeps its own card).
     - 402/429 with an M3 gate billing code (``wallet_empty`` /
       ``included_allowance_exhausted`` / ``free_air_daily_spend_fuse_exceeded``,
       body or X-MindsHub-Reason header) → the matching TokenLimitExceeded
@@ -95,8 +92,9 @@ def _raise_for_status_error(
     - 404 → ModelUnavailableError or EndpointConfigurationError via the
       shared ``classify_404`` (ENG-1139) — permanent, non-duplicated copy
       instead of the generic "temporarily unavailable, try again".
-    - overloaded/api_error (incl. the mid-stream HTTP-200 case), 5xx, plain 429
-      → TransientProviderError (retryable — see ENG-673).
+    - overloaded/api_error (incl. the mid-stream HTTP-200 case), 5xx, any 429
+      without a billing code (one whose body carries only a FastAPI ``detail``
+      included) → TransientProviderError (retryable — see ENG-673).
     - anything else → the generic "temporarily unavailable" ConnectionError.
     """
     if exc.status_code == 401:
@@ -106,23 +104,6 @@ def _raise_for_status_error(
 
     body = exc.body if isinstance(exc.body, dict) else {}
     parsed = ProviderErrorBody.parse(body)
-
-    # The `detail` branch below can mint a MindsHub billing verdict, so it must
-    # refuse a provably foreign origin; `mindshub_billing_stop`
-    # applies the same gate to the gate's billing codes itself.
-    _foreign = origin_is_known_third_party(exc)
-
-    # Origin-gated, and `str`-guarded to match the openai twin. Two bugs the
-    # twin already avoided and this one did not: an unguarded `detail` lets a
-    # FastAPI validation error (whose `detail` is a LIST) render as a Python
-    # repr next to our billing link, and an ungated one lets any BYOK endpoint
-    # mint the credits card from a single JSON key with attacker-authored prose
-    # in it.
-    _detail = parsed.top.detail
-    if not _foreign and exc.status_code == 429 and isinstance(_detail, str) and _detail:
-        msg = f"Server returned 429 — {_detail}"
-        msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
-        raise TokenLimitExceeded(msg) from exc
 
     # MindsHub M3 billing taxonomy, through the helper the openai twin uses so
     # the mapping can't drift. The gateway's Anthropic lane re-envelopes a gate

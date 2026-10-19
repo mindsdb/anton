@@ -101,7 +101,7 @@ def test_both_checkers_agree_a_clean_workbook_is_clean(monkeypatch, store: _Fake
     agrees with the structural lint — still no messages."""
     monkeypatch.setattr(
         "anton.core.artifacts.xlsx_office_check.check_xlsx_via_office",
-        lambda _path: [],
+        lambda _path, *, cell_sandbox: [],
     )
     folder = _make_artifact(store, "clean-abc12345")
     _write_workbook(folder / "clean.xlsx", {"Sheet1": {"A1": "1+1"}})
@@ -116,7 +116,7 @@ def test_structural_message_wins_when_both_flag_the_same_cell(monkeypatch, store
     actionable structural message should reach the agent, not both."""
     monkeypatch.setattr(
         "anton.core.artifacts.xlsx_office_check.check_xlsx_via_office",
-        lambda _path: [
+        lambda _path, *, cell_sandbox: [
             FormulaErrorFinding(
                 sheet="Assumptions", cell="E6",
                 formula="SLOPE(E6:J6,{1,2,3,4,5,6})", error="#VALUE!",
@@ -146,7 +146,7 @@ def test_oracle_only_finding_still_surfaces(monkeypatch, store: _FakeStore):
     here would silently drop real coverage."""
     monkeypatch.setattr(
         "anton.core.artifacts.xlsx_office_check.check_xlsx_via_office",
-        lambda _path: [
+        lambda _path, *, cell_sandbox: [
             FormulaErrorFinding(
                 sheet="Sheet1", cell="B2", formula="A1/0", error="#DIV/0!",
             )

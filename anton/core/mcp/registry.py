@@ -13,6 +13,10 @@ Two things happen here, in order, before the LLM ever sees a tool name:
    threads that connection's own `name` in too, so the two connections'
    tools don't collide under `ToolRegistry.register_tool`'s
    skip-duplicate-by-name behavior and silently shadow one another.
+   `names.parse_namespaced_tool_name` splits a registered name back into
+   engine, connection and tool for callers that only see the name (for
+   example a stored tool row). Both name helpers live in `names`, so such a
+   caller does not import the MCP SDK.
 2. **Access filtering** — `access.allowed_for_mode` decides which tools
    survive at all for this connection's mode. This *is* the governance
    mechanism for MCP tool access (see access.py's module docstring); nothing
@@ -29,19 +33,9 @@ from __future__ import annotations
 from anton.core.mcp.access import AccessMode, allowed_for_mode
 from anton.core.mcp.client import McpSession
 from anton.core.mcp.errors import McpPermanentError, McpTransientError
+from anton.core.mcp.names import namespaced_tool_name
 from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.tool_defs import ToolDef
-
-
-def namespaced_tool_name(engine: str, tool_name: str, *, connection_name: str | None = None) -> str:
-    """`{engine}__{tool_name}` in the common single-connection-per-engine
-    case; `{engine}__{connection_name}__{tool_name}` when `connection_name`
-    is given (multiple connections for this engine in the same turn — see
-    module docstring). Left out by default so the common case's tool names
-    stay exactly what every existing test/doc example already shows."""
-    if connection_name is None:
-        return f"{engine}__{tool_name}"
-    return f"{engine}__{connection_name}__{tool_name}"
 
 
 async def discover_tool_defs(

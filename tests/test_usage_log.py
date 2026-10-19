@@ -22,7 +22,6 @@ from anton.core.llm.provider import LLMProvider, LLMResponse, TransientProviderE
 from anton.core.llm.tracing import (
     TraceContext,
     call_role,
-    get_trace_context,
     reset_trace_context,
     set_trace_context,
 )
@@ -242,37 +241,6 @@ async def test_a_streamed_anthropic_call_that_fails_before_message_start_logs_no
     assert usage_log() == []
 
 
-async def _trace_seen_by_end_of_turn_work(monkeypatch):
-    """Run one turn and return the trace a task scheduled by the end-of-turn
-    memory passes sees."""
-    llm = make_mock_llm()
-    llm.plan.return_value = LLMResponse(content="hi", usage=Usage(input_tokens=1))
-    session = ChatSession(ChatSessionConfig(llm_client=llm))
-    seen = []
-
-    async def _record():
-        seen.append(get_trace_context())
-
-    tasks = []
-    monkeypatch.setattr(session, "_schedule_cerebellum_flush", lambda: tasks.append(asyncio.create_task(_record())))
-    async for _ in session.turn_stream("one", trace_metadata={"turn": "0"}):
-        pass
-    await asyncio.gather(*tasks)
-    (trace,) = seen
-    return trace
-
-
-async def test_end_of_turn_work_keeps_the_turns_trace_when_the_usage_log_is_on(monkeypatch):
-    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
-    trace = await _trace_seen_by_end_of_turn_work(monkeypatch)
-    assert trace is not None and trace.metadata == {"turn": "0"}
-
-
-async def test_end_of_turn_work_runs_without_a_trace_when_the_usage_log_is_off(monkeypatch):
-    monkeypatch.delenv("ANTON_USAGE_LOG", raising=False)
-    assert await _trace_seen_by_end_of_turn_work(monkeypatch) is None
-
-
 @pytest.fixture
 def background_done(caplog):
     caplog.set_level("INFO", logger="anton.usage")
@@ -294,7 +262,7 @@ async def test_a_turn_marks_its_end_of_turn_work_done_only_after_it_finishes(mon
     session = ChatSession(ChatSessionConfig(llm_client=llm))
     release = asyncio.Event()
     monkeypatch.setattr(session, "_schedule_cerebellum_flush",
-                        lambda: asyncio.create_task(release.wait()))
+                        lambda trace=None: asyncio.create_task(release.wait()))
 
     async for _ in session.turn_stream("one", trace_metadata={"turn": "0"}):
         pass

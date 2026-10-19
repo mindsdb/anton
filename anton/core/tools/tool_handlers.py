@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from anton.core.backends.base import Cell
+from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
 from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.side_effect import SideEffectResult, now_iso
 from anton.core.utils.scratchpad import (
@@ -16,6 +17,7 @@ from anton.core.utils.scratchpad import (
     observe_scratchpad_cell,
     cell_failure_reason,
     install_call_installed_something,
+    refuse_pad_name,
     reject_invalid_packages,
     send_package_install_event,
 )
@@ -25,6 +27,28 @@ if TYPE_CHECKING:
 
 
 _log = logging.getLogger(__name__)
+
+
+def preliminary_cell(
+    *,
+    code: str,
+    description: str,
+    estimated_time: str,
+    estimated_seconds: int,
+) -> Cell:
+    """The cell pre-execute observers see: the code and its intent, no output yet.
+
+    Both exec paths (`handle_scratchpad` and `ChatSession`'s inline streaming
+    exec) build it here, so observers get the same shape from either one.
+    """
+    return Cell(
+        code=code,
+        stdout="",
+        stderr="",
+        error=None,
+        description=description,
+        estimated_time=estimated_time or str(estimated_seconds),
+    )
 
 
 async def _fire_pre_execute(session: "ChatSession", cell: Cell) -> None:
@@ -150,7 +174,13 @@ def snapshot_existing_artifact_mtimes(store) -> dict[str, float]:
 _ARTIFACT_LINT_SIZE_CEILING = 10 * 1024 * 1024  # 10 MB
 
 
-def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
+# Said once per file when a check that would start a browser or LibreOffice
+# is skipped because agent code runs in a sandbox on this host.
+_SANDBOX_BROWSER_SKIP = "browser check skipped: agent code runs in a sandbox on this deployment"
+_SANDBOX_OFFICE_SKIP = "LibreOffice check skipped: agent code runs in a sandbox on this deployment"
+
+
+def _artifact_linters(*, cell_sandbox: CellSandbox | None = None) -> dict[str, Callable[[Path], list[str] | None]]:
     """suffix -> checker. `None` means it could not run at all (e.g. no
     headless browser); `[]` means it ran and found nothing; a non-empty
     list is real findings — only that last case is ever appended to the
@@ -159,12 +189,22 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
     Add a format by adding one entry here. Only `.xlsx`/`.html`/`.pptx`/
     `.docx` are registered — every other extension is silently unchecked,
     which is honest as-is: nothing ever claimed to validate a `.csv`.
+
+    A `cell_sandbox` policy skips the checks that start a browser or
+    LibreOffice on the agent's file (each of them also refuses under it);
+    the in-process lints still run. Where the skipped tool is installed, the
+    result says the check was skipped.
     """
-    from anton.core.artifacts.html_lint import lint_html
+    from anton.core.artifacts.html_lint import discover_browser, lint_html
     from anton.core.artifacts.office_open_check import check_opens_via_office
     from anton.core.artifacts.ooxml_lint import lint_ooxml
     from anton.core.artifacts.xlsx_lint import lint_xlsx
-    from anton.core.artifacts.xlsx_office_check import check_xlsx_via_office
+    from anton.core.artifacts.xlsx_office_check import _discover_office, check_xlsx_via_office
+
+    sandboxed = cell_sandbox is not None
+
+    def _office_skip() -> list[str]:
+        return [_SANDBOX_OFFICE_SKIP] if _discover_office() is not None else []
 
     def _xlsx_linter(path: Path) -> list[str] | None:
         # Both always run — LibreOffice recalculates and catches any
@@ -173,7 +213,13 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
         # sheet prefix") where the oracle only names the symptom
         # ("#VALUE!"), and some cells only the oracle catches at all
         # (a genuine #REF!/#DIV/0! unrelated to same-sheet circularity).
-        office_findings = check_xlsx_via_office(path)
+        if sandboxed:
+            structural_findings = lint_xlsx(path)
+            skipped = _office_skip()
+            if structural_findings is None and not skipped:
+                return None
+            return [f.message() for f in (structural_findings or [])] + skipped
+        office_findings = check_xlsx_via_office(path, cell_sandbox=cell_sandbox)
         structural_findings = lint_xlsx(path)
 
         if office_findings is None and structural_findings is None:
@@ -193,7 +239,9 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
         return messages
 
     def _html_linter(path: Path) -> list[str] | None:
-        findings = lint_html(path)
+        if sandboxed:
+            return [_SANDBOX_BROWSER_SKIP] if discover_browser() is not None else None
+        findings = lint_html(path, cell_sandbox=cell_sandbox)
         if findings is not None:
             return [f.message() for f in findings]
         return None
@@ -207,7 +255,10 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
             structural_findings = lint_ooxml(path, kind)
             if structural_findings:
                 return [f.message() for f in structural_findings]
-            office_findings = check_opens_via_office(path)
+            if sandboxed:
+                skipped = _office_skip()
+                return skipped if structural_findings is not None or skipped else None
+            office_findings = check_opens_via_office(path, cell_sandbox=cell_sandbox)
             if structural_findings is None and office_findings is None:
                 return None
             return [f.message() for f in (office_findings or [])]
@@ -222,14 +273,19 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
     }
 
 
-def lint_changed_artifact_files(store, before: dict[str, float]) -> list[str]:
+def lint_changed_artifact_files(
+    store, before: dict[str, float], *, cell_sandbox: CellSandbox | None = None
+) -> list[str]:
     """Run the format-appropriate checker on artifact folders this cell
     edited (mtime moved since `before`), so findings reach the agent as
     tool-result text right away, not only via a later open()/list().
+
+    Under a sandbox policy the checks that start a browser or LibreOffice
+    are skipped: they would run the agent's file outside the sandbox.
     """
     from anton.core.artifacts.store import iter_content_files
 
-    linters = _artifact_linters()
+    linters = _artifact_linters(cell_sandbox=cell_sandbox)
     if not linters:
         return []
     after = snapshot_existing_artifact_mtimes(store)
@@ -1005,6 +1061,9 @@ async def handle_scratchpad(
             ok=False,
             reason="scratchpad_missing_name",
         )
+    refused_name = refuse_pad_name(name)
+    if refused_name is not None:
+        return refused_name
 
     # ACC emit helper: use the session's safe wrapper if it exists,
     # otherwise no-op. Defined as a local closure so each emit site
@@ -1030,13 +1089,11 @@ async def handle_scratchpad(
         # never sees these — observation is an orchestration concern,
         # so it lives at the dispatcher layer where the data is most
         # natural and where local/remote runtimes stay interchangeable.
-        prelim_cell = Cell(
+        prelim_cell = preliminary_cell(
             code=code,
-            stdout="",
-            stderr="",
-            error=None,
             description=description,
-            estimated_time=estimated_time or str(estimated_seconds),
+            estimated_time=estimated_time,
+            estimated_seconds=estimated_seconds,
         )
         await _fire_pre_execute(session, prelim_cell)
 
@@ -1074,6 +1131,7 @@ async def handle_scratchpad(
                     lint_messages = await asyncio.to_thread(
                         lint_changed_artifact_files,
                         artifact_store, before_artifact_mtimes,
+                        cell_sandbox=cell_sandbox_of(getattr(session, "_scratchpads", None)),
                     )
                 except Exception:
                     # Best-effort: a lint crash must never fail
@@ -1091,7 +1149,8 @@ async def handle_scratchpad(
         if lint_messages:
             # [artifact lint] follows format_cell_result's own [output]/[error]
             # labeling convention so the agent can tell the finding apart from
-            # its own code's output.
+            # its own code's output. cowork-server's figure sources cut this
+            # block from a replayed cell's output.
             content += "\n\n[artifact lint]\n" + "\n".join(lint_messages)
         return ToolOutcome(
             content=content,
@@ -1178,8 +1237,11 @@ async def handle_read_image(
             ok=False, reason="missing_name",
         )
 
+    # Set only by a multi-person host (Cowork with the Landlock sandbox).
+    # The desktop, the CLI and the cloud pod carry none and read as before.
+    policy = cell_sandbox_of(getattr(session, "_scratchpads", None))
     try:
-        path = Path(file_path).expanduser()
+        path = _expand_home(file_path, policy)
         if not path.is_absolute():
             # Resolve relative paths against the project workspace (where
             # artifacts/decks live), not the process cwd. Under the desktop
@@ -1190,11 +1252,29 @@ async def handle_read_image(
             base = getattr(getattr(session, "_workspace", None), "base", None)
             root = Path(base) if base else Path.cwd()
             path = (root / path).resolve()
-    except OSError as exc:
+        if policy is not None:
+            path = path.resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
         # Tier 2: the model supplied a path that will not parse.
         return ToolOutcome(
             content=f"Error: invalid path '{file_path}': {exc}",
             ok=False, reason="invalid_type",
+        )
+
+    if policy is not None and not policy.allows_read(path):
+        # This process runs outside the sandbox, so it admits only what the
+        # person's own cells may read. Checked before the file is looked at,
+        # and worded without the resolved path, so the reply is the same
+        # whether another person's file exists or not.
+        return ToolOutcome(
+            content=(
+                f"Error: access denied: {file_path} is outside the files this "
+                "conversation may read (the project, the scratchpad's home and "
+                "temp folders, the shared folder and the conversation's "
+                "attachments). If the user wants you to see this image, ask "
+                "them to attach it to the conversation."
+            ),
+            ok=False, reason="access_denied",
         )
 
     if not path.is_file():
@@ -1266,9 +1346,11 @@ async def handle_read_image(
 
     summary = f"Loaded {path.name} ({human_size(len(raw))})."
     try:
+        import io
         from PIL import Image as _PILImage
 
-        with _PILImage.open(path) as im:
+        # The bytes already read, not a second open of the path.
+        with _PILImage.open(io.BytesIO(raw)) as im:
             summary = f"Loaded {path.name} ({im.width}x{im.height}, {human_size(len(raw))})."
     except Exception:
         pass
@@ -1299,6 +1381,18 @@ async def handle_read_image(
         ],
         ok=True,
     )
+
+
+def _expand_home(file_path: str, policy: "CellSandbox | None") -> Path:
+    """`file_path` with `~` expanded to the HOME the person's cells run with.
+
+    Under a policy the process HOME is the server's, which holds every
+    person's space; the cell's HOME is the policy's. Without one, `~` is the
+    process HOME as before.
+    """
+    if policy is not None and (file_path == "~" or file_path.startswith("~/")):
+        return policy.home_dir / file_path[1:].lstrip("/")
+    return Path(file_path).expanduser()
 
 
 def _read_roots(session: "ChatSession") -> "tuple[Path, tuple[Path, ...]]":
@@ -1388,8 +1482,9 @@ def _read_text_file(
     from anton.core.tools import file_access, text_file
 
     base, owned_roots = _read_roots(session)
+    policy = cell_sandbox_of(getattr(session, "_scratchpads", None))
     try:
-        path = Path(raw).expanduser()
+        path = _expand_home(raw, policy)
         if not path.is_absolute():
             path = base / path
         resolved = path.resolve()
@@ -1399,11 +1494,17 @@ def _read_text_file(
         )
     shown = _shown_path(path, display_root)
 
-    refusal = file_access.read_refusal(resolved, workspace=base, owned_roots=owned_roots)
+    refusal = file_access.under_policy(
+        file_access.read_refusal(resolved, workspace=base, owned_roots=owned_roots),
+        resolved, policy, outside=file_access.REFUSED_OUTSIDE,
+    )
     if refusal is not None:
         _log.debug("read_text_file refused %s: %s", resolved, refusal)
         resolved_shown = _shown_path(resolved, display_root)
-        where = shown if resolved_shown == shown else f"{shown} (it resolves to {resolved_shown})"
+        # Under a policy the target can be another person's file: name only
+        # the path as given.
+        same = resolved_shown == shown or policy is not None
+        where = shown if same else f"{shown} (it resolves to {resolved_shown})"
         message = f"Error: access denied: {where} is {refusal}."
         if refusal == file_access.REFUSED_OUTSIDE:
             message += (

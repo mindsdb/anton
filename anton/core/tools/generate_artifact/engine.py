@@ -31,7 +31,10 @@ import httpx2 as httpx
 
 from anton.core.artifacts.internal_files import API_SPEC_FILENAME, PRD_FILENAME
 from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
+from anton.core.backends.sandbox import cell_sandbox_of
+from anton.utils.datasources import scrub_credentials
 from anton.core.llm.structured import looks_truncated
+from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS
 
 from . import sub_tools
 from .debug_trace import NullTrace
@@ -541,7 +544,9 @@ async def generate(
     # gets the strict reading, not a permissive one.
     ws_base = getattr(getattr(session, "_workspace", None), "base", None)
     kept, dropped = resolve_attachments(
-        attachments, workspace=ws_base if isinstance(ws_base, Path) else None
+        attachments,
+        workspace=ws_base if isinstance(ws_base, Path) else None,
+        policy=cell_sandbox_of(getattr(session, "_scratchpads", None)),
     )
     state.attachments = kept
     if kept or dropped:
@@ -661,6 +666,14 @@ async def _generate_api_spec(
     else:
         system, user = build_api_spec_prompt(context, stateless=stateless)
     declared = _declared_api_paths(context)
+    if declared:
+        # Naming the paths up front: told only to copy them from spec.md, the
+        # model renamed them on the first attempt in most live runs.
+        listed = ", ".join(f"`{p}`" for p in declared.values())
+        user += (
+            f"\n\n`paths` must be exactly these, character for character: {listed} "
+            "(plus optional `/api/health`)."
+        )
     extra = ""
     for attempt in range(2):
         if attempt and on_retry is not None:
@@ -696,7 +709,13 @@ async def _generate_api_spec(
 
 
 _API_SPEC_METHODS = ("get", "post", "put", "patch", "delete")
-_DECLARED_PATH_RE = re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE)\s+(/api/[^\s`:,;)]+)")
+# What a path IS (plain, `{name}`, `{name:conv}` or `:name` segments), not
+# which characters end it: anything after the last segment is left out.
+_DECLARED_PATH_RE = re.compile(
+    r"\b(?:GET|POST|PUT|PATCH|DELETE)\b[*`]*\s+[*`]*"
+    r"(/api(?:/(?:\{[^{}\s]+\}|:[A-Za-z_]\w*|[\w.~-]+))+)"
+)
+_COLON_PARAM_RE = re.compile(r"/:([A-Za-z_]\w*)")
 _HEALTH_PATH = "/api/health"
 
 
@@ -718,7 +737,9 @@ def _declared_api_paths(context: str) -> dict[str, str]:
     if not match:
         return {}
     found: dict[str, str] = {}
-    for path in _DECLARED_PATH_RE.findall(match.group(1)):
+    for raw in _DECLARED_PATH_RE.findall(match.group(1)):
+        # A sentence's full stop; dots inside a path segment stay.
+        path = _COLON_PARAM_RE.sub(r"/{\1}", raw.rstrip("."))
         if _normalise_api_path(path) != _HEALTH_PATH:
             found.setdefault(_normalise_api_path(path), path)
     return found
@@ -840,9 +861,10 @@ async def _run_loop(
 
     Returns a result dict ``{files_written, rounds_used, summary,
     scratchpad_execs}`` on success, or a plain error string on failure.
-    ``scratchpad_execs`` records every scratchpad ``exec`` the loop made —
-    ``{name, code, output}`` per call — so callers can hand the exact
-    data-access code that ran to later FSM steps.
+    ``scratchpad_execs`` records every scratchpad ``exec`` the loop ran —
+    ``{name, code, output}`` per call, leaving out a cell that never ran
+    (``CELL_NOT_RUN_REASONS``) — so callers can hand the exact data-access
+    code that ran to later FSM steps.
 
     ``spend``, when given, is the run's `SpendGuard`. Once the turn's ceiling
     is reached the loop tells the model to close its file and stop, and gives
@@ -1040,15 +1062,21 @@ async def _run_loop(
                 result_blocks.append(sub_tools.tool_result(tc.id, msg))
             elif name == "read_text_file":
                 outcome = await _read_for_generator(session, artifact_path, inp)
-                result_blocks.append(sub_tools.tool_result(tc.id, outcome.content))
+                # The filter the main loop gives read_text_file results, so a
+                # saved secret in a read file reaches the builder as its marker.
+                result_blocks.append(sub_tools.tool_result(tc.id, scrub_credentials(outcome.content)))
             elif name == "scratchpad":
                 # Full scratchpad access: the sub-generator pulls or rebuilds
                 # the data described in the brief's `## Data` section. Lazy
                 # import avoids a tool_handlers <-> generate_artifact cycle.
                 from anton.core.tools.tool_handlers import handle_scratchpad
 
-                content = sub_tools.unwrap_outcome(await handle_scratchpad(session, inp))
-                if inp.get("action") == "exec":
+                outcome = await handle_scratchpad(session, inp)
+                content = sub_tools.unwrap_outcome(outcome)
+                # A cell that never ran, such as a write the user didn't
+                # approve, is no data-access code for later steps to reuse.
+                ran = getattr(outcome, "reason", "") not in CELL_NOT_RUN_REASONS
+                if inp.get("action") == "exec" and ran:
                     scratchpad_execs.append(
                         {
                             "name": str(inp.get("name") or ""),
