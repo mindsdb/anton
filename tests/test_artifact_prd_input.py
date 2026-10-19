@@ -19,9 +19,16 @@ from anton.core.tools.generate_artifact.state import GenState
 from tests.streaming_llm import StreamingLLM
 
 
+
+def _unsandboxed_session() -> AsyncMock:
+    """A mock session whose scratchpads carry no sandbox policy, as on the desktop."""
+    session = AsyncMock()
+    session._scratchpads.cell_sandbox = None
+    return session
+
 def _state(tmp_path, **kw):
     base = dict(
-        session=AsyncMock(), artifact_type="html-app", artifact_path=tmp_path,
+        session=_unsandboxed_session(), artifact_type="html-app", artifact_path=tmp_path,
         slug="a", brief="## User request\nShow orders", is_fullstack=False,
     )
     base.update(kw)
@@ -106,7 +113,7 @@ async def test_generate_loads_the_prd_before_running_the_fsm(tmp_path: Path, mon
     ))
     monkeypatch.setattr(orchestrator, "run", fake_run)
     await engine.generate(
-        session=AsyncMock(), artifact_type="html-app", artifact_path=tmp_path,
+        session=_unsandboxed_session(), artifact_type="html-app", artifact_path=tmp_path,
         slug="a", user_request="show orders", agent_understanding="orders table",
     )
     assert seen["entry"] == cp.ENTRY_SPEC
@@ -137,7 +144,7 @@ async def test_a_resumed_generation_reads_the_api_contract_back(tmp_path: Path, 
     ))
     monkeypatch.setattr(orchestrator, "run", fake_run)
     await engine.generate(
-        session=AsyncMock(), artifact_type="fullstack-stateless-app", artifact_path=tmp_path,
+        session=_unsandboxed_session(), artifact_type="fullstack-stateless-app", artifact_path=tmp_path,
         slug="a", user_request="a clock", agent_understanding="clock",
     )
     assert seen["entry"] == cp.ENTRY_GENERATE
@@ -166,7 +173,7 @@ async def test_a_resumed_spec_phase_does_not_read_a_contract_it_will_rewrite(tmp
     ))
     monkeypatch.setattr(orchestrator, "run", fake_run)
     await engine.generate(
-        session=AsyncMock(), artifact_type="fullstack-stateless-app", artifact_path=tmp_path,
+        session=_unsandboxed_session(), artifact_type="fullstack-stateless-app", artifact_path=tmp_path,
         slug="a", user_request="a clock", agent_understanding="clock",
     )
     assert seen["entry"] == cp.ENTRY_SPEC

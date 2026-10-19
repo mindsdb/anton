@@ -27,6 +27,7 @@ from anton.core.llm.provider import (
     StreamToolUseDelta,
     StreamToolUseEnd,
     StreamToolUseStart,
+    StreamTurnEnded,
     WalletEmptyError,
 )
 
@@ -169,6 +170,19 @@ def test_step_events_go_on_the_wire():
     assert {"kind": "round_end", "stop_reason": "end_turn",
             "had_tool_calls": False} in events
     assert events[-1] == {"kind": "turn_completed"}
+
+
+def test_handback_reason_goes_on_the_wire_before_the_terminal():
+    class _S(_FakeSession):
+        async def turn_stream(self, user_input, **kwargs):
+            yield StreamTextDelta(text="stopped at a limit")
+            yield StreamTurnEnded(ended_by="spend_ceiling")
+
+    events = _drive(_S())
+    assert events[-2:] == [
+        {"kind": "turn_ended", "ended_by": "spend_ceiling"},
+        {"kind": "turn_completed"},
+    ]
 
 
 def test_result_clip_preserves_error_verdict():
@@ -651,7 +665,9 @@ class _HistorySession(_FakeSession):
 
     `seed` is what the constructor would have loaded from `initial_history`;
     `appended` is what `turn_stream` adds — including the current turn's user
-    input, which lands INSIDE the slice and must be trimmed away.
+    input, which lands INSIDE `turn_messages()` and must be trimmed away.
+    A real ChatSession's history swaps are covered in
+    tests/test_turn_rows_through_compaction.py.
     """
 
     def __init__(self, seed, appended, deltas=("ok",), raise_on_stream=None,
@@ -660,8 +676,13 @@ class _HistorySession(_FakeSession):
         self.history = list(seed)
         self._appended = list(appended)
         self._compact = compact
+        self._turn_start = len(self.history)
+
+    def turn_messages(self):
+        return self.history[self._turn_start:]
 
     async def turn_stream(self, user_input, **kwargs):
+        self._turn_start = len(self.history)
         self.history.extend(self._appended)
         if self._compact:
             yield StreamContextCompacted(message="squeezed")
@@ -696,11 +717,11 @@ def test_history_slice_starts_after_the_seeded_history():
     assert _history_events(events) == [{"kind": "history", "rows": _EXPECTED_ROWS}]
 
 
-def test_history_rows_not_emitted_after_a_mid_turn_compaction():
-    """Compaction reassigns session.history, so seed_len no longer marks this
-    turn's start — slicing could surface an orphan tool_result."""
+def test_history_rows_emitted_after_a_mid_turn_compaction():
+    """`turn_messages` reads across the swap, so a compacted turn still sends
+    its rows instead of degrading to text-only replay."""
     events = _drive(_HistorySession(seed=[], appended=_HISTORY_TURN, compact=True))
-    assert _history_events(events) == []
+    assert _history_events(events) == [{"kind": "history", "rows": _EXPECTED_ROWS}]
     assert events[-1] == {"kind": "turn_completed"}
 
 
@@ -722,9 +743,9 @@ def test_no_history_event_when_the_turn_used_no_tools():
     assert _history_events(events) == []
 
 
-def test_a_session_without_history_still_completes():
-    """Test doubles and older anton builds have no `.history`; capture is
-    skipped rather than raising."""
+def test_a_session_without_turn_messages_still_completes():
+    """Test doubles have no `turn_messages`; capture is skipped rather than
+    raising."""
     events = _drive(_FakeSession(deltas=["ok"]))
     assert events == [{"kind": "delta", "text": "ok"}, {"kind": "turn_completed"}]
 
@@ -752,6 +773,8 @@ def test_compaction_is_emitted_before_the_terminal_event():
         {"kind": "compaction", "summary": "EARLIER: the user asked X.",
          "covered_through": 3},
     ]
+    # Sent beside the turn's rows, not instead of them.
+    assert _history_events(events) == [{"kind": "history", "rows": _EXPECTED_ROWS}]
     assert events[-1] == {"kind": "turn_completed"}
 
 

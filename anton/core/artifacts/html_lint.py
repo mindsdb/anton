@@ -19,6 +19,12 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+from anton.utils.datasources import scrub_output
+
+if TYPE_CHECKING:
+    from anton.core.backends.sandbox import CellSandbox
 
 _RUNNER_SCRIPT = Path(__file__).with_name("_html_lint_runner.js")
 # Public: callers that treat `None` from `lint_html` as "could not check"
@@ -41,7 +47,7 @@ class HtmlFinding:
         return f"{self.kind}: {self.detail}"
 
 
-def lint_html(path: Path) -> list[HtmlFinding] | None:
+def lint_html(path: Path, *, cell_sandbox: CellSandbox | None) -> list[HtmlFinding] | None:
     """Load the page headless and flag console errors + failed local assets.
 
     Returns `None` when the page could not actually be checked — no browser
@@ -49,7 +55,13 @@ def lint_html(path: Path) -> list[HtmlFinding] | None:
     `[]`, which means it loaded cleanly. Best-effort either way: none of
     this ever raises, so a checker failure can't fail the artifact
     read/cell that triggered it.
+
+    Under a sandbox policy (`cell_sandbox` set) it returns `None` without
+    starting the browser, which would open the agent's file unlocked with
+    the server's environment. Required, so no caller can forget it.
     """
+    if cell_sandbox is not None:
+        return None
     try:
         # Absolute on purpose: Electron's `loadFile` resolves a relative path
         # against its own app directory, not the cwd, and reports the page
@@ -60,7 +72,7 @@ def lint_html(path: Path) -> list[HtmlFinding] | None:
         return None
 
 
-def lint_url(url: str) -> list[HtmlFinding] | None:
+def lint_url(url: str, *, cell_sandbox: CellSandbox | None) -> list[HtmlFinding] | None:
     """Load a page served over http(s) — the fullstack frontend from its own
     running backend — and flag the same things `lint_html` does (S-02).
 
@@ -69,8 +81,11 @@ def lint_url(url: str) -> list[HtmlFinding] | None:
     asset in `static/` or a `fetch()` to a route the backend does not serve
     shows up the way a missing local file does under file://. Anything that
     is not an http(s) URL is refused as `None`: a file path belongs to
-    `lint_html`, and nothing else is a page.
+    `lint_html`, and nothing else is a page. Under a sandbox policy it
+    returns `None` without starting the browser, as `lint_html` does.
     """
+    if cell_sandbox is not None:
+        return None
     if not isinstance(url, str) or not url.lower().startswith(("http://", "https://")):
         return None
     try:
@@ -141,10 +156,10 @@ def _findings_from_result(result: dict) -> list[HtmlFinding]:
         message = err.get("message", "")
         line = err.get("line")
         detail = f"{message} (line {line})" if line else message
-        findings.append(HtmlFinding(kind="console_error", detail=detail))
+        findings.append(HtmlFinding(kind="console_error", detail=scrub_output(detail)))
     for req in result.get("failedRequests") or []:
         detail = f"{req.get('url', '?')} — {req.get('error', 'unknown error')}"
-        findings.append(HtmlFinding(kind="failed_request", detail=detail))
+        findings.append(HtmlFinding(kind="failed_request", detail=scrub_output(detail)))
     if result.get("crashed"):
         findings.append(
             HtmlFinding(kind="crashed", detail="renderer process crashed while loading the page")

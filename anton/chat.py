@@ -1525,7 +1525,7 @@ async def _chat_loop(
     cortex = Cortex(
         global_hc=Hippocampus(global_memory_dir),
         project_hc=Hippocampus(project_memory_dir),
-        mode=settings.memory_mode,
+        mode=settings.effective_memory_mode,
         llm_client=state["llm_client"],
         episodic=episodic if episodic.enabled else None,
     )

@@ -103,6 +103,7 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
     async def reset(self) -> None:
         await self._post("/scratchpad/reset", {"name": self.name})
         self.cells.clear()
+        self.compacted_code = ()
 
     async def close(self) -> None:
         try:
@@ -158,7 +159,7 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
                     estimated_time=cell_data.get("estimated_time", estimated_time),
                     logs=cell_data.get("logs", ""),
                 )
-                self.cells.append(cell)
+                cell = self._record_cell(cell)
                 yield cell
 
             elif event_type == "error":
@@ -170,7 +171,7 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
                     error=error_msg,
                     description=description,
                 )
-                self.cells.append(cell)
+                cell = self._record_cell(cell)
                 yield cell
 
     async def cleanup(self) -> None:

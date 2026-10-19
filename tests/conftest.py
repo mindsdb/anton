@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import functools
 import os
+import sys
 from collections.abc import Iterator
 
 from unittest.mock import AsyncMock, MagicMock
@@ -127,6 +129,66 @@ os.environ["ANTON_ANALYTICS_ENABLED"] = "false"
 os.environ["ANTON_ANALYTICS_URL"] = ""
 os.environ["ANTON_POSTHOG_KEY"] = ""
 
+@functools.cache
+def _landlock_abi() -> int:
+    from anton.core.backends.sandbox import landlock_abi
+
+    return landlock_abi()
+
+
+def _landlock_required() -> bool:
+    """Whether a host without Landlock fails the `landlock` tests instead of skipping them.
+
+    A Linux runner under GitHub Actions has Landlock, so a skip there would
+    mean the real-Landlock tests silently stopped running. LANDLOCK_REQUIRED=1
+    asks the same of any host.
+    """
+    if os.environ.get("LANDLOCK_REQUIRED") == "1":
+        return True
+    return sys.platform.startswith("linux") and os.environ.get("GITHUB_ACTIONS") == "true"
+
+
+def pytest_configure(config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "landlock: locks a process with real Landlock; skipped without Landlock, failed instead on Linux "
+        "under GitHub Actions or with LANDLOCK_REQUIRED=1",
+    )
+
+
+def pytest_report_header(config) -> str:
+    required = "required" if _landlock_required() else "skipped where missing"
+    return f"landlock: ABI {_landlock_abi()} ({required})"
+
+
+def _landlock_missing(item) -> str | None:
+    """Why a `landlock` test can't run here, or None when it can (or isn't one)."""
+    if item.get_closest_marker("landlock") is None:
+        return None
+    from anton.core.backends.sandbox import MIN_LANDLOCK_ABI
+
+    abi = _landlock_abi()
+    if abi >= MIN_LANDLOCK_ABI:
+        return None
+    return f"needs Linux with Landlock ABI >= {MIN_LANDLOCK_ABI}; this host reports {abi}"
+
+
+def pytest_runtest_setup(item) -> None:
+    """Skip a `landlock` test where the kernel has no usable Landlock, unless one is required."""
+    reason = _landlock_missing(item)
+    if reason is not None and not _landlock_required():
+        pytest.skip(reason)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_call(item) -> None:
+    """Fail a `landlock` test, without running it, where Landlock is required and missing."""
+    reason = _landlock_missing(item)
+    if reason is not None:
+        pytest.fail(f"{reason}, and this run requires it (Linux under GitHub Actions, or LANDLOCK_REQUIRED=1)",
+                    pytrace=False)
+
+
 #: The developer's real home, captured at import — before `_no_real_home` below
 #: redirects both `Path.home()` and `$HOME`. Tests that must prove the suite did
 #: not touch the real machine compare against this; after the fixture is armed
@@ -166,9 +228,11 @@ def make_mock_llm() -> AsyncMock:
         return_value=ProviderConnectionInfo(provider="anthropic", api_key="test")
     )
     mock.coding_model = "claude-sonnet-4-6"
-    # The real client defaults the router role to the coding model; mirror it so
-    # window-derived budgets read a real model id, not a Mock.
+    # The real client defaults the router role to the coding model; mirror it,
+    # and give the planning role the same id, so window-derived budgets read a
+    # real model id, not a Mock.
     mock.router_model = "claude-sonnet-4-6"
+    mock.planning_model = "claude-sonnet-4-6"
     mock.max_tokens = 8192  # LLMClient's own default output ceiling
     mock.planning_provider = MagicMock()
     # Default test posture: no native web tools — fallback tools also off

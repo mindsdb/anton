@@ -85,7 +85,9 @@ SCRATCHPAD_TOOL = ToolDef(
         "Defaults to 'preview' mode (compact); use sample(var, mode='full') for complete dump.\n"
         "get_llm, agentic_loop, web_search, sample, and progress are already available "
         "as globals in the scratchpad — do not import them.\n"
-        "All .anton/.env secrets are available as environment variables (os.environ)."
+        "All .anton/.env secrets are available as environment variables (os.environ).\n"
+        "Never print a credential or a token endpoint's response: keep the token in a "
+        "variable and print only its status and expiry."
     ),
     input_schema={
         "type": "object",

@@ -192,26 +192,26 @@ def test_live_check_is_skipped_when_no_browser_can_run(monkeypatch):
     """`None` from lint_html (no ANTON_HTML_LINT_BROWSER, timeout, garbage
     output) is "could not check", not "clean" — the caller must be able to
     tell the two apart, so it stays None here too."""
-    monkeypatch.setattr(verifiers, "lint_html", lambda path: None)
-    assert verify_frontend_live(Path("/tmp/x/index.html")) is None
+    monkeypatch.setattr(verifiers, "lint_html", lambda path, *, cell_sandbox: None)
+    assert verify_frontend_live(Path("/tmp/x/index.html"), cell_sandbox=None) is None
 
 
 def test_live_check_clean_page_is_an_empty_verdict(monkeypatch):
-    monkeypatch.setattr(verifiers, "lint_html", lambda path: [])
-    verdict = verify_frontend_live(Path("/tmp/x/index.html"))
+    monkeypatch.setattr(verifiers, "lint_html", lambda path, *, cell_sandbox: [])
+    verdict = verify_frontend_live(Path("/tmp/x/index.html"), cell_sandbox=None)
     assert verdict is not None and verdict.ok and verdict.warnings == []
 
 
 def test_live_check_maps_findings_to_errors_and_a_warning(monkeypatch):
     """Console errors, missing local files and crashes fail the step with the
     browser's own detail carried through; an empty render is advisory."""
-    monkeypatch.setattr(verifiers, "lint_html", lambda path: [
+    monkeypatch.setattr(verifiers, "lint_html", lambda path, *, cell_sandbox: [
         HtmlFinding(kind="console_error", detail="Uncaught ReferenceError: state is not defined (line 4)"),
         HtmlFinding(kind="failed_request", detail="file:///tmp/x/missing.js — net::ERR_FILE_NOT_FOUND"),
         HtmlFinding(kind="crashed", detail="renderer process crashed while loading the page"),
         HtmlFinding(kind="empty_page", detail="page rendered with no visible text or elements"),
     ])
-    verdict = verify_frontend_live(Path("/tmp/x/index.html"))
+    verdict = verify_frontend_live(Path("/tmp/x/index.html"), cell_sandbox=None)
     assert verdict is not None and not verdict.ok
     assert verdict.errors == [
         "Loaded in a headless browser, the page logged a console error: "
@@ -230,12 +230,12 @@ def test_live_check_hands_the_browser_an_absolute_path(monkeypatch):
     and reports the page as not found."""
     seen: list[Path] = []
 
-    def fake_lint(path):
+    def fake_lint(path, *, cell_sandbox):
         seen.append(path)
         return []
 
     monkeypatch.setattr(verifiers, "lint_html", fake_lint)
-    verify_frontend_live(Path("relative/index.html"))
+    verify_frontend_live(Path("relative/index.html"), cell_sandbox=None)
     assert seen == [Path("relative/index.html").resolve()]
     assert seen[0].is_absolute()
 
@@ -352,18 +352,18 @@ def test_no_contract_and_html_app_skip_the_comparison():
 # ── verify_app_live: the served fullstack page (S-02) ───────────────────────
 
 def test_served_check_is_skipped_when_no_browser_can_run(monkeypatch):
-    monkeypatch.setattr(verifiers, "lint_url", lambda url: None)
-    assert verify_app_live("http://127.0.0.1:5000") is None
+    monkeypatch.setattr(verifiers, "lint_url", lambda url, *, cell_sandbox: None)
+    assert verify_app_live("http://127.0.0.1:5000", cell_sandbox=None) is None
 
 
 def test_served_check_hands_the_url_through_unchanged(monkeypatch):
     seen: list[str] = []
 
-    def fake(url):
+    def fake(url, *, cell_sandbox):
         seen.append(url)
         return []
     monkeypatch.setattr(verifiers, "lint_url", fake)
-    verdict = verify_app_live("http://127.0.0.1:5000")
+    verdict = verify_app_live("http://127.0.0.1:5000", cell_sandbox=None)
     assert verdict is not None and verdict.ok
     assert seen == ["http://127.0.0.1:5000"]
 
@@ -372,13 +372,13 @@ def test_served_check_words_a_failed_request_as_a_url_not_a_local_file(monkeypat
     """Over http a 404 from the page's own origin is a missing asset in
     static/ or a route the backend does not serve — the message says URL,
     and the console-error / crash / empty-page wording stays shared."""
-    monkeypatch.setattr(verifiers, "lint_url", lambda url: [
+    monkeypatch.setattr(verifiers, "lint_url", lambda url, *, cell_sandbox: [
         HtmlFinding(kind="failed_request", detail="http://127.0.0.1:5000/api/items — HTTP 404"),
         HtmlFinding(kind="console_error", detail="Uncaught TypeError: rows is undefined (line 12)"),
         HtmlFinding(kind="crashed", detail="renderer process crashed while loading the page"),
         HtmlFinding(kind="empty_page", detail="page rendered with no visible text or elements"),
     ])
-    verdict = verify_app_live("http://127.0.0.1:5000")
+    verdict = verify_app_live("http://127.0.0.1:5000", cell_sandbox=None)
     assert verdict is not None and not verdict.ok
     assert verdict.errors == [
         "Loaded in a headless browser from the running backend, the page requested "
