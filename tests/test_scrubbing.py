@@ -7,11 +7,13 @@ import html
 import json
 import os
 import re
+import time
 import urllib.parse
 from unittest.mock import patch
 
 import pytest
 
+from anton.core.datasources.data_vault import _slug_env_prefix
 from anton.core.session import _scrub_user_input
 from anton.tools import SCRUBBED_VALUE_RE
 from anton.utils import datasources
@@ -481,6 +483,24 @@ FAKE_JWT = ".".join([
 OPAQUE_TOKEN = "opq" + "Z9" * 15
 B64URL_TOKEN = "ab_" + "Cd-Ef.Gh9" * 3
 TOKEN_SAMPLES = [OPAQUE_TOKEN, B64URL_TOKEN]
+BCRYPT_HASH = "$2b$12$" + "AbCdEfGhIjKlMnOpQrStUv" + "wXyZ0123456789AbCdEfGhIjKlMnOpq"
+ARGON2_HASH = "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG"
+# A connection name with a non-ASCII letter keeps it, uppercased, in its DS_* marker.
+UNICODE_DS_KEY = _slug_env_prefix("postgres", "données") + "__ACCESS_TOKEN"
+UNICODE_DS_MARKER = f"[{UNICODE_DS_KEY}]"
+
+
+class _CountingSearches:
+    """Wrap a compiled pattern and count the characters its searches cover."""
+
+    def __init__(self, pattern: re.Pattern[str]) -> None:
+        self.pattern = pattern
+        self.covered = 0
+
+    def search(self, text: str, pos: int = 0) -> re.Match[str] | None:
+        found = self.pattern.search(text, pos)
+        self.covered += (found.start() if found else len(text)) - pos
+        return found
 
 
 class TestScrubOutput:
@@ -663,6 +683,146 @@ class TestScrubOutput:
         """An operator, comment, bracket, call or keyword after the first word reads as
         code; lowercase words read as prose; a column value ends at its first space."""
         assert scrub_output(line) == line
+
+    @pytest.mark.parametrize("password_hash", [BCRYPT_HASH, ARGON2_HASH], ids=["bcrypt", "argon2id"])
+    @pytest.mark.parametrize(("template", "expected"), [
+        ("client_secret={}", "client_secret=[REDACTED_TOKEN]"),
+        ("client_secret: {} user=bob", "client_secret: [REDACTED_TOKEN] user=bob"),
+        ("https://idp.example/cb?client_secret={}&scope=read", "https://idp.example/cb?client_secret=[REDACTED_TOKEN]&scope=read"),
+        ("client_secret    {}\nexpires_in      3600", "client_secret    [REDACTED_TOKEN]\nexpires_in      3600"),
+    ], ids=["key-value", "log-pairs", "query-string", "column"])
+    def test_an_unquoted_password_hash_is_redacted_whole(self, template, expected, password_hash):
+        """A `$` before a digit or a `$name$` chain is a hash, not a reference, and
+        the commas between a PHC hash's parameters do not end it."""
+        assert scrub_output(template.format(password_hash)) == expected
+
+    @pytest.mark.parametrize(("value", "expected"), [
+        ("[" + OPAQUE_TOKEN, "[REDACTED_TOKEN]"),
+        ("{" + OPAQUE_TOKEN, "[REDACTED_TOKEN]"),
+        ("<" + OPAQUE_TOKEN, "[REDACTED_TOKEN]"),
+        ("*" + OPAQUE_TOKEN, "[REDACTED_TOKEN]"),
+        ("****" + OPAQUE_TOKEN, "[REDACTED_TOKEN]"),
+        ("$9" + OPAQUE_TOKEN, "[REDACTED_TOKEN]"),
+        ("[DS_A]" + OPAQUE_TOKEN, "[REDACTED_TOKEN]"),
+        ("[DS_A] " + OPAQUE_TOKEN, "[REDACTED_TOKEN]"),
+        ("{x}" + OPAQUE_TOKEN, "[REDACTED_TOKEN]"),
+        ("{x} " + OPAQUE_TOKEN, "[REDACTED_TOKEN]"),
+        ("${X}" + OPAQUE_TOKEN, "[REDACTED_TOKEN]"),
+        ("${OAUTH_SECRET:-" + OPAQUE_TOKEN + "}", "[REDACTED_TOKEN]}"),
+        ("$(x)" + OPAQUE_TOKEN, "[REDACTED_TOKEN]"),
+        ("$(x) " + OPAQUE_TOKEN + ")", "[REDACTED_TOKEN])"),
+        ("$TOKEN@" + OPAQUE_TOKEN, "[REDACTED_TOKEN]"),
+        ("<token>" + OPAQUE_TOKEN, "[REDACTED_TOKEN]"),
+    ], ids=[
+        "bracket", "brace", "angle", "asterisk", "asterisks", "dollar-digit", "marker-prefix",
+        "marker-then-word", "placeholder-prefix", "placeholder-then-word", "reference-prefix",
+        "long-default", "command-prefix", "command-then-word", "name-then-at", "angle-placeholder-prefix",
+    ])
+    @pytest.mark.parametrize("key", ["access_token", "client_secret"])
+    def test_an_unquoted_secret_starting_with_a_placeholder_character_is_redacted(self, key, value, expected):
+        """`$`, `[`, `{`, `<` and `*` keep a value readable only as a whole marker,
+        reference, placeholder or mask, never as the start of a token. A closing
+        bracket at the very end stays, as for any value."""
+        assert scrub_output(f"{key}={value}") == f"{key}={expected}"
+
+    @pytest.mark.parametrize("line", [
+        "client_secret=[REDACTED_API_KEY]",
+        "client_secret=[ANTON_OPENAI_API_KEY]",
+        "access_token=[DS_HUBSPOT_MAIN__ACCESS_TOKEN]",
+        "access_token: " + UNICODE_DS_MARKER,
+        "{'client_secret': [REDACTED_API_KEY]}",
+        "client_secret=$GOOGLE_CLIENT_SECRET",
+        "client_secret=${GOOGLE_CLIENT_SECRET}",
+        "client_secret=${GOOGLE_CLIENT_SECRET:-changeme}",
+        "access_token=$(gcloud auth print-access-token)",
+        "access_token=$(gcloud auth print-access-token) || exit 1",
+        "const url = `https://idp.example/cb?access_token=${session.accessToken}`",
+        "  client_secret: ${{ secrets.GOOGLE_CLIENT_SECRET }}",
+        "  client_secret: {{ .Values.oauth.clientSecret | b64enc }}",
+        "access_token={{ session.access_token }}",
+        "access_token={self.access_token!r}",
+        'url = f"https://idp.example/cb?access_token={self.access_token}&scope=read"',
+        "access_token=<your-access-token>",
+        "access_token=<SALESFORCE_ACCESS_TOKEN>",
+        "access_token: <your access token>",
+        "client_secret=********************",
+        "client_secret=****************abcd",
+        'text = f"client_secret={OPAQUE_TOKEN} and {FAKE_JWT}"',
+        'assert "access_token=[REDACTED_TOKEN]" in cells[0].stdout',
+        r'rest += "".join(f"access_token: {_LONG_TOKEN}\n" for _ in range(35))',
+        r'result = scrub_output(f"access_token    {OPAQUE_TOKEN}\nexpires_in      3600")',
+    ], ids=[
+        "redacted-api-key", "provider-label", "ds-marker", "ds-marker-non-ascii", "marker-in-dict",
+        "env-name", "env-braces", "env-default", "command", "command-then-operator",
+        "js-template-path", "actions-secret", "helm-value-with-filter", "jinja", "format-conversion",
+        "f-string-path", "angle-dashed", "angle-constant", "angle-words", "all-asterisks",
+        "masked-tail", "placeholder-then-keyword", "marker-then-closing-quote",
+        "placeholder-then-escaped-newline", "placeholder-then-escaped-newline-in-column",
+    ])
+    def test_an_unquoted_marker_reference_placeholder_or_mask_is_left_alone(self, line):
+        """A value that is all marker, reference, placeholder or mask stays, and so
+        does one followed by code, a closing quote or an escaped line break."""
+        assert scrub_output(line) == line
+
+    @pytest.mark.parametrize(("text", "expected"), [
+        (f"client_secret={BCRYPT_HASH}", "client_secret=[REDACTED_TOKEN]"),
+        (f"client_secret: {ARGON2_HASH} user=bob", "client_secret: [REDACTED_TOKEN] user=bob"),
+        (f"access_token=[{OPAQUE_TOKEN}", "access_token=[REDACTED_TOKEN]"),
+        (f"{{'client_secret': ab'{OPAQUE_TOKEN}}}", "{'client_secret': [REDACTED_TOKEN]}"),
+        (f'a=1&access_token=ab"{OPAQUE_TOKEN}&b=2', "a=1&access_token=[REDACTED_TOKEN]&b=2"),
+        (f"refresh_token=abc {OPAQUE_TOKEN} user=bob", "refresh_token=[REDACTED_TOKEN] user=bob"),
+        (f"access_token    {OPAQUE_TOKEN}\nexpires_in  3600", "access_token    [REDACTED_TOKEN]\nexpires_in  3600"),
+        (f'{{"access_token": "{OPAQUE_TOKEN}"}}', '{"access_token": "[REDACTED_TOKEN]"}'),
+        (f"Authorization: Bearer {OPAQUE_TOKEN}", "Authorization: Bearer [REDACTED_TOKEN]"),
+        (f"access_token={FAKE_JWT}&scope=read", "access_token=[REDACTED_TOKEN]&scope=read"),
+        ("client_secret=sk-ant-api03-abcdefghij1234567890XYZ", "client_secret=[REDACTED_API_KEY]"),
+        ("client_secret=sk-proj-" + "Kq7" * 10, "client_secret=[OPENAI_API_KEY]"),
+        ("access_token=crm" + "Q7" * 10 + " user=bob", "access_token=[DS_CRM_PROD__ACCESS_TOKEN] user=bob"),
+        ("access_token: pg" + "W4" * 10, "access_token: " + UNICODE_DS_MARKER),
+    ], ids=[
+        "bcrypt", "argon2id", "bracket-secret", "dict-close", "query-string", "log-pairs", "column",
+        "json", "bearer", "jwt", "api-key-shape", "provider-label", "ds-marker", "ds-marker-non-ascii",
+    ])
+    def test_scrubbing_scrubbed_output_again_changes_nothing(self, monkeypatch, text, expected):
+        """Every marker the scrub writes, for a configured secret, a provider key, a key
+        shape or a token value, reads as a marker to the unquoted pass after it and when
+        the output is scrubbed again."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-proj-" + "Kq7" * 10)
+        _DS_SECRET_VARS.add("DS_CRM_PROD__ACCESS_TOKEN")
+        _DS_SECRET_VARS.add(UNICODE_DS_KEY)
+        set_ds_env_values({"DS_CRM_PROD__ACCESS_TOKEN": "crm" + "Q7" * 10, UNICODE_DS_KEY: "pg" + "W4" * 10})
+
+        once = scrub_output(text)
+
+        assert once == expected
+        assert scrub_output(once) == once
+
+    def test_the_unquoted_pass_searches_each_part_of_a_line_once(self, monkeypatch):
+        """A value that stays readable runs on over the values after it, so a fresh
+        search for each value's end would rescan the rest of the line every time."""
+        line = "access_token: abc and " * 5000
+        counters = []
+        for name in ("_WORD_VALUE_END_PATTERN", "_SPACED_VALUE_END_PATTERN"):
+            counter = _CountingSearches(getattr(datasources, name))
+            monkeypatch.setattr(datasources, name, counter)
+            counters.append(counter)
+
+        assert scrub_output(line) == line
+        assert sum(counter.covered for counter in counters) <= 2 * len(line)
+
+    @pytest.mark.parametrize("line", [
+        "access_token: abc and " * 5000,
+        "access_token: {x} and " * 5000,
+        "access_token: x" + " " * 50_000 + "y",
+        "access_token: abc and " * 2000 + ")" * 50_000,
+    ], ids=["readable-values", "readable-placeholders", "long-space-run", "long-trailer-after-readable-values"])
+    def test_a_long_line_scrubs_in_well_under_a_second(self, line):
+        """Each line took 3 to 12 seconds when each value rescanned the rest of its
+        line, a run of spaces was retried from each space, or each value trimmed
+        the same trailer again; scanned once, each takes milliseconds."""
+        started = time.perf_counter()
+        scrub_output(line)
+        assert time.perf_counter() - started < 1.0
 
     @pytest.mark.parametrize("token", TOKEN_SAMPLES)
     @pytest.mark.parametrize("word", ["Bearer", "bearer", "BEARER"])

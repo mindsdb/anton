@@ -229,10 +229,14 @@ _TOKEN_KEY = (
     r"(?<![A-Za-z0-9])"
     r"(?i:access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret)"
 )
+# A marker this module writes in place of a secret: `[DS_...]` and provider labels
+# from `scrub_credentials`, `[REDACTED_API_KEY]` and `[REDACTED_TOKEN]`. The same
+# grammar as `SCRUBBED_VALUE_RE` in `anton/tools.py`.
+_SCRUB_MARKER = r"\[(?:DS_\w+|[A-Z][A-Z0-9_]*)\]"
 # A quoted value with no quote, backslash or space, unless it is a whole marker; for
 # Bearer values and code-like token values. Clipped output may lack the closing quote.
 _NARROW_QUOTED_VALUE = (
-    r"(?!(?:\$?\{[^\"'\\\s{}]*\}|\[[A-Z][A-Z0-9_]*\])(?![^\"'\\\s]))"
+    r"(?!(?:\$?\{[^\"'\\\s{}]*\}|" + _SCRUB_MARKER + r")(?![^\"'\\\s]))"
     r"(?:[^\"'\\\s]|\\/|\\u[0-9a-fA-F]{4}){16,}"
 )
 # A Bearer value cannot hold a space or a quote, so prose after `"Bearer ` stays.
@@ -245,7 +249,7 @@ _QUOTED_TOKEN_OPENER_PATTERN = re.compile(_TOKEN_KEY + r"\\*[\"']?\s*[:=]\s*(\\{
 _QUOTED_VALUE_SCAN_MAX = 16_384
 # A template expression (Helm, Jinja, GitHub Actions) is a whole marker too.
 _WHOLE_MARKER_PATTERN = re.compile(
-    r"\$?\{[^\"'\\\s{}]*\}|\[[A-Z][A-Z0-9_]*\]|\$?\{\{[^{}\r\n]*\}\}"
+    r"\$?\{[^\"'\\\s{}]*\}|" + _SCRUB_MARKER + r"|\$?\{\{[^{}\r\n]*\}\}"
 )
 # PHP, Lua and SQL join strings with ` . `, ` .. ` and ` || `.
 _CODE_OPERATOR_AFTER = re.compile(r"\s*(?:[+,()%]|(?:if|else|or|and)\b)|\s+(?:\.\.?|\|\|)\s")
@@ -267,18 +271,50 @@ _BEARER_VALUE_PATTERN = re.compile(
     r"(?!!)[A-Za-z0-9._~+/=%!-]{16,}"
     r"(?![A-Za-z0-9._~+/=%!(-])"
 )
+# The characters that open a marker, reference, placeholder or mask. A value
+# starting with one stays readable only as `_unquoted_value_is_placeholder` allows.
+_PLACEHOLDER_OPENERS = "$[{<*"
 # Group 1 is the `:` or `=` before the value; spaces alone separate a printed
-# table column. The value starts like a token, so a quoted, marker, template or
-# `$` value is left to the quoted pass or left alone.
+# table column. The value starts like a token or with a placeholder opener; a
+# quoted value is left to the quoted pass.
 _UNQUOTED_TOKEN_OPENER_PATTERN = re.compile(
-    _TOKEN_KEY + r"\\?[\"']?(?:[ \t]*([:=])[ \t]*|[ \t]+)(?=[A-Za-z0-9._~+/%-])"
+    _TOKEN_KEY + r"\\?[\"']?(?:[ \t]*([:=])[ \t]*|[ \t]+)"
+    r"(?=[A-Za-z0-9._~+/%" + re.escape(_PLACEHOLDER_OPENERS) + r"-])"
 )
 # An unquoted value ends at a line break or at `&`, `,` or `;`, which separate
 # query parameters and list items. In a column or a URL a space ends it too;
 # elsewhere it runs on through spaces up to the next `key=value` pair. Base64
-# padding at a value's end is no pair.
+# padding at a value's end is no pair. A run of spaces is tried from its first
+# space only, so a long run costs one pass; a value never starts on a space.
 _WORD_VALUE_END_PATTERN = re.compile(r"[\s&,;]")
-_SPACED_VALUE_END_PATTERN = re.compile(r"[\r\n&,;]|[ \t]+(?=[A-Za-z_][\w.-]*=[^\s=])")
+_SPACED_VALUE_END_PATTERN = re.compile(r"[\r\n&,;]|(?<![ \t])[ \t]+(?=[A-Za-z_][\w.-]*=[^\s=])")
+# A PHC password hash (`$argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>`) separates
+# its parameters with commas, so they do not end the value.
+_HASH_PARAMETERS_PATTERN = re.compile(
+    r"\$[a-z0-9-]+(?:\$v=[0-9]+)?\$[a-z0-9-]+=[A-Za-z0-9/+.-]*"
+    r"(?:,[a-z0-9-]+=[A-Za-z0-9/+.-]*)+(?=\$)"
+)
+_IDENTIFIER_PATH = r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
+# A value start that cannot be a secret: a scrub marker; a shell, env or JS
+# template reference (`$NAME`, `${NAME}`, `${session.token}`, `$(command)`, or
+# `${NAME:-default}` with a default under the 16-character floor); a template
+# placeholder of a name (`{{ access_token }}`, `${{ secrets.TOKEN }}`,
+# `{{ .Values.token | b64enc }}`, `{token}`, `{access_token!r}`); an angle-bracket
+# placeholder (`<your-access-token>`, `<your access token>`); or asterisks with at
+# most four characters after them (`****abcd`). A `$` before a digit or a `$name$`
+# chain is a password hash, which none of these matches whole.
+_PLACEHOLDER_PATTERN = re.compile(
+    _SCRUB_MARKER
+    + r"|\$(?:[A-Za-z_]\w*|\([^()\r\n]*\)"
+    + r"|\{" + _IDENTIFIER_PATH + r"(?::?[-=?+][^\s\"'\\{}]{0,15})?\})"
+    + r"|\$?\{\{[ \t]*\.?" + _IDENTIFIER_PATH + r"(?:[ \t]*\|[ \t]*[A-Za-z_]\w*)*[ \t]*\}\}"
+    + r"|\{" + _IDENTIFIER_PATH + r"(?:![rsa])?\}"
+    + r"|<[A-Za-z_][\w-]*(?: [\w-]+)*>"
+    + r"|\*+[^\s*]{0,4}"
+)
+# What ends a placeholder in a string literal: the quote that closes the string
+# or an escaped line break, after any spaces, as in `f"access_token: {token}\n"`.
+_LITERAL_END_PATTERN = re.compile(r"[ \t]*(?:[\"'`]|\\[rn])")
 # Quotes and closing brackets at the end of a value close what holds it.
 _VALUE_TRAILER = " \t\"'`\\)]}>"
 _TOKEN_CHARS_PATTERN = re.compile(r"[A-Za-z0-9._~+/=%!-]*")
@@ -890,25 +926,91 @@ def _unquoted_value_reads_as_code(text: str, start: int, end: int) -> bool:
     return bool(word_is_code and _CODE_AFTER_WORD_PATTERN.match(text, word_end, end))
 
 
+def _unquoted_value_is_placeholder(text: str, start: int, end: int, raw_end: int) -> bool:
+    """Return whether `text[start:end]`, an unquoted value, is a marker, reference, placeholder or mask.
+
+    `raw_end` is where the value ended before its trailing quotes and brackets
+    were dropped, since a marker or placeholder closes with one. The value
+    stays when the placeholder is all of it, or when code, a closing quote or
+    an escaped line break follows it. A plain word after it continues a secret.
+    """
+    placeholder = _PLACEHOLDER_PATTERN.match(text, start, raw_end)
+    if placeholder is None:
+        return False
+    rest = placeholder.end()
+    return (
+        rest >= end
+        or _CODE_AFTER_WORD_PATTERN.match(text, rest, end) is not None
+        or _LITERAL_END_PATTERN.match(text, rest, end) is not None
+    )
+
+
+class _NextMatch:
+    """Find the first match of a pattern at or after a position in one text, reusing the last search.
+
+    `Pattern.search(text, pos)` tries each position the same way whatever
+    `pos` is, so a match found from an earlier position is still the first
+    one from any later position up to its start.
+    """
+
+    def __init__(self, pattern: re.Pattern[str], text: str) -> None:
+        """Search `text` for `pattern`, with nothing searched yet."""
+        self.pattern = pattern
+        self.text = text
+        self.searched_from = len(text) + 1
+        self.found: re.Match[str] | None = None
+
+    def at_or_after(self, position: int) -> re.Match[str] | None:
+        """Return the first match that starts at or after `position`, or None."""
+        still_ahead = self.found is None or self.found.start() >= position
+        if not (self.searched_from <= position and still_ahead):
+            self.found = self.pattern.search(self.text, position)
+            self.searched_from = position
+        return self.found
+
+
+def _trim_value_trailer(text: str, start: int, end: int) -> int:
+    """Return where `text[start:end]` ends once its trailing spaces, quotes and closing brackets are dropped."""
+    while end > start and text[end - 1] in _VALUE_TRAILER:
+        end -= 1
+    return end
+
+
 def _redact_unquoted_token_values(text: str) -> str:
     """Redact each unquoted value after a token key, through the end of the value.
 
     The value may hold quotes, `@` and `#`, and spaces after `:` or `=` outside
-    a URL. A value under 16 characters, or one that reads as code or prose,
-    stays. Returns `text` with each redacted value replaced.
+    a URL. A value under 16 characters stays, and so does one that reads as
+    code or prose or, when it starts with `$`, `[`, `{`, `<` or `*`, one that
+    is a marker, reference, placeholder or mask. Returns `text` with each
+    redacted value replaced.
     """
     parts: list[str] = []
     position = 0
+    # A value that stays readable is not skipped past, so the values after it
+    # overlap it; reusing each end search and trailer trim scans the text once.
+    word_value_ends = _NextMatch(_WORD_VALUE_END_PATTERN, text)
+    spaced_value_ends = _NextMatch(_SPACED_VALUE_END_PATTERN, text)
+    trimmed_raw_end = trimmed_end = -1
     for opener in _UNQUOTED_TOKEN_OPENER_PATTERN.finditer(text):
         if opener.start() < position:
             continue
         start = opener.end()
         in_url = opener.start() > 0 and text[opener.start() - 1] in "?&#"
         spaced = opener.group(1) is not None and not in_url
-        found = (_SPACED_VALUE_END_PATTERN if spaced else _WORD_VALUE_END_PATTERN).search(text, start)
-        value = text[start : found.start() if found else len(text)].rstrip(_VALUE_TRAILER)
-        end = start + len(value)
-        if len(value) < 16 or _unquoted_value_reads_as_code(text, start, end):
+        hash_parameters = _HASH_PARAMETERS_PATTERN.match(text, start)
+        search_from = hash_parameters.end() if hash_parameters else start
+        found = (spaced_value_ends if spaced else word_value_ends).at_or_after(search_from)
+        raw_end = found.start() if found else len(text)
+        if raw_end != trimmed_raw_end:
+            trimmed_raw_end, trimmed_end = raw_end, _trim_value_trailer(text, start, raw_end)
+        end = max(start, trimmed_end)
+        if end - start < 16:
+            continue
+        if text[start] in _PLACEHOLDER_OPENERS:
+            if _unquoted_value_is_placeholder(text, start, end, raw_end):
+                continue
+        elif _unquoted_value_reads_as_code(text, start, end):
             continue
         parts.append(text[position:start])
         parts.append("[REDACTED_TOKEN]")
