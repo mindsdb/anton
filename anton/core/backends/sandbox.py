@@ -243,12 +243,20 @@ class _PathResolver:
     the one shared root. So this keeps each path it resolved, and resolves a
     new name below a known folder with one lstat. A name that isn't a link
     resolves to the resolved folder joined with it, the step realpath takes
-    there too; a link, and a path that isn't absolute and normalized, go
-    through realpath itself.
+    there too. A link resolves through realpath itself, and so does a path
+    that isn't absolute and normalized.
+
+    That step holds only below a link realpath fully resolved. Where a link
+    loops or can't be followed, realpath stops resolving and keeps the rest
+    of the path as written, and abspath then folds a ``..`` in it. So a path
+    below such a link goes through realpath whole.
     """
 
     def __init__(self) -> None:
         self._resolved: dict[str, str] = {}
+        # Paths at or below a link realpath couldn't follow (a loop, or a
+        # target it can't reach).
+        self._unfollowed: set[str] = set()
 
     def __call__(self, path: Path | str) -> str:
         text = str(path)
@@ -262,23 +270,43 @@ class _PathResolver:
         return self._walk(text)
 
     def _walk(self, path: str) -> str:
-        """``path``, absolute and normalized, resolved from its resolved parent."""
-        known = self._resolved.get(path)
-        if known is not None:
-            return known
-        parent, name = os.path.split(path)
-        if not name:
-            resolved = os.path.realpath(path)
-        else:
-            joined = os.path.join(self._walk(parent), name)
-            try:
-                is_link = stat.S_ISLNK(os.lstat(joined).st_mode)
-            except OSError:
-                # realpath treats a name it cannot lstat as no link, too.
-                is_link = False
-            resolved = os.path.realpath(joined) if is_link else joined
-        self._resolved[path] = resolved
+        """``path``, absolute and normalized, resolved from the nearest folder
+        above it that is already resolved, one name at a time."""
+        below: list[str] = []
+        known = path
+        while known not in self._resolved:
+            parent, name = os.path.split(known)
+            if not name:
+                self._resolved[known] = os.path.realpath(known)
+                break
+            below.append(name)
+            known = parent
+        resolved = self._resolved[known]
+        for name in reversed(below):
+            parent, known = known, os.path.join(known, name)
+            if parent in self._unfollowed:
+                self._unfollowed.add(known)
+                resolved = os.path.realpath(known)
+            else:
+                resolved = self._resolve_name(known, os.path.join(resolved, name))
+            self._resolved[known] = resolved
         return resolved
+
+    def _resolve_name(self, path: str, joined: str) -> str:
+        """``path`` resolved, where ``joined`` is its resolved parent joined
+        with its last name."""
+        try:
+            is_link = stat.S_ISLNK(os.lstat(joined).st_mode)
+        except OSError:
+            # realpath treats a name it cannot lstat as no link, too.
+            return joined
+        if not is_link:
+            return joined
+        try:
+            return os.path.realpath(joined, strict=True)
+        except OSError:
+            self._unfollowed.add(path)
+            return os.path.realpath(path)
 
 
 class _PathIndex:
@@ -289,18 +317,31 @@ class _PathIndex:
     sits in one run, so one bisect finds whether any path equals or sits
     below a folder. A hit names the first path in the order given whose pair
     overlaps, the one a pair-by-pair loop would name.
+
+    A path realpath can't resolve (a NUL byte, or a relative one under a
+    working folder that is gone) raises when it is resolved. The pairwise
+    loop raised only on reaching it, after the paths before it, so with one
+    such path the index answers pair by pair, in order, as that loop did.
     """
 
     def __init__(self, paths: Iterable[Path | str], *, resolve: _PathResolver) -> None:
         self._resolve = resolve
         self._paths = list(dict.fromkeys(str(path) for path in paths))
         self._written = frozenset(_norm(path) for path in self._paths)
-        self._real = frozenset(resolve(path) for path in self._paths)
+        try:
+            self._real = frozenset(resolve(path) for path in self._paths)
+        except (OSError, ValueError):
+            self._pairwise = True
+            self._real = frozenset()
+        else:
+            self._pairwise = False
         self._written_sorted = sorted(self._written)
         self._real_sorted = sorted(self._real)
 
     def first_inside(self, folder: Path | str) -> str | None:
         """The first path that ``folder`` equals or contains, or None."""
+        if self._pairwise:
+            return next((path for path in self._paths if _overlaps(folder, path, resolve=self._resolve)), None)
         written, real = _norm(folder), self._resolve(folder)
         hit = _first_at_or_below(self._written_sorted, written) or _first_at_or_below(self._real_sorted, real)
         if hit is None:
@@ -309,6 +350,8 @@ class _PathIndex:
 
     def first_holding(self, path: Path | str) -> str | None:
         """The first path that equals or contains ``path``, or None."""
+        if self._pairwise:
+            return next((held for held in self._paths if _overlaps(held, path, resolve=self._resolve)), None)
         written, real = _norm(path), self._resolve(path)
         hit = next((holder for holder in _holders(written) if holder in self._written), None)
         if hit is None:

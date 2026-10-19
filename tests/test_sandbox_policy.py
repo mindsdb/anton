@@ -161,6 +161,20 @@ def test_the_user_name_is_required(tmp_path):
 # ── Resolving each path once ─────────────────────────────────────────────────
 
 
+def _folded_loop_tree(base: Path) -> list[str]:
+    """A link that loops back on itself before a ``..``, ``a/L -> L/../x``, and
+    a link below the folder that ``..`` lands on, ``a/x/y -> elsewhere``. The
+    kernel can't open ``a/L/y`` (ELOOP). realpath stops at the loop, keeps the
+    rest as written and folds the ``..``, so it answers ``a/x/y`` without
+    following ``y``. ``b/K`` is a plain self loop."""
+    for folder in ("a/x/sub", "elsewhere", "b"):
+        (base / folder).mkdir(parents=True)
+    (base / "a" / "L").symlink_to("L/../x")
+    (base / "a" / "x" / "y").symlink_to(base / "elsewhere", target_is_directory=True)
+    (base / "b" / "K").symlink_to("K")
+    return [str(base / "a" / "L"), str(base / "a" / "L" / "y"), str(base / "a" / "L" / "y" / "z")]
+
+
 def _resolver_tree(tmp_path: Path) -> list[str]:
     """Paths through links in the middle and at the end, a relative link, a
     loop, a missing folder and a file used as a folder."""
@@ -174,7 +188,11 @@ def _resolver_tree(tmp_path: Path) -> list[str]:
     (tmp_path / "loop1").symlink_to(tmp_path / "loop2")
     (tmp_path / "loop2").symlink_to(tmp_path / "loop1")
     (tmp_path / "dangling").symlink_to(tmp_path / "gone")
+    folded = _folded_loop_tree(tmp_path / "folded")
     return [
+        *folded,
+        str(tmp_path / "folded" / "b" / "K" / "q"),
+        str(tmp_path) + "/deep" * 1000,
         "/",
         "//",
         "/etc",
@@ -209,6 +227,87 @@ def test_the_resolver_resolves_every_path_as_realpath_does(tmp_path):
     # A second ask returns what the first did, in any order.
     for path in reversed(paths):
         assert shared(Path(path)) == os.path.realpath(path), path
+
+
+def test_the_resolver_raises_what_realpath_raises_for_a_nul_byte(tmp_path):
+    with pytest.raises(ValueError) as expected:
+        os.path.realpath(f"{tmp_path}/nul\0name")
+    with pytest.raises(ValueError) as raised:
+        sandbox._PathResolver()(f"{tmp_path}/nul\0name")
+    assert str(raised.value) == str(expected.value)
+
+
+def _pairwise_refusal(fields: dict) -> str | None:
+    """What the pairwise check refused for ``fields``, with os.path.realpath
+    run on every pair: the check this index replaced, kept as the reference."""
+    model = CellSandbox.model_construct(**fields)
+    for grant in model._grants():
+        for root in model._denied_roots():
+            if sandbox._overlaps(grant, root):
+                return f"grant {grant} equals or contains {root}"
+    private = model._writable_dirs()
+    for grant in private:
+        for partition in model.other_partitions:
+            if sandbox._overlaps(partition, grant):
+                return f"writable grant {grant} sits in another person's partition {partition}"
+    return None
+
+
+def test_a_link_that_loops_before_a_dotdot_is_judged_as_the_pairwise_check_judged_it(tmp_path, monkeypatch):
+    _folded_loop_tree(tmp_path / "t")
+    a, elsewhere = tmp_path / "t" / "a", tmp_path / "t" / "elsewhere"
+    looped = a / "L" / "y"
+    cases = [
+        {"read_only_dirs": (a / "x",), "forbidden_roots": (looped,)},
+        {"read_only_dirs": (looped,), "forbidden_roots": (elsewhere,)},
+        {"read_only_dirs": (a / "x",), "forbidden_roots": (looped, a / "x" / "sub")},
+        {"project_dir": looped / "proj", "other_partitions": (a / "x",)},
+        {"project_dir": looped / "proj", "other_partitions": (elsewhere,)},
+    ]
+    for case in cases:
+        fields = _fields(tmp_path, **case)
+        expected = _pairwise_refusal(fields)
+        if expected is None:
+            CellSandbox(**fields)
+            continue
+        with pytest.raises(pydantic.ValidationError) as refused:
+            CellSandbox(**fields)
+        assert expected in str(refused.value), case
+
+    policy = CellSandbox(**_fields(tmp_path, forbidden_roots=(looped,)))
+    folder = str(a / "x")
+    monkeypatch.setattr(sandbox, "_interpreter_dirs", lambda: [folder])
+    expected = _first_overlap(folder, policy._denied_roots())
+    assert expected == str(looped)
+    with pytest.raises(SandboxUnavailable, match=f"the interpreter folder {folder} contains {expected}$"):
+        policy.launch(["/venv/bin/python"], env={})
+
+
+def test_a_path_a_thousand_folders_deep_is_checked_like_any_other(tmp_path, policy):
+    deep = Path(str(tmp_path) + "/deep" * 1000)
+    assert CellSandbox(**_fields(tmp_path, read_only_dirs=(deep,))).read_only_dirs == (deep,)
+    assert _ca_rules(policy, {"SSL_CERT_FILE": str(deep / "ca.pem")}) == {}
+
+
+def test_a_root_that_cannot_be_resolved_raises_only_where_the_pairwise_check_did(tmp_path, monkeypatch):
+    nul_root = Path("/nul\0root")
+    # A grant refused by a root listed before the unresolvable one is refused
+    # for that root; a grant that isn't normalized is refused for that first.
+    for case, expected in (
+        ({"project_dir": Path("/tmp")}, "grant /tmp equals or contains /tmp"),
+        ({"project_dir": Path("/x/../y")}, "'/x/../y' must be an absolute, normalized path"),
+    ):
+        with pytest.raises(pydantic.ValidationError) as refused:
+            CellSandbox(**_fields(tmp_path, forbidden_roots=(nul_root,), **case))
+        assert expected in str(refused.value), case
+    # A relative HOME under a working folder that is gone can't be resolved either.
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+    monkeypatch.setenv("HOME", "relative-home")
+    with pytest.raises(pydantic.ValidationError, match="grant /tmp equals or contains /tmp"):
+        CellSandbox(**_fields(tmp_path, project_dir=Path("/tmp")))
 
 
 _PREFIX_CASES = ["", "/", "//", "/a", "/a/", "/ab", "/a/b", "/a/b/", "/a/bc", "//a", "//a/b", "/b"]
