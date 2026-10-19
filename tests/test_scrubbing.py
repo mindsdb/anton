@@ -4,6 +4,8 @@ import asyncio
 import base64
 import json
 import os
+import re
+import time
 from unittest.mock import patch
 
 import pytest
@@ -11,6 +13,7 @@ import pytest
 from anton.core.datasources.data_vault import _slug_env_prefix
 from anton.core.session import _scrub_user_input
 from anton.tools import SCRUBBED_VALUE_RE
+from anton.utils import datasources
 from anton.utils.datasources import (
     _DS_KNOWN_VARS,
     _DS_SECRET_VARS,
@@ -223,6 +226,19 @@ ARGON2_HASH = "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWR
 # A connection name with a non-ASCII letter keeps it, uppercased, in its DS_* marker.
 UNICODE_DS_KEY = _slug_env_prefix("postgres", "données") + "__ACCESS_TOKEN"
 UNICODE_DS_MARKER = f"[{UNICODE_DS_KEY}]"
+
+
+class _CountingPattern:
+    """Wrap a compiled pattern and count the characters its searches cover."""
+
+    def __init__(self, pattern: re.Pattern[str]) -> None:
+        self.pattern = pattern
+        self.covered = 0
+
+    def search(self, text: str, pos: int = 0) -> re.Match[str] | None:
+        found = self.pattern.search(text, pos)
+        self.covered += (found.start() if found else len(text)) - pos
+        return found
 
 
 class TestScrubOutput:
@@ -518,6 +534,33 @@ class TestScrubOutput:
 
         assert once == expected
         assert scrub_output(once) == once
+
+    def test_the_unquoted_pass_searches_each_part_of_a_line_once(self, monkeypatch):
+        """A value that stays readable runs on over the values after it, so a fresh
+        search for each value's end would rescan the rest of the line every time."""
+        line = "access_token: abc and " * 5000
+        counters = []
+        for name in ("_WORD_VALUE_END_PATTERN", "_SPACED_VALUE_END_PATTERN"):
+            counter = _CountingPattern(getattr(datasources, name))
+            monkeypatch.setattr(datasources, name, counter)
+            counters.append(counter)
+
+        assert scrub_output(line) == line
+        assert sum(counter.covered for counter in counters) <= 2 * len(line)
+
+    @pytest.mark.parametrize("line", [
+        "access_token: abc and " * 5000,
+        "access_token: {x} and " * 5000,
+        "access_token: x" + " " * 50_000 + "y",
+        "access_token: abc and " * 2000 + ")" * 50_000,
+    ], ids=["readable-values", "readable-placeholders", "long-space-run", "long-trailer-after-readable-values"])
+    def test_a_long_line_scrubs_in_well_under_a_second(self, line):
+        """Each line took 3 to 12 seconds when each value rescanned the rest of its
+        line, a run of spaces was retried from each space, or each value trimmed
+        the same trailer again; scanned once, each takes milliseconds."""
+        started = time.perf_counter()
+        scrub_output(line)
+        assert time.perf_counter() - started < 1.0
 
     @pytest.mark.parametrize("token", TOKEN_SAMPLES)
     @pytest.mark.parametrize("word", ["Bearer", "bearer", "BEARER"])

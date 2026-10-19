@@ -280,9 +280,10 @@ _UNQUOTED_TOKEN_OPENER_PATTERN = re.compile(
 # An unquoted value ends at a line break or at `&`, `,` or `;`, which separate
 # query parameters and list items. In a column or a URL a space ends it too;
 # elsewhere it runs on through spaces up to the next `key=value` pair. Base64
-# padding at a value's end is no pair.
+# padding at a value's end is no pair. A run of spaces is tried from its first
+# space only, so a long run costs one pass; a value never starts on a space.
 _WORD_VALUE_END_PATTERN = re.compile(r"[\s&,;]")
-_SPACED_VALUE_END_PATTERN = re.compile(r"[\r\n&,;]|[ \t]+(?=[A-Za-z_][\w.-]*=[^\s=])")
+_SPACED_VALUE_END_PATTERN = re.compile(r"[\r\n&,;]|(?<![ \t])[ \t]+(?=[A-Za-z_][\w.-]*=[^\s=])")
 # A PHC password hash (`$argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>`) separates
 # its parameters with commas, so they do not end the value.
 _HASH_PARAMETERS_PATTERN = re.compile(
@@ -700,6 +701,37 @@ def _unquoted_value_is_placeholder(text: str, start: int, end: int, raw_end: int
     )
 
 
+class _NextMatch:
+    """Find the first match of a pattern at or after a position in one text, reusing the last search.
+
+    `Pattern.search(text, pos)` tries each position the same way whatever
+    `pos` is, so a match found from an earlier position is still the first
+    one from any later position up to its start.
+    """
+
+    def __init__(self, pattern: re.Pattern[str], text: str) -> None:
+        """Search `text` for `pattern`, with nothing searched yet."""
+        self.pattern = pattern
+        self.text = text
+        self.searched_from = len(text) + 1
+        self.found: re.Match[str] | None = None
+
+    def at_or_after(self, position: int) -> re.Match[str] | None:
+        """Return the first match that starts at or after `position`, or None."""
+        still_ahead = self.found is None or self.found.start() >= position
+        if not (self.searched_from <= position and still_ahead):
+            self.found = self.pattern.search(self.text, position)
+            self.searched_from = position
+        return self.found
+
+
+def _trim_value_trailer(text: str, start: int, end: int) -> int:
+    """Return where `text[start:end]` ends once its trailing spaces, quotes and closing brackets are dropped."""
+    while end > start and text[end - 1] in _VALUE_TRAILER:
+        end -= 1
+    return end
+
+
 def _redact_unquoted_token_values(text: str) -> str:
     """Redact each unquoted value after a token key, through the end of the value.
 
@@ -711,6 +743,11 @@ def _redact_unquoted_token_values(text: str) -> str:
     """
     parts: list[str] = []
     position = 0
+    # A value that stays readable is not skipped past, so the values after it
+    # overlap it; reusing each end search and trailer trim scans the text once.
+    word_value_ends = _NextMatch(_WORD_VALUE_END_PATTERN, text)
+    spaced_value_ends = _NextMatch(_SPACED_VALUE_END_PATTERN, text)
+    trimmed_raw_end = trimmed_end = -1
     for opener in _UNQUOTED_TOKEN_OPENER_PATTERN.finditer(text):
         if opener.start() < position:
             continue
@@ -719,11 +756,12 @@ def _redact_unquoted_token_values(text: str) -> str:
         spaced = opener.group(1) is not None and not in_url
         hash_parameters = _HASH_PARAMETERS_PATTERN.match(text, start)
         search_from = hash_parameters.end() if hash_parameters else start
-        found = (_SPACED_VALUE_END_PATTERN if spaced else _WORD_VALUE_END_PATTERN).search(text, search_from)
+        found = (spaced_value_ends if spaced else word_value_ends).at_or_after(search_from)
         raw_end = found.start() if found else len(text)
-        value = text[start:raw_end].rstrip(_VALUE_TRAILER)
-        end = start + len(value)
-        if len(value) < 16:
+        if raw_end != trimmed_raw_end:
+            trimmed_raw_end, trimmed_end = raw_end, _trim_value_trailer(text, start, raw_end)
+        end = max(start, trimmed_end)
+        if end - start < 16:
             continue
         if text[start] in _PLACEHOLDER_OPENERS:
             if _unquoted_value_is_placeholder(text, start, end, raw_end):
