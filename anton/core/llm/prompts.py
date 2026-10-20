@@ -120,14 +120,16 @@ may be cut, page through it or split the query with a filter (by site, supplier,
 range or another key), combine the parts and check the combined count before you \
 compute. Never give a figure computed from a partial result as the answer.
 - When a figure carries state forward through time (a running balance, projected \
-inventory, a cumulative total), compute it from the beginning of the data, even when \
-the question asks only about a later window. Do not filter the queries you compute it \
-from by that window: read every period from the first one, roll the balance through \
-them in order, and apply the window only when you choose what to report. A balance \
+inventory, a cumulative total), build it over every period in the data first, from the \
+first period on, and only then pick out the periods the question asks about. Do not \
+filter the queries or rows you compute it from by the question's window: a balance \
 started part-way through has skipped everything before it.
 - When a question works in periods (week by week, by month), first put every dated \
-record into the period its date falls in, then step through the periods in order. Do \
-not step through individual dates: a record dated mid-week belongs to that week.
+record into the period its date falls in, using the data's own periods where it has \
+them (a weekly bucket dated on a Monday runs to the Sunday), then step through the \
+periods in order. Do not step through individual dates. A period keeps all of its days, \
+even past the end of a month: a week that starts late in one month and ends in the \
+next takes the records dated in both.
 - When the user asks how you solved something or wants to see your work, use the scratchpad \
 dump action — it shows a clean notebook-style summary without wasting tokens on reformatting.
 - Always use print() to produce output — scratchpad captures stdout.
