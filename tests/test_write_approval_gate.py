@@ -334,13 +334,18 @@ async def test_an_update_without_approve_never_runs(project, answer):
 
 @pytest.mark.parametrize("answer", [APPROVE, CANCEL, SKIP, TIMEOUT], ids=["approve", "cancel", "skip", "timeout"])
 async def test_a_function_call_waits_for_approval_and_quotes_the_call(project, answer):
-    code = "cur.callfunc('purge_suppliers', int, [1])"
+    call = "cur.callfunc('purge_suppliers', int, [1])"
+    code = "import oracledb\nconn = oracledb.connect(dsn='x')\ncur = conn.cursor()\n" + call
     harness = _session(project, code)
     seen = await _run(harness=harness, answers=[answer])
     assert len(seen.cards) == 1
     assert seen.ran_before == [0]
-    assert f"```\n{code}\n```" in seen.cards[0].request.prompt
+    prompt = seen.cards[0].request.prompt
+    assert "This step would run a stored procedure or function:" in prompt
+    assert f"```\n{call}\n```" in prompt
     assert harness.pad.ran == ([code] if answer == APPROVE else [])
+    if answer != APPROVE:
+        assert "must not be made another way" in _history_text(harness.session)
 
 
 @pytest.mark.parametrize("report", [

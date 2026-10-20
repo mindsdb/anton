@@ -49,12 +49,14 @@ from anton.core.llm.provider import ProviderErrorFilter
 
 logger = logging.getLogger(__name__)
 
-#: Bound step-event payloads (tool args / results) on the wire. Matches the
-#: cap cowork's SSE formatter applies to the same content.
 # Trace-block keys the pod applies to the session config rather than forwarding
 # as per-turn Langfuse metadata (see `stream_turn`).
 _SESSION_CONFIG_TRACE_KEYS = frozenset({"surface", "user_id", "organization_id"})
 
+#: Bound step-event payloads (tool args / results) on the wire. Cowork's SSE
+#: formatter caps results and other tools' args at the same length but keeps a
+#: scratchpad call's args whole; a remote turn's are cut here, and remote turns
+#: run no write check.
 MAX_STEP_CHARS = 65536
 MAX_PROGRESS_CHARS = 2000
 #: Per-string-field cap when shrinking a cell-result JSON to fit the wire.

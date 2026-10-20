@@ -149,7 +149,7 @@ def _wholes(change: FileChange) -> str:
 
 # How each call-write reads on the card and in the refusal.
 _CALL_VIA = {
-    "procedure": "run a stored procedure",
+    "procedure": "run a stored procedure or function",
     "sqlalchemy": "change data through SQLAlchemy",
     "mongodb": "change data in MongoDB",
     "dynamodb": "change data in DynamoDB",
@@ -240,6 +240,8 @@ def _card_prompt(writes: CellWrites) -> str:
             lines += ["A part in braces, `{...}`, is the code that fills in that value when the step runs.", ""]
     for call in writes.calls:
         lines += [f"This step would {_CALL_VIA[call.via]}:", "", _fence(call.call), ""]
+        if call.runs and call.runs != call.call:
+            lines += ["That call runs:", "", _fence(call.runs), ""]
     for change in writes.held_files:
         lines += _file_lines(change, lead=f"This step would {change.action}")
     # An append, or an overwrite of a file the agent owns, raises no card on

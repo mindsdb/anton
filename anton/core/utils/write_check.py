@@ -16,7 +16,10 @@ What it finds:
   literal. Each statement in a string that holds a write is its own
   finding, writes or not, since one Approve runs them all. A
   statement only printed, logged or written to a file doesn't count, and
-  neither does one run on an in-process DuckDB or SQLite handle. Any other
+  neither does one run on an in-process DuckDB or SQLite handle, or text a
+  proven report API renders and nothing else reads: a ReportLab
+  ``Paragraph``, ``Preformatted`` or canvas ``drawString``, or python-docx's
+  ``add_paragraph``, ``add_heading`` or ``add_run``. Any other
   handle, known or not, counts. ``to_sql`` into a database that isn't
   in-process counts too. A statement hidden in a base64, base32, base16, hex
   or rot13 literal that the cell decodes, or read from a literal-path SQL
@@ -26,7 +29,8 @@ What it finds:
   (``BEGIN p; END;``), a SELECT of a side-effecting function (``setval``,
   ``pg_terminate_backend``, ``dblink_exec``, ``GET_LOCK`` and friends), a
   SELECT ... INTO OUTFILE and a COPY ... TO a file all count.
-- **Data changes with no SQL text to quote**: a ``cursor.callproc``, a
+- **Data changes with no SQL text to quote**: a ``cursor.callproc`` or
+  ``cursor.callfunc``, called or handed on, a
   SQLAlchemy Core or ORM write (``insert``/``update``/``delete`` constructs
   passed to ``execute``, ``Table.drop``/``create`` and ``MetaData``'s
   ``drop_all``/``create_all`` with an engine, ``session.query(...).delete()``,
@@ -105,6 +109,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import IntEnum
+from functools import cached_property
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -163,10 +168,10 @@ class SqlWrite(BaseModel):
     run_time_parts: bool = False
 
 
-# How a `CallWrite` changes data: a stored procedure, a SQLAlchemy construct
-# or session, a non-SQL store's own client ("data_store" for a table call on a
-# client the check can't trace to DynamoDB or BigQuery), or SQL read from a
-# file the check couldn't read before the cell runs.
+# How a `CallWrite` changes data: a stored procedure or function, a SQLAlchemy
+# construct or session, a non-SQL store's own client ("data_store" for a table
+# call on a client the check can't trace to DynamoDB or BigQuery), or SQL read
+# from a file the check couldn't read before the cell runs.
 CallVia = Literal[
     "procedure", "sqlalchemy", "mongodb", "dynamodb", "bigquery", "redis", "elasticsearch", "data_store", "sql_file",
 ]
@@ -174,13 +179,15 @@ CallVia = Literal[
 
 class CallWrite(BaseModel):
     """One call that changes data with no SQL text to quote: the card quotes
-    its code, scrubbed."""
+    its code, scrubbed. When `call` calls a function an earlier cell defined,
+    `runs` is the code inside it that makes the change."""
 
     model_config = ConfigDict(frozen=True)
 
     via: CallVia
     call: str
     line: int
+    runs: str = ""
 
 
 class FileChange(BaseModel):
@@ -1749,6 +1756,7 @@ class _Cell:
         # runner gets them, such as `Attach 'postgres:...' AS pg`, which
         # `_Reader` follows.
         self.imports: dict[str, str] = {}
+        self.import_sites: list[_ImportSite] = []
         self.functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
         self.classes: dict[str, ast.ClassDef] = {}
         self.calls: list[ast.Call] = []
@@ -1758,16 +1766,11 @@ class _Cell:
         for node in ast.walk(tree):
             for child in ast.iter_child_nodes(node):
                 self.parents[child] = node
-            if isinstance(node, ast.Import):
-                for a in node.names:
-                    if a.asname:
-                        self.imports[a.asname] = a.name
-                    else:
-                        top = a.name.split(".")[0]
-                        self.imports[top] = top
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                for a in node.names:
-                    self.imports[a.asname or a.name] = f"{node.module}.{a.name}"
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                for site in _import_sites(node, self):
+                    self.import_sites.append(site)
+                    if site.target:
+                        self.imports[site.bound] = site.target
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self.functions[node.name] = node
             elif isinstance(node, ast.ClassDef):
@@ -1881,6 +1884,11 @@ class _Cell:
                 return True
             child, parent = parent, self.parents.get(parent)
         return False
+
+    @cached_property
+    def report_facts(self) -> _CellReportFacts:
+        """What the cell shows about report provenance (`_cell_report_facts`)."""
+        return _cell_report_facts(self)
 
     def _under_branch(self, node: ast.AST, *, scope: ast.AST | None) -> bool:
         current = self.parents.get(node)
@@ -2068,7 +2076,8 @@ class _Reader:
                 elif isinstance(item, ast.Assign):
                     self.method_names.update(t.id for t in item.targets if isinstance(t, ast.Name))
         self.attaches = any(cell.attaches for cell in cells)
-        self._report_facts: _ReportFacts | None = None
+        # `_report_receiver`'s answers, by node, maker, depth and `call_key`.
+        self.report_receivers: dict[tuple[int, str, int, tuple[tuple[int, str, int], ...]], bool] = {}
         self._held: dict[tuple[int, str, bool, tuple[tuple[int, str, int], ...]], tuple[str, ...]] = {}
         # What `_name_statements` found at each read of a name, by the read's
         # id, `prose`, the function read and `call_key`: a value appended to
@@ -2156,6 +2165,11 @@ class _Reader:
                 s for t in texts if write_statements(t, prose=prose) for s in _quoted_statements(t)
             )
         return self._held[key]
+
+    @cached_property
+    def report_facts(self) -> _ReportFacts:
+        """Report provenance across the cells (`_report_facts`), once per check."""
+        return _report_facts(reader=self)
 
     def call_key(self) -> tuple[tuple[int, str, int], ...]:
         """What the call being read passes for each parameter, as a cache key."""
@@ -3384,143 +3398,604 @@ def _held_texts(name: str, binding: _Binding, reader: _Reader, *, depth: int) ->
     return ["".join(reader.hole(n) if p is None else p for p, n in zip(pieces, nodes))]
 
 
-# ── SQL findings ──────────────────────────────────────────────────────────
+# ── Report text ───────────────────────────────────────────────────────────
+#
+# Text a cell renders into a PDF or Word report reads as prose there, so a
+# lowercase sentence such as "delete orders where qty is zero" raises no SQL
+# card. The check exempts only text it can prove goes nowhere else: text
+# written into the report call itself, or held by a name that only report
+# calls read, given to a report API the history imports and never rebinds or
+# patches. The report object keeps its text, so the text still reaches a
+# runner wherever the object does. A history that can read a report's text
+# back, or reach a module's namespace or the import system, turns the
+# exemption off.
 
-_REPORT_PARAGRAPHS = frozenset({"reportlab.platypus.Paragraph", "reportlab.platypus.paragraph.Paragraph"})
+# ReportLab flowables, which take their text first.
+_REPORT_FLOWABLES = frozenset({
+    "reportlab.platypus.Paragraph", "reportlab.platypus.paragraph.Paragraph",
+    "reportlab.platypus.Preformatted", "reportlab.platypus.flowables.Preformatted",
+    "reportlab.platypus.XPreformatted", "reportlab.platypus.xpreformatted.XPreformatted",
+})
 _DOCX_DOCUMENTS = frozenset({"docx.Document", "docx.api.Document"})
+_REPORT_CANVASES = frozenset({"reportlab.pdfgen.canvas.Canvas"})
+# A python-docx Document's and paragraph's text methods, which take their text
+# first, and a canvas's, which take it third.
+_DOCX_DOCUMENT_TEXT = frozenset({"add_paragraph", "add_heading"})
+_DOCX_PARAGRAPH_TEXT = frozenset({"add_run"})
+_CANVAS_TEXT = frozenset({"drawString", "drawCentredString", "drawRightString", "drawAlignedString"})
+# Members that hand a report's text back: a flowable's, a python-docx
+# paragraph's or run's, and a canvas's page.
+_REPORT_READ_BACK = frozenset({"text", "getPlainText", "frags", "blPara", "_code"})
+# What reaches a module's or a function's namespace, the builtins, or the
+# import system, so that a report name may not be what the import bound.
 _NAMESPACE_ACCESS = frozenset({"getattr", "setattr", "delattr", "vars", "globals", "locals", "exec", "eval", "compile"})
+_NAMESPACE_NAMES = frozenset({"__main__", "__builtins__", "__import__"})
+_NAMESPACE_MEMBERS = frozenset({
+    "__dict__", "__getattribute__", "__getattr__", "__setattr__", "__delattr__",
+    "__globals__", "__builtins__", "__code__", "__closure__", "__prepare__",
+    "f_globals", "f_locals", "f_builtins", "modules", "meta_path", "path_hooks",
+    "setattr", "delattr", "update_wrapper", "wraps",
+})
+_NAMESPACE_IMPORTS = (
+    "builtins", "sys.modules", "sys.path", "sys.meta_path", "sys.path_hooks", "sys.path_importer_cache",
+    "sys._getframe", "importlib", "runpy", "site", "inspect.currentframe", "inspect.stack", "unittest.mock",
+    "mock", "types.FunctionType", "types.LambdaType", "types.ModuleType", "functools.update_wrapper",
+    "functools.wraps", "pydoc", "operator.methodcaller", "operator.attrgetter", "operator.setitem",
+)
+# Calls whose result only shows or measures what they get: a namespace read
+# handed to one, as in `print(vars(row))`, changes nothing.
+_SHOWS = frozenset({"print", "len", "str", "repr", "sorted", "list", "tuple", "set", "dict"})
+# Methods that run SQL: one stored on a member patches it into a runner.
+_RUNNER_METHODS = frozenset({"execute", "executemany", "executescript", "callproc", "callfunc", "query", "sql",
+                             "read_sql", "read_sql_query"})
+
+
+@dataclass(frozen=True, eq=False)
+class _ImportSite:
+    """One name an import binds: the name, the dotted path the cell's import
+    map gives it ("" for `from . import x`), and the import. A star import
+    binds "*"."""
+
+    cell: _Cell
+    node: ast.Import | ast.ImportFrom
+    bound: str
+    target: str
+
+    @property
+    def relative(self) -> bool:
+        return isinstance(self.node, ast.ImportFrom) and self.node.level > 0
+
+
+@dataclass(frozen=True, eq=False)
+class _Store:
+    """One place a cell binds a name, whatever the order: `scope` is the
+    function whose local it binds, None for the module's, and `site` what binds
+    it, such as the Assign, the For, the comprehension or the parameter."""
+
+    cell: _Cell
+    name: str
+    scope: ast.AST | None
+    site: ast.AST
+
+
+@dataclass(frozen=True)
+class _CellReportFacts:
+    """What one cell shows about report provenance, read once per cell.
+
+    `patched_roots` are the roots of member stores, which count as namespace
+    access when the history's imports make one a report library.
+    `patch_values` are names stored onto a member, which patch a method when
+    the history defines a function by that name. `deferred` says the cell
+    reads a namespace in a way that only shows it, which holds while nothing
+    rebinds the reading call's name."""
+
+    stores: tuple[_Store, ...]
+    member_stores: tuple[tuple[str, ast.AST], ...]
+    imports: tuple[_ImportSite, ...]
+    changed_members: frozenset[str]
+    namespace_access: bool
+    patched_roots: frozenset[str]
+    patch_values: frozenset[str]
+    deferred: bool
+    read_backs: tuple[ast.AST, ...]
 
 
 @dataclass(frozen=True)
 class _ReportFacts:
-    shadowed: frozenset[str]
+    """Report provenance across every cell a check reads."""
+
+    stores: dict[str, tuple[_Store, ...]]
+    member_stores: dict[str, tuple[ast.AST, ...]]
+    imports: tuple[_ImportSite, ...]
     changed_members: frozenset[str]
-    imports: tuple[tuple[_Cell, ast.Import | ast.ImportFrom], ...]
     namespace_access: bool
+    report_read_back: bool
 
 
-def _report_facts(reader: _Reader) -> _ReportFacts:
-    """Collect immutable provenance facts once per check. Namespace access,
-    even passed through an alias, makes import identity uncertain; it does
-    not need another alias graph. Literal exec cells also cannot establish
-    that identity because their bindings run within the host cell."""
-    if reader._report_facts is not None:
-        return reader._report_facts
-    shadowed: set[str] = set()
-    changed_members: set[str] = set()
-    imports: list[tuple[_Cell, ast.Import | ast.ImportFrom]] = []
-    namespace_access = False
-    for cell in reader.cells:
-        for node in ast.walk(cell.tree):
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                imports.append((cell, node))
-                if isinstance(node, ast.Import):
-                    namespace_access |= any(alias.name == "builtins" for alias in node.names)
-                elif node.module == "builtins":
-                    namespace_access |= any(alias.name in _NAMESPACE_ACCESS for alias in node.names)
-            if isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name is not None:
-                shadowed.add(node.name)
-            if isinstance(node, ast.MatchMapping) and node.rest is not None:
-                shadowed.add(node.rest)
-            if isinstance(node, (ast.Global, ast.Nonlocal)):
-                shadowed.update(node.names)
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Del):
-                shadowed.add(node.id)
-            if isinstance(node, ast.Attribute):
-                if isinstance(node.ctx, (ast.Store, ast.Del)):
-                    changed_members.add(node.attr)
-                    # A dunder replacement can change construction or method
-                    # dispatch without replacing the imported report name.
-                    if node.attr.startswith("__") and node.attr.endswith("__"):
-                        namespace_access = True
-                if node.attr in ("__dict__", "__getattribute__", "__getattr__", "__setattr__", "__delattr__"):
-                    namespace_access = True
-            if isinstance(node, (ast.Name, ast.Attribute)):
-                full = reader.dotted(node).removeprefix("builtins.")
-                if full in _NAMESPACE_ACCESS or isinstance(node, ast.Name) and node.id in _NAMESPACE_ACCESS:
-                    namespace_access = True
-    reader._report_facts = _ReportFacts(
-        shadowed=frozenset(shadowed), changed_members=frozenset(changed_members),
-        imports=tuple(imports), namespace_access=namespace_access,
+def _local_scope(node: ast.AST, cell: _Cell) -> ast.AST | None:
+    """The function whose locals a name at `node` belongs to, None for the
+    module's. A class body and a comprehension count as the scope around
+    them, which is where a walrus in a comprehension binds; a default,
+    decorator or annotation runs in the scope around its def."""
+    child, current = node, cell.parents.get(node)
+    while current is not None:
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)) and child in current.body:
+            return current
+        if isinstance(current, ast.Lambda) and child is current.body:
+            return current
+        child, current = current, cell.parents.get(current)
+    return None
+
+
+def _scope_chain(node: ast.AST, cell: _Cell) -> list[ast.AST | None]:
+    """The scopes a read at `node` looks a name up in, innermost first."""
+    chain: list[ast.AST | None] = []
+    scope = _local_scope(node, cell)
+    while scope is not None:
+        chain.append(scope)
+        scope = _local_scope(scope, cell)
+    return [*chain, None]
+
+
+def _import_sites(node: ast.Import | ast.ImportFrom, cell: _Cell) -> list[_ImportSite]:
+    """The names `node` binds, with the paths the cell's import map records."""
+    sites = []
+    for alias in node.names:
+        if isinstance(node, ast.Import):
+            bound = alias.asname or alias.name.split(".")[0]
+            target = alias.name if alias.asname else bound
+        else:
+            bound = alias.asname or alias.name
+            target = f"{node.module}.{alias.name}" if node.module else ""
+        sites.append(_ImportSite(cell=cell, node=node, bound=bound, target=target))
+    return sites
+
+
+def _imports_from(full: str, prefixes: Sequence[str]) -> bool:
+    return any(full == p or full.startswith(f"{p}.") for p in prefixes)
+
+
+def _shows_only(node: ast.AST, cell: _Cell) -> bool:
+    """Whether a namespace read at `node` is only compared, formatted or shown."""
+    parent = cell.parents.get(node)
+    if isinstance(parent, (ast.Compare, ast.FormattedValue)):
+        return True
+    return isinstance(parent, ast.Call) and node in parent.args and isinstance(parent.func, ast.Name) and (
+        parent.func.id in _SHOWS
     )
-    return reader._report_facts
 
 
-def _report_import(node: ast.AST, reader: _Reader, *, names: frozenset[str]) -> bool:
+def _cell_report_facts(cell: _Cell) -> _CellReportFacts:
+    """One walk of the cell: its stores, member stores and read-backs, and
+    what in it reaches a namespace or the import system."""
+    stores: list[_Store] = []
+    member_stores: list[tuple[str, ast.AST]] = []
+    changed_members: set[str] = set()
+    namespace_access = deferred = False
+    patched_roots: set[str] = set()
+    patch_values: set[str] = set()
+    read_backs: list[ast.AST] = []
+    # A function's global or nonlocal names, by the scope a store of each binds in.
+    declared: dict[tuple[int, str], ast.AST | None] = {}
+
+    def store(name: str, at: ast.AST, site: ast.AST) -> None:
+        stores.append(_Store(cell=cell, name=name, scope=_local_scope(at, cell), site=site))
+
+    for node in ast.walk(cell.tree):
+        parent = cell.parents.get(node)
+        if isinstance(node, ast.Name):
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                store(node.id, node, parent or node)
+            elif node.id in _NAMESPACE_ACCESS:
+                call = parent if isinstance(parent, ast.Call) and parent.func is node else None
+                literal = call is not None and node.id == "getattr" and 2 <= len(call.args) <= 3 and (
+                    not call.keywords and isinstance(call.args[1], ast.Constant) and isinstance(call.args[1].value, str)
+                )
+                if literal and not call.args[1].value.startswith("__") and call.args[1].value not in _NAMESPACE_ACCESS:
+                    # `getattr(row, "qty", 0)` reads one attribute, as `row.qty` does.
+                    deferred = True
+                    if call.args[1].value in _REPORT_READ_BACK:
+                        read_backs.append(call.args[0])
+                elif call is not None and node.id in ("vars", "locals", "globals") and _shows_only(call, cell):
+                    deferred = True
+                else:
+                    namespace_access = True
+            if node.id in _NAMESPACE_NAMES:
+                namespace_access = True
+        elif isinstance(node, ast.arg):
+            func = cell.parents.get(parent)
+            stores.append(_Store(cell=cell, name=node.arg, scope=func, site=node))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            store(node.name, node, node)
+            namespace_access |= node.name == "__prepare__"
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            scope = _local_scope(node, cell)
+            for name in node.names:
+                declared[(id(scope), name)] = None if isinstance(node, ast.Global) else _local_scope(scope, cell)
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name is not None:
+            store(node.name, node, node)
+        elif isinstance(node, ast.MatchMapping) and node.rest is not None:
+            store(node.rest, node, node)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                full = alias.name if isinstance(node, ast.Import) else f"{node.module or ''}.{alias.name}"
+                namespace_access |= _imports_from(full, _NAMESPACE_IMPORTS)
+        elif isinstance(node, ast.Attribute):
+            if node.attr in _NAMESPACE_MEMBERS and not (
+                node.attr == "__dict__" and isinstance(node.ctx, ast.Load) and _shows_only(node, cell)
+            ):
+                namespace_access = True
+            if isinstance(node.ctx, ast.Load):
+                if node.attr in _REPORT_READ_BACK:
+                    read_backs.append(node.value)
+            else:
+                changed_members.add(node.attr)
+                member_stores.append((node.attr, parent or node))
+                # A dunder replacement can change construction or method
+                # dispatch without replacing the imported report name.
+                namespace_access |= node.attr.startswith("__") and node.attr.endswith("__")
+                value = parent.value if isinstance(parent, (ast.Assign, ast.AnnAssign)) else None
+                root = node.value
+                while isinstance(root, (ast.Attribute, ast.Subscript, ast.Call)):
+                    root = root.func if isinstance(root, ast.Call) else root.value
+                if isinstance(root, ast.Name) and not isinstance(value, ast.Constant):
+                    # Anything but a setting, as `rl_config.invariant = 1` is, stored on
+                    # a report library's member may replace what a report call runs.
+                    patched_roots.add(root.id)
+                # A function stored on a member replaces a method, which a
+                # report's own call may run.
+                if isinstance(value, ast.Lambda) or (isinstance(value, ast.Attribute) and value.attr in _RUNNER_METHODS):
+                    namespace_access = True
+                elif isinstance(value, ast.Name):
+                    patch_values.add(value.id)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            namespace_access |= node.value == "builtins" or (node.value in _NAMESPACE_MEMBERS and node.value.startswith("__"))
+    if declared:
+        # A store in a function that declares the name global binds the module's.
+        stores = [
+            _Store(cell=s.cell, name=s.name, scope=declared[(id(s.scope), s.name)], site=s.site)
+            if s.scope is not None and (id(s.scope), s.name) in declared and not isinstance(s.site, ast.arg) else s
+            for s in stores
+        ]
+    return _CellReportFacts(
+        stores=tuple(stores), member_stores=tuple(member_stores), imports=tuple(cell.import_sites),
+        changed_members=frozenset(changed_members), namespace_access=namespace_access,
+        patched_roots=frozenset(patched_roots), patch_values=frozenset(patch_values), deferred=deferred,
+        read_backs=tuple(read_backs),
+    )
+
+
+def _report_facts(*, reader: _Reader) -> _ReportFacts:
+    """Merge the cells' report facts, resolving what depends on the history's
+    imports and definitions."""
+    stores: dict[str, list[_Store]] = {}
+    member_stores: dict[str, list[ast.AST]] = {}
+    imports: list[_ImportSite] = []
+    changed: set[str] = set()
+    namespace_access = deferred = False
+    read_backs: list[ast.AST] = []
+    for cell in reader.cells:
+        facts = cell.report_facts
+        for s in facts.stores:
+            stores.setdefault(s.name, []).append(s)
+        for attr, site in facts.member_stores:
+            member_stores.setdefault(attr, []).append(site)
+        imports += facts.imports
+        changed |= facts.changed_members
+        deferred |= facts.deferred
+        read_backs += facts.read_backs
+        namespace_access |= facts.namespace_access or any(
+            reader.imports.get(root, "").startswith(("reportlab", "docx")) for root in facts.patched_roots
+        ) or any(name in reader.functions for name in facts.patch_values)
+    # A namespace read that only shows a value is one only while the reading
+    # call is the builtin.
+    namespace_access |= deferred and bool(stores.keys() & (_NAMESPACE_ACCESS | _SHOWS))
+    frozen = {name: tuple(s) for name, s in stores.items()}
+    return _ReportFacts(
+        stores=frozen, member_stores={attr: tuple(s) for attr, s in member_stores.items()},
+        imports=tuple(imports), changed_members=frozenset(changed), namespace_access=namespace_access,
+        report_read_back=any(not _other_object(node=r, stores=frozen, reader=reader) for r in read_backs),
+    )
+
+
+def _other_object(*, node: ast.AST, stores: dict[str, tuple[_Store, ...]], reader: _Reader, depth: int = 0) -> bool:
+    """A receiver that can't be a report object: a name every store of which
+    assigns a call that, through such names, starts from an import outside
+    the report libraries, as `r = requests.get(...)` or `resp = session.get(...)`."""
+    if depth > 3 or not isinstance(node, ast.Name):
+        return False
+    if node.id in reader.imports:
+        return not reader.imports[node.id].startswith(("reportlab", "docx"))
+    sites = [s.site for s in stores.get(node.id, ())]
+    if not sites:
+        return False
+    for site in sites:
+        if not (isinstance(site, ast.Assign) and isinstance(site.value, ast.Call)):
+            return False
+        root = site.value.func
+        while isinstance(root, (ast.Attribute, ast.Call, ast.Subscript)):
+            root = root.func if isinstance(root, ast.Call) else root.value
+        if not _other_object(node=root, stores=stores, reader=reader, depth=depth + 1):
+            return False
+    return True
+
+
+def _stores_seen(*, name: str, node: ast.AST, reader: _Reader) -> list[_Store]:
+    """Every store, in any cell and any order, of the variable a read of
+    `name` at `node` finds."""
+    chain = _scope_chain(node, reader.cell_of(node))
+    return [s for s in reader.report_facts.stores.get(name, ()) if any(s.scope is c for c in chain)]
+
+
+def _surely_imports(*, site: _ImportSite, scope: ast.AST | None, suffix: str, names: frozenset[str]) -> bool:
+    """Whether code after the import runs only once its name holds a report
+    callable: no branch around it, except a `try` whose every handler raises
+    or imports the same callable at its top level."""
+    cell = site.cell
+    child, current = site.node, cell.parents.get(site.node)
+    while current is not None and current is not scope:
+        if isinstance(current, _BRANCHES):
+            if not (isinstance(current, (ast.Try, ast.TryStar)) and child in current.body and all(
+                (handler.body and isinstance(handler.body[-1], ast.Raise)) or any(
+                    isinstance(s, (ast.Import, ast.ImportFrom)) and any(
+                        other.bound == site.bound and other.target + suffix in names
+                        for other in _import_sites(s, cell)
+                    ) for s in handler.body
+                ) for handler in current.handlers
+            )):
+                return False
+        child, current = current, cell.parents.get(current)
+    return True
+
+
+def _report_import(*, node: ast.AST, reader: _Reader, names: frozenset[str]) -> bool:
     """A report callable imported before this use, with no conflicting import,
     binding or member replacement. `dotted` alone does not prove that: its
-    import map also remembers a name the pad subsequently rebinds."""
-    full = reader.dotted(node)
-    if full not in names:
+    import map also remembers a name the pad rebinds. Each import of the root
+    visible here must resolve into `names`; a star import conflicts unless a
+    sure report import follows it in the cell being checked."""
+    if reader.dotted(node) not in names:
         return False
+    parts: list[str] = []
     root = node
     while isinstance(root, ast.Attribute):
+        parts.append(root.attr)
         root = root.value
-    facts = _report_facts(reader)
-    if facts.namespace_access or facts.changed_members.intersection(full.split(".")):
+    # A private name in a class body is one Python renames, which no import binds.
+    if not isinstance(root, ast.Name) or root.id.startswith("__"):
         return False
-    if not isinstance(root, ast.Name) or reader.bindings_of(root.id, node=root) or (
-        root.id in reader.functions or root.id in reader.classes or root.id in facts.shadowed
-    ):
+    facts = reader.report_facts
+    if facts.namespace_access or _stores_seen(name=root.id, node=root, reader=reader):
         return False
+    suffix = "".join(f".{part}" for part in reversed(parts))
     home = reader.cell_of(root)
     scopes = home.scopes_around(root)
-    head = reader.imports.get(root.id)
     found = False
-    for cell, imp in facts.imports:
+    stars: list[tuple[int, int, int]] = []
+    sure_here: list[tuple[int, int, int]] = []
+    for site in facts.imports:
+        cell, imp = site.cell, site.node
         scope = cell.scope_of(imp)
         if scope is not None and (cell is not home or scope not in scopes):
             continue
-        for alias in imp.names:
-            if alias.name == "*":
-                return False
-            if isinstance(imp, ast.Import):
-                bound = alias.asname or alias.name.split(".")[0]
-                imported = alias.name if alias.asname else bound
-            else:
-                bound = alias.asname or alias.name
-                imported = f"{imp.module}.{alias.name}" if imp.level == 0 else ""
-            if bound != root.id:
-                continue
-            if imported != head:
-                return False
-            before = cell.index < home.index or cell is home and _follows(node=root, value=imp)
-            if before and not cell._under_branch(imp, scope=scope):
-                found = True
+        at = (cell.index, imp.lineno, imp.col_offset)
+        if site.bound == "*":
+            stars.append(at)
+            continue
+        if site.bound != root.id:
+            continue
+        full = "" if site.relative else site.target + suffix
+        if full not in names or facts.changed_members.intersection(full.split(".")):
+            return False
+        # A function body reads the name when the cell being checked calls it.
+        before = cell.index < home.index or (cell is home and _follows(node=root, value=imp)) or (
+            bool(scopes) and cell.index < reader.current.index
+        )
+        if before and _surely_imports(site=site, scope=scope, suffix=suffix, names=names):
+            found = True
+            if cell is home and home is reader.current:
+                sure_here.append(at)
+    if stars and not (sure_here and max(stars) < max(sure_here)):
+        return False
     return found
 
 
-def _docx_document(node: ast.AST, reader: _Reader, *, depth: int = 0) -> bool:
-    """A python-docx Document, through ordinary assignments, not a receiver
-    identified only by the common method name `add_paragraph`."""
+def _makes_document(*, call: ast.Call, reader: _Reader) -> bool:
+    return _report_import(node=call.func, reader=reader, names=_DOCX_DOCUMENTS)
+
+
+def _makes_canvas(*, call: ast.Call, reader: _Reader) -> bool:
+    return _report_import(node=call.func, reader=reader, names=_REPORT_CANVASES)
+
+
+def _makes_docx_paragraph(*, call: ast.Call, reader: _Reader) -> bool:
+    func = call.func
+    return isinstance(func, ast.Attribute) and func.attr in _DOCX_DOCUMENT_TEXT and (
+        func.attr not in reader.report_facts.changed_members
+        and _report_receiver(node=func.value, reader=reader, makes=_makes_document)
+    )
+
+
+def _report_receiver(
+    *, node: ast.AST, reader: _Reader, makes: Callable[..., bool], depth: int = 0,
+) -> bool:
+    """Whether `node` is an object a report call `makes` returns: that call
+    itself, a conditional of two, a name every store of which assigns one, a
+    parameter the call being read passes one for (else every own call does),
+    or a member every store of which assigns one, as `self.doc` does."""
     if depth > 6:
         return False
+    key = (id(node), makes.__name__, depth, reader.call_key())
+    known = reader.report_receivers.get(key)
+    if known is None:
+        known = reader.report_receivers[key] = _receiver_uncached(node=node, reader=reader, makes=makes, depth=depth)
+    return known
+
+
+def _receiver_uncached(*, node: ast.AST, reader: _Reader, makes: Callable[..., bool], depth: int) -> bool:
+    def holds(value: ast.AST | None) -> bool:
+        return value is not None and _report_receiver(node=value, reader=reader, makes=makes, depth=depth + 1)
+
     if isinstance(node, ast.Call):
-        return _report_import(node.func, reader, names=_DOCX_DOCUMENTS)
-    if isinstance(node, ast.Name):
-        if node.id in _report_facts(reader).shadowed:
-            return False
-        found = reader.bindings_of(node.id, node=node)
-        return bool(found) and all(
-            b.how == "value" and _docx_document(b.value, reader, depth=depth + 1) for b in found
+        return makes(call=node, reader=reader)
+    if isinstance(node, ast.IfExp):
+        return holds(node.body) and holds(node.orelse)
+    if isinstance(node, ast.Attribute):
+        sites = reader.report_facts.member_stores.get(node.attr, ())
+        return bool(sites) and all(
+            isinstance(site, ast.Assign) and len(site.targets) == 1 and holds(site.value) for site in sites
         )
-    return False
-
-
-def _report_text(arg: ast.AST, call: ast.Call, reader: _Reader) -> bool:
-    """The text argument a known report API renders. Other arguments, unknown
-    helpers, and strings also passed to a SQL runner keep their usual checks."""
-    if isinstance(arg, ast.keyword):
-        if arg.arg != "text":
-            return False
-    elif not call.args or arg is not call.args[0]:
+    if not isinstance(node, ast.Name) or node.id in reader.imports:
         return False
-    if _report_import(call.func, reader, names=_REPORT_PARAGRAPHS):
-        return True
-    return isinstance(call.func, ast.Attribute) and call.func.attr == "add_paragraph" and (
-        _docx_document(call.func.value, reader)
-        and "add_paragraph" not in _report_facts(reader).changed_members
+    found = _stores_seen(name=node.id, node=node, reader=reader)
+    if not found:
+        return False
+    for s in found:
+        if isinstance(s.site, ast.Assign) and len(s.site.targets) == 1 and isinstance(s.site.targets[0], ast.Name):
+            ok = holds(s.site.value)
+        elif isinstance(s.site, ast.AnnAssign):
+            ok = holds(s.site.value)
+        elif isinstance(s.site, ast.arg) and isinstance(s.scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            func = s.scope
+            arg_key = (id(func), node.id)
+            if arg_key in reader.param_args:
+                arg = reader.param_args[arg_key]
+                ok = arg is not None and holds(arg.node)
+            else:
+                calls = _own_calls(func, s.cell, reader)
+                ok = bool(calls) and all(
+                    holds(a.node if (a := _call_arguments(
+                        func, c, call_cell=reader.cell_of(c), func_cell=s.cell,
+                    ).get(node.id)) else None)
+                    for c in calls
+                )
+        else:
+            ok = False
+        if not ok:
+            return False
+    return True
+
+
+def _literal_text(node: ast.AST, *, items: bool) -> bool:
+    """A string literal, or with `items` a list or tuple of them."""
+    if items:
+        return isinstance(node, (ast.List, ast.Tuple)) and all(_literal_text(e, items=False) for e in node.elts)
+    return isinstance(node, ast.Constant) and isinstance(node.value, str)
+
+
+def _report_reads(*, name: str, reader: _Reader, within: ast.AST | None = None) -> bool:
+    """Whether every read of `name`, in every cell or only inside `within`, is
+    the text of a proven report call."""
+    if within is None:
+        loads = [(c, u) for c in reader.cells for u in c.loads.get(name, ())]
+    else:
+        cell = reader.cell_of(within)
+        loads = [(cell, u) for u in ast.walk(within)
+                 if isinstance(u, ast.Name) and u.id == name and isinstance(u.ctx, ast.Load)]
+    for c, use in loads:
+        parent = c.parents.get(use)
+        arg = use
+        if isinstance(parent, ast.keyword):
+            arg, parent = parent, c.parents.get(parent)
+        if not (isinstance(parent, ast.Call) and _report_text(arg=arg, call=parent, reader=reader)):
+            return False
+    return bool(loads)
+
+
+def _report_only(*, name: ast.Name, reader: _Reader) -> bool:
+    """A name whose text goes only into proven report calls: bound only to a
+    string literal, or as the target of a loop over a name bound only to a
+    literal list that only such loops read, or a parameter its function reads
+    only as report text."""
+    if name.id in reader.imports:
+        return False
+    found = _stores_seen(name=name.id, node=name, reader=reader)
+    if len(found) == 1 and isinstance(found[0].site, ast.arg):
+        # A parameter holds what its call passes, which the walk followed here.
+        return _report_reads(name=name.id, reader=reader, within=found[0].scope)
+    if not found or not _report_reads(name=name.id, reader=reader):
+        return False
+    stores = reader.report_facts.stores
+    for s in found:
+        site = s.site
+        if isinstance(site, ast.Assign):
+            if not (len(site.targets) == 1 and _literal_text(site.value, items=False)):
+                return False
+        elif isinstance(site, (ast.For, ast.comprehension)) and isinstance(site.iter, ast.Name):
+            source = site.iter.id
+            lists = [t.site for t in stores.get(source, ())]
+            if source in reader.imports or not lists or not all(
+                isinstance(t, ast.Assign) and len(t.targets) == 1 and _literal_text(t.value, items=True) for t in lists
+            ):
+                return False
+            for c in reader.cells:
+                for use in c.loads.get(source, ()):
+                    loop = c.parents.get(use)
+                    if not (isinstance(loop, (ast.For, ast.comprehension)) and loop.iter is use
+                            and isinstance(loop.target, ast.Name) and _report_reads(name=loop.target.id, reader=reader)):
+                        return False
+        else:
+            return False
+    return True
+
+
+def _text_argument(*, arg: ast.AST, call: ast.Call, position: int) -> bool:
+    """Whether `arg` is `call`'s `text=` keyword or its positional argument
+    at `position`, with nothing unpacked before it."""
+    if isinstance(arg, ast.keyword):
+        return arg.arg == "text"
+    return len(call.args) > position and arg is call.args[position] and not any(
+        isinstance(a, ast.Starred) for a in call.args[:position]
     )
+
+
+def _report_text(*, arg: ast.AST, call: ast.Call, reader: _Reader) -> bool:
+    """Whether `arg` is the text a report API renders: a ReportLab flowable's,
+    a python-docx Document's add_paragraph or add_heading, a paragraph's
+    add_run, or a canvas's drawString and its siblings. Other arguments,
+    unknown helpers and SQL runners keep their usual checks."""
+    func = call.func
+    method = func.attr if isinstance(func, ast.Attribute) else None
+    canvas = method in _CANVAS_TEXT
+    if not _text_argument(arg=arg, call=call, position=2 if canvas else 0):
+        return False
+    facts = reader.report_facts
+    if facts.report_read_back:
+        return False
+    if _report_import(node=func, reader=reader, names=_REPORT_FLOWABLES):
+        return True
+    if method is None or method in facts.changed_members:
+        return False
+    if canvas:
+        return _report_receiver(node=func.value, reader=reader, makes=_makes_canvas)
+    if method in _DOCX_DOCUMENT_TEXT:
+        return _report_receiver(node=func.value, reader=reader, makes=_makes_document)
+    return method in _DOCX_PARAGRAPH_TEXT and _report_receiver(node=func.value, reader=reader, makes=_makes_docx_paragraph)
+
+
+def _renders_only(*, call: ast.Call, uses: Sequence[ast.AST], reader: _Reader) -> bool:
+    """Whether `call` calls a helper the pad defines once, at module level and
+    undecorated, under a name nothing else binds, and each of `uses`, its
+    reads of the parameter `call` fills, is a report's text argument."""
+    name = call.func.id if isinstance(call.func, ast.Name) else None
+    if name is None or name in reader.imports or name in reader.classes:
+        return False
+    defs = [s for s in reader.report_facts.stores.get(name, ()) if s.scope is None]
+    if len(defs) != 1 or not isinstance(defs[0].site, (ast.FunctionDef, ast.AsyncFunctionDef)) or (
+        defs[0].site.decorator_list
+    ):
+        return False
+    for use in uses:
+        home = reader.cell_of(use)
+        arg, parent = use, home.parents.get(use)
+        if isinstance(parent, ast.keyword):
+            arg, parent = parent, home.parents.get(parent)
+        if not (isinstance(parent, ast.Call) and _report_text(arg=arg, call=parent, reader=reader)):
+            return False
+    return True
+
+
+# ── SQL findings ──────────────────────────────────────────────────────────
 
 
 def _is_harmless_call(call: ast.Call, reader: _Reader) -> bool:
@@ -3710,8 +4185,8 @@ class _Reach(IntEnum):
 
     # Only uses the check sees are harmless.
     NOWHERE = 0
-    # A use the check can't follow, such as a report, a template or a
-    # function it doesn't know: the text may be English there.
+    # A use the check can't follow, such as a report helper it can't prove,
+    # a template or a function it doesn't know: the text may be English there.
     ELSEWHERE = 1
     # A call that runs it as SQL.
     RUNNER = 2
@@ -3719,13 +4194,16 @@ class _Reach(IntEnum):
 
 def _reaches_a_runner(
     node: ast.AST, reader: _Reader, *, depth: int = 0, followed: set[int] | None = None, any_handle: bool = False,
+    inline: bool = False,
 ) -> _Reach:
     """Where a statement's value can go: the furthest of its uses.
 
     NOWHERE only when every use is visibly harmless: a bare expression (a
     docstring), a print, log or file write, a comparison or condition, a
-    list nothing runs, a name nothing reads, or an execute on a local
-    handle. RUNNER when a use is the statement an execute, read_sql, .sql()
+    list nothing runs, a name nothing reads, an execute on a local handle,
+    or the text a proven report API renders, written there or held by a name
+    only report calls read (`_report_text`), whose report object reaches no
+    runner. RUNNER when a use is the statement an execute, read_sql, .sql()
     or .query() call runs (`_runs_sql`), what text() or sql.SQL() wraps,
     or a parameter a pad function runs so. ELSEWHERE for anything else,
     because the check can't follow it. With `any_handle`, an execute on a
@@ -3873,14 +4351,26 @@ def _reaches_a_runner(
             if not isinstance(func.value, ast.Name):
                 return _Reach.ELSEWHERE
             return via_names({func.value.id}, at=parent)
-        if _report_text(node, parent, reader) or _is_harmless_call(parent, reader) or (
-            not any_handle and _executes_on_local(parent, reader)
+        if _report_text(arg=node, call=parent, reader=reader) and (
+            inline or (isinstance(value, ast.Name) and _report_only(name=value, reader=reader))
         ):
+            # Text written into a proven report call, or held by a name only
+            # report calls read, is prose there. The report object keeps the
+            # text, so the text reaches a runner wherever the object does.
+            return _Reach.RUNNER if on(parent) is _Reach.RUNNER else _Reach.NOWHERE
+        if _is_harmless_call(parent, reader) or (not any_handle and _executes_on_local(parent, reader)):
             return _Reach.NOWHERE
         if _runs_sql(parent, reader):
             return _Reach.RUNNER if _is_statement(node, parent) else _Reach.ELSEWHERE
-        # A pad function may run the parameter it gets; any other call may too.
-        return max(_Reach.ELSEWHERE, via(_parameter_uses(parent, value, reader)))
+        # A pad function may run the parameter it gets; any other call may too,
+        # unless it only hands text written here to a report's text.
+        uses = _parameter_uses(parent, value, reader)
+        reach = via(uses)
+        if uses and (inline or (isinstance(value, ast.Name) and _report_only(name=value, reader=reader))) and (
+            _renders_only(call=parent, uses=uses, reader=reader)
+        ):
+            return reach
+        return max(_Reach.ELSEWHERE, reach)
     if isinstance(parent, (ast.Assign, ast.AnnAssign, ast.NamedExpr, ast.AugAssign)):
         targets = parent.targets if isinstance(parent, ast.Assign) else [parent.target]
         # Into a name, or an entry or attribute of one such as df['sql'] when
@@ -4082,7 +4572,7 @@ def _sql_findings(
         # statement in it, since one Approve runs them all. Where it goes
         # decides how it reads: a SQL runner runs it whatever its case, and
         # anywhere else it may be English (`write_statements`).
-        reach = _reaches_a_runner(node, reader)
+        reach = _reaches_a_runner(node, reader, inline=True)
         if reach is _Reach.RUNNER or reach is _Reach.ELSEWHERE and write_statements(text):
             add(_quoted_statements(text), node)
     # A name an earlier cell bound to a statement, or one this cell builds up.
@@ -4119,6 +4609,8 @@ def _sql_findings(
 
 # ── Call findings (no SQL text) ─────────────────────────────────────────────
 
+# A DB-API cursor's stored procedure and stored function calls.
+_ROUTINE_CALLS = frozenset({"callproc", "callfunc"})
 # pymongo methods distinctive enough to hold on any receiver.
 _MONGO_WRITES = frozenset({
     "insert_one", "insert_many", "update_one", "update_many", "replace_one", "delete_one", "delete_many",
@@ -4297,10 +4789,17 @@ def _call_write_kind(call: ast.Call, reader: _Reader, *, commits: bool) -> CallV
     """What a call changes with no SQL text to quote, or None when it changes
     nothing the check holds."""
     func = call.func
+    if isinstance(func, ast.Name) and func.id in reader.bound_names:
+        # `run = cur.callfunc` then `run(...)`: the bound method runs the routine.
+        for b in reader.bindings_of(func.id, node=func):
+            if b.how == "value" and isinstance(b.value, ast.Attribute) and b.value.attr in _ROUTINE_CALLS and (
+                not reader.is_local_handle(b.value.value)
+            ):
+                return "procedure"
     if not isinstance(func, ast.Attribute):
         return None
     method, recv = func.attr, func.value
-    if method in ("callproc", "callfunc") and not reader.is_local_handle(recv):
+    if method in _ROUTINE_CALLS and not reader.is_local_handle(recv):
         return "procedure"
     if method in _MONGO_WRITES:
         return "mongodb"
@@ -4344,12 +4843,28 @@ def _call_findings(
     out: list[CallWrite] = []
 
     def add(via: CallVia, node: ast.AST) -> None:
-        line = report.line if report else cell.host_line or getattr(node, "lineno", 0)
-        call = report.call if report else scrub_output(cell.source(node))
-        out.append(CallWrite(via=via, call=call, line=line))
+        code = scrub_output(cell.source(node))
+        if report is None:
+            out.append(CallWrite(via=via, call=code, line=cell.host_line or getattr(node, "lineno", 0)))
+        else:
+            out.append(CallWrite(via=via, call=report.call, line=report.line, runs=code))
 
     for node in ast.walk(top):
+        if isinstance(node, ast.Attribute) and node.attr in _ROUTINE_CALLS and not reader.is_local_handle(node.value):
+            parent = cell.parents.get(node)
+            if not (isinstance(parent, ast.Call) and parent.func is node):
+                # Bound to a name, wrapped in a partial or passed on: the
+                # routine runs where the check can't follow it.
+                add("procedure", node)
+            continue
         if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name) and node.func.id == "getattr" and len(node.args) >= 2 and (
+            isinstance(node.args[1], ast.Constant) and node.args[1].value in _ROUTINE_CALLS
+            and not reader.is_local_handle(node.args[0])
+        ):
+            # `getattr(cur, "callfunc")` hands on the same bound method.
+            add("procedure", node)
             continue
         via = _call_write_kind(node, reader, commits=commits)
         if via is not None:
@@ -4865,10 +5380,21 @@ class _OwnedFiles:
         makes no file the agent's, and nor does an append."""
         if not self._earlier:
             return frozenset()
+        if not self._errored:
+            return self._writes_read_from(self._earlier)
+        # The check can't tell where an errored cell stopped, so a file is the
+        # agent's only when the earlier cells make it so both with each errored
+        # cell read whole and with it read as never run: a name it binds after
+        # its error may never have pointed a later write anywhere.
+        empty = [_Cell(ast.Module(body=[], type_ignores=[]), "", c.index) if c.index in self._errored else c
+                 for c in self._earlier]
+        return self._writes_read_from(self._earlier) & self._writes_read_from(empty)
+
+    def _writes_read_from(self, earlier: list[_Cell]) -> frozenset[str]:
         # Read from an empty cell after them all, so every earlier cell's
         # functions count as earlier ones (`_Reader.earlier_function`).
-        after = _Cell(ast.Module(body=[], type_ignores=[]), "", len(self._earlier))
-        reader = _Reader([*self._earlier, after], current=after)
+        after = _Cell(ast.Module(body=[], type_ignores=[]), "", len(earlier))
+        reader = _Reader([*earlier, after], current=after)
         changes: list[FileChange] = []
 
         def read_function(callee: _Callee, *, cell: _Cell, at: ast.AST, chain: tuple[int, ...]) -> None:
@@ -4886,7 +5412,7 @@ class _OwnedFiles:
                 for inner in _earlier_function_uses(reader, func, home, ran_only=True):
                     read_function(inner, cell=cell, at=at, chain=(*chain, id(func)))
 
-        for cell in self._earlier:
+        for cell in earlier:
             if cell.index in self._errored:
                 continue
             changes += _file_findings(reader, cell, self._snapshots, owned=None)
