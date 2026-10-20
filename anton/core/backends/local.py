@@ -1167,12 +1167,20 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     start_new_session=(sys.platform != "win32"),
                 )
             launch: SandboxedSpawn | None = None
+            launch_lock = threading.Lock()
+            launch_abandoned = False
 
             def prepare_launch() -> None:
                 nonlocal launch
-                # Keep ownership here even if Stop cancels the await. The
-                # worker drain finishes before the finally closes all FDs.
-                launch = policy.launch(argv, env=env)
+                prepared = policy.launch(argv, env=env)
+                # Cancelling the worker task can finish the caller before this
+                # thread. Transfer ownership only while the caller still waits.
+                with launch_lock:
+                    if not launch_abandoned:
+                        launch = prepared
+                        return
+                prepared.close()
+                prepared.refusal()
 
             try:
                 await self._run_venv_work(prepare_launch)
@@ -1188,6 +1196,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     pass_fds=launch.pass_fds,
                 )
             except BaseException:
+                with launch_lock:
+                    launch_abandoned = True
                 if launch is not None:
                     launch.refusal()
                 raise

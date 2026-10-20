@@ -402,6 +402,87 @@ async def test_cancelled_launch_preparation_drains_before_teardown(
         await pad.close()
 
 
+@pytest.mark.parametrize("prepared_before_cancel", [False, True])
+async def test_cancelled_preparation_task_closes_launch_descriptors(
+    project, policy, monkeypatch, prepared_before_cancel,
+):
+    """A cancelled asyncio task does not mean its preparation thread has finished."""
+    pad = _pad(project, policy)
+    monkeypatch.setattr(pad, "_verify_venv_python", lambda: True)
+    loop = asyncio.get_running_loop()
+    ready, finished = asyncio.Event(), asyncio.Event()
+    release = threading.Event()
+    original_launch = CellSandbox.launch
+    original_work = pad._run_venv_work
+    original_close = os.close
+    launches = []
+    closes = {}
+
+    def prepare(self, *args, **kwargs):
+        if not prepared_before_cancel:
+            loop.call_soon_threadsafe(ready.set)
+            assert release.wait(5), "the test did not release launch preparation"
+        launch = original_launch(self, *args, **kwargs)
+        launches.append(launch)
+        closes.update({fd: 0 for fd in (*launch.pass_fds, launch.refusal_fd)})
+        return launch
+
+    async def tracked_work(work):
+        if work.__name__ != "prepare_launch":
+            return await original_work(work)
+
+        def finish_work():
+            try:
+                result = work()
+                if prepared_before_cancel:
+                    loop.call_soon_threadsafe(ready.set)
+                    assert release.wait(5), "the test did not release the prepared launch"
+                return result
+            finally:
+                loop.call_soon_threadsafe(finished.set)
+
+        return await original_work(finish_work)
+
+    def close(fd):
+        if fd in closes:
+            closes[fd] += 1
+        original_close(fd)
+
+    async def spawn(*args, **kwargs):
+        pytest.fail("a cancelled preparation started a process")
+
+    monkeypatch.setattr(CellSandbox, "launch", prepare)
+    monkeypatch.setattr(pad, "_run_venv_work", tracked_work)
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(os, "close", close)
+    starting = asyncio.create_task(pad.start())
+    try:
+        await asyncio.wait_for(ready.wait(), 5)
+        assert len(pad._venv_workers) == 1
+        worker = next(iter(pad._venv_workers))
+        starting.cancel("start cancelled")
+        worker.cancel("preparation task cancelled")
+        with pytest.raises(asyncio.CancelledError, match="start cancelled"):
+            await asyncio.wait_for(starting, 5)
+        assert pad._proc is None
+        assert not pad._pending_starts
+        release.set()
+        await asyncio.wait_for(finished.wait(), 5)
+        assert len(launches) == 1
+        assert list(closes.values()) == [1, 1, 1]
+        for fd in closes:
+            with pytest.raises(OSError):
+                os.fstat(fd)
+    finally:
+        release.set()
+        await asyncio.gather(starting, return_exceptions=True)
+        await asyncio.wait_for(finished.wait(), 5)
+        for launch in launches:
+            launch.close()
+            launch.refusal()
+        await pad.close()
+
+
 async def test_the_cell_runs_the_installed_boot_script_through_the_launcher(
     project, policy, monkeypatch, server_env
 ):
