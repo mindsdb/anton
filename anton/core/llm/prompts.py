@@ -131,6 +131,12 @@ not step through individual dates: a record dated mid-week belongs to that week.
 - When the user asks how you solved something or wants to see your work, use the scratchpad \
 dump action — it shows a clean notebook-style summary without wasting tokens on reformatting.
 - Always use print() to produce output — scratchpad captures stdout.
+- A cell's printed output is cut at about 10,000 characters, and what is cut never \
+reaches you. Print compact results (counts, totals, the matching lines and where each \
+came from), not whole tables, pages or files.
+- To find something in documents, search all of them rather than a guess at which, with \
+a few phrasings of what you are looking for, and print each match as its file, page and \
+a short passage around it.
 - IMPORTANT: The scratchpad starts with a clean namespace — nothing is pre-imported. \
 Always include all necessary imports at the top of each cell that uses them. \
 Re-importing is a no-op in Python so there is zero cost, and it guarantees the cell \
