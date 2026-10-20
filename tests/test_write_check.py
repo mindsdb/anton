@@ -884,6 +884,21 @@ def test_report_namespace_mutations_keep_sql_held(code, earlier, snap):
     assert _held(code, snap, earlier=earlier)
 
 
+@pytest.mark.parametrize("code, earlier", [
+    ("import reportlab.platypus as pdf\nattrs = getattr\n"
+     "attrs(pdf, '__dict__')['Paragraph'] = cur.execute\n"
+     "pdf.Paragraph('delete orders where qty = 0')", ()),
+    ("import reportlab.platypus as pdf\nfrom builtins import getattr as attrs\n"
+     "attrs(pdf, '__dict__')['Paragraph'] = cur.execute\n"
+     "pdf.Paragraph('delete orders where qty = 0')", ()),
+    ("pdf.Paragraph('delete orders where qty = 0')",
+     ("import reportlab.platypus as pdf\nattrs = getattr\n"
+      "attrs(pdf, '__dict__')['Paragraph'] = cur.execute",)),
+], ids=["assigned-getter", "imported-getter", "earlier-getter"])
+def test_report_getter_aliases_keep_namespace_mutations_held(code, earlier, snap):
+    assert _held(code, snap, earlier=earlier)
+
+
 @pytest.mark.parametrize("code", [
     "import reportlab.platypus as pdf\npdf.__getattribute__('__dict__')['Paragraph'] = cur.execute\n"
     "pdf.Paragraph('delete orders where qty = 0')",

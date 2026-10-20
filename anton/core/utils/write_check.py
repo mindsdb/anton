@@ -3388,7 +3388,7 @@ def _held_texts(name: str, binding: _Binding, reader: _Reader, *, depth: int) ->
 
 _REPORT_PARAGRAPHS = frozenset({"reportlab.platypus.Paragraph", "reportlab.platypus.paragraph.Paragraph"})
 _DOCX_DOCUMENTS = frozenset({"docx.Document", "docx.api.Document"})
-_NAMESPACE_ACCESS = frozenset({"setattr", "delattr", "vars", "globals", "locals", "exec", "eval", "compile"})
+_NAMESPACE_ACCESS = frozenset({"getattr", "setattr", "delattr", "vars", "globals", "locals", "exec", "eval", "compile"})
 
 
 @dataclass(frozen=True)
