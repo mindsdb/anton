@@ -1440,7 +1440,7 @@ def test_a_request_less_response_does_not_shadow_a_foreign_host():
 
 
 # Every environment and vanity host that can serve a real gateway billing
-# denial, from the terraform host inventory (review question on #363). These all
+# denial, from MindsHub's host inventory (review question on #363). These all
 # resolve as ours today; the test exists so that narrowing `_MINDSHUB_HOSTS`, or
 # adding an apex the allowlist misses, fails here instead of silently degrading
 # a genuine out-of-credits denial to generic copy (ENG-1169's user-visible bug).
