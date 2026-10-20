@@ -4,15 +4,23 @@
 user typed and any URL built from it, so a token is only ever sent to a
 Databricks-owned host. `genie_mcp_url` builds the Genie MCP address from it.
 `mint_token` exchanges a service principal's client credentials for an access
-token.
+token. `wait_for_genie_answer` polls Genie until an answer is done, since
+`genie_ask` only starts one.
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
+import time
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 import httpx2
+
+if TYPE_CHECKING:
+    from anton.core.mcp.client import McpSession
 
 _HOST_SUFFIXES = (".cloud.databricks.com", ".azuredatabricks.net", ".gcp.databricks.com")
 _LABEL = re.compile(r"^[a-z0-9-]{1,63}$")
@@ -26,6 +34,10 @@ TOKEN_PATH = "/oidc/v1/token"
 TOKEN_SCOPE = "all-apis"
 _TOKEN_TIMEOUT_SECONDS = 10.0
 _CREDENTIAL_ERRORS = ("invalid_client", "unauthorized_client")
+# Genie's own tool description asks for 2 to 5 s between polls; answers took 57 to 81 s live.
+GENIE_POLL_INTERVAL_SECONDS = 3.0
+GENIE_WAIT_SECONDS = 240.0
+GENIE_IN_PROGRESS = "in_progress"
 
 
 class InvalidWorkspaceHost(ValueError):
@@ -46,6 +58,10 @@ class GenieRequestRefused(RuntimeError):
 
 class GenieUnavailable(RuntimeError):
     """The workspace could not be reached or answered with a server error."""
+
+
+class GenieAnswerFailed(RuntimeError):
+    """Genie reported an error, or no status, while it was polled for an answer."""
 
 
 def canonical_workspace_host(value: str) -> str:
@@ -163,3 +179,33 @@ async def mint_token(
     if not isinstance(token, str) or not token:
         raise GenieRequestRefused("Databricks answered the token request without a token")
     return token
+
+
+async def wait_for_genie_answer(
+    session: "McpSession",
+    conversation_id: str,
+    response_id: str,
+    *,
+    interval: float = GENIE_POLL_INTERVAL_SECONDS,
+    limit: float = GENIE_WAIT_SECONDS,
+    sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> dict[str, Any]:
+    """Poll `genie_poll_response` until Genie's status leaves `in_progress`.
+
+    Polls once at once, then every `interval` seconds while less than
+    `limit` seconds have passed on `clock`. Returns the last poll's
+    structured fields, whose status is still `in_progress` when the limit
+    ran out. Raises `GenieAnswerFailed` (a fixed message, never the reply
+    text) when a poll reports an error or carries no status; MCP errors from
+    the session propagate. `sleep` and `clock` are for tests.
+    """
+    started = clock()
+    arguments = {"conversation_id": conversation_id, "response_id": response_id}
+    while True:
+        structured, _, is_error = await session.call_tool_structured("genie_poll_response", arguments)
+        if is_error or not isinstance(structured, dict) or "status" not in structured:
+            raise GenieAnswerFailed("Genie did not report the answer's status")
+        if structured["status"] != GENIE_IN_PROGRESS or clock() - started + interval > limit:
+            return structured
+        await sleep(interval)

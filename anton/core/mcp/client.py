@@ -25,6 +25,7 @@ from typing import Any
 
 import httpx2
 import mcp
+from mcp_types import CallToolResult
 from mcp_types import Tool as McpTool
 
 from anton.core.mcp.errors import McpPermanentError, classify_mcp_error
@@ -194,11 +195,33 @@ class McpSession:
         one — verified empirically both ways before relying on it. A real
         cancellation is re-raised immediately, no retry attempted.
         """
+        result = await self._call_with_retry(name, arguments)
+        return _flatten_content(result.content), result.is_error
+
+    async def call_tool_structured(
+        self, name: str, arguments: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, str | list[dict], bool]:
+        """Call one tool and keep its structured result too.
+
+        Returns `(structured_content, content, is_error)`: the tool's MCP
+        `structured_content` (None when it sent none) beside what `call_tool`
+        returns. Retries, classifies and re-raises exactly as `call_tool`
+        does, since both go through `_call_with_retry`.
+        """
+        result = await self._call_with_retry(name, arguments)
+        return result.structured_content, _flatten_content(result.content), result.is_error
+
+    async def _call_with_retry(self, name: str, arguments: dict[str, Any]) -> CallToolResult:
+        """Run one `tools/call` with the retry and cancellation rules `call_tool` documents.
+
+        Returns the raw `CallToolResult`. Raises `McpPermanentError` at once,
+        `McpTransientError` or the original non-`Exception` failure after one
+        retry against a fresh session. May reconnect the session as a side effect.
+        """
         last_error: BaseException | None = None
         for attempt in (1, 2):
             try:
-                result = await self._require_client().call_tool(name, arguments)
-                return _flatten_content(result.content), result.is_error
+                return await self._require_client().call_tool(name, arguments)
             except (KeyboardInterrupt, SystemExit, GeneratorExit):
                 raise
             except BaseException as exc:  # noqa: BLE001 - reclassified/reraised below

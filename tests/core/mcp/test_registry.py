@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import functools
+import json
+
+import httpx2
 from mcp.server.mcpserver import MCPServer
 
+from anton.core.mcp import databricks, registry
 from anton.core.mcp.access import TOOL_ACCESS
 from anton.core.mcp.client import McpSession
 from anton.core.mcp.names import ToolNameParts, namespaced_tool_name, parse_namespaced_tool_name
-from anton.core.mcp.registry import discover_tool_defs, without_empty_optionals
+from anton.core.mcp.registry import GENIE_RESULT_ROW_CAP, discover_tool_defs, without_empty_optionals
 from anton.core.tools.registry import ToolOutcome
+
+# What `genie_stub_server` answers with (see conftest.py).
+GENIE_FINAL_ANSWER = "Revenue was 42 last quarter."
+GENIE_RESULT_ROWS = 250
 
 
 def test_namespaced_tool_name():
@@ -218,3 +227,131 @@ def test_a_field_required_by_any_branch_is_kept():
         {"type": "object", "properties": {"id": {"type": "string"}}},
     ]}
     assert without_empty_optionals({"q": "", "id": ""}, schema, schema) == {"q": ""}
+
+
+class FakeClock:
+    """A clock that only moves when the fake sleep is awaited."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def _patch_wait(monkeypatch, clock: FakeClock, **overrides) -> None:
+    """Make the Genie handlers wait on `clock` instead of real time."""
+    waiting = functools.partial(
+        databricks.wait_for_genie_answer, sleep=clock.sleep, clock=clock, **overrides
+    )
+    monkeypatch.setattr(registry, "wait_for_genie_answer", waiting)
+
+
+async def _genie_handlers(session: McpSession) -> dict:
+    """The read-mode Genie handlers by bare tool name."""
+    defs = await discover_tool_defs(session, engine="databricks", access_mode="read")
+    return {d.name.removeprefix("databricks__"): d.handler for d in defs}
+
+
+async def test_genie_ask_waits_for_the_answer_and_returns_the_short_fields(genie_stub_server, monkeypatch):
+    clock = FakeClock()
+    _patch_wait(monkeypatch, clock)
+    async with McpSession(server=genie_stub_server) as session:
+        handlers = await _genie_handlers(session)
+        outcome = await handlers["genie_ask"](None, {"question": "What was revenue?", "conversation_id": ""})
+
+    assert outcome.ok is True
+    assert clock.sleeps == [databricks.GENIE_POLL_INTERVAL_SECONDS] * 2
+    assert json.loads(outcome.content) == {
+        "status": "completed",
+        "conversation_id": "conv-1",
+        "response_id": "resp-1",
+        "final_answer": GENIE_FINAL_ANSWER,
+        "query_items": [{"item_id": "pub_1_output"}],
+        "deep_link": "https://dbc-1.cloud.databricks.com/genie/x",
+    }
+    assert "GENIE-REASONING-TEXT" not in outcome.content
+    assert "MUST" not in outcome.content
+
+
+async def test_genie_ask_hands_back_ids_when_genie_is_still_working(genie_stub_server, monkeypatch):
+    clock = FakeClock()
+    _patch_wait(monkeypatch, clock, limit=databricks.GENIE_POLL_INTERVAL_SECONDS * 1.5)
+    async with McpSession(server=genie_stub_server) as session:
+        handlers = await _genie_handlers(session)
+        outcome = await handlers["genie_ask"](None, {"question": "What was revenue?"})
+
+    assert outcome.ok is True
+    assert json.loads(outcome.content) == {
+        "status": "in_progress",
+        "conversation_id": "conv-1",
+        "response_id": "resp-1",
+        "note": "Genie is still working; call databricks__genie_poll_response with these ids.",
+    }
+    assert clock.now <= databricks.GENIE_POLL_INTERVAL_SECONDS * 2
+
+
+async def test_genie_poll_response_returns_only_the_short_fields(genie_stub_server, monkeypatch):
+    clock = FakeClock()
+    _patch_wait(monkeypatch, clock)
+    async with McpSession(server=genie_stub_server) as session:
+        handlers = await _genie_handlers(session)
+        outcome = await handlers["genie_poll_response"](
+            None, {"conversation_id": "conv-1", "response_id": "resp-1"}
+        )
+
+    assert json.loads(outcome.content)["final_answer"] == GENIE_FINAL_ANSWER
+    assert "GENIE-REASONING-TEXT" not in outcome.content
+
+
+async def test_a_large_query_result_is_cut_to_the_cap_with_a_note(genie_stub_server):
+    async with McpSession(server=genie_stub_server) as session:
+        handlers = await _genie_handlers(session)
+        outcome = await handlers["genie_get_query_result"](
+            None, {"conversation_id": "conv-1", "response_id": "resp-1", "item_id": "pub_1_output"}
+        )
+
+    result = json.loads(outcome.content)
+    assert outcome.ok is True
+    assert len(result["rows"]) == GENIE_RESULT_ROW_CAP
+    assert result["rows"][0] == ["0", "x"]
+    assert result["total_row_count"] == GENIE_RESULT_ROWS
+    assert result["columns"] == [{"name": "n", "type_text": "INT"}, {"name": "label", "type_text": "STRING"}]
+    assert result["note"] == f"Showing the first {GENIE_RESULT_ROW_CAP} of {GENIE_RESULT_ROWS} rows."
+
+
+async def test_genie_cancel_response_passes_through(genie_stub_server):
+    async with McpSession(server=genie_stub_server) as session:
+        handlers = await _genie_handlers(session)
+        outcome = await handlers["genie_cancel_response"](None, {"conversation_id": "conv-1"})
+
+    assert (outcome.content, outcome.ok) == ("cancelled", True)
+
+
+async def test_a_token_that_lapses_mid_turn_says_reconnect(genie_stub_server, monkeypatch):
+    request = httpx2.Request("POST", "https://dbc-1.cloud.databricks.com/mcp")
+    response = httpx2.Response(401, request=request, text="sentinel-token rejected")
+
+    async def lapsed(name, arguments, **kwargs):
+        raise httpx2.HTTPStatusError("401 for sentinel-token", request=request, response=response)
+
+    async with McpSession(server=genie_stub_server) as session:
+        handlers = await _genie_handlers(session)
+        monkeypatch.setattr(session._require_client(), "call_tool", lapsed)
+        outcomes = [
+            await handlers["genie_ask"](None, {"question": "q"}),
+            await handlers["genie_cancel_response"](None, {"conversation_id": "conv-1"}),
+        ]
+
+    for outcome in outcomes:
+        assert outcome.content == (
+            "The databricks connection needs to be reconnected before this tool can run again."
+        )
+        assert outcome.ok is False
+        assert outcome.reason == "mcp_permanent_error"
+        assert "sentinel-token" not in outcome.content

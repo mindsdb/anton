@@ -481,6 +481,18 @@ def _hold_exact_secrets() -> None:
             held.setdefault(secret.value, secret)
 
 
+def hold_secret_value(label: str, value: str) -> None:
+    """Hide `value` as `[label]` in everything `scrub_credentials` sees until this turn ends.
+
+    For a secret that never becomes a DS_* variable, such as a token minted
+    for the turn. A no-op when no turn scope is open or `value` is empty.
+    Never touches the environment or this turn's DS_* map.
+    """
+    held = _held_exact_secrets.get()
+    if held is not None and value:
+        held.setdefault(value, _ExactSecret(label, value))
+
+
 @dataclass(frozen=True)
 class _SecretForms:
     """The matcher for one saved value in every form `scrub_credentials` hides.
