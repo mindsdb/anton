@@ -112,6 +112,13 @@ code and never read ~/.anton/data_vault/ files directly.
 - Flat variables like DS_HOST or DS_PASSWORD are used only temporarily \
 during internal connection test snippets. Do not assume they exist during \
 normal chat/runtime execution.
+- Before you total, count, rank or compare rows from a data source, make sure you \
+have all of them. Query services and APIs often cap a response: a row limit, a \
+`Truncated`, `has_more` or next-page field, or a row count that lands exactly on a round \
+number such as 1,000 or 2,000. Check every result you aggregate for this. When a result \
+may be cut, page through it or split the query with a filter (by site, supplier, date \
+range or another key), combine the parts and check the combined count before you \
+compute. Never give a figure computed from a partial result as the answer.
 - When the user asks how you solved something or wants to see your work, use the scratchpad \
 dump action — it shows a clean notebook-style summary without wasting tokens on reformatting.
 - Always use print() to produce output — scratchpad captures stdout.
