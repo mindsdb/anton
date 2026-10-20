@@ -1,0 +1,29 @@
+# run-tree-ok: text edits need independent audit concurrency and results;
+# CLA and application checks have different event and permission contracts.
+# Separate workflow and job name: comment success must not satisfy the PR gate.
+name: Public text audit
+
+on:
+  issues:
+    types: [opened, edited]
+  issue_comment:
+    types: [created, edited]
+  pull_request_review:
+    types: [submitted, edited]
+  pull_request_review_comment:
+    types: [created, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+concurrency:
+  group: public-text-audit-${{ github.event_name }}-${{ github.event.comment.id || github.event.review.id || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  public-text-audit:
+    uses: mindsdb/github-actions/.github/workflows/public-text-check.yml@main
+    secrets:
+      PUBLIC_TEXT_DENYLIST: ${{ secrets.PUBLIC_TEXT_DENYLIST }}

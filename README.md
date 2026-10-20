@@ -410,3 +410,11 @@ If you genuinely need to release outside the normal flow (e.g. an admin hotfix),
 The CLI, cloud-turn, and resident launcher share safe diagnostic settings.
 See [structured logging](docs/structured-logging.md) for defaults, troubleshooting
 overrides, retained evidence streams and rollout requirements.
+
+## Public text checks
+
+PR titles, descriptions, branch names, commit messages, comments and code must not disclose customer, partner or user names, or private repository identities, links or release details. Use neutral roles and public component contracts. Generic deployment terminology remains valid.
+
+The `Public text` workflow checks PR metadata, commit messages and the current added lines and paths. Release trains receive the same scan, except for commits an earlier merged train already carried. `Public text audit` checks issues, comments and reviews separately. Failures name fields and line numbers without quoting the text. Missing configuration and incomplete scans fail; explicit fork events report that they are unscanned.
+
+The workflows call the shared [public text guard](https://github.com/mindsdb/github-actions/blob/main/docs/public-text.md). Maintainers must configure its private org secret and verify its actual required-check context before activation. Merge the shared implementation first, and promote these callers to the default branch for issue and comment events. The guard runs after publication and does not erase older revisions.
