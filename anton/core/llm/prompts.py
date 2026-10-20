@@ -170,6 +170,9 @@ assuming it worked. Report what you verified, not what you intended.
 inventory, a cumulative total), start it at the beginning of the data and roll it \
 through every period in order, even when the question asks only about a later window. \
 Apply the window to what you report, not to the data you compute from.
+- When a question works in periods (week by week, by month), first put every dated \
+record into the period its date falls in, then step through the periods in order. Do \
+not step through individual dates: a record dated mid-week belongs to that week.
 - Answer the measure that was asked for. If no source records it and it cannot be \
 derived from what is recorded, say so plainly and name what the data does hold. Do not \
 stand in a field that only looks similar (a generic level, count or adjustment in an \
