@@ -128,8 +128,8 @@ async def mint_token(
     `host` goes through `canonical_workspace_host` before any request. Sends
     one POST to the workspace token endpoint with HTTP Basic auth and no
     redirects. Returns the access token. Raises `InvalidWorkspaceHost`,
-    `GenieCredentialsRefused` (invalid_client, unauthorized_client, or a 401
-    with no readable error), `GenieRequestRefused` (any other 3xx or 4xx, or
+    `GenieCredentialsRefused` (invalid_client or unauthorized_client on any
+    4xx, or a 401 with no readable error), `GenieRequestRefused` (any other 3xx or 4xx, or
     a 200 without a token) or `GenieUnavailable` (network error or 5xx, with
     the cause kept). Messages never carry the secret, the token or body text.
     `transport` is for tests.
@@ -150,14 +150,16 @@ async def mint_token(
     status = response.status_code
     if status >= 500:
         raise GenieUnavailable(f"The Databricks workspace failed the token request (HTTP {status})")
-    if status == 401 and _error_code(response) in (None, *_CREDENTIAL_ERRORS):
+    error = _error_code(response) if status >= 400 else None
+    if error in _CREDENTIAL_ERRORS or (status == 401 and error is None):
         raise GenieCredentialsRefused("Databricks refused the service principal's client ID or secret")
     if status != 200:
         raise GenieRequestRefused(f"Databricks refused the token request (HTTP {status})")
     try:
-        token = response.json().get("access_token")
-    except (ValueError, AttributeError):
-        token = None
+        payload = response.json()
+    except ValueError:
+        payload = None
+    token = payload.get("access_token") if isinstance(payload, dict) else None
     if not isinstance(token, str) or not token:
         raise GenieRequestRefused("Databricks answered the token request without a token")
     return token

@@ -154,6 +154,16 @@ async def test_refused_credentials_are_named_without_the_secret():
     _assert_no_leak(info.value, "Client authentication failed")
 
 
+@pytest.mark.parametrize("code", ["invalid_client", "unauthorized_client"])
+async def test_a_rejected_client_on_a_400_is_refused_credentials(code):
+    transport, _ = _transport(lambda r: httpx2.Response(400, json={"error": code}))
+
+    with pytest.raises(GenieCredentialsRefused) as info:
+        await mint_token(HOST, "client-1", SECRET, transport=transport)
+
+    _assert_no_leak(info.value)
+
+
 @pytest.mark.parametrize(
     "response",
     [
@@ -198,6 +208,7 @@ async def test_an_unreachable_workspace_is_unavailable():
     with pytest.raises(GenieUnavailable) as info:
         await mint_token(HOST, "client-1", SECRET, transport=transport)
     assert isinstance(info.value.__cause__, httpx2.ConnectError)
+    _assert_no_leak(info.value)
 
     transport, _ = _transport(lambda r: httpx2.Response(503, text="down sentinel-token"))
     with pytest.raises(GenieUnavailable) as info:
