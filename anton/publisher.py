@@ -473,7 +473,8 @@ def _collect_datasource_secrets(
             missing.append(ref.slug)
             continue
         for key, value in fields.items():
-            if value is None:
+            # `_` fields are vault bookkeeping and hidden secrets, never app env.
+            if value is None or key.startswith("_"):
                 continue
             env_name = f"{ref.env_prefix}__{key.upper()}"
             secrets[env_name] = str(value)
