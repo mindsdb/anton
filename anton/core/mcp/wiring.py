@@ -149,11 +149,14 @@ async def _discover_one(
     connection name and the exception class only: its token request or a
     401 at `initialize` can carry values that must never reach a log line."""
     genie = method != "mcp"
-    try:
+    if genie:
+        try:
+            endpoint = await resolve_mcp_endpoint(engine, method, vault.load(engine, name) or {})
+        except Exception as exc:
+            logger.warning("discover_mcp_tools: could not resolve %s/%s: %s", engine, name, type(exc).__name__)
+            return [], None
+    else:
         endpoint = await resolve_mcp_endpoint(engine, method, vault.load(engine, name) or {})
-    except Exception as exc:
-        logger.warning("discover_mcp_tools: could not resolve %s/%s: %s", engine, name, type(exc).__name__)
-        return [], None
     if endpoint is None:
         if genie:
             logger.warning("discover_mcp_tools: incomplete Genie connection %s/%s", engine, name)

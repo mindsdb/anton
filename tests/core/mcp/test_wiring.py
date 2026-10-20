@@ -356,7 +356,7 @@ async def test_the_secret_and_token_are_scrubbed_in_the_turn(genie_vault, minted
 
     async def turn() -> str:
         begin_ds_turn_scope()
-        outcome = await ask.handler(None, {"question": "What was revenue?"})
+        outcome = await asyncio.create_task(ask.handler(None, {"question": "What was revenue?"}))
         assert outcome.ok is True
         return scrub_credentials(f"secret={SECRET} token={TOKEN}")
 

@@ -46,8 +46,8 @@ from anton.core.mcp.databricks import GENIE_IN_PROGRESS, GenieAnswerFailed, wait
 from anton.core.mcp.errors import McpPermanentError, McpTransientError
 from anton.core.mcp.names import namespaced_tool_name
 from anton.core.tools.registry import ToolOutcome
-from anton.utils.datasources import hold_secret_value
 from anton.core.tools.tool_defs import ToolDef
+from anton.utils.datasources import hold_secret_value
 
 
 async def discover_tool_defs(
@@ -99,6 +99,10 @@ _MAX_SCHEMA_DEPTH = 20
 
 #: Rows a Genie query result may hand the model; the largest seen live was 12.
 GENIE_RESULT_ROW_CAP = 200
+# Genie's raw reply text is long reasoning addressed to the agent, so a reply without
+# structured fields becomes one of these fixed messages, never that text.
+_GENIE_ANSWER_FAILED = "Genie did not report the answer's status."
+_GENIE_RESULT_FAILED = "Genie did not return the query result."
 _GENIE_ANSWER_FIELDS = ("status", "conversation_id", "response_id", "final_answer", "query_items", "deep_link")
 _GENIE_RESULT_FIELDS = (
     "conversation_id",
@@ -191,19 +195,23 @@ async def _call_genie_answer(
 ) -> ToolOutcome:
     """Run `genie_ask` or `genie_poll_response` and wait while Genie is still working.
 
-    Returns the short JSON reply from `_genie_answer_outcome`, or the
-    server's own content when it sent an error or no structured ids. A
-    failed wait is a tool error with a fixed message. MCP errors propagate.
+    Returns the short JSON reply from `_genie_answer_outcome`. An error, a
+    reply with no structured status, an in-progress reply without both ids,
+    or a failed wait is a tool error with a fixed message, never the
+    server's text. MCP errors propagate.
     """
-    structured, content, is_error = await mcp_session.call_tool_structured(bare_tool_name, arguments)
-    if is_error or not isinstance(structured, dict):
-        return ToolOutcome(content=content, ok=not is_error, reason="mcp_tool_error" if is_error else "")
-    conversation_id, response_id = structured.get("conversation_id"), structured.get("response_id")
-    if structured.get("status") == GENIE_IN_PROGRESS and conversation_id and response_id:
+    structured, _, is_error = await mcp_session.call_tool_structured(bare_tool_name, arguments)
+    failed = ToolOutcome(content=_GENIE_ANSWER_FAILED, ok=False, reason="mcp_tool_error")
+    if is_error or not isinstance(structured, dict) or "status" not in structured:
+        return failed
+    if structured["status"] == GENIE_IN_PROGRESS:
+        conversation_id, response_id = structured.get("conversation_id"), structured.get("response_id")
+        if not conversation_id or not response_id:
+            return failed
         try:
             structured = await wait_for_genie_answer(mcp_session, conversation_id, response_id)
-        except GenieAnswerFailed as exc:
-            return ToolOutcome(content=str(exc), ok=False, reason="mcp_tool_error")
+        except GenieAnswerFailed:
+            return failed
     return _genie_answer_outcome(structured, poll_tool_name)
 
 
@@ -213,13 +221,13 @@ async def _call_genie_query_result(
     """Run `genie_get_query_result` and keep at most `GENIE_RESULT_ROW_CAP` rows.
 
     Returns the result's structured fields as JSON, with a note when rows
-    were cut, or the server's own content when it sent an error or no
-    structured result. `poll_tool_name` is unused; it keeps the Genie call
-    signature. MCP errors propagate.
+    were cut. An error or a reply with no structured result is a tool error
+    with a fixed message, never the server's text. `poll_tool_name` is
+    unused; it keeps the Genie call signature. MCP errors propagate.
     """
-    structured, content, is_error = await mcp_session.call_tool_structured(bare_tool_name, arguments)
+    structured, _, is_error = await mcp_session.call_tool_structured(bare_tool_name, arguments)
     if is_error or not isinstance(structured, dict):
-        return ToolOutcome(content=content, ok=not is_error, reason="mcp_tool_error" if is_error else "")
+        return ToolOutcome(content=_GENIE_RESULT_FAILED, ok=False, reason="mcp_tool_error")
     result = {key: structured[key] for key in _GENIE_RESULT_FIELDS if key in structured}
     rows = result.get("rows")
     if isinstance(rows, list) and len(rows) > GENIE_RESULT_ROW_CAP:
