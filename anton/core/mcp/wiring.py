@@ -145,26 +145,34 @@ async def _discover_one(
     `asyncio.gather` — a bad connector never fails the whole turn over it,
     it just contributes `([], None)`.
 
-    Failures before discovery are logged with the engine, the connection
-    name and the exception class only: a Genie token request or a 401 at
-    `initialize` can carry values that must never reach a log line."""
+    A "genie-mcp" failure before discovery is logged with the engine, the
+    connection name and the exception class only: its token request or a
+    401 at `initialize` can carry values that must never reach a log line."""
+    genie = method != "mcp"
     try:
         endpoint = await resolve_mcp_endpoint(engine, method, vault.load(engine, name) or {})
     except Exception as exc:
         logger.warning("discover_mcp_tools: could not resolve %s/%s: %s", engine, name, type(exc).__name__)
         return [], None
     if endpoint is None:
-        logger.warning("discover_mcp_tools: no MCP server URL or credential for %s/%s", engine, name)
+        if genie:
+            logger.warning("discover_mcp_tools: incomplete Genie connection %s/%s", engine, name)
+        elif mcp_server_url(engine) is None:
+            logger.warning("discover_mcp_tools: no known MCP server URL for engine %s", engine)
+        else:
+            logger.warning("discover_mcp_tools: no access token for %s/%s", engine, name)
         return [], None
-    url, access_token = endpoint
 
-    mcp_session = McpSession(url=url, access_token=access_token)
+    mcp_session = McpSession(url=endpoint.url, access_token=endpoint.access_token)
     try:
         await mcp_session.__aenter__()
     except Exception as exc:
-        logger.warning(
-            "discover_mcp_tools: failed to open MCP session for %s/%s: %s", engine, name, type(exc).__name__
-        )
+        if genie:
+            logger.warning(
+                "discover_mcp_tools: failed to open MCP session for %s/%s: %s", engine, name, type(exc).__name__
+            )
+        else:
+            logger.exception("discover_mcp_tools: failed to open MCP session for %s/%s", engine, name)
         return [], None
     try:
         access_mode = _access_mode_of(vault, engine, name)
@@ -173,6 +181,7 @@ async def _discover_one(
             engine=engine,
             access_mode=access_mode,
             connection_name=name if disambiguate else None,
+            held_secrets=endpoint.held_secrets,
         )
     except Exception:
         logger.exception("discover_mcp_tools: tool discovery failed for %s/%s", engine, name)

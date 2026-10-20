@@ -46,6 +46,7 @@ from anton.core.mcp.databricks import GENIE_IN_PROGRESS, GenieAnswerFailed, wait
 from anton.core.mcp.errors import McpPermanentError, McpTransientError
 from anton.core.mcp.names import namespaced_tool_name
 from anton.core.tools.registry import ToolOutcome
+from anton.utils.datasources import hold_secret_value
 from anton.core.tools.tool_defs import ToolDef
 
 
@@ -55,6 +56,7 @@ async def discover_tool_defs(
     engine: str,
     access_mode: AccessMode,
     connection_name: str | None = None,
+    held_secrets: tuple[tuple[str, str], ...] = (),
 ) -> list[ToolDef]:
     """List `mcp_session`'s tools, apply the access filter, and wrap each
     surviving one as a namespaced `ToolDef` whose handler calls back into
@@ -66,6 +68,9 @@ async def discover_tool_defs(
     `connection_name` disambiguates the registered tool names when this
     engine has more than one connection in the same turn — see
     `namespaced_tool_name`.
+
+    `held_secrets` are `(label, value)` pairs each handler holds for the
+    running turn's `scrub_credentials` before it calls the server.
     """
     if access_mode == "none":
         return []
@@ -82,6 +87,7 @@ async def discover_tool_defs(
                 input_schema=tool.input_schema or {},
                 drop_empty_optionals=allowed_for_mode(engine, tool.name, "read"),
                 poll_tool_name=namespaced_tool_name(engine, "genie_poll_response", connection_name=connection_name),
+                held_secrets=held_secrets,
             ),
         )
         for tool in tools
@@ -239,6 +245,7 @@ def _make_handler(
     input_schema: dict,
     drop_empty_optionals: bool,
     poll_tool_name: str,
+    held_secrets: tuple[tuple[str, str], ...],
 ):
     """Build the `ToolDef` handler that calls `bare_tool_name` on `mcp_session`.
 
@@ -246,10 +253,14 @@ def _make_handler(
     every other tool returns the server's content. Either way a permanent MCP
     error becomes the reconnect message and a transient one the retry
     message. `poll_tool_name` is the registered name the Genie note points at.
+    Each call first holds `held_secrets` for the running turn's scrub.
     """
     genie_call = _GENIE_CALLS.get(bare_tool_name) if engine == "databricks" else None
 
     async def handle_mcp_call(session, tc_input: dict) -> ToolOutcome:  # noqa: ARG001 - session unused, contract requires it
+        # Held here, inside the turn: discovery runs before the turn opens its scrub scope.
+        for label, value in held_secrets:
+            hold_secret_value(label, value)
         arguments = tc_input or {}
         if drop_empty_optionals:
             arguments = without_empty_optionals(arguments, input_schema, input_schema)

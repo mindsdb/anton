@@ -7,9 +7,10 @@ import httpx2
 import pytest
 
 from anton.core.datasources.data_vault import LocalDataVault
-from anton.core.mcp import servers, wiring
+from anton.core.mcp import registry, servers, wiring
 from anton.core.mcp.client import McpSession
 from anton.core.mcp.databricks import GenieCredentialsRefused, genie_mcp_url
+from anton.core.mcp.servers import McpEndpoint
 from anton.utils.datasources import begin_ds_turn_scope, scrub_credentials
 
 HOST = "dbc-1.cloud.databricks.com"
@@ -302,13 +303,11 @@ async def test_a_rejected_token_at_connect_skips_the_connection(genie_vault, min
 
 
 async def test_hubspot_and_notion_connections_are_unchanged(monkeypatch, stub_mcp_server):
-    assert await servers.resolve_mcp_endpoint("hubspot", "mcp", {"access_token": "tok-h"}) == (
-        "https://mcp.hubspot.com",
-        "tok-h",
+    assert await servers.resolve_mcp_endpoint("hubspot", "mcp", {"access_token": "tok-h"}) == McpEndpoint(
+        "https://mcp.hubspot.com", "tok-h"
     )
-    assert await servers.resolve_mcp_endpoint("notion", "mcp", {"access_token": "tok-n"}) == (
-        "https://mcp.notion.com/mcp",
-        "tok-n",
+    assert await servers.resolve_mcp_endpoint("notion", "mcp", {"access_token": "tok-n"}) == McpEndpoint(
+        "https://mcp.notion.com/mcp", "tok-n"
     )
     assert await servers.resolve_mcp_endpoint("hubspot", "mcp", {}) is None
     assert await servers.resolve_mcp_endpoint("hubspot", "genie-mcp", dict(GENIE_FIELDS)) is None
@@ -341,15 +340,78 @@ async def test_hubspot_and_notion_connections_are_unchanged(monkeypatch, stub_mc
         await wiring.close_mcp_sessions(sessions)
 
 
-async def test_the_secret_and_token_are_scrubbed_in_the_turn(minted):
+async def test_the_secret_and_token_are_scrubbed_in_the_turn(genie_vault, minted, opened_sessions, monkeypatch):
+    """Discovery runs before the turn opens its scrub scope (and on the cloud
+    path in another thread), so the Genie handler itself must hold the values."""
+
+    async def instant_answer(session, conversation_id, response_id, **kwargs):
+        return {"status": "completed", "conversation_id": conversation_id, "response_id": response_id}
+
+    monkeypatch.setattr(registry, "wait_for_genie_answer", instant_answer)
+    tool_defs, sessions = await asyncio.create_task(
+        wiring.discover_mcp_tools_async(genie_vault, [{"engine": "databricks", "name": "genie-1"}]),
+        context=contextvars.Context(),
+    )
+    ask = next(d for d in tool_defs if d.name == "databricks__genie_ask")
+
     async def turn() -> str:
         begin_ds_turn_scope()
-        endpoint = await servers.resolve_mcp_endpoint("databricks", "genie-mcp", dict(GENIE_FIELDS))
-        assert endpoint == (genie_mcp_url(HOST), TOKEN)
+        outcome = await ask.handler(None, {"question": "What was revenue?"})
+        assert outcome.ok is True
         return scrub_credentials(f"secret={SECRET} token={TOKEN}")
 
-    scrubbed = await asyncio.create_task(turn(), context=contextvars.Context())
+    try:
+        scrubbed = await asyncio.create_task(turn(), context=contextvars.Context())
+    finally:
+        await wiring.close_mcp_sessions(sessions)
 
     assert SECRET not in scrubbed
     assert TOKEN not in scrubbed
     assert scrubbed == "secret=[DS_DATABRICKS__CLIENT_SECRET] token=[DS_DATABRICKS__ACCESS_TOKEN]"
+
+
+async def test_an_mcp_connection_keeps_its_discovery_logs(monkeypatch):
+    """HubSpot and Notion keep naming what is missing and log a failed open with its traceback."""
+    calls: list[tuple[str, str]] = []
+
+    class LevelLogger:
+        """Records each call's level and formatted line."""
+
+        def warning(self, message, *args, **kwargs):
+            calls.append(("warning", message % args))
+
+        def exception(self, message, *args, **kwargs):
+            calls.append(("exception", message % args))
+
+    class FailingSession:
+        """A session whose connect fails."""
+
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+        async def __aenter__(self):
+            raise ConnectionError("down")
+
+    monkeypatch.setattr(wiring, "logger", LevelLogger())
+    monkeypatch.setattr(wiring, "McpSession", FailingSession)
+    vault = FakeDataVault(
+        {
+            ("hubspot", "no-token"): {"_method": "mcp"},
+            ("future", "acme"): {"_method": "mcp", "access_token": "tok"},
+            ("notion", "acme"): {"_method": "mcp", "access_token": "tok"},
+        }
+    )
+    await wiring.discover_mcp_tools_async(
+        vault,
+        [
+            {"engine": "hubspot", "name": "no-token"},
+            {"engine": "future", "name": "acme"},
+            {"engine": "notion", "name": "acme"},
+        ],
+    )
+
+    assert sorted(calls) == [
+        ("exception", "discover_mcp_tools: failed to open MCP session for notion/acme"),
+        ("warning", "discover_mcp_tools: no access token for hubspot/no-token"),
+        ("warning", "discover_mcp_tools: no known MCP server URL for engine future"),
+    ]
