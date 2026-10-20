@@ -2,7 +2,7 @@
 
 `canonical_workspace_host` is the one gate between a workspace address a
 user typed and any URL built from it, so a token is only ever sent to a
-Databricks-owned host.
+Databricks-owned host. `genie_mcp_url` builds the Genie MCP address from it.
 """
 
 from __future__ import annotations
@@ -13,10 +13,18 @@ from urllib.parse import urlsplit
 _HOST_SUFFIXES = (".cloud.databricks.com", ".azuredatabricks.net", ".gcp.databricks.com")
 _LABEL = re.compile(r"^[a-z0-9-]{1,63}$")
 _QUERY = re.compile(r"^o=\d+$")
+_SPACE_ID = re.compile(r"[0-9a-f]{32}")
+
+GENIE_ONE_PATH = "/ai-gateway/mcp-services/system.ai.genie_one_mcp"
+PER_SPACE_PATH = "/api/2.0/mcp/genie/{space_id}"
 
 
 class InvalidWorkspaceHost(ValueError):
     """The value is not a Databricks workspace address."""
+
+
+class InvalidGenieSpace(ValueError):
+    """The value is not a Genie space id."""
 
 
 def canonical_workspace_host(value: str) -> str:
@@ -51,3 +59,22 @@ def canonical_workspace_host(value: str) -> str:
     if not all(_LABEL.match(label) for label in host.split(".")):
         raise InvalidWorkspaceHost("The workspace host has an invalid label.")
     return host
+
+
+def genie_mcp_url(host: str, space_id: str | None = None) -> str:
+    """Build the Genie MCP server address for a workspace.
+
+    `host` goes through `canonical_workspace_host` first. With no `space_id`
+    the result is the Genie One address; otherwise it is the per-space
+    address. The id is stripped, then must be 32 lowercase hex characters,
+    so nothing path-like can reach the URL. Raises `InvalidWorkspaceHost` or
+    `InvalidGenieSpace` (a fixed message that never echoes the id). No side
+    effects.
+    """
+    base = f"https://{canonical_workspace_host(host)}"
+    if space_id is None:
+        return base + GENIE_ONE_PATH
+    cleaned = space_id.strip()
+    if not _SPACE_ID.fullmatch(cleaned):
+        raise InvalidGenieSpace("A Genie space id is 32 lowercase hex characters.")
+    return base + PER_SPACE_PATH.format(space_id=cleaned)
