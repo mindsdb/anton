@@ -338,11 +338,12 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
     if not isinstance(gate, WriteGate):
         return None
     # The cells compaction folded away come first: the pad's process still
-    # holds what they imported and bound. Compaction keeps no cell's error.
-    compacted = tuple(getattr(pad, "compacted_code", ()))
+    # holds what they imported and bound. Their outcomes still decide whether
+    # the check can count a write as one that ran.
+    compacted = tuple(getattr(pad, "compacted_cells", ()))
     cells = tuple(getattr(pad, "cells", ()) or ())
-    earlier = (*compacted, *(cell.code for cell in cells))
-    errored = (*(False for _ in compacted), *(bool(getattr(cell, "error", None)) for cell in cells))
+    earlier = (*(cell.code for cell in compacted), *(cell.code for cell in cells))
+    errored = (*(cell.errored for cell in compacted), *(bool(getattr(cell, "error", None)) for cell in cells))
     try:
         writes = await asyncio.to_thread(
             find_cell_writes,

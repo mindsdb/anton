@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from anton.core.backends.base import Cell
+from anton.core.backends.base import Cell, CompactedCell
 from anton.core.utils import scratchpad
 from anton.core.utils.scratchpad import _card_prompt, _code_span, _fence, _refusal
 from anton.core.utils.write_check import (
@@ -748,6 +748,199 @@ def test_prose_a_report_gets_stays_free_beside_a_connection(code, snap):
     assert not _held(code, snap)
 
 
+@pytest.mark.parametrize("code, earlier", [
+    ("from reportlab.platypus import Paragraph\nParagraph('delete orders where qty is zero', style)", ()),
+    ("from reportlab.platypus import Paragraph as P\nP(text='delete orders where qty is zero', style=style)", ()),
+    ("import reportlab.platypus as pdf\npdf.Paragraph('delete orders where qty is zero', style)", ()),
+    ("import reportlab.platypus\nreportlab.platypus.Paragraph('delete orders where qty is zero', style)", ()),
+    ("from reportlab.platypus import Paragraph; Paragraph('delete orders where qty is zero', style)", ()),
+    ("from reportlab.platypus.paragraph import Paragraph\nParagraph('DELETE orders WHERE qty = 0', style)", ()),
+    ("from reportlab.platypus import Paragraph\nq = 'delete orders where qty is zero'\nParagraph(q, style)", ()),
+    ("Paragraph(q, style)", ("from reportlab.platypus import Paragraph\nq = 'delete orders where qty is zero'",)),
+    ("from reportlab.platypus import Paragraph\nstory = [Paragraph(q, style) for q in notes]",
+     ("notes = ['delete orders where qty is zero']",)),
+    ("from docx import Document\ndoc = Document()\ndoc.add_paragraph('delete orders where qty is zero')", ()),
+    ("import docx as word\ndoc = word.Document()\ndoc.add_paragraph(text='delete orders where qty is zero')", ()),
+    ("from docx.api import Document\nDocument().add_paragraph('DELETE orders WHERE qty = 0')", ()),
+    ("doc.add_paragraph(q)", ("from docx import Document\ndoc = Document()\nq = 'delete orders where qty is zero'",)),
+    ("from docx import Document\ndoc = Document()\nreport = doc\nreport.add_paragraph('delete orders where qty is zero')", ()),
+], ids=["paragraph", "paragraph-alias", "paragraph-module-alias", "paragraph-module", "paragraph-inline-import", "paragraph-sql",
+        "paragraph-name", "paragraph-earlier", "paragraph-list", "docx", "docx-module-alias",
+        "docx-inline-sql", "docx-earlier", "docx-alias"])
+def test_proven_report_text_destinations_raise_no_sql_card(code, earlier, snap):
+    assert not _held(code, snap, earlier=earlier)
+
+
+@pytest.mark.parametrize("code, earlier", [
+    ("Paragraph('delete orders where qty = 0', style)", ()),
+    ("doc.add_paragraph('delete orders where qty = 0')", ()),
+    ("run_query('delete orders where qty = 0')", ()),
+    ("from reportlab.platypus import Paragraph\nParagraph = run_query\nParagraph('delete orders where qty = 0')", ()),
+    ("Paragraph('delete orders where qty = 0')",
+     ("from reportlab.platypus import Paragraph", "Paragraph = run_query")),
+    ("from reportlab.platypus import Paragraph\ndef report(Paragraph):\n"
+     "    Paragraph('delete orders where qty = 0')\nreport(run_query)", ()),
+    ("from reportlab.platypus import Paragraph\ndef Paragraph(q):\n"
+     "    cur.execute(q)\nParagraph('delete orders where qty = 0')", ()),
+    ("from reportlab.platypus import Paragraph\ndef change_renderer():\n"
+     "    global Paragraph\n    Paragraph = run_query\nchange_renderer()\n"
+     "Paragraph('delete orders where qty = 0')", ()),
+    ("from reportlab.platypus import Paragraph\ntry:\n    raise RunnerError()\n"
+     "except RunnerError as Paragraph:\n    Paragraph('delete orders where qty = 0')", ()),
+    ("from reportlab.platypus import Paragraph\nmatch runner:\n"
+     "    case Paragraph:\n        Paragraph('delete orders where qty = 0')", ()),
+    ("import reportlab.platypus as pdf\npdf.Paragraph = run_query\npdf.Paragraph('delete orders where qty = 0')", ()),
+    ("import reportlab.platypus as pdf\nalias = pdf\nalias.Paragraph = run_query\n"
+     "pdf.Paragraph('delete orders where qty = 0')", ()),
+    ("import reportlab.platypus as pdf\nsetattr(pdf, 'Paragraph', run_query)\n"
+     "pdf.Paragraph('delete orders where qty = 0')", ()),
+    ("import reportlab\nreportlab.platypus = runner\n"
+     "reportlab.platypus.Paragraph('delete orders where qty = 0')", ()),
+    ("import reportlab.platypus as pdf\npdf.__dict__['Paragraph'] = run_query\n"
+     "pdf.Paragraph('delete orders where qty = 0')", ()),
+    ("Paragraph('delete orders where qty = 0')\nfrom reportlab.platypus import Paragraph", ()),
+    ("from reportlab.platypus import Paragraph\nfrom runner import Paragraph\n"
+     "Paragraph('delete orders where qty = 0')", ()),
+    ("from docx import Document\nDocument = make_runner\ndoc = Document()\n"
+     "doc.add_paragraph('delete orders where qty = 0')", ()),
+    ("from docx import Document\ndoc = Document()\ndoc = runner\n"
+     "doc.add_paragraph('delete orders where qty = 0')", ()),
+    ("from docx import Document\ndoc = Document()\ndef report(doc):\n"
+     "    doc.add_paragraph('delete orders where qty = 0')\nreport(runner)", ()),
+    ("from docx import Document\ndoc = Document()\ndef change_renderer():\n"
+     "    global doc\n    doc = runner\nchange_renderer()\ndoc.add_paragraph('delete orders where qty = 0')", ()),
+    ("from docx import Document\ndoc = Document()\ntry:\n    raise RunnerError()\n"
+     "except RunnerError as doc:\n    doc.add_paragraph('delete orders where qty = 0')", ()),
+    ("from docx import Document\ndoc = Document()\nmatch runner:\n"
+     "    case doc:\n        doc.add_paragraph('delete orders where qty = 0')", ()),
+    ("from docx import Document\ndoc = Document()\ndoc.add_paragraph = run_query\n"
+     "doc.add_paragraph('delete orders where qty = 0')", ()),
+    ("from docx import Document\ndoc = Document()\nother = doc\nother.add_paragraph = run_query\n"
+     "doc.add_paragraph('delete orders where qty = 0')", ()),
+    ("import docx\ndocx.Document = make_runner\ndoc = docx.Document()\n"
+     "doc.add_paragraph('delete orders where qty = 0')", ()),
+    ("from docx import Document\ndoc = Document()\nsetattr(doc, 'add_paragraph', run_query)\n"
+     "doc.add_paragraph('delete orders where qty = 0')", ()),
+    ("from reportlab.platypus import Paragraph\nq = 'delete orders where qty = 0'\n"
+     "Paragraph(q, style)\ncur.execute(q)", ()),
+    ("from docx import Document\ndoc = Document()\ndoc.add_paragraph(q)\nrun_query(q)",
+     ("q = 'delete orders where qty = 0'",)),
+    ("from reportlab.platypus import Paragraph\nParagraph('a report', 'delete orders where qty = 0')", ()),
+    ("from docx import Document\ndoc = Document()\ndoc.add_paragraph('a report', style='delete orders where qty = 0')", ()),
+], ids=["unknown-paragraph", "unknown-document", "unknown-helper", "paragraph-rebound", "paragraph-earlier-rebound",
+        "paragraph-parameter", "paragraph-function", "paragraph-global-rebound", "paragraph-exception",
+        "paragraph-match", "paragraph-patched", "paragraph-patched-alias",
+        "paragraph-setattr", "paragraph-parent-patched", "paragraph-dict-patched",
+        "paragraph-import-after", "paragraph-import-rebound", "document-constructor-rebound",
+        "document-rebound", "document-parameter", "document-global-rebound", "document-exception", "document-match",
+        "document-method-patched", "document-method-patched-alias",
+        "document-module-patched", "document-setattr", "report-then-execute", "report-then-unknown-helper",
+        "paragraph-nontext-argument", "document-nontext-argument"])
+def test_report_names_do_not_exempt_sql_execution_or_unknown_destinations(code, earlier, snap):
+    assert _held(code, snap, earlier=earlier)
+
+
+@pytest.mark.parametrize("code, earlier", [
+    ("import reportlab.platypus as pdf\nvars(pdf)['Paragraph'] = cur.execute\n"
+     "pdf.Paragraph('delete orders where qty = 0')", ()),
+    ("import reportlab.platypus as pdf\npdf.__dict__.update(Paragraph=cur.execute)\n"
+     "pdf.Paragraph('delete orders where qty = 0')", ()),
+    ("import reportlab.platypus as pdf\nvars(pdf).update(Paragraph=cur.execute)\n"
+     "pdf.Paragraph('delete orders where qty = 0')", ()),
+    ("import reportlab.platypus as pdf\nattrs = pdf.__dict__\nattrs['Paragraph'] = cur.execute\n"
+     "pdf.Paragraph('delete orders where qty = 0')", ()),
+    ("import reportlab.platypus as pdf\npatch = setattr\npatch(pdf, 'Paragraph', cur.execute)\n"
+     "pdf.Paragraph('delete orders where qty = 0')", ()),
+    ("import reportlab.platypus as pdf\nfrom builtins import setattr as patch\n"
+     "patch(pdf, 'Paragraph', cur.execute)\npdf.Paragraph('delete orders where qty = 0')", ()),
+    ("import reportlab.platypus as pdf\nattrs = vars(pdf)\nfrom helper import vars\n"
+     "attrs['Paragraph'] = cur.execute\npdf.Paragraph('delete orders where qty = 0')", ()),
+    ("import reportlab.platypus as pdf\nfrom builtins import setattr as patch\n"
+     "patch(pdf, 'Paragraph', cur.execute)\nfrom helper import patch\n"
+     "pdf.Paragraph('delete orders where qty = 0')", ()),
+    ("from reportlab.platypus import Paragraph\nglobals()['Paragraph'] = cur.execute\n"
+     "Paragraph('delete orders where qty = 0')", ()),
+    ("from reportlab.platypus import Paragraph\nlocals()['Paragraph'] = cur.execute\n"
+     "Paragraph('delete orders where qty = 0')", ()),
+    ("from reportlab.platypus import Paragraph\nexec('Paragraph = cur.execute')\n"
+     "Paragraph('delete orders where qty = 0')", ()),
+    ("Paragraph('delete orders where qty = 0')",
+     ("from reportlab.platypus import Paragraph\nexec('Paragraph = cur.execute')",)),
+    ("from docx import Document\nglobals()['Document'] = make_runner\ndoc = Document()\n"
+     "doc.add_paragraph('delete orders where qty = 0')", ()),
+    ("from docx import Document\ndoc = Document()\nvars(doc)['add_paragraph'] = cur.execute\n"
+     "doc.add_paragraph('delete orders where qty = 0')", ()),
+    ("from docx import Document\ndoc = Document()\nattrs = doc.__dict__\n"
+     "attrs['add_paragraph'] = cur.execute\ndoc.add_paragraph('delete orders where qty = 0')", ()),
+    ("from docx import Document\nexec('Document = make_runner')\ndoc = Document()\n"
+     "doc.add_paragraph('delete orders where qty = 0')", ()),
+    ("from docx import Document\ndoc = Document()\nexec('doc = runner')\n"
+     "doc.add_paragraph('delete orders where qty = 0')", ()),
+], ids=["vars-item", "dict-update", "vars-update", "dict-alias", "setter-alias", "setter-import-alias",
+        "namespace-shadowed-by-later-import", "setter-shadowed-by-later-import",
+        "globals-item", "locals-item", "literal-exec", "earlier-literal-exec", "document-globals",
+        "document-vars", "document-dict-alias", "document-constructor-exec", "document-receiver-exec"])
+def test_report_namespace_mutations_keep_sql_held(code, earlier, snap):
+    assert _held(code, snap, earlier=earlier)
+
+
+@pytest.mark.parametrize("code", [
+    "import reportlab.platypus as pdf\npdf.__getattribute__('__dict__')['Paragraph'] = cur.execute\n"
+    "pdf.Paragraph('delete orders where qty = 0')",
+    "import reportlab.platypus as pdf\nnamespace = pdf.__getattribute__\n"
+    "namespace('__dict__')['Paragraph'] = cur.execute\npdf.Paragraph('delete orders where qty = 0')",
+    "import reportlab.platypus as pdf\nobject.__getattribute__(pdf, '__dict__')['Paragraph'] = cur.execute\n"
+    "pdf.Paragraph('delete orders where qty = 0')",
+    "from reportlab.platypus import Paragraph\nParagraph.__new__ = unsafe_constructor\n"
+    "Paragraph('delete orders where qty = 0')",
+    "from reportlab.platypus import Paragraph\nParagraph.__init__ = unsafe_constructor\n"
+    "Paragraph('delete orders where qty = 0')",
+    "from reportlab.platypus import Paragraph\nalias = Paragraph\nalias.__new__ = unsafe_constructor\n"
+    "Paragraph('delete orders where qty = 0')",
+    "from docx import Document\ndoc = Document()\ndoc.__class__ = Runner\n"
+    "doc.add_paragraph('delete orders where qty = 0')",
+    "from docx import Document\nDocument.__code__ = unsafe_constructor.__code__\ndoc = Document()\n"
+    "doc.add_paragraph('delete orders where qty = 0')",
+], ids=["getattribute", "getattribute-alias", "object-getattribute", "paragraph-new", "paragraph-init",
+        "paragraph-new-alias", "document-class", "document-function-code"])
+def test_report_dunder_mutations_keep_sql_held(code, snap):
+    assert _held(code, snap)
+
+
+def test_reading_a_report_class_name_does_not_disable_report_text(snap):
+    code = ("from reportlab.platypus import Paragraph\nprint(Paragraph.__name__)\n"
+            "Paragraph('delete orders where qty is zero', style)")
+    assert not _held(code, snap)
+
+
+def test_report_provenance_does_not_walk_the_whole_cell_for_each_paragraph(snap, monkeypatch):
+    from anton.core.utils import write_check
+
+    walks = 0
+    walk = write_check.ast.walk
+
+    def counting(node):
+        nonlocal walks
+        if isinstance(node, write_check.ast.Module):
+            walks += 1
+        return walk(node)
+
+    monkeypatch.setattr(write_check.ast, "walk", counting)
+    code = "from reportlab.platypus import Paragraph\nfrom docx import Document\ndoc = Document()\n"
+    code += "\n".join(
+        f"Paragraph('delete orders where qty is zero {i}', style)\n"
+        f"doc.add_paragraph('delete orders where qty is zero {i}')"
+        for i in range(100)
+    )
+    assert not _held(code, snap)
+    assert walks < 20, "report provenance scans the cells once, independent of the number of paragraphs"
+
+
+@pytest.mark.parametrize("predicate", ["qty = 0", "qty in (0, 1)", "name like 'old%'", "qty is null", "qty is not null", "active"])
+def test_lowercase_sql_in_unknown_helpers_keeps_its_hold(predicate, snap):
+    assert _held(f"run_query({f'delete orders where {predicate}'!r})", snap)
+
+
 def test_a_statement_name_bound_again_shows_only_what_runs(snap):
     code = PG + "q = 'SELECT * FROM orders'\nq += \" WHERE id = 'A1'\"\ncur.execute(q)\nq = 'DELETE FROM orders'\ncur.execute(q)"
     assert set(_statements(code, snap)) == {"DELETE FROM orders"}
@@ -1156,8 +1349,7 @@ def test_an_errored_cell_lines_up_with_its_code_past_one_that_does_not_parse(off
 
 
 async def test_the_gate_passes_each_earlier_cells_error_to_the_check(office, monkeypatch):
-    """`hold_unapproved_write` reads the errors off the pad's cells; a
-    compacted cell kept no error, so it counts as one that ran."""
+    """Compacting a failed cell cannot turn its unexecuted write into ownership."""
     asked: list[CellWrites] = []
 
     async def cancel(_session, writes):
@@ -1169,12 +1361,18 @@ async def test_the_gate_passes_each_earlier_cells_error_to_the_check(office, mon
     wrote = "x = 1 / 0\nopen('stock.csv', 'w').write('z')"
     failed = Cell(code=wrote, stdout="", stderr="", error="ZeroDivisionError: division by zero")
     rewrite = "open('stock.csv', 'w').write('y')"
-    pad = SimpleNamespace(compacted_code=(), cells=[failed])
+    pad = SimpleNamespace(compacted_cells=(), cells=[failed])
     assert await scratchpad.hold_unapproved_write(session, pad=pad, code=rewrite) is not None
     assert [f.paths for f in asked[0].held_files] == [("stock.csv",)]
-    ran = SimpleNamespace(compacted_code=(wrote,), cells=[failed])
+    compacted = SimpleNamespace(compacted_cells=(CompactedCell(code=wrote, errored=True),), cells=[])
+    assert await scratchpad.hold_unapproved_write(session, pad=compacted, code=rewrite) is not None
+    assert [f.paths for f in asked[1].held_files] == [("stock.csv",)]
+    ran = SimpleNamespace(
+        compacted_cells=(CompactedCell(code="open('stock.csv', 'w').write('z')", errored=False),),
+        cells=[failed],
+    )
     assert await scratchpad.hold_unapproved_write(session, pad=ran, code=rewrite) is None
-    assert len(asked) == 1
+    assert len(asked) == 2
 
 
 @pytest.mark.parametrize("earlier", [
@@ -2539,6 +2737,25 @@ def test_a_write_with_no_sql_text_is_held(code, via, snap):
     writes = find_cell_writes(code=code, earlier_code=(), snapshots=(snap,))
     assert writes.needs_approval()
     assert [c.via for c in writes.calls] == [via]
+
+
+@pytest.mark.parametrize("code, earlier, call, line", [
+    ("cur.callfunc('refresh_totals', int, [1, 2])", (), "cur.callfunc('refresh_totals', int, [1, 2])", 1),
+    ("cur.callfunc('refresh_totals', int, [1, 2])", (PG,), "cur.callfunc('refresh_totals', int, [1, 2])", 1),
+    ("refresh()", ("def refresh():\n    cur.callfunc('refresh_totals', int, [1, 2])",), "refresh()", 1),
+    ("result = cur.callfunc(name='refresh_totals', return_type=int, parameters=[1, 2])", (),
+     "result = cur.callfunc(name='refresh_totals', return_type=int, parameters=[1, 2])", 1),
+], ids=["direct", "earlier-cursor", "earlier-helper", "keywords"])
+def test_stored_function_calls_are_held_and_quote_the_call(code, earlier, call, line, snap):
+    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,))
+    assert writes.needs_approval()
+    assert [(c.via, c.call, c.line) for c in writes.calls] == [("procedure", call, line)]
+    assert _fenced(_card_prompt(writes)) == [call]
+
+
+def test_a_stored_function_name_is_not_a_call(snap):
+    assert not _held("print('cur.callfunc(\\'refresh_totals\\', int)')", snap)
+    assert not _held("import sqlite3\nc = sqlite3.connect(':memory:')\nc.callfunc('p', int)", snap)
 
 
 @pytest.mark.parametrize("code", [

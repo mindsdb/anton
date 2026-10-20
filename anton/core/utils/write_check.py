@@ -2068,6 +2068,7 @@ class _Reader:
                 elif isinstance(item, ast.Assign):
                     self.method_names.update(t.id for t in item.targets if isinstance(t, ast.Name))
         self.attaches = any(cell.attaches for cell in cells)
+        self._report_facts: _ReportFacts | None = None
         self._held: dict[tuple[int, str, bool, tuple[tuple[int, str, int], ...]], tuple[str, ...]] = {}
         # What `_name_statements` found at each read of a name, by the read's
         # id, `prose`, the function read and `call_key`: a value appended to
@@ -3385,6 +3386,143 @@ def _held_texts(name: str, binding: _Binding, reader: _Reader, *, depth: int) ->
 
 # ── SQL findings ──────────────────────────────────────────────────────────
 
+_REPORT_PARAGRAPHS = frozenset({"reportlab.platypus.Paragraph", "reportlab.platypus.paragraph.Paragraph"})
+_DOCX_DOCUMENTS = frozenset({"docx.Document", "docx.api.Document"})
+_NAMESPACE_ACCESS = frozenset({"setattr", "delattr", "vars", "globals", "locals", "exec", "eval", "compile"})
+
+
+@dataclass(frozen=True)
+class _ReportFacts:
+    shadowed: frozenset[str]
+    changed_members: frozenset[str]
+    imports: tuple[tuple[_Cell, ast.Import | ast.ImportFrom], ...]
+    namespace_access: bool
+
+
+def _report_facts(reader: _Reader) -> _ReportFacts:
+    """Collect immutable provenance facts once per check. Namespace access,
+    even passed through an alias, makes import identity uncertain; it does
+    not need another alias graph. Literal exec cells also cannot establish
+    that identity because their bindings run within the host cell."""
+    if reader._report_facts is not None:
+        return reader._report_facts
+    shadowed: set[str] = set()
+    changed_members: set[str] = set()
+    imports: list[tuple[_Cell, ast.Import | ast.ImportFrom]] = []
+    namespace_access = False
+    for cell in reader.cells:
+        for node in ast.walk(cell.tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                imports.append((cell, node))
+                if isinstance(node, ast.Import):
+                    namespace_access |= any(alias.name == "builtins" for alias in node.names)
+                elif node.module == "builtins":
+                    namespace_access |= any(alias.name in _NAMESPACE_ACCESS for alias in node.names)
+            if isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name is not None:
+                shadowed.add(node.name)
+            if isinstance(node, ast.MatchMapping) and node.rest is not None:
+                shadowed.add(node.rest)
+            if isinstance(node, (ast.Global, ast.Nonlocal)):
+                shadowed.update(node.names)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Del):
+                shadowed.add(node.id)
+            if isinstance(node, ast.Attribute):
+                if isinstance(node.ctx, (ast.Store, ast.Del)):
+                    changed_members.add(node.attr)
+                    # A dunder replacement can change construction or method
+                    # dispatch without replacing the imported report name.
+                    if node.attr.startswith("__") and node.attr.endswith("__"):
+                        namespace_access = True
+                if node.attr in ("__dict__", "__getattribute__", "__getattr__", "__setattr__", "__delattr__"):
+                    namespace_access = True
+            if isinstance(node, (ast.Name, ast.Attribute)):
+                full = reader.dotted(node).removeprefix("builtins.")
+                if full in _NAMESPACE_ACCESS or isinstance(node, ast.Name) and node.id in _NAMESPACE_ACCESS:
+                    namespace_access = True
+    reader._report_facts = _ReportFacts(
+        shadowed=frozenset(shadowed), changed_members=frozenset(changed_members),
+        imports=tuple(imports), namespace_access=namespace_access,
+    )
+    return reader._report_facts
+
+
+def _report_import(node: ast.AST, reader: _Reader, *, names: frozenset[str]) -> bool:
+    """A report callable imported before this use, with no conflicting import,
+    binding or member replacement. `dotted` alone does not prove that: its
+    import map also remembers a name the pad subsequently rebinds."""
+    full = reader.dotted(node)
+    if full not in names:
+        return False
+    root = node
+    while isinstance(root, ast.Attribute):
+        root = root.value
+    facts = _report_facts(reader)
+    if facts.namespace_access or facts.changed_members.intersection(full.split(".")):
+        return False
+    if not isinstance(root, ast.Name) or reader.bindings_of(root.id, node=root) or (
+        root.id in reader.functions or root.id in reader.classes or root.id in facts.shadowed
+    ):
+        return False
+    home = reader.cell_of(root)
+    scopes = home.scopes_around(root)
+    head = reader.imports.get(root.id)
+    found = False
+    for cell, imp in facts.imports:
+        scope = cell.scope_of(imp)
+        if scope is not None and (cell is not home or scope not in scopes):
+            continue
+        for alias in imp.names:
+            if alias.name == "*":
+                return False
+            if isinstance(imp, ast.Import):
+                bound = alias.asname or alias.name.split(".")[0]
+                imported = alias.name if alias.asname else bound
+            else:
+                bound = alias.asname or alias.name
+                imported = f"{imp.module}.{alias.name}" if imp.level == 0 else ""
+            if bound != root.id:
+                continue
+            if imported != head:
+                return False
+            before = cell.index < home.index or cell is home and _follows(node=root, value=imp)
+            if before and not cell._under_branch(imp, scope=scope):
+                found = True
+    return found
+
+
+def _docx_document(node: ast.AST, reader: _Reader, *, depth: int = 0) -> bool:
+    """A python-docx Document, through ordinary assignments, not a receiver
+    identified only by the common method name `add_paragraph`."""
+    if depth > 6:
+        return False
+    if isinstance(node, ast.Call):
+        return _report_import(node.func, reader, names=_DOCX_DOCUMENTS)
+    if isinstance(node, ast.Name):
+        if node.id in _report_facts(reader).shadowed:
+            return False
+        found = reader.bindings_of(node.id, node=node)
+        return bool(found) and all(
+            b.how == "value" and _docx_document(b.value, reader, depth=depth + 1) for b in found
+        )
+    return False
+
+
+def _report_text(arg: ast.AST, call: ast.Call, reader: _Reader) -> bool:
+    """The text argument a known report API renders. Other arguments, unknown
+    helpers, and strings also passed to a SQL runner keep their usual checks."""
+    if isinstance(arg, ast.keyword):
+        if arg.arg != "text":
+            return False
+    elif not call.args or arg is not call.args[0]:
+        return False
+    if _report_import(call.func, reader, names=_REPORT_PARAGRAPHS):
+        return True
+    return isinstance(call.func, ast.Attribute) and call.func.attr == "add_paragraph" and (
+        _docx_document(call.func.value, reader)
+        and "add_paragraph" not in _report_facts(reader).changed_members
+    )
+
+
 def _is_harmless_call(call: ast.Call, reader: _Reader) -> bool:
     func = call.func
     if isinstance(func, ast.Name):
@@ -3735,7 +3873,9 @@ def _reaches_a_runner(
             if not isinstance(func.value, ast.Name):
                 return _Reach.ELSEWHERE
             return via_names({func.value.id}, at=parent)
-        if _is_harmless_call(parent, reader) or not any_handle and _executes_on_local(parent, reader):
+        if _report_text(node, parent, reader) or _is_harmless_call(parent, reader) or (
+            not any_handle and _executes_on_local(parent, reader)
+        ):
             return _Reach.NOWHERE
         if _runs_sql(parent, reader):
             return _Reach.RUNNER if _is_statement(node, parent) else _Reach.ELSEWHERE
@@ -4160,7 +4300,7 @@ def _call_write_kind(call: ast.Call, reader: _Reader, *, commits: bool) -> CallV
     if not isinstance(func, ast.Attribute):
         return None
     method, recv = func.attr, func.value
-    if method == "callproc" and not reader.is_local_handle(recv):
+    if method in ("callproc", "callfunc") and not reader.is_local_handle(recv):
         return "procedure"
     if method in _MONGO_WRITES:
         return "mongodb"
