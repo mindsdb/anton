@@ -121,9 +121,11 @@ range or another key), combine the parts and check the combined count before you
 compute. Never give a figure computed from a partial result as the answer.
 - When a figure carries state forward through time (a running balance, projected \
 inventory, a cumulative total), build it over every period in the data first, from the \
-first period on, and only then pick out the periods the question asks about. Do not \
-filter the queries or rows you compute it from by the question's window: a balance \
-started part-way through has skipped everything before it.
+first period on, and only then pick out the periods the question asks about. The data's \
+first period is where its balances start (an on-hand quantity opens it), even when \
+today's date or the question's window is later. Do not filter the queries or rows you \
+compute it from by the question's window: a balance started part-way through has \
+skipped everything before it.
 - When a question works in periods (week by week, by month), first put every dated \
 record into the period its date falls in, using the data's own periods where it has \
 them (a weekly bucket dated on a Monday runs to the Sunday), then step through the \
