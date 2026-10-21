@@ -79,7 +79,10 @@ def request_fingerprint(user_request: str) -> str:
 
 
 def call_fingerprint(
-    agent_understanding: str, known_data: str, user_preferences: str
+    agent_understanding: str,
+    known_data: str,
+    user_preferences: str,
+    user_language: str = "",
 ) -> str:
     """Identity of the CALL's soft fields. An optimization only.
 
@@ -87,7 +90,12 @@ def call_fingerprint(
     either direction is cheap: a needless redraw costs one call, a missed one
     shows the user an unchanged brief they will still see reflected in the PRD.
     """
-    return fingerprint(agent_understanding, known_data, user_preferences)
+    parts = [agent_understanding, known_data, user_preferences]
+    # Appended only when stated, so a call without a language fingerprints
+    # exactly as it did before the field existed.
+    if user_language.strip():
+        parts.append(user_language)
+    return fingerprint(*parts)
 
 
 @dataclass

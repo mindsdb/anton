@@ -265,12 +265,42 @@ def test_the_tool_schema_has_no_context_parameter():
     props = GENERATE_ARTIFACT_TOOL.input_schema["properties"]
     assert "context" not in props
     assert set(GENERATE_ARTIFACT_TOOL.input_schema["required"]) == {
-        "slug", "user_request", "agent_understanding",
+        "slug", "user_request", "user_language", "agent_understanding",
     }
     assert set(props) == {
-        "slug", "user_request", "agent_understanding",
+        "slug", "user_request", "user_language", "agent_understanding",
         "known_data", "user_preferences", "attachments",
     }
+
+
+def test_the_tool_tells_the_agent_to_keep_the_users_language():
+    """The pipeline writes in `user_language`; the agent relays the result
+    in the same language."""
+    from anton.core.tools.tool_defs import GENERATE_ARTIFACT_TOOL
+
+    assert "the language the user writes to you in" in GENERATE_ARTIFACT_TOOL.description
+    assert "talk to the user in that language" in GENERATE_ARTIFACT_TOOL.prompt
+
+
+async def test_the_handler_passes_the_user_language_to_the_pipeline(
+    tmp_path: Path, monkeypatch
+):
+    slug = _make_artifact(tmp_path)
+    seen = {}
+
+    async def fake_generate(**kw):
+        seen.update(kw)
+        return {"files_written": [], "summary": "ok", "trace": []}
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    await _collect(
+        _session(tmp_path),
+        {
+            "slug": slug, "user_request": "build it", "agent_understanding": "an app",
+            "user_language": " Russian ",
+        },
+    )
+    assert seen["user_language"] == "Russian"
 
 
 def test_the_soft_input_fields_forbid_the_outer_agent_from_inventing_scope():

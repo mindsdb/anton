@@ -178,6 +178,11 @@ class StepResult:
     detail: str = ""
 
 
+# Fallback for a call that did not state `user_language`: a bench run, a
+# test, or an agent that left the required field out.
+LANGUAGE_NOT_STATED = "the language of the user request"
+
+
 @dataclass
 class GenState:
     session: "ChatSession | Any"
@@ -277,6 +282,11 @@ class GenState:
     agent_understanding: str = ""
     known_data: str = ""
     user_preferences: str = ""
+    # English name of the language the user writes in, as the calling agent
+    # stated it. Every step is told this name explicitly: an indirect rule
+    # ("the language of the user request") made the model pick an unrelated
+    # language for an all-English request.
+    user_language: str = ""
     # The session's connections as data (slugs and DS_* names, no values), or
     # None when nothing is connected. Filled by the entry point; rendered whole
     # as `datasource_context`, and for only the declared sources by the
@@ -348,6 +358,11 @@ class GenState:
     # change them mid-run has to live in a step message instead.
     _pipeline_system: str = ""
     _pipeline_tools: "list[dict] | None" = None
+
+    @property
+    def language_name(self) -> str:
+        """The language every step writes in, as the prompts name it."""
+        return self.user_language.strip() or LANGUAGE_NOT_STATED
 
     @property
     def datasource_context(self) -> str:

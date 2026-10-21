@@ -206,15 +206,33 @@ def test_finish_gathering_schema_describes_the_fields_the_brief_reads():
         assert properties[field_name]["description"].strip()
 
 
-def test_gathering_step_carries_no_language_rule():
+def test_gathering_step_names_the_language_instead_of_pointing_at_the_request():
     """Seen live: with an all-English request and English attachments,
     "write in the language of the user request" made the gathering notes
     come back in Spanish (and Russian on replays), and the brief and the PRD
-    followed them. Without the rule the notes stay in the request's language."""
-    message = step_message(sub_tools.STEP_GATHERING, _state())
+    followed them. The step names the language the calling agent stated."""
+    message = step_message(sub_tools.STEP_GATHERING, _state(user_language="English"))
+    assert "User language: English\n" in message
+    assert "user language named in the step header" in message
     lowered = message.lower()
     assert "in the language of" not in lowered
     assert "same language as" not in lowered
+
+
+def test_every_document_step_header_names_the_user_language():
+    state = _state(user_language="Russian")
+    for step in (
+        sub_tools.STEP_GATHERING,
+        sub_tools.STEP_DRAFT_BRIEF,
+        sub_tools.STEP_REDRAW_BRIEF,
+        sub_tools.STEP_WRITE_PRD,
+    ):
+        assert "User language: Russian\n" in step_message(step, state), step
+
+
+def test_step_header_falls_back_when_no_language_was_stated():
+    message = step_message(sub_tools.STEP_WRITE_PRD, _state())
+    assert "User language: the language of the user request\n" in message
 
 
 def test_restored_context_carries_assumptions_and_open_points():

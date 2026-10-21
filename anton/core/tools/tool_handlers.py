@@ -1267,6 +1267,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
                     agent_understanding=agent_understanding,
                     known_data=(tc_input.get("known_data") or "").strip(),
                     user_preferences=(tc_input.get("user_preferences") or "").strip(),
+                    user_language=(tc_input.get("user_language") or "").strip(),
                     primary=artifact.primary,
                     progress=queue,
                     attachments=attachments,

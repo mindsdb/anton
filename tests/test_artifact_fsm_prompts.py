@@ -4,6 +4,7 @@ import re
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from anton.core.datasources.data_vault import LocalDataVault
 from anton.core.tools.generate_artifact import prompts
@@ -798,6 +799,21 @@ def test_tech_spec_instruction_drops_the_no_restate_rule_without_a_prd():
     )
     assert "Do not restate the PRD" not in instruction
     assert "Implementation notes" in instruction
+
+
+def test_tech_spec_instruction_names_the_user_language_and_keeps_headings():
+    """spec.md is written in the user's language, but `## Backend` is read
+    back by name (`engine._declared_api_paths`), so headings stay as listed."""
+    instruction = prompts.build_tech_spec_instruction(
+        _state(artifact_type="fullstack-stateless-app", user_language="Russian")
+    )
+    assert "Write the prose in Russian" in instruction
+    assert "headings above exactly as written in English" in instruction
+
+
+def test_tech_spec_instruction_falls_back_without_a_language():
+    instruction = prompts.build_tech_spec_instruction(SimpleNamespace())
+    assert "Write the prose in the language of the user request" in instruction
 
 
 def test_tech_spec_instruction_adds_a_backend_section_for_fullstack():
