@@ -422,6 +422,8 @@ RULES: tuple[Rule, ...] = (
          (("html", "stays blank"),)),
     Rule("errors", "Loaded in a headless browser, the page is wider than the screen: ",
          (("html", "wider than the screen"),)),
+    Rule("errors", "Loaded in a headless browser, a loading message still showed over a view that had ",
+         (("html", "loading message that still shows"),)),
     Rule("errors", "Loaded in a headless browser, the page had ",
          (("html", "more distinct problems"),)),
     # ── verify_frontend, fullstack only ──

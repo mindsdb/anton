@@ -16,7 +16,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
-from typing import NamedTuple
+from typing import NamedTuple, get_args
 
 import pytest
 
@@ -40,14 +40,23 @@ _PAGE = (
 _SHOT = base64.b64encode(b"\xff\xd8\xff\xe0 not really a jpeg").decode()
 
 
-def _answer(status: str = "passed", *, findings=(), unreachable=(), screenshot: bool = True) -> dict:
-    return {
+def _answer(
+    status: str = "passed", *, findings=(), unreachable=(), screenshot: bool = True, views=None, unopened=None
+) -> dict:
+    """A 200 answer. Without `views` and `unopened` it is an older service's,
+    which sends neither field."""
+    answer = {
         "status": status,
         "findings": list(findings),
         "unreachable": list(unreachable),
         "screenshot": {"media_type": "image/jpeg", "data": _SHOT} if screenshot else None,
         "policy": "default-src 'self'",
     }
+    if views is not None:
+        answer["views"] = list(views)
+    if unopened is not None:
+        answer["unopened"] = list(unopened)
+    return answer
 
 
 class _Service:
@@ -431,6 +440,23 @@ _THROWN = {"kind": "uncaught_exception", "viewport": "desktop", "detail": "Refer
 _BLANK = {"kind": "blank_view", "viewport": "desktop", "detail": "#world-map has no drawn content"}
 _CSP = {"kind": "csp_violation", "viewport": "desktop", "detail": "script-src blocked https://unpkg.com/x.js"}
 _MISSING = {"url": "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js", "reason": "not in the check's mirror"}
+# Shaped like what the render-check service sends: a finding of the kind it
+# adds for loading text left over a drawn view, the views it measured and a
+# toggle it found but did not press. The service is another program, so
+# these are literals.
+_LOADING = {
+    "kind": "loading_label", "viewport": "desktop",
+    "detail": 'div#map-fallback still says "Loading world map…" over svg in div#map, which drew: '
+    "hide or remove it once the view has drawn",
+}
+_TIME_RAN_OUT = "the check's time for pressing tabs and toggles ran out"
+_VIEWS = [
+    {"pressed": None, "viewports": ["desktop", "phone"]},
+    {"pressed": "Map", "viewports": ["desktop", "phone"]},
+    {"pressed": "3D Globe", "viewports": ["desktop", "phone"]},
+]
+_UNOPENED = [{"label": "Routes", "reason": _TIME_RAN_OUT}]
+_CHECKED = "at desktop and phone sizes, as it opens and behind “Map” and “3D Globe”"
 
 
 @pytest.mark.parametrize("status,findings,unreachable", [
@@ -439,11 +465,81 @@ _MISSING = {"url": "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js",
     pytest.param("failed", [_THROWN, _TIMEOUT], [], id="an-exception-fails-despite-the-deadline"),
     pytest.param("unverified", [_BLANK, _TIMEOUT], [], id="a-blank-view-on-a-slow-host"),
     pytest.param("failed", [_BLANK], [], id="a-blank-view"),
+    pytest.param("unverified", [_LOADING, _TIMEOUT], [], id="a-loading-label-on-a-slow-host"),
+    pytest.param("failed", [_LOADING], [], id="a-loading-label-over-a-drawn-view"),
     pytest.param("passed", [], [], id="nothing-found"),
 ])
 def test_each_status_the_rule_gives_parses(status, findings, unreachable):
     result = RenderCheckResult.model_validate(_answer(status, findings=findings, unreachable=unreachable))
     assert result.status == status
+
+
+def test_every_finding_kind_has_one_place_in_the_status_rule():
+    """A kind in no set reads as an "other finding" (rule 5), and after a
+    timeout loses the note that the page may still have been drawing."""
+    places = [
+        render_check._DEFINITE_KINDS, render_check._FAILED_DESPITE_TIMEOUT_KINDS,
+        render_check._MAY_STILL_DRAW_KINDS, frozenset({"timeout"}),
+    ]
+    assert sorted(kind for place in places for kind in place) == sorted(get_args(render_check.FindingKind))
+
+
+def test_the_views_the_check_measured_and_the_toggles_it_did_not_press_parse(service):
+    service.answer((200, _answer(views=_VIEWS, unopened=_UNOPENED), 0.0))
+
+    result = check_html(_PAGE)
+
+    assert isinstance(result, RenderCheckResult)
+    assert [(view.pressed, view.viewports) for view in result.views] == [
+        (None, ["desktop", "phone"]), ("Map", ["desktop", "phone"]), ("3D Globe", ["desktop", "phone"]),
+    ]
+    assert [(toggle.label, toggle.reason) for toggle in result.unopened] == [("Routes", _TIME_RAN_OUT)]
+
+
+def test_an_answer_that_names_no_views_still_parses_as_the_page_as_it_opens(service):
+    """An older service sends neither `views` nor `unopened`."""
+    service.answer((200, _answer(), 0.0))
+
+    result = check_html(_PAGE)
+
+    assert result.status == "passed"
+    assert result.views == [] and result.unopened == []
+    assert result.coverage == render_check.ViewCoverage(checked="as it opens", unchecked=[])
+
+
+@pytest.mark.parametrize("views,checked", [
+    pytest.param(_VIEWS, _CHECKED, id="every-view-at-both-sizes"),
+    pytest.param(
+        [{"pressed": None, "viewports": ["phone", "desktop"]}, {"pressed": "Map", "viewports": ["phone"]}],
+        "as it opens at desktop and phone sizes, behind “Map” at phone size",
+        id="a-view-only-the-phone-showed",
+    ),
+    pytest.param(
+        [{"pressed": "Map", "viewports": ["desktop"]}, {"pressed": "Map", "viewports": ["desktop"]}],
+        "at desktop size, behind “Map”",
+        id="one-label-pressed-twice-and-no-opening-view",
+    ),
+])
+def test_the_coverage_names_each_view_the_check_measured(views, checked):
+    assert RenderCheckResult.model_validate(_answer(views=views)).coverage.checked == checked
+
+
+def test_the_coverage_names_unopened_toggles_by_reason_and_counts_past_the_cap(monkeypatch):
+    monkeypatch.setattr(render_check, "MAX_UNOPENED_SHOWN", 3)
+    unopened = [
+        {"label": "Routes", "reason": _TIME_RAN_OUT},
+        {"label": "Admin", "reason": "the page navigated away"},
+        *({"label": f"Row {i}", "reason": _TIME_RAN_OUT} for i in range(6)),
+    ]
+
+    coverage = RenderCheckResult.model_validate(_answer(views=_VIEWS, unopened=unopened)).coverage
+
+    assert coverage.checked == _CHECKED
+    assert coverage.unchecked == [
+        f"“Routes” and “Row 0” ({_TIME_RAN_OUT})",
+        "“Admin” (the page navigated away)",
+        "and 5 more tabs or toggles",
+    ]
 
 
 @pytest.mark.parametrize("answer", [
@@ -454,6 +550,7 @@ def test_each_status_the_rule_gives_parses(status, findings, unreachable):
         {"kind": "console_error", "viewport": "desktop", "detail": "boom"},
     ]), id="passed-with-a-console-error"),
     pytest.param(_answer("unverified", findings=[_THROWN, _TIMEOUT]), id="unverified-beside-an-exception"),
+    pytest.param(_answer("passed", findings=[_LOADING]), id="passed-with-a-loading-label"),
 ])
 def test_a_status_its_findings_contradict_is_unverified_never_a_pass(service, tmp_path, answer):
     """The generator's check rebuilt the status from the findings, so a
@@ -731,6 +828,14 @@ def test_an_unverified_answer_is_a_skip_with_its_reason_not_an_error(service, tm
         "- uncaught_exception (desktop): ReferenceError: renderChart is not defined",
         id="an-exception-beside-a-library-the-check-could-not-load",
     ),
+    pytest.param(
+        _answer("unverified", findings=[_LOADING, _TIMEOUT]),
+        "unverified: the check ran out of time (the check's 25 s ran out while measuring the page)\n"
+        "Before it ran out of time, the check found:\n"
+        '- loading_label (desktop): div#map-fallback still says "Loading world map…" over svg in div#map, '
+        "which drew: hide or remove it once the view has drawn (it may still have been drawing)",
+        id="a-loading-label-before-the-deadline",
+    ),
 ])
 def test_an_unverified_check_still_lists_what_it_found(service, tmp_path, answer, reason):
     """The reason named only the timeout or the unreachable URL, so the agent
@@ -776,6 +881,23 @@ def test_an_exception_before_the_deadline_fails_the_generators_check(service, tm
     assert check.verdict.errors == [
         "Loaded in a headless browser, the page threw an uncaught exception: "
         "ReferenceError: renderChart is not defined (desktop)",
+    ]
+
+
+def test_a_loading_label_fails_the_generators_check(service, tmp_path):
+    """Without a verdict line of its own, a `loading_label` finding added no
+    verifier error, and a page the service failed passed the step."""
+    page = tmp_path / "index.html"
+    page.write_text(_PAGE)
+    service.answer((200, _answer("failed", findings=[_LOADING, {**_LOADING, "viewport": "phone"}]), 0.0))
+
+    check = verifiers.verify_frontend_live(page, cell_sandbox=None)
+
+    assert check.status == "failed"
+    assert check.verdict.errors == [
+        "Loaded in a headless browser, a loading message still showed over a view that had drawn: "
+        'div#map-fallback still says "Loading world map…" over svg in div#map, which drew: '
+        "hide or remove it once the view has drawn (desktop and phone)",
     ]
 
 
@@ -1095,6 +1217,30 @@ async def test_generate_traces_its_result_without_the_screenshot(tmp_path, monke
     assert _SHOT not in trace_file.read_text()
 
 
+@pytest.mark.parametrize("views,unopened,checked,unchecked", [
+    pytest.param(
+        _VIEWS, _UNOPENED, _CHECKED, [f"“Routes” ({_TIME_RAN_OUT})"], id="views-and-a-toggle-it-did-not-press",
+    ),
+    pytest.param(None, None, "as it opens", [], id="a-service-that-names-no-views"),
+])
+async def test_a_passing_check_tells_the_agent_which_views_it_covered(
+    service, project, policy, monkeypatch, views, unopened, checked, unchecked
+):
+    """A pass read as "browser-verified" for a globe behind a toggle the
+    check never opened. The result names the views the check measured and
+    the tabs and toggles it did not press."""
+    st = _gen_state(project, policy)
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", _writes_page(project, []))
+    service.answer((200, _answer(views=views, unopened=unopened, screenshot=False), 0.0))
+
+    assert await orchestrator._gen_verify_frontend(st) is None
+
+    shell = orchestrator._result_shell(st)
+    assert shell["verified_in_browser"] is True
+    assert shell["browser_checked"] == checked
+    assert shell["browser_unchecked"] == unchecked
+
+
 async def test_an_unverified_page_passes_the_step_and_says_why(service, project, policy, monkeypatch):
     st = _gen_state(project, policy)
     monkeypatch.setattr(orchestrator.engine, "_run_loop", _writes_page(project, []))
@@ -1110,7 +1256,10 @@ async def test_an_unverified_page_passes_the_step_and_says_why(service, project,
     ]
     assert st.browser_status == "unverified"
     assert st.browser_findings_listed is False
-    assert orchestrator._result_shell(st)["verified_in_browser"] is False
+    shell = orchestrator._result_shell(st)
+    assert shell["verified_in_browser"] is False
+    # No view is named as checked beside a page no check vouched for.
+    assert "browser_checked" not in shell and "browser_unchecked" not in shell
 
 
 async def test_an_unverified_page_tells_the_agent_what_the_check_still_found(service, project, policy, monkeypatch):
@@ -1418,6 +1567,40 @@ async def test_a_verified_page_keeps_the_do_not_reverify_instruction(tmp_path, m
     assert "unverified in a browser" not in instruction
 
 
+async def test_a_verified_page_lets_the_agent_claim_only_the_views_the_check_saw(tmp_path, monkeypatch):
+    """The agent told the user a page was browser-verified and its globe
+    toggle worked, though the check never opened the globe. The result
+    carries the views the check saw and the ones it did not open, and the
+    instruction lets the agent call only the first verified or working."""
+    _, out = await _handler_result(tmp_path, monkeypatch, {
+        "status": "generated", "files_written": ["index.html"], "warnings": [], "checks_skipped": [],
+        "verified_in_browser": True,
+        "browser_checked": "at desktop and phone sizes, as it opens and behind “Map”",
+        "browser_unchecked": [f"“3D Globe” ({_TIME_RAN_OUT})"],
+    })
+
+    payload = json.loads(out.content)
+    assert payload["browser_checked"] == "at desktop and phone sizes, as it opens and behind “Map”"
+    assert payload["browser_unchecked"] == [f"“3D Globe” ({_TIME_RAN_OUT})"]
+    instruction = payload["instruction"]
+    assert (
+        "a browser loaded the page without finding a problem in the views `browser_checked` names: "
+        "the page as it opens, and the view behind each tab or toggle it names."
+    ) in instruction
+    assert (
+        'Say "browser-verified", "tested" or "works" only of the views `browser_checked` names; '
+        "a view it does not name was not checked."
+    ) in instruction
+    assert (
+        "`browser_unchecked` lists the tabs and toggles the check found but did not press: when it is "
+        "non-empty, tell the user in one sentence that the views behind them were not checked, and "
+        "never call those views verified, tested or working."
+    ) in instruction
+    # The rules the instruction already had stay.
+    assert "Do NOT re-read, re-parse or re-verify" in instruction
+    assert "never present a skipped check as passed" in instruction
+
+
 # ── The check after a cell ───────────────────────────────────────────────────
 
 
@@ -1447,8 +1630,38 @@ def test_only_edited_pages_are_sent_primary_first_with_one_screenshot(service, t
     assert lint.screenshot is not None and lint.screenshot_page == f"{slug}/z.html"
     assert lint.page_checks == {(slug, "z.html"): "passed", (slug, "a.html"): "passed"}
     assert lint.messages == [
-        f"{slug}/z.html — loaded in a browser the way the app preview loads it: no problems found",
-        f"{slug}/a.html — loaded in a browser the way the app preview loads it: no problems found",
+        f"{slug}/z.html — loaded in a browser the way the app preview loads it, as it opens: no problems found",
+        f"{slug}/a.html — loaded in a browser the way the app preview loads it, as it opens: no problems found",
+    ]
+
+
+def test_a_passed_page_names_the_views_the_check_saw_and_the_toggles_it_did_not_press(service, tmp_path):
+    """A pass said only "no problems found", and the agent called a globe
+    behind a toggle working though the check never opened it."""
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    service.answer((200, _answer(views=_VIEWS, unopened=_UNOPENED, screenshot=False), 0.0))
+
+    lint = tool_handlers.lint_changed_artifact_files(store, {slug: tool_handlers.ArtifactFiles()})
+
+    assert lint.page_checks == {(slug, "index.html"): "passed"}
+    assert lint.messages == [
+        f"{slug}/index.html — loaded in a browser the way the app preview loads it, at desktop and phone "
+        "sizes, as it opens and behind “Map” and “3D Globe”: no problems found",
+        f"{slug}/index.html — tabs and toggles the check did not press: “Routes” ({_TIME_RAN_OUT}). "
+        "The views behind them were not checked: say so, and never call them verified, tested or working",
+    ]
+
+
+def test_a_page_that_failed_gets_no_line_for_the_toggles_the_check_did_not_press(service, tmp_path):
+    """The agent fixes a failed page and checks it again, so only a pass
+    names what the check left unopened."""
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    service.answer((200, _answer("failed", findings=[_LOADING], views=_VIEWS, unopened=_UNOPENED), 0.0))
+
+    lint = tool_handlers.lint_changed_artifact_files(store, {slug: tool_handlers.ArtifactFiles()})
+
+    assert [line.removeprefix(f"{slug}/index.html — ") for line in lint.messages] == [
+        f"loading_label (desktop): {_LOADING['detail']}",
     ]
 
 
@@ -2044,7 +2257,7 @@ async def test_the_cell_result_carries_the_screenshot_on_the_streaming_path(serv
     assert [r["body"]["html"] for r in service.requests] == [_PAGE.replace("hi", "cell 1")]
     text, caption, image = _tool_results(session)[0]["content"]
     assert text["text"].endswith(
-        f"[artifact lint]\n{slug}/index.html — loaded in a browser the way the app preview loads it: no problems found"
+        f"[artifact lint]\n{slug}/index.html — loaded in a browser the way the app preview loads it, as it opens: no problems found"
     )
     assert caption["text"].startswith(render_check.SCREENSHOT_CAPTION)
     assert image["source"]["data"] == _SHOT
