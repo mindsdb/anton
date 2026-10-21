@@ -968,7 +968,9 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolO
     from anton.core.artifacts.live_app_slots import live_apps_enabled
 
     if live_apps_enabled() and cell_sandbox_of(getattr(session, "_scratchpads", None)) is not None:
-        return await _launch_in_slot(session, store, artifact, rel_path=rel_path, extra_args=extra_args)
+        return await _launch_in_slot(
+            session, store, artifact, rel_path=rel_path, extra_args=extra_args, health_path=health_path,
+        )
 
     tracked = getattr(session, "_tracked_backends", None)
     if tracked is None:
@@ -1044,10 +1046,13 @@ _LIVE_APP_FAILURE_REASONS: "dict[LaunchFailure, str]" = {
     "app_not_ready": "launch_failed",
     "slot_refused": "launch_failed",
     "launch_not_approved": "live_app_not_approved",
+    "record_failed": "live_app_unavailable",
 }
 
 
-async def _launch_in_slot(session: "ChatSession", store, artifact, *, rel_path: str, extra_args) -> ToolOutcome:
+async def _launch_in_slot(
+    session: "ChatSession", store, artifact, *, rel_path: str, extra_args, health_path: str,
+) -> ToolOutcome:
     """`launch_backend` on a sandboxed deployment with live apps on: the app
     runs in an app slot (`live_app_slots.launch_live_app`), never in this
     process, and the result carries its address, no port and no pid."""
@@ -1062,6 +1067,7 @@ async def _launch_in_slot(session: "ChatSession", store, artifact, *, rel_path: 
     try:
         result = await live_app_slots.launch_live_app(
             session, slug=artifact.slug, folder=store.folder_for(artifact.slug), datasources=artifact.datasources,
+            probe_paths=[health_path if health_path.startswith("/") else "/" + health_path],
         )
     except live_app_slots.LiveAppLaunchError as exc:
         if exc.cause == "launch_not_approved":
@@ -1069,9 +1075,20 @@ async def _launch_in_slot(session: "ChatSession", store, artifact, *, rel_path: 
             # it must not feed the error streak's nudge.
             return ToolOutcome(content=str(exc), ok=True, reason="live_app_not_approved")
         return SideEffectResult.failed(str(exc), reason=_LIVE_APP_FAILURE_REASONS[exc.cause])
+    # As the in-process launcher reads readiness: any HTTP answer counts, no
+    # answer doesn't.
+    (health,) = result.probe
+    if health.status == 0:
+        return SideEffectResult.failed(
+            f"Error: the app started in its slot but didn't answer GET {health.path}.\nLog tail:\n{result.log_tail}",
+            reason="launch_failed",
+        )
+    message = result.message()
+    if health.status >= 500:
+        message += f" Its health check, GET {health.path}, answered {health.status}: read backend.log."
     return SideEffectResult(
         success=True,
-        message=result.message(),
+        message=message,
         resource_id=artifact.slug,
         external_url=result.address,
         idempotency_key=artifact.slug,

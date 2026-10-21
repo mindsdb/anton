@@ -105,17 +105,36 @@ async def test_the_tool_launches_into_a_slot_and_returns_the_address(tmp_path, p
 
     async def launch(session_arg, **kwargs):
         calls.append(kwargs)
-        return _result(missing=(MissingConnection(engine="snowflake", name="sales", reason="not_approved"),))
+        return _result(missing=(MissingConnection(engine="snowflake", name="sales", reason="not_approved"),),
+                       probe=(ProbeResult(path="/api/health", status=200),))
 
     monkeypatch.setattr(las, "launch_live_app", launch)
-    outcome = await tool_handlers.handle_launch_backend(session, {"slug": "app"})
+    outcome = await tool_handlers.handle_launch_backend(session, {"slug": "app", "health_path": "api/health"})
     assert outcome.ok is True
     assert "`http://app1.view.localhost:8080/`" in outcome.content
     assert "`snowflake/sales` (not approved for live apps by the operator)" in outcome.content
     assert "127.0.0.1" not in outcome.content and "pid" not in outcome.content
-    assert calls == [{"slug": "app", "folder": folder, "datasources": ["declared"]}]
+    assert calls == [{"slug": "app", "folder": folder, "datasources": ["declared"], "probe_paths": ["/api/health"]}]
     assert updates == []  # no port goes into metadata.json
     assert session._scratchpads.calls == []
+
+
+@pytest.mark.parametrize("status, ok, said", [
+    (0, False, "didn't answer GET /"),
+    (500, True, "Its health check, GET /, answered 500: read backend.log."),
+    (404, True, "is running at"),
+])
+async def test_the_tool_reads_its_health_probe_as_the_local_launcher_does(tmp_path, policy, live_apps_on,
+                                                                          monkeypatch, status, ok, said):
+    session, _, _ = _tool_session(tmp_path, policy, monkeypatch)
+
+    async def launch(session_arg, **kwargs):
+        return _result(probe=(ProbeResult(path="/", status=status),), log_tail="boot")
+
+    monkeypatch.setattr(las, "launch_live_app", launch)
+    outcome = await tool_handlers.handle_launch_backend(session, {"slug": "app"})
+    assert outcome.ok is ok
+    assert said in outcome.content
 
 
 async def test_the_tool_relays_a_refused_card_as_the_persons_decision(tmp_path, policy, live_apps_on, monkeypatch):
@@ -216,7 +235,7 @@ async def test_the_run_step_launches_in_a_slot_and_probes_through_it(tmp_path, p
     monkeypatch.setattr(orchestrator, "_launch_live_app", launch)
     state = _gen_state(tmp_path, policy, api_spec=api)
     assert await orchestrator._run_and_verify_app(state) is None
-    assert calls[0]["probe_paths"] == ["/api/health", "/api/health", "/api/items"]
+    assert calls[0]["probe_paths"] == ["/api/health", "/api/items"]
     assert calls[0]["datasources"] == ["declared"]
     assert state.app_url == "http://app1.view.localhost:8080/" and state.app_port is None
     assert state.browser_status == "unverified"
@@ -225,6 +244,21 @@ async def test_the_run_step_launches_in_a_slot_and_probes_through_it(tmp_path, p
     assert shell["url"] == "http://app1.view.localhost:8080/"
     assert "port" not in shell
     assert "`http://app1.view.localhost:8080/`" in shell["live_app"]
+
+
+async def test_the_run_step_probes_no_more_paths_than_a_slot_takes(tmp_path, policy, live_apps_on, monkeypatch,
+                                                                   gen_store):
+    calls: list[dict] = []
+    api = '{"paths": {' + ", ".join(f'"/api/r{i}": {{"get": {{}}}}' for i in range(40)) + "}}"
+
+    async def launch(session, **kwargs):
+        calls.append(kwargs)
+        return _result(probe=tuple(ProbeResult(path=p, status=200) for p in kwargs["probe_paths"]))
+
+    monkeypatch.setattr(orchestrator, "_launch_live_app", launch)
+    assert await orchestrator._run_and_verify_app(_gen_state(tmp_path, policy, api_spec=api)) is None
+    sent = calls[0]["probe_paths"]
+    assert len(sent) == las.MAX_PROBE_PATHS and sent[0] == "/api/health"
 
 
 async def test_a_failed_probe_regenerates_the_backend_and_launches_again(tmp_path, policy, live_apps_on, monkeypatch,

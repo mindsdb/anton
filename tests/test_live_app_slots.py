@@ -232,6 +232,12 @@ def test_a_malformed_slot_address_refuses_and_names_the_setting(monkeypatch, ent
         las.live_app_slot_addresses()
 
 
+def test_a_bad_setting_is_a_value_error_for_hosts_that_catch_one(monkeypatch):
+    monkeypatch.setenv(las.SLOTS_ENV_VAR, "not-an-address")
+    with pytest.raises(ValueError):
+        las.live_app_slot_addresses()
+
+
 def test_the_app_address_comes_from_the_slot_number(monkeypatch):
     monkeypatch.delenv(las.ADDRESS_ENV_VAR, raising=False)
     assert las.app_address(2) == "http://app2.view.localhost:8080/"
@@ -470,6 +476,14 @@ def test_the_connections_hash_ignores_order_and_sees_a_new_kind():
     assert las.changed_parts(las.app_hashes(_files(), [a, b]), las.app_hashes(_files(), [a, widened])) == ["connections"]
 
 
+def test_an_override_of_the_write_hold_is_part_of_the_approval():
+    plain = SlotConnection(engine="rest", name="planner", kind="http-write")
+    overriding = SlotConnection(engine="rest", name="planner", kind="http-write", overrides_write_hold=True)
+    assert las.changed_parts(las.app_hashes(_files(), [plain]), las.app_hashes(_files(), [overriding])) == [
+        "connections"
+    ]
+
+
 def test_an_absent_requirements_file_hashes_as_empty():
     files = [f for f in _files() if f.path != "requirements.txt"]
     import hashlib
@@ -544,6 +558,13 @@ def test_a_launch_never_replaces_another_persons_app():
     assert "ask the operator for more slots" in text
 
 
+def test_a_refusal_names_a_slot_that_gave_no_answer():
+    statuses = [_status(1, state="running", app=_app("app1", _OTHER, "2026-10-21T04:01:00Z")), None]
+    with pytest.raises(LiveAppLaunchError) as raised:
+        las.plan_slot(statuses, "sales", _ME)
+    assert "slot 1 runs `app1` for bo@example.com since 04:01 UTC; slot 2 gave no answer" in str(raised.value)
+
+
 def test_with_no_slot_answering_a_launch_is_refused():
     with pytest.raises(LiveAppLaunchError) as raised:
         las.plan_slot([None, None, None], "sales", _ME)
@@ -579,11 +600,11 @@ async def test_a_first_launch_asks_the_card_then_sends_only_approved_values(tmp_
     assert "`http://app1.view.localhost:8080/`" in message and "127.0.0.1" not in message
     assert _PG_PASSWORD not in message and _API_KEY not in message
 
-    events = session._live_app_host.events
-    assert events[0] == ("claim", 1)
-    assert events[1][0] == "launched"
-    assert events[1][1].model_dump() == {"slot": 1, "slug": "sales-demo", "artifact_dir": str(folder),
-                                         "address": "http://app1.view.localhost:8080/", "boot_id": "boot-1-1"}
+    # A free slot has no record to clear, so only the launch is recorded.
+    (event,) = session._live_app_host.events
+    assert event[0] == "launched"
+    assert event[1].model_dump() == {"slot": 1, "slug": "sales-demo", "artifact_dir": str(folder),
+                                     "address": "http://app1.view.localhost:8080/", "boot_id": "boot-1-1"}
 
 
 async def test_the_launch_writes_the_scrubbed_log_tail_and_no_port(tmp_path, slots, approved, cards):
@@ -763,16 +784,54 @@ async def test_a_broken_setting_refuses_the_launch(tmp_path, slots, approved, ca
     assert las.CONNECTIONS_FILE_ENV_VAR in str(raised.value)
 
 
-async def test_a_failing_launch_record_fails_the_launch(tmp_path, slots, approved, cards):
+async def test_a_failing_claim_stops_the_launch_before_the_slot_resets(tmp_path, slots, approved, cards):
     folder = _artifact(tmp_path)
+    slots[0].run("sales-demo", _ME, started_at="2026-10-21T04:10:00Z")
 
     class RefusingHost(FakeHost):
         async def claim(self, slot: int) -> None:
+            raise RuntimeError("record store down for ana@example.com")
+
+    with pytest.raises(LiveAppLaunchError) as raised:
+        await las.launch_live_app(_session(RefusingHost()), slug="sales-demo", folder=folder, datasources=())
+    assert raised.value.cause == "record_failed"
+    assert "ana@example.com" not in str(raised.value)
+    assert slots[0].resets == 0 and slots[0].requests == []
+
+
+async def test_a_failing_launch_record_stops_the_unrecorded_app(tmp_path, slots, approved, cards):
+    folder = _artifact(tmp_path)
+
+    class RefusingHost(FakeHost):
+        async def launched(self, launch) -> None:
             raise RuntimeError("record store down")
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(LiveAppLaunchError) as raised:
         await las.launch_live_app(_session(RefusingHost()), slug="sales-demo", folder=folder, datasources=())
-    assert slots[0].requests == []
+    assert raised.value.cause == "record_failed"
+    assert len(slots[0].requests) == 1 and slots[0].resets == 1 and slots[0].app is None
+
+
+async def test_replacing_a_running_app_claims_its_slot_first(tmp_path, slots, approved, cards):
+    folder = _artifact(tmp_path)
+    slots[0].run("sales-demo", _ME, started_at="2026-10-21T04:10:00Z")
+    session = _session()
+    await las.launch_live_app(session, slug="sales-demo", folder=folder, datasources=())
+    assert [e[0] for e in session._live_app_host.events] == ["claim", "launched"]
+    assert session._live_app_host.events[0] == ("claim", 1)
+
+
+async def test_an_address_without_a_slot_number_refuses_before_any_slot(tmp_path, slots, approved, cards,
+                                                                         monkeypatch):
+    folder = _artifact(tmp_path)
+    monkeypatch.setenv(las.ADDRESS_ENV_VAR, "http://apps.example.test:8080/")
+    session = _session()
+    with pytest.raises(LiveAppLaunchError) as raised:
+        await las.launch_live_app(session, slug="sales-demo", folder=folder, datasources=())
+    assert raised.value.cause == "config"
+    assert las.ADDRESS_ENV_VAR in str(raised.value)
+    assert all(slot.requests == [] and slot.resets == 0 for slot in slots)
+    assert cards == [] and session._live_app_host.events == []
 
 
 # ── After a cell ─────────────────────────────────────────────────────────────

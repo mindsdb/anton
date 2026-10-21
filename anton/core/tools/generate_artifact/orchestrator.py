@@ -1148,12 +1148,14 @@ async def _run_and_verify_app_in_slot(state: GenState) -> str | None:
         # connections into metadata again (see `_run_and_verify_app`).
         store = resolve_artifact_store(state.session)
         artifact = store.open(state.slug) if store is not None else None
-        routes = _safe_get_paths(state.api_spec)
+        # Health first, each path once, as many as one probe takes.
+        paths = list(dict.fromkeys(["/api/health", *_safe_get_paths(state.api_spec)]))[:live_app_slots.MAX_PROBE_PATHS]
+        routes = paths[1:]
         try:
             launch = await _launch_live_app(
                 state.session, slug=state.slug, folder=state.artifact_path,
                 datasources=getattr(artifact, "datasources", None) or (),
-                probe_paths=["/api/health", *routes],
+                probe_paths=paths,
             )
         except live_app_slots.LiveAppLaunchError as exc:
             state.record("run_app", "fail", str(exc))
