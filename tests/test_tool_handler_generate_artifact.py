@@ -12,6 +12,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 import anton.core.tools.generate_artifact as gen_pkg
 from anton.core.artifacts import ArtifactStore
 from anton.core.tools.progress import ToolProgress
@@ -23,8 +25,10 @@ async def _collect_raw(session, tc_input, handler=handle_generate_artifact):
 
     The final item is whatever the handler yielded — a `ToolOutcome` on every
     path that reached the pipeline, a bare string for input validation, which
-    the dispatcher still accepts.
+    the dispatcher still accepts. `user_language` defaults to English so
+    each case states only the fields it is about; pass it to override.
     """
+    tc_input = {"user_language": "English", **tc_input}
     progress: list[str] = []
     result = None
     async for item in handler(session, tc_input):
@@ -171,7 +175,8 @@ async def test_progress_lines_are_relayed_while_generation_is_still_running(
 
     monkeypatch.setattr(gen_pkg, "generate", fake_generate)
     agen = handle_generate_artifact(
-        _session(tmp_path), {"slug": slug, "user_request": "build it", "agent_understanding": "an app"}
+        _session(tmp_path), {"slug": slug, "user_request": "build it", "agent_understanding": "an app",
+        "user_language": "English"}
     )
     first = await agen.__anext__()
     assert first == ToolProgress("Writing the technical specification")
@@ -219,7 +224,8 @@ async def test_abandoning_the_generator_cancels_generation(tmp_path: Path, monke
 
     monkeypatch.setattr(gen_pkg, "generate", fake_generate)
     agen = handle_generate_artifact(
-        _session(tmp_path), {"slug": slug, "user_request": "build it", "agent_understanding": "an app"}
+        _session(tmp_path), {"slug": slug, "user_request": "build it", "agent_understanding": "an app",
+        "user_language": "English"}
     )
     assert await agen.__anext__() == ToolProgress("Writing the backend")
     await started.wait()
@@ -262,12 +268,85 @@ def test_the_tool_schema_has_no_context_parameter():
     props = GENERATE_ARTIFACT_TOOL.input_schema["properties"]
     assert "context" not in props
     assert set(GENERATE_ARTIFACT_TOOL.input_schema["required"]) == {
-        "slug", "user_request", "agent_understanding",
+        "slug", "user_request", "user_language", "agent_understanding",
     }
     assert set(props) == {
-        "slug", "user_request", "agent_understanding",
+        "slug", "user_request", "user_language", "agent_understanding",
         "known_data", "user_preferences", "attachments",
     }
+
+
+def test_the_tool_tells_the_agent_to_keep_the_users_language():
+    """The pipeline writes in `user_language`; the agent relays the result
+    in the same language."""
+    from anton.core.tools.tool_defs import GENERATE_ARTIFACT_TOOL
+
+    assert "the language the user writes to you in" in GENERATE_ARTIFACT_TOOL.description
+    assert "talk to the user in that language" in GENERATE_ARTIFACT_TOOL.prompt
+
+
+async def test_the_handler_passes_the_user_language_to_the_pipeline(
+    tmp_path: Path, monkeypatch
+):
+    slug = _make_artifact(tmp_path)
+    seen = {}
+
+    async def fake_generate(**kw):
+        seen.update(kw)
+        return {"files_written": [], "summary": "ok", "trace": []}
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    await _collect(
+        _session(tmp_path),
+        {
+            "slug": slug, "user_request": "build it", "agent_understanding": "an app",
+            "user_language": " Brazilian\n  Portuguese ",
+        },
+    )
+    assert seen["user_language"] == "Brazilian Portuguese"
+
+
+async def test_the_handler_rejects_a_user_language_longer_than_a_name(
+    tmp_path: Path, monkeypatch
+):
+    """The value is quoted into every step header and the call fingerprint,
+    so a sentence about the user is refused before the pipeline starts."""
+    from anton.core.tools.generate_artifact.state import MAX_USER_LANGUAGE_CHARS
+
+    slug = _make_artifact(tmp_path)
+
+    async def fake_generate(**kw):
+        raise AssertionError("the pipeline must not start")
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    _, out = await _collect(
+        _session(tmp_path),
+        {
+            "slug": slug, "user_request": "build it", "agent_understanding": "an app",
+            "user_language": "x" * (MAX_USER_LANGUAGE_CHARS + 1),
+        },
+    )
+    assert out.startswith("Error: `user_language` must be only the language's English name")
+    assert f"got {MAX_USER_LANGUAGE_CHARS + 1} characters" in out
+
+
+async def test_the_handler_accepts_a_user_language_at_the_cap(tmp_path: Path, monkeypatch):
+    from anton.core.tools.generate_artifact.state import MAX_USER_LANGUAGE_CHARS
+
+    slug = _make_artifact(tmp_path)
+    seen = {}
+
+    async def fake_generate(**kw):
+        seen.update(kw)
+        return {"files_written": [], "summary": "ok", "trace": []}
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    value = "x" * MAX_USER_LANGUAGE_CHARS
+    await _collect(
+        _session(tmp_path),
+        {"slug": slug, "user_request": "build it", "agent_understanding": "an app", "user_language": value},
+    )
+    assert seen["user_language"] == value
 
 
 def test_the_soft_input_fields_forbid_the_outer_agent_from_inventing_scope():
@@ -609,6 +688,24 @@ async def test_a_missing_agent_understanding_is_rejected(tmp_path: Path, monkeyp
     assert "agent_understanding" in out
 
 
+@pytest.mark.parametrize("value", ["", "   ", None, ["English"]])
+async def test_a_missing_or_malformed_user_language_is_rejected(tmp_path: Path, monkeypatch, value):
+    """Without a named language the steps fall back to a default instead of
+    the user's language, so the agent is sent back to state it."""
+    monkeypatch.setattr(
+        gen_pkg, "generate",
+        AsyncMock(side_effect=AssertionError("the pipeline must not start")),
+    )
+    slug = _make_artifact(tmp_path)
+    _, out = await _collect(
+        _session(tmp_path),
+        {"slug": slug, "user_request": "build it", "agent_understanding": "an app",
+         "user_language": value},
+    )
+    assert out.startswith("Error:")
+    assert "user_language" in out
+
+
 async def test_a_peek_line_is_relayed_as_a_peek_and_dropped_while_a_question_is_open():
     """The live tail replaces itself in the footer, so it must not be printed
     as a step line — and unlike a step line it is not worth holding through a
@@ -790,6 +887,7 @@ async def test_act_first_relays_the_brief_between_the_steps_and_reports_it(
     markers, result = [], None
     async for item in handle_generate_artifact(session, {
         "slug": slug, "user_request": "a clock", "agent_understanding": "an analog clock",
+        "user_language": "English",
     }):
         if isinstance(item, ToolProgress):
             markers.append((item.kind, item.text))
