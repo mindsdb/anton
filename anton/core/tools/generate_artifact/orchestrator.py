@@ -853,6 +853,7 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
                 state.browser_status = live.status
                 state.browser_findings_listed = live.findings_listed
                 state.browser_screenshot = live.screenshot
+                state.browser_coverage = live.coverage
                 state.browser_page = entry_file.relative_to(state.artifact_path).as_posix()
                 if live.status == "failed":
                     failed_shot = live.screenshot
@@ -1112,6 +1113,8 @@ async def _verify_app_in_browser(state: GenState) -> "str | None | object":
     page is clean or unchecked, an error string when it stays broken, or
     `OVER_BUDGET` propagated from the regeneration.
     """
+    from anton.core.artifacts import render_check
+
     target = prompts.FULLSTACK_FRONTEND_TARGET
     policy = _cell_sandbox(state)
     for attempt in range(RUNAPP_MAX_RETRIES + 1):
@@ -1121,8 +1124,11 @@ async def _verify_app_in_browser(state: GenState) -> "str | None | object":
             state.trace_log.node("verify_fullstack", "browser_skipped", reason)
             _note_skipped(state, f"browser load of {target} via the running backend: {reason}")
             state.browser_status = "unverified"
+            state.browser_coverage = None
             return None
         state.browser_status = "passed" if live.ok else "failed"
+        # The local browser presses nothing: it saw the page as it opens.
+        state.browser_coverage = render_check.view_coverage()
         state.trace_log.verifier(
             node="verify_fullstack", ok=live.ok,
             errors=list(live.errors), warnings=list(live.warnings),
@@ -1226,6 +1232,12 @@ def _result_shell(state: GenState) -> dict:
         "summary": "; ".join(f"{s.node}:{s.outcome}" for s in state.trace),
         "trace": [{"node": s.node, "outcome": s.outcome, "detail": s.detail} for s in state.trace],
     }
+    # Beside a pass: the views the check measured and the tabs and toggles it
+    # did not press. The agent's instruction lets it call only the views
+    # `browser_checked` names verified or working.
+    if state.browser_status == "passed" and state.browser_coverage is not None:
+        shell["browser_checked"] = state.browser_coverage.checked
+        shell["browser_unchecked"] = state.browser_coverage.unchecked
     # Seen live: the agent presented `<path>/static/index.html` as the
     # entry point of a fullstack app: the
     # port was in the trace, the URL nowhere, and the system prompt's "prefer

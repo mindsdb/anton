@@ -19,7 +19,7 @@ from .attachments import Attachment
 
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
-    from anton.core.artifacts.render_check import RenderScreenshot, RenderStatus
+    from anton.core.artifacts.render_check import RenderScreenshot, RenderStatus, ViewCoverage
     from anton.utils.datasources import DatasourceCatalog
 
 # ── Budgets (see design spec) ────────────────────────────────────────────────
@@ -153,7 +153,9 @@ class BrowserCheck:
     the check could not vouch for it (`reason` says why; the verdict is
     empty). `findings_listed` says whether `reason` also lists what an
     unverified check still found. `screenshot` is the render check's
-    desktop view, when it sent one.
+    desktop view, when it sent one. `coverage` names the views a browser
+    that loaded the page measured and the tabs and toggles it left
+    unopened; None when no browser loaded it.
     """
 
     status: "RenderStatus"
@@ -161,6 +163,7 @@ class BrowserCheck:
     reason: str = ""
     findings_listed: bool = False
     screenshot: "RenderScreenshot | None" = None
+    coverage: "ViewCoverage | None" = None
 
 
 # ── FSM state ────────────────────────────────────────────────────────────────
@@ -221,6 +224,10 @@ class GenState:
     # The render check's desktop view of the latest load, when it sent one.
     # Reaches the calling agent as an image beside the result.
     browser_screenshot: "RenderScreenshot | None" = None
+    # The views the latest load measured and the tabs and toggles it left
+    # unopened, or None when no browser loaded the page. Beside a pass, the
+    # result names both, so the agent calls only those views verified.
+    browser_coverage: "ViewCoverage | None" = None
     # The page the latest load checked, by its path inside the artifact
     # folder (`index.html`); it captions the screenshot. The generator may
     # have named it differently from the primary the run started with.
