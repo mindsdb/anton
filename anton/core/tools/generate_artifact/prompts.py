@@ -269,7 +269,9 @@ _BROWSER_GATE_HTML = """\
   crashed renderer, a request for a local file that does not exist, a load
   the preview's content security policy blocks, a separate file the page asks
   for (the preview serves only the page itself), a chart, map or canvas that
-  stays blank, or a page wider than the screen fails the step; a page with no
+  stays blank, a loading message that still shows over a view that has
+  drawn (hide or remove it once the view draws), or a page wider than the
+  screen fails the step; a page with no
   visible text or elements is a warning. A library the check cannot load
   leaves the page unverified, which does not fail the step. A page with
   many findings gets the first ones listed and a count of more distinct

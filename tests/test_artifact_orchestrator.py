@@ -1359,6 +1359,20 @@ async def test_served_page_check_loads_the_backend_url_and_keeps_warnings(tmp_pa
     assert st.checks_skipped == []
 
 
+async def test_a_served_page_that_passed_vouches_for_the_page_as_it_opens_only(tmp_path: Path, monkeypatch):
+    """The local browser presses no tab or toggle, so the result names the
+    page as it opens as the one view checked."""
+    st = _served_state(tmp_path)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_app_live", lambda url, *, cell_sandbox: VerifyResult(errors=[]))
+
+    assert await orchestrator._verify_app_in_browser(st) is None
+
+    shell = orchestrator._result_shell(st)
+    assert shell["verified_in_browser"] is True
+    assert shell["browser_checked"] == "as it opens"
+    assert shell["browser_unchecked"] == []
+
+
 async def test_served_page_findings_regenerate_the_frontend_once_then_pass(tmp_path: Path, monkeypatch):
     """The findings are the page's own (its /api/* resolve when served), so
     they go back to the FRONTEND generator as kickoff context; the backend

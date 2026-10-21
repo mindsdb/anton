@@ -436,8 +436,9 @@ def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, scree
     The class of defects the text checks above cannot see: a script that
     throws on load, a library the preview's content security policy blocks,
     a separate file the preview never serves, a chart that stays blank, a
-    renderer crash. Findings become verifier errors with the fixed prefixes
-    the contract lock registers, so the retry kickoff carries the browser's
+    loading message left over a view that drew, a renderer crash. Findings
+    become verifier errors with the fixed prefixes the contract lock
+    registers, so the retry kickoff carries the browser's
     own message (`Uncaught ReferenceError: state is not defined (line 4)`),
     which is exactly what the generator needs.
 
@@ -446,7 +447,9 @@ def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, scree
     runs in its own container and only the page's text leaves this process.
     Otherwise the local Electron browser loads it (`html_lint`), which a
     sandbox policy refuses. `screenshot=False` asks the service for no
-    screenshot.
+    screenshot. A loaded page's `coverage` names the views the browser
+    measured: the service's, with the tabs and toggles it did not press, or
+    the page as it opens from the local browser, which presses nothing.
 
     `unverified` when no browser loaded the page or the check could not
     vouch for it (no browser configured, a timeout, a library the check
@@ -474,7 +477,8 @@ def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, scree
             )
         verdict = _render_verdict(outcome.findings)
         return BrowserCheck(
-            status="passed" if verdict.ok else "failed", verdict=verdict, screenshot=outcome.screenshot
+            status="passed" if verdict.ok else "failed", verdict=verdict, screenshot=outcome.screenshot,
+            coverage=outcome.coverage,
         )
     findings = lint_html(entry.resolve(), cell_sandbox=cell_sandbox)
     if findings is None:
@@ -482,7 +486,10 @@ def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, scree
             status="unverified", reason=browser_check_skip_reason(sandboxed=cell_sandbox is not None)
         )
     verdict = _browser_verdict(findings, served=False)
-    return BrowserCheck(status="passed" if verdict.ok else "failed", verdict=verdict)
+    # The local browser presses nothing: it saw the page as it opens.
+    return BrowserCheck(
+        status="passed" if verdict.ok else "failed", verdict=verdict, coverage=render_check.view_coverage()
+    )
 
 
 def _unverified_reason(
@@ -541,6 +548,11 @@ def _render_verdict(findings: list[RenderFinding]) -> VerifyResult:
         elif kind == "overflow":
             errors.append(
                 f"Loaded in a headless browser, the page is wider than the screen: {detail} ({where})"
+            )
+        elif kind == "loading_label":
+            errors.append(
+                "Loaded in a headless browser, a loading message still showed over a view that had "
+                f"drawn: {detail} ({where})"
             )
         elif kind == "crashed":
             errors.append("Loaded in a headless browser, the page crashed the renderer process.")
