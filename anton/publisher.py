@@ -23,6 +23,7 @@ from anton.core.artifacts.internal_files import (
     REVISIONS_DIRNAME,
     STATE_SNAPSHOT_FILENAME,
 )
+from anton.core.artifacts import world_atlas
 from anton.core.artifacts.models import Artifact, artifact_key as artifact_key_for
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.minds_client import minds_request
@@ -38,6 +39,7 @@ _LLM_SECRET_VARS = (
 
 # File extensions treated as text and subject to credential scrubbing.
 _TEXT_EXTENSIONS = {".html", ".htm", ".js", ".css", ".py", ".txt"}
+_HTML_EXTENSIONS = {".html", ".htm"}
 
 # Fixed zip entry timestamp so the bundle md5 is a pure function of content +
 # arcname, never of the wall clock. Without this, zipfile stamps text entries
@@ -300,7 +302,11 @@ def _write_scrubbed(zf: zipfile.ZipFile, src: Path, arc_name: str) -> None:
     zi = zipfile.ZipInfo(arc_name, date_time=_ZIP_EPOCH)
     zi.compress_type = zipfile.ZIP_DEFLATED
     if src.suffix.lower() in _TEXT_EXTENSIONS:
-        data = _scrub_content(src.read_text(encoding="utf-8", errors="ignore")).encode("utf-8")
+        text = _scrub_content(src.read_text(encoding="utf-8", errors="ignore"))
+        # A published link's viewer may block the map recipe's atlas download, so the page carries it.
+        if src.suffix.lower() in _HTML_EXTENSIONS:
+            text = world_atlas.embed(text)
+        data = text.encode("utf-8")
     else:
         data = src.read_bytes()
     zf.writestr(zi, data)
