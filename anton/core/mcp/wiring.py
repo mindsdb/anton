@@ -186,8 +186,11 @@ async def _discover_one(
             connection_name=name if disambiguate else None,
             held_secrets=endpoint.held_secrets,
         )
-    except Exception:
-        logger.exception("discover_mcp_tools: tool discovery failed for %s/%s", engine, name)
+    except Exception as exc:
+        if genie:
+            logger.warning("discover_mcp_tools: tool discovery failed for %s/%s: %s", engine, name, type(exc).__name__)
+        else:
+            logger.exception("discover_mcp_tools: tool discovery failed for %s/%s", engine, name)
         await mcp_session.__aexit__(None, None, None)
         return [], None
     return tool_defs, mcp_session

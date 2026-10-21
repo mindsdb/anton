@@ -415,3 +415,60 @@ async def test_an_mcp_connection_keeps_its_discovery_logs(monkeypatch):
         ("warning", "discover_mcp_tools: no access token for hubspot/no-token"),
         ("warning", "discover_mcp_tools: no known MCP server URL for engine future"),
     ]
+
+
+class CallRecorder:
+    """Stands in for a module logger and keeps each call's level, line and kwargs."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict]] = []
+
+    def _make(level: str):
+        def record(self, message, *args, **kwargs):
+            self.calls.append((level, message % args if args else message, kwargs))
+
+        return record
+
+    debug = _make("debug")
+    info = _make("info")
+    warning = _make("warning")
+    error = _make("error")
+    exception = _make("exception")
+
+
+async def _failing_discovery(*args, **kwargs):
+    """Stands in for `discover_tool_defs` when `tools/list` fails."""
+    raise ConnectionError("list failed with a secret detail")
+
+
+async def test_a_genie_listing_failure_logs_the_class_only_without_a_traceback(
+    genie_vault, minted, opened_sessions, monkeypatch
+):
+    recorder = CallRecorder()
+    monkeypatch.setattr(wiring, "logger", recorder)
+    monkeypatch.setattr(wiring, "discover_tool_defs", _failing_discovery)
+
+    result = await wiring.discover_mcp_tools_async(genie_vault, [{"engine": "databricks", "name": "genie-1"}])
+
+    assert result == ([], [])
+    assert len(recorder.calls) == 1
+    level, line, kwargs = recorder.calls[0]
+    assert level == "warning"
+    assert "exc_info" not in kwargs
+    assert "databricks" in line and "genie-1" in line and "ConnectionError" in line
+    assert "secret detail" not in line
+
+
+async def test_an_mcp_listing_failure_keeps_its_traceback_log(monkeypatch, stub_mcp_server):
+    recorder = CallRecorder()
+    monkeypatch.setattr(wiring, "logger", recorder)
+    monkeypatch.setattr(wiring, "discover_tool_defs", _failing_discovery)
+    monkeypatch.setattr(wiring, "McpSession", lambda **kw: McpSession(server=stub_mcp_server))
+    vault = FakeDataVault({("hubspot", "acme"): {"_method": "mcp", "access_token": "tok"}})
+
+    result = await wiring.discover_mcp_tools_async(vault, [{"engine": "hubspot", "name": "acme"}])
+
+    assert result == ([], [])
+    assert [(level, line) for level, line, _ in recorder.calls] == [
+        ("exception", "discover_mcp_tools: tool discovery failed for hubspot/acme")
+    ]

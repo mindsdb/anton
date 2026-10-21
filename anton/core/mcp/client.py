@@ -40,6 +40,10 @@ logger = logging.getLogger(__name__)
 #: once a real server (not a local reference/stub) is in the loop.
 _SLOW_ROUND_TRIP_MS = 500.0
 
+# The SDK's own timeouts: httpx's 5 s default is too short, and a server may hold the stream open.
+_HTTP_TIMEOUT_SECONDS = 30.0
+_HTTP_READ_TIMEOUT_SECONDS = 300.0
+
 
 class McpSession:
     """An open session against one MCP server.
@@ -81,7 +85,13 @@ class McpSession:
             target: Any = self._server
         else:
             headers = {"Authorization": f"Bearer {self._access_token}"} if self._access_token else {}
-            self._http_client = httpx2.AsyncClient(headers=headers)
+            self._http_client = httpx2.AsyncClient(
+                headers=headers,
+                timeout=httpx2.Timeout(
+                    _HTTP_TIMEOUT_SECONDS,
+                    read=_HTTP_READ_TIMEOUT_SECONDS,
+                ),
+            )
             from mcp.client.streamable_http import streamable_http_client
 
             target = streamable_http_client(self._url, http_client=self._http_client)

@@ -164,3 +164,25 @@ async def test_call_tool_never_retries_a_real_task_cancellation(stub_mcp_server,
             await session.call_tool("add", {"a": 1, "b": 1})
 
     assert calls["n"] == 1  # no retry attempted
+
+
+async def test_url_session_http_client_uses_the_sdk_timeouts_and_keeps_its_auth_header(monkeypatch):
+    """httpx's 5 s default timed out Genie calls under load; the session must
+    carry the MCP SDK's timeouts and still send the bearer header."""
+
+    def refuse_transport(url, *, http_client):
+        raise ConnectionError("no network in tests")
+
+    monkeypatch.setattr("mcp.client.streamable_http.streamable_http_client", refuse_transport)
+    session = McpSession(url="https://example.test/mcp", access_token="tok-123")
+
+    with pytest.raises(ConnectionError):
+        await session._connect()
+
+    http_client = session._http_client
+    assert http_client is not None
+    assert http_client.timeout.connect == 30.0
+    assert http_client.timeout.write == 30.0
+    assert http_client.timeout.pool == 30.0
+    assert http_client.timeout.read == 300.0
+    assert http_client.headers["Authorization"] == "Bearer tok-123"
