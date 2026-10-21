@@ -16,6 +16,8 @@ the LLM drives like a notebook. The code lives in `anton/core/backends/`:
 | `manager.py` | `ScratchpadManager` — lifecycle of named runtimes |
 | `scratchpad_boot.py` | The boot script that runs *inside* the subprocess: REPL loop, `get_llm()`, `progress()`, `sample()`, `agentic_loop()`, `web_search()` |
 | `wire.py` | Protocol markers (cell delimiter, progress marker, result delimiters) |
+| `sandbox.py` | `CellSandbox`, the per-session Landlock policy, and the launcher call each spawn goes through when a policy is set |
+| `landlock_launcher.py` | The launcher: locks itself with Landlock, then execs the target in place (standard library only) |
 
 ## The `Cell` and the runtime contract
 
@@ -85,6 +87,235 @@ under `<workspace>/.anton/scratchpad-venvs/<name>/` (falling back to
   is bound, so relative paths in scratchpad code operate on the project.
 - **Windows**: a per-venv outbound firewall rule is added so the scratchpad can
   reach the internet.
+- **Pad names**: the name becomes a folder the host deletes and recreates, so
+  it must be one plain folder name on every platform (`validate_pad_name`):
+  not empty, no NUL, no `:` (a Windows drive or NTFS stream), not an
+  absolute path, no `..`, no `/` or `\` (one pad's venv would sit inside
+  another's), not only dots, and no trailing dot or space (Windows drops
+  them, so `x.` would name pad `x`'s folder). The venv path must also resolve
+  inside the venvs folder before any create or delete. `/share` import maps
+  a pad name an older export holds to one a pad may have.
+- **Host writes**: on Linux and macOS, the files the host writes into a venv
+  (`_parent_venv.pth`, `requirements.txt`, `.python_version`), the venv build
+  and removal, and `_agent_pads.json` refuse a symlink at or inside the venv
+  or session folder in every mode (`anton/utils/nofollow.py`). A file
+  written in place must be a regular file with no other hard link, checked
+  before it is truncated, and `_agent_pads.json` is written to a fresh
+  `.tmp` file (whatever held that name is unlinked first) and renamed into
+  place. Windows has no `dir_fd` or `O_NOFOLLOW`, so there these writes act
+  on the joined path and follow links; only the local user could have
+  planted one.
+- **Under a sandbox policy** the host also refuses a link anywhere below the
+  workspace root, a linked `.anton` included, and creates and deletes the
+  conversation's snapshot folder (`scratchpad-sessions/<conversation>`)
+  the same way, so a reset never deletes through a linked folder.
+  `_agent_pads.json` is read the same way and must be a regular file with
+  no other hard link, so a linked folder or file never shows another
+  person's pad names. A host
+  that calls `Workspace.initialize(refuse_links=True)` gets `.anton`,
+  `anton.md` and `.env` created the same way, and `read_anton_md` and
+  `load_env` then raise `OSError` when either file is a symlink, a hard link
+  or not a regular file. Without a policy a linked `.anton` or conversation
+  folder is followed, and those reads follow links.
+
+## Sandbox policy (Landlock)
+
+A host that runs several people's agent code in one process tree passes a
+`CellSandbox` as `ChatSessionConfig.cell_sandbox`. It names the person's
+project folder, a per-person `HOME` and `TMPDIR` (each read, write and
+execute, so a file moves between them and the project; a folder can't move
+into `TMPDIR`, the only one that may hold sockets), an optional shared
+folder (read and write, no renames in or out), and read-only folders and
+files such as linked skills and attachments. The model refuses a grant that equals or contains
+`/`, `/home`, `/opt`, `/opt/cowork`, `/tmp`, `/var/tmp`, `/dev`, `/etc`,
+`/proc`, `/sys`, the server's own home, a root the host names in
+`forbidden_roots`, or a partition it names in `other_partitions`. A writable
+grant (project, `HOME`, `TMPDIR`, shared folder) inside one of
+`other_partitions` is refused too; a read-only grant there, such as a skill
+its owner shares, is allowed.
+
+With a policy set, every spawn that runs agent code starts through the
+launcher: the cell (the installed `scratchpad_boot.py`, run with `-P`), the
+venv health check, package installs (pip only; uv is never used), and the
+artifact verifier's compile and import checks, each with a timeout.
+`CellSandbox.launch()` returns the launcher's argv, its fixed two-variable
+environment, the policy descriptor and the write end of a refusal pipe.
+The descriptor carries the rules and the target's environment as JSON, so no
+secret appears in an argv another process can read, and nothing from the
+target's environment loads into the launcher before the lock. `launch()`
+refuses a writable grant that holds the launcher's interpreter, the launcher
+module or the standard library, which run before the lock.
+
+The launcher (`python -I -S landlock_launcher.py`) reads and closes the
+descriptor, sets `no_new_privs`, requires Landlock ABI 3 (Linux 6.2) or later,
+handles every filesystem right of the running ABI, and on ABI 6 or later also
+scopes signals and abstract unix sockets. It adds these system rules, which
+follow links (`/bin` and `/lib` are links on Debian):
+
+- read and execute: `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, the host
+  interpreter's prefixes and site-packages, and anton's own root (in an
+  editable install, the whole checkout);
+- read: `/proc`, `/sys`, `/etc/ssl` and `/etc/ca-certificates`, and the
+  files `/etc/passwd`, `/etc/group`, `/etc/nsswitch.conf`, `/etc/hosts`,
+  `/etc/resolv.conf`, `/etc/host.conf`, `/etc/gai.conf`, `/etc/services`,
+  `/etc/protocols`, `/etc/mime.types`, `/etc/localtime`, `/etc/ld.so.cache`,
+  `/etc/debian_version`, `/etc/os-release` and `/etc/lsb-release`;
+- read: the host's `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `PIP_CERT` and
+  `CURL_CA_BUNDLE` files and its `SSL_CERT_DIR` folder. Each is held to the
+  same roots as a grant and must be a regular file (a folder for
+  `SSL_CERT_DIR`); anything else gets no rule and is logged once per
+  process;
+- devices: `/dev/null`, `/dev/zero` and `/dev/full` (read and write),
+  `/dev/urandom` and `/dev/random` (read), and `/dev/shm` (create, read,
+  write, truncate and remove files, without listing).
+
+It then adds the policy's grants. A grant that is a symlink, or sits below
+one, is treated like a missing path: a required one (project, `HOME`,
+`TMPDIR`) refuses the launch, and an optional one (shared folder, read-only
+folders and files) is skipped, which `launch()` logs. It restricts itself,
+closes every descriptor above 2 except the refusal pipe, which is
+close-on-exec, and execs the target. The process id, process group and exit
+code are the target's, so cancel and the stdout protocol work as before.
+
+The child environment is an allowlist (`CellSandbox.child_env`): model and
+coding-provider keys, `ANTON_SCRATCHPAD_*`, `DS_*`, the pip, proxy and CA
+variables, `PATH`, `PYTHONPATH` and locale, plus the per-person `HOME`,
+`TMPDIR`, `USER`, `LOGNAME`, `MPLCONFIGDIR`, `XDG_*` and `PIP_CACHE_DIR`.
+`COWORK_*`, `DATABASE_URI`, `MINDS_API_KEY`, `ANTON_MINDS_API_KEY` and `LD_*`
+never pass. The cell, the health check and installs get only the pad's own
+`DS_*`, never ones inherited from the server. A workspace `.env` key passes
+where the server doesn't already set it, unless it could repoint the
+interpreter, the loader, the folders or the certificate trust. A key the
+server sets keeps the allowlist's verdict, so naming it in the `.env` never
+passes the server's value. An entry `execve` would reject (an empty key, a
+key with `=` or NUL, a value with NUL) is dropped and logged, and if one
+still reaches the launcher it refuses instead of failing after the lock.
+Every URL in a `PIP_*` value (an index, a links page, a proxy) loses its
+userinfo and query string and keeps its scheme, host, port and path, so a
+mirror's password or token never reaches agent code. The health check and
+installs get the same URLs as the cell: they run the venv's own Python,
+which a cell can rewrite. So an index or proxy that needs credentials can't
+be used under a policy. A `PIP_*` value with a URL that can't be parsed is
+dropped. Each variable that loses credentials is logged once per process.
+
+Every refusal is one line starting with `anton-sandbox: refused:`, written to
+the refusal pipe and to stderr before any target code runs, with exit code
+87. anton reads refusals only from the pipe, which a target the launcher
+starts never holds: a target that prints the marker or exits 87 is not a
+refusal. An `execve` that fails because the target's own permissions forbid
+it (`access(2)`, which Landlock does not mediate) exits 126 and reads as a
+broken venv, which is rebuilt. anton raises a refusal as
+`SandboxUnavailable`, which the agent sees by name, and keeps the venv and
+the saved cell state: a refusal never counts as a broken venv or toward the
+auto-resume reset. After a refused restart the cell error does not offer a
+reset, and `reset()` runs the health check before it discards the saved
+namespace, so a refused reset keeps it too.
+
+Under a policy, app backends are refused (`launch_artifact_backend` returns
+`BACKENDS_OFF_MESSAGE` before it touches the pool, and `generate_artifact`
+refuses a fullstack artifact before discovery asks anything, or before the
+spec when discovery settles on one). The checks that start a browser or
+LibreOffice in this process (`lint_html`, `lint_url`, `check_xlsx_via_office`,
+`check_opens_via_office`, `verify_app_live`) take a required `cell_sandbox`
+and return None under a policy before they spawn. The in-process lints still
+run.
+
+Pages are still loaded in a browser under a policy when the host sets
+`ANTON_RENDER_CHECK_URL`: the render-check service
+(`anton/core/artifacts/render_check.py`) runs Chromium in its own container
+and loads the page the way the app preview does, and only the page's text
+leaves this process. The server reads the page only where the person's own
+cells may read (`CellSandbox.allows_read`), and through
+`nofollow.read_bytes_nofollow`, so a link agent code swaps in after that
+check is refused, never followed. The variable is not on the cell
+environment's allowlist. `generate_artifact`'s browser step
+(`verify_frontend_live`) and the check after every scratchpad cell that
+changes an artifact (`tool_handlers._check_pages`) both use it. A cell
+changes an artifact when it writes, replaces, renames, copies in or deletes
+any of its content files: each file is compared by its mtime and size
+(`tool_handlers.ArtifactFiles`). The cell check loads the pages the cell
+edited. When an artifact other than a fullstack app changed but none of
+its pages did (the cell rewrote only a data file the page loads, say), it
+loads the artifact's main page: its primary, else its `index.html`, else
+its first page by name. It sends no page of a fullstack app:
+that page calls its backend, which the service does not run, so the cell's
+result names the page as not checked. Without the variable,
+`verify_frontend_live` reports the page as unverified and the cell's result
+says the page was not checked in a browser. Either way, a sandboxed turn
+with a page that did not pass its last check ends with a line anton writes
+itself, naming the artifact (`ChatSession._unverified_page_lines`). Each
+page keeps its own latest result, so a later pass of one page never clears
+another page's failure.
+
+A check the service could not vouch for is unverified, and its line says
+why (a resource it could not load, the deadline). Under that line the
+agent sees what the check still found, such as an exception, or a blank
+view or overflow measured before the deadline, which the line marks as
+possibly still drawing (`render_check.unverified_findings`). The cell check
+lists those findings once per page per turn: once an unverified check in
+the turn listed findings for a page, in a cell's result or in
+`generate_artifact`'s `checks_skipped`, a later unverified check of that
+page gets only the line that says it was not checked
+(`ChatSession._unverified_findings_listed`). A check that listed nothing,
+because the service was busy or the cell's time ran out, leaves the next
+check free to list what it finds. So the agent fixes them once and then
+reports the page as unverified, instead of editing a page that may work
+on every cell.
+
+The service also sends a screenshot of the page, which reaches the agent as
+an image beside the check's text. History keeps only the newest one
+(`render_check.drop_older_screenshots`). When the model refuses a request
+that may have failed for carrying images at all
+(`provider.is_image_refusal`: a content rejection, or a 400 or 422 that
+names an image, which is what a model with no image input gets), the turn
+replaces the images anton added itself with a note, keeps the text beside
+them, and sends the request once more. Render screenshots
+(`ChatSession._drop_render_screenshots`) and the images other tools
+returned, such as what `read_image` loaded
+(`ChatSession._drop_refused_tool_images`), are each dropped at most once
+per turn, so one turn resends at most twice. An image the person attached
+is left to the content repair. A refusal of one image, such as an image
+over the size limit, does not count. Only when that request goes through
+without the dropped images does the note say the model refused them
+(`ChatSession._confirm_render_screenshots_refused`,
+`ChatSession._confirm_tool_images_refused`). When one refused request
+carries both kinds, the tool images go first; the screenshots go only if
+the request is refused again, and the request that then goes through
+confirms both. Otherwise each kind follows its own refusal. After refused
+screenshots, later checks in that session ask the service for no
+screenshot. After a refused tool image, `read_image` answers in text
+instead of loading another, and checks keep asking for screenshots: one
+corrupt file draws a refusal from a model that takes images too. A model
+with no image input then refuses the next screenshot as well, and that
+screenshot gets its own drop and resend. If the request is refused again
+with nothing left to drop, the dropped images were not the cause, and
+nothing changes for later checks or calls. A session seeded with a
+confirmed note, as cowork-server builds one for every turn, starts the same
+way.
+
+When `generate_artifact`'s browser step fails a page, the generator's next
+attempt gets the findings and, beside them, the screenshot of the failed
+page (`orchestrator._kickoff_with_screenshot`). A model that refuses that
+request gets it once more without the screenshot (`engine._run_loop`). When
+the refused request was the attempt's first round, which runs on the
+planning model, the main agent's own, the session records the refusal and
+later checks send no screenshot either. A later round runs on the coding
+model, so its refusal drops only that attempt's screenshot.
+
+`ScratchpadManager` refuses at construction a runtime factory that does not
+name a `cell_sandbox` parameter (a bare `**kwargs` is refused), and refuses
+to start a runtime whose `cell_sandbox` property reports another policy, so
+a policy is never dropped. A pool whose `cell_sandbox` holds anything other
+than a `CellSandbox` or None raises `TypeError` where anton reads it
+(`cell_sandbox_of`). With no policy (the desktop, the CLI and the cloud
+pod), every spawn runs unlocked with the server's environment, and
+`tests/test_sandbox_off_capture.py` pins each call's argv, environment, cwd
+and keyword arguments.
+
+The real-Landlock tests carry the `landlock` mark. `tests/conftest.py` skips
+them where the kernel has no Landlock ABI 3, fails them instead on Linux
+under GitHub Actions or with `LANDLOCK_REQUIRED=1`, and prints the ABI in
+pytest's report header.
 
 ## Remote backend
 

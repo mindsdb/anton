@@ -14,6 +14,7 @@ from anton.core.tools.tool_handlers import (
     handle_update_artifact_metadata,
 )
 from anton.core.artifacts.listing import FIELDS as ARTIFACT_LIST_FIELDS
+from anton.core.utils.scratchpad import SCRATCHPAD_ACTIONS
 from anton.core.tools.text_file import DEFAULT_LINE_COUNT, MAX_OUTPUT_CHARS
 
 from dataclasses import dataclass, replace
@@ -94,7 +95,12 @@ SCRATCHPAD_TOOL = ToolDef(
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["exec", "view", "reset", "remove", "dump", "install"],
+                "enum": list(SCRATCHPAD_ACTIONS),
+                "description": (
+                    "What to do: `exec` runs `code` in the scratchpad, `view` shows its "
+                    "cells, `dump` renders them as a notebook, `install` installs "
+                    "`packages`, `reset` clears its state and `remove` deletes it."
+                ),
             },
             "name": {"type": "string", "description": "Scratchpad name"},
             "code": {
@@ -327,7 +333,10 @@ LIST_ARTIFACTS_TOOL = ToolDef(
             "fields": {
                 "type": "array",
                 "items": {"type": "string", "enum": list(ARTIFACT_LIST_FIELDS)},
-                "description": "Fields to return instead of the default set; `slug` is always included.",
+                "description": (
+                    "Fields to return instead of the default set. Every artifact is "
+                    "headed by its slug whatever you ask for, so the slug needs no field."
+                ),
             },
             "match": {
                 "type": "array",
@@ -818,9 +827,10 @@ ASK_USER_TOOL = ToolDef(
         'Returns {"status":"answered","values":["<value>"]} — or "text" when the '
         'user typed their own answer instead of picking, possibly alongside '
         '"values". Other statuses: "cancelled" (the user declined to answer), '
-        '"timeout", "error". On cancelled/timeout/error do NOT call this tool '
-        "again for the same question: either proceed on an assumption you state "
-        "out loud, or ask in plain text and end your turn.\n\n"
+        '"timeout", "error". On cancelled/timeout do NOT call this tool again '
+        "and do NOT act on an assumed answer: end your turn and say the "
+        "question is still waiting for them. Their answer arrives as their "
+        "next message. On error, ask in plain text and end your turn.\n\n"
         "Ask one question at a time."
     ),
     # This is where the carve-out from CONVERSATION DISCIPLINE's "never ask and
@@ -841,8 +851,9 @@ ASK_USER_TOOL = ToolDef(
         "answer arrives inside the current turn, so continue with it immediately. "
         "Open-ended questions still go in plain text with the turn ended. Ask one "
         "question at a time either way. If `ask_user` comes back cancelled, "
-        "timeout or error, do not re-ask: proceed on an assumption you state out "
-        "loud, or ask in plain text and end your turn."
+        "timeout or error, do not re-ask and do not act on an assumed answer — "
+        "for an approval, that assumption is the approval. End your turn and "
+        "say the question is still open."
     ),
     input_schema={
         "type": "object",

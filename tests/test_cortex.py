@@ -2,13 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import sys
+import types
 from pathlib import Path
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from anton.core.backends.base import Cell
+from anton.core.memory.cerebellum import Cerebellum, _DiffPassResult, _LessonDraft
+from anton.core.memory.base import MemoryRead
 from anton.core.memory.cortex import Cortex, _CompactionResult
 from anton.core.memory.hippocampus import Engram, Hippocampus
+from anton.core.session import ChatSession
+from anton.core.tools.tool_handlers import handle_memorize
 
 
 @pytest.fixture()
@@ -24,6 +33,38 @@ def dirs(tmp_path):
 def cortex(dirs):
     g, p = dirs
     return Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="copilot")
+
+
+@pytest.fixture()
+def read_only_dir(tmp_path):
+    """Build folders the way an image ships one: 0o444 files in a 0o555 folder.
+
+    Yields a factory taking a folder name and `{file name: content}`. Modes are
+    restored at teardown so tmp_path can be removed.
+    """
+    if sys.platform == "win32" or os.geteuid() == 0:
+        pytest.skip("file modes don't stop this user writing, so read-only proves nothing")
+    made: list[Path] = []
+
+    def make(name: str, files: dict[str, str]) -> Path:
+        folder = tmp_path / name
+        folder.mkdir()
+        for file_name, content in files.items():
+            path = folder / file_name
+            path.write_text(content, encoding="utf-8")
+            path.chmod(0o444)
+        folder.chmod(0o555)
+        made.append(folder)
+        return folder
+
+    yield make
+    for folder in made:
+        folder.chmod(0o755)
+
+
+def _snapshot(folder: Path) -> dict[str, bytes]:
+    """Every file in `folder` by name, so a new file (a `.tmp`) shows too."""
+    return {path.name: path.read_bytes() for path in sorted(folder.iterdir())}
 
 
 class TestBuildMemoryContext:
@@ -130,6 +171,118 @@ class TestGetScratchpadContext:
         assert "Scratchpad times out" in result
 
 
+class TestMemoryRead:
+    """What the latest prompt and scratchpad description held from the learned
+    tiers."""
+
+    def test_none_before_the_memory_is_built(self, cortex):
+        assert cortex.memory_read is None
+
+    async def test_counts_what_the_prompt_and_the_scratchpad_hold(self, cortex, dirs):
+        g, p = dirs
+        global_hc, project_hc = Hippocampus(g), Hippocampus(p)
+        global_hc.rewrite_identity(["Name: Ana", "TZ: EST"])
+        global_hc.encode_rule("Use httpx", kind="always", confidence="high", source="user")
+        project_hc.encode_rule("Use Django ORM", kind="always", confidence="high", source="user")
+        global_hc.encode_lesson("Global fact")
+        project_hc.encode_lesson("Project fact one")
+        project_hc.encode_lesson("Project fact two")
+        global_hc.encode_rule(
+            "If a scratchpad API is paginated, use progress()",
+            kind="when", confidence="high", source="user",
+        )
+        project_hc.encode_lesson("Scratchpad cells time out at 30s")
+
+        # ChatSession builds its tools, and so the scratchpad description,
+        # before the system prompt.
+        cortex.get_scratchpad_context()
+        await cortex.build_memory_context()
+
+        assert cortex.memory_read == MemoryRead(
+            learned=True, rules=2, lessons=3, profile_lines=2, scratchpad=2
+        )
+        assert cortex.memory_read.entries == 9
+
+    async def test_counts_only_the_rules_the_prompt_shows(self, cortex, dirs):
+        g, _ = dirs
+        (g / "rules.md").write_text("## Preferences\n- Prefer short answers\n\n## Always\n- Use httpx\n")
+
+        prompt = await cortex.build_memory_context()
+
+        assert "Use httpx" in prompt and "Prefer short answers" not in prompt
+        assert cortex.memory_read.rules == 1
+
+    async def test_counts_the_profile_lines_the_prompt_shows(self, cortex, dirs, monkeypatch):
+        g, _ = dirs
+        hc = Hippocampus(g)
+        hc.rewrite_identity(["Name: Ana"])
+        filter_rules = cortex._retrieve_relevant_rules
+
+        async def filter_while_another_turn_learns(engrams, user_message):
+            hc.rewrite_identity(["Name: Ana", "TZ: EST"])
+            return await filter_rules(engrams, user_message)
+
+        monkeypatch.setattr(cortex, "_retrieve_relevant_rules", filter_while_another_turn_learns)
+
+        prompt = await cortex.build_memory_context()
+
+        assert "Name: Ana" in prompt and "TZ: EST" not in prompt
+        assert cortex.memory_read.profile_lines == 1
+
+    async def test_counts_only_the_lessons_the_budget_lets_in(self, cortex, dirs):
+        g, _ = dirs
+        hc = Hippocampus(g)
+        for i in range(60):
+            hc.encode_lesson(f"Lesson {i:02d}: {'detail ' * 20}")
+
+        prompt = await cortex.build_memory_context()
+
+        shown = sum(1 for i in range(60) if f"Lesson {i:02d}:" in prompt)
+        assert 0 < shown < 60
+        assert cortex.memory_read.lessons == shown
+
+    async def test_counts_the_rules_the_filter_keeps(self, cortex, dirs, captured_events):
+        g, _ = dirs
+        rules = _when_engrams(12)
+        lines = "\n".join(f"- {e.text}" for e in rules)
+        (g / "rules.md").write_text(f"## When\n{lines}\n")
+        cortex._llm = _FakeLLM(content="\n".join(f"- {rules[i].text}" for i in (0, 1)))
+
+        await cortex.build_memory_context("please do the august campaign")
+
+        assert cortex.memory_read.rules == 2
+
+    async def test_the_operators_layer_is_not_counted(self, dirs, tmp_path):
+        g, p = dirs
+        managed = tmp_path / "managed"
+        managed.mkdir()
+        Hippocampus(managed).encode_rule("Always cite the source", kind="always", confidence="high", source="user")
+        Hippocampus(managed).encode_lesson("Orders ship on Mondays")
+        Hippocampus(managed).encode_lesson("Scratchpad cells have pandas installed")
+        cortex = Cortex(
+            global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="copilot",
+            managed_hc=Hippocampus(managed),
+        )
+
+        prompt = await cortex.build_memory_context()
+        wisdom = cortex.get_scratchpad_context()
+
+        assert "Always cite the source" in prompt and "Orders ship on Mondays" in prompt
+        assert "Scratchpad cells have pandas installed" in wisdom
+        assert cortex.memory_read == MemoryRead(learned=True)
+
+    @pytest.mark.parametrize("scope", ["off", "unavailable"])
+    async def test_a_turn_with_learned_memory_off_reads_none(self, cortex, dirs, scope):
+        g, p = dirs
+        Hippocampus(g).encode_rule("Use httpx", kind="always", confidence="high", source="user")
+        Hippocampus(p).encode_lesson("Scratchpad cells time out at 30s")
+
+        await cortex.build_memory_context(learned_memory_scope=scope)
+        cortex.get_scratchpad_context(learned_memory_scope=scope)
+
+        assert cortex.memory_read == MemoryRead(learned=False)
+
+
 class TestEncode:
     async def test_encode_rule_to_project(self, cortex, dirs):
         _, p = dirs
@@ -204,6 +357,30 @@ class TestOrphanedIdentityMigration:
         Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="copilot")
         assert not (g / "profile.md").exists()
         assert not (p / "profile.md").exists()
+
+    async def test_a_read_only_global_tier_keeps_the_project_lines(
+        self, dirs, read_only_dir, caplog
+    ):
+        """A host builds a Cortex every turn. If the move raised, every turn in
+        that project would fail, and the line that caused it would never go."""
+        _, p = dirs
+        g = read_only_dir("read-only-global", {})
+        Hippocampus(p).rewrite_identity(["TZ: PST"])
+
+        logger_name = "anton.core.memory.cortex"
+        with caplog.at_level(logging.WARNING, logger=logger_name):
+            cortex = Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="autopilot")
+
+        warnings = [
+            r.getMessage()
+            for r in caplog.records
+            if r.name == logger_name and r.levelno == logging.WARNING
+        ]
+        assert warnings == ["memory: project profile not moved (PermissionError)"]
+        assert "TZ: PST" in (p / "profile.md").read_text()
+        assert _snapshot(g) == {}
+        # The turn still gets its memory.
+        assert await cortex.build_memory_context() == ""
 
 
 class TestEncodingGate:
@@ -798,3 +975,448 @@ class TestCompactRulesFile:
         await self._compact(dirs, hc, keep=list(range(1, 12)))
         assert "Hand-added note" in hc._rules_path.read_text()
         assert len(hc.get_rules()) == 11
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The operator's read-only layer
+# ─────────────────────────────────────────────────────────────────────────────
+
+# A person's tiers with every section build_memory_context renders. Timestamps
+# are fixed so the rendered lessons are stable.
+_PERSON_GLOBAL = {
+    "profile.md": "# Profile\n- Name: Ada\n- Timezone: PST\n",
+    "rules.md": (
+        "# Rules\n\n## Always\n- Use httpx <!-- confidence:high source:user ts:2026-10-01 -->\n"
+        "\n## Never\n- Never commit secrets <!-- confidence:high source:user ts:2026-10-01 -->\n"
+        "\n## When\n- If the user writes in Spanish, respond in Spanish"
+        " <!-- confidence:high source:user ts:2026-10-01 -->\n"
+        "- If a scratchpad API is paginated, use progress()"
+        " <!-- confidence:high source:user ts:2026-10-02 -->\n"
+    ),
+    "lessons.md": (
+        "# Lessons\n- CoinGecko rate-limits at 50/min <!-- topic:api ts:2026-10-01 -->\n"
+        "- Scratchpad cells time out at 30s <!-- topic:scratchpad ts:2026-10-02 -->\n"
+    ),
+}
+_PERSON_PROJECT = {
+    "rules.md": (
+        "# Rules\n\n## Always\n- Use the Django ORM"
+        " <!-- confidence:high source:user ts:2026-10-01 -->\n"
+    ),
+    "lessons.md": (
+        "# Lessons\n- Orders are partitioned by month <!-- ts:2026-10-01 -->\n"
+        "- Warehouse schema notes <!-- topic:minds-datasource ts:2026-10-01 -->\n"
+        "- Use one scratchpad per report <!-- topic:scratchpad ts:2026-10-03 -->\n"
+    ),
+}
+
+# What Cortex rendered for the tiers above before the operator's layer existed,
+# taken from that code. A Cortex with no managed layer must still produce it.
+_TODAY_PROMPT = (
+    "\n\n## Your Memory — Identity\n# Profile\n- Name: Ada\n- Timezone: PST"
+    "\n\n## Your Memory — Global Rules\n## Always\n- Use httpx\n## Never\n- Never commit secrets"
+    "\n## When\n- If the user writes in Spanish, respond in Spanish"
+    "\n\n## Your Memory — Project Rules\n## Always\n- Use the Django ORM"
+    "\n\n## Your Memory — Global Lessons\n# Lessons"
+    "\n- CoinGecko rate-limits at 50/min <!-- topic:api ts:2026-10-01 -->\n"
+    "\n\n## Your Memory — Project Lessons\n# Lessons"
+    "\n- Warehouse schema notes <!-- topic:minds-datasource ts:2026-10-01 -->"
+    "\n- Orders are partitioned by month <!-- ts:2026-10-01 -->\n"
+    "\n\n## Minds — Datasource Context\n# minds-datasource"
+    "\n- Warehouse schema notes <!-- topic:minds-datasource ts:2026-10-01 -->\n"
+)
+_TODAY_SCRATCHPAD = (
+    "- If a scratchpad API is paginated, use progress()\n"
+    "- Scratchpad cells time out at 30s\n"
+    "- Use one scratchpad per report"
+)
+
+# The operator's folder: a note line operators read (not a bullet, so it never
+# reaches the agent), one rule of each kind, a scratchpad rule and lesson that
+# belong in the tool description, and a profile that must never be read.
+_MANAGED_FILES = {
+    "rules.md": (
+        "# Rules\n"
+        'Only "- " bullets under "## Always", "## Never" and "## When" reach the agent.\n'
+        "\n## Always\n- Write requirements.txt with package names only\n"
+        "\n## Never\n- Never print a connection's password\n"
+        "\n## When\n- If the question names a quarter, use calendar quarters\n"
+        "- If a scratchpad cell loads a large table, page through it\n"
+    ),
+    "lessons.md": (
+        "# Lessons\n- Sales figures are in thousands of dollars <!-- ts:2026-10-01 -->\n"
+        "- Scratchpad cells stop after 120 seconds <!-- topic:scratchpad ts:2026-10-01 -->\n"
+    ),
+    "profile.md": "# Profile\n- Name: Operator\n",
+}
+# The line the first operator heading carries, so the model knows the
+# operator's entries win over the person's own.
+_OPERATOR_WINS = (
+    "The operator's rules and lessons apply to everyone and win over Your Memory "
+    "when the two conflict.\n"
+)
+_OPERATOR_SECTIONS = (
+    "\n\n## Operator Memory — Rules\n" + _OPERATOR_WINS
+    + "## Always\n- Write requirements.txt with package names only"
+    "\n## Never\n- Never print a connection's password"
+    "\n## When\n- If the question names a quarter, use calendar quarters"
+    "\n\n## Operator Memory — Lessons\n# Lessons"
+    "\n- Sales figures are in thousands of dollars <!-- ts:2026-10-01 -->\n"
+)
+
+
+def _write(folder: Path, files: dict[str, str]) -> None:
+    for name, content in files.items():
+        (folder / name).write_text(content, encoding="utf-8")
+
+
+@pytest.fixture()
+def managed(read_only_dir) -> Path:
+    return read_only_dir("managed", _MANAGED_FILES)
+
+
+@pytest.fixture()
+def person(dirs) -> tuple[Path, Path]:
+    g, p = dirs
+    _write(g, _PERSON_GLOBAL)
+    _write(p, _PERSON_PROJECT)
+    return g, p
+
+
+def _managed_cortex(dirs, managed: Path, **kwargs) -> Cortex:
+    g, p = dirs
+    return Cortex(
+        global_hc=Hippocampus(g),
+        project_hc=Hippocampus(p),
+        mode="autopilot",
+        managed_hc=Hippocampus(managed),
+        **kwargs,
+    )
+
+
+class TestManagedLayer:
+    """A read-only store an operator manages, read ahead of the person's own.
+
+    The folder is read-only on disk, as a host ships it, so a write that
+    reached it would raise. Memorize's background encode, the cerebellum and
+    the profile move all swallow that error, so every write test also checks
+    the entry landed in the person's own tier.
+    """
+
+    async def test_no_managed_layer_is_byte_identical_to_today(self, person):
+        g, p = person
+        for cortex in (
+            Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="autopilot"),
+            Cortex(
+                global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="autopilot",
+                managed_hc=None,
+            ),
+        ):
+            assert await cortex.build_memory_context("hola") == _TODAY_PROMPT
+            assert cortex.get_scratchpad_context() == _TODAY_SCRATCHPAD
+
+    def test_managed_hc_is_keyword_only(self, dirs, managed):
+        g, p = dirs
+        with pytest.raises(TypeError):
+            Cortex(Hippocampus(g), Hippocampus(p), "autopilot", None, None, Hippocampus(managed))
+
+    async def test_operator_sections_lead_and_leave_the_rest_unchanged(self, person, managed):
+        prompt = await _managed_cortex(person, managed).build_memory_context("hola")
+        assert prompt == _OPERATOR_SECTIONS + _TODAY_PROMPT
+
+    async def test_operator_rules_come_before_identity_and_the_persons_rules(
+        self, person, managed
+    ):
+        prompt = await _managed_cortex(person, managed).build_memory_context("hola")
+        headings = [
+            "## Operator Memory — Rules",
+            "## Your Memory — Identity",
+            "## Your Memory — Global Rules",
+            "## Your Memory — Project Rules",
+        ]
+        positions = [prompt.index(h) for h in headings]
+        assert positions == sorted(positions)
+
+    async def test_operator_lessons_come_before_the_persons_lessons(self, person, managed):
+        prompt = await _managed_cortex(person, managed).build_memory_context("hola")
+        headings = [
+            "## Operator Memory — Lessons",
+            "## Your Memory — Identity",
+            "## Your Memory — Global Lessons",
+            "## Your Memory — Project Lessons",
+        ]
+        positions = [prompt.index(h) for h in headings]
+        assert positions == sorted(positions)
+        assert prompt.index("## Operator Memory — Rules") < positions[0]
+
+    async def test_the_operator_heading_says_operator_entries_win(self, person, managed):
+        """Rendering first doesn't say which tier wins, so the first operator
+        heading says it, once. Without the layer the line never renders."""
+        prompt = await _managed_cortex(person, managed).build_memory_context("hola")
+        assert prompt.count(_OPERATOR_WINS) == 1
+        assert "## Operator Memory — Rules\n" + _OPERATOR_WINS in prompt
+
+        g, p = person
+        bare = Cortex(
+            global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="autopilot",
+            managed_hc=None,
+        )
+        assert _OPERATOR_WINS.strip() not in await bare.build_memory_context("hola")
+
+    async def test_a_managed_rule_with_a_kind_comment_renders_under_its_heading(
+        self, person, read_only_dir
+    ):
+        """A trailing `<!-- kind:... -->` on a managed rule must not reach
+        Engram next to the heading's kind, which raises TypeError on every
+        turn. The "## " heading decides the kind; the comment's kind is
+        dropped."""
+        managed = read_only_dir("managed", {
+            "rules.md": "# Rules\n\n## When\n- Use pallets <!-- kind:always -->\n",
+        })
+        prompt = await _managed_cortex(person, managed).build_memory_context("hola")
+        assert (
+            "## Operator Memory — Rules\n" + _OPERATOR_WINS + "## When\n- Use pallets"
+        ) in prompt
+
+    async def test_operator_wisdom_leads_the_scratchpad_context(self, person, managed):
+        context = _managed_cortex(person, managed).get_scratchpad_context()
+        # Within the operator's tier, Hippocampus's own order: the dated
+        # lesson ranks ahead of the undated rule. The operator's block is
+        # labeled and the person's own follows under its own label.
+        assert context == (
+            "Operator (applies to everyone, wins on conflict):\n"
+            "- Scratchpad cells stop after 120 seconds\n"
+            "- If a scratchpad cell loads a large table, page through it\n"
+            "Your own:\n" + _TODAY_SCRATCHPAD
+        )
+
+    async def test_an_operator_layer_without_scratchpad_wisdom_leaves_the_context_unlabeled(
+        self, person, read_only_dir
+    ):
+        managed = read_only_dir("managed", {"rules.md": "# Rules\n\n## Always\n- Use pallets\n"})
+        assert _managed_cortex(person, managed).get_scratchpad_context() == _TODAY_SCRATCHPAD
+
+    async def test_operator_wisdom_alone_carries_no_your_own_label(self, dirs, managed):
+        # `dirs` gives the person empty global and project tiers.
+        assert _managed_cortex(dirs, managed).get_scratchpad_context() == (
+            "Operator (applies to everyone, wins on conflict):\n"
+            "- Scratchpad cells stop after 120 seconds\n"
+            "- If a scratchpad cell loads a large table, page through it"
+        )
+
+    async def test_the_operator_profile_is_never_read(self, person, managed):
+        cortex = _managed_cortex(person, managed)
+        assert "Operator" not in (await cortex.build_memory_context("hola")).replace(
+            "Operator Memory", ""
+        )
+        # The scratchpad context labels the operator's block, so the word
+        # "Operator" is expected there; what must never leak is the profile.
+        assert "Name: Operator" not in cortex.get_scratchpad_context()
+
+    async def test_an_operator_datasource_lesson_renders_as_an_operator_lesson(
+        self, person, read_only_dir
+    ):
+        """The Minds section reads only the person's project tier, so a layer
+        lesson tagged `minds-datasource` shows once, with the operator's
+        lessons. Filtering it out of those, or adding it to the Minds section,
+        breaks the equality."""
+        managed = read_only_dir("managed", {
+            "lessons.md": (
+                "# Lessons\n- Revenue lives in fct_revenue"
+                " <!-- topic:minds-datasource ts:2026-10-01 -->\n"
+            ),
+        })
+
+        prompt = await _managed_cortex(person, managed).build_memory_context("hola")
+
+        assert prompt == (
+            "\n\n## Operator Memory — Lessons\n" + _OPERATOR_WINS + "# Lessons"
+            "\n- Revenue lives in fct_revenue <!-- topic:minds-datasource ts:2026-10-01 -->\n"
+            + _TODAY_PROMPT
+        )
+
+    async def test_operator_lessons_have_their_own_budget(self, dirs, read_only_dir):
+        """Each tier keeps about 4,000 characters of lessons. Sharing one budget
+        with the person's tiers would cut half of these."""
+        g, _ = dirs
+
+        def lessons(label: str) -> str:
+            lines = [f"- {label} lesson {i} {'x' * 480} <!-- ts:2026-10-01 -->" for i in range(7)]
+            return "# Lessons\n" + "\n".join(lines) + "\n"
+
+        managed = read_only_dir("managed", {"lessons.md": lessons("operator")})
+        _write(g, {"lessons.md": lessons("person")})
+        prompt = await _managed_cortex(dirs, managed).build_memory_context("hola")
+        for label in ("operator", "person"):
+            for i in range(7):
+                assert f"{label} lesson {i} " in prompt
+
+    async def test_operator_when_rules_go_through_the_same_filter(self, dirs, read_only_dir):
+        """All three tiers' filters run in one gather, not one after another."""
+        def when_rules(label: str) -> str:
+            lines = "\n".join(f"- {label}: {e.text}" for e in _when_engrams(12))
+            return f"## When\n{lines}\n"
+
+        managed = read_only_dir("managed", {"rules.md": when_rules("operator")})
+        for d, label in zip(dirs, ("global", "project")):
+            _write(d, {"rules.md": when_rules(label)})
+
+        in_flight = peak = 0
+
+        class _SlowLLM:
+            async def code(self, **kwargs):
+                from anton.core.llm.provider import LLMResponse, Usage
+
+                nonlocal in_flight, peak
+                in_flight += 1
+                peak = max(peak, in_flight)
+                await asyncio.sleep(0.01)
+                in_flight -= 1
+                return LLMResponse(content="", usage=Usage())
+
+        cortex = _managed_cortex(dirs, managed, llm_client=_SlowLLM())
+        prompt = await cortex.build_memory_context("do the august campaign")
+        assert peak == 3
+        # An empty answer keeps every rule.
+        assert prompt.index("## Operator Memory — Rules") < prompt.index("## Your Memory — Global Rules")
+
+    async def test_long_operator_when_rules_are_filtered(
+        self, dirs, read_only_dir, captured_events
+    ):
+        rules = _when_engrams(12)
+        lines = "\n".join(f"- {e.text}" for e in rules)
+        managed = read_only_dir(
+            "managed", {"rules.md": f"## Always\n- Keep it short\n## When\n{lines}\n"}
+        )
+        llm = _FakeLLM(content="\n".join(f"- {rules[i].text}" for i in (0, 1)))
+
+        cortex = _managed_cortex(dirs, managed, llm_client=llm)
+        prompt = await cortex.build_memory_context("do the august campaign")
+
+        assert llm.calls == 1
+        assert "- Keep it short" in prompt
+        assert rules[0].text in prompt and rules[1].text in prompt
+        assert rules[2].text not in prompt
+
+    async def test_an_empty_operator_tier_makes_no_model_call(
+        self, dirs, read_only_dir, captured_events
+    ):
+        g, _ = dirs
+        lines = "\n".join(f"- {e.text}" for e in _when_engrams(12))
+        _write(g, {"rules.md": f"## When\n{lines}\n"})
+        managed = read_only_dir("managed", {})
+        llm = _FakeLLM(content="")
+
+        await _managed_cortex(dirs, managed, llm_client=llm).build_memory_context("go")
+
+        assert llm.calls == 1  # the person's global tier only
+        assert len(captured_events) == 1
+
+    async def test_encode_never_writes_the_managed_folder(self, dirs, managed):
+        g, p = dirs
+        before = _snapshot(managed)
+        engrams = [
+            Engram(text="Name: Ada", kind="profile", scope="global"),
+            Engram(text="Timezone: PST", kind="profile", scope="project"),
+            *(
+                Engram(
+                    text=f"{kind} rule for {scope}", kind=kind, scope=scope,
+                    confidence="high", source="user",
+                )
+                for kind in ("always", "never", "when")
+                for scope in ("global", "project")
+            ),
+            *(
+                Engram(text=f"lesson for {scope}", kind="lesson", scope=scope)
+                for scope in ("global", "project")
+            ),
+        ]
+
+        await _managed_cortex(dirs, managed).encode(engrams)
+
+        assert _snapshot(managed) == before
+        profile = (g / "profile.md").read_text()
+        assert "Name: Ada" in profile and "Timezone: PST" in profile
+        for scope, folder in (("global", g), ("project", p)):
+            rules = (folder / "rules.md").read_text()
+            for kind in ("always", "never", "when"):
+                assert f"{kind} rule for {scope}" in rules
+            assert f"lesson for {scope}" in (folder / "lessons.md").read_text()
+
+    async def test_compaction_and_vacuum_never_touch_the_managed_folder(
+        self, dirs, read_only_dir
+    ):
+        g, _ = dirs
+        many = "# Lessons\n" + "".join(
+            f"- Managed fact {i} <!-- ts:2026-10-01 -->\n" for i in range(25)
+        )
+        managed = read_only_dir("managed", {"lessons.md": many})
+        before = _snapshot(managed)
+
+        cortex = _managed_cortex(dirs, managed, llm_client=_CompactionLLM(keep=[1]))
+        # The operator's entries don't count toward the person's threshold.
+        assert cortex.needs_compaction() is False
+
+        _write(g, {"lessons.md": many.replace("Managed", "Person")})
+        await cortex.compact_all()
+        assert len(Hippocampus(g).get_lessons()) == 1  # compaction did run
+
+        _write(g, {"lessons.md": many.replace("Managed", "Person")})
+        await cortex.vacuum()
+        assert len(Hippocampus(g).get_lessons()) == 1
+
+        assert _snapshot(managed) == before
+
+    def test_the_profile_move_targets_global_never_managed(self, dirs, managed, caplog):
+        g, p = dirs
+        Hippocampus(p).rewrite_identity(["Timezone: PST"])
+        before = _snapshot(managed)
+
+        with caplog.at_level(logging.WARNING, logger="anton.core.memory.cortex"):
+            _managed_cortex(dirs, managed)
+
+        assert _snapshot(managed) == before
+        assert "Timezone: PST" in (g / "profile.md").read_text()
+        assert not (p / "profile.md").exists()
+        assert [r for r in caplog.records if r.name == "anton.core.memory.cortex"] == []
+
+    async def test_a_cerebellum_lesson_lands_in_the_project_tier(self, dirs, managed):
+        _, p = dirs
+        before = _snapshot(managed)
+        llm = MagicMock()
+        llm.generate_object_code = AsyncMock(
+            return_value=_DiffPassResult(
+                lessons=[_LessonDraft(text="Check a column exists before filtering", topic="pandas")]
+            )
+        )
+        cerebellum = Cerebellum(cortex=_managed_cortex(dirs, managed), llm=llm)
+
+        await cerebellum.on_post_execute(
+            Cell(code="df[df.x > 1]", stdout="", stderr="", error="KeyError: 'x'")
+        )
+        await cerebellum.flush()
+
+        assert "Check a column exists before filtering" in (p / "lessons.md").read_text()
+        assert _snapshot(managed) == before
+
+    async def test_memorize_writes_the_persons_tiers(self, dirs, managed):
+        g, p = dirs
+        before = _snapshot(managed)
+        session = SimpleNamespace(_cortex=_managed_cortex(dirs, managed), _memory_writes=set())
+        session._track_memory_write = types.MethodType(ChatSession._track_memory_write, session)
+        session.settle_memory_writes = types.MethodType(ChatSession.settle_memory_writes, session)
+
+        result = await handle_memorize(session, {"entries": [
+            {"text": "Answer in Spanish", "kind": "always", "scope": "global"},
+            {"text": "Deploy on green only", "kind": "always", "scope": "project"},
+            {"text": "Name: Ada", "kind": "profile", "scope": "global"},
+            {"text": "Reports go out on Mondays", "kind": "lesson", "scope": "project"},
+        ]})
+        await session.settle_memory_writes()
+
+        assert result.ok is True
+        assert "Answer in Spanish" in (g / "rules.md").read_text()
+        assert "Deploy on green only" in (p / "rules.md").read_text()
+        assert "Name: Ada" in (g / "profile.md").read_text()
+        assert "Reports go out on Mondays" in (p / "lessons.md").read_text()
+        assert _snapshot(managed) == before

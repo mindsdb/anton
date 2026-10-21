@@ -22,6 +22,7 @@ from anton.core.artifacts.internal_files import (
     PUBLISHED_FILENAME,
     REVISIONS_DIRNAME,
     STATE_SNAPSHOT_FILENAME,
+    is_bytecode_name,
 )
 from anton.core.artifacts.models import Artifact, artifact_key as artifact_key_for
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
@@ -237,9 +238,10 @@ def _bundle_entries(
     the caller reads the resolved file, the one these checks were made on.
 
     Skipped: non-files, files written or resolving outside *root* (a symlink
-    must not publish what it points to), and files with a *skip* name on the
-    path as written or as resolved. Names match case-insensitively because on
-    macOS `.PUBLISHED.json` opens `.published.json`.
+    must not publish what it points to), files with a *skip* name on the
+    path as written or as resolved, and Python bytecode (`is_bytecode_name`)
+    on either path. Names match case-insensitively because on macOS
+    `.PUBLISHED.json` opens `.published.json`.
     """
     real_root = root.resolve()
     folded = {name.casefold() for name in skip}
@@ -254,7 +256,7 @@ def _bundle_entries(
             continue
         rel = f.relative_to(root)
         parts = rel.parts + target.relative_to(real_root).parts
-        if not any(part.casefold() in folded for part in parts):
+        if not any(part.casefold() in folded or is_bytecode_name(part) for part in parts):
             yield target, rel.as_posix()
 
 

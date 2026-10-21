@@ -456,12 +456,29 @@ async def test_handler_serializes_each_status(make_session):
             AskAnswer(status="answered", values=("pg", "my"), text="and duckdb"),
             {"status": "answered", "values": ["pg", "my"], "text": "and duckdb"},
         ),
-        (AskAnswer(status="cancelled"), {"status": "cancelled"}),
-        (AskAnswer(status="timeout"), {"status": "timeout"}),
     ]
     for answer, expected in cases:
         session = _wired(make_session, _RecordingElicitor(answer=answer))
         assert json.loads(await handle_ask_user(session, _TC_INPUT)) == expected
+
+
+@pytest.mark.parametrize("status", ["timeout", "cancelled"])
+async def test_an_unanswered_question_tells_the_model_to_end_its_turn(make_session, status):
+    """An approval question that timed out once ended in the change it asked
+    about: "proceed on a stated assumption" made the assumption the approval."""
+    session = _wired(make_session, _RecordingElicitor(answer=AskAnswer(status=status)))
+    result = json.loads(await handle_ask_user(session, _TC_INPUT))
+    assert result["status"] == status
+    assert "Do not act on an assumed answer" in result["message"]
+    assert "End your turn" in result["message"]
+
+
+def test_the_tool_text_no_longer_says_to_proceed_on_an_assumption():
+    from anton.core.tools.tool_defs import ASK_USER_TOOL
+
+    for text in (ASK_USER_TOOL.description, ASK_USER_TOOL.prompt):
+        assert "proceed on an assumption" not in text
+        assert "End your turn" in text or "end your turn" in text
 
 
 async def test_handler_maps_internal_statuses_onto_error(make_session):

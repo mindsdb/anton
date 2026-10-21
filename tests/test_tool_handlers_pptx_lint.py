@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from anton.core.artifacts.xlsx_office_check import FileLoadFinding
-from anton.core.tools.tool_handlers import lint_changed_artifact_files
+from anton.core.tools.tool_handlers import ArtifactFiles, lint_changed_artifact_files, snapshot_existing_artifacts
 from tests.ooxml_fixtures import minimal_pptx_parts, write_minimal_docx, write_minimal_pptx, write_package
 
 
@@ -45,7 +45,7 @@ def test_truncated_deck_in_a_changed_artifact_is_flagged(store: _FakeStore, tmp_
     folder = _make_artifact(store, "synthesis-abc12345")
     (folder / "synthesis.pptx").write_bytes(good[: len(good) // 2])
 
-    messages = lint_changed_artifact_files(store, {"synthesis-abc12345": 0.0})
+    messages = lint_changed_artifact_files(store, {"synthesis-abc12345": ArtifactFiles()}).messages
 
     assert len(messages) == 1
     assert messages[0].startswith("synthesis-abc12345/synthesis.pptx")
@@ -59,7 +59,7 @@ def test_missing_slide_part_is_flagged(store: _FakeStore):
     folder = _make_artifact(store, "deck-abc12345")
     write_package(folder / "deck.pptx", parts)
 
-    messages = lint_changed_artifact_files(store, {"deck-abc12345": 0.0})
+    messages = lint_changed_artifact_files(store, {"deck-abc12345": ArtifactFiles()}).messages
 
     assert messages
     assert all(m.startswith("deck-abc12345/deck.pptx") for m in messages)
@@ -72,18 +72,18 @@ def test_valid_deck_with_no_office_produces_no_messages(store: _FakeStore):
     folder = _make_artifact(store, "deck-abc12345")
     write_minimal_pptx(folder / "deck.pptx")
 
-    assert lint_changed_artifact_files(store, {"deck-abc12345": 0.0}) == []
+    assert lint_changed_artifact_files(store, {"deck-abc12345": ArtifactFiles()}).messages == []
 
 
 def test_office_refusal_of_a_well_formed_deck_still_surfaces(monkeypatch, store: _FakeStore):
     monkeypatch.setattr(
         "anton.core.artifacts.office_open_check.check_opens_via_office",
-        lambda _path: [FileLoadFinding(detail="general input/output error")],
+        lambda _path, *, cell_sandbox: [FileLoadFinding(detail="general input/output error")],
     )
     folder = _make_artifact(store, "deck-abc12345")
     write_minimal_pptx(folder / "deck.pptx")
 
-    messages = lint_changed_artifact_files(store, {"deck-abc12345": 0.0})
+    messages = lint_changed_artifact_files(store, {"deck-abc12345": ArtifactFiles()}).messages
 
     assert len(messages) == 1
     assert "LibreOffice could not open this file" in messages[0]
@@ -95,12 +95,12 @@ def test_oracle_is_skipped_when_the_structure_is_already_broken(monkeypatch, sto
     calls: list[Path] = []
     monkeypatch.setattr(
         "anton.core.artifacts.office_open_check.check_opens_via_office",
-        lambda path: calls.append(path) or [],
+        lambda path, *, cell_sandbox: calls.append(path) or [],
     )
     folder = _make_artifact(store, "deck-abc12345")
     (folder / "deck.pptx").write_text("not a zip")
 
-    assert lint_changed_artifact_files(store, {"deck-abc12345": 0.0})
+    assert lint_changed_artifact_files(store, {"deck-abc12345": ArtifactFiles()}).messages
     assert calls == []
 
 
@@ -108,7 +108,7 @@ def test_broken_docx_is_flagged_too(store: _FakeStore):
     folder = _make_artifact(store, "report-abc12345")
     (folder / "report.docx").write_text("not a zip")
 
-    messages = lint_changed_artifact_files(store, {"report-abc12345": 0.0})
+    messages = lint_changed_artifact_files(store, {"report-abc12345": ArtifactFiles()}).messages
 
     assert len(messages) == 1
     assert messages[0].startswith("report-abc12345/report.docx")
@@ -118,7 +118,7 @@ def test_valid_docx_produces_no_messages(store: _FakeStore):
     folder = _make_artifact(store, "report-abc12345")
     write_minimal_docx(folder / "report.docx")
 
-    assert lint_changed_artifact_files(store, {"report-abc12345": 0.0}) == []
+    assert lint_changed_artifact_files(store, {"report-abc12345": ArtifactFiles()}).messages == []
 
 
 def test_skips_decks_the_cell_did_not_touch(store: _FakeStore):
@@ -126,4 +126,4 @@ def test_skips_decks_the_cell_did_not_touch(store: _FakeStore):
     deck = folder / "deck.pptx"
     deck.write_text("not a zip")
 
-    assert lint_changed_artifact_files(store, {"deck-abc12345": deck.stat().st_mtime}) == []
+    assert lint_changed_artifact_files(store, snapshot_existing_artifacts(store)).messages == []

@@ -512,3 +512,28 @@ async def test_only_cells_that_ran_are_recorded_for_the_data_notes(monkeypatch):
     # The model still sees every result, refusal included — only the notes skip it.
     result_blocks = state.messages[2]["content"]
     assert len(result_blocks) == 4
+
+
+async def test_a_cell_that_left_out_action_is_recorded_and_verifies_its_source(monkeypatch):
+    """A call with `code` and no `action` runs as `exec`: its cell goes into
+    the data notes, and the source it ran against counts as verified."""
+    from anton.core.tools.registry import ToolOutcome
+
+    async def fake_handle_scratchpad(session, inp):
+        return ToolOutcome(content="[output] 504 rows", ok=True)
+
+    monkeypatch.setattr(
+        "anton.core.tools.tool_handlers.handle_scratchpad", fake_handle_scratchpad
+    )
+    session = _session_with_plan_sequence(
+        _response(tool_calls=[_tc("scratchpad", {"name": "hr", "code": "print(2)"})]),
+        _response(tool_calls=[_tc("finish_gathering", {
+            "summary": "ok",
+            "artifact_type": "html-app",
+            "data_sources": ["hr table"],
+        })]),
+    )
+    state = _state(session)
+    await engine.run_gathering_loop(state)
+    assert [(x["code"], x["output"]) for x in state.scratchpad_execs] == [("print(2)", "[output] 504 rows")]
+    assert state.unverified_sources == []

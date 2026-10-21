@@ -243,7 +243,7 @@ async def test_success_tells_the_agent_not_to_reverify(tmp_path: Path, monkeypat
     slug = _make_artifact(tmp_path)
 
     async def fake_generate(**kw):
-        return {"files_written": ["backend.py"], "summary": "ok", "trace": []}
+        return {"files_written": ["backend.py"], "summary": "ok", "trace": [], "verified_in_browser": True}
 
     monkeypatch.setattr(gen_pkg, "generate", fake_generate)
     _, out = await _collect(_session(tmp_path), {"slug": slug, "user_request": "build it", "agent_understanding": "an app"})

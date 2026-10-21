@@ -161,6 +161,18 @@ async def test_show_and_confirm_logs_a_node_per_outcome(monkeypatch):
     trace.node.assert_called_once_with("show_and_confirm", "accepted", detail="user picked accept")
 
 
+async def test_show_and_confirm_timeout_is_unconfirmed_not_cancelled(monkeypatch):
+    """A user who stepped away did not decline: their later Accept on the
+    still-open card has to resume the run, not find it cancelled."""
+    async def fake_elicit(session, request):
+        return AskAnswer(status="timeout")
+
+    monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_elicit)
+    state = _state(Path("/tmp/x"))
+    state.brief = "## Goal\n..."
+    assert await brief.show_and_confirm(state) == "unconfirmed"
+
+
 @pytest.mark.parametrize("status", ["limit", "unavailable", "error"])
 async def test_show_and_confirm_budget_or_channel_failure_is_unconfirmed_not_cancelled(monkeypatch, status):
     async def fake_elicit(session, request):

@@ -18,19 +18,27 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from anton.core.artifacts.xlsx_office_check import FileLoadFinding, _convert, _discover_office
+
+if TYPE_CHECKING:
+    from anton.core.backends.sandbox import CellSandbox
 
 # A PDF export renders every slide, so a long deck on a cold profile can
 # take longer than a recalculation; a timeout is reported as "could not check".
 _TIMEOUT_SECONDS = 30
 
 
-def check_opens_via_office(path: Path) -> list[FileLoadFinding] | None:
+def check_opens_via_office(path: Path, *, cell_sandbox: CellSandbox | None) -> list[FileLoadFinding] | None:
     """Open `path` in headless LibreOffice by exporting it to PDF.
 
     Never raises: any failure of the oracle itself is `None`, never `[]`.
+    Under a sandbox policy (`cell_sandbox` set) it returns `None` without
+    starting LibreOffice, as `check_xlsx_via_office` does.
     """
+    if cell_sandbox is not None:
+        return None
     try:
         return _check(path)
     except Exception:

@@ -13,6 +13,8 @@ from anton.core.backends.wire import (
     MISSING_MODULE_HINT,
     RESULT_START,
     RESULT_END,
+    USAGE_MARKER,
+    USAGE_MARKER_ENV,
     heal_surrogate_source,
 )
 
@@ -140,8 +142,29 @@ _session_notes: list[str] = []
 # resuming the conversation is enough to reach it. A non-dict trips that older loader's
 # `isinstance(ns, dict)` guard instead, so it starts fresh AND says so. Verified against
 # the real staging loader, both ways.
+#
+# Version 3 adds a fourth item: the sorted names of the DS_* connection variables this
+# process started with (ENG-3305). Names only, never values or hashes, because a cell
+# can read this file. A variable can hold a copy of a connection secret, and the next
+# turn's output scrubber knows only the connections that turn still has. So a snapshot
+# that names a DS_* variable this process lacks is deleted unread, and so is one in an
+# older format, which names none.
 _SNAPSHOT_MAGIC = "__anton_snapshot__"
-_SNAPSHOT_VERSION = 2
+_SNAPSHOT_VERSION = 3
+
+# Read once at boot, before any cell runs, so a cell that deletes a DS_* variable from
+# os.environ cannot drop its name from the snapshot.
+_DS_ENV_NAMES = tuple(sorted(name for name in os.environ if name.startswith("DS_")))
+
+_CONNECTION_GONE_NOTE = (
+    "A connection this conversation used is gone, so its saved variables were cleared. "
+    "Every variable from earlier turns is now undefined; rebuild what you need."
+)
+_OLD_FORMAT_NOTE = (
+    "This scratchpad's saved variables were in an older format that does not record "
+    "which connections they came from, so they were cleared. Every variable from "
+    "earlier turns is now undefined; rebuild what you need."
+)
 
 
 def _resolved_workspace() -> str | None:
@@ -199,9 +222,10 @@ def _decode_values(blobs: dict) -> tuple[dict, dict]:
     dropped: dict = {}
     for name, blob in blobs.items():
         if _FILEHANDLE_MARKER in blob:
-            # Snapshots written before ENG-1726 can still hold pickled file handles;
-            # materialising one re-opens the file in its original mode, truncating it
-            # when that mode is 'w'. Refuse to load rather than damage workspace files.
+            # The dump never writes a pickled file handle (ENG-1726), but a snapshot file
+            # can still hold one; materialising it re-opens the file in its original
+            # mode, truncating it when that mode is 'w'. Refuse to load rather than
+            # damage workspace files.
             dropped[name] = "file handle: restoring would re-open (and truncate) the file"
             continue
         try:
@@ -237,6 +261,13 @@ def _dropped_load_note(dropped: dict) -> str:
     )
 
 
+def _discard_snapshot(note: str) -> tuple[dict, str]:
+    """Delete the snapshot file unread and start a fresh namespace, saying why."""
+    with contextlib.suppress(OSError):
+        os.unlink(SESSION_PATH)
+    return {"__builtins__": __builtins__}, note
+
+
 def _load_namespace() -> tuple[dict, str | None]:
     if not PERSIST_SESSION:
         return {"__builtins__": __builtins__}, None
@@ -255,22 +286,25 @@ def _load_namespace() -> tuple[dict, str | None]:
             with open(SESSION_PATH, "rb") as f:
                 raw = dill.load(f)
             if isinstance(raw, tuple) and raw and raw[0] == _SNAPSHOT_MAGIC:
-                if len(raw) != 3 or raw[1] != _SNAPSHOT_VERSION:
+                version = raw[1] if len(raw) > 1 else None
+                if isinstance(version, int) and version < _SNAPSHOT_VERSION:
+                    return _discard_snapshot(_OLD_FORMAT_NOTE)
+                if len(raw) != 4 or version != _SNAPSHOT_VERSION:
                     # A snapshot from a NEWER anton than this one. Refuse it rather
                     # than guess at its shape; the except below reports and starts
                     # fresh, which is the honest degradation.
                     raise TypeError(
                         f"Unsupported scratchpad snapshot version: {raw[1:2]}"
                     )
+                if not set(raw[3]) <= set(_DS_ENV_NAMES):
+                    return _discard_snapshot(_CONNECTION_GONE_NOTE)
                 ns, dropped = _decode_values(raw[2] or {})
             elif not isinstance(raw, dict):
                 raise TypeError("Session file did not contain a namespace dict")
             else:
-                # A snapshot written before this format existed: one stream holding the
-                # real objects. Still readable, so a conversation in flight across the
-                # upgrade keeps its state instead of paying a cold turn. It is
-                # all-or-nothing by construction; the next dump rewrites it as v2.
-                ns, dropped = raw, {}
+                # A snapshot written before the envelope existed: one stream holding
+                # the real objects, with no record of the connections it saw.
+                return _discard_snapshot(_OLD_FORMAT_NOTE)
         ns.setdefault("__builtins__", __builtins__)
         return ns, (_dropped_load_note(dropped) if dropped else None)
     except FileNotFoundError:
@@ -367,7 +401,7 @@ def _encode_values(payload: dict) -> tuple[dict, list]:
 
 def _write_snapshot(blobs: dict, tmp_path: str) -> None:
     """Serialise the snapshot envelope to `tmp_path`, aborting past the size cap."""
-    envelope = (_SNAPSHOT_MAGIC, _SNAPSHOT_VERSION, blobs)
+    envelope = (_SNAPSHOT_MAGIC, _SNAPSHOT_VERSION, blobs, _DS_ENV_NAMES)
     with open(tmp_path, "wb") as f:
         # _CappedWriter still guards the envelope overhead on top of the value bytes
         # already counted in `_encode_values`.
@@ -488,9 +522,20 @@ if _scratchpad_model:
             set_trace_context,
         )
 
+        _send_usage = os.environ.get(USAGE_MARKER_ENV) == "1"
+
+        def _send_usage_to_host(record):
+            # One locked line, like every other _real_stdout writer (see _wire_lock).
+            with _wire_lock:
+                _real_stdout.write(USAGE_MARKER + " " + json.dumps(record, default=str) + "\n")
+                _real_stdout.flush()
+
         def _new_llm_provider():
             """Build a provider from the pad's model settings. The only place one is built."""
-            return _ProviderClass(**_llm_provider_kwargs)
+            provider = _ProviderClass(**_llm_provider_kwargs)
+            if _send_usage:
+                provider.usage_sink = _send_usage_to_host
+            return provider
 
         # Built at boot so a bad setting fails here, leaving the helpers
         # undefined, and so web_search() can ask native_web_tools() without a

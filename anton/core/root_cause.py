@@ -132,6 +132,8 @@ _SENTINEL_REASONS = {
     # The agent passed bad or missing arguments — it can fix these itself.
     "scratchpad_empty_code": (TIER_SELF, "empty_code"),
     "scratchpad_missing_name": (TIER_SELF, "missing_name"),
+    # No `action` and no `code`, or an action the tool does not have.
+    "scratchpad_unknown_action": (TIER_SELF, "invalid_argument"),
     "missing_name": (TIER_SELF, "missing_argument"),
     "missing_slug": (TIER_SELF, "missing_argument"),
     "missing_description": (TIER_SELF, "missing_argument"),
@@ -142,10 +144,16 @@ _SENTINEL_REASONS = {
     # A refused package spec (flag/URL/path-shaped entry) is the agent's own
     # bad argument, not an environment wall (ENG-1635).
     "package_install_rejected": (TIER_SELF, "invalid_argument"),
+    # A pad name that leads outside the venvs folder (absolute, `..`, NUL):
+    # the agent's own bad argument, and the message says which part.
+    "scratchpad_invalid_name": (TIER_SELF, "invalid_argument"),
     # The single-scratchpad guard's challenge to a NEW pad name. Guidance the
     # agent acts on by reusing the pad it already has (the outcome is even
     # `ok=True`), so it is the agent's own argument choice, never a wall.
     "new_scratchpad_challenged": (TIER_SELF, "invalid_argument"),
+    # A cell held for the user's approval and not approved. The user's call,
+    # never an environment wall; the model is told to report it, not retry.
+    "write_not_approved": (TIER_SELF, "invalid_argument"),
     # `read_image`, ENG-2248: both are the agent's own file choice, and both
     # messages tell it what to do instead (use a real image / resize).
     "not_an_image": (TIER_SELF, "invalid_argument"),
@@ -197,6 +205,11 @@ _SENTINEL_REASONS = {
     # A bare `except Exception` around a PIL round-trip: a missing Pillow is a
     # wall, a corrupt BMP is not, and the sentinel cannot tell them apart.
     "bmp_convert_failed": (TIER_UNCLASSIFIED, "unclassified"),
+    # `read_image` once the model provider refused a request carrying a
+    # tool's image and took it without one. The model may take no image
+    # input, or the refusal may have had another cause the provider only
+    # worded around an image, so it stays out of every trip rung.
+    "images_refused": (TIER_UNCLASSIFIED, "unclassified"),
     # MCP connectors (ENG-1816): a rejected/expired token needs a user
     # reconnect, same shape as a 401 (`_STATUS_WALLS["401"] = "auth_missing"`)
     # — the agent cannot fix this by retrying, so it's a genuine wall.

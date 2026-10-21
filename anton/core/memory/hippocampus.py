@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 from typing import Literal
 
-from anton.core.memory.base import Engram
+from anton.core.memory.base import Engram, MemoryPresence
 
 def _entry_text(text: str) -> str:
     """Make `text` safe to store as one entry line, changing nothing else.
@@ -132,6 +132,42 @@ class Hippocampus:
         self._profile_path = base_dir / "profile.md"
         self._rules_path = base_dir / "rules.md"
         self._lessons_path = base_dir / "lessons.md"
+
+    def memory_presence(self) -> MemoryPresence:
+        """Inspect saved content before retrieval filters, without hiding read errors.
+
+        Headings and blank lines alone are empty. Any other saved text counts
+        conservatively as present, including entries the normal parsers omit.
+        Unlike recall methods, a failed read never answers empty. Topic-tagged
+        lessons live in lessons.md; legacy topic files also prevent an empty
+        claim even though recall_topic no longer reads them.
+        """
+        present = False
+        try:
+            paths = [self._profile_path, self._rules_path, self._lessons_path]
+            topics = self._dir / "topics"
+            try:
+                paths.extend(
+                    path for path in topics.iterdir() if path.suffix == ".md"
+                )
+            except FileNotFoundError:
+                if topics.is_symlink():
+                    return "unavailable"
+            for path in paths:
+                try:
+                    content = path.read_text(encoding="utf-8")
+                except FileNotFoundError:
+                    # A broken link is not an empty store whose absence we know.
+                    if path.is_symlink():
+                        return "unavailable"
+                    continue
+                present |= any(
+                    line.strip() and not line.lstrip().startswith("#")
+                    for line in content.splitlines()
+                )
+        except (OSError, UnicodeDecodeError):
+            return "unavailable"
+        return "present" if present else "empty"
 
     def clear(self) -> None:
         for path in (self._profile_path, self._rules_path, self._lessons_path):
@@ -362,11 +398,16 @@ class Hippocampus:
     def recall_scratchpad_wisdom(self, token_budget: int = 2000) -> str:
         """Retrieve procedural knowledge relevant to scratchpad execution.
 
-        Gathers "when" rules + lessons whose text or topic mentions
-        "scratchpad", ordered by confidence tier (high, then medium/unset,
-        then low) and by recency within a tier, then trimmed to token_budget
-        (~4 chars/token — same convention as get_lessons). Injected into tool
-        descriptions so the LLM sees them when composing code.
+        The entries get_scratchpad_wisdom picks, one "- " line each. Injected
+        into tool descriptions so the LLM sees them when composing code.
+        """
+        return "\n".join(f"- {engram.text}" for engram in self.get_scratchpad_wisdom(token_budget))
+
+    def get_scratchpad_wisdom(self, token_budget: int = 2000) -> list[Engram]:
+        """The scratchpad wisdom as Engrams: "when" rules + lessons whose text
+        or topic mentions "scratchpad", ordered by confidence tier (high, then
+        medium/unset, then low) and by recency within a tier, then trimmed to
+        token_budget (~4 chars/token — same convention as get_lessons).
         """
         candidates: list[Engram] = []
 
@@ -396,9 +437,7 @@ class Hippocampus:
             seen_texts.add(engram.text)
             deduped.append(engram)
 
-        kept = _filter_by_token_budget(deduped, token_budget)
-
-        return "\n".join(f"- {engram.text}" for engram in kept)
+        return _filter_by_token_budget(deduped, token_budget)
 
     # ---------- rules -------------------
 
@@ -441,6 +480,9 @@ class Hippocampus:
                 current_kind = stripped[3:].lower()
             elif stripped.startswith("- ") and current_kind:
                 text, meta = _extract_metadata(stripped[2:])
+                # The "## " heading decides the kind, so drop a `kind:` key from
+                # the trailing comment; passing both to Engram raises TypeError.
+                meta.pop("kind", None)
                 if text and current_kind is not None:
                     entries.append(Engram(text=text, kind=current_kind, **meta))
 
