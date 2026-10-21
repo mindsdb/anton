@@ -587,13 +587,15 @@ def test_the_tenants_limits_from_the_wire_bound_the_real_session(tmp_path, monke
     _hermetic_limits_env(monkeypatch)
     line = json.dumps({
         "protocol_version": 1, "conversation_id": "conv_1", "input": "hi",
-        "limits": {"max_tool_rounds": 250, "max_continuations": 10, "max_turn_tokens": 25_000_000},
+        # Unlike both anton's old (25/3/1.25M) and new (250/10/25M) defaults,
+        # so a session that ignored the limits could not pass by accident.
+        "limits": {"max_tool_rounds": 7, "max_continuations": 2, "max_turn_tokens": 4_000_000},
     })
     request = TurnRequestV1.from_json(line)
     session = _real_cloud_session(tmp_path, monkeypatch, limits=request.limits)
-    assert session._max_tool_rounds == 250
-    assert session._max_continuations == 10
-    assert session._max_turn_tokens == 25_000_000
+    assert session._max_tool_rounds == 7
+    assert session._max_continuations == 2
+    assert session._max_turn_tokens == 4_000_000
 
 
 def test_a_turn_without_limits_keeps_antons_defaults(tmp_path, monkeypatch):
