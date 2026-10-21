@@ -10,6 +10,7 @@ import httpx2
 import mcp
 import pytest
 
+import anton.core.mcp.client as client_mod
 from anton.core.mcp.client import McpSession
 from anton.core.mcp.errors import McpPermanentError, McpTransientError
 from anton.core.mcp.wiring import close_mcp_sessions
@@ -416,3 +417,59 @@ async def test_a_close_while_a_call_reopens_a_missing_client_releases_it(stub_mc
 
     assert len(owners) == 1 and owners[0].done()
     assert session._client is None and session._owner is None
+
+
+class _LevelRecorder:
+    """Stands in for the client module's logger, keeping each call's level, line and kwargs."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict]] = []
+
+    def _make(level: str):
+        def record(self, message, *args, **kwargs):
+            self.calls.append((level, message % args if args else message, kwargs))
+
+        return record
+
+    debug = _make("debug")
+    info = _make("info")
+    warning = _make("warning")
+    error = _make("error")
+    exception = _make("exception")
+
+
+async def _drop_then_refuse_reconnect(dropping_url_server, monkeypatch, **session_kwargs) -> _LevelRecorder:
+    """Make one call whose request drops and whose reconnect is refused; return what was logged."""
+    recorder = _LevelRecorder()
+    async with dropping_url_server({1}, refuse_handshake={2}):
+        session = McpSession(url=_STUB_URL, **session_kwargs)
+        await asyncio.wait_for(session.__aenter__(), timeout=5)
+        monkeypatch.setattr(client_mod, "logger", recorder)
+        with pytest.raises(McpTransientError):
+            await _call_in_child_task(session, 1, 2)
+        await asyncio.wait_for(session.__aexit__(None, None, None), timeout=5)
+    return recorder
+
+
+async def test_a_redacting_session_logs_retry_failures_by_class_only(dropping_url_server, monkeypatch):
+    """A Genie session's transport errors can carry request detail, so its
+    retry and reconnect lines name exception classes only, without a traceback."""
+    recorder = await _drop_then_refuse_reconnect(dropping_url_server, monkeypatch, redact_errors=True)
+
+    retry_lines = [call for call in recorder.calls if "MCP tool add" in call[1]]
+    assert [level for level, _, _ in retry_lines] == ["info", "warning"]
+    for _, line, kwargs in retry_lines:
+        assert "simulated" not in line
+        assert "exc_info" not in kwargs
+    assert retry_lines[0][1] == "MCP tool add: transport failure, reconnecting and retrying once: McpTransientError"
+    assert retry_lines[1][1].startswith("MCP tool add: reconnect failed after a transport failure: ")
+
+
+async def test_a_default_session_keeps_its_retry_log_lines(dropping_url_server, monkeypatch):
+    """HubSpot and Notion keep the error text and the reconnect traceback."""
+    recorder = await _drop_then_refuse_reconnect(dropping_url_server, monkeypatch)
+
+    retry_lines = [(level, line) for level, line, _ in recorder.calls if "MCP tool add" in line]
+    assert retry_lines[0][0] == "info"
+    assert retry_lines[0][1].startswith("MCP tool add: transport failure, reconnecting and retrying once: ")
+    assert retry_lines[1] == ("exception", "MCP tool add: reconnect failed after a transport failure")

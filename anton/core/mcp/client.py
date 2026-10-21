@@ -67,10 +67,14 @@ class McpSession:
         access_token: str | None = None,
         server: Any | None = None,
         read_timeout_seconds: float = 30.0,
+        redact_errors: bool = False,
     ) -> None:
         """Store the target; nothing connects until `__aenter__`.
 
-        Raises `ValueError` unless exactly one of `url` or `server` is given.
+        `redact_errors` makes every error this session logs, and every error
+        `close_mcp_sessions` logs for it, name exception classes only, with no
+        message or traceback: set it when the endpoint's errors can carry a
+        secret. Raises `ValueError` unless exactly one of `url` or `server` is given.
         """
         if (url is None) == (server is None):
             raise ValueError("McpSession needs exactly one of `url` or `server`")
@@ -78,6 +82,7 @@ class McpSession:
         self._access_token = access_token
         self._server = server
         self._read_timeout_seconds = read_timeout_seconds
+        self.redact_errors = redact_errors
         self._http_client: httpx2.AsyncClient | None = None
         self._client: mcp.Client | None = None
         self._owner: asyncio.Task[BaseException | None] | None = None
@@ -365,11 +370,20 @@ class McpSession:
                     last_error = exc
                 if attempt == 2:
                     break
-                logger.info("MCP tool %s: transport failure, reconnecting and retrying once: %s", name, last_error)
+                logger.info(
+                    "MCP tool %s: transport failure, reconnecting and retrying once: %s",
+                    name,
+                    _describe(last_error) if self.redact_errors else last_error,
+                )
                 try:
                     await self._reconnect(client)
-                except Exception:
-                    logger.exception("MCP tool %s: reconnect failed after a transport failure", name)
+                except Exception as exc:
+                    if self.redact_errors:
+                        logger.warning(
+                            "MCP tool %s: reconnect failed after a transport failure: %s", name, _describe(exc)
+                        )
+                    else:
+                        logger.exception("MCP tool %s: reconnect failed after a transport failure", name)
                     break
         assert last_error is not None
         raise last_error

@@ -472,3 +472,49 @@ async def test_an_mcp_listing_failure_keeps_its_traceback_log(monkeypatch, stub_
     assert [(level, line) for level, line, _ in recorder.calls] == [
         ("exception", "discover_mcp_tools: tool discovery failed for hubspot/acme")
     ]
+
+
+async def test_only_a_genie_session_redacts_its_errors(genie_vault, minted, monkeypatch, stub_mcp_server):
+    """Discovery marks the Genie session, whose errors can carry its token, and leaves HubSpot's as it was."""
+    flags: dict[str, bool] = {}
+
+    def recording_factory(*, url=None, access_token=None, redact_errors=False, **kwargs):
+        flags["genie" if url and HOST in url else "hubspot"] = redact_errors
+        return McpSession(server=stub_mcp_server, redact_errors=redact_errors)
+
+    monkeypatch.setattr(wiring, "McpSession", recording_factory)
+    genie_vault.save("hubspot", "crm", {"_method": "mcp", "access_token": "tok"})
+    _, sessions = await asyncio.wait_for(
+        wiring.discover_mcp_tools_async(
+            genie_vault, [{"engine": "databricks", "name": "genie-1"}, {"engine": "hubspot", "name": "crm"}]
+        ),
+        timeout=5,
+    )
+    await asyncio.wait_for(wiring.close_mcp_sessions(sessions), timeout=5)
+
+    assert flags == {"genie": True, "hubspot": False}
+
+
+class _FailingClose:
+    """A session whose close raises an error carrying a secret detail."""
+
+    def __init__(self, *, redact_errors: bool) -> None:
+        self.redact_errors = redact_errors
+
+    async def __aexit__(self, *exc_info) -> None:
+        raise ConnectionError("close failed with a secret detail")
+
+
+async def test_closing_a_redacting_session_logs_the_class_only(monkeypatch):
+    recorder = CallRecorder()
+    monkeypatch.setattr(wiring, "logger", recorder)
+
+    await asyncio.wait_for(
+        wiring.close_mcp_sessions([_FailingClose(redact_errors=True), _FailingClose(redact_errors=False)]),
+        timeout=5,
+    )
+
+    assert recorder.calls == [
+        ("warning", "close_mcp_sessions: error closing an MCP session: ConnectionError", {}),
+        ("exception", "close_mcp_sessions: error closing an MCP session", {}),
+    ]

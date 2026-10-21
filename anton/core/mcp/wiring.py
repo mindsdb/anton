@@ -166,7 +166,7 @@ async def _discover_one(
             logger.warning("discover_mcp_tools: no access token for %s/%s", engine, name)
         return [], None
 
-    mcp_session = McpSession(url=endpoint.url, access_token=endpoint.access_token)
+    mcp_session = McpSession(url=endpoint.url, access_token=endpoint.access_token, redact_errors=genie)
     try:
         await mcp_session.__aenter__()
     except Exception as exc:
@@ -210,12 +210,16 @@ def discover_mcp_tools(
 async def close_mcp_sessions(sessions: list[McpSession]) -> None:
     """Close every session `discover_mcp_tools[_async]` opened. Best-effort:
     one session failing to close cleanly must not stop the others, or mask
-    whatever the turn was already tearing down for."""
+    whatever the turn was already tearing down for. A session opened with
+    `redact_errors` is logged by exception class only."""
     for session in sessions:
         try:
             await session.__aexit__(None, None, None)
-        except Exception:
-            logger.exception("close_mcp_sessions: error closing an MCP session")
+        except Exception as exc:
+            if session.redact_errors:
+                logger.warning("close_mcp_sessions: error closing an MCP session: %s", type(exc).__name__)
+            else:
+                logger.exception("close_mcp_sessions: error closing an MCP session")
 
 
 async def call_mcp_tool(engine: str, access_token: str, tool_name: str, **kwargs: Any) -> str | list[dict]:
