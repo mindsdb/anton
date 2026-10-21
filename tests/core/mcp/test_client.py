@@ -490,3 +490,36 @@ async def test_a_default_session_keeps_its_retry_log_lines(dropping_url_server, 
     assert retry_lines[0][0] == "info"
     assert retry_lines[0][1].startswith("MCP tool add: transport failure, reconnecting and retrying once: ")
     assert retry_lines[1] == ("exception", "MCP tool add: reconnect failed after a transport failure")
+
+
+@pytest.mark.parametrize("redact_errors", [False, True])
+async def test_a_close_during_a_retry_reconnect_is_not_logged_as_a_failure(
+    dropping_url_server, monkeypatch, redact_errors
+):
+    """The turn ends while a dropped call is reconnecting. The call still ends
+    in `McpTransientError`, but the reconnect is logged at debug, not as a failure."""
+    recorder = _LevelRecorder()
+    async with dropping_url_server({1}):
+        session = McpSession(url=_STUB_URL, redact_errors=redact_errors)
+        await asyncio.wait_for(session.__aenter__(), timeout=5)
+        monkeypatch.setattr(client_mod, "logger", recorder)
+        real_connect = session._connect
+        entered, gate = asyncio.Event(), asyncio.Event()
+
+        async def held_connect() -> None:
+            """Hold the reconnect until the test has closed the session."""
+            entered.set()
+            await gate.wait()
+            await real_connect()
+
+        monkeypatch.setattr(session, "_connect", held_connect)
+        call = asyncio.create_task(_call_in_child_task(session, 1, 2))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        await asyncio.wait_for(session.__aexit__(None, None, None), timeout=5)
+        gate.set()
+        with pytest.raises(McpTransientError):
+            await call
+
+    lines = [(level, line) for level, line, _ in recorder.calls if "reconnect" in line]
+    assert ("debug", "MCP tool add: session closed during the reconnect") in lines
+    assert not [level for level, _ in lines if level in ("warning", "error", "exception")]

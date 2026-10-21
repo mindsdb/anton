@@ -46,6 +46,10 @@ _HTTP_TIMEOUT_SECONDS = 30.0
 _HTTP_READ_TIMEOUT_SECONDS = 300.0
 
 
+class _ClosedDuringReconnect(RuntimeError):
+    """The session was closed while a reconnect opened a client; expected at turn end."""
+
+
 class McpSession:
     """An open session against one MCP server.
 
@@ -247,8 +251,8 @@ class McpSession:
 
         Call with `_reconnect_lock` held. `__aexit__` does not take the lock, so
         a close that lands during `_connect` finds no client to release; this is
-        the only place left that can. Raises `RuntimeError` in that case, and
-        what `_connect` raises otherwise.
+        the only place left that can. Raises `_ClosedDuringReconnect` (a
+        `RuntimeError`) in that case, and what `_connect` raises otherwise.
         """
         await self._connect()
         if not self._closed:
@@ -256,7 +260,7 @@ class McpSession:
         close_error = await self._close_client()
         if close_error is not None:
             logger.warning("McpSession: closing a client opened after close failed with %s", _describe(close_error))
-        raise RuntimeError("McpSession closed while it reconnected")
+        raise _ClosedDuringReconnect("McpSession closed while it reconnected")
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         """Tear down the session; safe from any task.
@@ -384,6 +388,9 @@ class McpSession:
                 )
                 try:
                     await self._reconnect(client)
+                except _ClosedDuringReconnect:
+                    logger.debug("MCP tool %s: session closed during the reconnect", name)
+                    break
                 except Exception as exc:
                     if self.redact_errors:
                         logger.warning(
