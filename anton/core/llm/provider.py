@@ -1827,12 +1827,17 @@ def _image_too_large(message: object) -> ContentTooLargeError:
     )
 
 
-def _content_rejected() -> ContentValidationError:
-    """The shape refusal, shared by the 400 classifier and the Responses one."""
+def _content_rejected(*, code: str = "content_validation") -> ContentValidationError:
+    """The shape refusal, shared by the 400 classifier and the Responses one.
+
+    The Responses one passes the provider's image code, which names the one
+    image it could not use (`is_image_refusal` reads it).
+    """
     return ContentValidationError(
         "The model provider rejected part of this conversation's content "
         "(an attachment or image in an unsupported format). That content "
-        "will be removed automatically so the conversation can continue."
+        "will be removed automatically so the conversation can continue.",
+        code=code,
     )
 
 
@@ -1919,6 +1924,48 @@ def classify_content_rejection(
     return None
 
 
+# Words a provider's refusal of an image part uses: OpenAI names the part
+# ("image_url is only supported by certain models"), and servers for
+# text-only models name what the model lacks ("not a multimodal model").
+_IMAGE_REFUSAL_WORDS = ("image", "vision", "multimodal", "multi-modal")
+
+
+def is_image_refusal(exc: BaseException) -> bool:
+    """Whether the provider may have refused a request for carrying image
+    parts at all, as it does when the model takes no image input.
+
+    True for the shape rejection ``classify_content_rejection`` raises (a
+    ``ContentValidationError`` with its default code), and for a 400 or 422
+    whose error names an image. The second is how an OpenAI-compatible API
+    refuses an image sent to a model that takes no image input: OpenAI
+    answers chat.completions with "Invalid content type. image_url is only
+    supported by certain models." ``classify_content_rejection`` leaves that
+    400 unnamed on purpose, because its remedy removes every image in the
+    conversation.
+
+    False for a refusal of one image, which says nothing about images in
+    general: ``ContentTooLargeError`` (an image over the provider's size
+    limit), and a Responses API image code (``classify_responses_failure``
+    keeps it on the error), on the error or in a 400's body. False for a
+    ``TransientProviderError`` too, which is a provider fault whatever its
+    text mentions.
+
+    Only "may have": a 400 that merely mentions an image passes. So the
+    caller removes only images it added itself, and treats the refusal as
+    theirs only once the request goes through without them.
+    """
+    if isinstance(exc, (ContentTooLargeError, TransientProviderError)):
+        return False
+    if isinstance(exc, ContentValidationError):
+        return exc.code not in _RESPONSES_IMAGE_CODES
+    if getattr(exc, "status_code", None) not in (400, 422):
+        return False
+    if ProviderErrorBody.parse(getattr(exc, "body", None)).code in _RESPONSES_IMAGE_CODES:
+        return False
+    text = f"{exc} {getattr(exc, 'body', '')}".lower()
+    return any(word in text for word in _IMAGE_REFUSAL_WORDS)
+
+
 # The sentence OpenAI and Azure send when chat.completions refuses function
 # tools for a model that reasons by default, whether or not the request set an
 # effort. Azure documents only this sentence, not the body's `param`.
@@ -1981,6 +2028,8 @@ _RESPONSES_IMAGE_REJECTED_CODES = (
     "unsupported_image_media_type", "empty_image_file",
     "failed_to_download_image", "image_file_not_found",
 )
+# Each names one image the provider could not use (`is_image_refusal`).
+_RESPONSES_IMAGE_CODES = _RESPONSES_IMAGE_TOO_LARGE_CODES + _RESPONSES_IMAGE_REJECTED_CODES
 
 
 def classify_responses_failure(
@@ -2018,7 +2067,7 @@ def classify_responses_failure(
     if code in _RESPONSES_IMAGE_TOO_LARGE_CODES:
         return _image_too_large(message)
     if code in _RESPONSES_IMAGE_REJECTED_CODES:
-        return _content_rejected()
+        return _content_rejected(code=code)
     return None
 
 

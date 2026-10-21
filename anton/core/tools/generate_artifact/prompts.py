@@ -145,20 +145,47 @@ VISUAL DESIGN (for every HTML file you produce):
   System sans-serif font stack, generous padding, responsive layout.
 - STYLING: Tailwind CSS is the recommended way to style the page. Load it
   once in `<head>` via CDN:
-  `<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>`
+  `<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.3"></script>`
   and use utility classes for layout, spacing, typography and colour
   (`bg-[#0d1117] text-[#e6edf3]` for the theme). Hand-written CSS in a
   `<style>` block stays allowed wherever utilities fall short — keyframes,
   chart containers, complex selectors — or when the page is too small to
   need a framework. No other CSS or JS library: the two CDN scripts named in
-  these rules (Tailwind, ECharts) are the ONLY external resources a page
-  may load. Both are fetched every time the page opens, so a page that must
-  work OFFLINE or without external resources (brief or PRD says so) skips
-  Tailwind and styles itself with hand-written CSS.
+  these rules (Tailwind, ECharts) and, for a map or globe, the recipe
+  packages under MAPS AND GLOBES, each at exactly the version shown, are the
+  ONLY external resources a page may load. They are fetched every time the
+  page opens, so a page that must work OFFLINE or without external resources
+  (brief or PRD says so) skips Tailwind and styles itself with hand-written
+  CSS.
 - ALWAYS use Apache ECharts for interactive charts via CDN:
-  `<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>`
+  `<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>`
   Initialise with `echarts.init(dom, 'dark')` and customise background to #0d1117.
   NEVER use Plotly, matplotlib, or other chart libraries unless explicitly asked.
+- MAPS AND GLOBES: ECharts ships no world outline, so a map or globe uses
+  one of these tested recipes, at exactly these versions. Load the world
+  atlas with d3@7.9.0 and topojson-client@3.1.0:
+  `<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>`
+  `<script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js"></script>`
+  `const WORLD_ATLAS = 'https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json';`
+  `d3.json(WORLD_ATLAS).then((world) => { const countries = topojson.feature(world, world.objects.countries); /* draw */ });`
+  Load it with `d3.json`, never `fetch()`: the verifier fails an absolute
+  URL in `fetch()`. Then draw `countries` in one of three ways:
+  - d3 into an `<svg>` (`d3.geoNaturalEarth1().fitSize([w, h], countries)`,
+    `d3.geoPath`);
+  - ECharts: `echarts.registerMap('world', countries)`, then a `map` series
+    with `map: 'world'`;
+  - a globe: globe.gl@2.34.2
+    (`<script src="https://cdn.jsdelivr.net/npm/globe.gl@2.34.2/dist/globe.gl.min.js"></script>`)
+    with `.polygonsData(countries.features)`. It is heavy, so the browser
+    check may run out of time on it and leave the page unverified.
+  Never write GeoJSON into the page by hand: a world outline runs to hundreds
+  of KB. Leaflet, raster map tiles, MapLibre (it needs a web worker) and
+  echarts-gl (it needs `eval`) break the preview policy below.
+- PREVIEW POLICY: the web app preview runs the page in a sandboxed frame
+  under a content security policy that blocks what it does not allow. Build
+  to that policy so the page renders on every deployment: no external
+  stylesheet or web font, no external image or map tile (embed an image as a
+  `data:` URI), no `eval` or `new Function`, and no web workers.
 - Chart type by purpose: line for change over time, bar for comparing
   categories (horizontal when labels are long), stacked bar for composition
   across categories, scatter for the relation between two measures. Pie or
@@ -221,7 +248,10 @@ step and costs a regeneration, unless the item says it is only a warning:
 - Every `z-index` is 1000 or below.
 - Significant block containers (`div`, `section`, `table`, `main`,
   `article`) carry stable `id` attributes — the host app attaches comments
-  to them. A missing `id` is only a warning.\
+  to them. A missing `id` is only a warning.
+- A script from any host but `https://cdn.jsdelivr.net/npm/`, an external
+  stylesheet or an external image is only a warning, but the app preview
+  does not load it: keep styles in `<style>` and embed images as `data:` URIs.\
 """
 
 # The browser gate, one bullet per page kind: the html-app page is loaded
@@ -231,10 +261,19 @@ step and costs a regeneration, unless the item says it is only a warning:
 # speak of a fullstack app, and the failure it can see differs (a local file
 # under file://, a URL of the page's own origin over http).
 _BROWSER_GATE_HTML = """\
-- Where a headless browser is available, the page is also loaded once from
-  disk right after these checks: a console error, a crashed renderer or a
-  request for a local file that does not exist fails the step; a page with
-  no visible text or elements is a warning.\
+- Where a headless browser is available, the page is also loaded once right
+  after these checks, on a deployment that supports it the way the app
+  preview loads it: in a sandboxed frame under the preview's content security
+  policy, at a desktop and a phone width. A console error, an uncaught
+  exception, a
+  crashed renderer, a request for a local file that does not exist, a load
+  the preview's content security policy blocks, a separate file the page asks
+  for (the preview serves only the page itself), a chart, map or canvas that
+  stays blank, or a page wider than the screen fails the step; a page with no
+  visible text or elements is a warning. A library the check cannot load
+  leaves the page unverified, which does not fail the step. A page with
+  many findings gets the first ones listed and a count of more distinct
+  problems: fix the listed ones first.\
 """
 
 _BROWSER_GATE_SERVED = """\
@@ -243,6 +282,22 @@ _BROWSER_GATE_SERVED = """\
   or a request for a URL that failed (a missing asset in `static/`, a
   `fetch()` to a route the backend does not serve) fails the step; a page
   with no visible text or elements is a warning.\
+"""
+
+
+# Follows either browser-gate bullet. The browser check counts console errors,
+# so an error a view catches and only writes into the page never reaches it,
+# and an expected failure that logs one fails a page that works.
+_CAUGHT_ERRORS = """\
+- A view you guard with `try`/`catch` logs what it caught as well as writing
+  a short message into the view:
+  `try { drawMap(el); } catch (e) { console.error(e); el.textContent = 'The map could not load.'; }`.
+  A catch that only writes the message hides the error from the browser
+  check: at most the check reports the view as empty, and it cannot say what
+  broke it. Log with `console.error` only a view that failed to draw. An
+  expected failure stays silent or uses `console.warn`: the guarded storage
+  helper the browser storage note below asks for catches a throw on every
+  load in the preview frame, and a `console.error` there fails the check.\
 """
 
 
@@ -266,7 +321,7 @@ Not checked by the verifier, but the page breaks inside the frame without them:
 def _verifier_contract(*, served: bool) -> str:
     return "## Verifier contract\n" + _VERIFIER_CONTRACT + "\n" + (
         _BROWSER_GATE_SERVED if served else _BROWSER_GATE_HTML
-    ) + "\n\n" + _FRAME_NOTES
+    ) + "\n" + _CAUGHT_ERRORS + "\n\n" + _FRAME_NOTES
 
 
 # ---------------------------------------------------------------------------
@@ -499,7 +554,8 @@ root-relative path instead of `api()`, or one whose `fetch()` names a path
 
 - Single self-contained HTML file: your own CSS in `<style>`, all JS in
   `<script>`. The only external resources are the CDN scripts named in the
-  design rules (Tailwind, ECharts).
+  design rules (Tailwind, ECharts) and, for a map or globe, the recipe
+  packages and world atlas named there.
 - Include the api-base meta tag in `<head>`:
   ```html
   <meta name="api-base" content="">
@@ -593,7 +649,8 @@ def _gen_html_task(target: str, *, fullstack: bool = False) -> str:
 Produce ONE self-contained HTML file named exactly `{target}`: the
 complete frontend of a fullstack app. Inline your own CSS and all JS; the
 only external resources allowed are the Tailwind and ECharts `<script>` tags
-from the CDNs named in the design rules. The backend is generated in parallel
+from the CDNs named in the design rules and, for a map or globe, the recipe
+packages and world atlas named there. The backend is generated in parallel
 and serves the endpoints listed under `## API Specification`: take exact
 paths and response shapes from there and call every one of them through the
 `api()` helper (see Fullstack rules). Embed no data — the page fetches it
@@ -605,9 +662,13 @@ the relative name given there."""
 Produce ONE self-contained HTML file named exactly `{target}`, at the root
 of the artifact folder. Inline your own CSS and all JS and embed all data in
 the file. Do not reference any other file of the artifact, except the assets
-listed under `## Attached files` (already in the folder, referenced by the
-relative name given there); the only external resources allowed are the
-Tailwind and ECharts `<script>` tags from the CDNs named in the design rules."""
+listed under `## Attached files`, by the relative name given there in quotes
+(`<img src="logo.png">`): once you have written the page, the pipeline
+replaces each such reference with the asset itself as a `data:` URI, since
+the app preview shows only the page. The only external resources allowed
+are the Tailwind and ECharts `<script>` tags from the CDNs named in the
+design rules and, for a map or globe, the recipe packages and world atlas
+named there."""
     return f"""\
 You are a single-purpose worker inside an artifact-generation pipeline. This
 step is `generate_frontend`.
@@ -1302,9 +1363,12 @@ any other stack. Describe behaviour, screens, data flow, and endpoints on top of
   an absolute URL anywhere in the spec.
 - Frontend: one self-contained HTML file (`static/index.html` for fullstack
   types) — vanilla JavaScript, Tailwind CSS via CDN for styling (hand-written
-  CSS where needed), Apache ECharts for charts. Both libraries need network
-  access when the page opens; when the PRD requires offline use, the spec
-  says so and the frontend is styled with hand-written CSS only.
+  CSS where needed), Apache ECharts for charts. A map or globe uses the
+  tested recipe: d3@7.9.0 and topojson-client@3.1.0 load world-atlas@2.0.2,
+  drawn with d3, with ECharts, or on a globe with globe.gl@2.34.2. These
+  libraries need network access when the page opens; when the PRD requires
+  offline use, the spec says so and the frontend is styled with hand-written
+  CSS only.
 - Durable state (`fullstack-stateful-app` ONLY): the platform STATE store — a
   document/key-value store keyed by (partition key, sort key) with named
   collections, no scan, no secondary indexes, atomic counters. The spec must

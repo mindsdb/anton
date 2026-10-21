@@ -326,7 +326,7 @@ def test_squash_does_not_truncate_but_normalize_does():
 
 _VERIFIER_FUNCS = (
     "verify_frontend", "verify_frontend_live", "verify_app_live", "_browser_verdict",
-    "evaluate_backend", "verify_backend",
+    "_render_verdict", "evaluate_backend", "verify_backend",
 )
 _ORCHESTRATOR_FUNCS = ("_gen_verify_backend", "_gen_verify_frontend")
 
@@ -392,8 +392,10 @@ RULES: tuple[Rule, ...] = (
          _both(_FRONT_BOTH, "z-index")),
     Rule("warnings", "Significant blocks have no stable `id` attributes.",
          _both(_FRONT_BOTH, "stable `id`")),
-    Rule("warnings", "Library CDN other than ECharts or Tailwind detected: ",
-         _both(_FRONT_BOTH, "ECharts") + _both(_FRONT_BOTH, "Tailwind")),
+    # Matched by host: the preview's content security policy loads scripts
+    # only from cdn.jsdelivr.net and no external stylesheet or image.
+    Rule("warnings", "External resource the app preview does not load: ",
+         _both(_FRONT_BOTH, "the app preview does not load it")),
     # ── verify_frontend_live (html-app, from disk) and verify_app_live
     # (fullstack, from the running backend after run_app — S-02). Each prompt
     # carries its own browser-gate bullet (`_BROWSER_GATE_HTML` /
@@ -408,6 +410,20 @@ RULES: tuple[Rule, ...] = (
          (("frontend", "a URL that failed"),)),
     Rule("warnings", "Loaded in a headless browser, the page rendered no visible text or elements.",
          _both(_FRONT_BOTH, "no visible text")),
+    # ── _render_verdict: the render-check service loads the html-app page the
+    # way the app preview does (srcdoc frame, preview CSP, two viewports). ──
+    Rule("errors", "Loaded in a headless browser, the page broke the app preview's content ",
+         (("html", "content security policy blocks"),)),
+    Rule("errors", "Loaded in a headless browser, the page asked for a separate file, which the ",
+         (("html", "separate file the page asks"),)),
+    Rule("errors", "Loaded in a headless browser, the page threw an uncaught exception: ",
+         (("html", "uncaught exception"),)),
+    Rule("errors", "Loaded in a headless browser, a chart, map or canvas stayed blank: ",
+         (("html", "stays blank"),)),
+    Rule("errors", "Loaded in a headless browser, the page is wider than the screen: ",
+         (("html", "wider than the screen"),)),
+    Rule("errors", "Loaded in a headless browser, the page had ",
+         (("html", "more distinct problems"),)),
     # ── verify_frontend, fullstack only ──
     Rule("errors", 'Missing <meta name="api-base" content=""> (required for fullstack frontends).',
          (("frontend", 'name="api-base"'),)),

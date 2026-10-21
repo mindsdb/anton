@@ -318,6 +318,7 @@ async def test_failed_image_size_code_raises_content_too_large(endpoint, code):
     with pytest.raises(ContentTooLargeError) as info:
         await _stream(endpoint.provider())
     assert "The image is larger than the 20 MB limit." in str(info.value)
+    assert not provider_mod.is_image_refusal(info.value), "one image's size says nothing about images"
 
 
 @pytest.mark.parametrize("code", _IMAGE_REJECTED_CODES)
@@ -326,6 +327,10 @@ async def test_failed_image_code_raises_content_validation(endpoint, code):
     with pytest.raises(ContentValidationError) as info:
         await _stream(endpoint.provider())
     assert not isinstance(info.value, ContentTooLargeError)
+    # The code names the one image the provider could not use, so the session
+    # keeps its render screenshots.
+    assert info.value.code == code
+    assert not provider_mod.is_image_refusal(info.value)
 
 
 async def test_a_filtered_output_still_ends_as_a_stop_reason(endpoint):

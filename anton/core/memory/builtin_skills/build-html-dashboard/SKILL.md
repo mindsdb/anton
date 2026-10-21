@@ -18,7 +18,7 @@ This is a checklist, not a brief — no narrative prose, no design discussion.
 
 BUILD THE DASHBOARD — use multiple scratchpad cells, but produce ONE single self-contained HTML file:
 
-Before the first write, call `create_artifact(type="html-app", name=..., description=..., primary="index.html")` and use the returned `<artifact_path>` for every file you write (the HTML, any sibling data files, images, etc.). All paths below referring to "the output directory" mean `<artifact_path>`. The final dashboard MUST be a single .html file with all data, CSS, and JS inlined, with exactly two exceptions, both covered below: an oversized JSON payload, and binary assets such as an image the user uploaded. Both live as sibling files in the SAME directory as the HTML. Never reference a local file OUTSIDE `<artifact_path>` — browsers block local file:// cross-references across directories, and the publisher will not bundle it.
+Before the first write, call `create_artifact(type="html-app", name=..., description=..., primary="index.html")` and use the returned `<artifact_path>` for every file you write. All paths below referring to "the output directory" mean `<artifact_path>`. The final dashboard MUST be a single .html file with all data, CSS, JS and images inlined, with no exception: the web app preview shows only the page itself, so a separate file next to it (`dashboard_data.js`, `logo.png`) does not load there, whatever its size. Build every page this way so it renders on every deployment. Keep the whole page under 8 MB; a larger page cannot be checked in a browser.
 
   REROUND DISCIPLINE (critical — most "round-cap exhaustion" failures we've seen on real dashboards come from drifting off one or more of these):
   1. ONE scratchpad, ONE name. Pick a name on the first cell (e.g. `dash`) and reuse it for the entire build. Switching names (`build_pres` → `write_html` → `pres1` …) creates *separate isolated environments* — variables in one don't exist in another — and burns rounds on recovery.
@@ -27,17 +27,17 @@ Before the first write, call `create_artifact(type="html-app", name=..., descrip
   4. NEVER re-emit the full HTML mid-build. Append deltas, don't re-print the world. Assembly is a one-line concat at the end, not a re-render of everything you've written so far.
   5. KEEP READS SMALL. To verify what landed, `os.path.getsize(path)` or the `read_text_file` tool with `start_line=-20` — never read a multi-KB HTML whole.
 
-  HOST CONTRACT (critical — the checks `generate_artifact` runs on every page it produces: 1–7 fail the step (`<html lang>` in 1 is not checked), 8–9 are warnings, 10 runs in a headless browser; a hand-built page gets no automatic check, so verify each item yourself before you finish):
+  HOST CONTRACT (critical — the checks `generate_artifact` runs on every page it produces: 1–7 fail the step (`<html lang>` in 1 is not checked), 8–9 are warnings, 10 runs in a headless browser. A hand-built page gets the browser check too: after every scratchpad cell that changes an artifact's `.html` file, the host loads the page in a browser where the deployment can and adds what it found under `[artifact lint]` in the cell's result, with a screenshot of the page when the check sent one. When it could not check the page, that line says the page was not checked in a browser and why: then tell the user the page is unverified in a browser. Items 1–9 are not checked for a hand-built page, so verify them yourself before you finish):
   1. A complete HTML document with an explicit `<body>`...`</body>`, and `<html lang>` set to the language the user writes in (UI text follows it too).
   2. `<meta name="viewport" content="width=device-width, initial-scale=1.0">` in `<head>`.
-  3. No absolute URL in any `fetch()` call. No root-relative path either, in `src`, `href`, `fetch()` or `new EventSource()`: a value that starts with a single `/` (`/logo.png`, `/api/export`) breaks in the app preview and once published, because the page is served under a path prefix that a path from the root drops. Use a relative path for files and links (`logo.png`); in a fullstack app, call the backend through the `api()` helper that build-fullstack-backend defines. `https://`, `//`, `data:`, `blob:`, `#` and `mailto:` values are fine, so `href`/`src` links to external sources stay allowed. Moving the same root-relative path into a JS string does not fix it.
+  3. No absolute URL in any `fetch()` call. A map loads its atlas, `https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json`, with `d3.json(...)` (item 9), not with `fetch()`. No root-relative path either, in `src`, `href`, `fetch()` or `new EventSource()`: a value that starts with a single `/` (`/logo.png`, `/api/export`) breaks in the app preview and once published, because the page is served under a path prefix that a path from the root drops. Use a relative path for a link to another page (`details.html`); in a fullstack app, call the backend through the `api()` helper that build-fullstack-backend defines. `https://`, `//`, `data:`, `blob:`, `#` and `mailto:` values are fine, so `href`/`src` links to external sources stay allowed. Moving the same root-relative path into a JS string does not fix it.
   4. Every opened `<script>` block is closed with `</script>` — an unclosed one silently disables all JS.
   5. The global name `window.__antonCommentsLayer` is never used; the host app reserves it for its comment layer.
   6. No universal `* { ... !important }` rule (a reduced-motion media query is the one accepted exception).
   7. Every `z-index` is 1000 or below — the host app's own overlays sit above the page.
   8. Significant block containers (`div`, `section`, `table`, `main`, `article`) carry stable `id` attributes — the host app attaches comments to them.
-  9. The only external resources are the two CDN scripts named under Visual design (Tailwind, ECharts). Any other library from a CDN is allowed only when the user asked for it.
-  10. Opened in a browser, the page logs no console error and requests no local file that does not exist; it renders visible content without user interaction.
+  9. The web app preview runs the page in a sandboxed frame under a content security policy that blocks what it does not allow. Build to that policy so the page renders on every deployment. Scripts load only from `https://cdn.jsdelivr.net/npm/<package>@<exact version>/...`: pin an exact version, since a floating `@4`, `@5` or `@latest` cannot be checked. Styles are inline only (`<style>` or `style=`): no external stylesheet, so no Leaflet CSS and no web fonts. No external images or map tiles: embed an image as a `data:` URI. No `eval`/`new Function` and no web workers. The default external resources are the two CDN scripts named under Visual design (Tailwind, ECharts); another library only when the user asked for it, from jsDelivr at an exact version. For a map or a globe, use a tested recipe: d3@7.9.0 with topojson-client@3.1.0 and world-atlas@2.0.2, loading `countries-110m.json` with `d3.json` (item 3) and turning it into GeoJSON with `topojson.feature(world, world.objects.countries)`. Draw that GeoJSON with d3 into an `<svg>`; or with ECharts 5.5.1 through `echarts.registerMap(name, geoJson)` and a `map` series; or on a globe with globe.gl@2.34.2 with `polygonsData`. Also tested: three@0.169.0 as an ES module, 3d-force-graph@1.73.4, gsap@3.12.5. Leaflet, raster tiles, MapLibre (it needs a worker) and echarts-gl (it needs `eval`) break that policy, so they do not render in the web app preview.
+  10. Loaded the way the app preview loads it, at a desktop and a phone width, the page logs no console error or uncaught exception, breaks no rule of the preview's content security policy, asks for no separate file, leaves no chart, map or canvas blank, is no wider than the screen, and renders visible content without user interaction. A view you guard with `try`/`catch` logs what it caught as well as writing a short message into the view: `try { drawMap(el); } catch (e) { console.error(e); el.textContent = 'The map could not load.'; }`. A catch that only writes the message hides the error from the check: at most the check reports the view as empty, and it cannot say what broke it. Log with `console.error` only a view that failed to draw. An expected failure stays silent or uses `console.warn`: the storage helper in item 11 catches a throw on every load in the preview frame, and a `console.error` there fails the check.
   Not checked by the pipeline, but the page breaks inside the frame without them:
   11. BROWSER STORAGE (critical): `localStorage` / `sessionStorage` / `indexedDB` / `document.cookie` may be unavailable — the in-app preview runs the page in a sandboxed frame. Never touch them directly during top-level initialisation: a throw there aborts the script before any listener is bound, and the page renders with every control dead. Go through one guarded helper with an in-memory fallback.
   12. LINKS: the page runs inside a frame, in the app preview and on the published link alike. `target="_top"` and `target="_parent"` do not work; give a link to another artifact or an external site `target="_blank"`, or it opens inside the frame.
@@ -59,7 +59,7 @@ Before the first write, call `create_artifact(type="html-app", name=..., descrip
   Combine: `html = html_body.replace('</body>', f'<script>{data_js}{js_charts}</script></body>')` or similar.
 
   SELF-CONTAINED OUTPUT (critical):
-  Prefer inlining everything — CSS in `<style>`, JS in `<script>`, data as JS variables. A single .html file is the most portable and publishable format. Anything larger than 100KB is the exception: write it to a separate file in the SAME directory and reference it with a relative path — a JSON dataset as `<script src="dashboard_data.js">`, a binary asset as `<img src="screenshot.png">`. The publisher auto-bundles sibling files referenced in the HTML, so both keep working after /publish. Never reference files outside the output directory.
+  Inline everything, however large: CSS in `<style>`, JS in `<script>`, data as JS variables, images as `data:` URIs. A big dataset goes into the page as a `const D = ...;` script, not into a `dashboard_data.js` beside it, and an image into an `<img src="data:...">`, not a `screenshot.png` beside it. The web app preview loads only the page itself, so a separate file does not show there. If the data makes the page too heavy, aggregate it in the cell first instead of splitting it out.
 
   UPLOADED IMAGES AND BINARY ASSETS:
   Files the user attached or pasted appear with ABSOLUTE paths in the conversation
@@ -69,30 +69,21 @@ Before the first write, call `create_artifact(type="html-app", name=..., descrip
   to the conversation — never ask for a filesystem path.
 
   Never point the HTML at that original path: it sits outside `<artifact_path>`, and
-  only relative references to files INSIDE that folder are bundled on publish, so the
-  artifact would render locally and break once published. Bring the file in instead —
-  one scratchpad cell, branching on the 100KB rule above, into the folder that holds
-  the primary HTML you're writing (`<artifact_path>` for a standalone dashboard,
-  `<artifact_path>/static/` inside a fullstack build):
+  the web app preview loads only the page itself. Embed the image instead, as a `data:` URI,
+  in one scratchpad cell:
 
-      import base64, mimetypes, os, shutil
+      import base64, mimetypes
       from pathlib import Path
-      name = Path(src).name
-      dest_dir = Path(artifact_path)  # or <artifact_path>/static in a fullstack build
-      if os.path.getsize(src) < 100_000:
-          mime = mimetypes.guess_type(src)[0] or "application/octet-stream"
-          b64 = base64.b64encode(Path(src).read_bytes()).decode()
-          img_src = f"data:{mime};base64,{b64}"
-      else:
-          shutil.copy(src, dest_dir / name)
-          img_src = name
+      mime = mimetypes.guess_type(src)[0] or "application/octet-stream"
+      b64 = base64.b64encode(Path(src).read_bytes()).decode()
+      img_src = f"data:{mime};base64,{b64}"
 
-  A copied sibling MUST be referenced as a literal `src="<name>"` in the HTML. A path
-  assembled in JS at runtime is invisible to the publisher and will not be bundled.
+  A photo of several MB makes the page heavy: shrink it first (Pillow, a smaller
+  width, JPEG) when the page would pass a few MB.
   For uploaded DATA files (CSV/JSON) do not use a data: URI — read them in CELL 1 and
   inline the result as a JS variable like any other dataset.
 
-  WHY: (1) Browsers block local file:// cross-references across directories. (2) Splitting the build across cells catches JS/CSS errors early — if a cell has a syntax issue in a string, you'll see it before the final assembly. (3) Large datasets in single cells timeout. (4) Self-contained files can be published to the web via /publish without missing assets.
+  WHY: (1) The web app preview loads only the page itself: a separate file does not reach it there. (2) Splitting the build across cells catches JS/CSS errors early: if a cell has a syntax issue in a string, you'll see it before the final assembly. (3) Large datasets in single cells timeout. (4) Self-contained files can be published to the web via /publish without missing assets.
 
   PYTHON → JS STRING SAFETY (critical):
   When building JS code inside Python strings, escape sequences get resolved by Python BEFORE writing to the file. This means '\n' in Python becomes a literal newline in the output, which breaks JavaScript string literals. Rules:
@@ -106,8 +97,8 @@ Output format:
 
 Visual design:
 - Make it look good by default. Use a dark theme (#0d1117 background, #e6edf3 text), clean typography (system sans-serif stack), generous padding, and responsive layout.
-- STYLING: Tailwind CSS is the recommended way to style the page. Load it once in `<head>` via CDN: `<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>` and use utility classes for layout, spacing, typography and colour (`bg-[#0d1117] text-[#e6edf3]` for the theme). Hand-written CSS in a `<style>` block stays allowed wherever utilities fall short — keyframes, chart containers, complex selectors — or when the page is too small to need a framework. No other CSS or JS library: the two CDN scripts named in these rules (Tailwind, ECharts) are the ONLY external resources a page may load. Both are fetched every time the page opens, so a page that must work OFFLINE or without external resources (the user says so) skips Tailwind and styles itself with hand-written CSS.
-- ALWAYS use Apache ECharts for interactive charts. Load it via CDN: `<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>`. No Python dependencies needed — just write the HTML with inline JS. Use ECharts' built-in dark theme: `echarts.init(dom, 'dark')`, then customize colors to match #0d1117 background.
+- STYLING: Tailwind CSS is the recommended way to style the page. Load it once in `<head>` via CDN: `<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.3"></script>` and use utility classes for layout, spacing, typography and colour (`bg-[#0d1117] text-[#e6edf3]` for the theme). Hand-written CSS in a `<style>` block stays allowed wherever utilities fall short — keyframes, chart containers, complex selectors — or when the page is too small to need a framework. No other CSS or JS library unless the user asked for one (host contract item 9): the two CDN scripts named in these rules (Tailwind, ECharts), at exactly the versions shown, are the default external resources. Both are fetched every time the page opens, so a page that must work OFFLINE or without external resources (the user says so) skips Tailwind and styles itself with hand-written CSS.
+- ALWAYS use Apache ECharts for interactive charts. Load it via CDN: `<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>`. No Python dependencies needed — just write the HTML with inline JS. Use ECharts' built-in dark theme: `echarts.init(dom, 'dark')`, then customize colors to match #0d1117 background.
 - NEVER use Plotly, matplotlib, or other charting libraries unless the user explicitly asks.
 
 Chart type by purpose (the same rule `generate_artifact` gives its generators):

@@ -14,6 +14,7 @@ from anton.core.tools.tool_handlers import (
     handle_update_artifact_metadata,
 )
 from anton.core.artifacts.listing import FIELDS as ARTIFACT_LIST_FIELDS
+from anton.core.utils.scratchpad import SCRATCHPAD_ACTIONS
 from anton.core.tools.text_file import DEFAULT_LINE_COUNT, MAX_OUTPUT_CHARS
 
 from dataclasses import dataclass, replace
@@ -94,7 +95,12 @@ SCRATCHPAD_TOOL = ToolDef(
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["exec", "view", "reset", "remove", "dump", "install"],
+                "enum": list(SCRATCHPAD_ACTIONS),
+                "description": (
+                    "What to do: `exec` runs `code` in the scratchpad, `view` shows its "
+                    "cells, `dump` renders them as a notebook, `install` installs "
+                    "`packages`, `reset` clears its state and `remove` deletes it."
+                ),
             },
             "name": {"type": "string", "description": "Scratchpad name"},
             "code": {
@@ -327,7 +333,10 @@ LIST_ARTIFACTS_TOOL = ToolDef(
             "fields": {
                 "type": "array",
                 "items": {"type": "string", "enum": list(ARTIFACT_LIST_FIELDS)},
-                "description": "Fields to return instead of the default set; `slug` is always included.",
+                "description": (
+                    "Fields to return instead of the default set. Every artifact is "
+                    "headed by its slug whatever you ask for, so the slug needs no field."
+                ),
             },
             "match": {
                 "type": "array",

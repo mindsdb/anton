@@ -24,8 +24,9 @@ import pytest
 
 from anton.core.artifacts import ArtifactStore
 from anton.core.tools.tool_handlers import (
+    ArtifactFiles,
     lint_changed_artifact_files,
-    snapshot_existing_artifact_mtimes,
+    snapshot_existing_artifacts,
     track_edits_since,
     handle_create_artifact,
     handle_update_artifact_metadata,
@@ -182,11 +183,43 @@ async def test_edit_without_reopening_is_tracked_via_mtime(session, root):
     slug = await _create(session)
     session._artifacts_touched.clear()
 
-    before = snapshot_existing_artifact_mtimes(ArtifactStore(root))
+    before = snapshot_existing_artifacts(ArtifactStore(root))
     # The scratchpad writing straight into the folder.
     index = root / slug / "index.html"
     index.write_text("<html>v2</html>")
     _bump_mtime(index)
+
+    track_edits_since(session, ArtifactStore(root), before)
+
+    assert session._artifacts_touched == {slug}
+
+
+async def test_a_rename_of_an_older_draft_into_place_is_tracked(session, root):
+    """`os.replace` keeps the draft's older mtime, so the folder's newest
+    mtime does not move; the file under `index.html` changed all the same."""
+    slug = await _create(session)
+    (root / slug / "index.html").write_text("<html>v1</html>")
+    draft = root / slug / "draft.html"
+    draft.write_text("<html>v2</html>")
+    os.utime(draft, (1, 1))
+    session._artifacts_touched.clear()
+
+    before = snapshot_existing_artifacts(ArtifactStore(root))
+    os.replace(draft, root / slug / "index.html")
+
+    track_edits_since(session, ArtifactStore(root), before)
+
+    assert session._artifacts_touched == {slug}
+
+
+async def test_a_cell_that_only_deletes_a_file_is_tracked(session, root):
+    slug = await _create(session)
+    (root / slug / "index.html").write_text("<html>v1</html>")
+    (root / slug / "data.js").write_text("window.DATA = [];")
+    session._artifacts_touched.clear()
+
+    before = snapshot_existing_artifacts(ArtifactStore(root))
+    (root / slug / "data.js").unlink()
 
     track_edits_since(session, ArtifactStore(root), before)
 
@@ -200,7 +233,7 @@ async def test_housekeeping_only_mtime_bump_is_not_an_edit(session, root):
     slug = await _create(session)
     session._artifacts_touched.clear()
 
-    before = snapshot_existing_artifact_mtimes(ArtifactStore(root))
+    before = snapshot_existing_artifacts(ArtifactStore(root))
     _bump_mtime(root / slug / "README.md")
 
     track_edits_since(session, ArtifactStore(root), before)
@@ -226,7 +259,7 @@ async def test_non_content_write_is_not_an_edit(session, root, rel):
     slug = await _create(session)
     session._artifacts_touched.clear()
 
-    before = snapshot_existing_artifact_mtimes(ArtifactStore(root))
+    before = snapshot_existing_artifacts(ArtifactStore(root))
     target = root / slug / rel
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("x")
@@ -242,7 +275,7 @@ async def test_content_write_next_to_state_files_is_an_edit(session, root):
     (root / slug / ".anton_state.db").write_text("x")
     session._artifacts_touched.clear()
 
-    before = snapshot_existing_artifact_mtimes(ArtifactStore(root))
+    before = snapshot_existing_artifacts(ArtifactStore(root))
     index = root / slug / "index.html"
     index.write_text("<html>v2</html>")
     _bump_mtime(index)
@@ -257,7 +290,7 @@ async def test_nested_name_matching_a_non_content_name_is_an_edit(session, root)
     slug = await _create(session)
     session._artifacts_touched.clear()
 
-    before = snapshot_existing_artifact_mtimes(ArtifactStore(root))
+    before = snapshot_existing_artifacts(ArtifactStore(root))
     target = root / slug / "static" / "prd.md"
     target.parent.mkdir()
     target.write_text("x")
@@ -281,10 +314,13 @@ def test_lint_walk_skips_revision_blobs(tmp_path, monkeypatch):
     index = folder / "index.html"
     index.write_text("<html></html>")
     monkeypatch.setattr(
-        th, "_artifact_linters", lambda *, cell_sandbox: {".html": lambda p: [f"bad {p.name}"]}
+        th, "_check_pages",
+        lambda store, pages, *, cell_sandbox, screenshot, findings_listed_earlier: th.ArtifactLint(
+            messages=[f"{p.slug}/{p.path.name} — bad {p.path.name}" for p in pages]
+        ),
     )
 
-    messages = lint_changed_artifact_files(Store(), {"art": 0.0})
+    messages = lint_changed_artifact_files(Store(), {"art": ArtifactFiles()}).messages
 
     assert messages == ["art/index.html — bad index.html"]
 
@@ -293,7 +329,7 @@ async def test_edit_without_reopening_stamps_provenance_too(session, root):
     slug = await _create(session)
     session._artifacts_touched.clear()
 
-    before = snapshot_existing_artifact_mtimes(ArtifactStore(root))
+    before = snapshot_existing_artifacts(ArtifactStore(root))
     index = root / slug / "index.html"
     index.write_text("<html>v2</html>")
     _bump_mtime(index)
@@ -307,7 +343,7 @@ async def test_untouched_artifact_is_not_tracked_by_mtime_fallback(session, root
     slug = await _create(session)
     session._artifacts_touched.clear()
 
-    before = snapshot_existing_artifact_mtimes(ArtifactStore(root))
+    before = snapshot_existing_artifacts(ArtifactStore(root))
     # Nothing written this cell — the folder is exactly as it was.
 
     track_edits_since(session, ArtifactStore(root), before)
@@ -319,7 +355,7 @@ async def test_a_slug_that_did_not_exist_before_is_not_claimed_as_an_edit(sessio
     """A folder the scratchpad creates from scratch (bypassing create_artifact
     too) isn't in `before` at all, so the mtime fallback correctly leaves it
     alone — this path only ever claims EDITS to already-existing artifacts."""
-    before: dict[str, float] = {}
+    before: dict[str, ArtifactFiles] = {}
     (root / "brand-new").mkdir(parents=True)
     (root / "brand-new" / "metadata.json").write_text("{}")
     (root / "brand-new" / "index.html").write_text("<html></html>")
@@ -336,7 +372,7 @@ async def test_a_slug_already_tracked_is_not_tracked_again(session, root):
     await handle_update_artifact_metadata(session, {"slug": slug, "primary": "index.html"})
     assert session._artifacts_touched == {slug}
 
-    before = snapshot_existing_artifact_mtimes(ArtifactStore(root))
+    before = snapshot_existing_artifacts(ArtifactStore(root))
     index = root / slug / "index.html"
     index.write_text("<html>v2</html>")
     _bump_mtime(index)

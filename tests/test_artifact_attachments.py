@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from anton.core.artifacts import render_check
 from anton.core.tools.generate_artifact import attachments as att_mod
 from anton.core.tools.generate_artifact import engine, orchestrator, prompts
 from anton.core.tools.generate_artifact.attachments import (
@@ -46,6 +47,17 @@ def _files(tmp_path: Path) -> tuple[Path, Path]:
     png = src / "logo.png"
     png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\0" * 64)
     return csv, png
+
+
+MIB = 1024 * 1024
+
+
+def _sparse_upload(path: Path, *, size: int) -> Path:
+    """An upload of `size` zero bytes that takes no disk space."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as f:
+        f.truncate(size)
+    return path
 
 
 # ── resolve ─────────────────────────────────────────────────────────────────
@@ -182,6 +194,96 @@ def test_stage_is_idempotent(tmp_path: Path):
     assert stage_assets(kept, art, static=False) == ["logo.png"]
 
 
+def test_stage_skips_an_asset_too_large_to_embed_in_the_single_file_page(tmp_path: Path):
+    """The html-app page carries each asset as a base64 `data:` URI, a third
+    larger than the file, so a 7 MB photo would take the page past the render
+    check's limit. It is not copied, and the generator is told not to use it."""
+    photo = _sparse_upload(tmp_path / "uploads" / "photo.jpg", size=7 * MIB)
+    art = tmp_path / "art"
+    art.mkdir()
+    kept, _ = resolve_attachments([str(photo)], workspace=tmp_path)
+    assert stage_assets(kept, art, static=False) == []
+    assert not (art / "photo.jpg").exists()
+    assert kept[0].staged == "" and "embed" in kept[0].skipped
+    text = render_for_generation(kept)
+    assert "NOT available" in text and "Do not reference it" in text
+
+
+def test_stage_still_copies_a_7_mb_asset_for_a_fullstack_app(tmp_path: Path):
+    """A fullstack app's backend serves `static/`, so nothing is embedded and
+    only the copy limit applies."""
+    photo = _sparse_upload(tmp_path / "uploads" / "photo.jpg", size=7 * MIB)
+    art = tmp_path / "art"
+    art.mkdir()
+    kept, _ = resolve_attachments([str(photo)], workspace=tmp_path)
+    assert stage_assets(kept, art, static=True) == ["static/photo.jpg"]
+
+
+def test_stage_counts_every_asset_of_the_page_against_the_embed_limit(tmp_path: Path):
+    first = _sparse_upload(tmp_path / "uploads" / "a.png", size=4 * MIB)
+    second = _sparse_upload(tmp_path / "uploads" / "b.png", size=4 * MIB)
+    art = tmp_path / "art"
+    art.mkdir()
+    kept, _ = resolve_attachments([str(first), str(second)], workspace=tmp_path)
+    assert stage_assets(kept, art, static=False) == ["a.png"]
+    assert kept[1].staged == "" and "embed" in kept[1].skipped
+
+
+def test_the_largest_asset_staged_leaves_room_under_the_render_check_limit(tmp_path: Path):
+    prefix = len("data:image/png;base64,")
+    largest = (att_mod.EMBED_MAX_BYTES - prefix) // 4 * 3
+    # One byte more still adds a whole base64 group, so it no longer fits.
+    for size, fits in ((largest, True), (largest + 1, False), (largest + 3, False)):
+        name = f"logo-{size}.png"
+        src = _sparse_upload(tmp_path / "uploads" / name, size=size)
+        art = tmp_path / f"art-{size}"
+        art.mkdir()
+        kept, _ = resolve_attachments([str(src)], workspace=tmp_path)
+        assert bool(stage_assets(kept, art, static=False)) is fits
+        if fits:
+            markup = f'<img src="{name}">'
+            page = att_mod.embed_assets(markup, kept, art, cell_sandbox=None)
+            uri_bytes = len(page.encode("utf-8")) - len(markup) + len(name)
+            assert uri_bytes <= att_mod.EMBED_MAX_BYTES <= render_check.MAX_PAGE_BYTES - 2 * MIB
+
+
+def test_an_asset_whose_text_lands_exactly_on_the_limit_still_fits(tmp_path: Path, monkeypatch):
+    size = 3 * 1024
+    monkeypatch.setattr(att_mod, "EMBED_MAX_BYTES", len("data:image/png;base64,") + size // 3 * 4)
+    src = _sparse_upload(tmp_path / "uploads" / "logo.png", size=size)
+    art = tmp_path / "art"
+    art.mkdir()
+    kept, _ = resolve_attachments([str(src)], workspace=tmp_path)
+    assert stage_assets(kept, art, static=False) == ["logo.png"]
+
+
+def test_a_skip_names_the_total_with_the_files_before_it(tmp_path: Path):
+    first = _sparse_upload(tmp_path / "uploads" / "a.png", size=4 * MIB)
+    second = _sparse_upload(tmp_path / "uploads" / "b.png", size=4 * MIB)
+    art = tmp_path / "art"
+    art.mkdir()
+    kept, _ = resolve_attachments([str(first), str(second)], workspace=tmp_path)
+    stage_assets(kept, art, static=False)
+    assert "with the files before it" in kept[1].skipped
+
+
+def test_the_page_with_every_staged_asset_embedded_fits_the_render_check(tmp_path: Path):
+    """The page that references every attached asset stays under the render
+    check's limit once the staged ones are embedded. A small asset after a
+    skipped large one still fits."""
+    sizes = {"a.png": 4 * MIB, "b.png": 4 * MIB, "photo.jpg": 7 * MIB, "icon.png": 64 * 1024}
+    uploads = [_sparse_upload(tmp_path / "uploads" / name, size=size) for name, size in sizes.items()]
+    art = tmp_path / "art"
+    art.mkdir()
+    kept, _ = resolve_attachments([str(p) for p in uploads], workspace=tmp_path)
+    staged = stage_assets(kept, art, static=False)
+    markup = "<!doctype html><body>" + "".join(f'<img src="{a.name}">' for a in kept) + "</body>"
+    page = att_mod.embed_assets(markup, kept, art, cell_sandbox=None)
+    assert len(page.encode("utf-8")) <= render_check.MAX_PAGE_BYTES
+    assert staged == ["a.png", "icon.png"]
+    assert render_for_generation(kept).count("Do not reference it") == 2
+
+
 # ── rendering ───────────────────────────────────────────────────────────────
 
 def test_gathering_section_lists_absolute_paths_and_roles(tmp_path: Path):
@@ -260,6 +362,18 @@ def test_stage_step_is_silent_without_attachments(tmp_path: Path):
     st = _state(tmp_path)
     orchestrator._stage_attachments(st)
     assert st.trace == [] and st.files_written == []
+
+
+def test_stage_step_warns_that_an_attached_file_is_not_on_the_page(tmp_path: Path):
+    """The result's `warnings` carry the skip, so the agent tells the user."""
+    photo = _sparse_upload(tmp_path / "uploads" / "photo.jpg", size=7 * MIB)
+    art = tmp_path / "art"
+    art.mkdir()
+    st = _state(tmp_path, artifact_path=art)
+    st.attachments, _ = resolve_attachments([str(photo)], workspace=tmp_path)
+    orchestrator._stage_attachments(st)
+    assert len(st.verify_warnings) == 1
+    assert st.verify_warnings[0].startswith("attached file not on the page: photo.jpg: too large to embed")
 
 
 def test_generator_prompts_allow_only_the_attached_assets_as_local_files():

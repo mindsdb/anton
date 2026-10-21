@@ -15,13 +15,14 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from anton.core.artifacts import html_lint
+from anton.core.artifacts import html_lint, render_check
 from anton.core.artifacts.html_lint import lint_html, lint_url
+from anton.core.artifacts.render_check import RenderFinding
 from anton.core.backends.sandbox import CellSandbox, SandboxedSpawn, cell_sandbox_of
 from anton.core.utils.scratchpad import install_call_failed
 from anton.utils.datasources import scrub_output
 
-from .state import VerifyResult
+from .state import BrowserCheck, VerifyResult
 
 _FETCH_CALL = re.compile(r"""fetch\s*\(\s*(?:api\s*\(\s*)?['"]([^'"]+)['"]""")
 # Every literal `fetch()` target, template literals included: the `api()`
@@ -97,7 +98,6 @@ def _fetch_path_key(raw: str) -> str | None:
         return None
     key = normalise_api_path(target)
     return None if key == _HEALTH_PATH else key
-_BARE_SCRIPT_SRC = re.compile(r"""<script[^>]*\bsrc\s*=\s*['"]([^'"]+)['"]""", re.I)
 # The body of a tag, scanned for attributes in a second step so that every
 # `src`/`href` of one tag is seen. Two steps also keep it linear: a single
 # `<[a-z][^>]*?…(src|href)` pattern rescanned to the next `>` from every `<b`
@@ -154,11 +154,22 @@ _HINT_API_CALL = (
     "new EventSource(api('/api/stream'))."
 )
 _HINT_EMBED = "Embed the data in the page instead of fetching it."
-# Libraries the design rules let a page load from the network. Matched as
-# substrings of the script URL so a different CDN host or version still
-# passes; anything else is advisory-flagged, since the prompt allows other
-# libraries only when the user asked for them.
-_ALLOWED_CDN_LIBRARIES = ("echarts", "tailwindcss")
+# The one host the app preview's content security policy lets a page load a
+# script from (cowork's web shell, `script-src`). Its `style-src` and
+# `img-src` name no host a page can use, so an external stylesheet or image
+# never loads there at all. Matched by host, not by library name, so a
+# library from another CDN is flagged whatever it is called.
+_PREVIEW_SCRIPT_HOST = "cdn.jsdelivr.net"
+_SCRIPT_TAG = re.compile(r"<script\b[^>]*>", re.I)
+_IMG_TAG = re.compile(r"<img\b[^>]*>", re.I)
+_SRC_ATTR = re.compile(r"""(?<![\w-])src\s*=\s*(?:['"](?P<quoted>[^'"]*)['"]|(?P<bare>[^\s'"<>]+))""", re.I)
+_HREF_ATTR = re.compile(r"""(?<![\w-])href\s*=\s*(?:['"](?P<quoted>[^'"]*)['"]|(?P<bare>[^\s'"<>]+))""", re.I)
+# `import x from 'https://…'`, `import 'https://…'` and `import('https://…')`
+# in a module script: loaded under the same `script-src`.
+_MODULE_IMPORT = re.compile(
+    r"""\bimport\s*(?:\(\s*|[\w*{}\s,$]*?\bfrom\s*|\s)['"](?P<url>(?:https?:)?//[^'"]+)['"]""", re.I
+)
+_EXTERNAL_SHOWN = 5
 
 _UNIVERSAL_IMPORTANT = re.compile(r"\*\s*\{[^}]*!important")
 # Media queries whose universal `!important` blocks are legitimate practice
@@ -210,6 +221,47 @@ def _loads_nothing(tag: str) -> bool:
     m = _LINK_REL.search(tag)
     rels = (m["quoted"] or m["bare"] or "").lower().split() if m else []
     return _LOADING_LINK_RELS.isdisjoint(rels)
+
+
+def _attr_value(pattern: re.Pattern[str], tag: str) -> str | None:
+    m = pattern.search(tag)
+    if m is None:
+        return None
+    return (m["quoted"] if m["quoted"] is not None else m["bare"]).strip()
+
+
+def _external_host(url: str) -> str | None:
+    """The host of an `http(s)://` or `//` URL, lower case, or None for any
+    other value (a relative path, `data:`, `blob:`)."""
+    m = re.match(r"(?:https?:)?//([^/?#\s:]+)", url.strip(), re.I)
+    return m.group(1).lower() if m else None
+
+
+def _resources_the_preview_blocks(html: str) -> list[str]:
+    """External scripts from a host other than `_PREVIEW_SCRIPT_HOST`, and
+    every external stylesheet and image, in page order without repeats."""
+    found: list[tuple[int, str]] = []
+    for tag in _SCRIPT_TAG.finditer(html):
+        src = _attr_value(_SRC_ATTR, tag.group())
+        host = _external_host(src) if src else None
+        if host is not None and host != _PREVIEW_SCRIPT_HOST:
+            found.append((tag.start(), src))
+    for m in _MODULE_IMPORT.finditer(html):
+        if _external_host(m["url"]) != _PREVIEW_SCRIPT_HOST:
+            found.append((m.start(), m["url"]))
+    for tag in _LINK_TAG.finditer(html):
+        body = _TAG_BODY.match(html, tag.start())
+        text = body.group() if body else ""
+        rel = _LINK_REL.search(text)
+        rels = (rel["quoted"] or rel["bare"] or "").lower().split() if rel else []
+        href = _attr_value(_HREF_ATTR, text)
+        if "stylesheet" in rels and href and _external_host(href) is not None:
+            found.append((tag.start(), href))
+    for tag in _IMG_TAG.finditer(html):
+        src = _attr_value(_SRC_ATTR, tag.group())
+        if src and _external_host(src) is not None:
+            found.append((tag.start(), src))
+    return list(dict.fromkeys(url for _, url in sorted(found)))
 
 
 def _root_relative_detail(html: str, *, is_fullstack: bool) -> str | None:
@@ -361,30 +413,47 @@ def verify_frontend(
     block_tags = re.findall(r"<(?:div|section|table|main|article)\b", low)
     if block_tags and "id=" not in low:
         warnings.append("Significant blocks have no stable `id` attributes.")
-    # A library loaded from a CDN the design rules do not name.
-    for src in _BARE_SCRIPT_SRC.findall(html):
-        if src.startswith("http") and not any(lib in src.lower() for lib in _ALLOWED_CDN_LIBRARIES):
-            warnings.append(f"Library CDN other than ECharts or Tailwind detected: {src!r} (allowed only if the user asked).")
-            break
+    # A script, stylesheet or image the app preview's content security policy
+    # blocks. Advisory: the page works opened from disk or on the desktop,
+    # and the browser check reports what the preview really blocks.
+    blocked = _resources_the_preview_blocks(html)
+    if blocked:
+        listed = ", ".join(_shown_value(url) for url in blocked[:_EXTERNAL_SHOWN])
+        if len(blocked) > _EXTERNAL_SHOWN:
+            listed += f" and {len(blocked) - _EXTERNAL_SHOWN} more"
+        warnings.append(
+            f"External resource the app preview does not load: {listed}. The preview loads "
+            "scripts only from https://cdn.jsdelivr.net/npm/ and no external stylesheet or "
+            "image: put styles in a <style> block and embed images as data: URIs."
+        )
 
     return VerifyResult(errors=errors, warnings=warnings)
 
 
-def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None) -> VerifyResult | None:
-    """Load the written page once in a headless browser (`html_lint`).
+def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, screenshot: bool = True) -> BrowserCheck:
+    """Load the written page once in a browser.
 
     The class of defects the text checks above cannot see: a script that
-    throws on load, a reference to a missing local file, a renderer crash,
-    a body that renders nothing. Findings become verifier errors with the
-    same fixed prefixes the contract lock registers, so the retry kickoff
-    carries the browser's own message (`Uncaught ReferenceError: state is
-    not defined (line 4)`), which is exactly what the generator needs.
+    throws on load, a library the preview's content security policy blocks,
+    a separate file the preview never serves, a chart that stays blank, a
+    renderer crash. Findings become verifier errors with the fixed prefixes
+    the contract lock registers, so the retry kickoff carries the browser's
+    own message (`Uncaught ReferenceError: state is not defined (line 4)`),
+    which is exactly what the generator needs.
 
-    Returns `None` when the page could not be checked at all — no browser
-    configured (`ANTON_HTML_LINT_BROWSER` unset: the cloud, a bare CLI),
-    a timeout, malformed runner output — as distinct from an empty verdict,
-    which means it loaded cleanly. The caller then rests on the static
-    verdict alone and notes the skip in the trace.
+    With `ANTON_RENDER_CHECK_URL` set, the render-check service loads the
+    page the way the app preview does, sandbox policy or not: the browser
+    runs in its own container and only the page's text leaves this process.
+    Otherwise the local Electron browser loads it (`html_lint`), which a
+    sandbox policy refuses. `screenshot=False` asks the service for no
+    screenshot.
+
+    `unverified` when no browser loaded the page or the check could not
+    vouch for it (no browser configured, a timeout, a library the check
+    cannot load); `reason` says why and the caller rests on the static
+    verdict. Never a pass in that case. Below that line, `reason` lists what
+    the render check still found (`render_check.unverified_findings`), such
+    as a blank map measured before the deadline, so the agent can fix it.
 
     Single-file `html-app` pages only: `lint_html` loads through `file://`,
     where a fullstack frontend's relative `/api/*` fetches cannot resolve and
@@ -393,13 +462,94 @@ def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None) -> Ve
     page gets the same check from `verify_app_live`, through its running
     backend, after `run_app`. The path is resolved here as well as in
     `lint_html`: Electron's `loadFile` reads a relative path against its own
-    app directory, not the cwd. Under a sandbox policy it returns `None`
-    without starting the browser.
+    app directory, not the cwd.
     """
+    if render_check.configured_url() is not None:
+        outcome = render_check.check_file(entry.resolve(), cell_sandbox=cell_sandbox, screenshot=screenshot)
+        if outcome.status == "unverified":
+            found = render_check.unverified_findings(outcome)
+            return BrowserCheck(
+                status="unverified", reason=_unverified_reason(outcome, found=found),
+                findings_listed=bool(found.lines), screenshot=outcome.screenshot,
+            )
+        verdict = _render_verdict(outcome.findings)
+        return BrowserCheck(
+            status="passed" if verdict.ok else "failed", verdict=verdict, screenshot=outcome.screenshot
+        )
     findings = lint_html(entry.resolve(), cell_sandbox=cell_sandbox)
     if findings is None:
-        return None
-    return _browser_verdict(findings, served=False)
+        return BrowserCheck(
+            status="unverified", reason=browser_check_skip_reason(sandboxed=cell_sandbox is not None)
+        )
+    verdict = _browser_verdict(findings, served=False)
+    return BrowserCheck(status="passed" if verdict.ok else "failed", verdict=verdict)
+
+
+def _unverified_reason(
+    outcome: render_check.RenderCheckOutcome, *, found: render_check.UnverifiedFindings
+) -> str:
+    """`unverified: <why>`, and under it one line per finding the check still
+    made (`found`), so the agent sees a problem the check found before it
+    gave up."""
+    lines = [f"unverified: {outcome.unverified_reason}"]
+    if found.lines:
+        lines.append(f"{found.lead.capitalize()}:")
+        lines += [f"- {line}" for line in found.lines]
+    if found.more:
+        lines.append(f"- and {found.more} more distinct findings, not listed")
+    return "\n".join(lines)
+
+
+def _render_verdict(findings: list[RenderFinding]) -> VerifyResult:
+    """The render check's findings as verifier errors, each named once with
+    the viewports it was seen in.
+
+    Every literal below is a `.append(...)` on purpose: the contract lock
+    reads them from this file and requires each in the generator prompts.
+    A `timeout` finding adds no error: it reaches here only beside a
+    finding that failed the page, which fails it with or without the
+    deadline.
+    Past `render_check.MAX_FINDINGS_SHOWN` distinct findings, the rest are
+    counted in one line, so a page that logs one error per data row cannot
+    fill the retry prompt.
+    """
+    errors: list[str] = []
+    grouped = render_check.grouped_findings(findings)
+    for kind, detail, where in grouped.shown:
+        if kind == "csp_violation":
+            errors.append(
+                "Loaded in a headless browser, the page broke the app preview's content "
+                f"security policy ({where}): {detail}"
+            )
+        elif kind == "separate_file":
+            errors.append(
+                "Loaded in a headless browser, the page asked for a separate file, which the "
+                f"app preview never serves ({where}): {detail}"
+            )
+        elif kind == "console_error":
+            errors.append(
+                f"Loaded in a headless browser, the page logged a console error: {detail} ({where})"
+            )
+        elif kind == "uncaught_exception":
+            errors.append(
+                f"Loaded in a headless browser, the page threw an uncaught exception: {detail} ({where})"
+            )
+        elif kind == "blank_view":
+            errors.append(
+                f"Loaded in a headless browser, a chart, map or canvas stayed blank: {detail} ({where})"
+            )
+        elif kind == "overflow":
+            errors.append(
+                f"Loaded in a headless browser, the page is wider than the screen: {detail} ({where})"
+            )
+        elif kind == "crashed":
+            errors.append("Loaded in a headless browser, the page crashed the renderer process.")
+    if grouped.more:
+        errors.append(
+            f"Loaded in a headless browser, the page had {grouped.more} more distinct problems, "
+            "not listed here: fix the ones above first."
+        )
+    return VerifyResult(errors=errors)
 
 
 def verify_app_live(url: str, *, cell_sandbox: CellSandbox | None) -> VerifyResult | None:
@@ -456,8 +606,19 @@ def _browser_verdict(findings, *, served: bool) -> VerifyResult:
     return VerifyResult(errors=errors, warnings=warnings)
 
 
+def browser_can_load(*, sandboxed: bool) -> bool:
+    """Whether `verify_frontend_live` will try to load the page in a browser:
+    the render check is configured, or a local browser is and no sandbox
+    policy refuses it. Decides only the progress line; the check itself
+    still reports `unverified` when the load produces nothing."""
+    if render_check.configured_url() is not None:
+        return True
+    return not sandboxed and html_lint.discover_browser() is not None
+
+
 def browser_check_skip_reason(*, sandboxed: bool = False) -> str:
-    """Why `verify_frontend_live` returned None, for the trace.
+    """Why the local browser (`lint_html`) loaded nothing, for the trace and
+    the result's `checks_skipped`.
 
     `sandboxed` says the check never ran because agent code runs in a sandbox
     on this host, which starts no browser.

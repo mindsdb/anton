@@ -38,6 +38,28 @@ LearnedMemoryScope = Literal["personal", "shared", "off", "unavailable"]
 MemoryPresence = Literal["empty", "present", "unavailable"]
 
 
+@dataclass(frozen=True)
+class MemoryRead:
+    """The learned memory one turn put in front of the model.
+
+    ``learned`` says whether the turn read the learned tiers at all, the
+    person's own or the shared store. The counts are the entries it put in
+    the system prompt (rules, lessons and profile lines) and in the scratchpad
+    tool's description (scratchpad rules and lessons). The operator's managed
+    layer is never counted, and neither is the project's datasource topic.
+    """
+
+    learned: bool
+    rules: int = 0
+    lessons: int = 0
+    profile_lines: int = 0
+    scratchpad: int = 0
+
+    @property
+    def entries(self) -> int:
+        return self.rules + self.lessons + self.profile_lines + self.scratchpad
+
+
 @runtime_checkable
 class HippocampusProtocol(Protocol):
     """Structural protocol for a single-scope memory store.
@@ -72,6 +94,10 @@ class HippocampusProtocol(Protocol):
 
     def recall_scratchpad_wisdom(self, token_budget: int = 2000) -> str:
         """Return procedural knowledge relevant to scratchpad execution, within budget."""
+        ...
+
+    def get_scratchpad_wisdom(self, token_budget: int = 2000) -> list[Engram]:
+        """Return the entries recall_scratchpad_wisdom renders, in its order."""
         ...
 
     # --- read (Engrams, for inspection / CRUD UI) ---

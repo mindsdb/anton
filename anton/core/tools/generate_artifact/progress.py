@@ -33,16 +33,21 @@ STEP_LABELS: dict[str, str] = {
     "verify_backend": "Verifying the backend",
     "generate_frontend": "Writing the frontend",
     "verify_frontend": "Verifying the frontend",
+    # Announced only when a browser will load the page (`verifiers.
+    # browser_can_load`), so no line claims a browser check that never runs.
+    "browser_check": "Loading the page in a browser",
     "run_app": "Starting the application",
     "verify_fullstack": "Checking the running application",
 }
 
 # An html-app has no backend, so "frontend" has nothing to contrast with and
 # reads as jargon; it is simply the page. Same node, same verification rules —
-# only the wording changes.
+# only the wording changes. "Checking", not "Verifying": this step's text
+# checks run on every deployment, and the browser load gets its own line
+# (`browser_check`) only where a browser runs.
 _HTML_APP_LABELS: dict[str, str] = {
     "generate_frontend": "Writing the page",
-    "verify_frontend": "Verifying the page",
+    "verify_frontend": "Checking the page",
 }
 
 

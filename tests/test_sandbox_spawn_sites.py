@@ -879,7 +879,7 @@ def test_each_browser_and_office_check_refuses_under_a_policy_before_it_spawns(t
     assert html_lint.lint_url("http://127.0.0.1:1/", cell_sandbox=policy) is None
     assert xlsx_office_check.check_xlsx_via_office(book, cell_sandbox=policy) is None
     assert office_open_check.check_opens_via_office(book, cell_sandbox=policy) is None
-    assert verifiers.verify_frontend_live(page, cell_sandbox=policy) is None
+    assert verifiers.verify_frontend_live(page, cell_sandbox=policy).status == "unverified"
     assert verifiers.verify_app_live("http://127.0.0.1:1/", cell_sandbox=policy) is None
     assert spawned == []
 
@@ -888,13 +888,16 @@ class _Store:
     def __init__(self, root: Path) -> None:
         self.root = root
 
+    def read_metadata(self, slug: str) -> None:
+        return None
 
-def _artifact(root: Path, slug: str, filename: str, content: bytes) -> dict[str, float]:
+
+def _artifact(root: Path, slug: str, filename: str, content: bytes) -> dict[str, tool_handlers.ArtifactFiles]:
     folder = root / slug
     folder.mkdir(parents=True)
     (folder / "metadata.json").write_text("{}")
     (folder / filename).write_bytes(content)
-    return {slug: 0.0}
+    return {slug: tool_handlers.ArtifactFiles()}
 
 
 def test_browser_and_office_lints_are_skipped_and_say_so(tmp_path, policy, monkeypatch):
@@ -914,17 +917,24 @@ def test_browser_and_office_lints_are_skipped_and_say_so(tmp_path, policy, monke
     before = _artifact(store.root, "page", "page.html", b"<html><body>hi</body></html>")
     before |= _artifact(store.root, "deck", "deck.pptx", b"not a zip")
 
-    messages = tool_handlers.lint_changed_artifact_files(store, before, cell_sandbox=policy)
+    messages = tool_handlers.lint_changed_artifact_files(store, before, cell_sandbox=policy).messages
     assert f"page/page.html — {tool_handlers._SANDBOX_BROWSER_SKIP}" in messages
     # The in-process structural lint still runs and reports the broken deck.
     assert any(m.startswith("deck/deck.pptx — ") and "LibreOffice" not in m for m in messages)
 
 
-def test_skipped_lints_stay_silent_where_the_tool_is_not_installed(tmp_path, policy, monkeypatch):
+def test_a_page_the_sandbox_cannot_load_says_so_even_with_no_browser_installed(tmp_path, policy, monkeypatch):
+    """Under a sandbox with no render-check service the agent is told the page
+    was not checked in a browser. It used to be told nothing at all, which
+    read as a clean check."""
     monkeypatch.delenv("ANTON_HTML_LINT_BROWSER", raising=False)
+    monkeypatch.delenv("ANTON_RENDER_CHECK_URL", raising=False)
     store = _Store(tmp_path / "artifacts")
     before = _artifact(store.root, "page", "page.html", b"<html></html>")
-    assert tool_handlers.lint_changed_artifact_files(store, before, cell_sandbox=policy) == []
+    lint = tool_handlers.lint_changed_artifact_files(store, before, cell_sandbox=policy)
+    assert lint.messages == [f"page/page.html — {tool_handlers._SANDBOX_BROWSER_SKIP}"]
+    assert tool_handlers._SANDBOX_BROWSER_SKIP.startswith("not checked in a browser: ")
+    assert lint.page_checks == {("page", "page.html"): "unverified"}
 
 
 def test_the_generator_skips_its_browser_check_and_says_why():

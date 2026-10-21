@@ -17,6 +17,7 @@ from anton.core.tools.registry import ToolOutcome
 from anton.core.utils.write_check import (
     CellWrites,
     FileChange,
+    HttpWrite,
     HttpWriteRule,
     ProjectSnapshot,
     find_cell_writes,
@@ -34,6 +35,35 @@ logger = logging.getLogger(__name__)
 # (`discovery.engine`, `generate_artifact.engine._run_loop` and the turn's
 # hand-back report).
 CELL_NOT_RUN_REASONS = frozenset({"new_scratchpad_challenged", "write_not_approved"})
+
+# Every `action` the scratchpad tool takes, in the order its schema lists them.
+SCRATCHPAD_ACTIONS: tuple[str, ...] = ("exec", "view", "reset", "remove", "dump", "install")
+
+
+def scratchpad_action(tc_input: dict) -> str:
+    """The action a scratchpad call asks for.
+
+    Tools go to the model without strict schemas, so a call can leave out
+    `action`. One that carries `code` can only mean to run it, so it is an
+    `exec`; one with neither gets "", which no action matches.
+    """
+    action = tc_input.get("action")
+    if not action and tc_input.get("code"):
+        return "exec"
+    return action if isinstance(action, str) else ""
+
+
+def fill_in_scratchpad_action(tc_input: dict) -> None:
+    """Write the `exec` that `scratchpad_action` reads into a call that left
+    `action` out, before the call is stored in history. A reader of the
+    stored call then sees the action that ran: cowork-server rebuilds an
+    earlier turn's cells from these rows and counts a step as a cell only
+    when its `action` is `exec`. cowork-server's cell replay reads another
+    field, the action the turn names on the call's `StreamToolResult`,
+    which cowork-server stores as `tool_action`."""
+    if not tc_input.get("action") and scratchpad_action(tc_input) == "exec":
+        tc_input["action"] = "exec"
+
 
 RefusalCause = Literal["cancelled", "timeout", "unavailable", "error", "unanswered_earlier"]
 # What a logged decision says came of a held cell: "stopped" when the turn
@@ -172,9 +202,27 @@ def _describe_calls(writes: CellWrites) -> list[str]:
 def _describe_requests(writes: CellWrites) -> list[str]:
     """The first held requests, for the refusal: the method and the URL.
     The card names every one."""
-    out = [f"send {write.method} to {_code_span(_shown_path(write.url))}" for write in writes.http[:_REFUSAL_PATHS]]
+    out = [_request_summary(write) for write in writes.http[:_REFUSAL_PATHS]]
     more = len(writes.http) - _REFUSAL_PATHS
     return out + ([f"send {more} more such requests"] if more > 0 else [])
+
+
+def _run_time_from(code: str) -> str:
+    """`, from <code>`, naming the code that decides a value when the step
+    runs, or nothing when the check cannot show that code."""
+    return f", from {_code_span(_inert(code))}" if code else ""
+
+
+def _request_summary(write: HttpWrite) -> str:
+    """One request for the refusal, in words where the code decides a part."""
+    method = _http_method(write.method) if write.method_code is None else "a request"
+    if write.url_code is not None:
+        text = f"send {method} to an address the code decides when it runs{_run_time_from(write.url_code)}"
+    else:
+        text = f"send {method} to {_code_span(_shown_path(write.url))}"
+    if write.method_code is not None:
+        text += f" (the code decides its method when it runs{_run_time_from(write.method_code)})"
+    return text
 
 
 def _describe_files(writes: CellWrites) -> list[str]:
@@ -221,9 +269,26 @@ def _file_lines(change: FileChange, *, lead: str) -> list[str]:
 
 
 def _http_method(method: str) -> str:
-    """A request's method as the card's prose names it: as it is, or as code
-    when the code picks it when it runs."""
+    """A written-out method as the card's prose names it: as it is when it is
+    a word, else as code. A method is any text an HTTP library sends, so one
+    such as `<!--` would otherwise open an HTML comment that Cowork drops
+    from the card, and with it the held requests that follow."""
     return method if method.isalpha() else _code_span(_inert(method))
+
+
+def _request_lines(request: HttpWrite) -> list[str]:
+    """One request on the card. A method or an address the code decides when
+    it runs is said in words, with the code that decides it, never shown as a
+    bare `{placeholder}` where the method or the address would stand."""
+    method = _http_method(request.method) if request.method_code is None else "a request"
+    if request.url_code is not None:
+        lead = f"This step would send {method} to an address the code decides when it runs{_run_time_from(request.url_code)}:"
+        lines = [lead, "", _fence(request.call), ""]
+    else:
+        lines = [f"This step would send {method} to:", "", _fence(_shown_path(request.url)), "", _fence(request.call), ""]
+    if request.method_code is not None:
+        lines += [f"The code decides the request's method when it runs{_run_time_from(request.method_code)}.", ""]
+    return lines
 
 
 def _card_prompt(writes: CellWrites) -> str:
@@ -248,8 +313,7 @@ def _card_prompt(writes: CellWrites) -> str:
         also = "append to" if change.action == "append" else change.action
         lines += _file_lines(change, lead=f"This step would also {also}")
     for request in writes.http:
-        lines += [f"This step would send {_http_method(request.method)} to:", "", _fence(_shown_path(request.url)), "",
-                  _fence(request.call), ""]
+        lines += _request_lines(request)
     if any(r.run_time_parts for r in writes.http) and not any(w.run_time_parts for w in writes.sql):
         lines += ["A part in braces, `{...}`, is the code that fills in that value when the step runs.", ""]
     shown = [*(p for change in writes.files for p in change.paths), *(r.url for r in writes.http)]

@@ -17,6 +17,7 @@ providers Anton ships (AnthropicProvider, OpenAIProvider) accept on input.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import re
@@ -34,7 +35,7 @@ from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
 from anton.core.backends.sandbox import cell_sandbox_of
 from anton.utils.datasources import scrub_credentials
 from anton.core.llm.structured import looks_truncated
-from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS
+from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS, scratchpad_action
 
 from . import sub_tools
 from .debug_trace import NullTrace
@@ -42,6 +43,8 @@ from .spend import WIND_DOWN_ROUNDS
 from .state import GEN_WRITE_MAX_TOKENS, SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY
 from .verifiers import normalise_api_path
 from .prompts import (
+    FULLSTACK_FRONTEND_TARGET,
+    HTML_APP_DEFAULT_PRIMARY,
     build_api_spec_instruction,
     build_api_spec_prompt,
     build_backend_kickoff,
@@ -587,8 +590,42 @@ async def generate(
     if isinstance(result, str):
         trace.run_result(ok=False, error=result)
     else:
-        trace.run_result(ok=True, result=result)
+        # Without the screenshot: the trace would write its whole base64,
+        # up to a megabyte, on every run. The handler takes it out of the
+        # result before the agent sees the JSON.
+        trace.run_result(ok=True, result={k: v for k, v in result.items() if k != "screenshot"})
+    _record_page_check(session, state=state, result=result)
     return result
+
+
+def _record_page_check(session, *, state, result: dict | str) -> None:
+    """Tell the session how this run left its page: its last browser check,
+    or `unverified` when the run wrote a page no browser loaded. A run that
+    wrote no page (stopped at the brief, refused, cancelled) records nothing.
+
+    The page is the one the run builds and verifies: the html-app's primary,
+    or the fullstack app's frontend. When its unverified check listed what
+    it still found, the agent reads that in the result's `checks_skipped`,
+    which only a dict result carries, so the session records the page as
+    listed and the cell checks after this run list those findings no second
+    time this turn."""
+    from anton.core.tools.tool_handlers import PageKey, record_page_checks
+
+    if isinstance(result, dict) and result.get("status") in ("cancelled", "needs_confirmation"):
+        return
+    wrote_page = any(name.endswith(".html") for name in state.files_written)
+    if state.browser_status is None and not wrote_page:
+        return
+    key = PageKey(
+        slug=state.slug,
+        page=FULLSTACK_FRONTEND_TARGET if state.is_fullstack else (state.primary or HTML_APP_DEFAULT_PRIMARY),
+    )
+    listed = isinstance(result, dict) and state.browser_status == "unverified" and state.browser_findings_listed
+    record_page_checks(
+        session,
+        checks={key: state.browser_status or "unverified"},
+        findings_listed=frozenset({key}) if listed else frozenset(),
+    )
 
 
 def _restore(state, stored) -> None:
@@ -838,11 +875,27 @@ async def _read_for_generator(session, artifact_path: Path, inp: dict):
     )
 
 
+def _drop_kickoff_images(messages: list[dict]) -> int:
+    """Replace each image in the kickoff, `messages[0]` (a failed attempt's
+    screenshot), with the note that it was removed after a refusal; return
+    how many went. A kickoff without one, text or already dropped, gives 0."""
+    from anton.core.artifacts.render_check import DROPPED_SCREENSHOT_PLACEHOLDER
+
+    content = messages[0].get("content")
+    if not isinstance(content, list):
+        return 0
+    is_image = [isinstance(b, dict) and b.get("type") == "image" for b in content]
+    if any(is_image):
+        note = {"type": "text", "text": DROPPED_SCREENSHOT_PLACEHOLDER}
+        messages[0] = {**messages[0], "content": [note if image else b for b, image in zip(content, is_image)]}
+    return sum(is_image)
+
+
 async def _run_loop(
     *,
     session: "ChatSession",
     system: str,
-    kickoff: str,
+    kickoff: str | list[dict],
     artifact_path: Path,
     node_label: str,
     attempt: int | None = None,
@@ -872,6 +925,17 @@ async def _run_loop(
     runs two of these loops at once over one guard, and a shared budget would
     leave each with about one round — not enough to both emit a final chunk
     and call `finish`.
+
+    ``kickoff`` is the first user message: text, or content blocks when a
+    retry shows the failed attempt's screenshot beside its findings. A model
+    that takes no image input refuses every request carrying that image, and
+    each round re-sends the kickoff, so on such a refusal the loop replaces
+    the image with a note and sends the same request once more. Once that
+    request goes through in round 0, which runs on the planning model, the
+    session records the refusal and later attempts and checks carry no
+    screenshot; a later round's refusal came from the coding model and
+    drops only this loop's image. Only the kickoff's image is the loop's to
+    drop, so this happens at most once per loop; a second refusal raises.
     """
     trace = trace or NullTrace()
     tools = sub_tools.tool_schemas()
@@ -929,7 +993,8 @@ async def _run_loop(
         # the failure the raised budget exists to remove. `used_budget` is what
         # the call settled on, which differs from `budget` when the round was
         # retried after a dropped stream.
-        response, used_budget = await _call_with_stream_retry(
+        call = functools.partial(
+            _call_with_stream_retry,
             llm_call,
             system=system,
             messages=messages,
@@ -938,6 +1003,27 @@ async def _run_loop(
             default_cap=default_cap,
             on_text=on_text,
         )
+        try:
+            response, used_budget = await call()
+        except Exception as exc:
+            from anton.core.llm.provider import is_image_refusal
+
+            if not (is_image_refusal(exc) and _drop_kickoff_images(messages)):
+                raise
+            logger.info(
+                "generate_artifact: the model refused the kickoff's screenshot; "
+                "sending the request once more without it"
+            )
+            # `messages` is the list `call` holds, now without the image.
+            response, used_budget = await call()
+            if first_round:
+                # Round 0 runs on the planning model, the main agent's own,
+                # so its checks send no screenshot either from now on. A
+                # later round runs on the coding model, whose refusal says
+                # nothing about the main agent's.
+                from anton.core.tools.tool_handlers import record_render_screenshots_refused
+
+                record_render_screenshots_refused(session)
         cap = used_budget or default_cap
 
         trace.llm_call(
@@ -1076,12 +1162,12 @@ async def _run_loop(
                 # A cell that never ran, such as a write the user didn't
                 # approve, is no data-access code for later steps to reuse.
                 ran = getattr(outcome, "reason", "") not in CELL_NOT_RUN_REASONS
-                if inp.get("action") == "exec" and ran:
+                if scratchpad_action(inp) == "exec" and ran:
                     scratchpad_execs.append(
                         {
                             "name": str(inp.get("name") or ""),
                             "code": str(inp.get("code") or ""),
-                            "output": content if isinstance(content, str) else str(content),
+                            "output": sub_tools.result_text(content),
                         }
                     )
                 trace.scratchpad(node=node_label, input=inp, output=content)

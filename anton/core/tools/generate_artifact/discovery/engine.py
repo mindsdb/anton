@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
-from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS
+from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS, scratchpad_action
 
 from .. import sub_tools as protocol
 from . import prompts, sub_tools
@@ -214,11 +214,11 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 # that RAN counts: a live run once recorded an exec
                 # the single-scratchpad guard had refused, and both generators
                 # received its code with the refusal text as its "Output".
-                if inp.get("action") == "exec" and inp.get("code") and _exec_ran(outcome):
+                if scratchpad_action(inp) == "exec" and inp.get("code") and _exec_ran(outcome):
                     state.scratchpad_execs.append({
                         "name": inp.get("name"),
                         "code": inp.get("code"),
-                        "output": content if isinstance(content, str) else str(content),
+                        "output": protocol.result_text(content),
                     })
                 result_blocks.append(protocol.tool_result(tc.id, content))
             elif name in ("web_search", "web_fetch"):

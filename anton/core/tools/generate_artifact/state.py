@@ -19,6 +19,7 @@ from .attachments import Attachment
 
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
+    from anton.core.artifacts.render_check import RenderScreenshot, RenderStatus
     from anton.utils.datasources import DatasourceCatalog
 
 # ── Budgets (see design spec) ────────────────────────────────────────────────
@@ -143,6 +144,25 @@ class VerifyResult:
         return not self.errors
 
 
+@dataclass(frozen=True)
+class BrowserCheck:
+    """One load of the page in a browser, or why the page was not loaded.
+
+    `status` is `passed` or `failed` when a browser loaded the page (`verdict`
+    holds its findings as verifier messages), `unverified` when none did or
+    the check could not vouch for it (`reason` says why; the verdict is
+    empty). `findings_listed` says whether `reason` also lists what an
+    unverified check still found. `screenshot` is the render check's
+    desktop view, when it sent one.
+    """
+
+    status: "RenderStatus"
+    verdict: VerifyResult = field(default_factory=VerifyResult)
+    reason: str = ""
+    findings_listed: bool = False
+    screenshot: "RenderScreenshot | None" = None
+
+
 # ── FSM state ────────────────────────────────────────────────────────────────
 @dataclass
 class StepResult:
@@ -189,6 +209,22 @@ class GenState:
     # learn that a check was skipped rather than passed (S-03).
     verify_warnings: list[str] = field(default_factory=list)
     checks_skipped: list[str] = field(default_factory=list)
+    # The latest browser load of the page this run: `passed`, `failed`, or
+    # `unverified` when no browser loaded it or the check could not vouch for
+    # it. None until a browser step runs. The result reports whether it
+    # passed, and the session records it for the end-of-turn line.
+    browser_status: "RenderStatus | None" = None
+    # Whether the latest load was unverified and its `checks_skipped` line
+    # lists what the check still found. The session then lists those
+    # findings no second time this turn.
+    browser_findings_listed: bool = False
+    # The render check's desktop view of the latest load, when it sent one.
+    # Reaches the calling agent as an image beside the result.
+    browser_screenshot: "RenderScreenshot | None" = None
+    # The page the latest load checked, by its path inside the artifact
+    # folder (`index.html`); it captions the screenshot. The generator may
+    # have named it differently from the primary the run started with.
+    browser_page: str = ""
     # Files the user attached to the conversation, as the tool call named
     # them (S-01). Data files are read by the gathering step; assets are
     # copied into the artifact by `orchestrator._stage_attachments`.

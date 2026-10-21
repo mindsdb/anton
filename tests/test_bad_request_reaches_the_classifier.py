@@ -41,6 +41,8 @@ from anton.core.llm.provider import (
     ContentTooLargeError,
     ContentValidationError,
     RequestRefusedError,
+    TransientProviderError,
+    is_image_refusal,
 )
 
 # The live ENG-2689 body: a user's ~8.3M-pixel PNG, comfortably under every
@@ -716,3 +718,108 @@ async def test_a_history_shape_400_still_retries_then_explains(flavor):
     assert all(r.get("tools") for r in requests[:3])
     assert "tools" not in requests[3]
     assert not [e for e in events if isinstance(e, StreamTextDelta)]
+
+
+# ── a model that takes no image input ──────────────────────────────────────
+# The session drops its own render-check screenshots and sends the request
+# once more when `is_image_refusal` says the provider refused an image part.
+# Asked of the exception each transport really raises: the SDK's own
+# BadRequestError where `classify_content_rejection` names nothing, the
+# ContentValidationError where it reads the `param` as content.
+
+_IMAGE_PART_400S = {
+    # OpenAI on chat.completions, for a model with no image input.
+    "openai-chat": {"error": {
+        "message": "Invalid content type. image_url is only supported by certain models.",
+        "type": "invalid_request_error", "param": "messages.[3].content.[1].type", "code": None}},
+    # The same refusal in the Responses API's `param` spelling.
+    "responses-param": {"error": {
+        "message": "Invalid content type. input_image is only supported by certain models.",
+        "type": "invalid_request_error", "param": "input[4].content[1].type", "code": "invalid_value"}},
+    # A gateway in front of a text-only model, naming no content path.
+    "no-param": {"error": {
+        "message": "This model does not support image input.",
+        "type": "invalid_request_error", "param": None, "code": None}},
+    # A server that names what the model lacks rather than the part.
+    "not-multimodal": {"error": {
+        "message": "The model is not a multimodal model.",
+        "type": "BadRequestError", "param": None, "code": 400}},
+}
+
+
+@pytest.mark.parametrize("body", sorted(_IMAGE_PART_400S))
+@pytest.mark.parametrize("flavor", _FLAVORS)
+async def test_a_refused_image_part_is_named_on_both_transports(flavor, body):
+    provider = _provider(_IMAGE_PART_400S[body], flavor)
+    try:
+        with pytest.raises((openai.BadRequestError, ContentValidationError)) as err:
+            async for _ in provider.stream(model="m", system="s", messages=_MESSAGES):
+                pass
+        assert is_image_refusal(err.value)
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.parametrize("flavor", _FLAVORS)
+async def test_a_400_that_names_no_image_is_not_an_image_refusal(flavor):
+    """The orphan tool call 400 keeps its own retries: the session resends it
+    after sealing the call, with every screenshot it holds."""
+    provider = _provider(_ORPHAN_TOOL_CALL_400, flavor)
+    try:
+        with pytest.raises(openai.BadRequestError) as err:
+            async for _ in provider.stream(model="m", system="s", messages=_MESSAGES):
+                pass
+        assert not is_image_refusal(err.value)
+    finally:
+        await provider.aclose()
+
+
+def test_an_error_that_is_no_client_refusal_is_not_an_image_refusal():
+    """A provider outage that mentions an image is not the model refusing one."""
+    request = httpx.Request("POST", "https://api.mindshub.ai/v1/chat/completions")
+    outage = openai.InternalServerError(
+        "image service unavailable", response=httpx.Response(500, request=request),
+        body={"message": "image service unavailable"},
+    )
+    assert not is_image_refusal(outage)
+    assert not is_image_refusal(ConnectionError("Could not process image"))
+
+
+# A refusal of one image says nothing about whether the model takes images,
+# so the session keeps its render screenshots for it.
+
+
+@pytest.mark.parametrize("flavor", _FLAVORS)
+async def test_an_oversized_image_is_not_an_image_refusal(flavor):
+    provider = _provider(_PATCHES_400, flavor)
+    try:
+        with pytest.raises(ContentTooLargeError) as err:
+            async for _ in provider.stream(model="m", system="s", messages=_MESSAGES):
+                pass
+        assert not is_image_refusal(err.value)
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.parametrize("code", ["invalid_image", "image_content_policy_violation", "failed_to_download_image"])
+@pytest.mark.parametrize("flavor", _FLAVORS)
+async def test_a_400_naming_one_images_code_is_not_an_image_refusal(flavor, code):
+    body = {"error": {
+        "message": "The image could not be used.", "type": "invalid_request_error", "param": None, "code": code,
+    }}
+    provider = _provider(body, flavor)
+    try:
+        with pytest.raises(openai.BadRequestError) as err:
+            async for _ in provider.stream(model="m", system="s", messages=_MESSAGES):
+                pass
+        assert not is_image_refusal(err.value)
+    finally:
+        await provider.aclose()
+
+
+def test_a_transient_error_that_mentions_an_image_is_not_an_image_refusal():
+    """A provider fault, whatever status it came with and whatever it says."""
+    overloaded = TransientProviderError(
+        "image service overloaded", provider="p", code="overloaded_error", session_backoff=False, status_code=400,
+    )
+    assert not is_image_refusal(overloaded)
