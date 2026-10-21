@@ -208,13 +208,14 @@ def create_text_nofollow(root: Path | str, path: Path | str, text: str, *, mode:
 
 
 def replace_text_nofollow(
-    root: Path | str, path: Path | str, text: str, *, create_parents: bool = False
+    root: Path | str, path: Path | str, text: str, *, create_parents: bool = False, mode: int = 0o666
 ) -> None:
     """Write ``text`` to ``<path>.tmp`` and rename it over ``path`` in the pinned parent.
 
     Whatever holds the ``.tmp`` name (a stale file, a link, a hard link to
     someone else's file) is unlinked first and the file is created fresh, so
-    the write never lands in an existing file.
+    the write never lands in an existing file. ``mode`` is the new file's
+    permission bits (before umask); Windows ignores it.
     """
     parts = relative_parts(root, path)
     tmp_name = parts[-1] + ".tmp"
@@ -234,7 +235,7 @@ def replace_text_nofollow(
         fd = _open_at(
             tmp_name,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC,
-            0o666,
+            mode,
             dir_fd=dir_fd,
             shown=Path(path).with_name(tmp_name),
         )
