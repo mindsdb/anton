@@ -11,6 +11,18 @@ GENIE_POLLS_IN_PROGRESS = 2
 
 
 @pytest.fixture()
+def genie_final_answer() -> str:
+    """The final answer the Genie stub server reports for a completed ask."""
+    return GENIE_FINAL_ANSWER
+
+
+@pytest.fixture()
+def genie_result_rows() -> int:
+    """The total row count the Genie stub server reports for a query result."""
+    return GENIE_RESULT_ROWS
+
+
+@pytest.fixture()
 def stub_mcp_server() -> MCPServer:
     """An in-process MCP server exposing a few stub tools — the SDK's own
     test pattern (no sockets, no threads, no subprocess). See

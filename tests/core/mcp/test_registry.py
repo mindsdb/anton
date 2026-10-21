@@ -15,10 +15,6 @@ from anton.core.mcp.names import ToolNameParts, namespaced_tool_name, parse_name
 from anton.core.mcp.registry import GENIE_RESULT_ROW_CAP, discover_tool_defs, without_empty_optionals
 from anton.core.tools.registry import ToolOutcome
 
-# What `genie_stub_server` answers with (see conftest.py).
-GENIE_FINAL_ANSWER = "Revenue was 42 last quarter."
-GENIE_RESULT_ROWS = 250
-
 
 def test_namespaced_tool_name():
     assert namespaced_tool_name("hubspot", "search_crm_objects") == "hubspot__search_crm_objects"
@@ -260,7 +256,9 @@ async def _genie_handlers(session: McpSession) -> dict:
     return {d.name.removeprefix("databricks__"): d.handler for d in defs}
 
 
-async def test_genie_ask_waits_for_the_answer_and_returns_the_short_fields(genie_stub_server, monkeypatch):
+async def test_genie_ask_waits_for_the_answer_and_returns_the_short_fields(
+    genie_stub_server, genie_final_answer, monkeypatch
+):
     clock = FakeClock()
     _patch_wait(monkeypatch, clock)
     async with McpSession(server=genie_stub_server) as session:
@@ -273,7 +271,7 @@ async def test_genie_ask_waits_for_the_answer_and_returns_the_short_fields(genie
         "status": "completed",
         "conversation_id": "conv-1",
         "response_id": "resp-1",
-        "final_answer": GENIE_FINAL_ANSWER,
+        "final_answer": genie_final_answer,
         "query_items": [{"item_id": "pub_1_output"}],
         "deep_link": "https://dbc-1.cloud.databricks.com/genie/x",
     }
@@ -298,7 +296,9 @@ async def test_genie_ask_hands_back_ids_when_genie_is_still_working(genie_stub_s
     assert clock.now <= databricks.GENIE_POLL_INTERVAL_SECONDS * 2
 
 
-async def test_genie_poll_response_returns_only_the_short_fields(genie_stub_server, monkeypatch):
+async def test_genie_poll_response_returns_only_the_short_fields(
+    genie_stub_server, genie_final_answer, monkeypatch
+):
     clock = FakeClock()
     _patch_wait(monkeypatch, clock)
     async with McpSession(server=genie_stub_server) as session:
@@ -307,11 +307,11 @@ async def test_genie_poll_response_returns_only_the_short_fields(genie_stub_serv
             None, {"conversation_id": "conv-1", "response_id": "resp-1"}
         )
 
-    assert json.loads(outcome.content)["final_answer"] == GENIE_FINAL_ANSWER
+    assert json.loads(outcome.content)["final_answer"] == genie_final_answer
     assert "GENIE-REASONING-TEXT" not in outcome.content
 
 
-async def test_a_large_query_result_is_cut_to_the_cap_with_a_note(genie_stub_server):
+async def test_a_large_query_result_is_cut_to_the_cap_with_a_note(genie_stub_server, genie_result_rows):
     async with McpSession(server=genie_stub_server) as session:
         handlers = await _genie_handlers(session)
         outcome = await handlers["genie_get_query_result"](
@@ -322,9 +322,9 @@ async def test_a_large_query_result_is_cut_to_the_cap_with_a_note(genie_stub_ser
     assert outcome.ok is True
     assert len(result["rows"]) == GENIE_RESULT_ROW_CAP
     assert result["rows"][0] == ["0", "x"]
-    assert result["total_row_count"] == GENIE_RESULT_ROWS
+    assert result["total_row_count"] == genie_result_rows
     assert result["columns"] == [{"name": "n", "type_text": "INT"}, {"name": "label", "type_text": "STRING"}]
-    assert result["note"] == f"Showing the first {GENIE_RESULT_ROW_CAP} of {GENIE_RESULT_ROWS} rows."
+    assert result["note"] == f"Showing the first {GENIE_RESULT_ROW_CAP} of {genie_result_rows} rows."
 
 
 async def test_genie_cancel_response_passes_through(genie_stub_server):

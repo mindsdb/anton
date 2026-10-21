@@ -145,10 +145,10 @@ async def mint_token(
     one POST to the workspace token endpoint with HTTP Basic auth and no
     redirects. Returns the access token. Raises `InvalidWorkspaceHost`,
     `GenieCredentialsRefused` (invalid_client or unauthorized_client on any
-    4xx, or a 401 with no readable error), `GenieRequestRefused` (any other 3xx or 4xx, or
-    a 200 without a token) or `GenieUnavailable` (network error or 5xx, with
-    the cause kept). Messages never carry the secret, the token or body text.
-    `transport` is for tests.
+    4xx, or a 401 with no readable error), `GenieRequestRefused` (any other
+    3xx or 4xx, or a 200 without a token) or `GenieUnavailable` (network
+    error or 5xx, with the cause kept). Messages never carry the secret, the
+    token or body text. `transport` is for tests.
     """
     url = f"https://{canonical_workspace_host(host)}{TOKEN_PATH}"
     try:

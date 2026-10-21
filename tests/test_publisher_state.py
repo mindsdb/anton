@@ -4,6 +4,8 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from anton.core.artifacts.models import Artifact, DatasourceRef
+from anton.core.datasources.data_vault import LocalDataVault
 from anton.publisher import (
     _FULLSTACK_EXCLUDED,
     _read_state_manifest,
@@ -184,9 +186,6 @@ def test_publish_blocks_on_collection_drop_without_uploading(tmp_path, monkeypat
 
 
 def test_collect_datasource_secrets_leaves_hidden_fields_out(tmp_path):
-    from anton.core.artifacts.models import Artifact, DatasourceRef
-    from anton.core.datasources.data_vault import LocalDataVault
-
     vault = LocalDataVault(tmp_path / "vault")
     vault.save(
         "databricks",
@@ -210,6 +209,11 @@ def test_collect_datasource_secrets_leaves_hidden_fields_out(tmp_path):
 
     assert missing == []
     assert not any("sentinel-secret-1" in v for v in secrets.values())
-    assert not any(k.rsplit("__", 1)[-1].startswith("_") for k in secrets)
+    assert set(secrets) == {
+        "DS_DATABRICKS_GENIE__WORKSPACE_URL",
+        "DS_DATABRICKS_GENIE__CLIENT_ID",
+        "DS_DATABRICKS_PAT__HOST",
+        "DS_DATABRICKS_PAT__TOKEN",
+    }
     assert secrets["DS_DATABRICKS_PAT__TOKEN"] == "pat-token-1"
     assert secrets["DS_DATABRICKS_GENIE__CLIENT_ID"] == "client-1"

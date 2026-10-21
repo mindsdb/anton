@@ -7,8 +7,6 @@ import httpx2
 import pytest
 
 from anton.core.mcp.databricks import (
-    GENIE_ONE_PATH,
-    PER_SPACE_PATH,
     TOKEN_SCOPE,
     GenieCredentialsRefused,
     GenieRequestRefused,
@@ -68,12 +66,15 @@ def test_anything_else_is_refused(value):
 
 
 def test_no_space_id_gives_the_genie_one_address():
-    assert genie_mcp_url(f"https://{HOST}/") == f"https://{HOST}{GENIE_ONE_PATH}"
+    assert (
+        genie_mcp_url(f"https://{HOST}/")
+        == "https://dbc-1.cloud.databricks.com/ai-gateway/mcp-services/system.ai.genie_one_mcp"
+    )
 
 
 def test_a_space_id_gives_the_per_space_address():
     url = genie_mcp_url(HOST, SPACE)
-    assert url == f"https://{HOST}" + PER_SPACE_PATH.format(space_id=SPACE)
+    assert url == "https://dbc-1.cloud.databricks.com/api/2.0/mcp/genie/01f0a1b2c3d4e5f60718293a4b5c6d7e"
     assert url.endswith(SPACE)
 
 
