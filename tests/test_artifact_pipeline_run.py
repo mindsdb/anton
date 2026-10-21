@@ -20,6 +20,7 @@ from anton.core.interaction.elicit import AskAnswer
 from anton.core.llm.provider import LLMResponse, ToolCall, Usage
 from anton.core.tools.generate_artifact.discovery import brief, checkpoint as cp, orchestrator
 from anton.core.tools.generate_artifact.discovery.state import PrdState
+from tests.streaming_llm import StreamingLLM
 from anton.core.tools.generate_artifact.progress import MESSAGE_PREFIX
 
 
@@ -40,7 +41,7 @@ def _make_state(tmp_path: Path, **over) -> PrdState:
     artifact = store.create(name="Clock", description="d", type="html-app")
     artifact_dir = store.folder_for(artifact.slug)
     base = dict(
-        session=SimpleNamespace(_llm=SimpleNamespace(), question_count=0, elicitor=None, emit=AsyncMock()),
+        session=SimpleNamespace(_llm=StreamingLLM(), question_count=0, elicitor=None, emit=AsyncMock()),
         slug=artifact.slug,
         artifact_path=artifact_dir,
         artifact_type="html-app",
@@ -272,7 +273,7 @@ async def test_revise_loop_has_a_defensive_cap_and_ends_unconfirmed(tmp_path, mo
 
 def _act_first_state(tmp_path: Path, *, renders: bool = True, **over) -> PrdState:
     session = SimpleNamespace(
-        _llm=SimpleNamespace(), question_count=0, elicitor=None, emit=AsyncMock(), emitter=object(),
+        _llm=StreamingLLM(), question_count=0, elicitor=None, emit=AsyncMock(), emitter=object(),
     )
     if renders:
         session.tool_messages = True

@@ -7,6 +7,7 @@ neither has to re-derive it — only the task-specific instructions differ.
 from __future__ import annotations
 
 from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES_ORDERED
+from anton.core.llm.prompts import ANTON_NOTE
 # The heading `build_datasource_context` renders, so the kickoff reads the same
 # whether or not anything is connected.
 from anton.utils.datasources import DATASOURCES_HEADER
@@ -161,6 +162,16 @@ GATHERING_CONTINUE = (
     "The user was not satisfied with the PRD brief and more data or "
     "clarifying questions are needed before it can be redrafted. "
     "Continue gathering: call `finish_gathering` again once ready."
+)
+
+# Sent only with the retry of a discovery call the output budget cut off. The
+# cut reply is not in the conversation, so "continue" would have nothing to
+# continue from: the model is asked for the whole reply again, compactly.
+DISCOVERY_TRUNCATED_NUDGE = (
+    f"{ANTON_NOTE} Your previous reply to this step ran out of its output-token budget "
+    "and was discarded. Reply to the step again, in full. Keep your deliberation "
+    "brief and the reply compact. If the step needs a tool call, make it right "
+    "away and keep its arguments small."
 )
 
 # No language rule here on purpose. With an all-English context, "write in

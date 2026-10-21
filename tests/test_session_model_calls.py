@@ -296,14 +296,16 @@ async def test_the_real_generate_artifact_tool_reports_a_wait(tmp_path):
     gate = _Gate()
     callers: list[str] = []
 
-    async def _held_tool_call():
-        callers.extend(frame.filename for frame in traceback.extract_stack())
-        await gate.hold()
-        return _text_response("gathering notes")
+    def _held_tool_call():
+        async def _events():
+            callers.extend(frame.filename for frame in traceback.extract_stack())
+            await gate.hold()
+            yield StreamComplete(response=_text_response("gathering notes"))
+
+        return _events()
 
     provider = _ScriptedProvider(
-        streams=[_stream_of(build), _stream_of(_text_response("done"))],
-        completes=[_held_tool_call],
+        streams=[_stream_of(build), _held_tool_call, _stream_of(_text_response("done"))],
     )
     client = LLMClient(
         planning_provider=provider, planning_model="planner",
