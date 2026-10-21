@@ -123,6 +123,7 @@ __all__ = [
     "ProjectSnapshot",
     "SqlWrite",
     "find_cell_writes",
+    "http_write_rule_matches",
     "parse_http_write_rules",
     "snapshot_project_files",
     "write_statements",
@@ -230,7 +231,7 @@ class HttpWriteRule(BaseModel):
     `*` for any. In `url_glob`, `*` stands for any text within one path
     segment, `**` for any text, and `?` for one character other than `/`;
     it is matched, ignoring case, against the request's URL without its
-    query string (`_url_could_match`)."""
+    query string or fragment (`http_write_rule_matches`)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -5588,7 +5589,9 @@ def http_write_rule_matches(rule: HttpWriteRule, *, method: str, url: str) -> bo
     """Whether a request with `method` to `url` matches `rule`, as the gate
     matches a cell's request: the rule's method or `*`, and its glob against
     the URL, ignoring case, the query string and the fragment. Public for a
-    service that applies the same rules to requests it forwards."""
+    service that applies the same rules to requests it forwards. The URL is
+    matched as given, so such a service passes it decoded and normalized,
+    as it forwards it."""
     return rule.method in ("*", method.upper()) and _url_could_match(url, rule.url_glob)
 
 

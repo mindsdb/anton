@@ -19,7 +19,7 @@ from .attachments import Attachment
 
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
-    from anton.core.artifacts.live_app_slots import LiveAppLaunchResult
+    from anton.core.artifacts.live_app_slots import LiveAppLaunchError, LiveAppLaunchResult
     from anton.core.artifacts.render_check import RenderScreenshot, RenderStatus
     from anton.utils.datasources import DatasourceCatalog
 
@@ -238,6 +238,8 @@ class GenState:
     # A fullstack app launched into an app slot (`live_app_slots`): its
     # address, slot and the declared connections it didn't get. No port.
     live_app: "LiveAppLaunchResult | None" = None
+    # Why a live app's launch didn't happen, when no new backend could fix it.
+    launch_failure: "LiveAppLaunchError | None" = None
     trace: list[StepResult] = field(default_factory=list)
     error: str | None = None
     trace_log: "GenTrace | NullTrace" = field(default_factory=NullTrace)

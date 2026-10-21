@@ -311,13 +311,35 @@ async def test_an_update_waits_for_approve_and_then_runs_once(project):
     assert len(seen.cards) == 1, "the card reaches the host while the cell waits"
     assert seen.ran_before == [0], "nothing ran before the user answered"
     assert harness.pad.ran == [UPDATE_CELL], "it runs exactly once after Approve"
-    assert drained == ["prepare_scratchpad_exec"], "the gated exec is drained so its card reaches the host"
+    assert drained == ["prepare_scratchpad_exec", "check_cell_artifacts"], (
+        "the gated exec and the check after it are drained so their cards reach the host"
+    )
     prompt = seen.cards[0].request.prompt
     quoted = "UPDATE suppliers\nSET lead_time_days = %s\nWHERE supplier_id = %s\nwith values (21, 'S005')"
     assert f"```\n{quoted}\n```" in prompt, "the card quotes the statement line by line, with its values"
     assert seen.cards[0].id.startswith("write:")
     assert seen.cards[0].request.allow_custom is False
     assert {option.style for option in seen.cards[0].request.options} == {"default"}, "no host renders a style"
+
+
+async def test_a_card_from_the_check_after_a_cell_reaches_the_host(project, monkeypatch):
+    """A running live app's relaunch asks its card from the check after the
+    cell. Undrained, that card sits on the emitter until its timeout, and
+    the turn hangs here and fails on the deadline."""
+    from anton.core.tools import tool_handlers
+    from anton.core.utils.scratchpad import ask_approval_card
+
+    async def relaunch(session, store, before):
+        cause = await ask_approval_card(
+            session, "**Launch this live app?**", approve_detail="Start", cancel_detail="Leave",
+        )
+        return [f"relaunch: {cause or 'approved'}"]
+
+    monkeypatch.setattr(tool_handlers, "_relaunch_live_apps", relaunch)
+    harness = _session(project, "print(1)\n")
+    seen = await _run(harness=harness, answers=[APPROVE])
+    assert [card.request.prompt for card in seen.cards] == ["**Launch this live app?**"]
+    assert "[live app]\nrelaunch: approved" in _history_text(harness.session)
 
 
 @pytest.mark.parametrize("answer", [CANCEL, SKIP, TIMEOUT], ids=["cancel", "skip", "timeout"])

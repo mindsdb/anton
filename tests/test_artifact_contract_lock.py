@@ -400,6 +400,9 @@ RULES: tuple[Rule, ...] = (
     # policy loads scripts only from cdn.jsdelivr.net.
     Rule("errors", "Script from a host a live app does not load: ",
          (("frontend", "https://cdn.jsdelivr.net/npm/"),)),
+    # The same policy's stylesheets and images: advisory, as for the preview.
+    Rule("warnings", "External resource a live app does not load: ",
+         (("frontend", "https://cdn.jsdelivr.net/npm/"),)),
     # ── verify_frontend_live (html-app, from disk) and verify_app_live
     # (fullstack, from the running backend after run_app — S-02). Each prompt
     # carries its own browser-gate bullet (`_BROWSER_GATE_HTML` /
@@ -486,6 +489,9 @@ ALLOWLIST: tuple[str, ...] = (
     "backend.py compile timed out after ",
     "backend.py import timed out after ",
     "backend introspection produced no JSON. stderr:\n",
+    # With live apps on: an app slot installs nothing, so a requirement this
+    # environment lacks fails the backend before any launch card.
+    "requirements.txt names a package a live app can't have: ",
 )
 
 

@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import re
+import threading
 import weakref
 from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass, field
@@ -44,6 +45,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from anton.core.artifacts.store import BACKEND_LOG_FILENAME
 from anton.core.backends.sandbox import cell_sandbox_of
+from anton.core.utils.scratchpad import RefusalCause, refusal_why
 from anton.utils.datasources import scrub_output
 from anton.utils.nofollow import read_bytes_nofollow, write_text_nofollow
 
@@ -66,29 +68,37 @@ LAUNCH_DIRS = ("static",)
 MAX_LAUNCH_FILES = 500
 MAX_LAUNCH_FILE_BYTES = 8 * 1024 * 1024
 MAX_LAUNCH_TOTAL_BYTES = 64 * 1024 * 1024
+# The slot's rule for a `DS_*` name it puts in the app's environment.
+ENV_NAME = re.compile(r"^DS_[A-Z0-9_]+__[A-Z0-9][A-Z0-9_]*$")
 
 # How long anton waits on a slot: a status read, the restart a reset starts
-# (the slot program exits no sooner than 10 seconds after its boot), and a
-# launch, which waits up to 20 seconds for the app's port.
+# (the slot program exits no sooner than 10 seconds after its boot), a
+# launch, which waits up to 20 seconds for the app's port, and a probe,
+# which GETs its paths one after another with 5 seconds for each.
 STATUS_TIMEOUT_SECONDS = 2.0
 RESET_TIMEOUT_SECONDS = 45.0
 RESET_POLL_SECONDS = 0.5
 LAUNCH_TIMEOUT_SECONDS = 60.0
-PROBE_TIMEOUT_SECONDS = 30.0
+PROBE_PATH_SECONDS = 5.0
 MAX_REPLY_BYTES = 1024 * 1024
-# The most paths one `POST /probe` takes.
+# The most paths one `POST /probe` takes, and the longest path it takes.
 MAX_PROBE_PATHS = 32
+MAX_PROBE_PATH_LENGTH = 512
 
 _SLOT_ADDRESS = re.compile(r"^http://[A-Za-z0-9.-]+:(?P<port>\d{1,5})$")
 
 ConnectionKind = Literal["db", "http-read", "http-write"]
-MissingReason = Literal["not_approved", "not_saved", "other_host"]
+MissingReason = Literal["not_approved", "not_saved", "other_host", "field_names"]
 SlotState = Literal["empty", "running", "exited"]
+SlotStopReason = Literal["idle", "max_time", "app_exited", "reset", "terminated"]
+# What a launch card approves, in card order. The `files` hash is no part of it.
+ChangedPart = Literal["backend", "requirements", "connections"]
 
 MISSING_REASON_TEXT: dict[MissingReason, str] = {
     "not_approved": "not approved for live apps by the operator",
     "not_saved": "no saved connection by that engine and name",
     "other_host": "saved with a host other than the approved one",
+    "field_names": "saved with a field name a live app can't receive (only letters, digits and _)",
 }
 
 
@@ -135,8 +145,12 @@ def live_app_slot_addresses() -> tuple[str, ...]:
     that isn't `http://<host>:<port>`, so a typo refuses launches rather than
     dropping a slot.
     """
-    raw = os.environ.get(SLOTS_ENV_VAR, "")
-    addresses = tuple(entry.strip() for entry in raw.split(",") if entry.strip())
+    raw = os.environ.get(SLOTS_ENV_VAR, "").strip()
+    if not raw:
+        return ()
+    # A blank entry stays, so it refuses rather than renumbering the slots
+    # after it; one trailing comma is allowed.
+    addresses = tuple(entry.strip() for entry in raw.removesuffix(",").split(","))
     for position, address in enumerate(addresses, start=1):
         match = _SLOT_ADDRESS.match(address)
         if match is None or not 1 <= int(match["port"]) <= 65535:
@@ -197,7 +211,7 @@ class ApprovedConnection(BaseModel):
 
 
 class ApprovedConnections(BaseModel):
-    """The approved-connections file the stack renders from `LIVE_APPS_CONNECTIONS`."""
+    """The approved-connections file that `ANTON_LIVE_APP_CONNECTIONS_FILE` names; the host renders it."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -207,11 +221,20 @@ class ApprovedConnections(BaseModel):
     @model_validator(mode="after")
     def _unique(self) -> ApprovedConnections:
         seen: set[tuple[str, str]] = set()
+        # One relay port per entry: a shared one would send one connection's
+        # values to the other entry's upstream.
+        by_relay_port: dict[int, ApprovedConnection] = {}
         for entry in self.connections:
             key = (entry.engine.lower(), entry.name.lower())
             if key in seen:
                 raise ValueError(f"{entry.engine}/{entry.name} is approved twice")
             seen.add(key)
+            if entry.relay_port is not None:
+                other = by_relay_port.setdefault(entry.relay_port, entry)
+                if other is not entry:
+                    raise ValueError(
+                        f"{other.engine}/{other.name} and {entry.engine}/{entry.name} share relay_port {entry.relay_port}"
+                    )
         return self
 
     def find(self, ref: DatasourceRef) -> ApprovedConnection | None:
@@ -225,11 +248,13 @@ def load_approved_connections() -> ApprovedConnections:
     if not path:
         raise LiveAppConfigError(f"{CONNECTIONS_FILE_ENV_VAR} is not set.")
     try:
-        text = Path(path).read_text(encoding="utf-8")
+        # Bytes: pydantic reads them as UTF-8, so a file that isn't takes the
+        # "is not valid" path below.
+        raw = Path(path).read_bytes()
     except OSError as exc:
         raise LiveAppConfigError(f"{CONNECTIONS_FILE_ENV_VAR} can't be read ({type(exc).__name__}).") from exc
     try:
-        return ApprovedConnections.model_validate_json(text)
+        return ApprovedConnections.model_validate_json(raw)
     except ValidationError as exc:
         # Each problem's place and message: they name engines, names and
         # fields, never a saved value, and the file holds none.
@@ -274,11 +299,19 @@ class LiveAppHost(Protocol):
     launch_token: str
 
     async def claim(self, slot: int) -> None:
-        """Called before anton resets slot `slot` or sends it a launch: the
-        host clears the slot's record, so nobody opens it until `launched`."""
+        """Called only when the launch replaces an app slot `slot` is
+        running, before anton resets it: the host stops that slot's running
+        record, so nobody opens the slot until `launched`. A free slot
+        (empty, or its app exited) gets no claim."""
 
     async def launched(self, launch: LiveAppLaunch) -> None:
         """Called after the slot accepted the launch."""
+
+    async def launch_failed(self, slot: int) -> None:
+        """Called once when a launch that ran `claim(slot)` doesn't finish:
+        the slot refused or failed it, a Stop cancelled it, or `launched`
+        raised. The app `claim` stopped is gone and nothing runs in the slot,
+        so the host tells its owner. Raising here changes nothing."""
 
 
 # ---------------------------------------------------------------------------
@@ -287,8 +320,9 @@ class LiveAppHost(Protocol):
 
 
 class _Wire(BaseModel):
-    # The slot may add fields; anton reads the ones it knows.
-    model_config = ConfigDict(extra="ignore", frozen=True)
+    # The slot may add fields; anton reads the ones it knows. A reply's
+    # values stay out of error text, since the warnings log these errors.
+    model_config = ConfigDict(extra="ignore", frozen=True, hide_input_in_errors=True)
 
 
 class SlotConnection(_Wire):
@@ -307,15 +341,22 @@ class AppHashes(_Wire):
     backend: str
     requirements: str
     connections: str
+    # Every file the launch sent: it never asks the card, and a relaunch
+    # after a cell that left all of them as they were is skipped.
+    files: str
 
 
 class SlotApp(_Wire):
     artifact: str
+    # The launch's `app_id`, echoed: which folder the app came from.
+    app_id: str
     launcher: LiveAppLauncher
     started_at: str
     expires_at: str
     # The app's latest request, or None before its first.
     last_request_at: str | None = None
+    # Why the app stopped, while the slot is `exited`.
+    stop_reason: SlotStopReason | None = None
     hashes: AppHashes
     env_names: tuple[str, ...] = ()
     connections: tuple[SlotConnection, ...] = ()
@@ -341,6 +382,7 @@ class LaunchRequest(_Wire):
 
     version: Literal[1] = 1
     artifact: str
+    app_id: str
     launcher: LiveAppLauncher
     files: tuple[LaunchFile, ...]
     env: dict[str, str]
@@ -401,8 +443,10 @@ class SlotClient:
         )
 
     def probe(self, paths: Sequence[str]) -> ProbeReply:
+        # The slot GETs the paths one after another, 5 seconds at most each.
+        timeout = PROBE_PATH_SECONDS * len(paths) + STATUS_TIMEOUT_SECONDS
         return ProbeReply.model_validate_json(
-            self._call("POST", "/probe", timeout=PROBE_TIMEOUT_SECONDS, body={"paths": list(paths)})
+            self._call("POST", "/probe", timeout=timeout, body={"paths": list(paths)})
         )
 
     def _call(self, method: str, path: str, *, timeout: float, body: dict | None = None) -> bytes:
@@ -437,13 +481,13 @@ class SlotClient:
         raise SlotRefused(status_code, error)
 
 
-def fetch_slot_status(address: str, *, token: str, timeout: float = STATUS_TIMEOUT_SECONDS) -> SlotStatus:
-    """One slot's status, for a host that checks who runs which slot.
-    Blocking. Raises `SlotUnavailable` or `SlotRefused`."""
-    try:
-        return SlotClient(address, token=token).status(timeout=timeout)
-    except ValidationError as exc:
-        raise SlotUnavailable(f"slot {address} answered a status that doesn't parse") from exc
+def probe_path_accepted(path: str) -> bool:
+    """Whether a slot's `POST /probe` takes `path`: it refuses the whole
+    probe for one path it doesn't."""
+    return (
+        path.startswith("/") and not path.startswith("//") and len(path) <= MAX_PROBE_PATH_LENGTH
+        and "#" not in path and not any(ch.isspace() for ch in path)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -461,6 +505,16 @@ def _bad_name(rel: str) -> bool:
     return "\\" in rel or "\0" in rel or rel.startswith("/") or any(p in ("", ".", "..") for p in parts)
 
 
+# Why a launch file couldn't be read, by the no-follow read's errno; the
+# refusal names the path and this, never the content.
+_READ_REFUSALS: dict[int, str] = {
+    errno.ELOOP: "is a link, and live apps send no links",
+    errno.EMLINK: "has another hard link, and live apps send only plain files",
+    errno.EINVAL: "is not a plain file, and live apps send only plain files",
+    errno.EACCES: "can't be read",
+}
+
+
 def read_launch_files(folder: Path) -> list[LaunchFileData]:
     """The files a launch sends from `folder`, a resolved path, read with
     no-follow opens from the filesystem root, so a link agent code swaps in
@@ -472,6 +526,11 @@ def read_launch_files(folder: Path) -> list[LaunchFileData]:
     """
     def refuse(rel: str, why: str) -> LiveAppLaunchError:
         return LiveAppLaunchError(f"Not launched: `{rel}` {why}.", cause="launch_files")
+
+    def too_many() -> LiveAppLaunchError:
+        return LiveAppLaunchError(
+            f"Not launched: the app has more than the {MAX_LAUNCH_FILES} files a launch sends.", cause="launch_files",
+        )
 
     found: list[str] = []
     for name in LAUNCH_FILES:
@@ -494,11 +553,9 @@ def read_launch_files(folder: Path) -> list[LaunchFileData]:
                 if path.is_symlink():
                     raise refuse(rel, "is a link, and live apps send no links")
             found.extend((Path(current) / name).relative_to(folder).as_posix() for name in sorted(filenames))
-    if len(found) > MAX_LAUNCH_FILES:
-        raise LiveAppLaunchError(
-            f"Not launched: the app has {len(found)} files, more than the {MAX_LAUNCH_FILES} a launch sends.",
-            cause="launch_files",
-        )
+            # Counted as it walks, so a huge tree stops at the cap.
+            if len(found) > MAX_LAUNCH_FILES:
+                raise too_many()
     files: list[LaunchFileData] = []
     total = 0
     for rel in found:
@@ -507,7 +564,7 @@ def read_launch_files(folder: Path) -> list[LaunchFileData]:
         except OSError as exc:
             if exc.errno == errno.EFBIG:
                 raise refuse(rel, f"is over the {MAX_LAUNCH_FILE_BYTES // (1024 * 1024)} MB a launch sends per file") from exc
-            raise refuse(rel, "is a link, a linked or special file, or unreadable, and live apps send only plain files") from exc
+            raise refuse(rel, _READ_REFUSALS.get(exc.errno, "can't be read, and live apps send only plain files")) from exc
         total += len(data)
         if total > MAX_LAUNCH_TOTAL_BYTES:
             raise LiveAppLaunchError(
@@ -564,7 +621,8 @@ def _http_url(value: str) -> SplitResult | None:
 
 
 def _points_at(parts: SplitResult, approved: ApprovedConnection) -> bool:
-    port = parts.port or _default_port(parts.scheme.lower())
+    # Only an absent port takes the scheme's default; an explicit 0 is no match.
+    port = parts.port if parts.port is not None else _default_port(parts.scheme.lower())
     return parts.hostname.lower() == approved.host and port == approved.port
 
 
@@ -611,6 +669,10 @@ def resolve_connections(
         if not env:
             resolved.missing.append(_missing(ref, "not_saved"))
             continue
+        if any(not ENV_NAME.fullmatch(name) for name in env):
+            # The slot refuses the whole launch for one such name.
+            resolved.missing.append(_missing(ref, "field_names"))
+            continue
         if entry.kind == "db":
             if not _db_points_at(env, ref.env_prefix, entry):
                 resolved.missing.append(_missing(ref, "other_host"))
@@ -643,22 +705,34 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _listed_hash(listed: list) -> str:
+    return _sha256(json.dumps(sorted(listed), separators=(",", ":")).encode("utf-8"))
+
+
 def app_hashes(files: Sequence[LaunchFileData], connections: Sequence[SlotConnection]) -> AppHashes:
     """The hashes a slot reports for an app, computed from what a launch would send."""
     by_path = {f.path: f.data for f in files}
-    listed = sorted([c.engine, c.name, c.kind, c.overrides_write_hold] for c in connections)
     return AppHashes(
         backend=_sha256(by_path.get("backend.py", b"")),
         requirements=_sha256(by_path.get("requirements.txt", b"")),
-        connections=_sha256(json.dumps(listed, separators=(",", ":")).encode("utf-8")),
+        connections=_listed_hash([[c.engine, c.name, c.kind, c.overrides_write_hold] for c in connections]),
+        files=_listed_hash([[f.path, _sha256(f.data)] for f in files]),
     )
+
+
+def app_identity(folder: Path) -> str:
+    """A launch's `app_id`: the SHA-256 of the artifact folder's resolved
+    path, so two artifacts of one person with one slug never count as one app."""
+    return _sha256(os.fsencode(os.path.realpath(folder)))
 
 
 # ---------------------------------------------------------------------------
 # The card
 # ---------------------------------------------------------------------------
 
-_CHANGED_PART_NAMES = {"backend": "`backend.py`", "requirements": "`requirements.txt`", "connections": "its connections"}
+_CHANGED_PART_NAMES: dict[ChangedPart, str] = {
+    "backend": "`backend.py`", "requirements": "`requirements.txt`", "connections": "its connections",
+}
 
 
 def _access_words(entry: ApprovedConnection) -> str:
@@ -675,9 +749,9 @@ def _access_words(entry: ApprovedConnection) -> str:
     return "reads and writes"
 
 
-def changed_parts(running: AppHashes, new: AppHashes) -> list[str]:
+def changed_parts(running: AppHashes, new: AppHashes) -> list[ChangedPart]:
     """Which approved parts differ between the running app and the new launch, in card order."""
-    return [part for part in ("backend", "requirements", "connections") if getattr(running, part) != getattr(new, part)]
+    return [part for part in _CHANGED_PART_NAMES if getattr(running, part) != getattr(new, part)]
 
 
 def shown_time(iso: str) -> str:
@@ -692,7 +766,7 @@ def launch_card_prompt(
     *,
     slug: str,
     granted: Sequence[GrantedConnection],
-    changed: Sequence[str],
+    changed: Sequence[ChangedPart],
     running: bool,
     replaces: SlotApp | None = None,
 ) -> str:
@@ -729,6 +803,10 @@ def launch_card_prompt(
     return "\n".join(lines)
 
 
+# What came of a launch card: "stopped" when the turn ended while it waited.
+LaunchStatus = RefusalCause | Literal["approved", "stopped"]
+
+
 class LaunchDecision(BaseModel):
     """One logged launch card: the app, its connections by name, and what came of it."""
 
@@ -736,9 +814,9 @@ class LaunchDecision(BaseModel):
 
     slug: str
     connections: tuple[str, ...]
-    changed: tuple[str, ...]
+    changed: tuple[ChangedPart, ...]
     replaces: str | None = None
-    status: str
+    status: LaunchStatus
 
 
 # ---------------------------------------------------------------------------
@@ -747,11 +825,29 @@ class LaunchDecision(BaseModel):
 
 NO_HOST_MESSAGE = "Not launched: live apps need a host that records who launches them, and this session has none."
 NO_SLOT_MESSAGE = "Not launched: no live-app slot answered. Ask the operator to check the stack's app slots."
-NOT_APPROVED_MESSAGE = "Not launched: the person didn't approve the launch. The app that was running is unchanged."
+
+
+def not_approved_message(cause: RefusalCause, *, running: bool) -> str:
+    """A launch card that didn't approve: who or what stopped it, and what stays."""
+    if cause == "cancelled":
+        lead = "Not launched: the person didn't approve the launch."
+    else:
+        lead = f"Not launched: the launch needs the person's approval, and {refusal_why(cause)}."
+    return f"{lead} {'Their running apps are unchanged.' if running else 'Nothing was started.'}"
+
+
+def missing_clause(missing: Sequence[MissingConnection]) -> str:
+    """The sentence a launch result adds for the declared connections the app
+    didn't get, by engine, name and reason, never a value; "" when none."""
+    if not missing:
+        return ""
+    named = ", ".join(f"`{m.engine}/{m.name}` ({MISSING_REASON_TEXT[m.reason]})" for m in missing)
+    return f" Not passed to the app: {named}. Ask the person to add or rename the connection, or their operator to approve it."
 
 
 class LiveAppLaunchResult(BaseModel):
-    """A launch that happened."""
+    """A launch that happened, or, with `unchanged`, a relaunch that wasn't
+    needed because the slot already runs exactly these files."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -760,22 +856,16 @@ class LiveAppLaunchResult(BaseModel):
     slug: str
     missing: tuple[MissingConnection, ...] = ()
     probe: tuple[ProbeResult, ...] = ()
+    # Why the probe couldn't run, when the slot gave it no usable answer.
+    probe_error: str = ""
     log_tail: str = ""
+    unchanged: bool = False
 
     def message(self) -> str:
-        text = (
+        return (
             f"Live app `{self.slug}` is running at `{self.address}`. "
             "Give the person this address in backticks; only they can open it."
-        )
-        if self.missing:
-            named = ", ".join(
-                f"`{m.engine}/{m.name}` ({MISSING_REASON_TEXT[m.reason]})" for m in self.missing
-            )
-            text += (
-                f" Not passed to the app: {named}. Ask the person to add or rename the "
-                "connection, or their operator to approve it."
-            )
-        return text
+        ) + missing_clause(self.missing)
 
 
 def _slot_locks() -> dict[str, asyncio.Lock]:
@@ -805,16 +895,16 @@ async def _read_statuses(clients: Sequence[SlotClient]) -> list[SlotStatus | Non
     return list(await asyncio.gather(*(_read_status(c) for c in clients)))
 
 
-def _holds(status: SlotStatus | None, slug: str, launcher: LiveAppLauncher) -> bool:
+def _holds(status: SlotStatus | None, app_id: str, launcher: LiveAppLauncher) -> bool:
     return (
         status is not None and status.state == "running" and status.app is not None
-        and status.app.artifact == slug and status.app.launcher.subject == launcher.subject
+        and status.app.app_id == app_id and status.app.launcher.subject == launcher.subject
     )
 
 
-def running_slot(statuses: Sequence[SlotStatus | None], slug: str, launcher: LiveAppLauncher) -> int | None:
-    """The index of the slot that runs `slug` for `launcher`, or None."""
-    return next((i for i, s in enumerate(statuses) if _holds(s, slug, launcher)), None)
+def running_slot(statuses: Sequence[SlotStatus | None], app_id: str, launcher: LiveAppLauncher) -> int | None:
+    """The index of the slot that runs the app `app_id` for `launcher`, or None."""
+    return next((i for i, s in enumerate(statuses) if _holds(s, app_id, launcher)), None)
 
 
 @dataclass(frozen=True)
@@ -846,13 +936,13 @@ def _held_by_others(statuses: Sequence[SlotStatus | None]) -> str:
     )
 
 
-def plan_slot(statuses: Sequence[SlotStatus | None], slug: str, launcher: LiveAppLauncher) -> SlotPlan:
+def plan_slot(statuses: Sequence[SlotStatus | None], app_id: str, launcher: LiveAppLauncher) -> SlotPlan:
     """The slot a launch takes. The app's own slot when one still runs it;
-    else the lowest free slot; else the launcher's own app that started
-    longest ago, which the card names. Nobody else's app is ever replaced:
-    with every slot held by other people, raises `LiveAppLaunchError` naming
-    who holds what."""
-    own = running_slot(statuses, slug, launcher)
+    else the lowest free slot, which after a stop may not be the slot the app
+    had; else the launcher's own app that started longest ago, which the card
+    names. Nobody else's app is ever replaced: with every slot held by other
+    people, raises `LiveAppLaunchError` naming who holds what."""
+    own = running_slot(statuses, app_id, launcher)
     if own is not None:
         return SlotPlan(own)
     answering = [(i, s) for i, s in enumerate(statuses) if s is not None]
@@ -879,15 +969,33 @@ def _same_plan(new: SlotPlan, approved: SlotPlan) -> bool:
     )
 
 
+def _still_as_planned(seen: SlotStatus, current: SlotStatus | None) -> bool:
+    """Whether the slot is still the one the plan saw. An exited app's slot
+    restarts by itself, so the same slot back empty under a new boot is too."""
+    if current is None:
+        return False
+    if seen.state == "exited" and current.state == "empty":
+        return True
+    return current.boot_id == seen.boot_id and current.state == seen.state
+
+
 async def _wait_for_restart(client: SlotClient, old_boot_id: str) -> SlotStatus:
-    """Poll until the slot is back from a reset: a new boot id and empty."""
+    """Poll until the slot is back from a reset: a new boot id and empty. A
+    slot that can't be reached meanwhile is still restarting."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + RESET_TIMEOUT_SECONDS
     while loop.time() < deadline:
         await asyncio.sleep(RESET_POLL_SECONDS)
-        status = await _read_status(client)
-        if status is not None and status.boot_id != old_boot_id and status.state == "empty":
+        try:
+            status = await asyncio.to_thread(client.status)
+        except SlotUnavailable:
+            continue
+        except (SlotRefused, ValidationError):
+            _log.warning("live app slot %s gave no usable status while restarting", client.address, exc_info=True)
+            continue
+        if status.boot_id != old_boot_id and status.state == "empty":
             return status
+    _log.warning("live app slot %s did not come back empty within %.0f s", client.address, RESET_TIMEOUT_SECONDS)
     raise LiveAppLaunchError(
         "Not launched: the app slot did not come back empty after its restart. Ask the operator to check it.",
         cause="slot_reset",
@@ -913,6 +1021,39 @@ def _launch_failure(error: SlotRefused) -> LiveAppLaunchError:
     )
 
 
+class _LaunchSetup(NamedTuple):
+    host: LiveAppHost
+    addresses: tuple[str, ...]
+    approved: ApprovedConnections
+
+
+def _launch_setup(session) -> _LaunchSetup:
+    """What every launch from `session` needs. Raises `LiveAppLaunchError`
+    when none can succeed: no host, or a broken setting. Checked before any
+    slot is touched, since an address that fails after a launch would leave
+    an app running that nobody recorded."""
+    host: LiveAppHost | None = getattr(session, "_live_app_host", None)
+    if host is None:
+        raise LiveAppLaunchError(NO_HOST_MESSAGE, cause="no_host")
+    try:
+        addresses = live_app_slot_addresses()
+        approved = load_approved_connections()
+        app_address(1)
+    except LiveAppConfigError as exc:
+        raise LiveAppLaunchError(f"Not launched: {exc} Ask the operator to fix it.", cause="config") from exc
+    return _LaunchSetup(host, addresses, approved)
+
+
+def live_app_launch_blocker(session) -> LiveAppLaunchError | None:
+    """Why no launch from `session` can succeed, or None: no host, or a
+    broken setting. The generator asks before it builds a fullstack app."""
+    try:
+        _launch_setup(session)
+    except LiveAppLaunchError as exc:
+        return exc
+    return None
+
+
 async def launch_live_app(
     session,
     *,
@@ -920,30 +1061,31 @@ async def launch_live_app(
     folder: Path,
     datasources: Sequence[DatasourceRef],
     probe_paths: Sequence[str] = (),
+    only_if_changed: bool = False,
 ) -> LiveAppLaunchResult:
     """Launch `slug` into an app slot, through the owner's card when it
     changes what the app runs or reaches. Raises `LiveAppLaunchError`, whose
     text the agent relays, when nothing launched; nothing ever starts in this
-    process."""
+    process. With `only_if_changed`, a running app whose files are all as
+    they were isn't relaunched: the result says `unchanged`."""
     from anton.core.utils.scratchpad import ask_approval_card
 
-    host: LiveAppHost | None = getattr(session, "_live_app_host", None)
-    if host is None:
-        raise LiveAppLaunchError(NO_HOST_MESSAGE, cause="no_host")
-    try:
-        addresses = live_app_slot_addresses()
-        approved = load_approved_connections()
-        # Checked before any slot is touched: an address that fails after a
-        # launch would leave an app running that nobody recorded.
-        app_address(1)
-    except LiveAppConfigError as exc:
-        raise LiveAppLaunchError(f"Not launched: {exc} Ask the operator to fix it.", cause="config") from exc
+    host, addresses, approved = _launch_setup(session)
     # This process reads the files outside the sandbox, so under a policy it
     # reads only what the person's own cells may read, as the render check
     # does: the folder's resolved path is approved, then read without links.
-    folder = Path(os.path.realpath(folder))
     policy = cell_sandbox_of(getattr(session, "_scratchpads", None))
-    if policy is not None and not policy.allows_read(folder):
+    try:
+        # Inside the try: resolving a name that agent code is swapping can
+        # itself fail, in realpath and in the policy's own resolve.
+        folder = Path(os.path.realpath(folder))
+        allowed = policy is None or policy.allows_read(folder)
+    except OSError as exc:
+        raise LiveAppLaunchError(
+            "Not launched: the app's folder could not be resolved; it changed while the launch read it.",
+            cause="launch_files",
+        ) from exc
+    if not allowed:
         raise LiveAppLaunchError(
             "Not launched: the app's folder is outside the files this conversation may read.", cause="launch_files",
         )
@@ -951,113 +1093,192 @@ async def launch_live_app(
     resolved = resolve_connections(getattr(session, "_data_vault", None), datasources, approved, slug=slug)
     connections = tuple(g.slot for g in resolved.granted)
     hashes = app_hashes(files, connections)
+    app_id = app_identity(folder)
     clients = [SlotClient(address, token=host.launch_token) for address in addresses]
     launcher = host.launcher
 
     statuses = await _read_statuses(clients)
-    plan = plan_slot(statuses, slug, launcher)
-    own = running_slot(statuses, slug, launcher)
+    plan = plan_slot(statuses, app_id, launcher)
+    own = running_slot(statuses, app_id, launcher)
     running_hashes = statuses[own].app.hashes if own is not None else None
-    if running_hashes != hashes or plan.replaces is not None:
-        changed = changed_parts(running_hashes, hashes) if running_hashes is not None else []
-        prompt = launch_card_prompt(
-            slug=slug, granted=resolved.granted, changed=changed, running=own is not None, replaces=plan.replaces,
+    if only_if_changed and running_hashes == hashes:
+        return LiveAppLaunchResult(
+            slot=own + 1, address=app_address(own + 1), slug=slug, missing=tuple(resolved.missing), unchanged=True,
         )
-        cause = await ask_approval_card(
-            session, prompt,
-            approve_detail="Start the app with these connections", cancel_detail="Leave things as they are",
+    changed = changed_parts(running_hashes, hashes) if running_hashes is not None else []
+    if running_hashes is None or changed or plan.replaces is not None:
+        running = own is not None or plan.replaces is not None
+        prompt = launch_card_prompt(
+            slug=slug, granted=resolved.granted, changed=changed, running=running, replaces=plan.replaces,
         )
         decision = LaunchDecision(
             slug=slug,
             connections=tuple(f"{c.engine}/{c.name}:{c.kind}" for c in connections),
             changed=tuple(changed),
             replaces=plan.replaces.artifact if plan.replaces is not None else None,
-            status=cause or "approved",
+            status="approved",
         )
-        # WARNING: hosts log at WARNING by default, and this line is the
-        # record of an approved or refused launch.
-        _log.warning("live app launch: %s", decision.model_dump_json())
+        try:
+            cause = await ask_approval_card(
+                session, prompt,
+                approve_detail="Start the app with these connections", cancel_detail="Leave things as they are",
+                log_label="live app launch",
+            )
+        except asyncio.CancelledError:
+            _log_launch_decision(decision.model_copy(update={"status": "stopped"}))
+            raise
+        _log_launch_decision(decision.model_copy(update={"status": cause or "approved"}))
         if cause is not None:
-            raise LiveAppLaunchError(NOT_APPROVED_MESSAGE, cause="launch_not_approved")
+            raise LiveAppLaunchError(not_approved_message(cause, running=running), cause="launch_not_approved")
 
     request = LaunchRequest(
         artifact=slug,
+        app_id=app_id,
         launcher=launcher,
         files=tuple(LaunchFile(path=f.path, content_b64=base64.b64encode(f.data).decode("ascii")) for f in files),
         env=resolved.env,
         connections=connections,
     )
-    # Twice at most: a slot another launch took between the read and the
-    # lock is read again, once. The new plan may not replace an app the card
-    # didn't name.
+    # A slot another launch took between the read and the lock is picked
+    # again once, and a slot that answers 409 is picked again once. The new
+    # plan may not replace an app the card didn't name.
     approved_plan = plan
-    for attempt in range(2):
-        if attempt:
+    changed_left = busy_left = 1
+    # The app `claim` stopped, and its slot: a launch that then fails says so.
+    claimed: SlotApp | None = None
+    claimed_slot = 0
+    try:
+        while True:
+            index = plan.index
+            client, seen = clients[index], statuses[index]
+            slot, address = index + 1, app_address(index + 1)
+            async with _slot_locks().setdefault(client.address, asyncio.Lock()):
+                current = await _read_status(client)
+                if current is None and seen.state == "exited":
+                    # The exited app's slot is restarting by itself.
+                    current = await _wait_for_restart(client, seen.boot_id)
+                reply = None
+                if _still_as_planned(seen, current):
+                    if current.state == "running":
+                        # Only a running app has a record to clear. A free
+                        # slot's older record opens nothing, since the host's
+                        # access check also asks the slot who runs it now,
+                        # and claiming one here could clear the record
+                        # another process's launch just wrote.
+                        await _record(host.claim(slot))
+                        claimed, claimed_slot = current.app, slot
+                    if current.state != "empty":
+                        await asyncio.to_thread(_reset, client)
+                        current = await _wait_for_restart(client, current.boot_id)
+                    reply = await _send_launch(
+                        client, request, folder=folder, boot_id=current.boot_id, app_id=app_id, launcher=launcher,
+                    )
+                    if reply is not None:
+                        await _record_launched(host, client, LiveAppLaunch(
+                            slot=slot, slug=slug, artifact_dir=str(folder), address=address, boot_id=reply.boot_id,
+                        ))
+                        break
+                    busy = True
+                else:
+                    busy = False
+            if busy and busy_left:
+                busy_left -= 1
+            elif not busy and changed_left:
+                changed_left -= 1
+            else:
+                raise LiveAppLaunchError(
+                    "Not launched: other launches kept taking the app slot. Try again in a moment.", cause="slot_busy",
+                )
             statuses = await _read_statuses(clients)
-            plan = plan_slot(statuses, slug, launcher)
+            plan = plan_slot(statuses, app_id, launcher)
             if not _same_plan(plan, approved_plan):
                 raise LiveAppLaunchError(
                     "Not launched: the app slots changed while the card waited. Ask to launch it again.",
                     cause="slots_changed",
                 )
-        index = plan.index
-        client, seen = clients[index], statuses[index]
-        lock = _slot_locks().setdefault(client.address, asyncio.Lock())
-        async with lock:
-            current = await _read_status(client)
-            if current is None or current.boot_id != seen.boot_id or current.state != seen.state:
-                continue
-            slot = index + 1
-            address = app_address(slot)
-            if current.state == "running":
-                # Only a running app has a record to clear. A free slot's
-                # older record opens nothing, since the host's access check
-                # also asks the slot who runs it now, and claiming one here
-                # could clear the record another process's launch just wrote.
-                await _record(host.claim(slot))
-            if current.state != "empty":
-                await asyncio.to_thread(_reset, client)
-                current = await _wait_for_restart(client, current.boot_id)
-            try:
-                reply = await asyncio.to_thread(client.launch, request)
-            except SlotRefused as exc:
-                if exc.body.error == "slot_busy":
-                    continue
-                failure = _launch_failure(exc)
-                _write_log(folder, failure.log_tail)
-                raise failure from None
-            except (SlotUnavailable, ValidationError) as exc:
-                raise LiveAppLaunchError(
-                    f"Not launched: the app slot gave no usable answer ({type(exc).__name__}).", cause="slot_unavailable",
-                ) from None
-            try:
-                await _record(host.launched(LiveAppLaunch(
-                    slot=slot, slug=slug, artifact_dir=str(folder), address=address, boot_id=reply.boot_id,
-                )))
-            except LiveAppLaunchError:
-                # Nobody could open an app with no record; stop it rather
-                # than leave it holding the slot.
-                await asyncio.to_thread(_reset_quietly, client)
-                raise
-        break
-    else:
+    except BaseException as exc:
+        if claimed is None:
+            raise
+        await _report_launch_failed(host, claimed_slot)
+        if not isinstance(exc, LiveAppLaunchError):
+            raise
         raise LiveAppLaunchError(
-            "Not launched: other launches kept taking the app slot. Try again in a moment.", cause="slot_busy",
-        )
+            f"{exc} Your app `{claimed.artifact}` that slot {claimed_slot} was running has stopped for this "
+            "launch, and nothing runs there now.",
+            cause=exc.cause, log_tail=exc.log_tail,
+        ) from exc
 
-    tail, probe = reply.log_tail, ()
+    tail, probe, probe_error = reply.log_tail, (), ""
     if probe_paths:
         try:
             probed = await asyncio.to_thread(client.probe, probe_paths)
-            tail, probe = probed.log_tail, probed.results
-        except (SlotUnavailable, SlotRefused, ValidationError):
+        except SlotRefused as exc:
+            # A slot whose app stopped answers none of the paths; any other
+            # refusal says nothing about the app, so the result says why.
+            probe = tuple(ProbeResult(path=p, status=0) for p in probe_paths)
+            if exc.body.error != "not_running":
+                probe_error = f"the slot refused the probe: {exc.body.error}"
+        except (SlotUnavailable, ValidationError) as exc:
             _log.warning("live app slot %s: the probe failed", client.address, exc_info=True)
             probe = tuple(ProbeResult(path=p, status=0) for p in probe_paths)
+            probe_error = f"the slot gave no usable answer ({type(exc).__name__})"
+        else:
+            # One result per path sent, in order; a path the slot left out didn't answer.
+            answered = {r.path: r.status for r in probed.results}
+            tail, probe = probed.log_tail, tuple(ProbeResult(path=p, status=answered.get(p, 0)) for p in probe_paths)
     tail = scrub_output(tail)
     _write_log(folder, tail)
     return LiveAppLaunchResult(
-        slot=slot, address=address, slug=slug, missing=tuple(resolved.missing), probe=tuple(probe), log_tail=tail,
+        slot=slot, address=address, slug=slug, missing=tuple(resolved.missing), probe=probe,
+        probe_error=probe_error, log_tail=tail,
     )
+
+
+def _log_launch_decision(decision: LaunchDecision) -> None:
+    # WARNING: hosts log at WARNING by default, and this line is the record
+    # of an approved or refused launch.
+    _log.warning("live app launch: %s", decision.model_dump_json())
+
+
+async def _send_launch(
+    client: SlotClient, request: LaunchRequest, *, folder: Path, boot_id: str, app_id: str, launcher: LiveAppLauncher,
+) -> LaunchReply | None:
+    """`POST /launch`. None when the slot answered 409 `slot_busy`. A launch
+    the slot may have started but anton can't record, because a Stop
+    cancelled it or the answer didn't parse, is reset once it lands, so no
+    unrecorded app keeps the slot."""
+    sent = asyncio.ensure_future(asyncio.to_thread(client.launch, request))
+    try:
+        return await asyncio.shield(sent)
+    except asyncio.CancelledError:
+        # The thread finishes the POST whatever happens here.
+        sent.add_done_callback(lambda _: _in_thread(
+            _reset_if_ours, client, boot_id=boot_id, app_id=app_id, launcher=launcher,
+        ))
+        raise
+    except SlotRefused as exc:
+        if exc.body.error == "slot_busy":
+            return None
+        failure = _launch_failure(exc)
+        _write_log(folder, failure.log_tail)
+        raise failure from None
+    except (SlotUnavailable, ValidationError) as exc:
+        await asyncio.shield(asyncio.to_thread(
+            _reset_if_ours, client, boot_id=boot_id, app_id=app_id, launcher=launcher,
+        ))
+        raise LiveAppLaunchError(
+            f"Not launched: the app slot gave no usable answer ({type(exc).__name__}).", cause="slot_unavailable",
+        ) from None
+
+
+async def _record_launched(host: LiveAppHost, client: SlotClient, launch: LiveAppLaunch) -> None:
+    """Record a launch the slot accepted. When that fails or is stopped, the
+    app is reset: nobody could open an app with no record."""
+    try:
+        await _record(host.launched(launch))
+    except BaseException:
+        await asyncio.shield(asyncio.to_thread(_reset_quietly, client))
+        raise
 
 
 async def _record(step: Awaitable[None]) -> None:
@@ -1073,28 +1294,89 @@ async def _record(step: Awaitable[None]) -> None:
         ) from exc
 
 
+async def _report_launch_failed(host: LiveAppHost, slot: int) -> None:
+    """Tell the host that the app `claim` stopped in `slot` is gone and
+    nothing replaced it. Never raises an `Exception`."""
+    try:
+        await asyncio.shield(host.launch_failed(slot))
+    except Exception as exc:
+        # The type only, as for the other records.
+        _log.warning("live app launch_failed record failed (%s)", type(exc).__name__)
+
+
+def _in_thread(target, *args, **kwargs) -> None:
+    """Run `target` in a daemon thread: from a done-callback, after the
+    turn that started the launch has gone."""
+    threading.Thread(target=target, args=args, kwargs=kwargs, daemon=True).start()
+
+
+def _reset_if_ours(client: SlotClient, *, boot_id: str, app_id: str, launcher: LiveAppLauncher) -> None:
+    """Reset the slot when it runs this launch's app in the boot anton
+    launched into, and nothing else. Never raises."""
+    try:
+        status = client.status()
+    except (SlotUnavailable, SlotRefused, ValidationError):
+        _log.warning("live app slot %s: no status to check before a reset", client.address, exc_info=True)
+        return
+    app = status.app
+    if status.boot_id == boot_id and app is not None and app.app_id == app_id and app.launcher.subject == launcher.subject:
+        _reset_quietly(client)
+
+
 def _reset_quietly(client: SlotClient) -> None:
     try:
         client.reset()
     except (SlotUnavailable, SlotRefused):
-        _log.warning("live app slot %s: the reset after a failed record failed", client.address, exc_info=True)
+        _log.warning("live app slot %s: the reset after a failed launch failed", client.address, exc_info=True)
 
 
 def _reset(client: SlotClient) -> None:
     try:
         client.reset()
-    except (SlotUnavailable, SlotRefused) as exc:
+    except SlotUnavailable:
+        # A slot whose app exited may already be restarting; the wait that
+        # follows sees it come back, or refuses after its timeout.
+        _log.warning("live app slot %s gave no answer to its reset", client.address)
+    except SlotRefused as exc:
         raise LiveAppLaunchError(
             "Not launched: the app slot refused its restart. Ask the operator to check it.", cause="slot_reset",
         ) from exc
 
 
 def _write_log(folder: Path, tail: str) -> None:
-    """The slot's scrubbed log tail as the artifact's `backend.log`."""
+    """The slot's scrubbed log tail as the artifact's `backend.log`, written
+    from the filesystem root without links, as the launch reads its files."""
     try:
-        write_text_nofollow(folder, folder / BACKEND_LOG_FILENAME, tail)
+        write_text_nofollow(folder.anchor, folder / BACKEND_LOG_FILENAME, tail)
     except OSError:
         _log.warning("could not write %s for %s", BACKEND_LOG_FILENAME, folder, exc_info=True)
+
+
+async def stop_live_app(session, *, folder: Path) -> None:
+    """Stop the app a slot runs from `folder` for this session's launcher, if
+    one does: a generation that gave up on it. The host hears of it as a
+    launch that failed. Never raises an `Exception`."""
+    host: LiveAppHost | None = getattr(session, "_live_app_host", None)
+    if host is None:
+        return
+    try:
+        clients = [SlotClient(a, token=host.launch_token) for a in live_app_slot_addresses()]
+        app_id = app_identity(folder)
+    except (LiveAppConfigError, OSError):
+        return
+    index = running_slot(await _read_statuses(clients), app_id, host.launcher)
+    if index is None:
+        return
+    client = clients[index]
+    async with _slot_locks().setdefault(client.address, asyncio.Lock()):
+        if not _holds(await _read_status(client), app_id, host.launcher):
+            return
+        try:
+            await _record(host.claim(index + 1))
+        except LiveAppLaunchError:
+            return
+        await asyncio.to_thread(_reset_quietly, client)
+        await _report_launch_failed(host, index + 1)
 
 
 def launch_paths_changed(before: dict[str, object], after: dict[str, object]) -> bool:
@@ -1108,8 +1390,8 @@ def launch_paths_changed(before: dict[str, object], after: dict[str, object]) ->
 
 async def relaunch_changed_apps(session, store, slugs: Sequence[str]) -> list[str]:
     """Relaunch each of `slugs` that a slot runs for this session's launcher,
-    after a cell changed its files. One line per app for the cell's result.
-    Never raises."""
+    after a cell changed its files. One line per app for the cell's result;
+    none for an app whose files all stayed as they were. Never raises."""
     host: LiveAppHost | None = getattr(session, "_live_app_host", None)
     if host is None or not slugs:
         return []
@@ -1120,21 +1402,46 @@ async def relaunch_changed_apps(session, store, slugs: Sequence[str]) -> list[st
     statuses = await _read_statuses(clients)
     lines: list[str] = []
     for slug in slugs:
-        if running_slot(statuses, slug, host.launcher) is None:
+        try:
+            folder = store.folder_for(slug)
+            app_id = app_identity(folder)
+        except (OSError, ValueError):
             continue
-        artifact = store.open(slug)
+        if running_slot(statuses, app_id, host.launcher) is None:
+            continue
+        try:
+            artifact = store.open(slug)
+        except Exception:
+            artifact = None
         if artifact is None:
+            lines.append(
+                f"Live app `{slug}` was not relaunched: its metadata.json can't be read. "
+                "Fix it, then call `launch_backend`."
+            )
             continue
         try:
             result = await launch_live_app(
-                session, slug=slug, folder=store.folder_for(slug), datasources=artifact.datasources,
+                session, slug=slug, folder=folder, datasources=artifact.datasources, only_if_changed=True,
             )
-        except LiveAppLaunchError as exc:
-            lines.append(f"Live app `{slug}` was not relaunched. {exc}")
+        except Exception as exc:
+            if not isinstance(exc, LiveAppLaunchError):
+                _log.warning("relaunching live app %s failed", slug, exc_info=True)
+            reason = str(exc) if isinstance(exc, LiveAppLaunchError) else "The relaunch failed."
+            # The slot as it is now says whether the app still runs.
+            if running_slot(await _read_statuses(clients), app_id, host.launcher) is None:
+                lines.append(
+                    f"Live app `{slug}` is stopped: its relaunch failed. {reason} "
+                    "Fix it, then call `launch_backend` to start it again."
+                )
+            else:
+                lines.append(f"Live app `{slug}` was not relaunched. {reason}")
             continue
-        except Exception:
-            _log.warning("relaunching live app %s failed", slug, exc_info=True)
-            lines.append(f"Live app `{slug}` was not relaunched: the relaunch failed.")
+        if result.unchanged:
+            # Nothing to relaunch; a connection it lacks is still worth a line.
+            if result.missing:
+                lines.append(f"Live app `{slug}` already runs these files at `{result.address}`." + missing_clause(result.missing))
             continue
-        lines.append(f"Relaunched live app `{slug}` at `{result.address}` with this cell's changes.")
+        lines.append(
+            f"Relaunched live app `{slug}` at `{result.address}` with this cell's changes." + missing_clause(result.missing)
+        )
     return lines

@@ -654,13 +654,19 @@ def page_check_lines(store, *, checks: "dict[PageKey, RenderStatus]") -> list[st
     by_slug: "dict[str, RenderStatus]" = {}
     for key, status in checks.items():
         by_slug[key.slug] = _worse(by_slug.get(key.slug), status)
+    from anton.core.artifacts.live_app_slots import live_apps_enabled
+
+    live_apps = live_apps_enabled()
     lines: list[str] = []
     for slug, status in by_slug.items():
         if status == "passed":
             continue
         metadata = store.read_metadata(slug) if store is not None else None
         name = metadata.name if metadata is not None and metadata.name.strip() else slug
-        if status == "failed":
+        if live_apps and status == "unverified" and metadata is not None and metadata.type in _FULLSTACK_TYPES:
+            # A live app opens at its own address, never in the preview.
+            lines.append(f"“{name}” was not checked in a browser: it is a live app, so open it at its address to check it.")
+        elif status == "failed":
             lines.append(f"“{name}” failed the browser check, so it may not display correctly in the preview.")
         else:
             lines.append(f"“{name}” was not verified in a browser, so it may not display correctly in the preview.")
@@ -680,7 +686,8 @@ def cell_content_with_lint(text: str, lint: ArtifactLint, *, cell_ok: bool) -> "
         # [artifact lint] follows format_cell_result's own [output]/[error]
         # labeling convention so the agent can tell the finding apart from
         # its own code's output. cowork-server's figure sources cut this
-        # block from a replayed cell's output.
+        # block, and the [live app] one below, from a replayed cell's
+        # output, so a new label needs the same change there.
         text += "\n\n[artifact lint]\n" + "\n".join(lint.messages)
     if lint.live_app_lines:
         text += "\n\n[live app]\n" + "\n".join(lint.live_app_lines)
@@ -736,13 +743,30 @@ async def _relaunch_live_apps(session: "ChatSession", store, before: dict[str, A
         return []
     try:
         after = snapshot_existing_artifacts(store)
+        # A slug generate_artifact is building is its run step's to launch.
+        building = getattr(session, "_live_apps_building", None) or set()
         slugs = [
             slug for slug, files in before.items()
-            if slug in after and live_app_slots.launch_paths_changed(files.stamps, after[slug].stamps)
+            if slug in after and slug not in building
+            and live_app_slots.launch_paths_changed(files.stamps, after[slug].stamps)
         ]
         return await live_app_slots.relaunch_changed_apps(session, store, slugs)
     except Exception:
         _log.warning("relaunching live apps after a cell failed", exc_info=True)
+        return []
+
+
+async def _relaunch_after_metadata(session: "ChatSession", store, slug: str) -> list[str]:
+    """Relaunch `slug`'s running live app after its declared connections
+    changed. Empty unless live apps run in app slots. Never raises."""
+    from anton.core.artifacts import live_app_slots
+
+    if not live_app_slots.live_apps_enabled() or cell_sandbox_of(getattr(session, "_scratchpads", None)) is None:
+        return []
+    try:
+        return await live_app_slots.relaunch_changed_apps(session, store, [slug])
+    except Exception:
+        _log.warning("relaunching live app %s after its metadata changed failed", slug, exc_info=True)
         return []
 
 
@@ -898,6 +922,7 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
             )
         kwargs["datasources"] = refs
 
+    earlier = store.open(slug) if "datasources" in kwargs else None
     artifact = store.update(slug, **kwargs)
     if artifact is None:
         return SideEffectResult.failed(
@@ -905,13 +930,19 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
         )
     datasources = [d.slug for d in artifact.datasources]
     _track_artifact(session, store, artifact.slug, summary=f"Updated artifact metadata: {artifact.name}")
+    live_app_block = ""
+    if earlier is not None and [d.slug for d in earlier.datasources] != datasources:
+        # A running live app gets the new connections now, through its
+        # card, not at some later launch.
+        lines = await _relaunch_after_metadata(session, store, artifact.slug)
+        live_app_block = "\n\n[live app]\n" + "\n".join(lines) if lines else ""
     return SideEffectResult(
         success=True,
         message=(
             f"Updated artifact `{artifact.slug}` "
             f"(primary={artifact.primary}, port={artifact.port}, "
             f"datasources={datasources})."
-        ),
+        ) + live_app_block,
         resource_id=artifact.slug,
         idempotency_key=artifact.slug,
         committed_at=now_iso(),
@@ -970,6 +1001,7 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolO
     if live_apps_enabled() and cell_sandbox_of(getattr(session, "_scratchpads", None)) is not None:
         return await _launch_in_slot(
             session, store, artifact, rel_path=rel_path, extra_args=extra_args, health_path=health_path,
+            health_timeout_given="health_timeout" in tc_input,
         )
 
     tracked = getattr(session, "_tracked_backends", None)
@@ -1050,8 +1082,16 @@ _LIVE_APP_FAILURE_REASONS: "dict[LaunchFailure, str]" = {
 }
 
 
+# What `launch_backend` adds when the model passed `health_timeout`.
+_SLOT_HEALTH_TIMEOUT_NOTE = (
+    " `health_timeout` doesn't apply in an app slot: the slot waits up to 20 seconds for the app's "
+    "port and gives `health_path` 5 seconds."
+)
+
+
 async def _launch_in_slot(
     session: "ChatSession", store, artifact, *, rel_path: str, extra_args, health_path: str,
+    health_timeout_given: bool = False,
 ) -> ToolOutcome:
     """`launch_backend` on a sandboxed deployment with live apps on: the app
     runs in an app slot (`live_app_slots.launch_live_app`), never in this
@@ -1064,26 +1104,40 @@ async def _launch_in_slot(
             "`path` and `extra_args` can't change what it runs.",
             reason="live_app_invalid_launch",
         )
+    probe_path = health_path if health_path.startswith("/") else "/" + health_path
+    if not live_app_slots.probe_path_accepted(probe_path):
+        # Checked before the launch: the slot probes only plain paths.
+        return SideEffectResult.failed(
+            "Error: `health_path` must be one URL path such as `/api/health`: no leading `//`, "
+            f"no whitespace or `#`, at most {live_app_slots.MAX_PROBE_PATH_LENGTH} characters.",
+            reason="live_app_invalid_launch",
+        )
+    note = _SLOT_HEALTH_TIMEOUT_NOTE if health_timeout_given else ""
     try:
         result = await live_app_slots.launch_live_app(
             session, slug=artifact.slug, folder=store.folder_for(artifact.slug), datasources=artifact.datasources,
-            probe_paths=[health_path if health_path.startswith("/") else "/" + health_path],
+            probe_paths=[probe_path],
         )
     except live_app_slots.LiveAppLaunchError as exc:
         if exc.cause == "launch_not_approved":
             # The person's decision, not a tool failure, as for a held cell:
             # it must not feed the error streak's nudge.
             return ToolOutcome(content=str(exc), ok=True, reason="live_app_not_approved")
-        return SideEffectResult.failed(str(exc), reason=_LIVE_APP_FAILURE_REASONS[exc.cause])
+        return SideEffectResult.failed(str(exc) + note, reason=_LIVE_APP_FAILURE_REASONS[exc.cause])
     # As the in-process launcher reads readiness: any HTTP answer counts, no
-    # answer doesn't.
-    (health,) = result.probe
-    if health.status == 0:
+    # answer doesn't. The app still runs either way, so the text says where.
+    health = result.probe[0]
+    if result.probe_error or health.status == 0:
+        why = (
+            f"its health check couldn't run: {result.probe_error}" if result.probe_error
+            else f"it didn't answer GET {health.path}"
+        )
         return SideEffectResult.failed(
-            f"Error: the app started in its slot but didn't answer GET {health.path}.\nLog tail:\n{result.log_tail}",
+            f"Error: the app runs in slot {result.slot} at `{result.address}`, but {why}. "
+            f"Fix it and launch it again.{note}\nLog tail:\n{result.log_tail}",
             reason="launch_failed",
         )
-    message = result.message()
+    message = result.message() + note
     if health.status >= 500:
         message += f" Its health check, GET {health.path}, answered {health.status}: read backend.log."
     return SideEffectResult(
@@ -1231,6 +1285,25 @@ _STATUS_INSTRUCTIONS = {
         "correctly in the preview; never say it works, was tested or renders "
         "correctly. "
         + _GENERATED_REPORTING
+    ),
+    # `generated` for a live app: it opens only at its own address, so no
+    # browser checked it and the preview never shows it.
+    "generated_live_app": (
+        "The files listed passed the pipeline's static checks, and the app answered its API "
+        "probe in its app slot, but no browser loaded the page: a live app opens only at its own "
+        "address, in its owner's browser, never in the preview. Your reply MUST give the address "
+        "from `live_app` and say the page was not checked in a browser; never say it works, was "
+        "tested or renders correctly. "
+        + _GENERATED_REPORTING
+    ),
+    # The files are done, but the live app didn't launch: `cause` and `detail` say why.
+    "not_launched": (
+        "The files listed passed the pipeline's checks, but the live app was not launched: "
+        "`detail` says why. Tell the user that in a sentence. When the user declined the launch "
+        "card, nothing new runs: launch it only when they ask, with `launch_backend`, which shows "
+        "the card again. Otherwise relay what `detail` asks (wait for a free slot, or ask the "
+        "operator), and once that is settled launch it with `launch_backend`. Do NOT call "
+        "generate_artifact again for this, and do not build the app another way."
     ),
     "cancelled": (
         "The user declined the brief. Do NOT write prd.md yourself and do "
@@ -1391,7 +1464,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         screenshot = None
     instruction_key = status
     if status == "generated" and not result.get("verified_in_browser"):
-        instruction_key = "generated_unverified"
+        instruction_key = "generated_live_app" if result.get("live_app") else "generated_unverified"
     text = json.dumps(
         {
             "slug": slug,
@@ -1408,8 +1481,9 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     # "failed" (e.g. "backend.py failed to import in venv" after a successful
     # retry), which the legacy classifier counted as an error and fed into the
     # per-tool error streak.
+    ok, reason = _not_launched_verdict(result) if status == "not_launched" else (True, "")
     if screenshot is None:
-        yield ToolOutcome(content=text, ok=True)
+        yield ToolOutcome(content=text, ok=ok, reason=reason)
         return
     from anton.core.artifacts import render_check
 
@@ -1418,8 +1492,20 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     page = f"{slug}/{screenshot_page or _primary_name(store, slug) or 'index.html'}"
     yield ToolOutcome(
         content=[{"type": "text", "text": text}, *render_check.screenshot_blocks(screenshot, page=page)],
+        # A screenshot comes only from a browser load, which a live app's
+        # `not_launched` run never reaches: a list result is a success.
         ok=True,
     )
+
+
+def _not_launched_verdict(result: dict) -> tuple[bool, str]:
+    """A generation whose live app didn't launch, as `launch_backend` words
+    it: a refused card is the person's decision, never a tool failure; every
+    other cause fails with its tiered reason."""
+    cause = result.get("cause")
+    if cause == "launch_not_approved":
+        return True, "live_app_not_approved"
+    return False, _LIVE_APP_FAILURE_REASONS.get(cause, "launch_failed")
 
 
 def _as_list(value) -> list:

@@ -118,3 +118,27 @@ cases:
       Every app slot is in use, so this stops your app `old-dashboard`, running since 04:12 UTC, and takes its slot.
 
       It starts only if you approve. Cancel, Skip or no answer leaves your running apps as they are.
+
+  - name: two hosts whose writes override the hold, one of them twice
+    slug: ops-board
+    running: false
+    changed: []
+    connections:
+      - {engine: rest, name: orders, kind: http-write, host: orders.example.com, port: 443, relay_port: 10002,
+         overrides_write_hold: true}
+      - {engine: rest, name: stock, kind: http-write, host: stock.example.com, port: 443, relay_port: 10003,
+         overrides_write_hold: true}
+      - {engine: rest, name: orders-admin, kind: http-write, host: orders.example.com, port: 443, relay_port: 10004,
+         overrides_write_hold: true}
+    card: |
+      **Launch this live app?**
+
+      `ops-board` would run as you, with these connections:
+
+      - `rest/orders`: reads and writes, overriding the write-approval hold
+      - `rest/stock`: reads and writes, overriding the write-approval hold
+      - `rest/orders-admin`: reads and writes, overriding the write-approval hold
+
+      Chat holds writes to `orders.example.com`, `stock.example.com` for your approval. This app's writes there aren't held: your operator approved them for apps, and each write is logged.
+
+      It starts only if you approve. Cancel, Skip or no answer starts nothing.

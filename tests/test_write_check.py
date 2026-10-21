@@ -2780,3 +2780,10 @@ def test_a_call_write_inside_an_earlier_function_is_held_at_the_call(snap):
     earlier = ("def wipe(coll):\n    coll.delete_many({})",)
     writes = find_cell_writes(code="wipe(users)", earlier_code=earlier, snapshots=(snap,))
     assert [(c.via, c.line, c.call) for c in writes.calls] == [("mongodb", 1, "wipe(users)")]
+
+
+def test_the_write_rule_matcher_is_exported() -> None:
+    """The relay imports it by name; the module's export list says so too."""
+    from anton.core.utils import write_check
+
+    assert "http_write_rule_matches" in write_check.__all__
