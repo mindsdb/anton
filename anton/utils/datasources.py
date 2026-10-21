@@ -1571,6 +1571,7 @@ def _hold_secure_bookkeeping_fields(vault: DataVault, engine: str, name: str) ->
     record = vault.read_record(engine, name) if hasattr(vault, "read_record") else None
     fields = (record or {}).get("fields") or {}
     prefix = _slug_env_prefix(engine, name)
+    # No length floor: like registered DS_* secrets, a secure field is held at any length.
     for field_name in (record or {}).get("secure_keys") or ():
         value = fields.get(field_name)
         if field_name.startswith("_") and isinstance(value, str):
