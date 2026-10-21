@@ -1574,6 +1574,23 @@ def test_a_rule_matches_the_url_without_its_query_string():
     assert _requests(f"import requests\nrequests.post({url!r})", rules=rules) == [("POST", url)]
 
 
+@pytest.mark.parametrize("method, url, matches", [
+    ("POST", "https://planner.example.com/api/v2/orders/9", True),
+    ("post", "https://PLANNER.example.com/api/v2/orders/9?dry_run=0#top", True),
+    ("POST", "https://planner.example.com/api/v2/orders/9/lines", False),
+    ("POST", "https://planner.example.com/api/v2/forecasts/9", False),
+    ("GET", "https://planner.example.com/api/v2/orders/9", False),
+])
+def test_a_forwarded_request_matches_a_rule_as_a_cells_does(method, url, matches):
+    """The public matcher a relay uses: a concrete request, the gate's rule."""
+    from anton.core.utils.write_check import http_write_rule_matches
+
+    (rule,) = parse_http_write_rules(PLANNER)
+    assert http_write_rule_matches(rule, method=method, url=url) is matches
+    (any_method,) = parse_http_write_rules("* https://planner.example.com/**")
+    assert http_write_rule_matches(any_method, method="DELETE", url=url) is True
+
+
 def test_http_write_rules_parse_entries_and_skip_bad_ones_with_a_warning(caplog):
     text = f"{PLANNER}\n  , delete https://x.example.com/* ,\nhttps://no-method.example.com/*\nPUTT https://x/*\nGET a b"
     with caplog.at_level(logging.WARNING, logger="anton.core.utils.write_check"):

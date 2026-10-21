@@ -5584,6 +5584,14 @@ def _url_could_match(url: str, glob: str) -> bool:
     return False
 
 
+def http_write_rule_matches(rule: HttpWriteRule, *, method: str, url: str) -> bool:
+    """Whether a request with `method` to `url` matches `rule`, as the gate
+    matches a cell's request: the rule's method or `*`, and its glob against
+    the URL, ignoring case, the query string and the fragment. Public for a
+    service that applies the same rules to requests it forwards."""
+    return rule.method in ("*", method.upper()) and _url_could_match(url, rule.url_glob)
+
+
 def _http_findings(
     reader: _Reader,
     cell: _Cell,
@@ -5614,7 +5622,7 @@ def _http_findings(
             held = [reader.hole(_deciding_node(request.method, reader))]
         else:
             held = [m for m in dict.fromkeys(methods) if m in _HELD_METHODS or any(
-                r.method in ("*", m) and _url_could_match(url, r.url_glob) for r in rules
+                http_write_rule_matches(r, method=m, url=url) for r in rules
             )]
         line = report.line if report else cell.host_line or node.lineno
         call = report.call if report else scrub_output(cell.source(node))
