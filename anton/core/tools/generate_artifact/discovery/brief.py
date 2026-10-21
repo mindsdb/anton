@@ -64,7 +64,7 @@ _DRAFT_BRIEF_TEMPLATE = (
     "PRD{after_prd}.\n\n"
     "{closing}"
     "Write everything — lead-in, section headings, sections, closing line "
-    "— in the user language; translate the section names above. Keep the "
+    "— in the user language, including the section names above. Keep the "
     "whole reply under about 25 "
     "lines. Reply with the brief only, no other text."
 )

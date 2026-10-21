@@ -1,8 +1,8 @@
 """Deterministic generation FSM behind the ``generate_artifact`` tool.
 
-Public entry point: ``generate(session, slug, artifact_path, artifact_type,
+Public entry point: ``generate(*, session, slug, artifact_path, artifact_type,
 user_request, agent_understanding, known_data, user_preferences,
-user_language, attachments)``. The outer
+user_language, primary, progress, attachments)``, keyword arguments only. The outer
 tool handler validates input and reads artifact metadata; everything below
 this surface is provider-agnostic. ``generate`` decides where a repeat call
 is entitled to resume (``discovery/checkpoint.py``), builds a ``GenState``

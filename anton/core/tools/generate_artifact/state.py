@@ -178,11 +178,15 @@ class StepResult:
 # handler requires `user_language`. A concrete name, never "the language of
 # the user request": that wording made the model pick an unrelated language.
 DEFAULT_USER_LANGUAGE = "English"
+# Longest `user_language` the tool accepts. A language name fits; a sentence
+# about the user would be quoted into every step header and change the
+# call fingerprint each time it is reworded.
+MAX_USER_LANGUAGE_CHARS = 40
 
 
 def language_name(user_language: str | None) -> str:
     """The language every step writes in, as the prompts name it."""
-    return (user_language or "").strip() or DEFAULT_USER_LANGUAGE
+    return " ".join((user_language or "").split()) or DEFAULT_USER_LANGUAGE
 
 
 @dataclass

@@ -315,12 +315,17 @@ def test_draft_brief_instruction_pins_the_language_to_the_step_header():
     assert "same language as the user request" not in text
 
 
-def test_draft_brief_instruction_translates_the_section_headings():
+def test_draft_brief_instruction_writes_the_section_headings_in_the_user_language():
     """Seen live: a Spanish request got a Spanish brief under the English
-    section names the instruction lists (Goal, Artifact type, ...)."""
+    section names the instruction lists (Goal, Artifact type, ...). The
+    instruction asks for the headings in the user language without the word
+    "translate": replaying recorded English briefs on gpt-5.6-luna, "translate
+    the section names above" next to an inferred language switched 12 of 45
+    briefs to Spanish or Russian, and the same sentence without it none."""
     text = brief._DRAFT_BRIEF_INSTRUCTION
     assert "section headings" in text
-    assert "translate the section names" in text
+    assert "in the user language, including the section names above" in text
+    assert "translat" not in text.lower()
 
 
 async def test_show_and_confirm_defaults_to_accept_on_a_bare_enter(monkeypatch):

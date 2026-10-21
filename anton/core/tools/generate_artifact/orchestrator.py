@@ -731,10 +731,12 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
     kickoff — the browser findings from `_run_and_verify_app` when the
     served fullstack page failed to load cleanly (S-02)."""
     if state.is_fullstack:
-        system = prompts.build_frontend_system_prompt(state.artifact_path)
+        system = prompts.build_frontend_system_prompt(
+            state.artifact_path, user_language=state.user_language
+        )
     else:
         system = prompts.build_subagent_system_prompt(
-            state.artifact_path, primary=state.primary
+            state.artifact_path, primary=state.primary, user_language=state.user_language
         )
     verdict = None  # guards the terminal message when no attempt ever verified
     # The loop's failure reason (round budget, no tool calls) is kept separately:

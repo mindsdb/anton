@@ -243,7 +243,9 @@ _REDRAW_RESTATE = (
     "Then call `finish_gathering` to re-state the artifact type and the data "
     "sources the corrected artifact needs. This is REQUIRED: if the "
     "correction introduces a source nobody has fetched yet, that call is the "
-    "only thing that will cause it to be fetched."
+    "only thing that will cause it to be fetched. Re-state every source that "
+    "was declared earlier by exactly the name it was declared with, whatever "
+    "language you write in."
 )
 
 _REDRAW_CORRECTION_ACT_FIRST = (

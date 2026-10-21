@@ -645,7 +645,7 @@ def _gen_html_inputs(*, fullstack: bool = False, backend: bool = False) -> str:
     return text + "\n" + _GEN_API_SPEC_INPUT.format(consumer=consumer)
 
 
-def _gen_html_task(target: str, *, fullstack: bool = False) -> str:
+def _gen_html_task(target: str, *, fullstack: bool = False, user_language: str = "") -> str:
     if fullstack:
         body = f"""\
 Produce ONE self-contained HTML file named exactly `{target}`: the
@@ -678,7 +678,9 @@ step is `generate_frontend`.
 ## Your task
 {body}
 
-UI text and the `<html lang>` attribute follow the language of the PRD.
+Write the UI text in {language_name(user_language)} unless the PRD asks for
+another language for the page, and set the `<html lang>` attribute to the
+language of the UI text.
 
 You are done when the file is written and closed (`</body></html>`) and you
 have called `finish(summary="<one line>")`. A deterministic verifier then
@@ -806,6 +808,7 @@ def build_subagent_system_prompt(
     artifact_path: Path,
     *,
     primary: str | None = None,
+    user_language: str = "",
 ) -> str:
     """System prompt for the single-generator path — the `html-app` page.
 
@@ -826,7 +829,7 @@ def build_subagent_system_prompt(
     # only something to misuse. The parameter stays for signature stability.
     return "\n\n".join(
         [
-            _gen_html_task(target),
+            _gen_html_task(target, user_language=user_language),
             _gen_html_inputs(),
             _gen_html_workflow(target),
             _gen_html_output_protocol(target),
@@ -1191,13 +1194,13 @@ def build_backend_kickoff(
 FULLSTACK_FRONTEND_TARGET = "static/index.html"
 
 
-def build_frontend_system_prompt(artifact_path: Path) -> str:
+def build_frontend_system_prompt(artifact_path: Path, *, user_language: str = "") -> str:
     # `artifact_path` is not quoted, for the same reason as in the html-app
     # builder: every path the model writes is relative to the artifact root.
     target = FULLSTACK_FRONTEND_TARGET
     return "\n\n".join(
         [
-            _gen_html_task(target, fullstack=True),
+            _gen_html_task(target, fullstack=True, user_language=user_language),
             _gen_html_inputs(fullstack=True),
             _gen_html_workflow(target, fullstack=True),
             _gen_html_output_protocol(target),
@@ -1471,6 +1474,8 @@ def build_tech_spec_instruction(state) -> str:
         content.append(_TECH_SPEC_BACKEND)
     content.append(_TECH_SPEC_EXCLUSIONS)
     language = language_name(getattr(state, "user_language", ""))
+    kept = ["`## Insights`", "`## Implementation notes`"] + (["`## Backend`"] if fullstack else [])
+    headings = ", ".join(kept[:-1]) + " and " + kept[-1]
     return (
         "## Your task\n"
         "Write the technical specification (`spec.md`) for the build. Do not "
@@ -1485,10 +1490,10 @@ def build_tech_spec_instruction(state) -> str:
         "every line is context the build step carries on every round.\n\n"
         "## Language\n"
         f"Write the prose in {language}, even where earlier notes use another "
-        "language. Keep the `##` section headings above exactly as written "
-        "in English (the build step finds sections by heading), and keep code, "
-        "identifiers, endpoints and file names as they are. Exact UI strings "
-        "follow the PRD."
+        f"language. Keep the document's headings {headings} exactly as "
+        "written, in English (the build step finds sections by heading), and "
+        "keep code, identifiers, endpoints and file names as they are. Exact "
+        "UI strings follow the PRD."
     )
 
 
