@@ -536,7 +536,7 @@ def test_a_launch_never_replaces_another_persons_app():
     statuses = [_status(n, state="running", app=_app(f"app{n}", _OTHER, f"2026-10-21T04:0{n}:00Z")) for n in (1, 2, 3)]
     with pytest.raises(LiveAppLaunchError) as raised:
         las.plan_slot(statuses, "sales", _ME)
-    assert raised.value.reason == "slots_full"
+    assert raised.value.cause == "slots_full"
     text = str(raised.value)
     assert "slot 1 runs `app1` for bo@example.com since 04:01 UTC" in text
     assert "slot 3 runs `app3` for bo@example.com since 04:03 UTC" in text
@@ -547,7 +547,7 @@ def test_a_launch_never_replaces_another_persons_app():
 def test_with_no_slot_answering_a_launch_is_refused():
     with pytest.raises(LiveAppLaunchError) as raised:
         las.plan_slot([None, None, None], "sales", _ME)
-    assert raised.value.reason == "no_slot"
+    assert raised.value.cause == "no_slot"
 
 
 # ── The launch ───────────────────────────────────────────────────────────────
@@ -602,7 +602,7 @@ async def test_a_refused_card_leaves_the_running_app_alone(tmp_path, slots, appr
     session = _session()
     with pytest.raises(LiveAppLaunchError) as raised:
         await las.launch_live_app(session, slug="sales-demo", folder=folder, datasources=())
-    assert raised.value.reason == "launch_not_approved"
+    assert raised.value.cause == "launch_not_approved"
     assert session._live_app_host.events == []
     assert slots[0].resets == 0 and slots[0].requests == []
     assert slots[0].app.artifact == "sales-demo"
@@ -658,7 +658,7 @@ async def test_every_slot_held_by_others_refuses_before_any_card(tmp_path, slots
     session = _session()
     with pytest.raises(LiveAppLaunchError) as raised:
         await las.launch_live_app(session, slug="sales-demo", folder=folder, datasources=())
-    assert raised.value.reason == "slots_full"
+    assert raised.value.cause == "slots_full"
     assert cards == [] and session._live_app_host.events == []
     assert all(slot.resets == 0 for slot in slots)
 
@@ -681,7 +681,7 @@ async def test_a_slot_taken_while_the_card_waited_is_never_replaced_unasked(tmp_
     session = _session()
     with pytest.raises(LiveAppLaunchError) as raised:
         await las.launch_live_app(session, slug="sales-demo", folder=folder, datasources=())
-    assert raised.value.reason == "slots_changed"
+    assert raised.value.cause == "slots_changed"
     assert slots[1].app.artifact == "mine" and slots[1].resets == 0
     assert session._live_app_host.events == []
 
@@ -711,7 +711,7 @@ async def test_a_missing_package_is_named(tmp_path, slots, approved, cards):
                                                         detail="polars"))
     with pytest.raises(LiveAppLaunchError, match="lacks the package `polars`") as raised:
         await las.launch_live_app(_session(), slug="sales-demo", folder=folder, datasources=())
-    assert raised.value.reason == "missing_package"
+    assert raised.value.cause == "missing_package"
 
 
 async def test_an_app_that_does_not_start_returns_its_scrubbed_log(tmp_path, slots, approved, cards):
@@ -721,7 +721,7 @@ async def test_an_app_that_does_not_start_returns_its_scrubbed_log(tmp_path, slo
     ))
     with pytest.raises(LiveAppLaunchError) as raised:
         await las.launch_live_app(_session(), slug="sales-demo", folder=folder, datasources=())
-    assert raised.value.reason == "app_not_ready"
+    assert raised.value.cause == "app_not_ready"
     assert _LOGGED_TOKEN not in str(raised.value)
     assert _LOGGED_TOKEN not in (folder / "backend.log").read_text(encoding="utf-8")
 
@@ -741,7 +741,7 @@ async def test_no_slot_answering_starts_nothing(tmp_path, slots, approved, cards
         slot.down = True
     with pytest.raises(LiveAppLaunchError) as raised:
         await las.launch_live_app(_session(), slug="sales-demo", folder=folder, datasources=())
-    assert raised.value.reason == "no_slot"
+    assert raised.value.cause == "no_slot"
     assert cards == []
 
 
@@ -750,7 +750,7 @@ async def test_a_session_without_a_host_launches_nothing(tmp_path, slots, approv
     session = SimpleNamespace(_data_vault=None)
     with pytest.raises(LiveAppLaunchError) as raised:
         await las.launch_live_app(session, slug="sales-demo", folder=folder, datasources=())
-    assert raised.value.reason == "no_host"
+    assert raised.value.cause == "no_host"
     assert all(slot.requests == [] for slot in slots)
 
 
@@ -759,7 +759,7 @@ async def test_a_broken_setting_refuses_the_launch(tmp_path, slots, approved, ca
     approved.write_text("{not json", encoding="utf-8")
     with pytest.raises(LiveAppLaunchError) as raised:
         await las.launch_live_app(_session(), slug="sales-demo", folder=folder, datasources=())
-    assert raised.value.reason == "config"
+    assert raised.value.cause == "config"
     assert las.CONNECTIONS_FILE_ENV_VAR in str(raised.value)
 
 

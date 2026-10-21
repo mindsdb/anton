@@ -94,12 +94,20 @@ class LiveAppConfigError(Exception):
     """A live-apps setting is missing or malformed. The message names the setting, never a value."""
 
 
-class LiveAppLaunchError(Exception):
-    """A launch that did not happen; `str(error)` is the sentence the agent relays."""
+LaunchFailure = Literal[
+    "no_host", "config", "launch_files", "launch_not_approved", "no_slot", "slots_full", "slots_changed",
+    "slot_busy", "slot_reset", "slot_unavailable", "slot_refused", "missing_package", "app_not_ready",
+]
 
-    def __init__(self, message: str, *, reason: str, log_tail: str = "") -> None:
+
+class LiveAppLaunchError(Exception):
+    """A launch that did not happen; `str(error)` is the sentence the agent
+    relays. `cause` says why, for the caller to choose what follows: the
+    tool handler maps it to a classified tool reason."""
+
+    def __init__(self, message: str, *, cause: LaunchFailure, log_tail: str = "") -> None:
         super().__init__(message)
-        self.reason = reason
+        self.cause = cause
         self.log_tail = log_tail
 
 
@@ -458,14 +466,14 @@ def read_launch_files(folder: Path) -> list[LaunchFileData]:
     The error names the path, never what the file holds.
     """
     def refuse(rel: str, why: str) -> LiveAppLaunchError:
-        return LiveAppLaunchError(f"Not launched: `{rel}` {why}.", reason="launch_files")
+        return LiveAppLaunchError(f"Not launched: `{rel}` {why}.", cause="launch_files")
 
     found: list[str] = []
     for name in LAUNCH_FILES:
         if os.path.lexists(folder / name):
             found.append(name)
     if "backend.py" not in found:
-        raise LiveAppLaunchError("Not launched: the artifact has no `backend.py`.", reason="launch_files")
+        raise LiveAppLaunchError("Not launched: the artifact has no `backend.py`.", cause="launch_files")
     for top in LAUNCH_DIRS:
         root = folder / top
         if os.path.islink(root):
@@ -484,7 +492,7 @@ def read_launch_files(folder: Path) -> list[LaunchFileData]:
     if len(found) > MAX_LAUNCH_FILES:
         raise LiveAppLaunchError(
             f"Not launched: the app has {len(found)} files, more than the {MAX_LAUNCH_FILES} a launch sends.",
-            reason="launch_files",
+            cause="launch_files",
         )
     files: list[LaunchFileData] = []
     total = 0
@@ -499,7 +507,7 @@ def read_launch_files(folder: Path) -> list[LaunchFileData]:
         if total > MAX_LAUNCH_TOTAL_BYTES:
             raise LiveAppLaunchError(
                 f"Not launched: the app's files are over the {MAX_LAUNCH_TOTAL_BYTES // (1024 * 1024)} MB a launch sends.",
-                reason="launch_files",
+                cause="launch_files",
             )
         files.append(LaunchFileData(rel, data))
     return files
@@ -513,6 +521,10 @@ class MissingConnection(BaseModel):
     engine: str
     name: str
     reason: MissingReason
+
+
+def _missing(ref: DatasourceRef, why: MissingReason) -> MissingConnection:
+    return MissingConnection(engine=ref.engine, name=ref.name, reason=why)
 
 
 @dataclass(frozen=True)
@@ -588,15 +600,15 @@ def resolve_connections(
     for ref in datasources or ():
         entry = approved.find(ref)
         if entry is None:
-            resolved.missing.append(MissingConnection(engine=ref.engine, name=ref.name, reason="not_approved"))
+            resolved.missing.append(_missing(ref, "not_approved"))
             continue
         env = build_datasource_env(vault, [ref], slug=slug)
         if not env:
-            resolved.missing.append(MissingConnection(engine=ref.engine, name=ref.name, reason="not_saved"))
+            resolved.missing.append(_missing(ref, "not_saved"))
             continue
         if entry.kind == "db":
             if not _db_points_at(env, ref.env_prefix, entry):
-                resolved.missing.append(MissingConnection(engine=ref.engine, name=ref.name, reason="other_host"))
+                resolved.missing.append(_missing(ref, "other_host"))
                 continue
         else:
             rewritten = dict(env)
@@ -607,7 +619,7 @@ def resolve_connections(
                     rewritten[key] = _to_relay(parts, entry)
                     points = True
             if not points:
-                resolved.missing.append(MissingConnection(engine=ref.engine, name=ref.name, reason="other_host"))
+                resolved.missing.append(_missing(ref, "other_host"))
                 continue
             env = rewritten
         resolved.env.update(env)
@@ -834,7 +846,7 @@ def plan_slot(statuses: Sequence[SlotStatus | None], slug: str, launcher: LiveAp
         return SlotPlan(own)
     answering = [(i, s) for i, s in enumerate(statuses) if s is not None]
     if not answering:
-        raise LiveAppLaunchError(NO_SLOT_MESSAGE, reason="no_slot")
+        raise LiveAppLaunchError(NO_SLOT_MESSAGE, cause="no_slot")
     free = [i for i, s in answering if _free(s)]
     if free:
         return SlotPlan(free[0])
@@ -842,7 +854,7 @@ def plan_slot(statuses: Sequence[SlotStatus | None], slug: str, launcher: LiveAp
     if mine:
         index, status = min(mine, key=lambda pair: (pair[1].app.started_at, pair[0]))
         return SlotPlan(index, replaces=status.app)
-    raise LiveAppLaunchError(_held_by_others(statuses), reason="slots_full")
+    raise LiveAppLaunchError(_held_by_others(statuses), cause="slots_full")
 
 
 def _same_plan(new: SlotPlan, approved: SlotPlan) -> bool:
@@ -867,7 +879,7 @@ async def _wait_for_restart(client: SlotClient, old_boot_id: str) -> SlotStatus:
             return status
     raise LiveAppLaunchError(
         "Not launched: the app slot did not come back empty after its restart. Ask the operator to check it.",
-        reason="slot_reset",
+        cause="slot_reset",
     )
 
 
@@ -877,16 +889,16 @@ def _launch_failure(error: SlotRefused) -> LiveAppLaunchError:
     if body.error == "missing_package":
         return LiveAppLaunchError(
             f"Not launched: the app slot lacks the package `{body.detail}`, and live apps can't install packages.",
-            reason="missing_package",
+            cause="missing_package",
         )
     if body.error == "app_not_ready":
         return LiveAppLaunchError(
             f"Error: the backend did not start in the app slot ({body.detail or 'no detail'}).\nLog tail:\n{tail}",
-            reason="app_not_ready", log_tail=tail,
+            cause="app_not_ready", log_tail=tail,
         )
     named = f" (field `{body.field}`)" if body.field else ""
     return LiveAppLaunchError(
-        f"Not launched: the app slot refused the launch: {body.error}{named}.", reason="slot_refused",
+        f"Not launched: the app slot refused the launch: {body.error}{named}.", cause="slot_refused",
     )
 
 
@@ -906,12 +918,12 @@ async def launch_live_app(
 
     host: LiveAppHost | None = getattr(session, "_live_app_host", None)
     if host is None:
-        raise LiveAppLaunchError(NO_HOST_MESSAGE, reason="no_host")
+        raise LiveAppLaunchError(NO_HOST_MESSAGE, cause="no_host")
     try:
         addresses = live_app_slot_addresses()
         approved = load_approved_connections()
     except LiveAppConfigError as exc:
-        raise LiveAppLaunchError(f"Not launched: {exc} Ask the operator to fix it.", reason="config") from exc
+        raise LiveAppLaunchError(f"Not launched: {exc} Ask the operator to fix it.", cause="config") from exc
     # This process reads the files outside the sandbox, so under a policy it
     # reads only what the person's own cells may read, as the render check
     # does: the folder's resolved path is approved, then read without links.
@@ -919,7 +931,7 @@ async def launch_live_app(
     policy = cell_sandbox_of(getattr(session, "_scratchpads", None))
     if policy is not None and not policy.allows_read(folder):
         raise LiveAppLaunchError(
-            "Not launched: the app's folder is outside the files this conversation may read.", reason="launch_files",
+            "Not launched: the app's folder is outside the files this conversation may read.", cause="launch_files",
         )
     files = await asyncio.to_thread(read_launch_files, folder)
     resolved = resolve_connections(getattr(session, "_data_vault", None), datasources, approved, slug=slug)
@@ -952,7 +964,7 @@ async def launch_live_app(
         # record of an approved or refused launch.
         _log.warning("live app launch: %s", decision.model_dump_json())
         if cause is not None:
-            raise LiveAppLaunchError(NOT_APPROVED_MESSAGE, reason="launch_not_approved")
+            raise LiveAppLaunchError(NOT_APPROVED_MESSAGE, cause="launch_not_approved")
 
     request = LaunchRequest(
         artifact=slug,
@@ -972,7 +984,7 @@ async def launch_live_app(
             if not _same_plan(plan, approved_plan):
                 raise LiveAppLaunchError(
                     "Not launched: the app slots changed while the card waited. Ask to launch it again.",
-                    reason="slots_changed",
+                    cause="slots_changed",
                 )
         index = plan.index
         client, seen = clients[index], statuses[index]
@@ -996,7 +1008,7 @@ async def launch_live_app(
                 raise failure from None
             except (SlotUnavailable, ValidationError) as exc:
                 raise LiveAppLaunchError(
-                    f"Not launched: the app slot gave no usable answer ({type(exc).__name__}).", reason="slot_unavailable",
+                    f"Not launched: the app slot gave no usable answer ({type(exc).__name__}).", cause="slot_unavailable",
                 ) from None
             address = app_address(slot)
             await host.launched(LiveAppLaunch(
@@ -1005,7 +1017,7 @@ async def launch_live_app(
         break
     else:
         raise LiveAppLaunchError(
-            "Not launched: other launches kept taking the app slot. Try again in a moment.", reason="slot_busy",
+            "Not launched: other launches kept taking the app slot. Try again in a moment.", cause="slot_busy",
         )
 
     tail, probe = reply.log_tail, ()
@@ -1028,7 +1040,7 @@ def _reset(client: SlotClient) -> None:
         client.reset()
     except (SlotUnavailable, SlotRefused) as exc:
         raise LiveAppLaunchError(
-            "Not launched: the app slot refused its restart. Ask the operator to check it.", reason="slot_reset",
+            "Not launched: the app slot refused its restart. Ask the operator to check it.", cause="slot_reset",
         ) from exc
 
 

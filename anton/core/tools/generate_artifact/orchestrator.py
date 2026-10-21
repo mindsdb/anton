@@ -1157,7 +1157,7 @@ async def _run_and_verify_app_in_slot(state: GenState) -> str | None:
             )
         except live_app_slots.LiveAppLaunchError as exc:
             state.record("run_app", "fail", str(exc))
-            if exc.reason not in _RETRYABLE_LIVE_APP_FAILURES:
+            if exc.cause not in _RETRYABLE_LIVE_APP_FAILURES:
                 state.error = str(exc)
                 return state.error
             problem = str(exc)

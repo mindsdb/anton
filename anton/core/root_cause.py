@@ -191,6 +191,22 @@ _SENTINEL_REASONS = {
     # Could be environment or config and the sentinel does not say which, so it
     # stays out of every trip rung until something distinguishes them.
     "launch_failed": (TIER_UNCLASSIFIED, "unclassified"),
+    # Live apps in app slots (`live_app_slots`). The person refused the launch
+    # card: their call, like a held cell, never a wall.
+    "live_app_not_approved": (TIER_SELF, "invalid_argument"),
+    # A `path` or `extra_args` a slot won't run, or launch files the agent
+    # made unsendable (a link, a cap, no `backend.py`): its own to fix.
+    "live_app_invalid_launch": (TIER_SELF, "invalid_argument"),
+    "live_app_invalid_files": (TIER_SELF, "invalid_argument"),
+    # No slot answered, no host records launches, or a setting is broken:
+    # only the operator can fix these, same shape as `store_unavailable`.
+    "live_app_unavailable": (TIER_WALL, "service_unavailable"),
+    # Other people hold every slot. Each frees itself in time, so retrying
+    # later can succeed: transient, never a wall.
+    "live_app_slots_full": (TIER_TRANSIENT, "live_app_slots_full"),
+    # The slot image lacks a requirement. A rewritten backend may drop it, or
+    # the app may truly need it; nothing here tells which.
+    "live_app_missing_package": (TIER_UNCLASSIFIED, "unclassified"),
     # `generate_artifact` stopped somewhere inside its own pipeline. The
     # single string it returns names the node, but the causes behind that
     # node span everything from a truncated spec to a missing data source, so

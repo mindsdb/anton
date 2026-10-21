@@ -122,7 +122,7 @@ async def test_the_tool_relays_a_refused_card_as_the_persons_decision(tmp_path, 
     session, _, _ = _tool_session(tmp_path, policy, monkeypatch)
 
     async def launch(session_arg, **kwargs):
-        raise LiveAppLaunchError(las.NOT_APPROVED_MESSAGE, reason="launch_not_approved")
+        raise LiveAppLaunchError(las.NOT_APPROVED_MESSAGE, cause="launch_not_approved")
 
     monkeypatch.setattr(las, "launch_live_app", launch)
     outcome = await tool_handlers.handle_launch_backend(session, {"slug": "app"})
@@ -134,12 +134,22 @@ async def test_the_tool_relays_a_slot_refusal_as_a_failure(tmp_path, policy, liv
     session, _, _ = _tool_session(tmp_path, policy, monkeypatch)
 
     async def launch(session_arg, **kwargs):
-        raise LiveAppLaunchError(las.NO_SLOT_MESSAGE, reason="no_slot")
+        raise LiveAppLaunchError(las.NO_SLOT_MESSAGE, cause="no_slot")
 
     monkeypatch.setattr(las, "launch_live_app", launch)
     outcome = await tool_handlers.handle_launch_backend(session, {"slug": "app"})
     assert outcome.ok is False
+    assert outcome.reason == "live_app_unavailable"
     assert las.NO_SLOT_MESSAGE in outcome.content
+
+
+def test_every_launch_failure_has_a_tiered_tool_reason():
+    from typing import get_args
+
+    from anton.core.root_cause import _SENTINEL_REASONS
+
+    assert set(tool_handlers._LIVE_APP_FAILURE_REASONS) == set(get_args(las.LaunchFailure))
+    assert set(tool_handlers._LIVE_APP_FAILURE_REASONS.values()) <= set(_SENTINEL_REASONS)
 
 
 @pytest.mark.parametrize("tc_input", [{"path": "server.py"}, {"extra_args": ["--debug"]}])
@@ -241,7 +251,7 @@ async def test_a_failed_probe_regenerates_the_backend_and_launches_again(tmp_pat
 async def test_a_launch_a_new_backend_cant_fix_ends_the_run(tmp_path, policy, live_apps_on, monkeypatch, gen_store,
                                                             reason):
     async def launch(session, **kwargs):
-        raise LiveAppLaunchError(f"Not launched: {reason}.", reason=reason)
+        raise LiveAppLaunchError(f"Not launched: {reason}.", cause=reason)
 
     async def must_not_regenerate(state, extra_context=""):
         raise AssertionError("must not regenerate")

@@ -28,6 +28,7 @@ from anton.core.utils.scratchpad import (
 
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
+    from anton.core.artifacts.live_app_slots import LaunchFailure
     from anton.core.artifacts.render_check import RenderScreenshot, RenderStatus
 
 
@@ -1028,6 +1029,24 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolO
     ).to_outcome()
 
 
+# The tool reason for each live-app launch failure; `root_cause` tiers each one.
+_LIVE_APP_FAILURE_REASONS: "dict[LaunchFailure, str]" = {
+    "no_host": "live_app_unavailable",
+    "config": "live_app_unavailable",
+    "no_slot": "live_app_unavailable",
+    "slot_reset": "live_app_unavailable",
+    "slot_unavailable": "live_app_unavailable",
+    "slots_full": "live_app_slots_full",
+    "slots_changed": "live_app_slots_full",
+    "slot_busy": "live_app_slots_full",
+    "launch_files": "live_app_invalid_files",
+    "missing_package": "live_app_missing_package",
+    "app_not_ready": "launch_failed",
+    "slot_refused": "launch_failed",
+    "launch_not_approved": "live_app_not_approved",
+}
+
+
 async def _launch_in_slot(session: "ChatSession", store, artifact, *, rel_path: str, extra_args) -> ToolOutcome:
     """`launch_backend` on a sandboxed deployment with live apps on: the app
     runs in an app slot (`live_app_slots.launch_live_app`), never in this
@@ -1045,11 +1064,11 @@ async def _launch_in_slot(session: "ChatSession", store, artifact, *, rel_path: 
             session, slug=artifact.slug, folder=store.folder_for(artifact.slug), datasources=artifact.datasources,
         )
     except live_app_slots.LiveAppLaunchError as exc:
-        if exc.reason == "launch_not_approved":
+        if exc.cause == "launch_not_approved":
             # The person's decision, not a tool failure, as for a held cell:
             # it must not feed the error streak's nudge.
             return ToolOutcome(content=str(exc), ok=True, reason="live_app_not_approved")
-        return SideEffectResult.failed(str(exc), reason=f"live_app_{exc.reason}")
+        return SideEffectResult.failed(str(exc), reason=_LIVE_APP_FAILURE_REASONS[exc.cause])
     return SideEffectResult(
         success=True,
         message=result.message(),
