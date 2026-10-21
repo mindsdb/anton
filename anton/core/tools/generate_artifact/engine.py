@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+import logging
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -51,6 +52,8 @@ from .prompts import (
 
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
+
+logger = logging.getLogger(__name__)
 
 # Higher than the old 12 because the sub-generator also spends rounds on
 # scratchpad calls (pulling/rebuilding data) on top of writing files, and higher
