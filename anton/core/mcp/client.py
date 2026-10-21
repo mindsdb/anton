@@ -102,7 +102,8 @@ class McpSession:
         Builds the HTTP client (url target) or uses the in-process server,
         then starts `_hold_client` in a new task and waits for its handshake.
         Sets `_client`, `_owner` and `_release` on success. Raises whatever
-        the handshake raised; the owner has closed the HTTP client by then.
+        building the transport or the handshake raised; the HTTP client is
+        closed by then either way.
         """
         http_client: httpx2.AsyncClient | None = None
         if self._server is not None:
@@ -117,13 +118,19 @@ class McpSession:
                 ),
             )
             self._http_client = http_client
-            from mcp.client.streamable_http import streamable_http_client
+        try:
+            if http_client is not None:
+                from mcp.client.streamable_http import streamable_http_client
 
-            target = streamable_http_client(self._url, http_client=http_client)
-
-        client = mcp.Client(
-            target, raise_exceptions=True, read_timeout_seconds=self._read_timeout_seconds
-        )
+                target = streamable_http_client(self._url, http_client=http_client)
+            client = mcp.Client(
+                target, raise_exceptions=True, read_timeout_seconds=self._read_timeout_seconds
+            )
+        except BaseException:
+            # The owner task closes the HTTP client, but it has not started yet.
+            if http_client is not None:
+                await http_client.aclose()
+            raise
         opened: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         release = asyncio.Event()
         started = time.monotonic()

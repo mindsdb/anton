@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from anton.core.datasources.data_vault import _slug_env_prefix
 from anton.core.mcp.databricks import canonical_workspace_host, genie_mcp_url, mint_token
 
 #: engine -> MCP server base URL. Add an entry here, nowhere else, when a
@@ -48,7 +49,9 @@ def mcp_server_url(engine: str) -> str | None:
     return MCP_SERVER_URLS.get(engine)
 
 
-async def resolve_mcp_endpoint(engine: str, method: str, fields: dict[str, str]) -> McpEndpoint | None:
+async def resolve_mcp_endpoint(
+    engine: str, method: str, fields: dict[str, str], *, connection_name: str
+) -> McpEndpoint | None:
     """Return the `McpEndpoint` one MCP connection opens its session with.
 
     `method` "mcp" uses the engine's fixed URL and the stored `access_token`.
@@ -57,8 +60,10 @@ async def resolve_mcp_endpoint(engine: str, method: str, fields: dict[str, str])
     `client_id` and `_client_secret`. Returns None when the pair is unknown
     or a field is missing. Raises the `databricks` errors (a bad host or
     space id before any request). The Genie endpoint carries the client
-    secret and the minted token as `held_secrets`. No side effects beyond
-    the token request.
+    secret and the minted token as `held_secrets`, labeled with the
+    connection's own DS_ prefix (from `connection_name`), the same label the
+    turn's scrub registry gives that connection. No side effects beyond the
+    token request.
     """
     if method == "mcp":
         url, access_token = mcp_server_url(engine), fields.get("access_token")
@@ -72,7 +77,7 @@ async def resolve_mcp_endpoint(engine: str, method: str, fields: dict[str, str])
     host = canonical_workspace_host(workspace_url)
     url = genie_mcp_url(host, fields.get("genie_space_id") or None)
     token = await mint_token(host, client_id, client_secret)
-    label = f"DS_{engine.upper()}"
+    label = _slug_env_prefix(engine, connection_name)
     return McpEndpoint(
         url, token, held_secrets=((f"{label}__CLIENT_SECRET", client_secret), (f"{label}__ACCESS_TOKEN", token))
     )

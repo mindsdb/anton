@@ -195,6 +195,23 @@ async def test_url_session_http_client_uses_the_sdk_timeouts_and_keeps_its_auth_
     assert http_client.headers["Authorization"] == "Bearer tok-123"
 
 
+async def test_a_transport_that_fails_to_build_still_closes_the_http_client(monkeypatch):
+    """The owner task closes the HTTP client, but it never starts when the
+    transport cannot be built, so `_connect` must close it itself."""
+
+    def refuse_transport(url, *, http_client):
+        raise ConnectionError("no network in tests")
+
+    monkeypatch.setattr("mcp.client.streamable_http.streamable_http_client", refuse_transport)
+    session = McpSession(url="https://example.test/mcp", access_token="tok-123")
+
+    with pytest.raises(ConnectionError):
+        await asyncio.wait_for(session._connect(), timeout=5)
+
+    assert session._http_client is not None
+    assert session._http_client.is_closed
+
+
 _HANDSHAKE_METHODS = frozenset({"initialize", "server/discover"})
 
 

@@ -303,14 +303,14 @@ async def test_a_rejected_token_at_connect_skips_the_connection(genie_vault, min
 
 
 async def test_hubspot_and_notion_connections_are_unchanged(monkeypatch, stub_mcp_server):
-    assert await servers.resolve_mcp_endpoint("hubspot", "mcp", {"access_token": "tok-h"}) == McpEndpoint(
+    assert await servers.resolve_mcp_endpoint("hubspot", "mcp", {"access_token": "tok-h"}, connection_name="acme") == McpEndpoint(
         "https://mcp.hubspot.com", "tok-h"
     )
-    assert await servers.resolve_mcp_endpoint("notion", "mcp", {"access_token": "tok-n"}) == McpEndpoint(
+    assert await servers.resolve_mcp_endpoint("notion", "mcp", {"access_token": "tok-n"}, connection_name="acme") == McpEndpoint(
         "https://mcp.notion.com/mcp", "tok-n"
     )
-    assert await servers.resolve_mcp_endpoint("hubspot", "mcp", {}) is None
-    assert await servers.resolve_mcp_endpoint("hubspot", "genie-mcp", dict(GENIE_FIELDS)) is None
+    assert await servers.resolve_mcp_endpoint("hubspot", "mcp", {}, connection_name="acme") is None
+    assert await servers.resolve_mcp_endpoint("hubspot", "genie-mcp", dict(GENIE_FIELDS), connection_name="acme") is None
 
     opened: list[dict] = []
 
@@ -367,7 +367,7 @@ async def test_the_secret_and_token_are_scrubbed_in_the_turn(genie_vault, minted
 
     assert SECRET not in scrubbed
     assert TOKEN not in scrubbed
-    assert scrubbed == "secret=[DS_DATABRICKS__CLIENT_SECRET] token=[DS_DATABRICKS__ACCESS_TOKEN]"
+    assert scrubbed == "secret=[DS_DATABRICKS_GENIE_1__CLIENT_SECRET] token=[DS_DATABRICKS_GENIE_1__ACCESS_TOKEN]"
 
 
 async def test_an_mcp_connection_keeps_its_discovery_logs(monkeypatch):
@@ -518,3 +518,19 @@ async def test_closing_a_redacting_session_logs_the_class_only(monkeypatch):
         ("warning", "close_mcp_sessions: error closing an MCP session: ConnectionError", {}),
         ("exception", "close_mcp_sessions: error closing an MCP session", {}),
     ]
+
+
+async def test_a_genie_connection_with_tools_off_mints_no_token_and_opens_no_session(
+    tmp_path, minted, opened_sessions
+):
+    """Access mode "none" registers no tools, so discovery must not pay for a token or a session."""
+    vault = LocalDataVault(tmp_path)
+    vault.save("databricks", "genie-1", {**GENIE_FIELDS, "_access_mode": "none"})
+
+    result = await asyncio.wait_for(
+        wiring.discover_mcp_tools_async(vault, [{"engine": "databricks", "name": "genie-1"}]), timeout=5
+    )
+
+    assert result == ([], [])
+    assert minted == []
+    assert opened_sessions == []

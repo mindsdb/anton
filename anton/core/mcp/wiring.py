@@ -145,18 +145,24 @@ async def _discover_one(
     `asyncio.gather` — a bad connector never fails the whole turn over it,
     it just contributes `([], None)`.
 
-    A "genie-mcp" failure before discovery is logged with the engine, the
-    connection name and the exception class only: its token request or a
-    401 at `initialize` can carry values that must never reach a log line."""
+    A "genie-mcp" connection whose access mode is "none" is skipped before
+    its token is minted, since it registers no tools. A "genie-mcp" failure
+    before discovery is logged with the engine, the connection name and the
+    exception class only: its token request or a 401 at `initialize` can
+    carry values that must never reach a log line."""
     genie = method != "mcp"
     if genie:
         try:
-            endpoint = await resolve_mcp_endpoint(engine, method, vault.load(engine, name) or {})
+            if _access_mode_of(vault, engine, name) == "none":
+                return [], None
+            endpoint = await resolve_mcp_endpoint(
+                engine, method, vault.load(engine, name) or {}, connection_name=name
+            )
         except Exception as exc:
             logger.warning("discover_mcp_tools: could not resolve %s/%s: %s", engine, name, type(exc).__name__)
             return [], None
     else:
-        endpoint = await resolve_mcp_endpoint(engine, method, vault.load(engine, name) or {})
+        endpoint = await resolve_mcp_endpoint(engine, method, vault.load(engine, name) or {}, connection_name=name)
     if endpoint is None:
         if genie:
             logger.warning("discover_mcp_tools: incomplete Genie connection %s/%s", engine, name)

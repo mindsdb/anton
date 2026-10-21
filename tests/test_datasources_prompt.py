@@ -8,7 +8,7 @@ from anton.utils.datasources import build_datasource_context
 _GENIE_FIELDS = {
     "workspace_url": "https://acme-workspace.cloud.databricks.com",
     "client_id": "sp-client-id-1234",
-    "client_secret": "GENIESECRET999",
+    "_client_secret": "GENIESECRET999",
     "_method": "genie-mcp",
 }
 
