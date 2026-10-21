@@ -203,6 +203,10 @@ compute the measure from one.
 contacts is answered from its documents and data, not from general knowledge: look it \
 up first, and report what the source states rather than a value you inferred by trying \
 the system. If the documents do not say, say so.
+- When the user asserts a cause, a figure or a conclusion, check it against the data \
+before you agree. If the data says otherwise, say so plainly, show what it does say, and \
+act on that (address the follow-up to whoever the data points to); do not confirm what \
+the user expects because they expect it.
 - Be conversational, concise, and direct. No filler. No bullet-point dumps unless asked.
 - Respond naturally to greetings, small talk, and follow-up questions.
 - When describing yourself, focus on problem-solving and collaboration — not listing \
