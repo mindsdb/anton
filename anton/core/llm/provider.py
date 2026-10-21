@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+import httpx2
+
 from .tracing import TraceContext, get_call_role, get_trace_context
 
 if TYPE_CHECKING:
@@ -980,6 +982,27 @@ def _loggable_transient_code(*, code: object) -> str:
 def _log_status(*, status: object) -> int | str:
     """An HTTP status for a log line: a real status code, else `unknown`."""
     return status if type(status) is int and 100 <= status <= 599 else "unknown"
+
+
+# Transport errors a stream raises while its body is read. The SDKs wrap
+# transport failures only while they open the request; once the 200 is in,
+# a dying connection surfaces as the raw httpx2 error and the SDK never
+# retried it. Providers catch it next to the SDK's own connection error.
+STREAM_DROP_ERROR = httpx2.TransportError
+
+
+def is_stream_drop(exc: BaseException) -> bool:
+    """True for a connection that died after the response started.
+
+    Providers raise ``connection_error`` for every lost connection and set
+    ``session_backoff`` only once the stream has started, so a failure to
+    connect never matches.
+    """
+    return (
+        isinstance(exc, TransientProviderError)
+        and exc.code == "connection_error"
+        and exc.session_backoff
+    )
 
 
 class ProviderOverloadedError(ConnectionError):
@@ -2292,6 +2315,10 @@ class ProviderErrorFilter(logging.Filter):
             provider_error = _provider_error(exc=exc)
             if provider_error is None:
                 continue
+            record._diagnostic_safe_template = True
+            record.error_type = type(exc).__name__
+            record.provider_error = type(provider_error).__name__
+            record.status_code = _log_status(status=getattr(provider_error, "status_code", None))
             record.msg = "Provider operation failed: error_type=%s provider_error=%s status=%s"
             record.args = (
                 type(exc).__name__, type(provider_error).__name__,
@@ -2405,6 +2432,23 @@ class LLMProvider(ABC):
         else:
             log_usage_record(record)
 
+    @property
+    def reasoning_effort(self) -> str | None:
+        """The effort this provider sends when a call does not override it."""
+        return getattr(self, "_reasoning_effort", None)
+
+    @property
+    def accepts_large_output(self) -> bool:
+        """Whether the endpoint is known to take output budgets up to 64k tokens.
+
+        Known means Anthropic, the Responses API or the MindsHub gateway. The
+        Responses API flavor is also what a host picks for a custom endpoint it
+        configured to speak that API, which in practice is OpenAI or Azure.
+        False for unknown servers: an OpenAI-compatible server with a small
+        context window rejects ``prompt + max_tokens`` above its limit.
+        """
+        return False
+
     def native_web_tools(self) -> set[str]:
         """Subset of {"web_search", "web_fetch"} this provider executes server-side.
 
@@ -2432,6 +2476,7 @@ class LLMProvider(ABC):
         tool_choice: dict | None = None,
         max_tokens: int = 4096,
         native_web_tools: set[str] | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse: ...
 
     def export_connection_info(self) -> ProviderConnectionInfo:
@@ -2451,8 +2496,12 @@ class LLMProvider(ABC):
         tools: list[dict] | None = None,
         max_tokens: int = 4096,
         native_web_tools: set[str] | None = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Stream LLM responses. Default falls back to complete()."""
+        # Passed only when set: a subclass written before the parameter existed
+        # still works for every call that does not override the effort.
+        extra = {"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}
         response = await self.complete(
             model=model,
             system=system,
@@ -2460,6 +2509,7 @@ class LLMProvider(ABC):
             tools=tools,
             max_tokens=max_tokens,
             native_web_tools=native_web_tools,
+            **extra,
         )
         if response.content:
             yield StreamTextDelta(text=response.content)

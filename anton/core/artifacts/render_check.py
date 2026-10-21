@@ -8,6 +8,14 @@ reads back a verdict. Nothing runs in this process and nothing of this
 process's environment is sent, so the check works where agent code runs in a
 sandbox and no local browser may start.
 
+The service also presses each tab and toggle it finds and measures the
+views they show. Its answer names the views it measured (`views`) and the
+tabs and toggles it found but did not press (`unopened`). A pass vouches
+for those views only. `view_coverage` words both, so the agent calls a view
+verified or working only where the check saw it, and calls the views
+behind the unpressed tabs and toggles unchecked. An older service sends
+neither field, which reads as the page as it opens only.
+
 The service's URL comes from `ANTON_RENDER_CHECK_URL` in this process's
 environment, read at call time the way `html_lint` reads
 `ANTON_HTML_LINT_BROWSER`. Unset, no caller asks the service anything.
@@ -78,8 +86,14 @@ MAX_FINDINGS_SHOWN = 20
 # service sends a JPEG at most 1024 px wide, far below it; the cap keeps a
 # request with one screenshot well under the model route's 16 MB limit.
 MAX_SCREENSHOT_BASE64_CHARS = 1024 * 1024
+# At most this many tabs and toggles the check did not press are named in
+# one result; the rest are counted. The service lists every one it found, so
+# a table with a toggle on each row would otherwise name hundreds. The views
+# it pressed need no cap: the service caps its own presses.
+MAX_UNOPENED_SHOWN = 5
 
 RenderStatus = Literal["passed", "failed", "unverified"]
+Viewport = Literal["desktop", "phone"]
 FindingKind = Literal[
     "csp_violation",
     "separate_file",
@@ -87,6 +101,7 @@ FindingKind = Literal[
     "uncaught_exception",
     "blank_view",
     "overflow",
+    "loading_label",
     "crashed",
     "timeout",
 ]
@@ -94,8 +109,8 @@ FindingKind = Literal[
 _DEFINITE_KINDS = frozenset({"csp_violation", "separate_file"})
 # Findings that fail a page even when the check ran out of time afterwards:
 # the exception, error or crash happened whatever the check had left to do.
-# A blank view or overflow measured on a slow host may still have been
-# drawing, so a timeout leaves those unverified.
+# A blank view, an overflow or a loading label measured on a slow host may
+# still have been drawing, so a timeout leaves those unverified.
 _FAILED_DESPITE_TIMEOUT_KINDS = frozenset({"uncaught_exception", "console_error", "crashed"})
 
 
@@ -117,8 +132,32 @@ class RenderFinding(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     kind: FindingKind
-    viewport: Literal["desktop", "phone"]
+    viewport: Viewport
     detail: str
+
+
+class CheckedView(BaseModel):
+    """One state of the page the check measured.
+
+    `pressed` is None for the page as it opens, else the visible label of the
+    tab or toggle the check pressed. The service lists a press only when it
+    showed a view not shown before, and `viewports` are where it did.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    pressed: str | None
+    viewports: list[Viewport]
+
+
+class UnopenedToggle(BaseModel):
+    """A tab or toggle the check found but did not press, and why: its cap on
+    presses, its time for pressing ran out, or the page navigated away."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    label: str
+    reason: str
 
 
 class UnreachableResource(BaseModel):
@@ -185,12 +224,18 @@ class RenderCheckResult(BaseModel):
     3. otherwise `failed` on any `uncaught_exception`, `console_error` or
        `crashed` finding, even beside a `timeout` one;
     4. otherwise `unverified` when a `timeout` finding exists, so a
-       `blank_view` or `overflow` seen before the deadline stays unverified;
-    5. otherwise `failed` on any other finding (`blank_view`, `overflow`);
+       `blank_view`, `overflow` or `loading_label` seen before the deadline
+       stays unverified;
+    5. otherwise `failed` on any other finding (`blank_view`, `overflow`,
+       `loading_label`);
     6. otherwise `passed`.
 
     An answer whose status breaks the rule does not validate, so a service
     that drifts from it reads as unverified, never as a pass.
+
+    `views` and `unopened` say what the check covered, whatever its status:
+    the views it measured, and the tabs and toggles it found but did not
+    press. An older service sends neither, so both default to empty.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -200,6 +245,8 @@ class RenderCheckResult(BaseModel):
     unreachable: list[UnreachableResource] = Field(default_factory=list)
     screenshot: RenderScreenshot | None = None
     policy: str = ""
+    views: list[CheckedView] = Field(default_factory=list)
+    unopened: list[UnopenedToggle] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _status_follows_the_rule(self) -> "RenderCheckResult":
@@ -224,6 +271,12 @@ class RenderCheckResult(BaseModel):
             f"the check ran out of time ({f.detail})" for f in self.findings if f.kind == "timeout"
         ][:1]
         return scrub_output("; ".join(parts) or "the render check could not verify the page")
+
+    @property
+    def coverage(self) -> "ViewCoverage":
+        """The views this check measured and the tabs and toggles it left
+        unopened, worded for the agent (`view_coverage`)."""
+        return view_coverage(views=self.views, unopened=self.unopened)
 
 
 class RenderCheckUnavailable(BaseModel):
@@ -286,8 +339,10 @@ def grouped_findings(findings: Sequence[RenderFinding]) -> GroupedFindings:
     return GroupedFindings(shown=groups[:MAX_FINDINGS_SHOWN], more=max(len(groups) - MAX_FINDINGS_SHOWN, 0))
 
 
-# Seen before the deadline, these may have drawn or settled given the time.
-_MAY_STILL_DRAW_KINDS = frozenset({"blank_view", "overflow"})
+# Seen before the deadline, these may have drawn or settled given the time:
+# the kinds a timeout leaves unverified (rule 4 in `RenderCheckResult`). A
+# loading label is one: the page may hide it once its last view has drawn.
+_MAY_STILL_DRAW_KINDS = frozenset({"blank_view", "overflow", "loading_label"})
 
 
 class UnverifiedFindings(NamedTuple):
@@ -307,10 +362,10 @@ def unverified_findings(outcome: RenderCheckOutcome) -> UnverifiedFindings:
     """What an unverified check still found, grouped like `grouped_findings`.
 
     An exception beside a library the check could not load, say, or a
-    `blank_view` or `overflow` seen before the deadline. After a timeout the
-    lead says the findings came before it, and a blank view or overflow
-    says the page may still have been drawing, which is why the service
-    leaves those unverified (rule 4 in `RenderCheckResult`). No `timeout`
+    `blank_view`, `overflow` or `loading_label` seen before the deadline.
+    After a timeout the lead says the findings came before it, and each of
+    those three says the page may still have been drawing, which is why the
+    service leaves them unverified (rule 4 in `RenderCheckResult`). No `timeout`
     finding, which `unverified_reason` already names. Empty for
     `RenderCheckUnavailable`, which holds no findings.
     """
@@ -327,6 +382,69 @@ def unverified_findings(outcome: RenderCheckOutcome) -> UnverifiedFindings:
         lines=[line(group) for group in grouped.shown],
         more=grouped.more,
     )
+
+
+class ViewCoverage(NamedTuple):
+    """What a check measured and what it left unopened, worded for the agent."""
+
+    # The views measured: `at desktop and phone sizes, as it opens and behind
+    # “Map” and “3D Globe”`, or `as it opens` from a check that names none.
+    checked: str
+    # The tabs and toggles found but not pressed, one entry per reason:
+    # `“Routes” and “Settings” (the check's time for pressing tabs and
+    # toggles ran out)`. Past `MAX_UNOPENED_SHOWN` of them, a last entry
+    # counts the rest. Empty when the check pressed every one it found.
+    unchecked: list[str]
+
+
+def view_coverage(*, views: Sequence[CheckedView] = (), unopened: Sequence[UnopenedToggle] = ()) -> ViewCoverage:
+    """Word the views a check measured and the tabs and toggles it left unopened.
+
+    Views measured at the same sizes are named together, the page as it
+    opens before the labels pressed. No views at all (an older service, or
+    the local browser, which presses nothing) is the page as it opens, at no
+    named size. Labels and reasons are page text, scrubbed like a finding's
+    detail.
+    """
+    by_sizes: dict[tuple[str, ...], list[CheckedView]] = {}
+    for view in views or [CheckedView(pressed=None, viewports=[])]:
+        sizes = tuple(v for v in ("desktop", "phone") if v in view.viewports)
+        by_sizes.setdefault(sizes, []).append(view)
+    groups = [(_sizes(sizes), _views(group)) for sizes, group in by_sizes.items()]
+    if len(groups) == 1:
+        sizes, named = groups[0]
+        checked = f"at {sizes}, {named}" if sizes else named
+    else:
+        checked = ", ".join(f"{named} at {sizes}" if sizes else named for sizes, named in groups)
+    by_reason: dict[str, list[str]] = {}
+    for item in unopened[:MAX_UNOPENED_SHOWN]:
+        by_reason.setdefault(scrub_output(item.reason), []).append(item.label)
+    unchecked = [f"{_quoted(labels)} ({reason})" for reason, labels in by_reason.items()]
+    if len(unopened) > MAX_UNOPENED_SHOWN:
+        unchecked.append(f"and {len(unopened) - MAX_UNOPENED_SHOWN} more tabs or toggles")
+    return ViewCoverage(checked=checked, unchecked=unchecked)
+
+
+def _sizes(viewports: Sequence[str]) -> str:
+    """`desktop and phone sizes`, `phone size`, or "" for none."""
+    if not viewports:
+        return ""
+    return " and ".join(viewports) + (" sizes" if len(viewports) > 1 else " size")
+
+
+def _views(views: Sequence[CheckedView]) -> str:
+    """`as it opens and behind “Map” and “3D Globe”`: each label once."""
+    pressed = list(dict.fromkeys(view.pressed for view in views if view.pressed is not None))
+    parts = ["as it opens"] if any(view.pressed is None for view in views) else []
+    if pressed:
+        parts.append(f"behind {_quoted(pressed)}")
+    return " and ".join(parts)
+
+
+def _quoted(labels: Sequence[str]) -> str:
+    """`“A”`, `“A” and “B”`, `“A”, “B” and “C”`, each label scrubbed."""
+    names = [f"“{scrub_output(label)}”" for label in labels]
+    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
 
 
 def configured_url() -> str | None:

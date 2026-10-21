@@ -36,6 +36,7 @@ from anton.cloud_turn.launcher import (
     forbid_same_user_access,
     socket_address,
 )
+from anton.diagnostics import make_formatter
 
 logger = logging.getLogger(__name__)
 
@@ -332,12 +333,14 @@ def _run_cloud_turn() -> int | None:
 
 
 def main() -> int:
+    level = os.environ.get("LOG_LEVEL", "WARNING").upper()
     handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    handler.setFormatter(make_formatter())
+    handler.setLevel(level)
     # Its own handler rather than the root logger's: a fork must start with the
     # root unconfigured, as the turn configures it.
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
+    logger.handlers = [handler]
+    logger.setLevel(level)
     logger.propagate = False
     return serve(_run_cloud_turn)
 

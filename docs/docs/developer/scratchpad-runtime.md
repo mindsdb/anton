@@ -283,8 +283,9 @@ another page's failure.
 A check the service could not vouch for is unverified, and its line says
 why (a resource it could not load, the deadline). Under that line the
 agent sees what the check still found, such as an exception, or a blank
-view or overflow measured before the deadline, which the line marks as
-possibly still drawing (`render_check.unverified_findings`). The cell check
+view, an overflow or a loading message left over a drawn view, measured
+before the deadline, which the line marks as possibly still drawing
+(`render_check.unverified_findings`). The cell check
 lists those findings once per page per turn: once an unverified check in
 the turn listed findings for a page, in a cell's result or in
 `generate_artifact`'s `checks_skipped`, a later unverified check of that
@@ -294,6 +295,19 @@ because the service was busy or the cell's time ran out, leaves the next
 check free to list what it finds. So the agent fixes them once and then
 reports the page as unverified, instead of editing a page that may work
 on every cell.
+
+The service also presses each tab and toggle it finds, and a pass vouches
+only for the views it measured. The cell check's line for a passed page
+names them: the page as it opens and the view behind each tab or toggle the
+service pressed, at the sizes where each showed
+(`render_check.view_coverage`). When the service found tabs or toggles it
+did not press (its cap on presses, its time ran out, the page navigated
+away), a second line names them and tells the agent to call the views
+behind them unchecked. `generate_artifact` puts the same beside a pass as
+`browser_checked` and `browser_unchecked`, and its instruction lets the
+agent call only the views `browser_checked` names verified or working. An
+older service that names no views, and the local browser, which presses
+nothing, vouch for the page as it opens only.
 
 The service also sends a screenshot of the page, which reaches the agent as
 an image beside the check's text. History keeps only the newest one

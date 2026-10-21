@@ -24,9 +24,20 @@ from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
 from anton.core.datasources.data_vault import DataVault
 from anton.core.llm import jev as _jev
+from anton.core.llm.effort import (
+    TRUNCATION_RETRY_NOTE,
+    client_stream_budget,
+    effort_ceiling_of,
+    retry_budget,
+)
 from anton.core.llm.endpoints import ENDPOINT_MINDSHUB, classify_base_url, classify_endpoint
 from anton.core.llm.identity import DeploymentIdentity, product_lines, serving_model_lines
-from anton.core.llm.liveness import ModelCallTracker, arm_turn_tracker, disarm_turn_tracker
+from anton.core.llm.liveness import (
+    MODEL_WAIT_PHASE,
+    ModelCallTracker,
+    arm_turn_tracker,
+    disarm_turn_tracker,
+)
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.acc import AnteriorCingulate
 from anton.core.root_cause import RootCauseLedger
@@ -71,6 +82,7 @@ from anton.core.llm.provider import (
     TransientProviderError,
     context_window,
     damaged_tool_call_result,
+    is_stream_drop,
     is_image_refusal,
     log_background_done,
     provider_failure_kind,
@@ -3398,11 +3410,13 @@ class ChatSession:
             # smaller `max_tokens` (or a distinct router model with a lower
             # output cap) would otherwise get a 400 on every compaction, and the
             # handler below logs only the exception type — proactive compaction
-            # would be dead and invisible. Read through `_turn_max_tokens` for
+            # would be dead and invisible. Read through `_client_max_tokens` for
             # its defensive fallback: a client that doesn't expose the attribute
             # would otherwise make `min()` raise, and the raise lands in that
-            # same blind `except`.
-            output_budget_tokens = min(_SUMMARY_OUTPUT_BUDGET, self._turn_max_tokens())
+            # same blind `except`. Not `_turn_max_tokens`: that is the
+            # streamed-call budget, which can be larger than what a non-streamed
+            # call may ask for.
+            output_budget_tokens = min(_SUMMARY_OUTPUT_BUDGET, self._client_max_tokens())
             summary_response = await self._llm.summarize(
                 system=_SUMMARY_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_content}],
@@ -3559,6 +3573,27 @@ class ChatSession:
         if retry_after is not None and retry_after > 0:
             return min(max(float(retry_after), d), max_delay)
         return d
+
+    def _attempt_limit_error(
+        self, exc: TransientProviderError, attempts: int
+    ) -> ProviderOverloadedError:
+        """The terminal for a transient that outlasted its retry count.
+
+        Keeps anton's own typed message: it already says what happened ("The
+        model provider returned 500.") and is the one detail that tells a user
+        or a support thread which failure this was. Only the attempt count is
+        new. Names the model that actually failed (planning or coding), so the
+        card's provider lookup and its BYOK-vs-managed nudge are right.
+        """
+        detail = str(exc).rstrip()
+        if detail and detail[-1] not in ".!?":
+            detail += "."
+        return ProviderOverloadedError(
+            f"{detail} It did not recover after {attempts} attempts.",
+            provider=getattr(exc, "provider", "") or "",
+            model=(getattr(exc, "model", "") or "")
+            or getattr(self._llm, "planning_model", "") or "",
+        )
 
     async def _backoff_sleep(self, delay: float) -> bool:
         """Sleep `delay` seconds, waking early if the turn is cancelled.
@@ -4963,6 +4998,7 @@ class ChatSession:
         system: str,
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
+        wait_note: str | None = None,
         messages_factory: Callable[[], list[dict]] | None = None,
         allow_native_web_tools: bool = True,
     ) -> AsyncIterator[StreamEvent]:
@@ -4996,6 +5032,8 @@ class ChatSession:
             kwargs["tools"] = tools
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
+        if wait_note is not None:
+            kwargs["wait_note"] = wait_note
         if allow_native_web_tools and self._native_web_tools:
             kwargs["native_web_tools"] = self._native_web_tools
 
@@ -5499,6 +5537,7 @@ class ChatSession:
         assistant_text_parts: list[str] = []
         _max_auto_retries = 2
         _retry_count = 0
+        _drop_retries = 0
         # The one resend this turn allows after the model refused a request
         # over a render-check screenshot (see the handler below), and whether
         # it still waits for a request that goes through without them. The
@@ -5630,6 +5669,27 @@ class ChatSession:
                     # host's reconnect/update-key card.
                     if _is_provider_auth_error(_agent_exc):
                         raise
+
+                    # A connection that died after the response started. It is
+                    # counted, not timed like the incident window below: that
+                    # window is wall-clock time from the turn's first transient,
+                    # and one long stream outlasts it, so a second drop would
+                    # end the turn without a retry. Same backoff and no recovery
+                    # note, as for any provider blip.
+                    if is_stream_drop(_agent_exc):
+                        self._seal_dangling_tool_uses("interrupted by a transient provider error")
+                        if _drop_retries < _max_auto_retries:
+                            delay = self._transient_backoff_delay(_drop_retries)
+                            _drop_retries += 1
+                            if await self._backoff_sleep(delay):
+                                break
+                            continue
+                        _stamp_retry_terminal(
+                            self._turn_cost, _agent_exc, "request_attempt_limit"
+                        )
+                        raise self._attempt_limit_error(
+                            _agent_exc, _drop_retries + 1
+                        ) from _agent_exc
 
                     # ENG-673: a mid-stream transient failure that had NO prior
                     # retry (overload smuggled into a 200, or a truncated stream).
@@ -5945,12 +6005,6 @@ class ChatSession:
                             _stamp_retry_terminal(
                                 self._turn_cost, _agent_exc, "request_attempt_limit"
                             )
-                            # Name the model that actually failed (planning OR
-                            # coding) so the card's provider lookup — and so the
-                            # BYOK-vs-managed nudge it picks — is right.
-                            _model = (getattr(_agent_exc, "model", "") or "") or getattr(
-                                self._llm, "planning_model", ""
-                            ) or ""
                             # NO rate-limit special case here, deliberately.
                             # A 429 reaching the COUNT path is by definition one
                             # `classify_transient` could NOT confirm was a
@@ -5968,21 +6022,8 @@ class ChatSession:
                             # rate_limited card has no interval to time-gate its
                             # Retry with. The generic branch below is honest —
                             # anton's own typed message, no claim either way.
-                            # KEEP anton's own classification in the copy. The
-                            # typed message already says what happened ("The
-                            # model provider returned 500.") and ENG-673 put it
-                            # there deliberately; replacing it with a generic
-                            # "could not be reached" would throw away the one
-                            # detail that tells a user — or a support thread —
-                            # which failure this was. Only the attempt count is
-                            # new information.
-                            _detail = str(_agent_exc).rstrip()
-                            if _detail and _detail[-1] not in ".!?":
-                                _detail += "."
-                            raise ProviderOverloadedError(
-                                f"{_detail} It did not recover after {_retry_count} attempts.",
-                                provider=getattr(_agent_exc, "provider", "") or "",
-                                model=_model,
+                            raise self._attempt_limit_error(
+                                _agent_exc, _retry_count
                             ) from _agent_exc
                         # Exhausted retries — stop and summarize for the user.
                         # Mark the terminal: the apology below is yielded as
@@ -6199,10 +6240,18 @@ class ChatSession:
     def _turn_max_tokens(self) -> int:
         """Output-token budget the turn's planning calls actually run with.
 
-        `looks_truncated` compares output tokens against the budget the
-        call was given; the main loop never overrides ``max_tokens``, so
-        that is the client default. Falls back to LLMClient's own default
-        when the client doesn't expose one (mocks, exotic hosts).
+        `looks_truncated` compares output tokens against the budget the call
+        was given. The main loop never passes ``max_tokens``, so that is the
+        client's streamed-call budget for the planning role, which follows the
+        reasoning effort.
+        """
+        return client_stream_budget(self._llm, "planning", default=self._client_max_tokens())
+
+    def _client_max_tokens(self) -> int:
+        """The client's own ceiling for non-streamed calls.
+
+        Falls back to LLMClient's default when the client doesn't expose one
+        (mocks, exotic hosts).
         """
         budget = getattr(self._llm, "max_tokens", None)
         return budget if isinstance(budget, int) and budget > 0 else 8192
@@ -6243,7 +6292,8 @@ class ChatSession:
         identically (measured: three unchanged retries 14 minutes apart,
         all silent):
 
-        - the output budget is doubled for this one call, and
+        - the output budget is raised for this one call, up to the streamed-call
+          ceiling; at the ceiling only the nudge changes, and
         - a corrective nudge is injected into history, matching how the round
           died — "continue where you left off" when partial text arrived,
           "answer now, deliberate less" when the whole budget went to internal
@@ -6287,22 +6337,30 @@ class ChatSession:
             {"role": "assistant", "content": llm_response.content or ""}
         )
         self._append_history({"role": "user", "content": nudge})
-        retry_budget = budget * 2
+        bigger = retry_budget(budget)
         logger.warning(
             "Response truncated at the output budget without a usable tool call "
             "(output_tokens=%s, budget=%s, stop_reason=%s, silent=%s, "
-            "cut_tool_call=%s) — retrying once with max_tokens=%s",
+            "cut_tool_call=%s) — retrying once %s max_tokens=%s",
             llm_response.usage.output_tokens,
             budget,
             llm_response.stop_reason,
             silent,
             cut_tool_call,
-            retry_budget,
+            "with" if bigger > budget else "at the same",
+            bigger,
         )
 
         retry: StreamComplete | None = None
+        # The retry can think as long as the first try did. Hosts render this
+        # phase as the live status line, and the note keeps it there once their
+        # own still-working ticks take over.
+        yield StreamTaskProgress(phase=MODEL_WAIT_PHASE, message=TRUNCATION_RETRY_NOTE)
         async for event in self.plan_stream_with_recovery(
-            system=system, tools=tools, max_tokens=retry_budget
+            system=system,
+            tools=tools,
+            max_tokens=bigger,
+            wait_note=TRUNCATION_RETRY_NOTE,
         ):
             if isinstance(event, StreamComplete):
                 retry = event
@@ -6316,14 +6374,14 @@ class ChatSession:
         if (
             not retried.tool_calls
             and not (retried.content or "").strip()
-            and looks_truncated(retried, retry_budget)
+            and looks_truncated(retried, bigger)
         ):
             logger.error(
                 "Truncation retry also burned its whole budget with no "
                 "visible output (output_tokens=%s, retry_budget=%s) — "
                 "surfacing failure to the user",
                 retried.usage.output_tokens,
-                retry_budget,
+                bigger,
             )
             self._append_history(
                 {"role": "assistant", "content": _TRUNCATION_FAILURE_NOTICE}
@@ -7345,12 +7403,16 @@ class ChatSession:
             # Skipped when Jev decided; otherwise exactly the LLM verifier as before.
             for attempt, budget in enumerate(() if jev_decided else _VERIFIER_TOKEN_BUDGETS):
                 try:
-                    verdict = await self._llm.generate_object_code(
-                        _VerifierVerdict,
-                        system=verifier_system,
-                        messages=verify_messages,
-                        max_tokens=budget,
-                    )
+                    # A verdict is a short decision. At the turn's own top
+                    # efforts the model can think past both verdict budgets
+                    # before it reaches the tool call.
+                    with effort_ceiling_of(self._llm, "high"):
+                        verdict = await self._llm.generate_object_code(
+                            _VerifierVerdict,
+                            system=verifier_system,
+                            messages=verify_messages,
+                            max_tokens=budget,
+                        )
                     break
                 except StructuredOutputError as exc:
                     # A truncated verdict is a budget problem, not a verdict: the

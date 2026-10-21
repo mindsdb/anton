@@ -28,7 +28,7 @@ from .sub_tools import FILE_BEGIN_MARKER as BEGIN, FILE_END_MARKER as END
 # How much file content fits in one reply, in characters — the unit the model
 # can compare against what it is about to write. Derived from the output budget
 # in state.py; quoted from the constant so the two cannot drift.
-from .state import REPLY_BODY_CHARS
+from .state import REPLY_BODY_CHARS, language_name
 
 if TYPE_CHECKING:
     from anton.utils.datasources import CatalogConnection, DatasourceCatalog
@@ -269,7 +269,9 @@ _BROWSER_GATE_HTML = """\
   crashed renderer, a request for a local file that does not exist, a load
   the preview's content security policy blocks, a separate file the page asks
   for (the preview serves only the page itself), a chart, map or canvas that
-  stays blank, or a page wider than the screen fails the step; a page with no
+  stays blank, a loading message that still shows over a view that has
+  drawn (hide or remove it once the view draws), or a page wider than the
+  screen fails the step; a page with no
   visible text or elements is a warning. A library the check cannot load
   leaves the page unverified, which does not fail the step. A page with
   many findings gets the first ones listed and a count of more distinct
@@ -503,6 +505,7 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
   ```python
   todos = Collection(get_store(), "todos")   # built inside the route
   await todos.put("id1", {"text": "buy milk"})
+  item = await todos.get("id1")    # None if missing; an item written by put also carries pk, sk, _key, _v
   items = await todos.list()
   n = await Collection(get_store(), "counters").increment("visits", field="n")
   ```
@@ -511,6 +514,27 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
   is read back ONLY through the same `Collection` (`get`/`list`) — never
   with raw `store.get(...)`/`store.query(...)` on your own pk/sk, which
   finds nothing. Pick one style per piece of data and stick to it.
+- CHANGE A STORED DOCUMENT by reading it, modifying it and putting it back
+  with the `_v` it was read with. If another request wrote in between, the
+  put raises `ConditionalCheckFailed` and writes nothing, instead of
+  silently overwriting that write; answer 409. Handle a missing document
+  first, and make sure some endpoint creates it, e.g. a "new game" route
+  calling `await games.put("current", new_game(), if_not_exists=True)`;
+  until then this route answers 404:
+  ```python
+  from fastapi import HTTPException
+  from anton_state import ConditionalCheckFailed
+
+  games = Collection(get_store(), "games")
+  game = await games.get("current")
+  if game is None:
+      raise HTTPException(status_code=404, detail="no game")
+  game["moves"].append(cell)
+  try:
+      await games.put("current", game, if_version=game["_v"])
+  except ConditionalCheckFailed:
+      raise HTTPException(status_code=409, detail="state changed, reload")
+  ```
   Low-level `store` methods (all async; there is NO `scan()` and NO secondary
   indexes — `query` has no `index=` argument):
   * `await store.get(pk, sk=None)` → one item or `None`
@@ -519,7 +543,7 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
   * `await store.delete(pk, sk=None)`
   * `await store.query(pk, *, sk_prefix=None, filters=None, limit=None)`
   * `await store.increment(pk, sk=None, *, field, by=1)` — atomic counter;
-    do NOT hand-roll read-modify-write
+    never read-modify-write a counter by hand
   * `await store.update(pk, sk=None, *, set_fields=None, add_fields=None,
     if_version=None)` — atomic partial update
 - An item that `increment`/`update` CREATES carries NO `pk`/`sk` attributes
@@ -676,13 +700,30 @@ step is `generate_frontend`.
 ## Your task
 {body}
 
-UI text and the `<html lang>` attribute follow the language of the PRD.
-
 You are done when the file is written and closed (`</body></html>`) and you
 have called `finish(summary="<one line>")`. A deterministic verifier then
 checks the file; on failure you get another attempt with the exact errors.
 Checking your own output is NOT part of the job.\
 """
+
+
+def _ui_language(user_language: str, *, backend: bool = False) -> str:
+    """The page's language, by name. Last in the system prompt: the blocks
+    before it are the same for every run, so they stay one shared prefix."""
+    language = language_name(user_language)
+    if backend:
+        return (
+            "## UI language\n"
+            f"Text the backend returns for the page to show (error messages, "
+            f"labels, seeded records) is in {language} unless the PRD or the "
+            "brief asks for another language for the page."
+        )
+    return (
+        "## UI language\n"
+        f"Write the UI text in {language} unless the PRD or the brief asks "
+        "for another language for the page, and set the `<html lang>` "
+        "attribute to the language of the UI text."
+    )
 
 
 def _gen_html_workflow(target: str, *, fullstack: bool = False) -> str:
@@ -804,6 +845,7 @@ def build_subagent_system_prompt(
     artifact_path: Path,
     *,
     primary: str | None = None,
+    user_language: str = "",
 ) -> str:
     """System prompt for the single-generator path — the `html-app` page.
 
@@ -832,6 +874,7 @@ def build_subagent_system_prompt(
             _verifier_contract(served=False),
             "## Design rules\n" + _DESIGN_RULES,
             _GEN_TOOLS,
+            _ui_language(user_language),
         ]
     )
 
@@ -1118,6 +1161,7 @@ def build_backend_system_prompt(
     datasources: "DatasourceCatalog | None" = None,
     declared_sources: list[str] | tuple[str, ...] = (),
     data_notes: str = "",
+    user_language: str = "",
 ) -> str:
     """System prompt for `generate_backend`.
 
@@ -1141,6 +1185,7 @@ def build_backend_system_prompt(
     if section:
         parts.append(section)
     parts.append(_GEN_TOOLS)
+    parts.append(_ui_language(user_language, backend=True))
     return "\n\n".join(parts)
 
 
@@ -1201,7 +1246,9 @@ _LIVE_APP_SCRIPTS = (
 )
 
 
-def build_frontend_system_prompt(artifact_path: Path, *, live_app: bool = False) -> str:
+def build_frontend_system_prompt(
+    artifact_path: Path, *, live_app: bool = False, user_language: str = ""
+) -> str:
     # `artifact_path` is not quoted, for the same reason as in the html-app
     # builder: every path the model writes is relative to the artifact root.
     target = FULLSTACK_FRONTEND_TARGET
@@ -1216,6 +1263,7 @@ def build_frontend_system_prompt(artifact_path: Path, *, live_app: bool = False)
         "## Fullstack rules\n" + _FRONTEND_RULES,
         "## Design rules\n" + _DESIGN_RULES,
         _GEN_TOOLS,
+        _ui_language(user_language),
     ]
     if live_app:
         # Right after the contract it tightens. Without live apps the prompt
@@ -1484,6 +1532,9 @@ def build_tech_spec_instruction(state) -> str:
     if fullstack:
         content.append(_TECH_SPEC_BACKEND)
     content.append(_TECH_SPEC_EXCLUSIONS)
+    language = language_name(getattr(state, "user_language", ""))
+    kept = ["`## Insights`", "`## Implementation notes`"] + (["`## Backend`"] if fullstack else [])
+    headings = ", ".join(kept[:-1]) + " and " + kept[-1]
     return (
         "## Your task\n"
         "Write the technical specification (`spec.md`) for the build. Do not "
@@ -1495,7 +1546,13 @@ def build_tech_spec_instruction(state) -> str:
         + "\n\n## Fixed stack\n"
         + _TECH_SPEC_STACK
         + "\n\nKeep the whole document short: it complements the PRD, and "
-        "every line is context the build step carries on every round."
+        "every line is context the build step carries on every round.\n\n"
+        "## Language\n"
+        f"Write the prose in {language}, even where earlier notes use another "
+        f"language. Keep the document's headings {headings} exactly as "
+        "written, in English (the build step finds sections by heading), and "
+        "keep code, identifiers, endpoints and file names as they are. Exact "
+        "UI strings follow the PRD."
     )
 
 
