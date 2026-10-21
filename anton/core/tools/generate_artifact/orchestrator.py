@@ -585,6 +585,7 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
         datasources=state.datasource_catalog,
         declared_sources=state.declared_sources,
         data_notes=state.data_notes,
+        user_language=state.user_language,
     )
     verdict = None  # guards the terminal message when no attempt ever verified
     last_loop_error: str | None = None  # see the comment in _gen_verify_frontend
