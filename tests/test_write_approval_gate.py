@@ -64,8 +64,8 @@ PUT_CELL = (
     "r = requests.put('https://erp.example.com/api/suppliers/S005', json={'lead_time_days': 21})\n"
     "print(r.status_code)\n"
 )
-MAESTRO_RULE = "POST https://maestro.example.com/api/*/orders/*"
-MAESTRO_POST = "import requests\nrequests.post('https://maestro.example.com/api/v2/orders/9', json={'qty': 5})\n"
+PLANNER_RULE = "POST https://planner.example.com/api/*/orders/*"
+PLANNER_POST = "import requests\nrequests.post('https://planner.example.com/api/v2/orders/9', json={'qty': 5})\n"
 
 APPROVE = AskAnswer(status="answered", values=("approve",))
 CANCEL = AskAnswer(status="answered", values=("cancel",))
@@ -438,25 +438,25 @@ async def test_a_put_without_approve_never_runs_and_the_refusal_names_it(project
 
 
 async def test_a_post_to_an_endpoint_the_setting_lists_waits_for_approve(project):
-    harness = _session(project, MAESTRO_POST, http=MAESTRO_RULE)
+    harness = _session(project, PLANNER_POST, http=PLANNER_RULE)
     seen = await _run(harness=harness, answers=[CANCEL])
     assert len(seen.cards) == 1
-    assert "This step would send POST to:\n\n```\nhttps://maestro.example.com/api/v2/orders/9\n```" in (
+    assert "This step would send POST to:\n\n```\nhttps://planner.example.com/api/v2/orders/9\n```" in (
         seen.cards[0].request.prompt
     )
     assert harness.pad.ran == []
 
 
 async def test_a_post_the_setting_does_not_list_runs_with_no_card(project):
-    elsewhere = MAESTRO_POST.replace("/orders/9", "/forecasts/9")
-    harness = _session(project, elsewhere, MAESTRO_POST, http=MAESTRO_RULE)
+    elsewhere = PLANNER_POST.replace("/orders/9", "/forecasts/9")
+    harness = _session(project, elsewhere, PLANNER_POST, http=PLANNER_RULE)
     seen = await _run(harness=harness, answers=[CANCEL])
     assert len(seen.cards) == 1, "only the listed endpoint asks"
     assert harness.pad.ran == [elsewhere]
 
 
 async def test_the_setting_reads_its_environment_variable(project, monkeypatch):
-    monkeypatch.setenv("ANTON_WRITE_APPROVAL_HTTP", f"{MAESTRO_RULE}\nDELETE https://hooks.example.com/**")
+    monkeypatch.setenv("ANTON_WRITE_APPROVAL_HTTP", f"{PLANNER_RULE}\nDELETE https://hooks.example.com/**")
     workspace = MagicMock(base=project)
     workspace.artifacts_dir = project / "artifacts"
     session = ChatSession(ChatSessionConfig(
@@ -464,7 +464,7 @@ async def test_the_setting_reads_its_environment_variable(project, monkeypatch):
     ))
     try:
         assert [(r.method, r.url_glob) for r in session._write_gate.http_rules] == [
-            ("POST", "https://maestro.example.com/api/*/orders/*"), ("DELETE", "https://hooks.example.com/**"),
+            ("POST", "https://planner.example.com/api/*/orders/*"), ("DELETE", "https://hooks.example.com/**"),
         ]
     finally:
         await session.close()
@@ -472,7 +472,7 @@ async def test_the_setting_reads_its_environment_variable(project, monkeypatch):
 
 async def test_a_bad_entry_in_the_setting_is_skipped_with_one_warning(project, caplog):
     with caplog.at_level(logging.WARNING, logger="anton.core.utils.write_check"):
-        harness = _session(project, MAESTRO_POST, http=f"{MAESTRO_RULE}, POST")
+        harness = _session(project, PLANNER_POST, http=f"{PLANNER_RULE}, POST")
     warned = [r.getMessage() for r in caplog.records
               if r.name == "anton.core.utils.write_check" and r.levelno == logging.WARNING]
     assert warned == ["write approval: skipped the HTTP write entry 'POST': an entry is a method and a URL"]

@@ -256,7 +256,7 @@ class HttpWriteRule(BaseModel):
 def parse_http_write_rules(text: str) -> tuple[HttpWriteRule, ...]:
     """The rules in the `write_approval_http` setting: entries separated by
     newlines or commas, each a method and a URL glob, as in
-    `POST https://maestro.example.com/api/*/orders/*`. A bad entry is skipped
+    `POST https://planner.example.com/api/*/orders/*`. A bad entry is skipped
     with a WARNING that names it."""
     rules: list[HttpWriteRule] = []
     for entry in (e.strip() for e in re.split(r"[\n,]", text)):

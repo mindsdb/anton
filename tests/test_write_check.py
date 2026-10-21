@@ -1536,50 +1536,50 @@ def test_a_url_with_a_character_that_does_not_show_as_itself_is_named_with_escap
 
 # ── HTTP endpoints the operator lists ─────────────────────────────────────
 
-MAESTRO = "POST https://maestro.example.com/api/*/orders/*"
+PLANNER = "POST https://planner.example.com/api/*/orders/*"
 
 
 @pytest.mark.parametrize("url, held", [
-    ("'https://maestro.example.com/api/v2/orders/9'", True),
-    ("'https://MAESTRO.example.com/api/v2/orders/9?dry_run=0'", True),
-    ("f'https://maestro.example.com/api/{version}/orders/{order_id}'", True),
-    ("f'{MAESTRO_BASE}/orders/{order_id}'", True),
+    ("'https://planner.example.com/api/v2/orders/9'", True),
+    ("'https://PLANNER.example.com/api/v2/orders/9?dry_run=0'", True),
+    ("f'https://planner.example.com/api/{version}/orders/{order_id}'", True),
+    ("f'{PLANNER_BASE}/orders/{order_id}'", True),
     ("url", True),
-    ("'https://maestro.example.com/api/v2/orders'", False),
-    ("'https://maestro.example.com/api/v2/orders/9/lines'", False),
-    ("'https://maestro.example.com/api/v2/forecasts/9'", False),
+    ("'https://planner.example.com/api/v2/orders'", False),
+    ("'https://planner.example.com/api/v2/orders/9/lines'", False),
+    ("'https://planner.example.com/api/v2/forecasts/9'", False),
     ("f'https://other.example.com/api/{version}/orders/{order_id}'", False),
 ], ids=["literal", "case-and-query", "run-time-segments", "run-time-base", "run-time-whole-url",
         "too-short", "star-stays-in-one-segment", "other-path", "other-host"])
 def test_a_post_to_a_listed_endpoint_is_held(url, held):
-    rules = parse_http_write_rules(MAESTRO)
+    rules = parse_http_write_rules(PLANNER)
     code = f"import requests\nrequests.post({url}, json=order)"
     assert bool(_requests(code, rules=rules)) is held
     assert _requests(code) == [], "with no rule a POST is free"
 
 
 def test_a_rule_names_its_method_or_any():
-    rules = parse_http_write_rules("GET https://maestro.example.com/api/**\n* https://hooks.example.com/**")
-    assert _requests("import requests\nrequests.get('https://maestro.example.com/api/v2/orders/9/lines')",
-                     rules=rules) == [("GET", "https://maestro.example.com/api/v2/orders/9/lines")]
-    assert _requests("import requests\nrequests.post('https://maestro.example.com/api/v2/orders')", rules=rules) == []
+    rules = parse_http_write_rules("GET https://planner.example.com/api/**\n* https://hooks.example.com/**")
+    assert _requests("import requests\nrequests.get('https://planner.example.com/api/v2/orders/9/lines')",
+                     rules=rules) == [("GET", "https://planner.example.com/api/v2/orders/9/lines")]
+    assert _requests("import requests\nrequests.post('https://planner.example.com/api/v2/orders')", rules=rules) == []
     assert _requests("import requests\nrequests.head('https://hooks.example.com/x')", rules=rules) == [
         ("HEAD", "https://hooks.example.com/x")
     ]
 
 
 def test_a_rule_matches_the_url_without_its_query_string():
-    rules = parse_http_write_rules("POST https://maestro.example.com/api/jobs")
-    url = "https://maestro.example.com/api/jobs?run=1&next=/home"
+    rules = parse_http_write_rules("POST https://planner.example.com/api/jobs")
+    url = "https://planner.example.com/api/jobs?run=1&next=/home"
     assert _requests(f"import requests\nrequests.post({url!r})", rules=rules) == [("POST", url)]
 
 
 def test_http_write_rules_parse_entries_and_skip_bad_ones_with_a_warning(caplog):
-    text = f"{MAESTRO}\n  , delete https://x.example.com/* ,\nhttps://no-method.example.com/*\nPUTT https://x/*\nGET a b"
+    text = f"{PLANNER}\n  , delete https://x.example.com/* ,\nhttps://no-method.example.com/*\nPUTT https://x/*\nGET a b"
     with caplog.at_level(logging.WARNING, logger="anton.core.utils.write_check"):
         rules = parse_http_write_rules(text)
     assert rules == (
-        HttpWriteRule(method="POST", url_glob="https://maestro.example.com/api/*/orders/*"),
+        HttpWriteRule(method="POST", url_glob="https://planner.example.com/api/*/orders/*"),
         HttpWriteRule(method="DELETE", url_glob="https://x.example.com/*"),
     )
     warned = [r.getMessage() for r in caplog.records
