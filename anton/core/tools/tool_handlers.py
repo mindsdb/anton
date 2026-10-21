@@ -1157,7 +1157,8 @@ _STATUS_INSTRUCTIONS = {
     "needs_confirmation": (
         "A brief was drafted but the user could not be asked to confirm it. "
         "Show `brief_summary` to the user. If they agree, call this tool "
-        "again with the SAME `user_request` — the repeat call is the "
+        "again with the SAME `user_request` and `user_language` — the repeat "
+        "call is the "
         "confirmation and the pipeline continues from where it stopped. If "
         "they ask for a change, call again with the same `user_request` and "
         "the change in `agent_understanding`. If they decline, do not call "
@@ -1172,7 +1173,8 @@ _STATUS_INSTRUCTIONS = {
         "carries a non-empty `brief_summary`, show it to the user as part of "
         "that question: the pipeline stopped before they could confirm it, "
         "and the repeat call is taken as their agreement to that brief. If "
-        "they agree, call this tool again with the SAME `user_request` — it "
+        "they agree, call this tool again with the SAME `user_request` and "
+        "`user_language` — it "
         "resumes rather than restarting. A requested change goes in "
         "`agent_understanding`, with `user_request` left as it was."
     ),

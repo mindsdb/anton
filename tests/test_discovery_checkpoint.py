@@ -60,6 +60,15 @@ def test_call_fingerprint_keys_on_the_language_the_steps_write_in():
     assert cp.call_fingerprint("u", "d", "p") == cp.call_fingerprint("u", "d", "p", "English")
 
 
+def test_an_english_call_matches_a_checkpoint_saved_before_the_language_existed():
+    """A checkpoint saved before `user_language` hashed only three fields.
+    An English call must still match it, or every existing artifact redraws
+    its brief once after the upgrade and asks to confirm it again."""
+    before = cp.fingerprint("u", "d", "p")
+    assert cp.call_fingerprint("u", "d", "p", "English") == before
+    assert cp.call_fingerprint("u", "d", "p", "Russian") != before
+
+
 def test_fields_are_not_concatenation_ambiguous():
     # "ab" + "" must not fingerprint the same as "a" + "b".
     assert cp.call_fingerprint("ab", "", "") != cp.call_fingerprint("a", "b", "")

@@ -173,3 +173,18 @@ def test_a_redraw_restates_the_sources_by_their_declared_names():
     for act_first in (False, True):
         suffix = discovery_prompts._redraw_suffix(act_first)
         assert "that the corrected artifact still needs, use exactly the name it was declared with" in suffix
+
+
+def test_a_confirming_call_repeats_the_language():
+    """The language is part of the call fingerprint, so a confirming call
+    that restates it differently redraws the brief and asks again."""
+    from anton.core.tools.tool_defs import GENERATE_ARTIFACT_TOOL
+    from anton.core.tools.tool_handlers import _STATUS_INSTRUCTIONS
+
+    for text in (
+        _STATUS_INSTRUCTIONS["needs_confirmation"],
+        _STATUS_INSTRUCTIONS["stopped_over_budget"],
+        GENERATE_ARTIFACT_TOOL.description,
+        GENERATE_ARTIFACT_TOOL.prompt,
+    ):
+        assert "SAME `user_request` and `user_language`" in text
