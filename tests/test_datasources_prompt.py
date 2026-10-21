@@ -1,6 +1,8 @@
 """How the Connected Data Sources section describes MCP-method connections."""
 
 from anton.core.datasources.data_vault import LocalDataVault
+from anton.core.mcp.servers import MCP_METHODS
+from anton.utils import datasources
 from anton.utils.datasources import build_datasource_context
 
 _GENIE_FIELDS = {
@@ -60,3 +62,44 @@ class TestGenieConnectionBlock:
             "Credential env vars:",
             " - DS_HUBSPOT_CRM__ACCESS_TOKEN",
         ]
+
+    def test_two_genie_connections_name_the_tools_registration_gives_them(self, tmp_path):
+        """Two Genie connections register their tools under the connection
+        name, so each block must name those, not the single-connection ones."""
+        v = LocalDataVault(tmp_path)
+        v.save("databricks", "sales", dict(_GENIE_FIELDS))
+        v.save("databricks", "ops", dict(_GENIE_FIELDS))
+
+        ctx = build_datasource_context(v)
+
+        for name in ("sales", "ops"):
+            text = "\n".join(_block(ctx, f"databricks-{name}"))
+            assert f"`databricks__{name}__genie_ask`" in text
+            assert f"`databricks__{name}__genie_poll_response`" in text
+            assert f"`databricks__{name}__genie_get_query_result`" in text
+            assert f"`databricks__{name}__genie_*`" in text
+            assert "databricks__genie_" not in text
+
+    def test_a_genie_connection_beside_a_pat_one_keeps_the_plain_tool_names(self, tmp_path):
+        """A PAT connection registers no MCP tools, so it does not make Genie's names longer."""
+        v = LocalDataVault(tmp_path)
+        v.save("databricks", "genie", dict(_GENIE_FIELDS))
+        v.save("databricks", "wh", {"host": "dbc.example.com", "access_token": "PATSECRET"})
+
+        text = "\n".join(_block(build_datasource_context(v), "databricks-genie"))
+
+        assert "`databricks__genie_ask`" in text
+        assert "databricks__genie__" not in text
+
+    def test_a_genie_connection_with_tools_off_names_no_tools(self, tmp_path):
+        """Access mode "none" registers no Genie tools, so the block must not point at any."""
+        v = LocalDataVault(tmp_path)
+        v.save("databricks", "genie", {**_GENIE_FIELDS, "_access_mode": "none"})
+
+        block = _block(build_datasource_context(v), "databricks-genie")
+
+        assert block[1:] == ["Engine: Databricks"]
+
+
+def test_the_prompt_counts_the_methods_discovery_counts():
+    assert datasources._MCP_METHODS == MCP_METHODS
