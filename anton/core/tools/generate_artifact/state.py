@@ -178,9 +178,15 @@ class StepResult:
     detail: str = ""
 
 
-# Fallback for a call that did not state `user_language`: a bench run, a
-# test, or an agent that left the required field out.
-LANGUAGE_NOT_STATED = "the language of the user request"
+# Language for a direct caller that names none (bench runs, tests); the tool
+# handler requires `user_language`. A concrete name, never "the language of
+# the user request": that wording made the model pick an unrelated language.
+DEFAULT_USER_LANGUAGE = "English"
+
+
+def language_name(user_language: str | None) -> str:
+    """The language every step writes in, as the prompts name it."""
+    return (user_language or "").strip() or DEFAULT_USER_LANGUAGE
 
 
 @dataclass
@@ -361,8 +367,7 @@ class GenState:
 
     @property
     def language_name(self) -> str:
-        """The language every step writes in, as the prompts name it."""
-        return self.user_language.strip() or LANGUAGE_NOT_STATED
+        return language_name(self.user_language)
 
     @property
     def datasource_context(self) -> str:

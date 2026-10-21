@@ -50,6 +50,7 @@ def test_call_fingerprint_covers_all_three_soft_fields():
 def test_call_fingerprint_covers_the_user_language():
     base = cp.call_fingerprint("understanding", "data", "prefs", "English")
     assert base != cp.call_fingerprint("understanding", "data", "prefs", "Russian")
+    assert base == cp.call_fingerprint("understanding", "data", "prefs", "english")
 
 
 def test_call_fingerprint_without_a_language_is_unchanged():

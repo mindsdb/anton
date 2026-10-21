@@ -174,10 +174,10 @@ DISCOVERY_TRUNCATED_NUDGE = (
     "away and keep its arguments small."
 )
 
-# The language rule points at the language the step header names, never at
-# "the language of the user request": with an all-English context that
-# wording made the model pick an unrelated language (Russian, Spanish) for
-# these notes, and the brief and the PRD continued in it.
+# The language rule points at the language the step header names, which is
+# always a concrete name. "Write in the language of the user request" made
+# the model pick an unrelated language (Russian, Spanish) for these notes
+# with an all-English context, and the brief and the PRD continued in it.
 _GATHERING_TEMPLATE = (
     "## Your task\n"
     "Answer three questions and record the answers with `finish_gathering`:\n"

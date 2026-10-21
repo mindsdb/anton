@@ -288,7 +288,8 @@ async def test_the_real_generate_artifact_tool_reports_a_wait(tmp_path):
         content="",
         tool_calls=[ToolCall(
             id="ga1", name="generate_artifact",
-            input={"slug": slug, "user_request": "build a clock", "agent_understanding": "an analog clock"},
+            input={"slug": slug, "user_request": "build a clock", "agent_understanding": "an analog clock",
+                   "user_language": "English"},
         )],
         usage=_usage(),
         stop_reason="tool_use",

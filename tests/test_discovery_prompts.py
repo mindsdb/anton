@@ -230,9 +230,14 @@ def test_every_document_step_header_names_the_user_language():
         assert "User language: Russian\n" in step_message(step, state), step
 
 
-def test_step_header_falls_back_when_no_language_was_stated():
-    message = step_message(sub_tools.STEP_WRITE_PRD, _state())
-    assert "User language: the language of the user request\n" in message
+def test_step_header_falls_back_to_a_named_language_when_none_was_stated():
+    """A direct caller (bench, tests) may name no language. The fallback is a
+    concrete name: "the language of the user request" is the wording that
+    made the model pick an unrelated language."""
+    for step in (sub_tools.STEP_GATHERING, sub_tools.STEP_WRITE_PRD):
+        message = step_message(step, _state())
+        assert "User language: English\n" in message, step
+        assert "language of the user request" not in message.lower(), step
 
 
 def test_restored_context_carries_assumptions_and_open_points():

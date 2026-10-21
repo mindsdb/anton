@@ -1461,7 +1461,8 @@ async def _handler_result(
     )
     out = None
     async for item in tool_handlers.handle_generate_artifact(
-        session, {"slug": slug, "user_request": "a map", "agent_understanding": "a map"}
+        session, {"slug": slug, "user_request": "a map", "agent_understanding": "a map",
+                  "user_language": "English"}
     ):
         out = item
     return slug, out

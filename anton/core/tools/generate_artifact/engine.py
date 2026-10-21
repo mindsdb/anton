@@ -409,6 +409,7 @@ async def generate(
         artifact_path=artifact_path,
         user_request=user_request,
         agent_understanding=agent_understanding,
+        user_language=user_language,
         is_fullstack=artifact_type != "html-app",
     )
 

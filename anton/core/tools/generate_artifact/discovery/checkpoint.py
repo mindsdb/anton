@@ -92,9 +92,10 @@ def call_fingerprint(
     """
     parts = [agent_understanding, known_data, user_preferences]
     # Appended only when stated, so a call without a language fingerprints
-    # exactly as it did before the field existed.
+    # exactly as it did before the field existed. Casefolded: "English" and
+    # "english" are the same language and must not redraw a confirmed brief.
     if user_language.strip():
-        parts.append(user_language)
+        parts.append(user_language.casefold())
     return fingerprint(*parts)
 
 
