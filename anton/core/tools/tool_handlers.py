@@ -1237,9 +1237,11 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         yield "Error: `agent_understanding` is required."
         return
     # Collapsed to one line: the value is quoted into every step header.
+    from anton.core.tools.generate_artifact.state import MAX_USER_LANGUAGE_CHARS
+
     raw_language = tc_input.get("user_language")
     user_language = " ".join(raw_language.split()) if isinstance(raw_language, str) else ""
-    if not user_language:
+    if not user_language or len(user_language) > MAX_USER_LANGUAGE_CHARS:
         yield (
             "Error: `user_language` is required: the English name of the "
             "language the user writes to you in, e.g. \"English\"."

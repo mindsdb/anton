@@ -808,7 +808,14 @@ def test_tech_spec_instruction_names_the_user_language_and_keeps_headings():
         _state(artifact_type="fullstack-stateless-app", user_language="Russian")
     )
     assert "Write the prose in Russian" in instruction
-    assert "headings above exactly as written in English" in instruction
+    assert (
+        "`## Insights`, `## Implementation notes` and `## Backend` exactly as "
+        "written, in English"
+    ) in instruction
+    html = prompts.build_tech_spec_instruction(
+        _state(artifact_type="html-app", is_fullstack=False, user_language="Russian")
+    )
+    assert "`## Insights` and `## Implementation notes` exactly as written" in html
 
 
 def test_tech_spec_instruction_falls_back_without_a_language():
@@ -1056,8 +1063,12 @@ def test_html_prompt_states_each_rule_once():
     assert "NOT part of the job" in s
 
 
-def test_html_prompt_pins_ui_language_to_the_prd():
-    assert "language of the PRD" in _html_prompt()
+def test_html_prompt_names_the_ui_language():
+    """Named, not "the language of the PRD": a step left to infer the
+    language is where an English run turned Russian."""
+    s = _html_prompt()
+    assert "Write the UI text in English unless the PRD asks for" in s
+    assert "language of the PRD" not in s
 
 
 def test_html_prompt_quotes_the_markers_and_the_size_from_the_constants():
@@ -1132,7 +1143,7 @@ def test_fullstack_prompt_names_its_input_sections_and_the_api_spec():
         prompts.PRD_SECTION_FOOTER,
     ):
         assert heading in s, heading
-    assert "language of the PRD" in s
+    assert "Write the UI text in English unless the PRD asks for" in s
     # The two fullstack-only verifier failures are announced as such.
     assert 'name="api-base"' in s
     assert "fails the step" in s

@@ -303,10 +303,33 @@ async def test_the_handler_passes_the_user_language_to_the_pipeline(
         _session(tmp_path),
         {
             "slug": slug, "user_request": "build it", "agent_understanding": "an app",
-            "user_language": " Russian\n ",
+            "user_language": " Brazilian\n  Portuguese ",
         },
     )
-    assert seen["user_language"] == "Russian"
+    assert seen["user_language"] == "Brazilian Portuguese"
+
+
+async def test_the_handler_rejects_a_user_language_longer_than_a_name(
+    tmp_path: Path, monkeypatch
+):
+    """The value is quoted into every step header and the call fingerprint,
+    so a sentence about the user is refused before the pipeline starts."""
+    from anton.core.tools.generate_artifact.state import MAX_USER_LANGUAGE_CHARS
+
+    slug = _make_artifact(tmp_path)
+
+    async def fake_generate(**kw):
+        raise AssertionError("the pipeline must not start")
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    _, out = await _collect(
+        _session(tmp_path),
+        {
+            "slug": slug, "user_request": "build it", "agent_understanding": "an app",
+            "user_language": "x" * (MAX_USER_LANGUAGE_CHARS + 1),
+        },
+    )
+    assert out.startswith("Error: `user_language` is required")
 
 
 def test_the_soft_input_fields_forbid_the_outer_agent_from_inventing_scope():
