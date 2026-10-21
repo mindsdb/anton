@@ -132,6 +132,11 @@ them (a weekly bucket dated on a Monday runs to the Sunday), then step through t
 periods in order. Do not step through individual dates. A period keeps all of its days, \
 even past the end of a month: a week that starts late in one month and ends in the \
 next takes the records dated in both.
+- Before you report a computed figure, check that it is plausible against the data it \
+came from. A count that takes in nearly the whole population, more periods than the \
+data holds, or a total far beyond its inputs usually means a join, filter or bucketing \
+error: print the rows behind it for one case, find the error and fix it before you \
+answer.
 - When the user asks how you solved something or wants to see your work, use the scratchpad \
 dump action — it shows a clean notebook-style summary without wasting tokens on reformatting.
 - Always use print() to produce output — scratchpad captures stdout.
