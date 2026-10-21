@@ -2292,6 +2292,10 @@ class ProviderErrorFilter(logging.Filter):
             provider_error = _provider_error(exc=exc)
             if provider_error is None:
                 continue
+            record._diagnostic_safe_template = True
+            record.error_type = type(exc).__name__
+            record.provider_error = type(provider_error).__name__
+            record.status_code = _log_status(status=getattr(provider_error, "status_code", None))
             record.msg = "Provider operation failed: error_type=%s provider_error=%s status=%s"
             record.args = (
                 type(exc).__name__, type(provider_error).__name__,
