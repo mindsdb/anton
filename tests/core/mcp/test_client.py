@@ -364,3 +364,55 @@ def test_a_session_opened_under_one_event_loop_closes_cleanly_under_another(stub
     assert asyncio.run(open_and_call()) == ("3", False)
     asyncio.run(close())
     assert session._client is None
+
+
+async def _close_while_connecting(session: McpSession, monkeypatch, reopen) -> list[Any]:
+    """Run `reopen()` with `_connect` held open, close the session meanwhile, then let it finish.
+
+    Returns the owner tasks the held `_connect` started, so a test can check
+    nothing was left running. `reopen()` must raise `RuntimeError`.
+    """
+    real_connect = session._connect
+    entered, gate = asyncio.Event(), asyncio.Event()
+    owners: list[Any] = []
+
+    async def held_connect() -> None:
+        """Wait for the test's go, then open the client as usual and record its owner."""
+        entered.set()
+        await gate.wait()
+        await real_connect()
+        owners.append(session._owner)
+
+    monkeypatch.setattr(session, "_connect", held_connect)
+    task = asyncio.create_task(reopen())
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    await asyncio.wait_for(session.__aexit__(None, None, None), timeout=5)
+    gate.set()
+    with pytest.raises(RuntimeError):
+        await asyncio.wait_for(task, timeout=5)
+    return owners
+
+
+async def test_a_close_during_a_reconnect_releases_the_fresh_client(stub_mcp_server, monkeypatch):
+    """The turn closes the session while a call is reconnecting it. The client
+    that reconnect opens afterwards must be closed too, not left running."""
+    session = McpSession(server=stub_mcp_server)
+    await asyncio.wait_for(session.__aenter__(), timeout=5)
+
+    owners = await _close_while_connecting(session, monkeypatch, lambda: session._reconnect(session._client))
+
+    assert len(owners) == 1 and owners[0].done()
+    assert session._client is None and session._owner is None
+
+
+async def test_a_close_while_a_call_reopens_a_missing_client_releases_it(stub_mcp_server, monkeypatch):
+    """After a failed reconnect left no client, a call opens one. A close that
+    lands while it opens must still leave nothing running."""
+    session = McpSession(server=stub_mcp_server)
+    await asyncio.wait_for(session.__aenter__(), timeout=5)
+    await asyncio.wait_for(session._close_client(), timeout=5)
+
+    owners = await _close_while_connecting(session, monkeypatch, session._acquire_client)
+
+    assert len(owners) == 1 and owners[0].done()
+    assert session._client is None and session._owner is None

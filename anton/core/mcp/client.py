@@ -219,7 +219,8 @@ class McpSession:
         `Client` built on it, is unusable. A no-op when another call already
         replaced `failed`; `failed=None` means no client was live, and a fresh
         one is opened unless another call already did. Raises what `_connect`
-        raises; a close error from the dead client is logged, never raised.
+        raises, or `RuntimeError` when the session closed meanwhile; a close
+        error from the dead client is logged, never raised.
         """
         async with self._reconnect_lock:
             if self._client is not failed:
@@ -227,7 +228,23 @@ class McpSession:
             close_error = await self._close_client()
             if close_error is not None:
                 logger.warning("McpSession: closing the dead client failed with %s", _describe(close_error))
-            await self._connect()
+            await self._connect_unless_closed()
+
+    async def _connect_unless_closed(self) -> None:
+        """Run `_connect`, then close what it opened if the session closed meanwhile.
+
+        Call with `_reconnect_lock` held. `__aexit__` does not take the lock, so
+        a close that lands during `_connect` finds no client to release; this is
+        the only place left that can. Raises `RuntimeError` in that case, and
+        what `_connect` raises otherwise.
+        """
+        await self._connect()
+        if not self._closed:
+            return
+        close_error = await self._close_client()
+        if close_error is not None:
+            logger.warning("McpSession: closing a client opened after close failed with %s", _describe(close_error))
+        raise RuntimeError("McpSession closed while it reconnected")
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         """Tear down the session; safe from any task.
@@ -375,7 +392,7 @@ class McpSession:
         async with self._reconnect_lock:
             self._check_open()
             if self._client is None:
-                await self._connect()
+                await self._connect_unless_closed()
             assert self._client is not None
             return self._client
 
