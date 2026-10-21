@@ -329,7 +329,27 @@ async def test_the_handler_rejects_a_user_language_longer_than_a_name(
             "user_language": "x" * (MAX_USER_LANGUAGE_CHARS + 1),
         },
     )
-    assert out.startswith("Error: `user_language` is required")
+    assert out.startswith("Error: `user_language` must be only the language's English name")
+    assert f"got {MAX_USER_LANGUAGE_CHARS + 1} characters" in out
+
+
+async def test_the_handler_accepts_a_user_language_at_the_cap(tmp_path: Path, monkeypatch):
+    from anton.core.tools.generate_artifact.state import MAX_USER_LANGUAGE_CHARS
+
+    slug = _make_artifact(tmp_path)
+    seen = {}
+
+    async def fake_generate(**kw):
+        seen.update(kw)
+        return {"files_written": [], "summary": "ok", "trace": []}
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    value = "x" * MAX_USER_LANGUAGE_CHARS
+    await _collect(
+        _session(tmp_path),
+        {"slug": slug, "user_request": "build it", "agent_understanding": "an app", "user_language": value},
+    )
+    assert seen["user_language"] == value
 
 
 def test_the_soft_input_fields_forbid_the_outer_agent_from_inventing_scope():

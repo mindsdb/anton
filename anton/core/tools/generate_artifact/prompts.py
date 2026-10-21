@@ -667,7 +667,7 @@ def _gen_html_inputs(*, fullstack: bool = False, backend: bool = False) -> str:
     return text + "\n" + _GEN_API_SPEC_INPUT.format(consumer=consumer)
 
 
-def _gen_html_task(target: str, *, fullstack: bool = False, user_language: str = "") -> str:
+def _gen_html_task(target: str, *, fullstack: bool = False) -> str:
     if fullstack:
         body = f"""\
 Produce ONE self-contained HTML file named exactly `{target}`: the
@@ -700,15 +700,30 @@ step is `generate_frontend`.
 ## Your task
 {body}
 
-Write the UI text in {language_name(user_language)} unless the PRD asks for
-another language for the page, and set the `<html lang>` attribute to the
-language of the UI text.
-
 You are done when the file is written and closed (`</body></html>`) and you
 have called `finish(summary="<one line>")`. A deterministic verifier then
 checks the file; on failure you get another attempt with the exact errors.
 Checking your own output is NOT part of the job.\
 """
+
+
+def _ui_language(user_language: str, *, backend: bool = False) -> str:
+    """The page's language, by name. Last in the system prompt: the blocks
+    before it are the same for every run, so they stay one shared prefix."""
+    language = language_name(user_language)
+    if backend:
+        return (
+            "## UI language\n"
+            f"Text the backend returns for the page to show (error messages, "
+            f"labels, seeded records) is in {language} unless the PRD or the "
+            "brief asks for another language for the page."
+        )
+    return (
+        "## UI language\n"
+        f"Write the UI text in {language} unless the PRD or the brief asks "
+        "for another language for the page, and set the `<html lang>` "
+        "attribute to the language of the UI text."
+    )
 
 
 def _gen_html_workflow(target: str, *, fullstack: bool = False) -> str:
@@ -851,7 +866,7 @@ def build_subagent_system_prompt(
     # only something to misuse. The parameter stays for signature stability.
     return "\n\n".join(
         [
-            _gen_html_task(target, user_language=user_language),
+            _gen_html_task(target),
             _gen_html_inputs(),
             _gen_html_workflow(target),
             _gen_html_output_protocol(target),
@@ -859,6 +874,7 @@ def build_subagent_system_prompt(
             _verifier_contract(served=False),
             "## Design rules\n" + _DESIGN_RULES,
             _GEN_TOOLS,
+            _ui_language(user_language),
         ]
     )
 
@@ -1145,6 +1161,7 @@ def build_backend_system_prompt(
     datasources: "DatasourceCatalog | None" = None,
     declared_sources: list[str] | tuple[str, ...] = (),
     data_notes: str = "",
+    user_language: str = "",
 ) -> str:
     """System prompt for `generate_backend`.
 
@@ -1168,6 +1185,7 @@ def build_backend_system_prompt(
     if section:
         parts.append(section)
     parts.append(_GEN_TOOLS)
+    parts.append(_ui_language(user_language, backend=True))
     return "\n\n".join(parts)
 
 
@@ -1222,7 +1240,7 @@ def build_frontend_system_prompt(artifact_path: Path, *, user_language: str = ""
     target = FULLSTACK_FRONTEND_TARGET
     return "\n\n".join(
         [
-            _gen_html_task(target, fullstack=True, user_language=user_language),
+            _gen_html_task(target, fullstack=True),
             _gen_html_inputs(fullstack=True),
             _gen_html_workflow(target, fullstack=True),
             _gen_html_output_protocol(target),
@@ -1231,6 +1249,7 @@ def build_frontend_system_prompt(artifact_path: Path, *, user_language: str = ""
             "## Fullstack rules\n" + _FRONTEND_RULES,
             "## Design rules\n" + _DESIGN_RULES,
             _GEN_TOOLS,
+            _ui_language(user_language),
         ]
     )
 

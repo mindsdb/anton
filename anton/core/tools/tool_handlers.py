@@ -1241,10 +1241,17 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
 
     raw_language = tc_input.get("user_language")
     user_language = " ".join(raw_language.split()) if isinstance(raw_language, str) else ""
-    if not user_language or len(user_language) > MAX_USER_LANGUAGE_CHARS:
+    if not user_language:
         yield (
             "Error: `user_language` is required: the English name of the "
             "language the user writes to you in, e.g. \"English\"."
+        )
+        return
+    if len(user_language) > MAX_USER_LANGUAGE_CHARS:
+        yield (
+            "Error: `user_language` must be only the language's English name, "
+            f"at most {MAX_USER_LANGUAGE_CHARS} characters, e.g. \"Brazilian "
+            f"Portuguese\"; got {len(user_language)} characters."
         )
         return
 

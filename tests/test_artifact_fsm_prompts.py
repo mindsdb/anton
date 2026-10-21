@@ -1067,7 +1067,7 @@ def test_html_prompt_names_the_ui_language():
     """Named, not "the language of the PRD": a step left to infer the
     language is where an English run turned Russian."""
     s = _html_prompt()
-    assert "Write the UI text in English unless the PRD asks for" in s
+    assert "Write the UI text in English unless the PRD or the brief asks" in s
     assert "language of the PRD" not in s
 
 
@@ -1143,7 +1143,7 @@ def test_fullstack_prompt_names_its_input_sections_and_the_api_spec():
         prompts.PRD_SECTION_FOOTER,
     ):
         assert heading in s, heading
-    assert "Write the UI text in English unless the PRD asks for" in s
+    assert "Write the UI text in English unless the PRD or the brief asks" in s
     # The two fullstack-only verifier failures are announced as such.
     assert 'name="api-base"' in s
     assert "fails the step" in s
