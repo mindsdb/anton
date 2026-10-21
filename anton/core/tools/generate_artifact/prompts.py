@@ -28,7 +28,7 @@ from .sub_tools import FILE_BEGIN_MARKER as BEGIN, FILE_END_MARKER as END
 # How much file content fits in one reply, in characters — the unit the model
 # can compare against what it is about to write. Derived from the output budget
 # in state.py; quoted from the constant so the two cannot drift.
-from .state import REPLY_BODY_CHARS
+from .state import REPLY_BODY_CHARS, language_name
 
 if TYPE_CHECKING:
     from anton.utils.datasources import CatalogConnection, DatasourceCatalog
@@ -700,13 +700,30 @@ step is `generate_frontend`.
 ## Your task
 {body}
 
-UI text and the `<html lang>` attribute follow the language of the PRD.
-
 You are done when the file is written and closed (`</body></html>`) and you
 have called `finish(summary="<one line>")`. A deterministic verifier then
 checks the file; on failure you get another attempt with the exact errors.
 Checking your own output is NOT part of the job.\
 """
+
+
+def _ui_language(user_language: str, *, backend: bool = False) -> str:
+    """The page's language, by name. Last in the system prompt: the blocks
+    before it are the same for every run, so they stay one shared prefix."""
+    language = language_name(user_language)
+    if backend:
+        return (
+            "## UI language\n"
+            f"Text the backend returns for the page to show (error messages, "
+            f"labels, seeded records) is in {language} unless the PRD or the "
+            "brief asks for another language for the page."
+        )
+    return (
+        "## UI language\n"
+        f"Write the UI text in {language} unless the PRD or the brief asks "
+        "for another language for the page, and set the `<html lang>` "
+        "attribute to the language of the UI text."
+    )
 
 
 def _gen_html_workflow(target: str, *, fullstack: bool = False) -> str:
@@ -828,6 +845,7 @@ def build_subagent_system_prompt(
     artifact_path: Path,
     *,
     primary: str | None = None,
+    user_language: str = "",
 ) -> str:
     """System prompt for the single-generator path — the `html-app` page.
 
@@ -856,6 +874,7 @@ def build_subagent_system_prompt(
             _verifier_contract(served=False),
             "## Design rules\n" + _DESIGN_RULES,
             _GEN_TOOLS,
+            _ui_language(user_language),
         ]
     )
 
@@ -1142,6 +1161,7 @@ def build_backend_system_prompt(
     datasources: "DatasourceCatalog | None" = None,
     declared_sources: list[str] | tuple[str, ...] = (),
     data_notes: str = "",
+    user_language: str = "",
 ) -> str:
     """System prompt for `generate_backend`.
 
@@ -1165,6 +1185,7 @@ def build_backend_system_prompt(
     if section:
         parts.append(section)
     parts.append(_GEN_TOOLS)
+    parts.append(_ui_language(user_language, backend=True))
     return "\n\n".join(parts)
 
 
@@ -1213,7 +1234,7 @@ def build_backend_kickoff(
 FULLSTACK_FRONTEND_TARGET = "static/index.html"
 
 
-def build_frontend_system_prompt(artifact_path: Path) -> str:
+def build_frontend_system_prompt(artifact_path: Path, *, user_language: str = "") -> str:
     # `artifact_path` is not quoted, for the same reason as in the html-app
     # builder: every path the model writes is relative to the artifact root.
     target = FULLSTACK_FRONTEND_TARGET
@@ -1228,6 +1249,7 @@ def build_frontend_system_prompt(artifact_path: Path) -> str:
             "## Fullstack rules\n" + _FRONTEND_RULES,
             "## Design rules\n" + _DESIGN_RULES,
             _GEN_TOOLS,
+            _ui_language(user_language),
         ]
     )
 
@@ -1492,6 +1514,9 @@ def build_tech_spec_instruction(state) -> str:
     if fullstack:
         content.append(_TECH_SPEC_BACKEND)
     content.append(_TECH_SPEC_EXCLUSIONS)
+    language = language_name(getattr(state, "user_language", ""))
+    kept = ["`## Insights`", "`## Implementation notes`"] + (["`## Backend`"] if fullstack else [])
+    headings = ", ".join(kept[:-1]) + " and " + kept[-1]
     return (
         "## Your task\n"
         "Write the technical specification (`spec.md`) for the build. Do not "
@@ -1503,7 +1528,13 @@ def build_tech_spec_instruction(state) -> str:
         + "\n\n## Fixed stack\n"
         + _TECH_SPEC_STACK
         + "\n\nKeep the whole document short: it complements the PRD, and "
-        "every line is context the build step carries on every round."
+        "every line is context the build step carries on every round.\n\n"
+        "## Language\n"
+        f"Write the prose in {language}, even where earlier notes use another "
+        f"language. Keep the document's headings {headings} exactly as "
+        "written, in English (the build step finds sections by heading), and "
+        "keep code, identifiers, endpoints and file names as they are. Exact "
+        "UI strings follow the PRD."
     )
 
 

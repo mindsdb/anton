@@ -369,6 +369,7 @@ async def generate(
     agent_understanding: str,
     known_data: str = "",
     user_preferences: str = "",
+    user_language: str = "",
     primary: str | None = None,
     progress: "asyncio.Queue[str | None] | None" = None,
     attachments: "list[str] | tuple[str, ...]" = (),
@@ -408,6 +409,7 @@ async def generate(
         artifact_path=artifact_path,
         user_request=user_request,
         agent_understanding=agent_understanding,
+        user_language=user_language,
         is_fullstack=artifact_type != "html-app",
     )
 
@@ -421,6 +423,7 @@ async def generate(
         agent_understanding=agent_understanding,
         known_data=known_data,
         user_preferences=user_preferences,
+        user_language=user_language,
         datasource_catalog=_datasource_catalog(session),
         scratchpads_context=_scratchpads_context(session),
         trace_log=trace,
@@ -546,7 +549,8 @@ def _restore(state, stored) -> None:
             a for a in (Attachment.from_dict(d) for d in stored.attachments) if a is not None
         ]
     state.call_changed = stored.call_fingerprint != cp.call_fingerprint(
-        state.agent_understanding, state.known_data, state.user_preferences
+        state.agent_understanding, state.known_data, state.user_preferences,
+        state.user_language,
     )
 
 

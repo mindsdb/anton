@@ -585,6 +585,7 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
         datasources=state.datasource_catalog,
         declared_sources=state.declared_sources,
         data_notes=state.data_notes,
+        user_language=state.user_language,
     )
     verdict = None  # guards the terminal message when no attempt ever verified
     last_loop_error: str | None = None  # see the comment in _gen_verify_frontend
@@ -731,10 +732,12 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
     kickoff — the browser findings from `_run_and_verify_app` when the
     served fullstack page failed to load cleanly (S-02)."""
     if state.is_fullstack:
-        system = prompts.build_frontend_system_prompt(state.artifact_path)
+        system = prompts.build_frontend_system_prompt(
+            state.artifact_path, user_language=state.user_language
+        )
     else:
         system = prompts.build_subagent_system_prompt(
-            state.artifact_path, primary=state.primary
+            state.artifact_path, primary=state.primary, user_language=state.user_language
         )
     verdict = None  # guards the terminal message when no attempt ever verified
     # The loop's failure reason (round budget, no tool calls) is kept separately:
@@ -1267,7 +1270,8 @@ def _save_checkpoint(state: GenState, stage: str) -> None:
         cp.DiscoveryCheckpoint(
             request_fingerprint=cp.request_fingerprint(state.user_request),
             call_fingerprint=cp.call_fingerprint(
-                state.agent_understanding, state.known_data, state.user_preferences
+                state.agent_understanding, state.known_data, state.user_preferences,
+                state.user_language,
             ),
             pipeline_stage=stage,
             artifact_type=state.final_artifact_type or state.artifact_type,

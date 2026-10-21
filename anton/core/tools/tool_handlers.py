@@ -1158,7 +1158,8 @@ _STATUS_INSTRUCTIONS = {
         "A brief was drafted but the user could not be asked to confirm it, "
         "or did not answer in time. "
         "Show `brief_summary` to the user. If they agree, call this tool "
-        "again with the SAME `user_request` — the repeat call is the "
+        "again with the SAME `user_request` and `user_language` — the repeat "
+        "call is the "
         "confirmation and the pipeline continues from where it stopped. If "
         "they ask for a change or answer an open question, call again with "
         "the same `user_request` and that in `agent_understanding`. If they "
@@ -1174,7 +1175,8 @@ _STATUS_INSTRUCTIONS = {
         "carries a non-empty `brief_summary`, show it to the user as part of "
         "that question: the pipeline stopped before they could confirm it, "
         "and the repeat call is taken as their agreement to that brief. If "
-        "they agree, call this tool again with the SAME `user_request` — it "
+        "they agree, call this tool again with the SAME `user_request` and "
+        "`user_language` — it "
         "resumes rather than restarting. A requested change goes in "
         "`agent_understanding`, with `user_request` left as it was."
     ),
@@ -1236,6 +1238,24 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     if not agent_understanding:
         yield "Error: `agent_understanding` is required."
         return
+    # Collapsed to one line: the value is quoted into every step header.
+    from anton.core.tools.generate_artifact.state import MAX_USER_LANGUAGE_CHARS
+
+    raw_language = tc_input.get("user_language")
+    user_language = " ".join(raw_language.split()) if isinstance(raw_language, str) else ""
+    if not user_language:
+        yield (
+            "Error: `user_language` is required: the English name of the "
+            "language the user writes to you in, e.g. \"English\"."
+        )
+        return
+    if len(user_language) > MAX_USER_LANGUAGE_CHARS:
+        yield (
+            "Error: `user_language` must be only the language's English name, "
+            f"at most {MAX_USER_LANGUAGE_CHARS} characters, e.g. \"Brazilian "
+            f"Portuguese\"; got {len(user_language)} characters."
+        )
+        return
 
     raw_attachments = tc_input.get("attachments") or []
     if isinstance(raw_attachments, str):  # a single path, not wrapped in a list
@@ -1267,6 +1287,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
                     agent_understanding=agent_understanding,
                     known_data=(tc_input.get("known_data") or "").strip(),
                     user_preferences=(tc_input.get("user_preferences") or "").strip(),
+                    user_language=user_language,
                     primary=artifact.primary,
                     progress=queue,
                     attachments=attachments,
