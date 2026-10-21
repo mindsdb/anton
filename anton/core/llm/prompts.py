@@ -119,6 +119,10 @@ number such as 1,000 or 2,000. Check every result you aggregate for this. When a
 may be cut, page through it or split the query with a filter (by site, supplier, date \
 range or another key), combine the parts and check the combined count before you \
 compute. Never give a figure computed from a partial result as the answer.
+- When you gather records by a key (a part and date, a site and week), add up the \
+records that share a key; never let a later one overwrite an earlier one, because data \
+often holds several records for the same key (two receipts due the same day). After \
+grouping, check that the grouped totals still match the totals of the raw rows.
 - When a figure carries state forward through time (a running balance, projected \
 inventory, a cumulative total), build it over every period in the data first, from the \
 first period on, and only then pick out the periods the question asks about. The data's \
