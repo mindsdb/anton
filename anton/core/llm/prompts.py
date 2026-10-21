@@ -133,9 +133,10 @@ skipped everything before it.
 - When a question works in periods (week by week, by month), first put every dated \
 record into the period its date falls in, using the data's own periods where it has \
 them (a weekly bucket dated on a Monday runs to the Sunday), then step through the \
-periods in order. Those periods are the horizon: a record dated after the last of them \
-(a receipt due after the final forecast week) adds no period of its own, and a total \
-over the horizon stops at its last period. Do not step through individual dates. A period keeps all of its days, \
+periods in order. Those periods are the horizon. A record dated after the last period \
+ends (after the final week's Sunday, not merely after its start date) adds no period of \
+its own, and a total over the horizon stops at its last period. Do not step through \
+individual dates. A period keeps all of its days, \
 even past the end of a month: a week that starts late in one month and ends in the \
 next takes the records dated in both.
 - Before you report a computed figure, check that it is plausible against the data it \
