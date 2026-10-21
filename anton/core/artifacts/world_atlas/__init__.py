@@ -45,6 +45,13 @@ def _atlas(name: str) -> object:
     return json.loads((_HERE / name).read_text(encoding="utf-8"))
 
 
+@cache
+def _notice() -> str:
+    """The ISC license as an HTML comment. The license asks for its notice in all copies, and each
+    page that carries the files is one."""
+    return f"<!-- World Atlas 2.0.2 (https://github.com/topojson/world-atlas)\n{(_HERE / 'LICENSE').read_text(encoding='utf-8')}-->"
+
+
 def embed(html: str) -> str:
     """HTML with each World Atlas file whose address it names embedded, and its fetch of each
     answered from that copy. HTML comes back as it was when it names none, or already has them."""
@@ -53,7 +60,7 @@ def embed(html: str) -> str:
         return html
     # "</" escaped, so no "</script>" in the data ends its element early.
     data = json.dumps({url: _atlas(url.rsplit("/", 1)[1]) for url in named}, separators=(",", ":")).replace("</", "<\\/")
-    block = f'<script type="application/json" id="{MARKER}">{data}</script>' + _ANSWER % json.dumps(MARKER)
+    block = _notice() + f'<script type="application/json" id="{MARKER}">{data}</script>' + _ANSWER % json.dumps(MARKER)
     for place in _PLACES:
         if (found := place.search(html)) is not None:
             return html[: found.end()] + block + html[found.end():]

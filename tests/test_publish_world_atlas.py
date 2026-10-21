@@ -40,7 +40,8 @@ def test_a_page_that_downloads_the_atlas_carries_it_before_its_own_scripts():
 
     assert carried(page) == {COUNTRIES: package_file("countries-110m.json")}
     head = page.index("<head>") + len("<head>")
-    assert page[head:].startswith(f'<script type="application/json" id="{world_atlas.MARKER}">')
+    assert page[head:].startswith("<!-- World Atlas 2.0.2")
+    assert page.index(f'<script type="application/json" id="{world_atlas.MARKER}">') > head
     answer = page.index("window.fetch=")
     assert answer < page.index("d3.min.js") < page.index("d3.json(WORLD_ATLAS)")
 
@@ -90,6 +91,16 @@ def test_no_script_end_tag_inside_the_carried_data():
     start = page.index(f'id="{world_atlas.MARKER}">')
 
     assert page.index("</script>", start) > start + 100_000
+
+
+def test_a_page_that_carries_the_atlas_carries_its_license():
+    """The ISC license asks for its notice in all copies, and each carrying page is one."""
+    page = world_atlas.embed(RECIPE_PAGE)
+    license_text = (Path(world_atlas.__file__).parent / "LICENSE").read_text(encoding="utf-8")
+    notice = page[page.index("<!-- World Atlas 2.0.2") : page.index("-->") + len("-->")]
+
+    assert license_text in notice
+    assert page.index("-->") < page.index(world_atlas.MARKER)
 
 
 def test_a_published_single_page_carries_the_atlas(tmp_path):
