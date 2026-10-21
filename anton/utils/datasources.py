@@ -1521,6 +1521,23 @@ def restore_namespaced_env(vault: DataVault) -> None:
         raise
 
 
+def _hold_secure_bookkeeping_fields(vault: DataVault, engine: str, name: str) -> None:
+    """Hold, for this turn, every `_`-prefixed field the record's `secure_keys` marks secret.
+
+    `env_for` skips `_` fields, so such a value (a Genie `_client_secret`) is
+    in no DS_* map, yet a scratchpad cell can still print the record. Each is
+    labeled `<connection prefix>__<FIELD>` without the leading `_`. Reads the
+    record; raises what `read_record` raises.
+    """
+    record = vault.read_record(engine, name) if hasattr(vault, "read_record") else None
+    fields = (record or {}).get("fields") or {}
+    prefix = _slug_env_prefix(engine, name)
+    for field_name in (record or {}).get("secure_keys") or ():
+        value = fields.get(field_name)
+        if field_name.startswith("_") and isinstance(value, str):
+            hold_secret_value(f"{prefix}__{field_name.lstrip('_').upper()}", value)
+
+
 def _rebuild_ds_registries(vault: DataVault) -> None:
     # Emptied in place rather than via _reset_registered_ds_vars(), which drops
     # the scope: that would hide a mid-turn rebuild from its own turn.
@@ -1555,6 +1572,7 @@ def _rebuild_ds_registries(vault: DataVault) -> None:
             )
         try:
             env_values.update(vault.env_for(engine, name) or {})
+            _hold_secure_bookkeeping_fields(vault, engine, name)
         except Exception:
             # Must not block the rest, but it leaves that connection
             # unscrubbable for this turn, so say so. Names only, never a value.

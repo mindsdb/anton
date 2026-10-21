@@ -1325,6 +1325,30 @@ class TestGenieConnectionClassification:
         assert f"[{label}__CLIENT_SECRET]" in hidden
         assert f"[{label}__ACCESS_TOKEN]" in hidden
 
+    def test_the_stored_secret_is_hidden_before_any_genie_tool_runs(self, tmp_path):
+        """A scratchpad cell can print the vault record before a Genie tool
+        has held the secret, so the turn's rebuild must hide it already."""
+        vault = LocalDataVault(vault_dir=tmp_path / "vault")
+        vault.save(
+            "databricks",
+            "genie",
+            {
+                "workspace_url": self._WORKSPACE,
+                "client_id": self._CLIENT_ID,
+                "_client_secret": "sentinel-secret-2",
+                "_method": "genie-mcp",
+            },
+            secure_keys=["_client_secret"],
+        )
+        begin_ds_turn_scope()
+        restore_namespaced_env(vault)
+        label = _slug_env_prefix("databricks", "genie")
+
+        hidden = scrub_credentials('{"_client_secret": "sentinel-secret-2", "_method": "genie-mcp"}')
+        assert "sentinel-secret-2" not in hidden
+        assert f"[{label}__CLIENT_SECRET]" in hidden
+        assert "genie-mcp" in hidden
+
     def test_a_pat_connection_keeps_the_engine_field_list(self, tmp_path):
         vault = LocalDataVault(vault_dir=tmp_path / "vault")
         vault.save(
