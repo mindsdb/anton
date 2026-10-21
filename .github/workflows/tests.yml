@@ -24,6 +24,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.30"
 
       - name: Set up Python
         run: uv python install 3.12
@@ -34,7 +36,23 @@ jobs:
         run: uv lock --check
 
       - name: Run unit tests
-        run: uv run --group dev pytest tests/ -v --ignore=tests/e2e
+        run: uv run --locked --group dev pytest tests/ -v --ignore=tests/e2e
+
+      - name: Check exported release dependencies
+        run: python scripts/release_contract.py --check
 
       - name: Run E2E tests (stub)
-        run: uv run --group dev pytest tests/e2e/ -v
+        run: uv run --locked --group dev pytest tests/e2e/ -v
+
+  windows-installer:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.30"
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Check PowerShell release installation
+        run: uv run --locked --group dev pytest tests/test_release_installers.py -k powershell -v

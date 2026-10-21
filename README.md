@@ -355,9 +355,29 @@ service repos through the `calver-release.yml` reusable workflow in
 [mindsdb/github-actions](https://github.com/mindsdb/github-actions); this repo's
 workflow supplies the major component and consumes the resulting `tag`/`version` outputs.
 
+### Reviewed dependency updates
+
+`uv.lock` selects the dependencies used by CI and release checks. Docker uses `uv sync --locked --no-dev --group scratchpad`; the scratchpad group includes `boto3` and its dependencies in that same lock. Its initial SDK selection matches the successful image build on October 21, 2026. Existing runtime selections are unchanged.
+
+`anton/release-requirements.txt` is generated from the runtime lock with markers and artifact hashes. Both release archives include it. CI rejects a stale export or an archive with a different export. Wheel, source and Git smoke installs install the hashed registry requirements first, then Anton without resolving dependencies again.
+
+The shell and PowerShell installers resolve one release tag to a commit and use that commit's requirements as constraints. They fail if the export is missing. Rerun the installer to select a newer release; a generic `uv tool upgrade` does not apply this contract. These tool installs constrain versions; the release smoke tests additionally enforce artifact hashes.
+
+To update a dependency deliberately:
+
+```sh
+# Advance tool.uv.exclude-newer in pyproject.toml to the reviewed cutoff first.
+uv lock --upgrade-package <package-name>
+python scripts/release_contract.py
+uv sync --locked --group dev
+uv run --locked --group dev pytest
+```
+
+Review the lock and export diffs together, then publish through the normal release checks. Changing a source file does not update dependency versions. Public `Requires-Dist` keeps compatibility ranges for library consumers; an independent `pip install anton-agent` resolves those ranges. Python, build backends and operating-system packages remain separate image inputs. Packages an agent explicitly installs during a task remain runtime user work.
+
 ### Staging release candidates
 
-Every push to `staging` publishes a **release candidate** through [`.github/workflows/publish-staging.yml`](.github/workflows/publish-staging.yml): it cuts a PEP 440 pre-release tag (`v2.YY.M.DD.SEQrcN`), publishes a GitHub pre-release, and uploads the wheel to PyPI — so cowork-server staging installs an immutable, versioned Anton instead of a mutable branch or hand-pinned commit (ENG-1159). These never reach production: resolvers ignore pre-releases unless a specifier names one, and PyPI's `info.version` (read by the prod desktop updater) excludes them.
+Every push to `staging` publishes a **release candidate** through [`.github/workflows/publish-staging.yml`](.github/workflows/publish-staging.yml): it cuts a PEP 440 pre-release tag (`v2.YY.M.DD.SEQrcN`), publishes a GitHub pre-release, and uploads the wheel to PyPI — so a reviewed cowork-server lock can select an immutable, versioned Anton. These never reach production: resolvers ignore pre-releases unless a specifier names one, and PyPI's `info.version` (read by the prod desktop updater) excludes them.
 
 ### What you should NOT do
 
