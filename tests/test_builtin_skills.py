@@ -747,6 +747,12 @@ class TestPipelineContractMirrored:
         # The preview frame's storage APIs throw, and a page that
         # reads them at top level dies before binding a single listener.
         "BROWSER STORAGE",
+        # A per-view catch that only writes a message into the view keeps
+        # the error that broke it out of the browser check.
+        "catch (e) { console.error(e); el.textContent",
+        # Storage throws on every load in the preview frame, so a helper
+        # that logs that throw as an error fails a page that works.
+        "stays silent or uses `console.warn`",
     )
 
     # FRONTEND_MARKERS minus the two the pipeline contract does not state

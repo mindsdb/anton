@@ -189,6 +189,39 @@ async def test_unconfirmed_when_budget_runs_out_at_confirm(tmp_path, monkeypatch
     assert (state.artifact_path / "prd.md").exists()
 
 
+_ASK = {"question": "Which timezone?", "options": [{"value": "utc"}, {"value": "local"}]}
+
+
+@pytest.mark.parametrize("act_first", [False, True])
+async def test_a_timed_out_question_stops_at_the_brief(tmp_path, monkeypatch, act_first):
+    """The user is away, so the run must not build on a guessed answer nor
+    wait on a second card. It hands back for confirmation instead."""
+    state = _act_first_state(tmp_path) if act_first else _make_state(tmp_path)
+    state.session._llm.plan = AsyncMock(side_effect=[
+        _tool_response("ask_user", _ASK),
+        _text_response("## Goal\nA clock.\n"),  # draft_brief
+        _text_response("## Goal\nA clock, in full.\n"),  # write_prd
+    ])
+    state.session._llm.code = AsyncMock(return_value=_tool_response(
+        "finish_gathering",
+        {"summary": "ok", "artifact_type": "html-app", "open_points": ["Which timezone?"]},
+    ))
+    asked = []
+
+    async def fake_ask_via_elicit(session, request):
+        asked.append(request.prompt)
+        return AskAnswer(status="timeout")
+
+    monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_ask_via_elicit)
+
+    result = await orchestrator.run_discovery(state, entry=cp.ENTRY_FULL)
+
+    assert result == cp.STAGE_AWAITING_CONFIRMATION
+    assert asked == ["Which timezone?"]
+    assert (state.artifact_path / PRD_FILENAME).exists()
+    assert state.brief_shown is False
+
+
 async def test_the_qa_log_survives_a_cancelled_run(tmp_path, monkeypatch):
     """It used to ride out on the result dict. The sequencer returns a stage
     now, so the log lives on the state — which is also where the FSM

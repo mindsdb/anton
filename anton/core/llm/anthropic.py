@@ -324,25 +324,28 @@ class AnthropicProvider(LLMProvider):
             tool_calls[-1].repaired = True
 
 
+        input_tokens = response.usage.input_tokens
+        usage = Usage(
+            input_tokens=input_tokens,
+            output_tokens=response.usage.output_tokens,
+            context_pressure=compute_context_pressure(model, input_tokens),
+            # Anthropic reports cache activity as separate fields and its
+            # input_tokens already excludes them — pass through as-is.
+            # getattr-guarded: absent on older SDK responses.
+            cache_read_tokens=getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+            cache_creation_tokens=getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
+        )
+        self.log_usage(model=model, usage=usage, served_model=getattr(response, "model", None))
+
         raise_on_empty_response(
             content=content_text, tool_calls=tool_calls,
             stop_reason=response.stop_reason, provider="Anthropic", model=model,
         )
 
-        input_tokens = response.usage.input_tokens
         return LLMResponse(
             content=content_text,
             tool_calls=tool_calls,
-            usage=Usage(
-                input_tokens=input_tokens,
-                output_tokens=response.usage.output_tokens,
-                context_pressure=compute_context_pressure(model, input_tokens),
-                # Anthropic reports cache activity as separate fields and its
-                # input_tokens already excludes them — pass through as-is
-                # (ENG-1288). getattr-guarded: absent on older SDK responses.
-                cache_read_tokens=getattr(response.usage, "cache_read_input_tokens", 0) or 0,
-                cache_creation_tokens=getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
-            ),
+            usage=usage,
             stop_reason=response.stop_reason,
             model=getattr(response, "model", None),
         )
@@ -390,12 +393,14 @@ class AnthropicProvider(LLMProvider):
         # returned, so it never retried — the session must (ENG-673). A failure
         # BEFORE this (request establishment) was already SDK-retried → fail fast.
         stream_started = False
+        usage_seen = False
 
         try:
             async with self._client.messages.stream(**kwargs) as stream:
                 stream_started = True
                 async for event in stream:
                     if event.type == "message_start":
+                        usage_seen = True
                         served_model = getattr(event.message, "model", None) or served_model
                         usage = event.message.usage
                         input_tokens = usage.input_tokens
@@ -495,6 +500,18 @@ class AnthropicProvider(LLMProvider):
                 provider="Anthropic", code="connection_error",
                 session_backoff=stream_started, model=model,
             ) from exc
+        finally:
+            usage = Usage(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                context_pressure=compute_context_pressure(model, input_tokens),
+                cache_read_tokens=cache_read_tokens,
+                cache_creation_tokens=cache_creation_tokens,
+            )
+            # Billed from message_start on, so a stream that then fails or that its
+            # consumer closes still writes its line.
+            if usage_seen:
+                self.log_usage(model=model, usage=usage, served_model=served_model)
 
         # Missing stop_reason is a genuine truncation only when the stream
         # produced NOTHING. A content/tool-bearing stream that lacks it is almost
@@ -525,13 +542,7 @@ class AnthropicProvider(LLMProvider):
             response=LLMResponse(
                 content=content_text,
                 tool_calls=tool_calls,
-                usage=Usage(
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    context_pressure=compute_context_pressure(model, input_tokens),
-                    cache_read_tokens=cache_read_tokens,
-                    cache_creation_tokens=cache_creation_tokens,
-                ),
+                usage=usage,
                 stop_reason=stop_reason,
                 model=served_model,
             )

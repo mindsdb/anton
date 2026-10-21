@@ -132,6 +132,8 @@ _SENTINEL_REASONS = {
     # The agent passed bad or missing arguments — it can fix these itself.
     "scratchpad_empty_code": (TIER_SELF, "empty_code"),
     "scratchpad_missing_name": (TIER_SELF, "missing_name"),
+    # No `action` and no `code`, or an action the tool does not have.
+    "scratchpad_unknown_action": (TIER_SELF, "invalid_argument"),
     "missing_name": (TIER_SELF, "missing_argument"),
     "missing_slug": (TIER_SELF, "missing_argument"),
     "missing_description": (TIER_SELF, "missing_argument"),
@@ -203,6 +205,11 @@ _SENTINEL_REASONS = {
     # A bare `except Exception` around a PIL round-trip: a missing Pillow is a
     # wall, a corrupt BMP is not, and the sentinel cannot tell them apart.
     "bmp_convert_failed": (TIER_UNCLASSIFIED, "unclassified"),
+    # `read_image` once the model provider refused a request carrying a
+    # tool's image and took it without one. The model may take no image
+    # input, or the refusal may have had another cause the provider only
+    # worded around an image, so it stays out of every trip rung.
+    "images_refused": (TIER_UNCLASSIFIED, "unclassified"),
     # MCP connectors (ENG-1816): a rejected/expired token needs a user
     # reconnect, same shape as a 401 (`_STATUS_WALLS["401"] = "auth_missing"`)
     # — the agent cannot fix this by retrying, so it's a genuine wall.

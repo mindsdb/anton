@@ -125,6 +125,10 @@ def build_backend_env(
 
     A non-None `ds_env` replaces the inherited DS_* entirely, so the backend
     sees only the datasources it declared.
+
+    Bytecode writes are off: the backend runs with the artifact folder as cwd
+    and on sys.path, so its local imports would leave `__pycache__` in the
+    artifact.
     """
     env = {**os.environ}
     # Before the strip, so a caller's DS_* survive only when ds_env is None;
@@ -137,6 +141,7 @@ def build_backend_env(
     isolated = _anton_state_pythonpath_dir()
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = isolated + (os.pathsep + existing if existing else "")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
 
 

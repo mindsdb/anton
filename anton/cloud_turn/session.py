@@ -557,23 +557,6 @@ def resolve_trusted_artifacts_root() -> Path | None:
 _ATTACHMENTS_DIRNAME = "attachments"
 
 
-def _sniff_image_format(head: bytes) -> str | None:
-    """The real image format from magic bytes, or None if not a known image.
-    Content, never the extension — a BMP named ``.png`` must not ship as PNG,
-    and a text file named ``.png`` must not ship at all."""
-    if head.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "PNG"
-    if head.startswith(b"\xff\xd8\xff"):
-        return "JPEG"
-    if head.startswith((b"GIF87a", b"GIF89a")):
-        return "GIF"
-    if head.startswith(b"BM"):
-        return "BMP"
-    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
-        return "WEBP"
-    return None
-
-
 def _image_block_from_file(path: Path) -> dict | None:
     """A base64 image content block for *path*, or None if it can't be shown.
 
@@ -583,7 +566,7 @@ def _image_block_from_file(path: Path) -> dict | None:
     can't OOM the pod. Pillow is optional in the deployed image, so it's used
     only to convert BMP (via the shared ``clipboard.image_content_block``); a
     BMP where Pillow is absent is skipped rather than crashing."""
-    from anton.utils.clipboard import MAX_IMAGE_BYTES, image_content_block
+    from anton.utils.clipboard import MAX_IMAGE_BYTES, image_content_block, sniff_image_format
 
     try:
         if path.stat().st_size * 4 // 3 > MAX_IMAGE_BYTES:  # cap before reading into memory
@@ -591,7 +574,7 @@ def _image_block_from_file(path: Path) -> dict | None:
         raw = path.read_bytes()
     except OSError:
         return None
-    fmt = _sniff_image_format(raw[:16])
+    fmt = sniff_image_format(raw[:16])
     if fmt is None:
         return None
     try:

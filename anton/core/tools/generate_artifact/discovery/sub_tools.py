@@ -338,11 +338,24 @@ async def dispatch_ask_user(session: "ChatSession", tc_input: dict) -> dict:
             "question": request.prompt,
             "answer_summary": f"({answer.status}, not answered)",
         }
-    if answer.status in ("cancelled", "timeout"):
+    if answer.status == "timeout":
+        # The user is away, so nobody will confirm a brief built on a guess.
+        # The run stops at the brief instead (see `PrdState.question_unanswered`).
         return {
             "tool_result": (
-                f"The user did not answer ({answer.status}); proceed on a "
-                "stated assumption instead of re-asking."
+                "The user has not answered. Do not assume an answer: call "
+                "`finish_gathering` now and list this question under "
+                "`open_points`."
+            ),
+            "status": answer.status,
+            "question": request.prompt,
+            "answer_summary": "(user timeout)",
+        }
+    if answer.status == "cancelled":
+        return {
+            "tool_result": (
+                "The user skipped this question; proceed on a stated "
+                "assumption instead of re-asking."
             ),
             "status": answer.status,
             "question": request.prompt,

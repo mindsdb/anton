@@ -110,7 +110,9 @@ class GenTrace:
             "attempt": attempt,
             "round": round,
             "system": system,
-            "messages": serialize_messages(messages),
+            "messages": [
+                {**m, "content": _without_image_data(m["content"])} for m in serialize_messages(messages)
+            ],
             "response": resp,
         })
 
@@ -130,6 +132,26 @@ class GenTrace:
 
     def run_result(self, *, ok, result=None, error=None) -> None:
         self._emit("run_result", {"ok": ok, "result": result, "error": error})
+
+
+def _without_image_data(content: Any) -> Any:
+    """`content` with each base64 image's data replaced by its length,
+    inside tool results too. A retry's kickoff carries the failed attempt's
+    screenshot, up to a megabyte, and every round of the loop sends the
+    kickoff again."""
+    if not isinstance(content, list):
+        return content
+    out: list[Any] = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "tool_result":
+            block = {**block, "content": _without_image_data(block.get("content"))}
+        elif isinstance(block, dict) and block.get("type") == "image" and isinstance(block.get("source"), dict):
+            source = block["source"]
+            data = source.get("data")
+            if isinstance(data, str):
+                block = {**block, "source": {**source, "data": f"<{len(data)} base64 characters>"}}
+        out.append(block)
+    return out
 
 
 def make_trace() -> GenTrace | NullTrace:

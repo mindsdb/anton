@@ -188,12 +188,20 @@ async def show_and_confirm(state: PrdState) -> str:
     async with sub_tools.progress_muted(state.session):
         answer = await sub_tools.ask_via_elicit(state.session, request)
 
+    # A timeout is not a decline: the user stepped away, and the card stays
+    # answerable after the turn. Leaving the brief unconfirmed makes their
+    # later "Accept" a repeat call, which `run_discovery` takes as agreement.
+    if answer.status == "timeout":
+        state.record_qa("Show PRD brief for confirmation", "user did not respond (timeout)")
+        state.trace_log.node("show_and_confirm", "unconfirmed", detail="answer status: timeout")
+        return "unconfirmed"
+
     if answer.status in ("unavailable", "limit", "error"):
         state.trace_log.node("show_and_confirm", "unconfirmed", detail=f"answer status: {answer.status}")
         return "unconfirmed"
 
-    if answer.status in ("cancelled", "timeout"):
-        state.record_qa("Show PRD brief for confirmation", f"user did not respond ({answer.status})")
+    if answer.status == "cancelled":
+        state.record_qa("Show PRD brief for confirmation", "user did not respond (cancelled)")
         state.trace_log.node("show_and_confirm", "cancelled", detail=f"answer status: {answer.status}")
         return "cancelled"
 

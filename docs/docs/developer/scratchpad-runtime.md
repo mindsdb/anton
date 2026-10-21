@@ -215,10 +215,92 @@ Under a policy, app backends are refused (`launch_artifact_backend` returns
 `BACKENDS_OFF_MESSAGE` before it touches the pool, and `generate_artifact`
 refuses a fullstack artifact before discovery asks anything, or before the
 spec when discovery settles on one). The checks that start a browser or
-LibreOffice (`lint_html`, `lint_url`, `check_xlsx_via_office`,
-`check_opens_via_office`, `verify_frontend_live`, `verify_app_live`) take a
-required `cell_sandbox` and return None under a policy before they spawn.
-The in-process lints still run.
+LibreOffice in this process (`lint_html`, `lint_url`, `check_xlsx_via_office`,
+`check_opens_via_office`, `verify_app_live`) take a required `cell_sandbox`
+and return None under a policy before they spawn. The in-process lints still
+run.
+
+Pages are still loaded in a browser under a policy when the host sets
+`ANTON_RENDER_CHECK_URL`: the render-check service
+(`anton/core/artifacts/render_check.py`) runs Chromium in its own container
+and loads the page the way the app preview does, and only the page's text
+leaves this process. The server reads the page only where the person's own
+cells may read (`CellSandbox.allows_read`), and through
+`nofollow.read_bytes_nofollow`, so a link agent code swaps in after that
+check is refused, never followed. The variable is not on the cell
+environment's allowlist. `generate_artifact`'s browser step
+(`verify_frontend_live`) and the check after every scratchpad cell that
+changes an artifact (`tool_handlers._check_pages`) both use it. A cell
+changes an artifact when it writes, replaces, renames, copies in or deletes
+any of its content files: each file is compared by its mtime and size
+(`tool_handlers.ArtifactFiles`). The cell check loads the pages the cell
+edited. When an artifact other than a fullstack app changed but none of
+its pages did (the cell rewrote only a data file the page loads, say), it
+loads the artifact's main page: its primary, else its `index.html`, else
+its first page by name. It sends no page of a fullstack app:
+that page calls its backend, which the service does not run, so the cell's
+result names the page as not checked. Without the variable,
+`verify_frontend_live` reports the page as unverified and the cell's result
+says the page was not checked in a browser. Either way, a sandboxed turn
+with a page that did not pass its last check ends with a line anton writes
+itself, naming the artifact (`ChatSession._unverified_page_lines`). Each
+page keeps its own latest result, so a later pass of one page never clears
+another page's failure.
+
+A check the service could not vouch for is unverified, and its line says
+why (a resource it could not load, the deadline). Under that line the
+agent sees what the check still found, such as an exception, or a blank
+view or overflow measured before the deadline, which the line marks as
+possibly still drawing (`render_check.unverified_findings`). The cell check
+lists those findings once per page per turn: once an unverified check in
+the turn listed findings for a page, in a cell's result or in
+`generate_artifact`'s `checks_skipped`, a later unverified check of that
+page gets only the line that says it was not checked
+(`ChatSession._unverified_findings_listed`). A check that listed nothing,
+because the service was busy or the cell's time ran out, leaves the next
+check free to list what it finds. So the agent fixes them once and then
+reports the page as unverified, instead of editing a page that may work
+on every cell.
+
+The service also sends a screenshot of the page, which reaches the agent as
+an image beside the check's text. History keeps only the newest one
+(`render_check.drop_older_screenshots`). When the model refuses a request
+that may have failed for carrying images at all
+(`provider.is_image_refusal`: a content rejection, or a 400 or 422 that
+names an image, which is what a model with no image input gets), the turn
+replaces the images anton added itself with a note, keeps the text beside
+them, and sends the request once more. Render screenshots
+(`ChatSession._drop_render_screenshots`) and the images other tools
+returned, such as what `read_image` loaded
+(`ChatSession._drop_refused_tool_images`), are each dropped at most once
+per turn, so one turn resends at most twice. An image the person attached
+is left to the content repair. A refusal of one image, such as an image
+over the size limit, does not count. Only when that request goes through
+without the dropped images does the note say the model refused them
+(`ChatSession._confirm_render_screenshots_refused`,
+`ChatSession._confirm_tool_images_refused`). When one refused request
+carries both kinds, the tool images go first; the screenshots go only if
+the request is refused again, and the request that then goes through
+confirms both. Otherwise each kind follows its own refusal. After refused
+screenshots, later checks in that session ask the service for no
+screenshot. After a refused tool image, `read_image` answers in text
+instead of loading another, and checks keep asking for screenshots: one
+corrupt file draws a refusal from a model that takes images too. A model
+with no image input then refuses the next screenshot as well, and that
+screenshot gets its own drop and resend. If the request is refused again
+with nothing left to drop, the dropped images were not the cause, and
+nothing changes for later checks or calls. A session seeded with a
+confirmed note, as cowork-server builds one for every turn, starts the same
+way.
+
+When `generate_artifact`'s browser step fails a page, the generator's next
+attempt gets the findings and, beside them, the screenshot of the failed
+page (`orchestrator._kickoff_with_screenshot`). A model that refuses that
+request gets it once more without the screenshot (`engine._run_loop`). When
+the refused request was the attempt's first round, which runs on the
+planning model, the main agent's own, the session records the refusal and
+later checks send no screenshot either. A later round runs on the coding
+model, so its refusal drops only that attempt's screenshot.
 
 `ScratchpadManager` refuses at construction a runtime factory that does not
 name a `cell_sandbox` parameter (a bare `**kwargs` is refused), and refuses

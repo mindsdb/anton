@@ -13,6 +13,7 @@ import pytest
 
 from anton.core.backends.base import Cell
 from anton.core.memory.cerebellum import Cerebellum, _DiffPassResult, _LessonDraft
+from anton.core.memory.base import MemoryRead
 from anton.core.memory.cortex import Cortex, _CompactionResult
 from anton.core.memory.hippocampus import Engram, Hippocampus
 from anton.core.session import ChatSession
@@ -168,6 +169,118 @@ class TestGetScratchpadContext:
         result = cortex.get_scratchpad_context()
         assert "slow" in result
         assert "Scratchpad times out" in result
+
+
+class TestMemoryRead:
+    """What the latest prompt and scratchpad description held from the learned
+    tiers."""
+
+    def test_none_before_the_memory_is_built(self, cortex):
+        assert cortex.memory_read is None
+
+    async def test_counts_what_the_prompt_and_the_scratchpad_hold(self, cortex, dirs):
+        g, p = dirs
+        global_hc, project_hc = Hippocampus(g), Hippocampus(p)
+        global_hc.rewrite_identity(["Name: Ana", "TZ: EST"])
+        global_hc.encode_rule("Use httpx", kind="always", confidence="high", source="user")
+        project_hc.encode_rule("Use Django ORM", kind="always", confidence="high", source="user")
+        global_hc.encode_lesson("Global fact")
+        project_hc.encode_lesson("Project fact one")
+        project_hc.encode_lesson("Project fact two")
+        global_hc.encode_rule(
+            "If a scratchpad API is paginated, use progress()",
+            kind="when", confidence="high", source="user",
+        )
+        project_hc.encode_lesson("Scratchpad cells time out at 30s")
+
+        # ChatSession builds its tools, and so the scratchpad description,
+        # before the system prompt.
+        cortex.get_scratchpad_context()
+        await cortex.build_memory_context()
+
+        assert cortex.memory_read == MemoryRead(
+            learned=True, rules=2, lessons=3, profile_lines=2, scratchpad=2
+        )
+        assert cortex.memory_read.entries == 9
+
+    async def test_counts_only_the_rules_the_prompt_shows(self, cortex, dirs):
+        g, _ = dirs
+        (g / "rules.md").write_text("## Preferences\n- Prefer short answers\n\n## Always\n- Use httpx\n")
+
+        prompt = await cortex.build_memory_context()
+
+        assert "Use httpx" in prompt and "Prefer short answers" not in prompt
+        assert cortex.memory_read.rules == 1
+
+    async def test_counts_the_profile_lines_the_prompt_shows(self, cortex, dirs, monkeypatch):
+        g, _ = dirs
+        hc = Hippocampus(g)
+        hc.rewrite_identity(["Name: Ana"])
+        filter_rules = cortex._retrieve_relevant_rules
+
+        async def filter_while_another_turn_learns(engrams, user_message):
+            hc.rewrite_identity(["Name: Ana", "TZ: EST"])
+            return await filter_rules(engrams, user_message)
+
+        monkeypatch.setattr(cortex, "_retrieve_relevant_rules", filter_while_another_turn_learns)
+
+        prompt = await cortex.build_memory_context()
+
+        assert "Name: Ana" in prompt and "TZ: EST" not in prompt
+        assert cortex.memory_read.profile_lines == 1
+
+    async def test_counts_only_the_lessons_the_budget_lets_in(self, cortex, dirs):
+        g, _ = dirs
+        hc = Hippocampus(g)
+        for i in range(60):
+            hc.encode_lesson(f"Lesson {i:02d}: {'detail ' * 20}")
+
+        prompt = await cortex.build_memory_context()
+
+        shown = sum(1 for i in range(60) if f"Lesson {i:02d}:" in prompt)
+        assert 0 < shown < 60
+        assert cortex.memory_read.lessons == shown
+
+    async def test_counts_the_rules_the_filter_keeps(self, cortex, dirs, captured_events):
+        g, _ = dirs
+        rules = _when_engrams(12)
+        lines = "\n".join(f"- {e.text}" for e in rules)
+        (g / "rules.md").write_text(f"## When\n{lines}\n")
+        cortex._llm = _FakeLLM(content="\n".join(f"- {rules[i].text}" for i in (0, 1)))
+
+        await cortex.build_memory_context("please do the august campaign")
+
+        assert cortex.memory_read.rules == 2
+
+    async def test_the_operators_layer_is_not_counted(self, dirs, tmp_path):
+        g, p = dirs
+        managed = tmp_path / "managed"
+        managed.mkdir()
+        Hippocampus(managed).encode_rule("Always cite the source", kind="always", confidence="high", source="user")
+        Hippocampus(managed).encode_lesson("Orders ship on Mondays")
+        Hippocampus(managed).encode_lesson("Scratchpad cells have pandas installed")
+        cortex = Cortex(
+            global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="copilot",
+            managed_hc=Hippocampus(managed),
+        )
+
+        prompt = await cortex.build_memory_context()
+        wisdom = cortex.get_scratchpad_context()
+
+        assert "Always cite the source" in prompt and "Orders ship on Mondays" in prompt
+        assert "Scratchpad cells have pandas installed" in wisdom
+        assert cortex.memory_read == MemoryRead(learned=True)
+
+    @pytest.mark.parametrize("scope", ["off", "unavailable"])
+    async def test_a_turn_with_learned_memory_off_reads_none(self, cortex, dirs, scope):
+        g, p = dirs
+        Hippocampus(g).encode_rule("Use httpx", kind="always", confidence="high", source="user")
+        Hippocampus(p).encode_lesson("Scratchpad cells time out at 30s")
+
+        await cortex.build_memory_context(learned_memory_scope=scope)
+        cortex.get_scratchpad_context(learned_memory_scope=scope)
+
+        assert cortex.memory_read == MemoryRead(learned=False)
 
 
 class TestEncode:

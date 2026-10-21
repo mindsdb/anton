@@ -1303,29 +1303,33 @@ class OpenAIProvider(LLMProvider):
                     )
                 ))
 
+        usage_obj = response.usage
+        input_tokens, cache_read_tokens, cache_creation_tokens = _split_cached_input(
+            usage_obj
+        )
+        usage = Usage(
+            input_tokens=input_tokens,
+            output_tokens=usage_obj.completion_tokens if usage_obj else 0,
+            # All prompt-side tokens, exactly as before this split existed
+            # (the OpenAI dialect's prompt_tokens is cache-inclusive).
+            context_pressure=compute_context_pressure(
+                model, input_tokens + cache_read_tokens + cache_creation_tokens
+            ),
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+        )
+        if usage_obj is not None:
+            self.log_usage(model=model, usage=usage, served_model=getattr(response, "model", None))
+
         raise_on_empty_response(
             content=content_text, tool_calls=tool_calls,
             stop_reason=choice.finish_reason, model=model,
         )
 
-        usage_obj = response.usage
-        input_tokens, cache_read_tokens, cache_creation_tokens = _split_cached_input(
-            usage_obj
-        )
         return LLMResponse(
             content=content_text,
             tool_calls=tool_calls,
-            usage=Usage(
-                input_tokens=input_tokens,
-                output_tokens=usage_obj.completion_tokens if usage_obj else 0,
-                # All prompt-side tokens, exactly as before this split existed
-                # (the OpenAI dialect's prompt_tokens is cache-inclusive).
-                context_pressure=compute_context_pressure(
-                    model, input_tokens + cache_read_tokens + cache_creation_tokens
-                ),
-                cache_read_tokens=cache_read_tokens,
-                cache_creation_tokens=cache_creation_tokens,
-            ),
+            usage=usage,
             stop_reason=choice.finish_reason,
             model=getattr(response, "model", None),
         )
@@ -1394,6 +1398,7 @@ class OpenAIProvider(LLMProvider):
         # returned, so it never retried — the session must (ENG-673). A failure
         # BEFORE this (request establishment) was already SDK-retried → fail fast.
         stream_started = False
+        usage_seen = False
 
         stream = None
         try:
@@ -1402,6 +1407,7 @@ class OpenAIProvider(LLMProvider):
             async for chunk in stream:
                 served_model = getattr(chunk, "model", None) or served_model
                 if chunk.usage:
+                    usage_seen = True
                     (
                         input_tokens,
                         cache_read_tokens,
@@ -1548,6 +1554,17 @@ class OpenAIProvider(LLMProvider):
         finally:
             await _aclose_stream(stream)
 
+        usage = Usage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            context_pressure=compute_context_pressure(
+                model, input_tokens + cache_read_tokens + cache_creation_tokens
+            ),
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+        )
+        if usage_seen:
+            self.log_usage(model=model, usage=usage, served_model=served_model)
 
         # Finalize tool calls. Same safe-parse protection as the
         # non-streaming path — a model cut off mid-JSON-arguments
@@ -1604,15 +1621,7 @@ class OpenAIProvider(LLMProvider):
             response=LLMResponse(
                 content=content_text,
                 tool_calls=tool_calls,
-                usage=Usage(
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    context_pressure=compute_context_pressure(
-                        model, input_tokens + cache_read_tokens + cache_creation_tokens
-                    ),
-                    cache_read_tokens=cache_read_tokens,
-                    cache_creation_tokens=cache_creation_tokens,
-                ),
+                usage=usage,
                 stop_reason=stop_reason,
                 model=served_model,
             )
@@ -1749,6 +1758,11 @@ class OpenAIProvider(LLMProvider):
                 model=model,
             ) from exc
 
+        if getattr(response, "usage", None) is not None:
+            self.log_usage(
+                model=model, usage=_responses_usage(response, model),
+                served_model=getattr(response, "model", None),
+            )
         return _parse_response_object(response, model)
 
     async def _stream_via_responses(
@@ -1780,6 +1794,7 @@ class OpenAIProvider(LLMProvider):
         cache_creation_tokens = 0
         stop_reason: str | None = None
         served_model: str | None = None  # from the final Response object (ENG-1638)
+        usage_seen = False
 
         # Map output_index → in-flight function-call state. Responses API uses
         # a per-output_index stable handle for streaming arguments.
@@ -1885,6 +1900,7 @@ class OpenAIProvider(LLMProvider):
                     if final_response is not None:
                         usage = getattr(final_response, "usage", None)
                         if usage is not None:
+                            usage_seen = True
                             (
                                 input_tokens,
                                 cache_read_tokens,
@@ -1902,6 +1918,11 @@ class OpenAIProvider(LLMProvider):
                 # classifies it the same way (billing stop, a code that names
                 # its cause, transient, or stream_error with backoff).
                 elif etype in ("response.failed", "error"):
+                    failed = getattr(event, "response", None) if etype == "response.failed" else None
+                    if getattr(failed, "usage", None) is not None:
+                        # Billed though it failed, and this raise skips the usage line below.
+                        self.log_usage(model=model, usage=_responses_usage(failed, model),
+                                       served_model=getattr(failed, "model", None))
                     error = (getattr(getattr(event, "response", None), "error", None)
                              if etype == "response.failed" else event)
                     body = _responses_error_body(error)
@@ -1973,6 +1994,18 @@ class OpenAIProvider(LLMProvider):
         finally:
             await _aclose_stream(stream)
 
+        usage = Usage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            context_pressure=compute_context_pressure(
+                model, input_tokens + cache_read_tokens + cache_creation_tokens
+            ),
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+        )
+        if usage_seen:
+            self.log_usage(model=model, usage=usage, served_model=served_model)
+
         # Same rule as the chat.completions reader (ENG-673): a stream that
         # ended with no terminal event and produced nothing was cut, and must
         # fail fast rather than hand back an empty answer.
@@ -1993,15 +2026,7 @@ class OpenAIProvider(LLMProvider):
             response=LLMResponse(
                 content=content_text,
                 tool_calls=tool_calls,
-                usage=Usage(
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    context_pressure=compute_context_pressure(
-                        model, input_tokens + cache_read_tokens + cache_creation_tokens
-                    ),
-                    cache_read_tokens=cache_read_tokens,
-                    cache_creation_tokens=cache_creation_tokens,
-                ),
+                usage=usage,
                 stop_reason=stop_reason,
                 model=served_model,
             )
@@ -2078,13 +2103,6 @@ def _parse_response_object(response, model: str) -> LLMResponse:
         # Other item types (web_search_call, reasoning, etc.) are skipped —
         # the model's output_text already incorporates their effects.
 
-    usage = getattr(response, "usage", None)
-    # `or 0` guards an explicit None (the attr is present but null) — the
-    # Responses API returns usage.input_tokens=None on web-search responses,
-    # which a bare getattr default does NOT catch. Mirrors the streaming path.
-    input_tokens, cache_read_tokens, cache_creation_tokens = _split_cached_input(usage)
-    output_tokens = (getattr(usage, "output_tokens", 0) or 0) if usage else 0
-
     if getattr(response, "status", None) == "failed":
         body = _responses_error_body(getattr(response, "error", None))
         named = classify_responses_failure(body, provider="The model provider", model=model)
@@ -2105,15 +2123,25 @@ def _parse_response_object(response, model: str) -> LLMResponse:
     return LLMResponse(
         content=content_text,
         tool_calls=tool_calls,
-        usage=Usage(
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            context_pressure=compute_context_pressure(
-                model, input_tokens + cache_read_tokens + cache_creation_tokens
-            ),
-            cache_read_tokens=cache_read_tokens,
-            cache_creation_tokens=cache_creation_tokens,
-        ),
+        usage=_responses_usage(response, model),
         stop_reason=status,
         model=getattr(response, "model", None),
+    )
+
+
+def _responses_usage(response, model: str) -> Usage:
+    usage = getattr(response, "usage", None)
+    # `or 0` guards an explicit None (the attr is present but null) — the
+    # Responses API returns usage.input_tokens=None on web-search responses,
+    # which a bare getattr default does NOT catch. Mirrors the streaming path.
+    input_tokens, cache_read_tokens, cache_creation_tokens = _split_cached_input(usage)
+    output_tokens = (getattr(usage, "output_tokens", 0) or 0) if usage else 0
+    return Usage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        context_pressure=compute_context_pressure(
+            model, input_tokens + cache_read_tokens + cache_creation_tokens
+        ),
+        cache_read_tokens=cache_read_tokens,
+        cache_creation_tokens=cache_creation_tokens,
     )
