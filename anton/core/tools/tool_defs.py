@@ -438,8 +438,7 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "English name (\"English\", \"Russian\", \"Spanish\"). Judge it by "
         "the user's own messages, not by the data, the attachments or this "
         "conversation's system text. The pipeline asks its questions and "
-        "writes the brief, `prd.md` and `spec.md` in this language, and you "
-        "keep talking to the user in it when you relay the result.\n"
+        "writes the brief, `prd.md` and `spec.md` in this language.\n"
         "- `agent_understanding`: what the user asked for, in your words — "
         "only what they said or what plainly follows from it. Do NOT add "
         "features, screens, mechanics or styling of your own: the pipeline "
@@ -499,8 +498,7 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
                 "type": "string",
                 "description": (
                     "English name of the language the user writes to you "
-                    "in, e.g. \"English\" or \"Russian\". Questions, the "
-                    "brief, prd.md and spec.md are written in it."
+                    "in, e.g. \"Russian\"."
                 ),
             },
             "agent_understanding": {

@@ -174,10 +174,6 @@ DISCOVERY_TRUNCATED_NUDGE = (
     "away and keep its arguments small."
 )
 
-# The language rule points at the language the step header names, which is
-# always a concrete name. "Write in the language of the user request" made
-# the model pick an unrelated language (Russian, Spanish) for these notes
-# with an all-English context, and the brief and the PRD continued in it.
 _GATHERING_TEMPLATE = (
     "## Your task\n"
     "Answer three questions and record the answers with `finish_gathering`:\n"
@@ -212,9 +208,8 @@ _GATHERING_TEMPLATE = (
     "touch is fetched before generation starts — naming one is how you "
     "request that.\n"
     "- Keep the whole `finish_gathering` call under about 30 lines.\n"
-    "- Write questions to the user and the text you record in the user "
-    "language named in the step header. Keep names of tables, fields, "
-    "files and APIs as they are.\n\n"
+    "- Keep names of tables, fields, files and APIs as they are, whatever "
+    "language you write in.\n\n"
     "## When there is no external data\n"
     "Call `finish_gathering` at once: no scratchpad, no web search, no "
     "description of the page."
@@ -300,13 +295,16 @@ def step_message(step: str, state: PrdState, *, extra: str = "") -> str:
     user language, remaining question budget — because the system prompt
     cannot.
     """
-    from ..state import gathering_question_budget
+    from ..state import gathering_question_budget, language_name
     from . import sub_tools
 
+    language = language_name(state.user_language)
     header = (
         f"STEP: {step}\n"
         f"Current artifact type: {state.final_artifact_type or state.artifact_type}\n"
-        f"User language: {state.language_name}\n"
+        f"User language: {language}. Write everything meant for the user, and "
+        f"every note and document, in {language}, even where earlier messages "
+        "use another language.\n"
     )
     if step == sub_tools.STEP_GATHERING:
         header += (

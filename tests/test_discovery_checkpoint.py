@@ -53,11 +53,11 @@ def test_call_fingerprint_covers_the_user_language():
     assert base == cp.call_fingerprint("understanding", "data", "prefs", "english")
 
 
-def test_call_fingerprint_without_a_language_is_unchanged():
-    """A call that names no language matches a checkpoint written before
-    the field existed."""
-    assert cp.call_fingerprint("u", "d", "p", "") == cp.call_fingerprint("u", "d", "p")
-    assert cp.call_fingerprint("u", "d", "p", "English") != cp.call_fingerprint("u", "d", "p")
+def test_call_fingerprint_keys_on_the_language_the_steps_write_in():
+    """No language means the English default, so the two calls write the
+    same brief and must not redraw it."""
+    assert cp.call_fingerprint("u", "d", "p", "") == cp.call_fingerprint("u", "d", "p", "English")
+    assert cp.call_fingerprint("u", "d", "p") == cp.call_fingerprint("u", "d", "p", "English")
 
 
 def test_fields_are_not_concatenation_ambiguous():
