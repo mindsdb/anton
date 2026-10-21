@@ -344,14 +344,25 @@ def _refusal(writes: CellWrites, cause: RefusalCause) -> ToolOutcome:
 
 
 async def _ask_approval(session: ChatSession, writes: CellWrites) -> RefusalCause | None:
-    """Ask Approve or Cancel. None when the user picks Approve, else why not."""
+    """Ask Approve or Cancel for a held cell. None when the user picks Approve, else why not."""
+    return await ask_approval_card(
+        session, _card_prompt(writes),
+        approve_detail="Run this step once", cancel_detail="Leave the data and files as they are",
+    )
+
+
+async def ask_approval_card(
+    session: ChatSession, prompt: str, *, approve_detail: str, cancel_detail: str
+) -> RefusalCause | None:
+    """Ask the gate's Approve or Cancel card with `prompt`. None when the user
+    picks Approve, else why not. The live-app launch card asks through it too."""
     from anton.core.interaction.elicit import AskOption, AskRequest, elicit
 
     request = AskRequest(
-        prompt=_card_prompt(writes),
+        prompt=prompt,
         options=(
-            AskOption(value="approve", label="Approve", detail="Run this step once"),
-            AskOption(value="cancel", label="Cancel", detail="Leave the data and files as they are"),
+            AskOption(value="approve", label="Approve", detail=approve_detail),
+            AskOption(value="cancel", label="Cancel", detail=cancel_detail),
         ),
         # No typed answer and no default: only a picked Approve runs the cell.
         allow_custom=False,

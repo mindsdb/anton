@@ -252,6 +252,8 @@ class ArtifactLint:
     page_checks: "dict[PageKey, RenderStatus]" = field(default_factory=dict)
     # The pages whose unverified check listed what it still found.
     findings_listed: frozenset[PageKey] = frozenset()
+    # One line per live app this cell's changes relaunched, or didn't.
+    live_app_lines: list[str] = field(default_factory=list)
 
 
 _STATUS_RANK = {"passed": 0, "unverified": 1, "failed": 2}
@@ -679,6 +681,8 @@ def cell_content_with_lint(text: str, lint: ArtifactLint, *, cell_ok: bool) -> "
         # its own code's output. cowork-server's figure sources cut this
         # block from a replayed cell's output.
         text += "\n\n[artifact lint]\n" + "\n".join(lint.messages)
+    if lint.live_app_lines:
+        text += "\n\n[live app]\n" + "\n".join(lint.live_app_lines)
     if lint.screenshot is None or not cell_ok:
         return text
     return [{"type": "text", "text": text}, *render_check.screenshot_blocks(lint.screenshot, page=lint.screenshot_page)]
@@ -699,6 +703,7 @@ async def check_cell_artifacts(
     import asyncio
 
     track_edits_since(session, store, before)
+    live_app_lines = await _relaunch_live_apps(session, store, before)
     refused = render_screenshots_refused(session)
     listed = getattr(session, "_unverified_findings_listed", None)
     findings_listed_earlier = frozenset(listed) if isinstance(listed, set) else frozenset()
@@ -712,12 +717,32 @@ async def check_cell_artifacts(
     except Exception:
         # Best-effort: a lint crash must never fail the cell's own result.
         _log.warning("artifact lint failed for this cell", exc_info=True)
-        return ArtifactLint()
+        return ArtifactLint(live_app_lines=live_app_lines)
     record_page_checks(session, checks=lint.page_checks, findings_listed=lint.findings_listed)
     if refused:
         # A service that sends a screenshot it was not asked for.
-        return replace(lint, screenshot=None, screenshot_page="")
-    return lint
+        return replace(lint, screenshot=None, screenshot_page="", live_app_lines=live_app_lines)
+    return replace(lint, live_app_lines=live_app_lines)
+
+
+async def _relaunch_live_apps(session: "ChatSession", store, before: dict[str, ArtifactFiles]) -> list[str]:
+    """Relaunch each running live app whose launch files this cell changed,
+    so the app serves the edit without a launch call. Empty unless live apps
+    run in app slots. Never raises."""
+    from anton.core.artifacts import live_app_slots
+
+    if not live_app_slots.live_apps_enabled() or cell_sandbox_of(getattr(session, "_scratchpads", None)) is None:
+        return []
+    try:
+        after = snapshot_existing_artifacts(store)
+        slugs = [
+            slug for slug, files in before.items()
+            if slug in after and live_app_slots.launch_paths_changed(files.stamps, after[slug].stamps)
+        ]
+        return await live_app_slots.relaunch_changed_apps(session, store, slugs)
+    except Exception:
+        _log.warning("relaunching live apps after a cell failed", exc_info=True)
+        return []
 
 
 def track_edits_since(session: "ChatSession", store, before: dict[str, ArtifactFiles]) -> None:
@@ -939,6 +964,11 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolO
             "Error: `health_timeout` must be a number.", reason="invalid_health_timeout"
         )
 
+    from anton.core.artifacts.live_app_slots import live_apps_enabled
+
+    if live_apps_enabled() and cell_sandbox_of(getattr(session, "_scratchpads", None)) is not None:
+        return await _launch_in_slot(session, store, artifact, rel_path=rel_path, extra_args=extra_args)
+
     tracked = getattr(session, "_tracked_backends", None)
     if tracked is None:
         tracked = {}
@@ -994,6 +1024,44 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolO
             "port": result.get("port"),
             "pid": result.get("pid"),
             "log_path": result.get("log_path"),
+        },
+    ).to_outcome()
+
+
+async def _launch_in_slot(session: "ChatSession", store, artifact, *, rel_path: str, extra_args) -> ToolOutcome:
+    """`launch_backend` on a sandboxed deployment with live apps on: the app
+    runs in an app slot (`live_app_slots.launch_live_app`), never in this
+    process, and the result carries its address, no port and no pid."""
+    from anton.core.artifacts import live_app_slots
+
+    if rel_path != "backend.py" or extra_args:
+        return SideEffectResult.failed(
+            "Error: a live app's slot runs the `app` in `backend.py` itself; "
+            "`path` and `extra_args` can't change what it runs.",
+            reason="live_app_invalid_launch",
+        )
+    try:
+        result = await live_app_slots.launch_live_app(
+            session, slug=artifact.slug, folder=store.folder_for(artifact.slug), datasources=artifact.datasources,
+        )
+    except live_app_slots.LiveAppLaunchError as exc:
+        if exc.reason == "launch_not_approved":
+            # The person's decision, not a tool failure, as for a held cell:
+            # it must not feed the error streak's nudge.
+            return ToolOutcome(content=str(exc), ok=True, reason="live_app_not_approved")
+        return SideEffectResult.failed(str(exc), reason=f"live_app_{exc.reason}")
+    return SideEffectResult(
+        success=True,
+        message=result.message(),
+        resource_id=artifact.slug,
+        external_url=result.address,
+        idempotency_key=artifact.slug,
+        committed_at=now_iso(),
+        details={
+            "slug": artifact.slug,
+            "slot": result.slot,
+            "address": result.address,
+            "missing": [m.model_dump() for m in result.missing],
         },
     ).to_outcome()
 

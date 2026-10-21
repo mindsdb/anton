@@ -322,6 +322,7 @@ if TYPE_CHECKING:
     from rich.console import Console
     from anton.context.self_awareness import SelfAwarenessContext
     from anton.chat_ui import EscapeWatcher
+    from anton.core.artifacts.live_app_slots import LiveAppHost
     from anton.core.llm.client import LLMClient
     from anton.core.mcp.client import McpSession
     from anton.core.memory.cortex import Cortex
@@ -1685,6 +1686,9 @@ class ChatSessionConfig:
     # session, since the folders differ per person; a runtime factory that
     # cannot take it makes the session refuse to build.
     cell_sandbox: CellSandbox | None = None
+    # Who launches live apps and where each launch is recorded. Set by a host
+    # that runs live apps in app slots (`live_app_slots`); None launches none.
+    live_app_host: LiveAppHost | None = None
     console: Console | None = None
     initial_history: list[dict] | None = None
     history_store: HistoryStore | None = None
@@ -1937,6 +1941,7 @@ class ChatSession:
         # Kept so an artifact backend can be given the same project .env the
         # scratchpad gets; it is never applied to this process.
         self._workspace_env_overlay = config.workspace_env_overlay or {}
+        self._live_app_host = config.live_app_host
         self._console = config.console
         if self._console is None:
             # connect_new_datasource's interactive mode needs a terminal to

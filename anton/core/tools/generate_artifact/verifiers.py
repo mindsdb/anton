@@ -264,6 +264,25 @@ def _resources_the_preview_blocks(html: str) -> list[str]:
     return list(dict.fromkeys(url for _, url in sorted(found)))
 
 
+# The one script origin a live app's content security policy allows.
+_LIVE_APP_SCRIPT_ORIGIN = "https://cdn.jsdelivr.net/"
+
+
+def _scripts_a_live_app_blocks(html: str) -> list[str]:
+    """External scripts not served from `_LIVE_APP_SCRIPT_ORIGIN`, in page
+    order without repeats. A protocol-relative `//cdn.jsdelivr.net` URL is
+    one: the app is served over http, so it would load over http."""
+    found: list[tuple[int, str]] = []
+    for tag in _SCRIPT_TAG.finditer(html):
+        src = _attr_value(_SRC_ATTR, tag.group())
+        if src and _external_host(src) is not None and not src.strip().lower().startswith(_LIVE_APP_SCRIPT_ORIGIN):
+            found.append((tag.start(), src))
+    for m in _MODULE_IMPORT.finditer(html):
+        if not m["url"].strip().lower().startswith(_LIVE_APP_SCRIPT_ORIGIN):
+            found.append((m.start(), m["url"]))
+    return list(dict.fromkeys(url for _, url in sorted(found)))
+
+
 def _root_relative_detail(html: str, *, is_fullstack: bool) -> str | None:
     """The rest of rule 4a's message after its fixed head, or None when the
     page has no root-relative path: every finding in page order without
@@ -309,11 +328,13 @@ def _root_relative_detail(html: str, *, is_fullstack: bool) -> str | None:
 
 
 def verify_frontend(
-    html: str, *, is_fullstack: bool, api_paths: set[str] | None = None
+    html: str, *, is_fullstack: bool, api_paths: set[str] | None = None, live_app: bool = False
 ) -> VerifyResult:
     """Static checks of the page. `api_paths` (from `contract_paths`) is the
     set of normalised `openapi.json` paths a fullstack page may call; None
-    skips that comparison — html-app pages and callers without a contract."""
+    skips that comparison — html-app pages and callers without a contract.
+    `live_app` is set for a fullstack page that runs as a live app, whose
+    content security policy loads scripts from one origin only."""
     errors: list[str] = []
     warnings: list[str] = []
     low = html.lower()
@@ -406,6 +427,21 @@ def verify_frontend(
         if int(m.group(1)) > 1000:
             errors.append("Frontend uses an extreme z-index (> 1000); keep it within a sane range.")
             break
+
+    # A live app's page opens at its own address, whose content security
+    # policy loads scripts only from https://cdn.jsdelivr.net: any other
+    # script never runs there, so the page fails rather than warns.
+    if live_app:
+        blocked_scripts = _scripts_a_live_app_blocks(html)
+        if blocked_scripts:
+            listed = ", ".join(_shown_value(url) for url in blocked_scripts[:_EXTERNAL_SHOWN])
+            if len(blocked_scripts) > _EXTERNAL_SHOWN:
+                listed += f" and {len(blocked_scripts) - _EXTERNAL_SHOWN} more"
+            errors.append(
+                f"Script from a host a live app does not load: {listed}. A live app loads scripts "
+                "only from https://cdn.jsdelivr.net/npm/, so load each library from there at the "
+                "version these rules name, or write the code into the page."
+            )
 
     # ── Warnings (advisory) ────────────────────────────────────────────────
     # Block-level containers without any stable id — weak anchors for the

@@ -396,6 +396,10 @@ RULES: tuple[Rule, ...] = (
     # only from cdn.jsdelivr.net and no external stylesheet or image.
     Rule("warnings", "External resource the app preview does not load: ",
          _both(_FRONT_BOTH, "the app preview does not load it")),
+    # Fullstack only, with live apps on: the app's own content security
+    # policy loads scripts only from cdn.jsdelivr.net.
+    Rule("errors", "Script from a host a live app does not load: ",
+         (("frontend", "https://cdn.jsdelivr.net/npm/"),)),
     # ── verify_frontend_live (html-app, from disk) and verify_app_live
     # (fullstack, from the running backend after run_app — S-02). Each prompt
     # carries its own browser-gate bullet (`_BROWSER_GATE_HTML` /
