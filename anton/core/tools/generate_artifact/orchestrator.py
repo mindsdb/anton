@@ -1267,7 +1267,8 @@ def _save_checkpoint(state: GenState, stage: str) -> None:
         cp.DiscoveryCheckpoint(
             request_fingerprint=cp.request_fingerprint(state.user_request),
             call_fingerprint=cp.call_fingerprint(
-                state.agent_understanding, state.known_data, state.user_preferences
+                state.agent_understanding, state.known_data, state.user_preferences,
+                state.user_language,
             ),
             pipeline_stage=stage,
             artifact_type=state.final_artifact_type or state.artifact_type,

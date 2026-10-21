@@ -163,11 +163,10 @@ GATHERING_CONTINUE = (
     "Continue gathering: call `finish_gathering` again once ready."
 )
 
-# No language rule here on purpose. With an all-English context, "write in
-# the language of the user request" made the model pick an unrelated language
-# (Russian, Spanish) for these notes, and the brief and the PRD continued in
-# it. The brief carries its own language rule and follows the request without
-# this one.
+# The language rule points at the language the step header names, never at
+# "the language of the user request": with an all-English context that
+# wording made the model pick an unrelated language (Russian, Spanish) for
+# these notes, and the brief and the PRD continued in it.
 _GATHERING_TEMPLATE = (
     "## Your task\n"
     "Answer three questions and record the answers with `finish_gathering`:\n"
@@ -201,7 +200,10 @@ _GATHERING_TEMPLATE = (
     "page in this step. A source you name in `data_sources` but did not "
     "touch is fetched before generation starts — naming one is how you "
     "request that.\n"
-    "- Keep the whole `finish_gathering` call under about 30 lines.\n\n"
+    "- Keep the whole `finish_gathering` call under about 30 lines.\n"
+    "- Write questions to the user and the text you record in the user "
+    "language named in the step header. Keep names of tables, fields, "
+    "files and APIs as they are.\n\n"
     "## When there is no external data\n"
     "Call `finish_gathering` at once: no scratchpad, no web search, no "
     "description of the page."
@@ -284,7 +286,8 @@ def step_message(step: str, state: PrdState, *, extra: str = "") -> str:
     """The user message that switches the pipeline to `step`.
 
     Carries every mutable value the step needs — current artifact type,
-    remaining question budget — because the system prompt cannot.
+    user language, remaining question budget — because the system prompt
+    cannot.
     """
     from ..state import gathering_question_budget
     from . import sub_tools
@@ -292,6 +295,7 @@ def step_message(step: str, state: PrdState, *, extra: str = "") -> str:
     header = (
         f"STEP: {step}\n"
         f"Current artifact type: {state.final_artifact_type or state.artifact_type}\n"
+        f"User language: {state.language_name}\n"
     )
     if step == sub_tools.STEP_GATHERING:
         header += (

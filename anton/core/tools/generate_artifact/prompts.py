@@ -28,7 +28,7 @@ from .sub_tools import FILE_BEGIN_MARKER as BEGIN, FILE_END_MARKER as END
 # How much file content fits in one reply, in characters — the unit the model
 # can compare against what it is about to write. Derived from the output budget
 # in state.py; quoted from the constant so the two cannot drift.
-from .state import REPLY_BODY_CHARS
+from .state import LANGUAGE_NOT_STATED, REPLY_BODY_CHARS
 
 if TYPE_CHECKING:
     from anton.utils.datasources import CatalogConnection, DatasourceCatalog
@@ -1470,6 +1470,7 @@ def build_tech_spec_instruction(state) -> str:
     if fullstack:
         content.append(_TECH_SPEC_BACKEND)
     content.append(_TECH_SPEC_EXCLUSIONS)
+    language = (getattr(state, "user_language", "") or "").strip() or LANGUAGE_NOT_STATED
     return (
         "## Your task\n"
         "Write the technical specification (`spec.md`) for the build. Do not "
@@ -1481,7 +1482,13 @@ def build_tech_spec_instruction(state) -> str:
         + "\n\n## Fixed stack\n"
         + _TECH_SPEC_STACK
         + "\n\nKeep the whole document short: it complements the PRD, and "
-        "every line is context the build step carries on every round."
+        "every line is context the build step carries on every round.\n\n"
+        "## Language\n"
+        f"Write the prose in {language}, even where earlier notes use another "
+        "language. Keep the `##` section headings above exactly as written "
+        "in English (the build step finds sections by heading), and keep code, "
+        "identifiers, endpoints and file names as they are. Exact UI strings "
+        "follow the PRD."
     )
 
 

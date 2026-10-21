@@ -47,6 +47,18 @@ def test_call_fingerprint_covers_all_three_soft_fields():
     assert base != cp.call_fingerprint("understanding", "data", "other")
 
 
+def test_call_fingerprint_covers_the_user_language():
+    base = cp.call_fingerprint("understanding", "data", "prefs", "English")
+    assert base != cp.call_fingerprint("understanding", "data", "prefs", "Russian")
+
+
+def test_call_fingerprint_without_a_language_is_unchanged():
+    """A call that names no language matches a checkpoint written before
+    the field existed."""
+    assert cp.call_fingerprint("u", "d", "p", "") == cp.call_fingerprint("u", "d", "p")
+    assert cp.call_fingerprint("u", "d", "p", "English") != cp.call_fingerprint("u", "d", "p")
+
+
 def test_fields_are_not_concatenation_ambiguous():
     # "ab" + "" must not fingerprint the same as "a" + "b".
     assert cp.call_fingerprint("ab", "", "") != cp.call_fingerprint("a", "b", "")

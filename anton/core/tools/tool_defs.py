@@ -434,6 +434,12 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "- `slug`: the artifact slug from a prior `create_artifact` call.\n"
         "- `user_request`: the user's request, as close to their original "
         "wording as possible.\n"
+        "- `user_language`: the language the user writes to you in, by its "
+        "English name (\"English\", \"Russian\", \"Spanish\"). Judge it by "
+        "the user's own messages, not by the data, the attachments or this "
+        "conversation's system text. The pipeline asks its questions and "
+        "writes the brief, `prd.md` and `spec.md` in this language, and you "
+        "keep talking to the user in it when you relay the result.\n"
         "- `agent_understanding`: what the user asked for, in your words — "
         "only what they said or what plainly follows from it. Do NOT add "
         "features, screens, mechanics or styling of your own: the pipeline "
@@ -489,6 +495,14 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
                     "one stopped, a different one starts over."
                 ),
             },
+            "user_language": {
+                "type": "string",
+                "description": (
+                    "English name of the language the user writes to you "
+                    "in, e.g. \"English\" or \"Russian\". Questions, the "
+                    "brief, prd.md and spec.md are written in it."
+                ),
+            },
             "agent_understanding": {
                 "type": "string",
                 "description": (
@@ -534,7 +548,7 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
                 ),
             },
         },
-        "required": ["slug", "user_request", "agent_understanding"],
+        "required": ["slug", "user_request", "user_language", "agent_understanding"],
     },
     handler=handle_generate_artifact,
     prompt=(
@@ -549,9 +563,12 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "  1. Call `create_artifact` to register the slug and pick the type "
         "(one of html-app, fullstack-stateless-app, fullstack-stateful-app).\n"
         "  2. Call `generate_artifact(slug=<slug>, user_request=..., "
-        "agent_understanding=..., known_data?, user_preferences?, attachments?)`. It asks "
+        "user_language=..., agent_understanding=..., known_data?, "
+        "user_preferences?, attachments?)`. It asks "
         "the user anything it still needs, so do not pre-interview them for "
-        "it.\n"
+        "it. `user_language` is the language the user writes to you in; "
+        "talk to the user in that language while the artifact is built and "
+        "when you report the result.\n"
         "  3. Follow the `instruction` in the result. `needs_confirmation` "
         "means show `brief_summary` and, if the user agrees, call again with "
         "the SAME `user_request` — that repeat call IS the confirmation. A "

@@ -312,8 +312,8 @@ primary?)`. It claims the folder and returns `<artifact_path>`.
 2. THEN route the request. A report the user has fully specified you build \
 yourself (DIRECT REPORTS above). Any other `html-app`, and every \
 `fullstack-stateless-app` and `fullstack-stateful-app`, goes to \
-`generate_artifact(slug, user_request, agent_understanding, known_data?, \
-user_preferences?, attachments?)`, which produces every file. It runs the whole thing: gathers what it needs, asks the user whatever \
+`generate_artifact(slug, user_request, user_language, agent_understanding, \
+known_data?, user_preferences?, attachments?)`, which produces every file. It runs the whole thing: gathers what it needs, asks the user whatever \
 is still unclear, shows them a short brief (and asks them to confirm it when the \
 agent is set to ask first), writes the requirements down as `prd.md`, then a \
 technical spec, then the code with static verification, \
