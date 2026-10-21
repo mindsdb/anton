@@ -265,7 +265,7 @@ def test_write_prd_instruction_asks_for_brevity_without_a_line_count():
     text = prd._WRITE_PRD_INSTRUCTION
     assert text.startswith("## Your task")
     assert "## Sections" in text and "## Rules" in text
-    assert "in the user language named in the step header" in text
+    assert "Section headings are in the user language too" in text
     assert "language of the user request" not in text
     assert "as short as the requirements allow" in text
     assert "lines" not in text.lower()

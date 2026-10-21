@@ -212,8 +212,8 @@ def test_gathering_step_names_the_language_instead_of_pointing_at_the_request():
     come back in Spanish (and Russian on replays), and the brief and the PRD
     followed them. The step names the language the calling agent stated."""
     message = step_message(sub_tools.STEP_GATHERING, _state(user_language="English"))
-    assert "User language: English\n" in message
-    assert "user language named in the step header" in message
+    assert "User language: English. Write everything meant for the user" in message
+    assert "in English, even where earlier messages use another language" in message
     lowered = message.lower()
     assert "in the language of" not in lowered
     assert "same language as" not in lowered
@@ -227,7 +227,7 @@ def test_every_document_step_header_names_the_user_language():
         sub_tools.STEP_REDRAW_BRIEF,
         sub_tools.STEP_WRITE_PRD,
     ):
-        assert "User language: Russian\n" in step_message(step, state), step
+        assert "User language: Russian." in step_message(step, state), step
 
 
 def test_step_header_falls_back_to_a_named_language_when_none_was_stated():
@@ -236,7 +236,7 @@ def test_step_header_falls_back_to_a_named_language_when_none_was_stated():
     made the model pick an unrelated language."""
     for step in (sub_tools.STEP_GATHERING, sub_tools.STEP_WRITE_PRD):
         message = step_message(step, _state())
-        assert "User language: English\n" in message, step
+        assert "User language: English." in message, step
         assert "language of the user request" not in message.lower(), step
 
 

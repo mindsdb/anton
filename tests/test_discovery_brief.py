@@ -230,7 +230,7 @@ def test_draft_brief_instruction_asks_for_a_lead_in_sentence():
     with zero framing — just headers. The model must open with one
     sentence explaining what follows, in the reply's own language."""
     assert "lead-in" in brief._DRAFT_BRIEF_INSTRUCTION.lower()
-    assert "user language named in the step header" in brief._DRAFT_BRIEF_INSTRUCTION.lower()
+    assert "in the user language" in brief._DRAFT_BRIEF_INSTRUCTION.lower()
 
 
 def test_draft_brief_instruction_forbids_process_meta_commentary():
@@ -311,7 +311,7 @@ def test_draft_brief_instruction_pins_the_language_to_the_step_header():
     all-English request in Russian or Spanish. The brief follows the
     language the step header names, which the calling agent states."""
     text = brief._DRAFT_BRIEF_INSTRUCTION
-    assert "user language named in the step header" in text
+    assert "in the user language" in text
     assert "same language as the user request" not in text
 
 
@@ -406,7 +406,7 @@ def test_act_first_brief_has_one_assumptions_section_and_no_question():
     assert "Do NOT ask the user anything" in text
     # The shared rules survive.
     lowered = text.lower()
-    for marker in ("lead-in", "user language named in the step header", "hex", "not used", "redo"):
+    for marker in ("lead-in", "in the user language", "hex", "not used", "redo"):
         assert marker in lowered, marker
 
 

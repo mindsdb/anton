@@ -280,9 +280,7 @@ class GenState:
     known_data: str = ""
     user_preferences: str = ""
     # English name of the language the user writes in, as the calling agent
-    # stated it. Every step is told this name explicitly: an indirect rule
-    # ("the language of the user request") made the model pick an unrelated
-    # language for an all-English request.
+    # stated it. Read through `language_name`.
     user_language: str = ""
     # The session's connections as data (slugs and DS_* names, no values), or
     # None when nothing is connected. Filled by the entry point; rendered whole
@@ -350,10 +348,6 @@ class GenState:
     # change them mid-run has to live in a step message instead.
     _pipeline_system: str = ""
     _pipeline_tools: "list[dict] | None" = None
-
-    @property
-    def language_name(self) -> str:
-        return language_name(self.user_language)
 
     @property
     def datasource_context(self) -> str:
