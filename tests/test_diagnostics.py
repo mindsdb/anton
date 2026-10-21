@@ -66,3 +66,56 @@ async def test_concurrent_contexts_reset():
 
     assert await asyncio.gather(operation("one"), operation("two")) == ["one", "two"]
     assert "conversation_id" not in get_contextvars()
+
+
+@pytest.mark.parametrize("log_format", ["json", "text"])
+@pytest.mark.parametrize("level", [None, "DEBUG"])
+def test_resident_entrypoint_keeps_setup_and_fork_failures_safe(monkeypatch, capsys, log_format, level):
+    from types import SimpleNamespace
+
+    from anton.cloud_turn import resident
+
+    monkeypatch.setenv("LOG_FORMAT", log_format)
+    if level is None:
+        monkeypatch.delenv("LOG_LEVEL", raising=False)
+    else:
+        monkeypatch.setenv("LOG_LEVEL", level)
+    monkeypatch.setattr(resident.logger, "handlers", [])
+    monkeypatch.setattr(resident.logger, "level", resident.logger.level)
+    monkeypatch.setattr(resident.logger, "propagate", resident.logger.propagate)
+    monkeypatch.setattr(resident, "forbid_same_user_access", lambda: None)
+    root = logging.getLogger()
+    original_root = (root.handlers[:], root.level)
+
+    def fail_preload():
+        raise RuntimeError("private-preload-value")
+
+    def fail_fork():
+        raise OSError("private-fork-value")
+
+    def serve(entry):
+        assert resident._prepare(fail_preload) is False
+        closed = []
+        worker = object.__new__(resident._Resident)
+        worker._fork(SimpleNamespace(close=lambda: closed.append(True)), [])
+        assert closed == [True]
+        resident.logger.info("Resident progress")
+        return 0
+
+    monkeypatch.setattr(resident.os, "fork", fail_fork)
+    monkeypatch.setattr(resident, "serve", serve)
+    assert resident.main() == 0
+    assert (root.handlers, root.level) == original_root
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "private-" not in output.err
+    assert ("Resident progress" in output.err) is (level == "DEBUG")
+    assert "RuntimeError" in output.err and "OSError" in output.err
+    if log_format == "json":
+        events = [json.loads(line) for line in output.err.splitlines()]
+        failures = [event for event in events if event["log_level"] == "ERROR"]
+        assert [event["error_type"] for event in failures] == ["RuntimeError", "OSError"]
+        assert all(event["logger"] == resident.__name__ for event in events)
+        assert all(event["event"] == "operation_failed" for event in failures)
+        assert "fail_preload" in failures[0]["exception"]
+        assert "fail_fork" in failures[1]["exception"]

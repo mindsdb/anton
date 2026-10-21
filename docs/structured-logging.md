@@ -5,6 +5,10 @@
 to restore WARNING. `LOG_FORMAT=text` is a local readability override with the
 same exception privacy policy. Restore `json` for collected deployments.
 
+The packaged `cloud-turn-resident` uses the same settings and safe formatter for
+setup and fork failures. It keeps its own handler so forked turns can configure
+the root logger independently.
+
 Cloud turns bind `conversation_id` for their entire lifetime and reset it when
 the turn ends. Dependency loggers remain at WARNING during troubleshooting.
 `anton.usage` remains an independent plain-text INFO stream for its existing

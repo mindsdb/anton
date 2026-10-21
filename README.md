@@ -375,5 +375,6 @@ If you genuinely need to release outside the normal flow (e.g. an admin hotfix),
 
 ## Diagnostics
 
+The CLI, cloud-turn, and resident launcher share safe diagnostic settings.
 See [structured logging](docs/structured-logging.md) for defaults, troubleshooting
 overrides, retained evidence streams and rollout requirements.
