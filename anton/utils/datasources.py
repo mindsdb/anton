@@ -1470,18 +1470,19 @@ def _connection_identity(fields: dict, secure_keys: list | None = None) -> str |
     return None
 
 
-def _is_oauth_connection(vault: DataVault, engine: str, name: str) -> bool:
-    """True when this connection's own stored fields say auth_type=oauth.
+def _classifies_from_own_record(vault: DataVault, engine: str, name: str) -> bool:
+    """True when this connection's fields must be classified from its own record.
 
-    An OAuth connection's engine name can collide with an unrelated registry
-    entry of the same name (gmail's registry entry is the legacy IMAP
-    connector) — its field schema never matches, so it must not be
-    classified against that registry entry. Cheap: TurnKeyDataVault caches
-    per (engine, name), so this never costs a second network fetch.
+    That is an OAuth connection (stored auth_type=oauth) or a Databricks Genie
+    one (stored _method=genie-mcp). Each shares its engine name with an
+    unrelated registry entry (gmail's is the legacy IMAP connector,
+    databricks's the PAT SQL connector) whose field schema never matches, so
+    it must not be classified against that entry. Cheap: TurnKeyDataVault
+    caches per (engine, name), so this never costs a second network fetch.
     """
     record = vault.read_record(engine, name) if hasattr(vault, "read_record") else None
     fields = (record or {}).get("fields") or {}
-    return fields.get("auth_type") == "oauth"
+    return fields.get("auth_type") == "oauth" or fields.get("_method") == _GENIE_METHOD
 
 
 def clear_ds_env() -> None:
@@ -1535,14 +1536,14 @@ def _rebuild_ds_registries(vault: DataVault) -> None:
         # that aborted the whole rebuild would still be injected there.
         try:
             edef = dreg.get(engine)
-            oauth = _is_oauth_connection(vault, engine, name)
+            own_record = _classifies_from_own_record(vault, engine, name)
         except Exception:
             # Unclassifiable, so take the unknown-field path: its coarse net
             # over-redacts, which is the safe direction.
-            edef, oauth = None, False
+            edef, own_record = None, False
             logger.warning("Could not classify %s/%s", engine, name, exc_info=True)
         try:
-            if edef is not None and not oauth:
+            if edef is not None and not own_record:
                 register_secret_vars(edef, engine=engine, name=name)
             else:
                 _register_unregistered_connection_vars(vault, engine, name)
