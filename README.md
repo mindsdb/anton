@@ -372,3 +372,9 @@ Anything under [`.github/`](.github/) is owned by `@mindsdb/devops` via [CODEOWN
 ### Hotfixes / out-of-band releases
 
 If you genuinely need to release outside the normal flow (e.g. an admin hotfix), coordinate with `@mindsdb/devops` to bypass the tag ruleset. The e2e workflow's version-match guard will still verify the release tag matches `anton.__version__` and fail loudly on mismatch.
+
+## Diagnostics
+
+The CLI, cloud-turn, and resident launcher share safe diagnostic settings.
+See [structured logging](docs/structured-logging.md) for defaults, troubleshooting
+overrides, retained evidence streams and rollout requirements.
