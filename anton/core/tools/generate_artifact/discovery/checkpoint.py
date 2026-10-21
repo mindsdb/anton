@@ -28,7 +28,7 @@ from pathlib import Path
 
 from anton.core.artifacts.internal_files import DISCOVERY_FILENAME
 
-from ..state import language_name
+from ..state import DEFAULT_USER_LANGUAGE, language_name
 
 # ── Pipeline stages ─────────────────────────────────────────────────────────
 # Written at each transition. A failure or a budget stop does NOT advance the
@@ -93,11 +93,13 @@ def call_fingerprint(
     shows the user an unchanged brief they will still see reflected in the PRD.
     """
     # The language the steps actually write in, casefolded: "" and "English",
-    # or "English" and "english", must not redraw a confirmed brief.
-    return fingerprint(
-        agent_understanding, known_data, user_preferences,
-        language_name(user_language).casefold(),
-    )
+    # or "English" and "english", must not redraw a confirmed brief. English
+    # adds no field, so a checkpoint saved before the language existed still
+    # matches an English call.
+    language = language_name(user_language).casefold()
+    if language == DEFAULT_USER_LANGUAGE.casefold():
+        return fingerprint(agent_understanding, known_data, user_preferences)
+    return fingerprint(agent_understanding, known_data, user_preferences, language)
 
 
 @dataclass
