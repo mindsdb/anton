@@ -19,6 +19,7 @@ SDK's own test pattern — no sockets, no threads, no subprocess).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from typing import Any
@@ -82,9 +83,12 @@ class McpSession:
         self._owner: asyncio.Task[BaseException | None] | None = None
         self._release: asyncio.Event | None = None
         self._reconnect_lock = asyncio.Lock()
+        self._entered = False
+        self._closed = False
 
     async def __aenter__(self) -> "McpSession":
         await self._connect()
+        self._entered = True
         return self
 
     async def _connect(self) -> None:
@@ -125,6 +129,8 @@ class McpSession:
             await opened
         except asyncio.CancelledError:
             owner.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await owner
             raise
         except BaseException:
             await owner
@@ -187,6 +193,10 @@ class McpSession:
 
         Clears `_client`, `_owner`, `_release` and `_http_client`. Returns the
         error the client raised while exiting, or None. Safe from any task.
+        The teardown is shielded, so a cancelled closer re-raises at once while
+        the owner still finishes the SDK's session DELETE and the HTTP close.
+        An owner its event loop already cancelled (opened under one
+        `asyncio.run`, closed under another) is logged and skipped.
         """
         owner, release = self._owner, self._release
         self._client = None
@@ -196,16 +206,20 @@ class McpSession:
         if owner is None or release is None:
             return None
         release.set()
-        return await owner
+        if owner.cancelled():
+            logger.warning("McpSession: the session's owner task was already cancelled by its event loop")
+            return None
+        return await asyncio.shield(owner)
 
-    async def _reconnect(self, failed: mcp.Client) -> None:
+    async def _reconnect(self, failed: mcp.Client | None) -> None:
         """Replace `failed` with a fresh client against the same target/token.
 
         Required, not optional, for `call_tool`'s retry: once one task in a
         session's transport task group has failed, the whole group, and the
         `Client` built on it, is unusable. A no-op when another call already
-        replaced `failed`. Raises what `_connect` raises; a close error from
-        the dead client is logged, never raised.
+        replaced `failed`; `failed=None` means no client was live, and a fresh
+        one is opened unless another call already did. Raises what `_connect`
+        raises; a close error from the dead client is logged, never raised.
         """
         async with self._reconnect_lock:
             if self._client is not failed:
@@ -223,6 +237,7 @@ class McpSession:
         logged when an exception is already leaving the `async with` block,
         so it never replaces a clean, catchable error with an opaque one.
         """
+        self._closed = True
         close_error = await self._close_client()
         if close_error is None:
             return
@@ -236,7 +251,8 @@ class McpSession:
 
     async def list_tools(self) -> list[McpTool]:
         """List every tool this server advertises, unfiltered."""
-        client = self._require_client()
+        self._check_open()
+        client = await self._acquire_client()
         started = time.monotonic()
         result = await client.list_tools()
         self._log_round_trip("tools/list()", started)
@@ -311,9 +327,11 @@ class McpSession:
         retry against a fresh session. May reconnect the session as a side effect.
         """
         last_error: BaseException | None = None
+        self._check_open()
         for attempt in (1, 2):
-            client = self._require_client()
+            client: mcp.Client | None = None
             try:
+                client = await self._acquire_client()
                 return await client.call_tool(name, arguments)
             except (KeyboardInterrupt, SystemExit, GeneratorExit):
                 raise
@@ -339,10 +357,27 @@ class McpSession:
         assert last_error is not None
         raise last_error
 
-    def _require_client(self) -> mcp.Client:
-        if self._client is None:
+    def _check_open(self) -> None:
+        """Raise `RuntimeError` unless the session was entered and not yet closed."""
+        if not self._entered or self._closed:
             raise RuntimeError("McpSession used outside its `async with` block")
-        return self._client
+
+    async def _acquire_client(self) -> mcp.Client:
+        """Return the live client, opening one when a failed reconnect left none.
+
+        A call that starts while another call reconnects waits on the lock and
+        gets the new client. Raises what `_connect` raises, which the caller
+        classifies like any transport failure; `RuntimeError` once closed.
+        """
+        client = self._client
+        if client is not None:
+            return client
+        async with self._reconnect_lock:
+            self._check_open()
+            if self._client is None:
+                await self._connect()
+            assert self._client is not None
+            return self._client
 
     def _log_round_trip(self, label: str, started: float) -> None:
         elapsed_ms = (time.monotonic() - started) * 1000

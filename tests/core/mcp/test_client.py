@@ -12,6 +12,7 @@ import pytest
 
 from anton.core.mcp.client import McpSession
 from anton.core.mcp.errors import McpPermanentError, McpTransientError
+from anton.core.mcp.wiring import close_mcp_sessions
 
 
 async def test_list_tools_returns_the_stub_servers_tools(stub_mcp_server):
@@ -193,25 +194,37 @@ async def test_url_session_http_client_uses_the_sdk_timeouts_and_keeps_its_auth_
     assert http_client.headers["Authorization"] == "Bearer tok-123"
 
 
+_HANDSHAKE_METHODS = frozenset({"initialize", "server/discover"})
+
+
 class _DroppingTransport(httpx2.AsyncBaseTransport):
     """Routes requests to an in-process ASGI app, failing chosen `tools/call` POSTs.
 
     `drop` holds the 1-based numbers of the `tools/call` requests that raise
     `httpx2.ReadTimeout` before reaching the app, the shape a dropped
-    connection took live. `tool_calls` counts every `tools/call` seen.
+    connection took live; `refuse_handshake` does the same for handshake
+    requests with `httpx2.ConnectError`. `tool_calls` and `handshakes` count
+    every request of that kind seen.
     """
 
-    def __init__(self, app: Any, drop: set[int]) -> None:
+    def __init__(self, app: Any, drop: set[int], refuse_handshake: set[int] | None = None) -> None:
         self._inner = httpx2.ASGITransport(app=app)
         self._drop = drop
+        self._refuse_handshake = refuse_handshake or set()
         self.tool_calls = 0
+        self.handshakes = 0
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
-        """Forward `request` to the app, or raise `ReadTimeout` for a dropped call."""
-        if request.method == "POST" and json.loads(request.content or b"{}").get("method") == "tools/call":
+        """Forward `request` to the app, or fail a dropped call or a refused handshake."""
+        method = json.loads(request.content or b"{}").get("method") if request.method == "POST" else None
+        if method == "tools/call":
             self.tool_calls += 1
             if self.tool_calls in self._drop:
                 raise httpx2.ReadTimeout("simulated dropped connection", request=request)
+        if method in _HANDSHAKE_METHODS:
+            self.handshakes += 1
+            if self.handshakes in self._refuse_handshake:
+                raise httpx2.ConnectError("simulated refused reconnect", request=request)
         return await self._inner.handle_async_request(request)
 
 
@@ -229,12 +242,17 @@ def dropping_url_server(stub_mcp_server, monkeypatch):
     real_async_client = httpx2.AsyncClient
 
     @contextlib.asynccontextmanager
-    async def serve(drop: set[int]) -> AsyncIterator[_DroppingTransport]:
-        """Run the server and route McpSession's HTTP client through a transport dropping `drop`."""
-        transport = _DroppingTransport(app, drop)
+    async def serve(
+        drop: set[int], refuse_handshake: set[int] | None = None
+    ) -> AsyncIterator[_DroppingTransport]:
+        """Run the server and route McpSession's HTTP client through a failing transport."""
+        transport = _DroppingTransport(app, drop, refuse_handshake)
 
         class _RoutedClient(real_async_client):
+            """An `httpx2.AsyncClient` that always sends through `transport`."""
+
             def __init__(self, **kwargs: Any) -> None:
+                """Build the client as McpSession asks, with the test transport forced in."""
                 super().__init__(transport=transport, **kwargs)
 
         monkeypatch.setattr(httpx2, "AsyncClient", _RoutedClient)
@@ -294,3 +312,55 @@ async def test_a_call_dropped_twice_raises_a_transient_error_not_a_cancellation(
         await asyncio.wait_for(session.__aexit__(None, None, None), timeout=5)
 
     assert transport.tool_calls == 3
+
+
+async def test_a_session_recovers_on_the_next_call_after_a_failed_reconnect(dropping_url_server):
+    """The first call is dropped and its reconnect is refused, so it ends in
+    `McpTransientError`. The session must not stay dead for the turn: the
+    next call opens a fresh client and is answered."""
+    async with dropping_url_server({1}, refuse_handshake={2}) as transport:
+        session = McpSession(url=_STUB_URL)
+        await asyncio.wait_for(asyncio.gather(session.__aenter__()), timeout=5)
+
+        with pytest.raises(McpTransientError):
+            await _call_in_child_task(session, 1, 2)
+        assert await _call_in_child_task(session, 3, 4) == ("7", False)
+        await asyncio.wait_for(session.__aexit__(None, None, None), timeout=5)
+
+    assert transport.handshakes == 3
+
+
+async def test_parallel_calls_hit_by_one_drop_share_a_single_reconnect(dropping_url_server):
+    """Two tool calls run at once and the first request drops. Both are
+    answered, and the session reconnects once, not once per caller."""
+    async with dropping_url_server({1}) as transport:
+        session = McpSession(url=_STUB_URL)
+        await asyncio.wait_for(asyncio.gather(session.__aenter__()), timeout=5)
+
+        first = asyncio.create_task(session.call_tool("add", {"a": 1, "b": 1}))
+        second = asyncio.create_task(session.call_tool("add", {"a": 2, "b": 2}))
+        results = await asyncio.wait_for(asyncio.gather(first, second), timeout=5)
+        await asyncio.wait_for(session.__aexit__(None, None, None), timeout=5)
+
+    assert results == [("2", False), ("4", False)]
+    assert transport.handshakes == 2
+
+
+def test_a_session_opened_under_one_event_loop_closes_cleanly_under_another(stub_mcp_server):
+    """The cloud turn opens sessions under one `asyncio.run` and closes them
+    under another. The first loop's shutdown has cancelled the owner task by
+    then, and closing must return normally rather than raise `CancelledError`."""
+    session = McpSession(server=stub_mcp_server)
+
+    async def open_and_call() -> tuple[str | list[dict], bool]:
+        """Open the session and make one call, bounded."""
+        await asyncio.wait_for(session.__aenter__(), timeout=5)
+        return await asyncio.wait_for(session.call_tool("add", {"a": 1, "b": 2}), timeout=5)
+
+    async def close() -> None:
+        """Close the session from a fresh loop, bounded."""
+        await asyncio.wait_for(close_mcp_sessions([session]), timeout=5)
+
+    assert asyncio.run(open_and_call()) == ("3", False)
+    asyncio.run(close())
+    assert session._client is None

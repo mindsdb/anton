@@ -344,7 +344,7 @@ async def test_a_token_that_lapses_mid_turn_says_reconnect(genie_stub_server, mo
 
     async with McpSession(server=genie_stub_server) as session:
         handlers = await _genie_handlers(session)
-        monkeypatch.setattr(session._require_client(), "call_tool", lapsed)
+        monkeypatch.setattr(session._client, "call_tool", lapsed)
         outcomes = [
             await handlers["genie_ask"](None, {"question": "q"}),
             await handlers["genie_cancel_response"](None, {"conversation_id": "conv-1"}),
