@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
+from collections.abc import AsyncIterator
+from typing import Any
 
+import httpx2
 import mcp
 import pytest
 
@@ -186,3 +191,106 @@ async def test_url_session_http_client_uses_the_sdk_timeouts_and_keeps_its_auth_
     assert http_client.timeout.pool == 30.0
     assert http_client.timeout.read == 300.0
     assert http_client.headers["Authorization"] == "Bearer tok-123"
+
+
+class _DroppingTransport(httpx2.AsyncBaseTransport):
+    """Routes requests to an in-process ASGI app, failing chosen `tools/call` POSTs.
+
+    `drop` holds the 1-based numbers of the `tools/call` requests that raise
+    `httpx2.ReadTimeout` before reaching the app, the shape a dropped
+    connection took live. `tool_calls` counts every `tools/call` seen.
+    """
+
+    def __init__(self, app: Any, drop: set[int]) -> None:
+        self._inner = httpx2.ASGITransport(app=app)
+        self._drop = drop
+        self.tool_calls = 0
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        """Forward `request` to the app, or raise `ReadTimeout` for a dropped call."""
+        if request.method == "POST" and json.loads(request.content or b"{}").get("method") == "tools/call":
+            self.tool_calls += 1
+            if self.tool_calls in self._drop:
+                raise httpx2.ReadTimeout("simulated dropped connection", request=request)
+        return await self._inner.handle_async_request(request)
+
+
+@pytest.fixture()
+def dropping_url_server(stub_mcp_server, monkeypatch):
+    """Serve the stub over streamable HTTP in-process and route every session to it.
+
+    Returns an async context manager taking the `tools/call` numbers to drop
+    and yielding the transport, so a test can count the calls that reached
+    the server. Entered in the test body: the server's task group must be
+    exited in the task that entered it, and an async fixture's teardown runs
+    in another task.
+    """
+    app = stub_mcp_server.streamable_http_app(json_response=True, stateless_http=True)
+    real_async_client = httpx2.AsyncClient
+
+    @contextlib.asynccontextmanager
+    async def serve(drop: set[int]) -> AsyncIterator[_DroppingTransport]:
+        """Run the server and route McpSession's HTTP client through a transport dropping `drop`."""
+        transport = _DroppingTransport(app, drop)
+
+        class _RoutedClient(real_async_client):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(transport=transport, **kwargs)
+
+        monkeypatch.setattr(httpx2, "AsyncClient", _RoutedClient)
+        async with stub_mcp_server.session_manager.run():
+            yield transport
+
+    return serve
+
+
+_STUB_URL = "http://127.0.0.1:8000/mcp"
+
+
+async def _call_in_child_task(session: McpSession, a: int, b: int) -> tuple[str | list[dict], bool]:
+    """Call `add` from a fresh task, as a turn's tool handler does, bounded so a hang fails."""
+    return await asyncio.wait_for(asyncio.create_task(session.call_tool("add", {"a": a, "b": b})), timeout=5)
+
+
+async def test_a_dropped_call_from_a_child_task_retries_and_the_opener_closes_cleanly(dropping_url_server):
+    """The session is opened in this task and a tool handler calls it from a
+    child task. A dropped first request is retried once and answered, a later
+    call works, and the opener closes the session without an error or a hang."""
+    async with dropping_url_server({1}) as transport:
+        session = McpSession(url=_STUB_URL)
+        await asyncio.wait_for(session.__aenter__(), timeout=5)
+
+        assert await _call_in_child_task(session, 1, 2) == ("3", False)
+        assert await _call_in_child_task(session, 2, 3) == ("5", False)
+        await asyncio.wait_for(session.__aexit__(None, None, None), timeout=5)
+
+    assert transport.tool_calls == 3
+    assert asyncio.current_task().cancelling() == 0
+
+
+async def test_a_session_opened_in_a_finished_task_survives_a_drop_and_closes_cleanly(dropping_url_server):
+    """Discovery opens each session inside an `asyncio.gather` task that has
+    finished before any tool runs, and the turn closes it from another task.
+    Neither the retry nor that close may depend on the opening task."""
+    async with dropping_url_server({1}):
+        session = McpSession(url=_STUB_URL)
+        await asyncio.wait_for(asyncio.gather(session.__aenter__()), timeout=5)
+
+        assert await _call_in_child_task(session, 1, 2) == ("3", False)
+        assert await _call_in_child_task(session, 4, 4) == ("8", False)
+        await asyncio.wait_for(session.__aexit__(None, None, None), timeout=5)
+
+
+async def test_a_call_dropped_twice_raises_a_transient_error_not_a_cancellation(dropping_url_server):
+    """When the retry is dropped too, the caller gets `McpTransientError`. A
+    `CancelledError` here would end the turn as if the person pressed Stop."""
+    async with dropping_url_server({1, 2}) as transport:
+        session = McpSession(url=_STUB_URL)
+        await asyncio.wait_for(asyncio.gather(session.__aenter__()), timeout=5)
+
+        with pytest.raises(McpTransientError):
+            await _call_in_child_task(session, 1, 2)
+        assert await _call_in_child_task(session, 2, 2) == ("4", False)
+        await asyncio.wait_for(session.__aexit__(None, None, None), timeout=5)
+
+    assert transport.tool_calls == 3
