@@ -216,6 +216,32 @@ def _rule_section(engram: Engram) -> str:
     return (engram.kind or _RULE_SECTIONS[0]).lower()
 
 
+def _read_memory_entries(path: Path) -> tuple[list[str], list[str]]:
+    """Read a memory file's `- ` entries with the section each one sits under.
+
+    Entries above the first heading (a hand-edited file) are kept rather than
+    dropped, under the same heading the keyword pass defaulted to. Headings
+    outside `_RULE_SECTIONS` fold into the first one too.
+    """
+    sections: list[str] = []
+    entries: list[str] = []
+    section = _RULE_SECTIONS[0]
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # A file removed under a running compaction has no entries to keep.
+        return sections, entries
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            heading = stripped[3:].lower()
+            section = heading if heading in _RULE_SECTIONS else _RULE_SECTIONS[0]
+        elif stripped.startswith("- "):
+            sections.append(section)
+            entries.append(stripped)
+    return sections, entries
+
+
 class Cortex:
     """Executive coordinator for Anton's memory systems.
 
@@ -796,20 +822,7 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         if not path.is_file():
             return
 
-        # Read with sections
-        sections: list[str] = []
-        entries: list[str] = []
-        # Entries above the first heading (a hand-edited file) are kept rather
-        # than dropped, under the same heading the keyword pass defaulted to.
-        section = _RULE_SECTIONS[0]
-        for line in path.read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if stripped.startswith("## "):
-                heading = stripped[3:].lower()
-                section = heading if heading in _RULE_SECTIONS else _RULE_SECTIONS[0]
-            elif stripped.startswith("- "):
-                sections.append(section)
-                entries.append(stripped)
+        sections, entries = _read_memory_entries(path)
 
         if len(entries) < 8:
             return
@@ -874,7 +887,22 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         else:
             new_content = "\n".join(["# Lessons", *(e for _, e in kept)]) + "\n"
 
-        hc._encode_with_lock(path, new_content, mode="write")
+        # The rebuild comes from the read above, and the model call sat between
+        # them. A memory written meanwhile, by this session or another process
+        # sharing the file, is on disk but not in that read, so a rewrite would
+        # erase it. The check and the replace run under the file's writer lock;
+        # compaction can wait for a later pass, the memory cannot be recovered.
+        if not hc.rewrite_if_unchanged(
+            path, new_content, read=_read_memory_entries, snapshot=(sections, entries)
+        ):
+            logger.info(
+                "memory-compaction: %s changed during the model call "
+                "(%d entries read, %d now), skipped",
+                path.name,
+                len(entries),
+                len(_read_memory_entries(path)[1]),
+            )
+            return
 
         # The only record that the file changed size, and the only pressure
         # against over-pruning: naming survivors by index makes dropping most
