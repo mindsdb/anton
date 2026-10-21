@@ -461,7 +461,7 @@ def test_verifier_contract_promises_the_browser_load_for_both_page_kinds():
     assert "headless browser" not in prompts._VERIFIER_CONTRACT  # shared head only
     html = prompts.build_subagent_system_prompt(Path("/tmp/a"))
     front = prompts.build_frontend_system_prompt(Path("/tmp/a"))
-    assert "loaded once from\n  disk right after these checks" in html
+    assert "the page is also loaded once right\n  after these checks" in html
     assert "local file that does not exist" in html
     assert "running backend" not in html
     assert "loaded once from\n  its running backend after the launch" in front

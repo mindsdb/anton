@@ -212,7 +212,13 @@ class HttpWrite(BaseModel):
     url: str
     call: str
     line: int
+    # A part of `url` is shown as its code in braces.
     run_time_parts: bool = False
+    # The code that picks the method when the step runs, scrubbed; "" when
+    # the check cannot show it; None when the method is written out.
+    method_code: str | None = None
+    # The same for the whole address, when no part of it is written out.
+    url_code: str | None = None
 
 
 _HTTP_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"})
@@ -2126,6 +2132,21 @@ class _Reader:
         if node is not None:
             self._hole_numbers[id(node)] = len(self._holes) - 1
         return f"{_HOLE}{len(self._holes) - 1}{_HOLE_END}"
+
+    def hole_code(self, text: str) -> str | None:
+        """When `text` is one placeholder and nothing else, the code that
+        fills it in, without braces ("" when there is none to show); None
+        when `text` holds anything written out."""
+        m = _NUMBERED_HOLE.fullmatch(text)
+        if m is None:
+            return None
+        node = self._holes[int(m.group(1))] if int(m.group(1)) < len(self._holes) else None
+        if node is None:
+            return ""
+        try:
+            return ast.unparse(node.value if isinstance(node, ast.FormattedValue) else node)
+        except Exception:
+            return ""
 
     def show_holes(self, text: str) -> str:
         """`text` with each numbered placeholder replaced by the code that
@@ -5590,19 +5611,53 @@ def _http_findings(
         else:
             methods = _http_methods(request.method, reader)
         if isinstance(methods, _Unknown):
-            held = [reader.hole(request.method)]
+            held = [reader.hole(_deciding_node(request.method, reader))]
         else:
             held = [m for m in dict.fromkeys(methods) if m in _HELD_METHODS or any(
                 r.method in ("*", m) and _url_could_match(url, r.url_glob) for r in rules
             )]
         line = report.line if report else cell.host_line or node.lineno
         call = report.call if report else scrub_output(cell.source(node))
+        url_code = reader.hole_code(url)
         out += [
-            HttpWrite(method=reader.show_holes(method), url=_scrub(reader.show_holes(url)), call=call,
-                      line=line, run_time_parts=_NUMBERED_HOLE.search(method + url) is not None)
+            HttpWrite(
+                method=reader.show_holes(method), url=_scrub(reader.show_holes(url)), call=call, line=line,
+                run_time_parts=url_code is None and _NUMBERED_HOLE.search(url) is not None,
+                method_code=_scrub_code_or_none(reader.hole_code(method)),
+                url_code=_scrub_code_or_none(url_code),
+            )
             for method in held
         ]
     return out
+
+
+def _deciding_node(node: ast.AST, reader: _Reader) -> ast.AST:
+    """The code that decides `node` as the checked call writes it: a
+    parameter is followed to the argument the call passes for it, so the
+    card shows `verb` from `api(verb, ...)`, not the helper's `method`.
+
+    Only a parameter the helper never assigns again: one it may reassign
+    (`if ...: method = 'DELETE'`) is decided inside the helper too, so the
+    card names the helper's own `method`, not the caller's value alone."""
+    for _ in range(8):
+        if not isinstance(node, ast.Name):
+            break
+        bindings = reader.bindings_of(node.id, node=node)
+        if len(bindings) != 1 or bindings[0].how != "param":
+            break
+        arg = reader.argument_of(node)
+        if arg is None:
+            break
+        node = arg.node
+    return node
+
+
+def _scrub_code_or_none(code: str | None) -> str | None:
+    """The run-time code the card quotes for a method or address, scrubbed
+    as one text: `ast.unparse` writes a space after a dict's colon, so a
+    token held in a dict is a word of its own, which `_scrub_code` would
+    pass as written."""
+    return None if code is None else scrub_output(code)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import functools
+import json
 import os
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 from unittest.mock import AsyncMock, MagicMock
 
@@ -474,6 +475,18 @@ def _no_user_registry(tmp_path_factory, monkeypatch):
 
     empty = tmp_path_factory.mktemp("no-user-registry")
     monkeypatch.setattr(DatasourceRegistry, "_USER_PATH", empty / "datasources.md")
+
+
+@pytest.fixture()
+def usage_lines(caplog) -> Callable[[], list[dict]]:
+    """Read back the `llm_usage` lines logged so far, parsed; the test sets ANTON_USAGE_LOG."""
+    caplog.set_level("INFO", logger="anton.usage")
+
+    def lines() -> list[dict]:
+        messages = [r.getMessage() for r in caplog.records if r.name == "anton.usage"]
+        return [json.loads(m.removeprefix("llm_usage ")) for m in messages if m.startswith("llm_usage ")]
+
+    return lines
 
 
 @pytest.fixture()

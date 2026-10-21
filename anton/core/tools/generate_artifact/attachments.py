@@ -33,13 +33,19 @@ is dropped with the reason, for both kinds of file.
 
 from __future__ import annotations
 
+import base64
 import mimetypes
+import os
+import re
 import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import quote
 
+from anton.core.artifacts.render_check import MAX_PAGE_BYTES
 from anton.core.tools import file_access
+from anton.utils.nofollow import read_bytes_nofollow
 
 if TYPE_CHECKING:
     from anton.core.backends.sandbox import CellSandbox
@@ -53,6 +59,11 @@ DATA_SUFFIXES: frozenset[str] = frozenset({
 # An asset above this is not copied: the artifact folder is what gets
 # published, and the browser gate loads the page from disk in 8 seconds.
 ASSET_MAX_BYTES = 15 * 1024 * 1024
+# The single-file page carries each asset inside it as a base64 `data:` URI,
+# a third larger than the file, and the render check loads a page of at most
+# `MAX_PAGE_BYTES`. The URIs of one page may take this much of it; the rest
+# is left for the page's own markup, script and data.
+EMBED_MAX_BYTES = MAX_PAGE_BYTES - 2 * 1024 * 1024
 
 KIND_DATA = "data"
 KIND_ASSET = "asset"
@@ -193,22 +204,50 @@ def resolve_attachments(
     return kept, dropped
 
 
+def _data_uri_prefix(name: str) -> str:
+    """What `embed_assets` writes before the base64 bytes of the file `name`."""
+    return f"data:{mimetypes.guess_type(name)[0] or 'application/octet-stream'};base64,"
+
+
+def _data_uri_bytes(att: Attachment) -> int:
+    """The length of the `data:` URI `embed_assets` writes for `att`."""
+    return len(_data_uri_prefix(att.name)) + 4 * ((att.size + 2) // 3)
+
+
 def stage_assets(attachments: list[Attachment], artifact_path: Path, *, static: bool) -> list[str]:
     """Copy every asset into the artifact (`static/` when `static`), return
     the relative paths written. Data files are left where they are.
 
     Idempotent: a retry or a resumed run copies the same source over the same
     name. Oversized assets are skipped with the reason on the record, so the
-    generator is not told to reference a file that is not there.
+    generator is not told to reference a file that is not there. For the
+    single-file page (not `static`), oversized means its `data:` URI, with
+    those of the assets before it, would pass `EMBED_MAX_BYTES`.
     """
     dest_dir = artifact_path / "static" if static else artifact_path
     written: list[str] = []
+    embedded = 0
     for att in attachments:
         if att.kind != KIND_ASSET:
             continue
         if att.size > ASSET_MAX_BYTES:
             att.staged = ""
             att.skipped = f"larger than {ASSET_MAX_BYTES // (1024 * 1024)} MB, not copied"
+            continue
+        uri_bytes = 0 if static else _data_uri_bytes(att)
+        if embedded + uri_bytes > EMBED_MAX_BYTES:
+            att.staged = ""
+            if embedded:
+                att.skipped = (
+                    f"too large to embed: with the files before it, the page would carry "
+                    f"{_human_size(embedded + uri_bytes)} of attached files as text, over the "
+                    f"{_human_size(EMBED_MAX_BYTES)} one page may take, not copied"
+                )
+            else:
+                att.skipped = (
+                    f"too large to embed: the page would carry it as {_human_size(uri_bytes)} of text, "
+                    f"over the {_human_size(EMBED_MAX_BYTES)} one page may take, not copied"
+                )
             continue
         dest_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -219,8 +258,60 @@ def stage_assets(attachments: list[Attachment], artifact_path: Path, *, static: 
             continue
         att.staged = (dest_dir / att.name).relative_to(artifact_path).as_posix()
         att.skipped = ""
+        embedded += uri_bytes
         written.append(att.staged)
     return written
+
+
+def embed_assets(
+    html: str, attachments: list[Attachment], artifact_path: Path, *, cell_sandbox: CellSandbox | None
+) -> str:
+    """`html` with each reference to a staged asset replaced by the asset
+    itself as a `data:` URI.
+
+    For the single-file page (html-app): the app preview shows only the page
+    itself, so a file next to it never loads there (the render check fails
+    the page for asking for one). The generator still writes the relative
+    name it was given and never touches the bytes; this puts them in. A
+    reference is the name, or `./` and the name, as a quoted value
+    (`src="logo.png"`, `'logo.png'` in a script), an unquoted attribute value
+    or a CSS `url(...)`. A name inside other text is left as it is.
+
+    The staged copy sits where agent code can write, and its bytes end up in
+    a page the agent can read, so under a policy it is read only where the
+    person's cells may read, and through `read_bytes_nofollow`: a link
+    swapped in for the copy is refused, never followed. A copy that cannot be
+    read that way stays a reference.
+    """
+    for att in attachments:
+        if att.kind != KIND_ASSET or not att.staged:
+            continue
+        names = "|".join(re.escape(n) for n in dict.fromkeys((att.staged, quote(att.staged))))
+        pattern = re.compile(
+            rf"""(?P<q>["'])(?:\./)?(?:{names})(?P=q)"""
+            rf"""|(?P<eq>=)(?:\./)?(?:{names})(?=[\s>])"""
+            rf"""|(?P<url>url\(\s*)(?:\./)?(?:{names})(?P<close>\s*\))"""
+        )
+        if pattern.search(html) is None:
+            continue
+        try:
+            real = Path(os.path.realpath(artifact_path / att.staged))
+            if cell_sandbox is not None and not cell_sandbox.allows_read(real):
+                continue
+            raw = read_bytes_nofollow(real.anchor, real, limit=ASSET_MAX_BYTES)
+        except OSError:
+            continue
+        uri = _data_uri_prefix(att.name) + base64.b64encode(raw).decode("ascii")
+
+        def _embedded(m: re.Match[str], uri: str = uri) -> str:
+            if m["q"]:
+                return f"{m['q']}{uri}{m['q']}"
+            if m["eq"]:
+                return f'="{uri}"'
+            return f"{m['url']}{uri}{m['close']}"
+
+        html = pattern.sub(_embedded, html)
+    return html
 
 
 def _human_size(n: int) -> str:
@@ -282,8 +373,8 @@ def render_for_generation(attachments: list[Attachment]) -> str:
 
 
 __all__ = [
-    "ASSET_MAX_BYTES", "ATTACHMENTS_HEADER", "Attachment", "DATA_SUFFIXES",
+    "ASSET_MAX_BYTES", "ATTACHMENTS_HEADER", "Attachment", "DATA_SUFFIXES", "EMBED_MAX_BYTES",
     "KIND_ASSET", "KIND_DATA", "REFUSED_HIDDEN", "REFUSED_OUTSIDE",
-    "UPLOAD_ROOTS_IN_WORKSPACE", "refusal_reason", "render_for_gathering",
+    "UPLOAD_ROOTS_IN_WORKSPACE", "embed_assets", "refusal_reason", "render_for_gathering",
     "render_for_generation", "resolve_attachments", "stage_assets",
 ]

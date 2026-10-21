@@ -42,7 +42,7 @@ from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptC
 from anton.core.memory.acc import AnteriorCingulate
 from anton.core.root_cause import RootCauseLedger
 from anton.core.root_cause import classify as classify_root_cause
-from anton.core.memory.base import Engram, LearnedMemoryScope
+from anton.core.memory.base import Engram, LearnedMemoryScope, MemoryRead
 from anton.core.memory.cerebellum import Cerebellum
 from anton.core.memory.skills import SkillStore
 from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
@@ -82,7 +82,10 @@ from anton.core.llm.provider import (
     TransientProviderError,
     context_window,
     damaged_tool_call_result,
+    is_image_refusal,
+    log_background_done,
     provider_failure_kind,
+    usage_log_enabled,
 )
 from anton.core.llm.structured import looks_truncated, truncation_verdict, usable_tool_call
 from anton.core.llm.tracing import (
@@ -123,6 +126,8 @@ from anton.core.utils.scratchpad import (
     prepare_scratchpad_exec,
     format_cell_result,
     observe_scratchpad_cell,
+    fill_in_scratchpad_action,
+    scratchpad_action,
 )
 from anton.core.utils.write_check import parse_http_write_rules
 # Artifact-edit tracking + lint and the scratchpad observer hooks: shared with
@@ -131,11 +136,23 @@ from anton.core.utils.write_check import parse_http_write_rules
 from anton.core.tools.tool_handlers import (
     _fire_post_execute,
     _fire_pre_execute,
+    cell_content_with_lint,
+    check_cell_artifacts,
+    PageKey,
+    page_check_lines,
     preliminary_cell,
     resolve_artifact_store,
-    snapshot_existing_artifact_mtimes,
-    track_edits_since,
-    lint_changed_artifact_files,
+    snapshot_existing_artifacts,
+)
+from anton.core.artifacts.render_check import (
+    RenderStatus,
+    confirm_refused_screenshots,
+    confirm_refused_tool_images,
+    drop_older_screenshots,
+    drop_refused_screenshots,
+    drop_refused_tool_images,
+    screenshots_refused,
+    tool_images_refused,
 )
 
 from anton.explainability import ExplainabilityCollector, ExplainabilityStore
@@ -233,6 +250,17 @@ def _legacy_looks_like_failure(text: str) -> bool:
     return any(m in text for m in _LEGACY_FAILURE_MARKERS)
 
 
+# Strong references: asyncio keeps only a weak one to a task nothing else holds.
+_BACKGROUND_MARKERS: set[asyncio.Task] = set()
+
+
+async def _log_background_done_after(tasks: set[asyncio.Task], trace: TraceContext) -> None:
+    # `wait`, not `gather`: a failed task keeps its exception for asyncio to report.
+    if tasks:
+        await asyncio.wait(tasks)
+    log_background_done(trace)
+
+
 def _discarded_call_reason(tc: ToolCall) -> str:
     """Why this call's step is closing without having run.
 
@@ -252,7 +280,7 @@ def _known_scratchpad_action(tc: ToolCall) -> str | None:
     `StreamToolResult.action` as ours: `"message"`, for one, means a tool's
     message to the user.
     """
-    action = tc.input.get("action") if isinstance(tc.input, dict) else None
+    action = scratchpad_action(tc.input) if isinstance(tc.input, dict) else None
     allowed = SCRATCHPAD_TOOL.input_schema["properties"]["action"]["enum"]
     return action if action in allowed else None
 
@@ -2066,6 +2094,33 @@ class ChatSession:
         # project-wide) directory can never be mistaken for this turn's work.
         # Reset at the top of every turn.
         self._artifacts_touched: set[str] = set()
+        # (artifact slug, page) -> how that page last fared in a browser this
+        # turn (`passed`, `failed` or `unverified`), from generate_artifact
+        # and the checks after each cell. On a sandboxed deployment the turn
+        # ends with a line for each artifact with a page that did not pass.
+        # Reset every turn.
+        self._page_checks: dict[PageKey, RenderStatus] = {}
+        # The pages whose findings an unverified check already listed for
+        # the agent this turn, in a cell's result or in generate_artifact's
+        # `checks_skipped`. A later unverified check of such a page lists
+        # none (`tool_handlers.check_cell_artifacts`). Reset every turn.
+        self._unverified_findings_listed: set[PageKey] = set()
+        # Set once the model refused a request carrying render-check
+        # screenshots and took it without them
+        # (`_confirm_render_screenshots_refused`). From then on the checks'
+        # findings reach the agent without a screenshot, for the rest of the
+        # session; `tool_handlers.render_screenshots_refused` reads it.
+        # generate_artifact sets it too when the model refused its retry's
+        # screenshot (`engine._run_loop`).
+        self._render_screenshots_refused = False
+        # Set once the model refused a request carrying an image a tool
+        # returned (what `read_image` loaded) and took it without that image
+        # (`_confirm_tool_images_refused`). From then on `read_image` answers
+        # in text instead of sending another image the model would refuse;
+        # `tool_handlers.images_refused` reads it. Render screenshots keep
+        # their own flag above: one corrupt file draws a
+        # refusal from a model that takes images too.
+        self._images_refused = False
         # Cerebellum: supervised error learning over scratchpad cells.
         # Buffers errored/warning cells across the turn, runs one diff
         # call at end-of-turn, and encodes lessons via cortex.encode(),
@@ -2206,6 +2261,25 @@ class ChatSession:
         surface, and must not be able to mutate the session's own record.
         """
         return set(self._artifacts_touched)
+
+    def _unverified_page_lines(self) -> list[str]:
+        """The lines that end the turn's final message on a sandboxed
+        deployment: one per artifact with a page that did not pass its last
+        browser check this turn. Written by anton, not the model, so the user
+        hears it whatever the reply claims. Empty without a sandbox: there
+        each cell's check (`tool_handlers._check_pages`) already tells the
+        agent which page failed or was not checked in a browser."""
+        if not self._page_checks or cell_sandbox_of(self._scratchpads) is None:
+            return []
+        return page_check_lines(resolve_artifact_store(self), checks=self._page_checks)
+
+    @property
+    def memory_read(self) -> MemoryRead | None:
+        """The learned memory this session's latest turn put in front of the
+        model (Cortex.memory_read). A host reads it after the turn to record
+        it. None without a Cortex, or before the first turn built its prompt.
+        """
+        return self._cortex.memory_read if self._cortex is not None else None
 
     @property
     def last_compaction(self) -> dict | None:
@@ -3570,6 +3644,48 @@ class ChatSession:
             if changed:
                 msg["content"] = new_content
         return removed
+
+    def _drop_render_screenshots(self) -> int:
+        """Replace every render-check screenshot in history with a note that
+        it was removed after a refusal; return how many went.
+
+        For a model that may take no image input. Unlike
+        `_strip_image_blocks_from_history`, this removes only images anton
+        added itself: the findings beside each screenshot stay, and an image
+        the person attached is left for that repair to judge. Checks keep
+        their screenshots until `_confirm_render_screenshots_refused`.
+        """
+        return drop_refused_screenshots(self._history)
+
+    def _confirm_render_screenshots_refused(self) -> None:
+        """The request went through without the render-check screenshots, so
+        they caused the refusal: say so in history, where a session seeded
+        from it finds it (`screenshots_refused`), and attach none for the
+        rest of the session."""
+        confirm_refused_screenshots(self._history)
+        self._render_screenshots_refused = True
+
+    def _drop_refused_tool_images(self) -> int:
+        """Replace every image a tool returned in history (what `read_image`
+        loaded) with a note that it was removed after a refusal; return how
+        many went.
+
+        The counterpart of `_drop_render_screenshots` for the other images
+        anton put in history itself. A render screenshot is left to that
+        method, and an image the person attached to
+        `_strip_image_blocks_from_history`. `read_image` keeps sending images
+        until a request goes through without them
+        (`_confirm_tool_images_refused`).
+        """
+        return drop_refused_tool_images(self._history)
+
+    def _confirm_tool_images_refused(self) -> None:
+        """The request went through without the tool images, so they caused
+        the refusal: say so in history, where a session seeded from it finds
+        it (`tool_images_refused`), and send no more for the rest of the
+        session."""
+        confirm_refused_tool_images(self._history)
+        self._images_refused = True
 
     def _seal_dangling_tool_uses(self, reason: str = "interrupted") -> int:
         """Append synthetic `tool_result` blocks for any unmatched
@@ -5307,6 +5423,8 @@ class ChatSession:
         # reports only what the CURRENT turn touched. Hosts that build a fresh
         # session per turn get the same result either way.
         self._artifacts_touched = set()
+        self._page_checks = {}
+        self._unverified_findings_listed = set()
         # What the project held when this turn began: a cell may delete or
         # rename a file it wrote this turn without asking, not one from before.
         if self._write_gate is not None:
@@ -5365,6 +5483,14 @@ class ChatSession:
         # NOT be stamped.
         stamped_input = _stamp_user_content(user_input, datetime.now(timezone.utc))
         self._append_history({"role": "user", "content": stamped_input})
+        # A host may seed history with earlier turns' render screenshots.
+        drop_older_screenshots(self._history)
+        # A host that builds a session per turn seeds the notes that say the
+        # model refused a screenshot, or a tool's image, in an earlier turn.
+        if screenshots_refused(self._history):
+            self._render_screenshots_refused = True
+        if tool_images_refused(self._history):
+            self._images_refused = True
 
         # Log user input to episodic memory
         if self._episodic is not None:
@@ -5381,6 +5507,14 @@ class ChatSession:
         assistant_text_parts: list[str] = []
         _max_auto_retries = 2
         _retry_count = 0
+        # The one resend this turn allows after the model refused a request
+        # over a render-check screenshot (see the handler below), and whether
+        # it still waits for a request that goes through without them. The
+        # same pair for the images other tools returned (`read_image`).
+        _screenshots_dropped = False
+        _screenshot_drop_unconfirmed = False
+        _tool_images_dropped = False
+        _tool_image_drop_unconfirmed = False
         # One-time cap grace, reset once per turn_stream() call rather than in
         # `_stream_and_handle_tools`, which retries re-enter and would re-arm.
         self._spend_ceiling_grace_used = False
@@ -5457,15 +5591,33 @@ class ChatSession:
         _calls_token = arm_turn_tracker(_turn_calls)
 
         _turn_exc: BaseException | None = None
+        _turn_raised = False
         # A wrap-up failure the retry-exhausted site has already booked, so
         # the finally keeps that terminal instead of filing it as "error".
         _booked_exc: BaseException | None = None
+        # A continuation boundary no answer text has followed yet: a consumer
+        # takes the next text for the answer that replaces the one it showed.
+        _replacement_pending = False
         try:
             while True:
                 try:
                     async for event in self._stream_and_handle_tools(user_msg_str):
+                        # The first model call after the drop sends the
+                        # history without the dropped images; its completion
+                        # shows they caused the refusal. Before the generator
+                        # resumes, so the tools it runs next see the flag.
+                        if _screenshot_drop_unconfirmed and isinstance(event, StreamComplete):
+                            _screenshot_drop_unconfirmed = False
+                            self._confirm_render_screenshots_refused()
+                        if _tool_image_drop_unconfirmed and isinstance(event, StreamComplete):
+                            _tool_image_drop_unconfirmed = False
+                            self._confirm_tool_images_refused()
                         if isinstance(event, StreamTextDelta):
                             assistant_text_parts.append(event.text)
+                            if event.text.strip():
+                                _replacement_pending = False
+                        elif isinstance(event, StreamTaskProgress) and event.phase in ("continuation", "handback"):
+                            _replacement_pending = event.phase == "continuation"
                         yield event
                     break  # completed successfully
                 except Exception as _agent_exc:
@@ -5604,6 +5756,50 @@ class ChatSession:
                             provider=getattr(_agent_exc, "provider", "") or "",
                             model=_model,
                         ) from _agent_exc
+
+                    # A model that takes no image input refuses every request
+                    # carrying a render-check screenshot or an image
+                    # `read_image` loaded, and the request is rebuilt from
+                    # history, so a plain resend fails the same way. Those
+                    # images are anton's own additions: drop them, keep the
+                    # text beside them, and send the request once more within
+                    # this turn, with no recovery note, since the agent did
+                    # nothing wrong. A model that takes images refuses a
+                    # corrupt file too, so the tool images go first, and the
+                    # screenshots go only on a refusal that finds no tool
+                    # image left to drop. Each kind is dropped at most once
+                    # per turn, so this resends at most twice. Before the
+                    # count below, which is for resends of an unchanged
+                    # request. Sealed first, as every resend here is. Checks
+                    # and `read_image` keep sending images until a request
+                    # goes through without them (above). An image refusal
+                    # after a drop shows the dropped images were not the
+                    # cause, so nothing confirms that drop after it. The one
+                    # exception is a refusal after a tool-image drop that
+                    # still finds screenshots: the screenshots go too, and
+                    # the request that then goes through confirms both.
+                    if is_image_refusal(_agent_exc):
+                        self._seal_dangling_tool_uses("interrupted by error")
+                        _tool_images = 0 if _tool_images_dropped else self._drop_refused_tool_images()
+                        _screens = (
+                            0 if (_tool_images or _screenshots_dropped)
+                            else self._drop_render_screenshots()
+                        )
+                        if _tool_images:
+                            _screenshot_drop_unconfirmed = False
+                            _tool_images_dropped = _tool_image_drop_unconfirmed = True
+                        elif _screens:
+                            _screenshots_dropped = _screenshot_drop_unconfirmed = True
+                        else:
+                            _screenshot_drop_unconfirmed = _tool_image_drop_unconfirmed = False
+                        if _screens or _tool_images:
+                            logger.info(
+                                "the model refused a request with images; sending it "
+                                "again without %d render-check screenshot(s) and %d "
+                                "other tool image(s)",
+                                _screens, _tool_images,
+                            )
+                            continue
 
                     _retry_count += 1
                     # Anthropic's API rejects any history where the
@@ -5885,12 +6081,28 @@ class ChatSession:
                                 _booked_exc = e
                             raise
                         break
+            if not self._cancel_event.is_set():
+                page_lines = self._unverified_page_lines()
+                if page_lines:
+                    if _replacement_pending:
+                        # Not the replacement answer: without this a consumer
+                        # drops the answer the user read for these lines.
+                        yield StreamTaskProgress(phase="handback", message="")
+                    text = "\n".join(page_lines)
+                    if any(part.strip() for part in assistant_text_parts):
+                        # A paragraph of its own, since the reply before it
+                        # may end without a line break.
+                        text = "\n\n" + text
+                    assistant_text_parts.append(text)
+                    yield StreamTextDelta(text=text)
+                    self._append_history({"role": "assistant", "content": text})
         except BaseException as _e:
             # Capture, don't classify — the finally needs to know whether THIS
             # turn failed, rather than asking the interpreter what the thread
             # happens to be handling (#309 review). Covers GeneratorExit and
             # CancelledError too, both BaseException, both real turn endings.
             _turn_exc = None if _e is _booked_exc else _e
+            _turn_raised = True
             raise
         finally:
             self._turn_memory = None
@@ -5926,6 +6138,9 @@ class ChatSession:
             # guard passes the books this turn opened so a late finalizer
             # can't close a newer turn's.
             self._emit_turn_cost(expected=_turn_cost_books, exc=_turn_exc)
+            if _turn_raised and usage_log_enabled():
+                # A turn that raised starts no end-of-turn work, so it is done now.
+                log_background_done(_turn_trace)
             try:
                 reset_trace_context(_trace_token)
             except ValueError:
@@ -5933,17 +6148,39 @@ class ChatSession:
                 # task anyway, so there is nothing to restore.
                 pass
 
-        # Log assistant response to episodic memory
-        if self._episodic is not None and assistant_text_parts:
-            self._episodic.log_turn(
-                self._turn_count + 1,
-                "assistant",
-                "".join(assistant_text_parts)[:2000],
-            )
+        usage_log = usage_log_enabled()
+        # The passes keep no handle on the tasks they start, and nothing else can
+        # start one before the `finally` below: no await in between.
+        before = asyncio.all_tasks() if usage_log else set()
+        try:
+            # Log assistant response to episodic memory
+            if self._episodic is not None and assistant_text_parts:
+                self._episodic.log_turn(
+                    self._turn_count + 1,
+                    "assistant",
+                    "".join(assistant_text_parts)[:2000],
+                )
 
+            self._turn_count += 1
+            self._persist_history()
+            self._start_background_work(user_input, _turn_trace)
+        finally:
+            if usage_log:
+                # Also when a step above failed: the turn already wrote its turn_cost line.
+                marker = asyncio.create_task(
+                    _log_background_done_after(asyncio.all_tasks() - before, _turn_trace)
+                )
+                _BACKGROUND_MARKERS.add(marker)
+                marker.add_done_callback(_BACKGROUND_MARKERS.discard)
+
+        # The books are closed, so ended_by is final. A clean exit can still book
+        # "cancelled" (the CLI's cancel flag); that is a Stop, not a hand-back.
+        if _turn_cost_books.ended_by not in ("completed", "cancelled", "error"):
+            yield StreamTurnEnded(ended_by=_turn_cost_books.ended_by)
+
+    def _start_background_work(self, user_input: str | list[dict], trace: TraceContext) -> None:
+        """Schedule the end-of-turn memory passes of the turn `trace` names; none blocks the reply."""
         # Identity extraction (Default Mode Network — every 5 turns)
-        self._turn_count += 1
-        self._persist_history()
         if self._background_memory_active:
             if self._turn_count % 5 == 0 and isinstance(user_input, str):
                 if self._episodic:
@@ -5956,21 +6193,16 @@ class ChatSession:
                 else:
                     messages_str = user_input
 
-                self._spawn_background(self._cortex.maybe_update_identity(messages_str), _turn_trace)
+                self._spawn_background(self._cortex.maybe_update_identity(messages_str), trace)
             # Periodic memory vacuum (Systems Consolidation). Its compaction
             # task is started inside, so it runs in the background context.
-            self._background_context(_turn_trace).run(self._cortex.maybe_vacuum)
+            self._background_context(trace).run(self._cortex.maybe_vacuum)
 
         # Cerebellar consolidation — same fire-and-forget contract as
         # the non-streaming turn. Lets the user-facing stream finish
         # immediately while supervised error learning runs in the background.
-        self._schedule_cerebellum_flush(_turn_trace)
+        self._schedule_cerebellum_flush(trace)
         self._schedule_acc_flush()
-
-        # The books are closed, so ended_by is final. A clean exit can still book
-        # "cancelled" (the CLI's cancel flag); that is a Stop, not a hand-back.
-        if _turn_cost_books.ended_by not in ("completed", "cancelled", "error"):
-            yield StreamTurnEnded(ended_by=_turn_cost_books.ended_by)
 
     def _turn_max_tokens(self) -> int:
         """Output-token budget the turn's planning calls actually run with.
@@ -6361,6 +6593,9 @@ class ChatSession:
 
                 # Build assistant message with content blocks
                 self._ensure_replayable_calls(llm_response)
+                for tc in llm_response.tool_calls:
+                    if tc.name == "scratchpad" and isinstance(tc.input, dict):
+                        fill_in_scratchpad_action(tc.input)
                 assistant_content: list[dict] = []
                 if llm_response.content:
                     assistant_content.append(
@@ -6448,7 +6683,7 @@ class ChatSession:
                     # falls back to reading the clock itself. See the emit.
                     _tool_elapsed: float | None = None
                     try:
-                        if tc.name == "scratchpad" and tc.input.get("action") == "exec":
+                        if tc.name == "scratchpad" and scratchpad_action(tc.input) == "exec":
                             # Inline streaming exec — yields progress events
                             if self._write_gate is not None and self.emitter is not None:
                                 # Drained: the approval card prepare may raise
@@ -6514,8 +6749,8 @@ class ChatSession:
                                 # (below) can tell which artifact this cell
                                 # actually touched
                                 artifact_store = resolve_artifact_store(self)
-                                before_artifact_mtimes = (
-                                    snapshot_existing_artifact_mtimes(artifact_store)
+                                before_artifacts = (
+                                    snapshot_existing_artifacts(artifact_store)
                                     if artifact_store is not None
                                     else {}
                                 )
@@ -6550,31 +6785,16 @@ class ChatSession:
                                 )
                                 if cell is not None and artifact_store is not None:
                                     # handle_scratchpad's exec branch runs
-                                    # this same pair; this inline path is the
+                                    # this same check; this inline path is the
                                     # one the streaming product actually
                                     # takes, so it needs its own call.
-                                    track_edits_since(
-                                        self, artifact_store, before_artifact_mtimes
+                                    lint = await check_cell_artifacts(
+                                        self, store=artifact_store, before=before_artifacts
                                     )
-                                    try:
-                                        lint_messages = await asyncio.to_thread(
-                                            lint_changed_artifact_files,
-                                            artifact_store, before_artifact_mtimes,
-                                            cell_sandbox=cell_sandbox_of(self._scratchpads),
-                                        )
-                                    except Exception:
-                                        lint_messages = []
-                                        logger.warning(
-                                            "artifact lint failed for this cell",
-                                            exc_info=True,
-                                        )
-                                    if lint_messages:
-                                        # cowork-server's figure sources cut this
-                                        # block from a replayed cell's output.
-                                        result_text += (
-                                            "\n\n[artifact lint]\n"
-                                            + "\n".join(lint_messages)
-                                        )
+                                    result_text = cell_content_with_lint(
+                                        result_text, lint,
+                                        cell_ok=not (cell.error or "").strip(),
+                                    )
                                 # The runtime's verdict, not a text guess: a
                                 # cell with a raised error/timeout/kill failed;
                                 # stderr-only output (warnings) is not a
@@ -6923,6 +7143,9 @@ class ChatSession:
                 self._acc_maybe_nudge(tool_results)
 
                 self._append_history({"role": "user", "content": tool_results})
+                # Every model call resends the whole history: one render
+                # screenshot in it, the newest, is enough.
+                drop_older_screenshots(self._history)
 
                 # Rebuild: a tool this round (e.g. recall_skill) may have
                 # registered new tools the follow-up must see.
