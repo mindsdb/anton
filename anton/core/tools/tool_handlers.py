@@ -1234,6 +1234,15 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     if not agent_understanding:
         yield "Error: `agent_understanding` is required."
         return
+    # Collapsed to one line: the value is quoted into every step header.
+    raw_language = tc_input.get("user_language")
+    user_language = " ".join(raw_language.split()) if isinstance(raw_language, str) else ""
+    if not user_language:
+        yield (
+            "Error: `user_language` is required: the English name of the "
+            "language the user writes to you in, e.g. \"English\"."
+        )
+        return
 
     raw_attachments = tc_input.get("attachments") or []
     if isinstance(raw_attachments, str):  # a single path, not wrapped in a list
@@ -1256,7 +1265,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
                 agent_understanding=agent_understanding,
                 known_data=(tc_input.get("known_data") or "").strip(),
                 user_preferences=(tc_input.get("user_preferences") or "").strip(),
-                user_language=(tc_input.get("user_language") or "").strip(),
+                user_language=user_language,
                 primary=artifact.primary,
                 progress=queue,
                 attachments=attachments,

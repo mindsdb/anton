@@ -805,7 +805,7 @@ def test_tech_spec_instruction_names_the_user_language_and_keeps_headings():
 
 def test_tech_spec_instruction_falls_back_without_a_language():
     instruction = prompts.build_tech_spec_instruction(SimpleNamespace())
-    assert "Write the prose in the language of the user request" in instruction
+    assert "Write the prose in English" in instruction
 
 
 def test_tech_spec_instruction_adds_a_backend_section_for_fullstack():

@@ -28,7 +28,7 @@ from .sub_tools import FILE_BEGIN_MARKER as BEGIN, FILE_END_MARKER as END
 # How much file content fits in one reply, in characters — the unit the model
 # can compare against what it is about to write. Derived from the output budget
 # in state.py; quoted from the constant so the two cannot drift.
-from .state import LANGUAGE_NOT_STATED, REPLY_BODY_CHARS
+from .state import REPLY_BODY_CHARS, language_name
 
 if TYPE_CHECKING:
     from anton.utils.datasources import CatalogConnection, DatasourceCatalog
@@ -1470,7 +1470,7 @@ def build_tech_spec_instruction(state) -> str:
     if fullstack:
         content.append(_TECH_SPEC_BACKEND)
     content.append(_TECH_SPEC_EXCLUSIONS)
-    language = (getattr(state, "user_language", "") or "").strip() or LANGUAGE_NOT_STATED
+    language = language_name(getattr(state, "user_language", ""))
     return (
         "## Your task\n"
         "Write the technical specification (`spec.md`) for the build. Do not "
