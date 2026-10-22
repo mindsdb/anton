@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .debug_trace import NullTrace, GenTrace  # noqa: F401  (GenTrace re-exported for typing)
 from .progress import PEEK_GROUPS, LivePeek, StepCounter, label_for, plan_steps
@@ -32,6 +32,11 @@ DATA_LOOP_MAX: int = 3
 GEN_LOOP_MAX_RETRIES: int = 1
 GEN_VERIFY_MAX_RETRIES: int = 1
 RUNAPP_MAX_RETRIES: int = 1
+
+# Longest `known_data` the contexts re-sent on every round carry (the
+# generators' `_spec_context`, the fetch kickoff). A longer one is cut there,
+# so it never verifies a source on its own (`known_data_usable`).
+KNOWN_DATA_SPEC_MAX: int = 8000
 
 # Per-line detail cap for GenState.journal() — keeps the journal compact when
 # a step's detail is long (full text still lives in data_notes / trace_log).
@@ -127,7 +132,10 @@ class RequiredDataItem(BaseModel):
 class RequiredData(BaseModel):
     """`define_required_data`: what data is needed and where to get it."""
 
-    items: list[RequiredDataItem]
+    items: list[RequiredDataItem] = Field(
+        description="Data still missing for the task, one entry per item. "
+        "Empty when nothing is missing."
+    )
     reasoning: str
 
 
@@ -192,6 +200,18 @@ MAX_USER_LANGUAGE_CHARS = 40
 def language_name(user_language: str | None) -> str:
     """The language every step writes in, as the prompts name it."""
     return " ".join((user_language or "").split()) or DEFAULT_USER_LANGUAGE
+
+
+def known_data_usable(state) -> bool:
+    """Whether `known_data` can stand in for executed code.
+
+    Only for an html-app, whose page embeds a snapshot, and only when the
+    snapshot reaches the page builder whole. A fullstack backend reads its
+    source at run time and needs working access code in `data_notes`.
+    """
+    artifact_type = state.final_artifact_type or state.artifact_type
+    text = (state.known_data or "").strip()
+    return artifact_type == "html-app" and 0 < len(text) <= KNOWN_DATA_SPEC_MAX
 
 
 @dataclass
