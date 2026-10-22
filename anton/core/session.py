@@ -334,6 +334,7 @@ if TYPE_CHECKING:
     from rich.console import Console
     from anton.context.self_awareness import SelfAwarenessContext
     from anton.chat_ui import EscapeWatcher
+    from anton.core.artifacts.live_app_slots import LiveAppHost
     from anton.core.llm.client import LLMClient
     from anton.core.mcp.client import McpSession
     from anton.core.memory.cortex import Cortex
@@ -1697,6 +1698,9 @@ class ChatSessionConfig:
     # session, since the folders differ per person; a runtime factory that
     # cannot take it makes the session refuse to build.
     cell_sandbox: CellSandbox | None = None
+    # Who launches live apps and where each launch is recorded. Set by a host
+    # that runs live apps in app slots (`live_app_slots`); None launches none.
+    live_app_host: LiveAppHost | None = None
     console: Console | None = None
     initial_history: list[dict] | None = None
     history_store: HistoryStore | None = None
@@ -1949,6 +1953,10 @@ class ChatSession:
         # Kept so an artifact backend can be given the same project .env the
         # scratchpad gets; it is never applied to this process.
         self._workspace_env_overlay = config.workspace_env_overlay or {}
+        self._live_app_host = config.live_app_host
+        # The slugs generate_artifact is building now: the check after each
+        # cell leaves their live apps alone, since the run launches them.
+        self._live_apps_building: set[str] = set()
         self._console = config.console
         if self._console is None:
             # connect_new_datasource's interactive mode needs a terminal to
@@ -6813,9 +6821,27 @@ class ChatSession:
                                     # this same check; this inline path is the
                                     # one the streaming product actually
                                     # takes, so it needs its own call.
-                                    lint = await check_cell_artifacts(
-                                        self, store=artifact_store, before=before_artifacts
-                                    )
+                                    if self.emitter is not None:
+                                        # Drained: the card a live app's
+                                        # relaunch raises reaches the host
+                                        # only through the emitter, as
+                                        # prepare's card does above.
+                                        lint = None
+                                        agen = self._run_draining(check_cell_artifacts(
+                                            self, store=artifact_store, before=before_artifacts
+                                        ))
+                                        try:
+                                            async for _kind, _payload in agen:
+                                                if _kind == "event":
+                                                    yield _payload
+                                                else:
+                                                    lint = _payload
+                                        finally:
+                                            await agen.aclose()
+                                    else:
+                                        lint = await check_cell_artifacts(
+                                            self, store=artifact_store, before=before_artifacts
+                                        )
                                     result_text = cell_content_with_lint(
                                         result_text, lint,
                                         cell_ok=not (cell.error or "").strip(),

@@ -77,6 +77,12 @@ _WHY = {
     "error": "the approval request failed",
     "unanswered_earlier": "an earlier approval request in this turn went unanswered",
 }
+
+
+def refusal_why(cause: RefusalCause) -> str:
+    """Why a card didn't approve, in the words the gate's refusal uses."""
+    return _WHY[cause]
+
 # What the refusal names of one list: a file change's paths, the requests,
 # or the data changes with no SQL text. The card names every one.
 _REFUSAL_PATHS = 20
@@ -344,16 +350,40 @@ def _refusal(writes: CellWrites, cause: RefusalCause) -> ToolOutcome:
 
 
 async def _ask_approval(session: ChatSession, writes: CellWrites) -> RefusalCause | None:
-    """Ask Approve or Cancel. None when the user picks Approve, else why not."""
+    """Ask Approve or Cancel for a held cell. None when the user picks Approve, else why not."""
+    return await ask_approval_card(
+        session, _card_prompt(writes),
+        approve_detail="Run this step once", cancel_detail="Leave the data and files as they are",
+    )
+
+
+async def ask_approval_card(
+    session: ChatSession,
+    prompt: str,
+    *,
+    approve_detail: str,
+    cancel_detail: str,
+    log_label: str = "write approval",
+) -> RefusalCause | None:
+    """Ask the gate's Approve or Cancel card with `prompt`. None when the user
+    picks Approve, else why not. The live-app launch card asks through it too.
+
+    One unanswered card per turn: after a card times out, every later card in
+    the turn is refused without asking, so an unattended turn doesn't wait
+    out the timeout once per card. Sessions without a `WriteGate` keep no
+    such memory."""
     from anton.core.interaction.elicit import AskOption, AskRequest, elicit
 
+    gate = getattr(session, "_write_gate", None)
+    if isinstance(gate, WriteGate) and gate.unanswered:
+        return "unanswered_earlier"
     request = AskRequest(
-        prompt=_card_prompt(writes),
+        prompt=prompt,
         options=(
-            AskOption(value="approve", label="Approve", detail="Run this step once"),
-            AskOption(value="cancel", label="Cancel", detail="Leave the data and files as they are"),
+            AskOption(value="approve", label="Approve", detail=approve_detail),
+            AskOption(value="cancel", label="Cancel", detail=cancel_detail),
         ),
-        # No typed answer and no default: only a picked Approve runs the cell.
+        # No typed answer and no default: only a picked Approve clears the card.
         allow_custom=False,
         timeout_s=getattr(session.elicitor, "timeout_s", None),
     )
@@ -364,12 +394,14 @@ async def _ask_approval(session: ChatSession, writes: CellWrites) -> RefusalCaus
     except Exception as exc:
         # The type only: a traceback's frames would print the card and the
         # statement under a host that logs local variables.
-        logger.warning("write approval: the question failed (%s)", type(exc).__name__)
+        logger.warning("%s: the question failed (%s)", log_label, type(exc).__name__)
         return "error"
     if answer.status == "answered" and answer.values == ("approve",):
         return None
     if answer.status in ("answered", "cancelled"):
         return "cancelled"
+    if answer.status == "timeout" and isinstance(gate, WriteGate):
+        gate.unanswered = True
     if answer.status in ("timeout", "unavailable"):
         return answer.status
     return "error"
@@ -422,7 +454,7 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
             _log_decision(writes=writes, status="not_held")
         return None
     try:
-        cause = "unanswered_earlier" if gate.unanswered else await _ask_approval(session, writes)
+        cause = await _ask_approval(session, writes)
     except asyncio.CancelledError:
         # Stop, or the host ending the turn, while the card waited.
         _log_decision(writes=writes, status="stopped")
@@ -430,8 +462,6 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
     _log_decision(writes=writes, status=cause or "approved")
     if cause is None:
         return None
-    if cause == "timeout":
-        gate.unanswered = True
     return _refusal(writes, cause)
 
 

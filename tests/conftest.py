@@ -130,6 +130,12 @@ os.environ["ANTON_ANALYTICS_ENABLED"] = "false"
 # emitted nothing. Costs no coverage — the full suite passes unchanged.
 os.environ["ANTON_ANALYTICS_URL"] = ""
 os.environ["ANTON_POSTHOG_KEY"] = ""
+#
+# The live-app slot settings belong to a host deployment. A shell that exports
+# them would turn live apps on for tests that expect them off; the tests that
+# need them set them with monkeypatch.
+for _name in ("ANTON_LIVE_APP_SLOTS", "ANTON_LIVE_APP_CONNECTIONS_FILE", "ANTON_LIVE_APP_ADDRESS"):
+    os.environ.pop(_name, None)
 
 @functools.cache
 def _landlock_abi() -> int:

@@ -1249,8 +1249,9 @@ async def test_gen_verify_frontend_hands_the_contract_paths_to_the_verifier(tmp_
         (tmp_path / "static" / "index.html").write_text(_VALID_PAGE)
         return {"files_written": ["static/index.html"], "rounds_used": 1, "summary": "s"}
 
-    def fake_verify(html, *, is_fullstack, api_paths=None):
+    def fake_verify(html, *, is_fullstack, api_paths=None, live_app=False):
         seen["api_paths"] = api_paths
+        seen["live_app"] = live_app
         return VerifyResult(errors=[])
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
@@ -1258,6 +1259,8 @@ async def test_gen_verify_frontend_hands_the_contract_paths_to_the_verifier(tmp_
 
     assert await orchestrator._gen_verify_frontend(st) is None
     assert seen["api_paths"] == {"/api/items"}
+    # No sandbox, no live apps: the page isn't held to a live app's script rule.
+    assert seen["live_app"] is False
 
 
 # ── S-03: skipped checks and accepted warnings reach the result ─────────────
@@ -1305,7 +1308,7 @@ async def test_warnings_of_the_accepted_frontend_attempt_reach_the_result(tmp_pa
         (tmp_path / "index.html").write_text(_VALID_HTML)
         return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
 
-    def fake_verify(html, *, is_fullstack, api_paths=None):
+    def fake_verify(html, *, is_fullstack, api_paths=None, live_app=False):
         return VerifyResult(errors=[], warnings=["Significant blocks have no stable `id` attributes."])
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)

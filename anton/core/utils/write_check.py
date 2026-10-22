@@ -123,6 +123,7 @@ __all__ = [
     "ProjectSnapshot",
     "SqlWrite",
     "find_cell_writes",
+    "http_write_rule_matches",
     "parse_http_write_rules",
     "snapshot_project_files",
     "write_statements",
@@ -230,7 +231,7 @@ class HttpWriteRule(BaseModel):
     `*` for any. In `url_glob`, `*` stands for any text within one path
     segment, `**` for any text, and `?` for one character other than `/`;
     it is matched, ignoring case, against the request's URL without its
-    query string (`_url_could_match`)."""
+    query string or fragment (`http_write_rule_matches`)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -256,7 +257,7 @@ class HttpWriteRule(BaseModel):
 def parse_http_write_rules(text: str) -> tuple[HttpWriteRule, ...]:
     """The rules in the `write_approval_http` setting: entries separated by
     newlines or commas, each a method and a URL glob, as in
-    `POST https://maestro.example.com/api/*/orders/*`. A bad entry is skipped
+    `POST https://planner.example.com/api/*/orders/*`. A bad entry is skipped
     with a WARNING that names it."""
     rules: list[HttpWriteRule] = []
     for entry in (e.strip() for e in re.split(r"[\n,]", text)):
@@ -5584,6 +5585,16 @@ def _url_could_match(url: str, glob: str) -> bool:
     return False
 
 
+def http_write_rule_matches(rule: HttpWriteRule, *, method: str, url: str) -> bool:
+    """Whether a request with `method` to `url` matches `rule`, as the gate
+    matches a cell's request: the rule's method or `*`, and its glob against
+    the URL, ignoring case, the query string and the fragment. Public for a
+    service that applies the same rules to requests it forwards. The URL is
+    matched as given, so such a service passes it decoded and normalized,
+    as it forwards it."""
+    return rule.method in ("*", method.upper()) and _url_could_match(url, rule.url_glob)
+
+
 def _http_findings(
     reader: _Reader,
     cell: _Cell,
@@ -5614,7 +5625,7 @@ def _http_findings(
             held = [reader.hole(_deciding_node(request.method, reader))]
         else:
             held = [m for m in dict.fromkeys(methods) if m in _HELD_METHODS or any(
-                r.method in ("*", m) and _url_could_match(url, r.url_glob) for r in rules
+                http_write_rule_matches(r, method=m, url=url) for r in rules
             )]
         line = report.line if report else cell.host_line or node.lineno
         call = report.call if report else scrub_output(cell.source(node))

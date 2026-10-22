@@ -1234,24 +1234,42 @@ def build_backend_kickoff(
 FULLSTACK_FRONTEND_TARGET = "static/index.html"
 
 
-def build_frontend_system_prompt(artifact_path: Path, *, user_language: str = "") -> str:
+# A live app's page opens at its own address, whose content security policy
+# loads scripts from one host only, so the verifier fails any other script.
+_LIVE_APP_SCRIPTS = (
+    "## Live app scripts\n"
+    "This app runs as a live app, whose content security policy loads scripts and "
+    "stylesheets only from `https://cdn.jsdelivr.net`, and images and fonts only from the "
+    "page itself. A script from any other host, or one written as `//cdn.jsdelivr.net/...`, "
+    "fails the step instead of warning, in a `<script src>`, an import or an import map "
+    "alike: load every library as `https://cdn.jsdelivr.net/npm/<package>@<version>/...`."
+)
+
+
+def build_frontend_system_prompt(
+    artifact_path: Path, *, live_app: bool = False, user_language: str = ""
+) -> str:
     # `artifact_path` is not quoted, for the same reason as in the html-app
     # builder: every path the model writes is relative to the artifact root.
     target = FULLSTACK_FRONTEND_TARGET
-    return "\n\n".join(
-        [
-            _gen_html_task(target, fullstack=True),
-            _gen_html_inputs(fullstack=True),
-            _gen_html_workflow(target, fullstack=True),
-            _gen_html_output_protocol(target),
-            _GEN_SIZE_RULES,
-            _verifier_contract(served=True),
-            "## Fullstack rules\n" + _FRONTEND_RULES,
-            "## Design rules\n" + _DESIGN_RULES,
-            _GEN_TOOLS,
-            _ui_language(user_language),
-        ]
-    )
+    contract = _verifier_contract(served=True)
+    sections = [
+        _gen_html_task(target, fullstack=True),
+        _gen_html_inputs(fullstack=True),
+        _gen_html_workflow(target, fullstack=True),
+        _gen_html_output_protocol(target),
+        _GEN_SIZE_RULES,
+        contract,
+        "## Fullstack rules\n" + _FRONTEND_RULES,
+        "## Design rules\n" + _DESIGN_RULES,
+        _GEN_TOOLS,
+        _ui_language(user_language),
+    ]
+    if live_app:
+        # Right after the contract it tightens. Without live apps the prompt
+        # is as it was, byte for byte.
+        sections.insert(sections.index(contract) + 1, _LIVE_APP_SCRIPTS)
+    return "\n\n".join(sections)
 
 
 def build_frontend_kickoff(
