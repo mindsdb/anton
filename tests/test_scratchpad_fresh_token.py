@@ -199,11 +199,17 @@ async def test_running_cell_picks_up_the_renewed_credential(monkeypatch):
                 pad.execute(
                     _HELPERS_CELL + "import time\n"
                     "print(ask('before'))\n"
-                    "time.sleep(1.5)\n"
+                    "time.sleep(3)\n"
                     "print(ask('after'))\n"
                 )
             )
-            await asyncio.sleep(0.5)
+            # Renew once the first call has gone out, however long the pad
+            # took to start; the cell's sleep leaves time for the heartbeat
+            # refresh before its second call.
+            for _ in range(600):
+                if gateway.bearers:
+                    break
+                await asyncio.sleep(0.05)
             assert gateway.bearers == ["token-a"]
             credential.value = gateway.accepted = "token-b"
             cell = await running
