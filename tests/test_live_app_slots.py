@@ -1409,6 +1409,35 @@ async def test_stopping_an_app_stops_only_that_folders_app(tmp_path, slots, appr
     await las.stop_live_app(_session(), folder=tmp_path / "nothing-runs-here")
 
 
+async def test_a_stop_during_the_reset_still_tells_the_host_the_app_stopped(tmp_path, slots, approved, cards):
+    """The claim already stopped the app's record: without `launch_failed`
+    its owner would never hear the app is gone."""
+    folder = _artifact(tmp_path)
+    _runs_from(slots[0], folder)
+    entered, gate = threading.Event(), threading.Event()
+    reset = slots[0].reset
+
+    def slow_reset():
+        entered.set()
+        gate.wait(5)
+        reset()
+
+    slots[0].reset = slow_reset  # type: ignore[method-assign]
+    session = _session()
+    task = asyncio.create_task(las.stop_live_app(session, folder=folder))
+    await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    for _ in range(100):
+        if slots[0].resets:
+            break
+        await asyncio.sleep(0.02)
+    assert slots[0].resets == 1
+    assert session._live_app_host.events == [("claim", 1), ("launch_failed", 1)]
+
+
 async def test_the_running_address_is_that_folders_apps(tmp_path, slots, approved, cards):
     folder = _artifact(tmp_path)
     _runs_from(slots[1], folder)

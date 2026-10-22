@@ -1311,11 +1311,17 @@ async def _claim(host: LiveAppHost, client: SlotClient, slot: int) -> None:
             except asyncio.CancelledError:
                 continue
         if not claiming.cancelled() and claiming.exception() is None:
-            try:
-                await asyncio.shield(asyncio.to_thread(_reset_quietly, client))
-            finally:
-                await _report_launch_failed(host, slot)
+            await _stop_claimed(host, client, slot)
         raise
+
+
+async def _stop_claimed(host: LiveAppHost, client: SlotClient, slot: int) -> None:
+    """Reset the slot whose app `claim` stopped and tell the host the launch
+    failed, the report going out even when a Stop lands during the reset."""
+    try:
+        await asyncio.shield(asyncio.to_thread(_reset_quietly, client))
+    finally:
+        await _report_launch_failed(host, slot)
 
 
 async def _report_launch_failed(host: LiveAppHost, slot: int) -> None:
@@ -1425,8 +1431,7 @@ async def stop_live_app(session, *, folder: Path) -> None:
             await _claim(host, client, running.slot)
         except LiveAppLaunchError:
             return
-        await asyncio.to_thread(_reset_quietly, client)
-        await _report_launch_failed(host, running.slot)
+        await _stop_claimed(host, client, running.slot)
 
 
 def launch_paths_changed(before: dict[str, object], after: dict[str, object]) -> bool:

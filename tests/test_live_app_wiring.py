@@ -437,18 +437,12 @@ async def test_a_regeneration_that_ends_the_run_stops_the_app_it_launched(tmp_pa
     assert "url" not in result and "live_app" not in result
 
 
-@pytest.mark.parametrize("cause, still_runs", [("launch_not_approved", True), ("slot_unavailable", False)],
-                         ids=["card-refused", "stopped-after-claim"])
-async def test_a_relaunch_that_fails_after_a_launched_attempt_sends_no_address(tmp_path, policy, live_apps_on,
-                                                                               monkeypatch, gen_store, cause,
-                                                                               still_runs):
-    """The first attempt's app failed its probe; the run says so, and never
-    hands its address over as a working app's."""
-    address = "http://app1.view.localhost:8080/"
-    attempts = iter([
-        _result(probe=(ProbeResult(path="/api/health", status=500),)),
-        LiveAppLaunchError(f"Not launched: {cause}.", cause=cause),
-    ])
+_FAILED_CHECK = "health check GET /api/health returned 500 (expected 200)."
+
+
+def _launches(monkeypatch, *steps) -> None:
+    """`launch_live_app` returns or raises each of `steps` in turn."""
+    attempts = iter(steps)
 
     async def launch(session, **kwargs):
         step = next(attempts)
@@ -459,24 +453,92 @@ async def test_a_relaunch_that_fails_after_a_launched_attempt_sends_no_address(t
     async def regenerate(state, extra_context=""):
         return None
 
+    monkeypatch.setattr(las, "launch_live_app", launch)
+    monkeypatch.setattr(orchestrator, "_gen_verify_backend", regenerate)
+
+
+@pytest.mark.parametrize("still_runs", [True, False], ids=["running", "gone"])
+async def test_a_refused_relaunch_keeps_the_earlier_app_and_sends_no_address(tmp_path, policy, live_apps_on,
+                                                                            monkeypatch, gen_store, still_runs):
+    """The card promised to leave the running app as it is: the app that
+    failed its probe stays, and the run says where it runs and that it
+    failed, never handing its address over as a working app's."""
+    address = "http://app1.view.localhost:8080/"
+    _launches(
+        monkeypatch,
+        _result(probe=(ProbeResult(path="/api/health", status=500),)),
+        LiveAppLaunchError("Not launched: refused.", cause="launch_not_approved"),
+    )
+
     async def running_address(session, *, folder):
         return address if still_runs else None
 
     async def must_not_stop(session, *, folder):
-        raise AssertionError("the launch failure leaves the app as it was")
+        raise AssertionError("a refused card leaves the running app as it is")
 
-    monkeypatch.setattr(las, "launch_live_app", launch)
     monkeypatch.setattr(las, "running_app_address", running_address)
     monkeypatch.setattr(las, "stop_live_app", must_not_stop)
-    monkeypatch.setattr(orchestrator, "_gen_verify_backend", regenerate)
     state = _gen_state(tmp_path, policy)
     assert await orchestrator._run_and_verify_app(state) is orchestrator.NOT_LAUNCHED
     result = orchestrator._not_launched(state)
-    assert result["status"] == "not_launched" and result["cause"] == cause
+    assert result["status"] == "not_launched" and result["cause"] == "launch_not_approved"
     assert "url" not in result and "live_app" not in result
-    assert result["detail"].startswith(f"Not launched: {cause}. The app this run launched earlier ")
-    assert result["detail"].endswith("failed its check: health check GET /api/health returned 500 (expected 200).")
-    assert (f"still runs at `{address}`" in result["detail"]) is still_runs
+    still = f"still runs at `{address}`, but it failed its check: " if still_runs else "failed its check: "
+    assert result["detail"] == f"Not launched: refused. The app this run launched earlier {still}{_FAILED_CHECK}"
+
+
+@pytest.mark.parametrize("cause", ["launch_files", "record_failed", "slot_reset"])
+async def test_any_other_relaunch_failure_stops_the_earlier_app(tmp_path, policy, live_apps_on, monkeypatch,
+                                                                gen_store, cause):
+    """Only the card promised to leave the app: after any other failure the
+    run gives up on the app that failed its probe and stops it, whether or
+    not the failed launch had already claimed its slot."""
+    stopped: list[Path] = []
+    _launches(
+        monkeypatch,
+        _result(probe=(ProbeResult(path="/api/health", status=500),)),
+        LiveAppLaunchError(f"Not launched: {cause}.", cause=cause),
+    )
+
+    async def record_stop(session, *, folder):
+        stopped.append(folder)
+
+    async def must_not_ask(session, *, folder):
+        raise AssertionError("a stopped app has no address to name")
+
+    monkeypatch.setattr(las, "stop_live_app", record_stop)
+    monkeypatch.setattr(las, "running_app_address", must_not_ask)
+    state = _gen_state(tmp_path, policy)
+    assert await orchestrator._run_and_verify_app(state) is orchestrator.NOT_LAUNCHED
+    assert stopped == [tmp_path]
+    result = orchestrator._not_launched(state)
+    assert result["cause"] == cause and "url" not in result and "live_app" not in result
+    assert result["detail"] == (
+        f"Not launched: {cause}. The app this run launched earlier failed its check, so the run stopped it: "
+        + _FAILED_CHECK
+    )
+
+
+async def test_the_failure_names_the_check_the_launched_app_failed(tmp_path, policy, live_apps_on, monkeypatch,
+                                                                    gen_store):
+    """With more retries, a launch error between the failed check and the
+    final failure doesn't take the check's place in the sentence."""
+    monkeypatch.setattr(orchestrator, "RUNAPP_MAX_RETRIES", 2)
+    _launches(
+        monkeypatch,
+        _result(probe=(ProbeResult(path="/api/health", status=500),)),
+        LiveAppLaunchError("Error: the backend did not start.", cause="app_not_ready"),
+        LiveAppLaunchError("Not launched: refused.", cause="launch_not_approved"),
+    )
+
+    async def running_address(session, *, folder):
+        return None
+
+    monkeypatch.setattr(las, "running_app_address", running_address)
+    state = _gen_state(tmp_path, policy)
+    assert await orchestrator._run_and_verify_app(state) is orchestrator.NOT_LAUNCHED
+    detail = orchestrator._not_launched(state)["detail"]
+    assert detail.endswith(f"failed its check: {_FAILED_CHECK}") and "did not start" not in detail
 
 
 async def test_a_probe_the_slot_couldnt_run_ends_the_run_without_a_new_backend(tmp_path, policy, live_apps_on,

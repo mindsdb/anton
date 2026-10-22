@@ -1173,11 +1173,14 @@ async def _run_and_verify_app_in_slot(state: GenState) -> "str | object | None":
     loads the page, since the app's address opens only in its owner's
     browser. `NOT_LAUNCHED` when the launch didn't happen for a reason a new
     backend can't fix (`state.launch_failure` holds it). A run that gives up
-    stops the app it launched, so it doesn't hold a slot."""
+    stops the app it launched, so it doesn't hold a slot, unless the person
+    refused the card for its relaunch, which leaves it running."""
     from anton.core.tools.tool_handlers import resolve_artifact_store
 
     problem, tail = "", ""
     launched = False
+    # The check the latest launched app failed, for a later failure to name.
+    failed_check = ""
     for attempt in range(RUNAPP_MAX_RETRIES + 1):
         state.step_started("run_app", attempt=attempt)
         # Read on every attempt: a regenerated backend declares its
@@ -1203,7 +1206,7 @@ async def _run_and_verify_app_in_slot(state: GenState) -> "str | object | None":
         except live_app_slots.LiveAppLaunchError as exc:
             state.record("run_app", "fail", str(exc))
             if exc.cause not in _RETRYABLE_LIVE_APP_FAILURES:
-                state.launch_failure = await _after_earlier_launch(state, exc, problem) if launched else exc
+                state.launch_failure = await _after_earlier_launch(state, exc, failed_check) if launched else exc
                 return NOT_LAUNCHED
             problem, tail = str(exc), exc.log_tail
         else:
@@ -1233,6 +1236,7 @@ async def _run_and_verify_app_in_slot(state: GenState) -> "str | object | None":
                 return None
             state.record("verify_fullstack", "fail", probe_err)
             problem, tail = probe_err, launch.log_tail
+            failed_check = probe_err
 
         if attempt >= RUNAPP_MAX_RETRIES:
             break
@@ -1258,19 +1262,24 @@ async def _stop_launched_app(state: GenState) -> None:
 
 
 async def _after_earlier_launch(
-    state: GenState, failure: live_app_slots.LiveAppLaunchError, problem: str,
+    state: GenState, failure: live_app_slots.LiveAppLaunchError, failed_check: str,
 ) -> live_app_slots.LiveAppLaunchError:
     """`failure` for a run whose earlier attempt launched an app that then
-    failed its check. That app stays as the failure left it, since a refused
-    card promised to leave it running; the result sends no address that
-    reads as a working app, and the sentence says whether it still runs."""
-    state.app_url, state.live_app = None, None
-    address = await live_app_slots.running_app_address(state.session, folder=state.artifact_path)
-    earlier = (
-        f"The app this run launched earlier still runs at `{address}`, but it failed its check: {problem}"
-        if address is not None
-        else f"The app this run launched earlier failed its check: {problem}"
-    )
+    failed `failed_check`. A refused card promised to leave that app
+    running, so it stays and the sentence says where it runs; after any
+    other failure the run gives up on it and stops it. Either way the result
+    sends no address that reads as a working app's."""
+    if failure.cause == "launch_not_approved":
+        state.app_url, state.live_app = None, None
+        address = await live_app_slots.running_app_address(state.session, folder=state.artifact_path)
+        earlier = (
+            f"The app this run launched earlier still runs at `{address}`, but it failed its check: {failed_check}"
+            if address is not None
+            else f"The app this run launched earlier failed its check: {failed_check}"
+        )
+    else:
+        await _stop_launched_app(state)
+        earlier = f"The app this run launched earlier failed its check, so the run stopped it: {failed_check}"
     return live_app_slots.LiveAppLaunchError(f"{failure} {earlier}", cause=failure.cause, log_tail=failure.log_tail)
 
 
