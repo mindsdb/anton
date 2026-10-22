@@ -129,11 +129,11 @@ def run_installer(tmp_path, kind, *, refs, tag=TAG, export="present"):
             command.chmod(0o755)
         environment["PATH"] = str(commands) + os.pathsep + os.environ["PATH"]
         script = fixture / "install.sh"
-        script.write_text("set -e\ninfo() { :; }\nwarn() { :; }\nerror() { echo \"$1\" >&2; }\nconfirm() { return 0; }\n" + release_sections((ROOT / "install.sh").read_text()))
+        script.write_text("set -e\ninfo() { :; }\nwarn() { :; }\nerror() { echo \"$1\" >&2; }\nconfirm() { return 0; }\n" + release_sections((ROOT / "install.sh").read_text(encoding="utf-8")), encoding="utf-8")
         command = [shutil.which("sh"), str(script)]
     else:
         script = fixture / "install.ps1"
-        script.write_text(POWERSHELL_COMMANDS + release_sections((ROOT / "install.ps1").read_text()))
+        script.write_text(POWERSHELL_COMMANDS + release_sections((ROOT / "install.ps1").read_text(encoding="utf-8")), encoding="utf-8")
         command = [shutil.which("pwsh"), "-NoProfile", "-NonInteractive", "-File", str(script)]
     result = subprocess.run(command, cwd=fixture, env=environment, capture_output=True, text=True, timeout=15)
     calls = [json.loads(line) for line in log.read_text(encoding="utf-8-sig").splitlines()] if log.exists() else []
