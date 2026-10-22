@@ -1203,7 +1203,7 @@ async def _run_and_verify_app_in_slot(state: GenState) -> "str | object | None":
         except live_app_slots.LiveAppLaunchError as exc:
             state.record("run_app", "fail", str(exc))
             if exc.cause not in _RETRYABLE_LIVE_APP_FAILURES:
-                state.launch_failure = exc
+                state.launch_failure = await _after_earlier_launch(state, exc, problem) if launched else exc
                 return NOT_LAUNCHED
             problem, tail = str(exc), exc.log_tail
         else:
@@ -1238,17 +1238,40 @@ async def _run_and_verify_app_in_slot(state: GenState) -> "str | object | None":
             break
         stop = await _regenerate_backend_after(state, problem, tail=tail)
         if stop is not None:
+            if launched:
+                await _stop_launched_app(state)
             return stop
 
     if launched:
-        # Gave up on an app that may still run: free its slot, and send no
-        # address for it.
-        await live_app_slots.stop_live_app(state.session, folder=state.artifact_path)
-        state.app_url, state.live_app = None, None
+        await _stop_launched_app(state)
     state.error = f"Application failed to launch: {problem}" + _tail_section(
         problem, tail, heading="--- backend.log tail ---",
     )
     return state.error
+
+
+async def _stop_launched_app(state: GenState) -> None:
+    """Gave up on an app that may still run: free its slot, and send no
+    address for it."""
+    await live_app_slots.stop_live_app(state.session, folder=state.artifact_path)
+    state.app_url, state.live_app = None, None
+
+
+async def _after_earlier_launch(
+    state: GenState, failure: live_app_slots.LiveAppLaunchError, problem: str,
+) -> live_app_slots.LiveAppLaunchError:
+    """`failure` for a run whose earlier attempt launched an app that then
+    failed its check. That app stays as the failure left it, since a refused
+    card promised to leave it running; the result sends no address that
+    reads as a working app, and the sentence says whether it still runs."""
+    state.app_url, state.live_app = None, None
+    address = await live_app_slots.running_app_address(state.session, folder=state.artifact_path)
+    earlier = (
+        f"The app this run launched earlier still runs at `{address}`, but it failed its check: {problem}"
+        if address is not None
+        else f"The app this run launched earlier failed its check: {problem}"
+    )
+    return live_app_slots.LiveAppLaunchError(f"{failure} {earlier}", cause=failure.cause, log_tail=failure.log_tail)
 
 
 async def _verify_app_in_browser(state: GenState) -> "str | None | object":

@@ -1260,6 +1260,40 @@ async def test_a_stop_while_recording_the_launch_resets_it(tmp_path, slots, appr
     assert slots[0].resets == 1
 
 
+@pytest.mark.parametrize("step", ["launch", "stop"])
+async def test_a_stop_while_claiming_resets_the_app_the_claim_stopped(tmp_path, slots, approved, cards, step):
+    """A host may finish a claim's record after the Stop, as a database write
+    it began does. The app that record calls replaced is reset, and the host
+    hears the launch failed, so nothing runs that nobody can open."""
+    folder = _artifact(tmp_path)
+    _runs_from(slots[0], folder)
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class SlowHost(FakeHost):
+        async def claim(self, slot: int) -> None:
+            started.set()
+            try:
+                await release.wait()
+            finally:
+                # The record lands whatever happens to the caller.
+                self.events.append(("claim", slot))
+
+    session = _session(SlowHost())
+    if step == "launch":
+        call = las.launch_live_app(session, slug="sales-demo", folder=folder, datasources=())
+    else:
+        call = las.stop_live_app(session, folder=folder)
+    task = asyncio.create_task(call)
+    await started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert slots[0].resets == 1 and slots[0].requests == []
+    assert session._live_app_host.events == [("claim", 1), ("launch_failed", 1)]
+
+
 async def test_an_address_without_a_slot_number_refuses_before_any_slot(tmp_path, slots, approved, cards,
                                                                          monkeypatch):
     folder = _artifact(tmp_path)
@@ -1373,6 +1407,15 @@ async def test_stopping_an_app_stops_only_that_folders_app(tmp_path, slots, appr
     assert slots[0].resets == 1 and slots[1].resets == 0
     assert session._live_app_host.events == [("claim", 1), ("launch_failed", 1)]
     await las.stop_live_app(_session(), folder=tmp_path / "nothing-runs-here")
+
+
+async def test_the_running_address_is_that_folders_apps(tmp_path, slots, approved, cards):
+    folder = _artifact(tmp_path)
+    _runs_from(slots[1], folder)
+    _runs_from(slots[0], _artifact(tmp_path / "theirs"), _OTHER)
+    assert await las.running_app_address(_session(), folder=folder) == "http://app2.view.localhost:8080/"
+    assert await las.running_app_address(_session(), folder=tmp_path / "nothing-runs-here") is None
+    assert await las.running_app_address(SimpleNamespace(), folder=folder) is None
 
 
 # ── What the launch says ─────────────────────────────────────────────────────

@@ -412,6 +412,73 @@ async def test_a_run_that_gives_up_stops_the_app_it_launched(tmp_path, policy, l
     assert state.app_url is None and state.live_app is None
 
 
+@pytest.mark.parametrize("stop", ["Error: the backend could not be rebuilt.", orchestrator.OVER_BUDGET],
+                         ids=["error", "over-budget"])
+async def test_a_regeneration_that_ends_the_run_stops_the_app_it_launched(tmp_path, policy, live_apps_on,
+                                                                          monkeypatch, gen_store, stop):
+    stopped: list[Path] = []
+
+    async def launch(session, **kwargs):
+        return _result(probe=(ProbeResult(path="/api/health", status=500),))
+
+    async def regenerate(state, extra_context=""):
+        return stop
+
+    async def record_stop(session, *, folder):
+        stopped.append(folder)
+
+    monkeypatch.setattr(las, "launch_live_app", launch)
+    monkeypatch.setattr(las, "stop_live_app", record_stop)
+    monkeypatch.setattr(orchestrator, "_gen_verify_backend", regenerate)
+    state = _gen_state(tmp_path, policy)
+    assert await orchestrator._run_and_verify_app(state) == stop
+    assert stopped == [tmp_path]
+    result = orchestrator._stopped_over_budget(state, "the backend could not be rebuilt in time")
+    assert "url" not in result and "live_app" not in result
+
+
+@pytest.mark.parametrize("cause, still_runs", [("launch_not_approved", True), ("slot_unavailable", False)],
+                         ids=["card-refused", "stopped-after-claim"])
+async def test_a_relaunch_that_fails_after_a_launched_attempt_sends_no_address(tmp_path, policy, live_apps_on,
+                                                                               monkeypatch, gen_store, cause,
+                                                                               still_runs):
+    """The first attempt's app failed its probe; the run says so, and never
+    hands its address over as a working app's."""
+    address = "http://app1.view.localhost:8080/"
+    attempts = iter([
+        _result(probe=(ProbeResult(path="/api/health", status=500),)),
+        LiveAppLaunchError(f"Not launched: {cause}.", cause=cause),
+    ])
+
+    async def launch(session, **kwargs):
+        step = next(attempts)
+        if isinstance(step, Exception):
+            raise step
+        return step
+
+    async def regenerate(state, extra_context=""):
+        return None
+
+    async def running_address(session, *, folder):
+        return address if still_runs else None
+
+    async def must_not_stop(session, *, folder):
+        raise AssertionError("the launch failure leaves the app as it was")
+
+    monkeypatch.setattr(las, "launch_live_app", launch)
+    monkeypatch.setattr(las, "running_app_address", running_address)
+    monkeypatch.setattr(las, "stop_live_app", must_not_stop)
+    monkeypatch.setattr(orchestrator, "_gen_verify_backend", regenerate)
+    state = _gen_state(tmp_path, policy)
+    assert await orchestrator._run_and_verify_app(state) is orchestrator.NOT_LAUNCHED
+    result = orchestrator._not_launched(state)
+    assert result["status"] == "not_launched" and result["cause"] == cause
+    assert "url" not in result and "live_app" not in result
+    assert result["detail"].startswith(f"Not launched: {cause}. The app this run launched earlier ")
+    assert result["detail"].endswith("failed its check: health check GET /api/health returned 500 (expected 200).")
+    assert (f"still runs at `{address}`" in result["detail"]) is still_runs
+
+
 async def test_a_probe_the_slot_couldnt_run_ends_the_run_without_a_new_backend(tmp_path, policy, live_apps_on,
                                                                               monkeypatch, gen_store):
     async def launch(session, **kwargs):

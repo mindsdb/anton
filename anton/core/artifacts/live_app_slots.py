@@ -1165,7 +1165,7 @@ async def launch_live_app(
                         # access check also asks the slot who runs it now,
                         # and claiming one here could clear the record
                         # another process's launch just wrote.
-                        await _record(host.claim(slot))
+                        await _claim(host, client, slot)
                         claimed, claimed_slot = current.app, slot
                     if current.state != "empty":
                         await asyncio.to_thread(_reset, client)
@@ -1294,6 +1294,30 @@ async def _record(step: Awaitable[None]) -> None:
         ) from exc
 
 
+async def _claim(host: LiveAppHost, client: SlotClient, slot: int) -> None:
+    """`host.claim(slot)`, which a Stop doesn't cut short. A host may finish
+    the claim's record after the Stop, and that record then says the app was
+    replaced while it still runs where nobody can open it. So a claim that
+    went through after a Stop resets the slot and tells the host the launch
+    failed before the Stop goes on. Raises `LiveAppLaunchError` when the
+    claim fails. The caller holds the slot's lock."""
+    claiming = asyncio.ensure_future(_record(host.claim(slot)))
+    try:
+        await asyncio.shield(claiming)
+    except asyncio.CancelledError:
+        while not claiming.done():
+            try:
+                await asyncio.wait({claiming})
+            except asyncio.CancelledError:
+                continue
+        if not claiming.cancelled() and claiming.exception() is None:
+            try:
+                await asyncio.shield(asyncio.to_thread(_reset_quietly, client))
+            finally:
+                await _report_launch_failed(host, slot)
+        raise
+
+
 async def _report_launch_failed(host: LiveAppHost, slot: int) -> None:
     """Tell the host that the app `claim` stopped in `slot` is gone and
     nothing replaced it. Never raises an `Exception`."""
@@ -1352,31 +1376,57 @@ def _write_log(folder: Path, tail: str) -> None:
         _log.warning("could not write %s for %s", BACKEND_LOG_FILENAME, folder, exc_info=True)
 
 
-async def stop_live_app(session, *, folder: Path) -> None:
-    """Stop the app a slot runs from `folder` for this session's launcher, if
-    one does: a generation that gave up on it. The host hears of it as a
-    launch that failed. Never raises an `Exception`."""
+class _RunningApp(NamedTuple):
+    host: LiveAppHost
+    client: SlotClient
+    app_id: str
+    slot: int
+
+
+async def _running_app(session, folder: Path) -> _RunningApp | None:
+    """The slot that runs the app from `folder` for this session's launcher,
+    or None when none does or the slots can't say."""
     host: LiveAppHost | None = getattr(session, "_live_app_host", None)
     if host is None:
-        return
+        return None
     try:
         clients = [SlotClient(a, token=host.launch_token) for a in live_app_slot_addresses()]
         app_id = app_identity(folder)
     except (LiveAppConfigError, OSError):
-        return
+        return None
     index = running_slot(await _read_statuses(clients), app_id, host.launcher)
-    if index is None:
+    return None if index is None else _RunningApp(host, clients[index], app_id, index + 1)
+
+
+async def running_app_address(session, *, folder: Path) -> str | None:
+    """The address a slot serves the app from `folder` at for this session's
+    launcher, or None when none runs it. Never raises an `Exception`."""
+    running = await _running_app(session, folder)
+    if running is None:
+        return None
+    try:
+        return app_address(running.slot)
+    except LiveAppConfigError:
+        return None
+
+
+async def stop_live_app(session, *, folder: Path) -> None:
+    """Stop the app a slot runs from `folder` for this session's launcher, if
+    one does: a generation that gave up on it. The host hears of it as a
+    launch that failed. Never raises an `Exception`."""
+    running = await _running_app(session, folder)
+    if running is None:
         return
-    client = clients[index]
+    host, client = running.host, running.client
     async with _slot_locks().setdefault(client.address, asyncio.Lock()):
-        if not _holds(await _read_status(client), app_id, host.launcher):
+        if not _holds(await _read_status(client), running.app_id, host.launcher):
             return
         try:
-            await _record(host.claim(index + 1))
+            await _claim(host, client, running.slot)
         except LiveAppLaunchError:
             return
         await asyncio.to_thread(_reset_quietly, client)
-        await _report_launch_failed(host, index + 1)
+        await _report_launch_failed(host, running.slot)
 
 
 def launch_paths_changed(before: dict[str, object], after: dict[str, object]) -> bool:
