@@ -385,6 +385,18 @@ Every push to `staging` publishes a **release candidate** through [`.github/work
 - **Don't push `v*` tags directly.** Same protection applies.
 - **Don't hand-edit a version.** There's no version file to bump — the tag is the source of truth, and both publishers derive the wheel version from it.
 
+### Running the test suite
+
+CI runs four unit-test shards on separate runners while stub E2E runs alongside them. Each shard collects the full unit suite, then selects whole files using a stable hash of their repository-relative paths. Separate checkouts keep the shared scratchpad workspaces isolated. The `run-tests` check requires every shard, stub E2E and the Windows installer tests to succeed; failed or skipped jobs cannot pass the gate. Test durations are printed for the slowest 20 cases.
+
+Without shard options, pytest still runs the full selected suite. To reproduce one CI shard:
+
+```sh
+uv run --locked --group dev pytest tests/ --ignore=tests/e2e --shard-index 0 --shard-count 4 --durations=20
+```
+
+Run indices 0 through 3 in separate checkouts to reproduce all shards concurrently. Stub E2E uses `uv run --locked --group dev pytest tests/e2e/ --durations=20`.
+
 ### Editing CI / workflows
 
 Anything under [`.github/`](.github/) is owned by `@mindsdb/devops` via [CODEOWNERS](.github/CODEOWNERS). PRs touching workflows, actions, or release configuration require their review before merge.
