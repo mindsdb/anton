@@ -4630,9 +4630,8 @@ class ChatSession:
         change one. cowork-server refuses an org member's write to the limits
         unless they are an org admin (`_require_org_admin_for` in
         cowork/api/v1/endpoints/settings.py). A self-hosted stack's recording
-        proxy refuses every tester's (`decide`, with the limits among
-        `SHARED_SETTING_NAMES`, in recording-proxy/recording_proxy/rules.py of
-        cowork-self-hosted). Nothing tells the session which case it is in.
+        proxy refuses every tester's, since it counts the limits among the
+        shared settings. Nothing tells the session which case it is in.
         """
         if limit == "spend_ceiling":
             ceiling = self._max_turn_tokens + self._spend_ceiling_continued_tokens

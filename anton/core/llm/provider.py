@@ -1076,7 +1076,7 @@ _MINDSHUB_BILLING_CTA = (
 # select a billing verdict — see :func:`origin_is_known_third_party` (ENG-1693).
 #
 # VERIFIED COMPLETE for every host MindsHub ITSELF serves (review question on
-# #363, checked 2026-08-18 against the terraform host inventory, which is the
+# #363, checked 2026-08-18 against MindsHub's host inventory, which is the
 # source of truth for zones and certs). Deliberately not the broader claim
 # "every host that can serve a gateway billing denial" — see the relay note
 # below, where that is false by design. Two apexes cover the served set because
@@ -1084,7 +1084,7 @@ _MINDSHUB_BILLING_CTA = (
 # prod `api.mindshub.ai`, `api.staging.mindshub.ai`, `api.dev.mindshub.ai`,
 # per-PR envs `api-pr<N>.dev.mindshub.ai`, and the white-label surfaces
 # `llm.mdb.ai`, `llm.staging.mdb.ai`, vanity hosts under `*.mdb.ai` and `*.dev.mdb.ai`,
-# `view.mindshub.ai`. Terraform declares no other apex zone, and the wildcards
+# `view.mindshub.ai`. The host inventory declares no other apex zone, and the wildcards
 # `*.mindshub.ai` / `*.mdb.ai` cover anything added later under them. The
 # positive cases are pinned in tests/test_status_error_mapper.py so this
 # paragraph cannot quietly go stale.
