@@ -664,6 +664,8 @@ def main(
     ),
 ) -> None:
     """Anton — a self-evolving autonomous system."""
+    from anton.diagnostics import configure_logging
+    configure_logging()
     from anton.config.settings import AntonSettings
 
     settings = AntonSettings()

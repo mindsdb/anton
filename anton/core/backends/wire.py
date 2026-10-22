@@ -14,6 +14,11 @@ RESULT_END = "__ANTON_RESULT_END__"
 PROGRESS_MARKER = "__ANTON_PROGRESS__"
 HEARTBEAT_MARKER = "__ANTON_HEARTBEAT__"
 STDOUT_CHUNK_MARKER = "__ANTON_STDOUT_CHUNK__"
+# One line per model call a cell makes, carrying its usage record as JSON, so
+# the host logs it: the pad's own log is cell output the model reads. Sent only
+# when the host sets USAGE_MARKER_ENV in the pad's environment.
+USAGE_MARKER = "__ANTON_USAGE__"
+USAGE_MARKER_ENV = "ANTON_SCRATCHPAD_USAGE"
 # A cell's stdout limit, and how much more the worker sends for the parent to
 # scrub before it cuts, so a secret across the limit can still match whole.
 MAX_OUTPUT = 10_000

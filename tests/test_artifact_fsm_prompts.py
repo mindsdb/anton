@@ -4,6 +4,7 @@ import re
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from anton.core.datasources.data_vault import LocalDataVault
 from anton.core.tools.generate_artifact import prompts
@@ -308,6 +309,14 @@ def test_stateful_rules_carry_the_state_sdk_contract():
     assert "EXTERNAL database" in stateful
 
 
+def test_stateful_rules_show_versioned_read_modify_write():
+    stateful = prompts.build_backend_system_prompt(Path("/tmp/a"), stateless=False)
+    assert "todos.get(" in stateful
+    assert 'if_version=game["_v"]' in stateful
+    assert "ConditionalCheckFailed" in stateful
+    assert 'games.put("current", new_game(), if_not_exists=True)' in stateful
+
+
 def test_stateful_rules_say_which_items_come_back_without_keys():
     """An app counted with `increment` and listed with `query`, read the option
     from `sk`, got None and showed every count as 0: the items those calls
@@ -461,7 +470,7 @@ def test_verifier_contract_promises_the_browser_load_for_both_page_kinds():
     assert "headless browser" not in prompts._VERIFIER_CONTRACT  # shared head only
     html = prompts.build_subagent_system_prompt(Path("/tmp/a"))
     front = prompts.build_frontend_system_prompt(Path("/tmp/a"))
-    assert "loaded once from\n  disk right after these checks" in html
+    assert "the page is also loaded once right\n  after these checks" in html
     assert "local file that does not exist" in html
     assert "running backend" not in html
     assert "loaded once from\n  its running backend after the launch" in front
@@ -792,6 +801,28 @@ def test_tech_spec_instruction_drops_the_no_restate_rule_without_a_prd():
     assert "Implementation notes" in instruction
 
 
+def test_tech_spec_instruction_names_the_user_language_and_keeps_headings():
+    """spec.md is written in the user's language, but `## Backend` is read
+    back by name (`engine._declared_api_paths`), so headings stay as listed."""
+    instruction = prompts.build_tech_spec_instruction(
+        _state(artifact_type="fullstack-stateless-app", user_language="Russian")
+    )
+    assert "Write the prose in Russian" in instruction
+    assert (
+        "`## Insights`, `## Implementation notes` and `## Backend` exactly as "
+        "written, in English"
+    ) in instruction
+    html = prompts.build_tech_spec_instruction(
+        _state(artifact_type="html-app", is_fullstack=False, user_language="Russian")
+    )
+    assert "`## Insights` and `## Implementation notes` exactly as written" in html
+
+
+def test_tech_spec_instruction_falls_back_without_a_language():
+    instruction = prompts.build_tech_spec_instruction(SimpleNamespace())
+    assert "Write the prose in English" in instruction
+
+
 def test_tech_spec_instruction_adds_a_backend_section_for_fullstack():
     """Fullstack specs feed the API design: they get a `## Backend` section
     on top of the shared rules, not a licence to retell the PRD."""
@@ -1032,8 +1063,12 @@ def test_html_prompt_states_each_rule_once():
     assert "NOT part of the job" in s
 
 
-def test_html_prompt_pins_ui_language_to_the_prd():
-    assert "language of the PRD" in _html_prompt()
+def test_html_prompt_names_the_ui_language():
+    """Named, not "the language of the PRD": a step left to infer the
+    language is where an English run turned Russian."""
+    s = _html_prompt()
+    assert "Write the UI text in English unless the PRD or the brief asks" in s
+    assert "language of the PRD" not in s
 
 
 def test_html_prompt_quotes_the_markers_and_the_size_from_the_constants():
@@ -1108,7 +1143,7 @@ def test_fullstack_prompt_names_its_input_sections_and_the_api_spec():
         prompts.PRD_SECTION_FOOTER,
     ):
         assert heading in s, heading
-    assert "language of the PRD" in s
+    assert "Write the UI text in English unless the PRD or the brief asks" in s
     # The two fullstack-only verifier failures are announced as such.
     assert 'name="api-base"' in s
     assert "fails the step" in s

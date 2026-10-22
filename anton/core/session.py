@@ -30,14 +30,25 @@ from anton.core.idle_scratchpad import (
     without_scratchpad,
 )
 from anton.core.llm import jev as _jev
+from anton.core.llm.effort import (
+    TRUNCATION_RETRY_NOTE,
+    client_stream_budget,
+    effort_ceiling_of,
+    retry_budget,
+)
 from anton.core.llm.endpoints import ENDPOINT_MINDSHUB, classify_base_url, classify_endpoint
 from anton.core.llm.identity import DeploymentIdentity, product_lines, serving_model_lines
-from anton.core.llm.liveness import ModelCallTracker, arm_turn_tracker, disarm_turn_tracker
+from anton.core.llm.liveness import (
+    MODEL_WAIT_PHASE,
+    ModelCallTracker,
+    arm_turn_tracker,
+    disarm_turn_tracker,
+)
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.acc import AnteriorCingulate
 from anton.core.root_cause import RootCauseLedger
 from anton.core.root_cause import classify as classify_root_cause
-from anton.core.memory.base import Engram, LearnedMemoryScope
+from anton.core.memory.base import Engram, LearnedMemoryScope, MemoryRead
 from anton.core.memory.cerebellum import Cerebellum
 from anton.core.memory.skills import SkillStore
 from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
@@ -77,7 +88,11 @@ from anton.core.llm.provider import (
     TransientProviderError,
     context_window,
     damaged_tool_call_result,
+    is_stream_drop,
+    is_image_refusal,
+    log_background_done,
     provider_failure_kind,
+    usage_log_enabled,
 )
 from anton.core.llm.structured import looks_truncated, truncation_verdict, usable_tool_call
 from anton.core.llm.tracing import (
@@ -118,6 +133,8 @@ from anton.core.utils.scratchpad import (
     prepare_scratchpad_exec,
     format_cell_result,
     observe_scratchpad_cell,
+    fill_in_scratchpad_action,
+    scratchpad_action,
 )
 from anton.core.utils.write_check import parse_http_write_rules
 # Artifact-edit tracking + lint and the scratchpad observer hooks: shared with
@@ -126,11 +143,23 @@ from anton.core.utils.write_check import parse_http_write_rules
 from anton.core.tools.tool_handlers import (
     _fire_post_execute,
     _fire_pre_execute,
+    cell_content_with_lint,
+    check_cell_artifacts,
+    PageKey,
+    page_check_lines,
     preliminary_cell,
     resolve_artifact_store,
-    snapshot_existing_artifact_mtimes,
-    track_edits_since,
-    lint_changed_artifact_files,
+    snapshot_existing_artifacts,
+)
+from anton.core.artifacts.render_check import (
+    RenderStatus,
+    confirm_refused_screenshots,
+    confirm_refused_tool_images,
+    drop_older_screenshots,
+    drop_refused_screenshots,
+    drop_refused_tool_images,
+    screenshots_refused,
+    tool_images_refused,
 )
 
 from anton.explainability import ExplainabilityCollector, ExplainabilityStore
@@ -228,6 +257,17 @@ def _legacy_looks_like_failure(text: str) -> bool:
     return any(m in text for m in _LEGACY_FAILURE_MARKERS)
 
 
+# Strong references: asyncio keeps only a weak one to a task nothing else holds.
+_BACKGROUND_MARKERS: set[asyncio.Task] = set()
+
+
+async def _log_background_done_after(tasks: set[asyncio.Task], trace: TraceContext) -> None:
+    # `wait`, not `gather`: a failed task keeps its exception for asyncio to report.
+    if tasks:
+        await asyncio.wait(tasks)
+    log_background_done(trace)
+
+
 def _discarded_call_reason(tc: ToolCall) -> str:
     """Why this call's step is closing without having run.
 
@@ -247,7 +287,7 @@ def _known_scratchpad_action(tc: ToolCall) -> str | None:
     `StreamToolResult.action` as ours: `"message"`, for one, means a tool's
     message to the user.
     """
-    action = tc.input.get("action") if isinstance(tc.input, dict) else None
+    action = scratchpad_action(tc.input) if isinstance(tc.input, dict) else None
     allowed = SCRATCHPAD_TOOL.input_schema["properties"]["action"]["enum"]
     return action if action in allowed else None
 
@@ -300,6 +340,7 @@ if TYPE_CHECKING:
     from rich.console import Console
     from anton.context.self_awareness import SelfAwarenessContext
     from anton.chat_ui import EscapeWatcher
+    from anton.core.artifacts.live_app_slots import LiveAppHost
     from anton.core.llm.client import LLMClient
     from anton.core.mcp.client import McpSession
     from anton.core.memory.cortex import Cortex
@@ -1663,6 +1704,9 @@ class ChatSessionConfig:
     # session, since the folders differ per person; a runtime factory that
     # cannot take it makes the session refuse to build.
     cell_sandbox: CellSandbox | None = None
+    # Who launches live apps and where each launch is recorded. Set by a host
+    # that runs live apps in app slots (`live_app_slots`); None launches none.
+    live_app_host: LiveAppHost | None = None
     console: Console | None = None
     initial_history: list[dict] | None = None
     history_store: HistoryStore | None = None
@@ -1915,6 +1959,10 @@ class ChatSession:
         # Kept so an artifact backend can be given the same project .env the
         # scratchpad gets; it is never applied to this process.
         self._workspace_env_overlay = config.workspace_env_overlay or {}
+        self._live_app_host = config.live_app_host
+        # The slugs generate_artifact is building now: the check after each
+        # cell leaves their live apps alone, since the run launches them.
+        self._live_apps_building: set[str] = set()
         self._console = config.console
         if self._console is None:
             # connect_new_datasource's interactive mode needs a terminal to
@@ -2061,6 +2109,33 @@ class ChatSession:
         # project-wide) directory can never be mistaken for this turn's work.
         # Reset at the top of every turn.
         self._artifacts_touched: set[str] = set()
+        # (artifact slug, page) -> how that page last fared in a browser this
+        # turn (`passed`, `failed` or `unverified`), from generate_artifact
+        # and the checks after each cell. On a sandboxed deployment the turn
+        # ends with a line for each artifact with a page that did not pass.
+        # Reset every turn.
+        self._page_checks: dict[PageKey, RenderStatus] = {}
+        # The pages whose findings an unverified check already listed for
+        # the agent this turn, in a cell's result or in generate_artifact's
+        # `checks_skipped`. A later unverified check of such a page lists
+        # none (`tool_handlers.check_cell_artifacts`). Reset every turn.
+        self._unverified_findings_listed: set[PageKey] = set()
+        # Set once the model refused a request carrying render-check
+        # screenshots and took it without them
+        # (`_confirm_render_screenshots_refused`). From then on the checks'
+        # findings reach the agent without a screenshot, for the rest of the
+        # session; `tool_handlers.render_screenshots_refused` reads it.
+        # generate_artifact sets it too when the model refused its retry's
+        # screenshot (`engine._run_loop`).
+        self._render_screenshots_refused = False
+        # Set once the model refused a request carrying an image a tool
+        # returned (what `read_image` loaded) and took it without that image
+        # (`_confirm_tool_images_refused`). From then on `read_image` answers
+        # in text instead of sending another image the model would refuse;
+        # `tool_handlers.images_refused` reads it. Render screenshots keep
+        # their own flag above: one corrupt file draws a
+        # refusal from a model that takes images too.
+        self._images_refused = False
         # Cerebellum: supervised error learning over scratchpad cells.
         # Buffers errored/warning cells across the turn, runs one diff
         # call at end-of-turn, and encodes lessons via cortex.encode(),
@@ -2201,6 +2276,25 @@ class ChatSession:
         surface, and must not be able to mutate the session's own record.
         """
         return set(self._artifacts_touched)
+
+    def _unverified_page_lines(self) -> list[str]:
+        """The lines that end the turn's final message on a sandboxed
+        deployment: one per artifact with a page that did not pass its last
+        browser check this turn. Written by anton, not the model, so the user
+        hears it whatever the reply claims. Empty without a sandbox: there
+        each cell's check (`tool_handlers._check_pages`) already tells the
+        agent which page failed or was not checked in a browser."""
+        if not self._page_checks or cell_sandbox_of(self._scratchpads) is None:
+            return []
+        return page_check_lines(resolve_artifact_store(self), checks=self._page_checks)
+
+    @property
+    def memory_read(self) -> MemoryRead | None:
+        """The learned memory this session's latest turn put in front of the
+        model (Cortex.memory_read). A host reads it after the turn to record
+        it. None without a Cortex, or before the first turn built its prompt.
+        """
+        return self._cortex.memory_read if self._cortex is not None else None
 
     @property
     def last_compaction(self) -> dict | None:
@@ -3322,11 +3416,13 @@ class ChatSession:
             # smaller `max_tokens` (or a distinct router model with a lower
             # output cap) would otherwise get a 400 on every compaction, and the
             # handler below logs only the exception type — proactive compaction
-            # would be dead and invisible. Read through `_turn_max_tokens` for
+            # would be dead and invisible. Read through `_client_max_tokens` for
             # its defensive fallback: a client that doesn't expose the attribute
             # would otherwise make `min()` raise, and the raise lands in that
-            # same blind `except`.
-            output_budget_tokens = min(_SUMMARY_OUTPUT_BUDGET, self._turn_max_tokens())
+            # same blind `except`. Not `_turn_max_tokens`: that is the
+            # streamed-call budget, which can be larger than what a non-streamed
+            # call may ask for.
+            output_budget_tokens = min(_SUMMARY_OUTPUT_BUDGET, self._client_max_tokens())
             summary_response = await self._llm.summarize(
                 system=_SUMMARY_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_content}],
@@ -3484,6 +3580,27 @@ class ChatSession:
             return min(max(float(retry_after), d), max_delay)
         return d
 
+    def _attempt_limit_error(
+        self, exc: TransientProviderError, attempts: int
+    ) -> ProviderOverloadedError:
+        """The terminal for a transient that outlasted its retry count.
+
+        Keeps anton's own typed message: it already says what happened ("The
+        model provider returned 500.") and is the one detail that tells a user
+        or a support thread which failure this was. Only the attempt count is
+        new. Names the model that actually failed (planning or coding), so the
+        card's provider lookup and its BYOK-vs-managed nudge are right.
+        """
+        detail = str(exc).rstrip()
+        if detail and detail[-1] not in ".!?":
+            detail += "."
+        return ProviderOverloadedError(
+            f"{detail} It did not recover after {attempts} attempts.",
+            provider=getattr(exc, "provider", "") or "",
+            model=(getattr(exc, "model", "") or "")
+            or getattr(self._llm, "planning_model", "") or "",
+        )
+
     async def _backoff_sleep(self, delay: float) -> bool:
         """Sleep `delay` seconds, waking early if the turn is cancelled.
 
@@ -3563,6 +3680,48 @@ class ChatSession:
             if changed:
                 msg["content"] = new_content
         return removed
+
+    def _drop_render_screenshots(self) -> int:
+        """Replace every render-check screenshot in history with a note that
+        it was removed after a refusal; return how many went.
+
+        For a model that may take no image input. Unlike
+        `_strip_image_blocks_from_history`, this removes only images anton
+        added itself: the findings beside each screenshot stay, and an image
+        the person attached is left for that repair to judge. Checks keep
+        their screenshots until `_confirm_render_screenshots_refused`.
+        """
+        return drop_refused_screenshots(self._history)
+
+    def _confirm_render_screenshots_refused(self) -> None:
+        """The request went through without the render-check screenshots, so
+        they caused the refusal: say so in history, where a session seeded
+        from it finds it (`screenshots_refused`), and attach none for the
+        rest of the session."""
+        confirm_refused_screenshots(self._history)
+        self._render_screenshots_refused = True
+
+    def _drop_refused_tool_images(self) -> int:
+        """Replace every image a tool returned in history (what `read_image`
+        loaded) with a note that it was removed after a refusal; return how
+        many went.
+
+        The counterpart of `_drop_render_screenshots` for the other images
+        anton put in history itself. A render screenshot is left to that
+        method, and an image the person attached to
+        `_strip_image_blocks_from_history`. `read_image` keeps sending images
+        until a request goes through without them
+        (`_confirm_tool_images_refused`).
+        """
+        return drop_refused_tool_images(self._history)
+
+    def _confirm_tool_images_refused(self) -> None:
+        """The request went through without the tool images, so they caused
+        the refusal: say so in history, where a session seeded from it finds
+        it (`tool_images_refused`), and send no more for the rest of the
+        session."""
+        confirm_refused_tool_images(self._history)
+        self._images_refused = True
 
     def _seal_dangling_tool_uses(self, reason: str = "interrupted") -> int:
         """Append synthetic `tool_result` blocks for any unmatched
@@ -4845,6 +5004,7 @@ class ChatSession:
         system: str,
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
+        wait_note: str | None = None,
         messages_factory: Callable[[], list[dict]] | None = None,
         allow_native_web_tools: bool = True,
     ) -> AsyncIterator[StreamEvent]:
@@ -4878,6 +5038,8 @@ class ChatSession:
             kwargs["tools"] = tools
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
+        if wait_note is not None:
+            kwargs["wait_note"] = wait_note
         if allow_native_web_tools and self._native_web_tools:
             kwargs["native_web_tools"] = self._native_web_tools
 
@@ -5297,6 +5459,8 @@ class ChatSession:
         # reports only what the CURRENT turn touched. Hosts that build a fresh
         # session per turn get the same result either way.
         self._artifacts_touched = set()
+        self._page_checks = {}
+        self._unverified_findings_listed = set()
         # What the project held when this turn began: a cell may delete or
         # rename a file it wrote this turn without asking, not one from before.
         if self._write_gate is not None:
@@ -5355,6 +5519,14 @@ class ChatSession:
         # NOT be stamped.
         stamped_input = _stamp_user_content(user_input, datetime.now(timezone.utc))
         self._append_history({"role": "user", "content": stamped_input})
+        # A host may seed history with earlier turns' render screenshots.
+        drop_older_screenshots(self._history)
+        # A host that builds a session per turn seeds the notes that say the
+        # model refused a screenshot, or a tool's image, in an earlier turn.
+        if screenshots_refused(self._history):
+            self._render_screenshots_refused = True
+        if tool_images_refused(self._history):
+            self._images_refused = True
 
         # Log user input to episodic memory
         if self._episodic is not None:
@@ -5371,6 +5543,15 @@ class ChatSession:
         assistant_text_parts: list[str] = []
         _max_auto_retries = 2
         _retry_count = 0
+        _drop_retries = 0
+        # The one resend this turn allows after the model refused a request
+        # over a render-check screenshot (see the handler below), and whether
+        # it still waits for a request that goes through without them. The
+        # same pair for the images other tools returned (`read_image`).
+        _screenshots_dropped = False
+        _screenshot_drop_unconfirmed = False
+        _tool_images_dropped = False
+        _tool_image_drop_unconfirmed = False
         # One-time cap grace, reset once per turn_stream() call rather than in
         # `_stream_and_handle_tools`, which retries re-enter and would re-arm.
         self._spend_ceiling_grace_used = False
@@ -5447,15 +5628,33 @@ class ChatSession:
         _calls_token = arm_turn_tracker(_turn_calls)
 
         _turn_exc: BaseException | None = None
+        _turn_raised = False
         # A wrap-up failure the retry-exhausted site has already booked, so
         # the finally keeps that terminal instead of filing it as "error".
         _booked_exc: BaseException | None = None
+        # A continuation boundary no answer text has followed yet: a consumer
+        # takes the next text for the answer that replaces the one it showed.
+        _replacement_pending = False
         try:
             while True:
                 try:
                     async for event in self._stream_and_handle_tools(user_msg_str):
+                        # The first model call after the drop sends the
+                        # history without the dropped images; its completion
+                        # shows they caused the refusal. Before the generator
+                        # resumes, so the tools it runs next see the flag.
+                        if _screenshot_drop_unconfirmed and isinstance(event, StreamComplete):
+                            _screenshot_drop_unconfirmed = False
+                            self._confirm_render_screenshots_refused()
+                        if _tool_image_drop_unconfirmed and isinstance(event, StreamComplete):
+                            _tool_image_drop_unconfirmed = False
+                            self._confirm_tool_images_refused()
                         if isinstance(event, StreamTextDelta):
                             assistant_text_parts.append(event.text)
+                            if event.text.strip():
+                                _replacement_pending = False
+                        elif isinstance(event, StreamTaskProgress) and event.phase in ("continuation", "handback"):
+                            _replacement_pending = event.phase == "continuation"
                         yield event
                     break  # completed successfully
                 except Exception as _agent_exc:
@@ -5476,6 +5675,27 @@ class ChatSession:
                     # host's reconnect/update-key card.
                     if _is_provider_auth_error(_agent_exc):
                         raise
+
+                    # A connection that died after the response started. It is
+                    # counted, not timed like the incident window below: that
+                    # window is wall-clock time from the turn's first transient,
+                    # and one long stream outlasts it, so a second drop would
+                    # end the turn without a retry. Same backoff and no recovery
+                    # note, as for any provider blip.
+                    if is_stream_drop(_agent_exc):
+                        self._seal_dangling_tool_uses("interrupted by a transient provider error")
+                        if _drop_retries < _max_auto_retries:
+                            delay = self._transient_backoff_delay(_drop_retries)
+                            _drop_retries += 1
+                            if await self._backoff_sleep(delay):
+                                break
+                            continue
+                        _stamp_retry_terminal(
+                            self._turn_cost, _agent_exc, "request_attempt_limit"
+                        )
+                        raise self._attempt_limit_error(
+                            _agent_exc, _drop_retries + 1
+                        ) from _agent_exc
 
                     # ENG-673: a mid-stream transient failure that had NO prior
                     # retry (overload smuggled into a 200, or a truncated stream).
@@ -5594,6 +5814,50 @@ class ChatSession:
                             provider=getattr(_agent_exc, "provider", "") or "",
                             model=_model,
                         ) from _agent_exc
+
+                    # A model that takes no image input refuses every request
+                    # carrying a render-check screenshot or an image
+                    # `read_image` loaded, and the request is rebuilt from
+                    # history, so a plain resend fails the same way. Those
+                    # images are anton's own additions: drop them, keep the
+                    # text beside them, and send the request once more within
+                    # this turn, with no recovery note, since the agent did
+                    # nothing wrong. A model that takes images refuses a
+                    # corrupt file too, so the tool images go first, and the
+                    # screenshots go only on a refusal that finds no tool
+                    # image left to drop. Each kind is dropped at most once
+                    # per turn, so this resends at most twice. Before the
+                    # count below, which is for resends of an unchanged
+                    # request. Sealed first, as every resend here is. Checks
+                    # and `read_image` keep sending images until a request
+                    # goes through without them (above). An image refusal
+                    # after a drop shows the dropped images were not the
+                    # cause, so nothing confirms that drop after it. The one
+                    # exception is a refusal after a tool-image drop that
+                    # still finds screenshots: the screenshots go too, and
+                    # the request that then goes through confirms both.
+                    if is_image_refusal(_agent_exc):
+                        self._seal_dangling_tool_uses("interrupted by error")
+                        _tool_images = 0 if _tool_images_dropped else self._drop_refused_tool_images()
+                        _screens = (
+                            0 if (_tool_images or _screenshots_dropped)
+                            else self._drop_render_screenshots()
+                        )
+                        if _tool_images:
+                            _screenshot_drop_unconfirmed = False
+                            _tool_images_dropped = _tool_image_drop_unconfirmed = True
+                        elif _screens:
+                            _screenshots_dropped = _screenshot_drop_unconfirmed = True
+                        else:
+                            _screenshot_drop_unconfirmed = _tool_image_drop_unconfirmed = False
+                        if _screens or _tool_images:
+                            logger.info(
+                                "the model refused a request with images; sending it "
+                                "again without %d render-check screenshot(s) and %d "
+                                "other tool image(s)",
+                                _screens, _tool_images,
+                            )
+                            continue
 
                     _retry_count += 1
                     # Anthropic's API rejects any history where the
@@ -5747,12 +6011,6 @@ class ChatSession:
                             _stamp_retry_terminal(
                                 self._turn_cost, _agent_exc, "request_attempt_limit"
                             )
-                            # Name the model that actually failed (planning OR
-                            # coding) so the card's provider lookup — and so the
-                            # BYOK-vs-managed nudge it picks — is right.
-                            _model = (getattr(_agent_exc, "model", "") or "") or getattr(
-                                self._llm, "planning_model", ""
-                            ) or ""
                             # NO rate-limit special case here, deliberately.
                             # A 429 reaching the COUNT path is by definition one
                             # `classify_transient` could NOT confirm was a
@@ -5770,21 +6028,8 @@ class ChatSession:
                             # rate_limited card has no interval to time-gate its
                             # Retry with. The generic branch below is honest —
                             # anton's own typed message, no claim either way.
-                            # KEEP anton's own classification in the copy. The
-                            # typed message already says what happened ("The
-                            # model provider returned 500.") and ENG-673 put it
-                            # there deliberately; replacing it with a generic
-                            # "could not be reached" would throw away the one
-                            # detail that tells a user — or a support thread —
-                            # which failure this was. Only the attempt count is
-                            # new information.
-                            _detail = str(_agent_exc).rstrip()
-                            if _detail and _detail[-1] not in ".!?":
-                                _detail += "."
-                            raise ProviderOverloadedError(
-                                f"{_detail} It did not recover after {_retry_count} attempts.",
-                                provider=getattr(_agent_exc, "provider", "") or "",
-                                model=_model,
+                            raise self._attempt_limit_error(
+                                _agent_exc, _retry_count
                             ) from _agent_exc
                         # Exhausted retries — stop and summarize for the user.
                         # Mark the terminal: the apology below is yielded as
@@ -5875,12 +6120,28 @@ class ChatSession:
                                 _booked_exc = e
                             raise
                         break
+            if not self._cancel_event.is_set():
+                page_lines = self._unverified_page_lines()
+                if page_lines:
+                    if _replacement_pending:
+                        # Not the replacement answer: without this a consumer
+                        # drops the answer the user read for these lines.
+                        yield StreamTaskProgress(phase="handback", message="")
+                    text = "\n".join(page_lines)
+                    if any(part.strip() for part in assistant_text_parts):
+                        # A paragraph of its own, since the reply before it
+                        # may end without a line break.
+                        text = "\n\n" + text
+                    assistant_text_parts.append(text)
+                    yield StreamTextDelta(text=text)
+                    self._append_history({"role": "assistant", "content": text})
         except BaseException as _e:
             # Capture, don't classify — the finally needs to know whether THIS
             # turn failed, rather than asking the interpreter what the thread
             # happens to be handling (#309 review). Covers GeneratorExit and
             # CancelledError too, both BaseException, both real turn endings.
             _turn_exc = None if _e is _booked_exc else _e
+            _turn_raised = True
             raise
         finally:
             self._turn_memory = None
@@ -5916,6 +6177,9 @@ class ChatSession:
             # guard passes the books this turn opened so a late finalizer
             # can't close a newer turn's.
             self._emit_turn_cost(expected=_turn_cost_books, exc=_turn_exc)
+            if _turn_raised and usage_log_enabled():
+                # A turn that raised starts no end-of-turn work, so it is done now.
+                log_background_done(_turn_trace)
             try:
                 reset_trace_context(_trace_token)
             except ValueError:
@@ -5923,17 +6187,39 @@ class ChatSession:
                 # task anyway, so there is nothing to restore.
                 pass
 
-        # Log assistant response to episodic memory
-        if self._episodic is not None and assistant_text_parts:
-            self._episodic.log_turn(
-                self._turn_count + 1,
-                "assistant",
-                "".join(assistant_text_parts)[:2000],
-            )
+        usage_log = usage_log_enabled()
+        # The passes keep no handle on the tasks they start, and nothing else can
+        # start one before the `finally` below: no await in between.
+        before = asyncio.all_tasks() if usage_log else set()
+        try:
+            # Log assistant response to episodic memory
+            if self._episodic is not None and assistant_text_parts:
+                self._episodic.log_turn(
+                    self._turn_count + 1,
+                    "assistant",
+                    "".join(assistant_text_parts)[:2000],
+                )
 
+            self._turn_count += 1
+            self._persist_history()
+            self._start_background_work(user_input, _turn_trace)
+        finally:
+            if usage_log:
+                # Also when a step above failed: the turn already wrote its turn_cost line.
+                marker = asyncio.create_task(
+                    _log_background_done_after(asyncio.all_tasks() - before, _turn_trace)
+                )
+                _BACKGROUND_MARKERS.add(marker)
+                marker.add_done_callback(_BACKGROUND_MARKERS.discard)
+
+        # The books are closed, so ended_by is final. A clean exit can still book
+        # "cancelled" (the CLI's cancel flag); that is a Stop, not a hand-back.
+        if _turn_cost_books.ended_by not in ("completed", "cancelled", "error"):
+            yield StreamTurnEnded(ended_by=_turn_cost_books.ended_by)
+
+    def _start_background_work(self, user_input: str | list[dict], trace: TraceContext) -> None:
+        """Schedule the end-of-turn memory passes of the turn `trace` names; none blocks the reply."""
         # Identity extraction (Default Mode Network — every 5 turns)
-        self._turn_count += 1
-        self._persist_history()
         if self._background_memory_active:
             if self._turn_count % 5 == 0 and isinstance(user_input, str):
                 if self._episodic:
@@ -5946,29 +6232,32 @@ class ChatSession:
                 else:
                     messages_str = user_input
 
-                self._spawn_background(self._cortex.maybe_update_identity(messages_str), _turn_trace)
+                self._spawn_background(self._cortex.maybe_update_identity(messages_str), trace)
             # Periodic memory vacuum (Systems Consolidation). Its compaction
             # task is started inside, so it runs in the background context.
-            self._background_context(_turn_trace).run(self._cortex.maybe_vacuum)
+            self._background_context(trace).run(self._cortex.maybe_vacuum)
 
         # Cerebellar consolidation — same fire-and-forget contract as
         # the non-streaming turn. Lets the user-facing stream finish
         # immediately while supervised error learning runs in the background.
-        self._schedule_cerebellum_flush(_turn_trace)
+        self._schedule_cerebellum_flush(trace)
         self._schedule_acc_flush()
-
-        # The books are closed, so ended_by is final. A clean exit can still book
-        # "cancelled" (the CLI's cancel flag); that is a Stop, not a hand-back.
-        if _turn_cost_books.ended_by not in ("completed", "cancelled", "error"):
-            yield StreamTurnEnded(ended_by=_turn_cost_books.ended_by)
 
     def _turn_max_tokens(self) -> int:
         """Output-token budget the turn's planning calls actually run with.
 
-        `looks_truncated` compares output tokens against the budget the
-        call was given; the main loop never overrides ``max_tokens``, so
-        that is the client default. Falls back to LLMClient's own default
-        when the client doesn't expose one (mocks, exotic hosts).
+        `looks_truncated` compares output tokens against the budget the call
+        was given. The main loop never passes ``max_tokens``, so that is the
+        client's streamed-call budget for the planning role, which follows the
+        reasoning effort.
+        """
+        return client_stream_budget(self._llm, "planning", default=self._client_max_tokens())
+
+    def _client_max_tokens(self) -> int:
+        """The client's own ceiling for non-streamed calls.
+
+        Falls back to LLMClient's default when the client doesn't expose one
+        (mocks, exotic hosts).
         """
         budget = getattr(self._llm, "max_tokens", None)
         return budget if isinstance(budget, int) and budget > 0 else 8192
@@ -6009,7 +6298,8 @@ class ChatSession:
         identically (measured: three unchanged retries 14 minutes apart,
         all silent):
 
-        - the output budget is doubled for this one call, and
+        - the output budget is raised for this one call, up to the streamed-call
+          ceiling; at the ceiling only the nudge changes, and
         - a corrective nudge is injected into history, matching how the round
           died — "continue where you left off" when partial text arrived,
           "answer now, deliberate less" when the whole budget went to internal
@@ -6053,22 +6343,30 @@ class ChatSession:
             {"role": "assistant", "content": llm_response.content or ""}
         )
         self._append_history({"role": "user", "content": nudge})
-        retry_budget = budget * 2
+        bigger = retry_budget(budget)
         logger.warning(
             "Response truncated at the output budget without a usable tool call "
             "(output_tokens=%s, budget=%s, stop_reason=%s, silent=%s, "
-            "cut_tool_call=%s) — retrying once with max_tokens=%s",
+            "cut_tool_call=%s) — retrying once %s max_tokens=%s",
             llm_response.usage.output_tokens,
             budget,
             llm_response.stop_reason,
             silent,
             cut_tool_call,
-            retry_budget,
+            "with" if bigger > budget else "at the same",
+            bigger,
         )
 
         retry: StreamComplete | None = None
+        # The retry can think as long as the first try did. Hosts render this
+        # phase as the live status line, and the note keeps it there once their
+        # own still-working ticks take over.
+        yield StreamTaskProgress(phase=MODEL_WAIT_PHASE, message=TRUNCATION_RETRY_NOTE)
         async for event in self.plan_stream_with_recovery(
-            system=system, tools=tools, max_tokens=retry_budget
+            system=system,
+            tools=tools,
+            max_tokens=bigger,
+            wait_note=TRUNCATION_RETRY_NOTE,
         ):
             if isinstance(event, StreamComplete):
                 retry = event
@@ -6082,14 +6380,14 @@ class ChatSession:
         if (
             not retried.tool_calls
             and not (retried.content or "").strip()
-            and looks_truncated(retried, retry_budget)
+            and looks_truncated(retried, bigger)
         ):
             logger.error(
                 "Truncation retry also burned its whole budget with no "
                 "visible output (output_tokens=%s, retry_budget=%s) — "
                 "surfacing failure to the user",
                 retried.usage.output_tokens,
-                retry_budget,
+                bigger,
             )
             self._append_history(
                 {"role": "assistant", "content": _TRUNCATION_FAILURE_NOTICE}
@@ -6335,6 +6633,9 @@ class ChatSession:
 
                 # Build assistant message with content blocks
                 self._ensure_replayable_calls(llm_response)
+                for tc in llm_response.tool_calls:
+                    if tc.name == "scratchpad" and isinstance(tc.input, dict):
+                        fill_in_scratchpad_action(tc.input)
                 assistant_content: list[dict] = []
                 if llm_response.content:
                     assistant_content.append(
@@ -6422,7 +6723,7 @@ class ChatSession:
                     # falls back to reading the clock itself. See the emit.
                     _tool_elapsed: float | None = None
                     try:
-                        if tc.name == "scratchpad" and tc.input.get("action") == "exec":
+                        if tc.name == "scratchpad" and scratchpad_action(tc.input) == "exec":
                             # Inline streaming exec — yields progress events
                             if self._write_gate is not None and self.emitter is not None:
                                 # Drained: the approval card prepare may raise
@@ -6488,8 +6789,8 @@ class ChatSession:
                                 # (below) can tell which artifact this cell
                                 # actually touched
                                 artifact_store = resolve_artifact_store(self)
-                                before_artifact_mtimes = (
-                                    snapshot_existing_artifact_mtimes(artifact_store)
+                                before_artifacts = (
+                                    snapshot_existing_artifacts(artifact_store)
                                     if artifact_store is not None
                                     else {}
                                 )
@@ -6524,31 +6825,34 @@ class ChatSession:
                                 )
                                 if cell is not None and artifact_store is not None:
                                     # handle_scratchpad's exec branch runs
-                                    # this same pair; this inline path is the
+                                    # this same check; this inline path is the
                                     # one the streaming product actually
                                     # takes, so it needs its own call.
-                                    track_edits_since(
-                                        self, artifact_store, before_artifact_mtimes
+                                    if self.emitter is not None:
+                                        # Drained: the card a live app's
+                                        # relaunch raises reaches the host
+                                        # only through the emitter, as
+                                        # prepare's card does above.
+                                        lint = None
+                                        agen = self._run_draining(check_cell_artifacts(
+                                            self, store=artifact_store, before=before_artifacts
+                                        ))
+                                        try:
+                                            async for _kind, _payload in agen:
+                                                if _kind == "event":
+                                                    yield _payload
+                                                else:
+                                                    lint = _payload
+                                        finally:
+                                            await agen.aclose()
+                                    else:
+                                        lint = await check_cell_artifacts(
+                                            self, store=artifact_store, before=before_artifacts
+                                        )
+                                    result_text = cell_content_with_lint(
+                                        result_text, lint,
+                                        cell_ok=not (cell.error or "").strip(),
                                     )
-                                    try:
-                                        lint_messages = await asyncio.to_thread(
-                                            lint_changed_artifact_files,
-                                            artifact_store, before_artifact_mtimes,
-                                            cell_sandbox=cell_sandbox_of(self._scratchpads),
-                                        )
-                                    except Exception:
-                                        lint_messages = []
-                                        logger.warning(
-                                            "artifact lint failed for this cell",
-                                            exc_info=True,
-                                        )
-                                    if lint_messages:
-                                        # cowork-server's figure sources cut this
-                                        # block from a replayed cell's output.
-                                        result_text += (
-                                            "\n\n[artifact lint]\n"
-                                            + "\n".join(lint_messages)
-                                        )
                                 # The runtime's verdict, not a text guess: a
                                 # cell with a raised error/timeout/kill failed;
                                 # stderr-only output (warnings) is not a
@@ -6908,6 +7212,9 @@ class ChatSession:
                     tool_results.append({"type": "text", "text": IDLE_SCRATCHPAD_NOTICE})
 
                 self._append_history({"role": "user", "content": tool_results})
+                # Every model call resends the whole history: one render
+                # screenshot in it, the newest, is enough.
+                drop_older_screenshots(self._history)
 
                 # Rebuild: a tool this round (e.g. recall_skill) may have
                 # registered new tools the follow-up must see.
@@ -7116,12 +7423,16 @@ class ChatSession:
             # Skipped when Jev decided; otherwise exactly the LLM verifier as before.
             for attempt, budget in enumerate(() if jev_decided else _VERIFIER_TOKEN_BUDGETS):
                 try:
-                    verdict = await self._llm.generate_object_code(
-                        _VerifierVerdict,
-                        system=verifier_system,
-                        messages=verify_messages,
-                        max_tokens=budget,
-                    )
+                    # A verdict is a short decision. At the turn's own top
+                    # efforts the model can think past both verdict budgets
+                    # before it reaches the tool call.
+                    with effort_ceiling_of(self._llm, "high"):
+                        verdict = await self._llm.generate_object_code(
+                            _VerifierVerdict,
+                            system=verifier_system,
+                            messages=verify_messages,
+                            max_tokens=budget,
+                        )
                     break
                 except StructuredOutputError as exc:
                     # A truncated verdict is a budget problem, not a verdict: the

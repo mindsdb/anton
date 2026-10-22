@@ -3,14 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
-# Must be the SAME module the engine catches against. A plain `httpx` here
-# builds its error from a different class tree, the engine's except clause
-# never matches, and this file would assert a retry while actually proving
-# that a dropped stream is fatal.
-import httpx2 as httpx
 import pytest
 
-from anton.core.llm.provider import LLMResponse, StreamComplete, ToolCall, Usage
+from anton.core.llm.provider import (
+    LLMResponse,
+    StreamComplete,
+    ToolCall,
+    TransientProviderError,
+    Usage,
+)
 from anton.core.tools.generate_artifact.engine import _run_loop
 from anton.core.tools.generate_artifact.state import GEN_WRITE_MAX_TOKENS
 from anton.core.tools.generate_artifact.sub_tools import (
@@ -145,6 +146,32 @@ async def test_run_loop_records_no_cell_that_never_ran(tmp_path: Path, monkeypat
     assert isinstance(result, dict)
     assert result["scratchpad_execs"] == [
         {"name": "pad", "code": "print(df.head())", "output": "cell 2 ok: 100 rows"}
+    ]
+
+
+async def test_run_loop_records_a_cell_that_left_out_action(tmp_path: Path, monkeypatch):
+    """A call with `code` and no `action` runs as `exec`, so it is data-access code that ran."""
+    import anton.core.tools.tool_handlers as tool_handlers
+
+    monkeypatch.setattr(
+        tool_handlers, "handle_scratchpad", AsyncMock(return_value="cell 1 ok: 100 rows")
+    )
+    session = AsyncMock()
+    session._scratchpads.cell_sandbox = None
+    session._llm.plan_stream = _stream_mock(
+        _resp([
+            ToolCall(id="1", name="scratchpad", input={"name": "pad", "code": "print(df.head())"}),
+            ToolCall(id="2", name="finish", input={"summary": "done"}),
+        ])
+    )
+    result = await _run_loop(
+        session=session, system="s", kickoff="k",
+        artifact_path=tmp_path, require_files=False,
+        node_label="fetch_data_sample",
+    )
+    assert isinstance(result, dict)
+    assert result["scratchpad_execs"] == [
+        {"name": "pad", "code": "print(df.head())", "output": "cell 1 ok: 100 rows"}
     ]
 
 
@@ -608,12 +635,15 @@ async def test_truncation_on_a_write_round_is_judged_against_its_own_budget(
 
 
 def _dropping_stream():
-    """A stream that dies mid-iteration, as a real dropped connection does."""
+    """A stream that dies mid-iteration, raised as the providers type the drop."""
 
     async def _gen(**kw):
         if False:  # pragma: no cover - makes this an async generator
             yield None
-        raise httpx.RemoteProtocolError("peer closed connection")
+        raise TransientProviderError(
+            "Lost the connection to the model provider mid-response.",
+            code="connection_error", session_backoff=True,
+        )
 
     return _gen
 
@@ -671,11 +701,12 @@ async def test_a_second_drop_in_the_same_round_propagates(tmp_path: Path):
     session._llm.code_stream = Mock(
         side_effect=[_dropping_stream()(), _dropping_stream()()]
     )
-    with pytest.raises(httpx.RemoteProtocolError):
+    with pytest.raises(TransientProviderError):
         await _run_loop(
             session=session, system="s", kickoff="k", artifact_path=tmp_path,
             node_label="generate_frontend",
         )
+    assert session._llm.code_stream.call_count == 2
 
 
 async def test_read_text_file_paths_are_relative_to_the_artifact_folder(tmp_path: Path, monkeypatch):

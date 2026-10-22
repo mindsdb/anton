@@ -12,6 +12,7 @@ import json
 import re
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,9 +21,11 @@ from anton.core.artifacts.internal_files import (
     PRD_FILENAME,
     TECH_SPEC_FILENAME,
 )
+from anton.core.artifacts import live_app_slots
 from anton.core.artifacts.store import BACKEND_LOG_FILENAME
 from anton.core.backends.sandbox import BACKENDS_OFF_MESSAGE, CellSandbox, cell_sandbox_of
 from anton.utils.datasources import scrub_output
+from anton.utils.nofollow import read_text_nofollow, write_text_nofollow
 
 from . import attachments, engine, prompts, verifiers
 from .discovery import checkpoint as cp
@@ -47,6 +50,7 @@ from .state import (
 )
 
 if TYPE_CHECKING:
+    from anton.core.artifacts.render_check import RenderScreenshot
     from anton.utils.datasources import DatasourceCatalog
 
 
@@ -55,6 +59,9 @@ if TYPE_CHECKING:
 # the forbidden retry, not unusable code, and the instruction the outer agent
 # gets differs — "continue when you are ready" rather than "this failed".
 OVER_BUDGET = "__over_budget__"
+# The run step's live app didn't launch for a reason a new backend can't fix:
+# a refused card, full slots, no slot, a setting. The files are done.
+NOT_LAUNCHED = "__not_launched__"
 
 
 async def _decide(state: GenState, schema, prompt_pair, node: str) -> object:
@@ -345,6 +352,26 @@ def _cell_sandbox(state: GenState) -> CellSandbox | None:
     return cell_sandbox_of(getattr(state.session, "_scratchpads", None))
 
 
+def _runs_live_apps(state: GenState) -> bool:
+    """Whether a fullstack app runs in an app slot: a sandboxed deployment
+    with live apps on. Sandboxed without them, fullstack is refused. The
+    setting is read first, so with live apps off nothing new is looked up."""
+    return live_app_slots.live_apps_enabled() and _cell_sandbox(state) is not None
+
+
+def _fullstack_refusal(state: GenState) -> str | None:
+    """Why no fullstack app can run here, or None. Sandboxed without live
+    apps, the sandbox starts no backend. With them, a launch that can never
+    succeed (no host records it, a setting is broken) refuses here too,
+    before the pipeline spends anything."""
+    if _cell_sandbox(state) is None:
+        return None
+    if not live_app_slots.live_apps_enabled():
+        return BACKENDS_OFF_MESSAGE
+    blocker = live_app_slots.live_app_launch_blocker(state.session)
+    return str(blocker) if blocker is not None else None
+
+
 def _verify_datasource_env(state: GenState) -> dict[str, str]:
     """The `DS_*` the sandboxed import check gets: the connections backend.py reads.
 
@@ -535,6 +562,27 @@ def _verification_feedback(verdict: VerifyResult) -> str:
     )
 
 
+def _kickoff_with_screenshot(
+    state: GenState, *, text: str, screenshot: "RenderScreenshot | None"
+) -> "str | list[dict]":
+    """The next attempt's kickoff: `text`, followed by the screenshot of the
+    page the previous attempt wrote when the render check failed it, so the
+    generator sees what the findings in `text` describe.
+
+    Text alone when there is no such screenshot, or when the model refused
+    a render screenshot earlier in the session: another would cost a
+    refused request. A refusal of this one is handled where it is sent
+    (`engine._run_loop`).
+    """
+    from anton.core.artifacts import render_check
+    from anton.core.tools.tool_handlers import render_screenshots_refused
+
+    if screenshot is None or render_screenshots_refused(state.session):
+        return text
+    page = f"{state.slug}/{state.browser_page}"
+    return [{"type": "text", "text": text}, *render_check.screenshot_blocks(screenshot, page=page)]
+
+
 def _terminal_error(
     side: str, *, verify_failures: int, verdict: VerifyResult | None, last_loop_error: str | None,
 ) -> str:
@@ -562,6 +610,7 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
         datasources=state.datasource_catalog,
         declared_sources=state.declared_sources,
         data_notes=state.data_notes,
+        user_language=state.user_language,
     )
     verdict = None  # guards the terminal message when no attempt ever verified
     last_loop_error: str | None = None  # see the comment in _gen_verify_frontend
@@ -629,6 +678,8 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
                 if _cell_sandbox(state) is not None
                 else {}
             ),
+            # A live app's slot installs nothing, so nothing is installed here either.
+            **({"live_app": True} if _runs_live_apps(state) else {}),
         )
         state.trace_log.verifier(
             node="verify_backend", ok=verdict.ok,
@@ -708,10 +759,14 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
     kickoff — the browser findings from `_run_and_verify_app` when the
     served fullstack page failed to load cleanly (S-02)."""
     if state.is_fullstack:
-        system = prompts.build_frontend_system_prompt(state.artifact_path)
+        system = prompts.build_frontend_system_prompt(
+            state.artifact_path,
+            live_app=_runs_live_apps(state),
+            user_language=state.user_language,
+        )
     else:
         system = prompts.build_subagent_system_prompt(
-            state.artifact_path, primary=state.primary
+            state.artifact_path, primary=state.primary, user_language=state.user_language
         )
     verdict = None  # guards the terminal message when no attempt ever verified
     # The loop's failure reason (round budget, no tool calls) is kept separately:
@@ -725,6 +780,10 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
     loop_failures = 0
     verify_failures = 0
     extra = ("\n\n" + extra_context) if extra_context else ""
+    # The render check's screenshot of the page the previous attempt wrote,
+    # when the check failed that page: the next kickoff shows it beside the
+    # findings in `extra`. Only from the attempt just before.
+    failed_shot: "RenderScreenshot | None" = None
     # The `.html` files the previous attempt reported writing. Known on the
     # verify-failure path only: a loop failure returns a message, not a result.
     stale_html: list[str] = []
@@ -754,7 +813,10 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
         if state.is_fullstack:
             kickoff = prompts.build_frontend_kickoff(_spec_context(state), state.api_spec or "{}") + extra
         else:
-            kickoff = prompts.build_user_kickoff(_spec_context(state)) + extra
+            kickoff = _kickoff_with_screenshot(
+                state, text=prompts.build_user_kickoff(_spec_context(state)) + extra, screenshot=failed_shot,
+            )
+        failed_shot = None
         try:
             result = await engine._run_loop(
                 session=state.session, system=system, kickoff=kickoff,
@@ -783,6 +845,11 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
 
         state.step_started("verify_frontend", attempt=attempt)
         entry_file = _frontend_entry(state, result["files_written"])
+        if entry_file is not None and not state.is_fullstack:
+            # Off the event loop, like the browser check below: the page and
+            # each asset can be megabytes, and every conversation in the
+            # process waits on this loop.
+            await asyncio.to_thread(_embed_attachments, state, entry_file)
         if entry_file is None:
             # One channel: this message rides on VerifyResult like every other
             # check — otherwise the contract lock cannot see it and the terminal
@@ -792,33 +859,47 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
                 "(or the html-app page)."
             ])
         else:
-            verdict = verifiers.verify_frontend(
+            # In a thread: the static checks scan the whole page, which an
+            # embedded asset can grow to tens of megabytes.
+            verdict = await asyncio.to_thread(
+                verifiers.verify_frontend,
                 entry_file.read_text(encoding="utf-8"), is_fullstack=state.is_fullstack,
                 api_paths=verifiers.contract_paths(
                     verifiers.contract_operations(state.api_spec)
                 ) if state.is_fullstack else None,
+                live_app=state.is_fullstack and _runs_live_apps(state),
             )
             if verdict.ok and not state.is_fullstack:
                 # Second gate, only once the text checks pass and only for the
                 # single-file page — see `verify_frontend_live` for why not the
-                # fullstack frontend. In a thread: the browser subprocess
-                # blocks for up to its 8-second timeout. The sandbox starts
-                # no browser.
+                # fullstack frontend. In a thread: the browser subprocess or
+                # the render-check request blocks for seconds.
+                from anton.core.tools.tool_handlers import render_screenshots_refused
+
                 policy = _cell_sandbox(state)
+                if verifiers.browser_can_load(sandboxed=policy is not None):
+                    state.step_started("browser_check", attempt=attempt)
                 live = await asyncio.to_thread(
-                    verifiers.verify_frontend_live, entry_file, cell_sandbox=policy
+                    verifiers.verify_frontend_live, entry_file, cell_sandbox=policy,
+                    screenshot=not render_screenshots_refused(state.session),
                 )
-                if live is None:
-                    reason = verifiers.browser_check_skip_reason(sandboxed=policy is not None)
-                    state.trace_log.node("verify_frontend", "browser_skipped", reason)
-                    _note_skipped(state, f"browser load of the page: {reason}")
+                state.browser_status = live.status
+                state.browser_findings_listed = live.findings_listed
+                state.browser_screenshot = live.screenshot
+                state.browser_coverage = live.coverage
+                state.browser_page = entry_file.relative_to(state.artifact_path).as_posix()
+                if live.status == "failed":
+                    failed_shot = live.screenshot
+                if live.status == "unverified":
+                    state.trace_log.node("verify_frontend", "browser_skipped", live.reason)
+                    _note_skipped(state, f"browser load of the page: {live.reason}")
                 else:
                     # `extend`, not `append`: the contract lock keys on
                     # `.append(...)` / `VerifyResult(...)` literals, and these
                     # strings are registered where `verify_frontend_live`
                     # builds them.
-                    verdict.errors.extend(live.errors)
-                    verdict.warnings.extend(live.warnings)
+                    verdict.errors.extend(live.verdict.errors)
+                    verdict.warnings.extend(live.verdict.warnings)
             # The fullstack page is loaded later, from its running backend
             # (`_run_and_verify_app`): under file:// its `/api/*` fetches
             # cannot resolve.
@@ -907,14 +988,24 @@ async def _probe_app(state: GenState, port: int) -> str | None:
 
     status, _ = await asyncio.to_thread(_get, base + "/api/health")
     if status != 200:
-        return f"health check GET /api/health returned {status} (expected 200)."
+        return _probe_problem(status, [])
     # The routes are independent, so they are probed at once: the wait is the
     # slowest route's latency, not the sum. Reported in spec order.
     paths = _safe_get_paths(state.api_spec)
     results = await asyncio.gather(*(asyncio.to_thread(_get, base + p) for p in paths))
-    for path, (status, _) in zip(paths, results):
-        if status == 0 or status >= 500:
-            return f"endpoint GET {path} failed with status {status}."
+    return _probe_problem(
+        status, [live_app_slots.ProbeResult(path=path, status=code) for path, (code, _) in zip(paths, results)],
+    )
+
+
+def _probe_problem(health: int, routes: Sequence[live_app_slots.ProbeResult]) -> str | None:
+    """What a probe found wrong, or None: `/api/health` answers 200, and no
+    safe GET route goes unanswered (0) or answers 5xx. Routes in spec order."""
+    if health != 200:
+        return f"health check GET /api/health returned {health} (expected 200)."
+    for route in routes:
+        if route.status == 0 or route.status >= 500:
+            return f"endpoint GET {route.path} failed with status {route.status}."
     return None
 
 
@@ -966,7 +1057,9 @@ def _launch_datasource_env(state: GenState) -> dict[str, str]:
     )
 
 
-async def _run_and_verify_app(state: GenState) -> str | None:
+async def _run_and_verify_app(state: GenState) -> "str | object | None":
+    if _runs_live_apps(state):
+        return await _run_and_verify_app_in_slot(state)
     # `_tracked_backends` is initialised on ChatSession (session.py), but use the
     # same defensive getattr-or-create as handle_launch_backend for parity with
     # non-standard session objects.
@@ -1022,31 +1115,172 @@ async def _run_and_verify_app(state: GenState) -> str | None:
 
         if attempt >= RUNAPP_MAX_RETRIES:
             break
-        # One backend-loop retry with the failure + log tail passed as kickoff
-        # context (NOT persisted into data_notes, so later steps stay clean).
-        tail = await _tail_log(state)
-        regen_err = await _gen_verify_backend(
-            state,
-            extra_context=(
-                f"## Previous launch failure\n{problem}\n\n"
-                f"## backend.log tail\n{tail}"
-            ),
-        )
-        if regen_err is OVER_BUDGET:
-            # Propagated as the sentinel, never as an error string: assigning
-            # it to `state.error` would surface "__over_budget__" to the user
-            # as a failed generation AND forbid the repeat call, when the
-            # files are on disk and a continuation is exactly what is wanted.
-            return OVER_BUDGET
-        if regen_err is not None:
-            state.error = regen_err
-            return regen_err
+        stop = await _regenerate_backend_after(state, problem)
+        if stop is not None:
+            return stop
 
     state.error = (
         f"Application failed to launch: {problem}\n\n"
         f"--- backend.log tail ---\n{await _tail_log(state)}"
     )
     return state.error
+
+
+async def _regenerate_backend_after(
+    state: GenState, problem: str, *, tail: str | None = None,
+) -> "str | object | None":
+    """One backend-loop retry with the failure + log tail passed as kickoff
+    context (NOT persisted into data_notes, so later steps stay clean).
+    None when the launch should be tried again; otherwise what the run
+    returns: the regeneration's error, or `OVER_BUDGET`.
+
+    `tail` is the log tail the failure came with, as a live app's launch
+    hands it over; without one, backend.log's. A tail the problem already
+    quotes, or an empty one, isn't added again."""
+    if tail is None:
+        extra_context = f"## Previous launch failure\n{problem}\n\n## backend.log tail\n{await _tail_log(state)}"
+    else:
+        extra_context = f"## Previous launch failure\n{problem}" + _tail_section(problem, tail, heading="## backend.log tail")
+    regen_err = await _gen_verify_backend(state, extra_context=extra_context)
+    if regen_err is OVER_BUDGET:
+        # Propagated as the sentinel, never as an error string: assigning
+        # it to `state.error` would surface "__over_budget__" to the user
+        # as a failed generation AND forbid the repeat call, when the
+        # files are on disk and a continuation is exactly what is wanted.
+        return OVER_BUDGET
+    if regen_err is not None:
+        state.error = regen_err
+        return regen_err
+    return None
+
+
+def _tail_section(problem: str, tail: str, *, heading: str) -> str:
+    """`tail` under `heading`, to follow `problem`; empty when the problem
+    already quotes the log tail or there is none."""
+    if not tail or "\nLog tail:\n" in problem:
+        return ""
+    return f"\n\n{heading}\n{tail}"
+
+
+# Launch failures a rewritten backend can fix. Every other one (a refused
+# card, no slot answering, a setting) ends the run with its own sentence.
+_RETRYABLE_LIVE_APP_FAILURES = frozenset({"app_not_ready", "missing_package"})
+
+
+async def _run_and_verify_app_in_slot(state: GenState) -> "str | object | None":
+    """`_run_and_verify_app` for a live app. The backend runs in an app slot,
+    never in this process; the probe goes through the slot; and no browser
+    loads the page, since the app's address opens only in its owner's
+    browser. `NOT_LAUNCHED` when the launch didn't happen for a reason a new
+    backend can't fix (`state.launch_failure` holds it). A run that gives up
+    stops the app it launched, so it doesn't hold a slot, unless the person
+    refused the card for its relaunch, which leaves it running."""
+    from anton.core.tools.tool_handlers import resolve_artifact_store
+
+    problem, tail = "", ""
+    launched = False
+    # The check the latest launched app failed, for a later failure to name.
+    failed_check = ""
+    for attempt in range(RUNAPP_MAX_RETRIES + 1):
+        state.step_started("run_app", attempt=attempt)
+        # Read on every attempt: a regenerated backend declares its
+        # connections into metadata again (see `_run_and_verify_app`).
+        store = resolve_artifact_store(state.session)
+        artifact = store.open(state.slug) if store is not None else None
+        # Only paths the slot's probe takes, which refuses the whole probe
+        # for one it doesn't; health first, each path once, as many as one
+        # probe takes.
+        routes = _safe_get_paths(state.api_spec)
+        refused = [path for path in routes if not live_app_slots.probe_path_accepted(path)]
+        if refused:
+            _note_skipped(state, f"probe of {', '.join(refused)}: an app slot probes only plain paths")
+        paths = list(dict.fromkeys(
+            ["/api/health", *(path for path in routes if path not in refused)]
+        ))[:live_app_slots.MAX_PROBE_PATHS]
+        try:
+            launch = await live_app_slots.launch_live_app(
+                state.session, slug=state.slug, folder=state.artifact_path,
+                datasources=getattr(artifact, "datasources", None) or (),
+                probe_paths=paths,
+            )
+        except live_app_slots.LiveAppLaunchError as exc:
+            state.record("run_app", "fail", str(exc))
+            if exc.cause not in _RETRYABLE_LIVE_APP_FAILURES:
+                state.launch_failure = await _after_earlier_launch(state, exc, failed_check) if launched else exc
+                return NOT_LAUNCHED
+            problem, tail = str(exc), exc.log_tail
+        else:
+            launched = True
+            state.app_url = launch.address
+            state.live_app = launch
+            state.record("run_app", "done", f"slot {launch.slot}")
+            state.step_started("verify_fullstack", attempt=attempt)
+            if launch.probe_error:
+                # The slot, not the app: a new backend can't fix it.
+                problem, tail = f"the app slot couldn't probe the app: {launch.probe_error}.", launch.log_tail
+                state.record("verify_fullstack", "fail", problem)
+                break
+            answered = {result.path: result.status for result in launch.probe}
+            probe_err = _probe_problem(
+                answered.get("/api/health", 0),
+                [live_app_slots.ProbeResult(path=path, status=answered.get(path, 0)) for path in paths[1:]],
+            )
+            if probe_err is None:
+                _note_skipped(
+                    state,
+                    f"browser load of {prompts.FULLSTACK_FRONTEND_TARGET}: a live app opens only in "
+                    "its owner's browser, at its own address",
+                )
+                state.browser_status = "unverified"
+                state.record("verify_fullstack", "ok", f"slot {launch.slot}, API probe only")
+                return None
+            state.record("verify_fullstack", "fail", probe_err)
+            problem, tail = probe_err, launch.log_tail
+            failed_check = probe_err
+
+        if attempt >= RUNAPP_MAX_RETRIES:
+            break
+        stop = await _regenerate_backend_after(state, problem, tail=tail)
+        if stop is not None:
+            if launched:
+                await _stop_launched_app(state)
+            return stop
+
+    if launched:
+        await _stop_launched_app(state)
+    state.error = f"Application failed to launch: {problem}" + _tail_section(
+        problem, tail, heading="--- backend.log tail ---",
+    )
+    return state.error
+
+
+async def _stop_launched_app(state: GenState) -> None:
+    """Gave up on an app that may still run: free its slot, and send no
+    address for it."""
+    await live_app_slots.stop_live_app(state.session, folder=state.artifact_path)
+    state.app_url, state.live_app = None, None
+
+
+async def _after_earlier_launch(
+    state: GenState, failure: live_app_slots.LiveAppLaunchError, failed_check: str,
+) -> live_app_slots.LiveAppLaunchError:
+    """`failure` for a run whose earlier attempt launched an app that then
+    failed `failed_check`. A refused card promised to leave that app
+    running, so it stays and the sentence says where it runs; after any
+    other failure the run gives up on it and stops it. Either way the result
+    sends no address that reads as a working app's."""
+    if failure.cause == "launch_not_approved":
+        state.app_url, state.live_app = None, None
+        address = await live_app_slots.running_app_address(state.session, folder=state.artifact_path)
+        earlier = (
+            f"The app this run launched earlier still runs at `{address}`, but it failed its check: {failed_check}"
+            if address is not None
+            else f"The app this run launched earlier failed its check: {failed_check}"
+        )
+    else:
+        await _stop_launched_app(state)
+        earlier = f"The app this run launched earlier failed its check, so the run stopped it: {failed_check}"
+    return live_app_slots.LiveAppLaunchError(f"{failure} {earlier}", cause=failure.cause, log_tail=failure.log_tail)
 
 
 async def _verify_app_in_browser(state: GenState) -> "str | None | object":
@@ -1065,6 +1299,8 @@ async def _verify_app_in_browser(state: GenState) -> "str | None | object":
     page is clean or unchecked, an error string when it stays broken, or
     `OVER_BUDGET` propagated from the regeneration.
     """
+    from anton.core.artifacts import render_check
+
     target = prompts.FULLSTACK_FRONTEND_TARGET
     policy = _cell_sandbox(state)
     for attempt in range(RUNAPP_MAX_RETRIES + 1):
@@ -1073,7 +1309,12 @@ async def _verify_app_in_browser(state: GenState) -> "str | None | object":
             reason = verifiers.browser_check_skip_reason(sandboxed=policy is not None)
             state.trace_log.node("verify_fullstack", "browser_skipped", reason)
             _note_skipped(state, f"browser load of {target} via the running backend: {reason}")
+            state.browser_status = "unverified"
+            state.browser_coverage = None
             return None
+        state.browser_status = "passed" if live.ok else "failed"
+        # The local browser presses nothing: it saw the page as it opens.
+        state.browser_coverage = render_check.view_coverage()
         state.trace_log.verifier(
             node="verify_fullstack", ok=live.ok,
             errors=list(live.errors), warnings=list(live.warnings),
@@ -1108,7 +1349,9 @@ def _stage_attachments(state: GenState) -> None:
     artifact type (`static/` for fullstack), which `write_prd` settles, and
     a cancelled run must not leave copies behind. Deterministic on purpose —
     the generators are told the relative names and never touch the bytes.
-    The copies are artifact files, so they join `files_written`.
+    The copies are artifact files, so they join `files_written`. An asset
+    that staging skips goes into the result's `warnings`, so the user hears
+    that their file is not on the page.
     """
     if not state.attachments:
         return
@@ -1119,11 +1362,33 @@ def _stage_attachments(state: GenState) -> None:
         if rel not in state.files_written:
             state.files_written.append(rel)
     skipped = [f"{a.name}: {a.skipped}" for a in state.attachments if a.skipped]
+    state.verify_warnings.extend(f"attached file not on the page: {s}" for s in skipped)
     if written or skipped:
         state.record(
             "stage_attachments", "done" if written else "skipped",
             "; ".join([*written, *skipped]),
         )
+
+
+def _embed_attachments(state: GenState, entry_file: Path) -> None:
+    """Put each staged asset the html-app page references into the page as a
+    `data:` URI (`attachments.embed_assets`), before the page is verified:
+    the app preview shows only the page itself, never a file next to it.
+    The fullstack frontend keeps its references: its backend serves
+    `static/`. The page is read and rewritten refusing a link below the
+    artifact folder, since agent code can write there. A page that cannot be
+    rewritten keeps its references, which the checks then report."""
+    if not state.attachments:
+        return
+    try:
+        html = read_text_nofollow(state.artifact_path, entry_file)
+        embedded = attachments.embed_assets(
+            html, state.attachments, state.artifact_path, cell_sandbox=_cell_sandbox(state)
+        )
+        if embedded != html:
+            write_text_nofollow(state.artifact_path, entry_file, embedded)
+    except (OSError, ValueError):
+        state.trace_log.node("verify_frontend", "embed_skipped", "the page could not be rewritten")
 
 
 def _note_skipped(state: GenState, text: str) -> None:
@@ -1147,16 +1412,36 @@ def _result_shell(state: GenState) -> dict:
         # only if the agent knows the key exists (S-03).
         "warnings": state.verify_warnings,
         "checks_skipped": state.checks_skipped,
+        # True only when a browser loaded the page and found nothing wrong.
+        # The handler picks the agent's instruction by it.
+        "verified_in_browser": state.browser_status == "passed",
         "summary": "; ".join(f"{s.node}:{s.outcome}" for s in state.trace),
         "trace": [{"node": s.node, "outcome": s.outcome, "detail": s.detail} for s in state.trace],
     }
+    # Beside a pass: the views the check measured and the tabs and toggles it
+    # did not press. The agent's instruction lets it call only the views
+    # `browser_checked` names verified or working.
+    if state.browser_status == "passed" and state.browser_coverage is not None:
+        shell["browser_checked"] = state.browser_coverage.checked
+        shell["browser_unchecked"] = state.browser_coverage.unchecked
     # Seen live: the agent presented `<path>/static/index.html` as the
     # entry point of a fullstack app: the
     # port was in the trace, the URL nowhere, and the system prompt's "prefer
     # the url the launch step returned" had nothing to prefer.
     if state.app_url:
         shell["url"] = state.app_url
-        shell["port"] = state.app_port
+        if state.app_port is not None:
+            shell["port"] = state.app_port
+    # A live app: its address in the sentence the agent relays, and the
+    # declared connections it didn't get. Never a port.
+    if state.live_app is not None:
+        shell["live_app"] = state.live_app.message()
+    # The model itself, not its JSON: the handler takes it out of the result
+    # and shows it to the agent as an image beside the text, captioned with
+    # the page the check loaded.
+    if state.browser_screenshot is not None:
+        shell["screenshot"] = state.browser_screenshot
+        shell["screenshot_page"] = state.browser_page
     return shell
 
 
@@ -1173,7 +1458,8 @@ def _save_checkpoint(state: GenState, stage: str) -> None:
         cp.DiscoveryCheckpoint(
             request_fingerprint=cp.request_fingerprint(state.user_request),
             call_fingerprint=cp.call_fingerprint(
-                state.agent_understanding, state.known_data, state.user_preferences
+                state.agent_understanding, state.known_data, state.user_preferences,
+                state.user_language,
             ),
             pipeline_stage=stage,
             artifact_type=state.final_artifact_type or state.artifact_type,
@@ -1229,6 +1515,21 @@ def _finish(state: GenState) -> dict:
     return {"status": "generated", **_result_shell(state), **_brief_fields(state)}
 
 
+def _not_launched(state: GenState) -> dict:
+    """The files are built and passed their checks, but the live app didn't
+    launch: `cause` and `detail` say why, and `launch_backend` starts it
+    once that's settled."""
+    _save_checkpoint(state, cp.STAGE_GENERATED)
+    failure = state.launch_failure
+    return {
+        "status": "not_launched",
+        "cause": failure.cause,
+        "detail": str(failure),
+        **_result_shell(state),
+        **_brief_fields(state),
+    }
+
+
 def _cancelled(state: GenState) -> dict:
     """Nothing written, nothing deleted.
 
@@ -1265,12 +1566,27 @@ def _stopped_over_budget(state: GenState, detail: str) -> dict:
 
 
 async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
-    """Walk the whole pipeline from wherever this call is entitled to start."""
+    """Walk the whole pipeline from wherever this call is entitled to start.
+    Meanwhile the check after each cell leaves this artifact's live app
+    alone: the run step is the run's only launch, and a cell in one write
+    loop could otherwise relaunch the other loop's half-written files."""
+    building = getattr(state.session, "_live_apps_building", None)
+    if not isinstance(building, set):
+        return await _run(state, entry=entry)
+    building.add(state.slug)
+    try:
+        return await _run(state, entry=entry)
+    finally:
+        building.discard(state.slug)
+
+
+async def _run(state: GenState, *, entry: str) -> dict | str:
     state.entry = entry
-    if state.is_fullstack and _cell_sandbox(state) is not None:
-        # A fullstack artifact is done only once its backend runs, and the
-        # sandbox starts no backend: refuse before any question or brief.
-        state.error = BACKENDS_OFF_MESSAGE
+    if state.is_fullstack and (refusal := _fullstack_refusal(state)) is not None:
+        # A fullstack artifact is done only once its backend runs: refuse
+        # before any question or brief when nothing here can run it. With
+        # live apps on, the backend runs in an app slot instead.
+        state.error = refusal
         return state.error
     if state.act_first and entry not in (cp.ENTRY_FULL, cp.ENTRY_NEW_ITERATION):
         # A repeat call past the brief: an earlier turn showed it (for
@@ -1299,10 +1615,10 @@ async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
         _invalidate_specs(state)
         _save_checkpoint(state, cp.STAGE_PRD_WRITTEN)
 
-    if state.is_fullstack and _cell_sandbox(state) is not None:
+    if state.is_fullstack and (refusal := _fullstack_refusal(state)) is not None:
         # The gathering step settled on a fullstack type: refuse before the
         # spec and generation spend anything.
-        state.error = BACKENDS_OFF_MESSAGE
+        state.error = refusal
         return state.error
 
     if entry != cp.ENTRY_GENERATE:
@@ -1376,6 +1692,8 @@ async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
     err = await _run_and_verify_app(state)
     if err is OVER_BUDGET:
         return _stopped_over_budget(state, "the backend could not be rebuilt in time")
+    if err is NOT_LAUNCHED:
+        return _not_launched(state)
     if err is not None:
         return err
     return _finish(state)

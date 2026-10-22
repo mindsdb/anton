@@ -1,16 +1,93 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 import weakref
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+import httpx2
+
+from .tracing import TraceContext, get_call_role, get_trace_context
+
 if TYPE_CHECKING:
     from anton.core.interaction.elicit import AskAnswer, AskRequest
+
+
+# Turns on one `llm_usage` log line per model call, for an eval that reads the
+# host's log instead of Langfuse. Off by default: production logs nothing new.
+USAGE_LOG_ENV = "ANTON_USAGE_LOG"
+_usage_logger = logging.getLogger("anton.usage")
+
+
+def usage_log_enabled() -> bool:
+    return os.environ.get(USAGE_LOG_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def log_usage_record(record: dict) -> None:
+    # default=str: an odd value from a host or an SDK must not fail the call.
+    _usage_logger.info("llm_usage %s", json.dumps(record, separators=(",", ":"), default=str))
+
+
+def log_background_done(trace: TraceContext) -> None:
+    """Mark that a turn's end-of-turn work has finished, so an eval stops waiting for its usage.
+
+    One line per turn that wrote a `turn_cost` line. The trace is passed in, not
+    read: a late finalizer of an abandoned turn runs in another context.
+    """
+    record = {"conversation": trace.session_id, "turn": (trace.metadata or {}).get("turn")}
+    _usage_logger.info("usage_background_done %s", json.dumps(record, separators=(",", ":"), default=str))
+
+
+def _usage_record(*, role: str | None, model: str | None, served_model: str | None,
+                  input_tokens: int, output_tokens: int, cache_read: int,
+                  cache_creation: int) -> dict:
+    """One call's usage, named by the conversation, turn and tags of the current trace."""
+    ctx = get_trace_context()
+    metadata = (ctx.metadata or {}) if ctx else {}
+    return {
+        # End-of-turn work runs detached from the session, its conversation in the metadata.
+        "conversation": (ctx.session_id or metadata.get("conversation_id")) if ctx else None,
+        "turn": metadata.get("turn"),
+        "tags": list(ctx.tags) if ctx else [],
+        "role": role,
+        "model": model,
+        "served_model": served_model,
+        "input": input_tokens,
+        "output": output_tokens,
+        "cache_read": cache_read,
+        "cache_creation": cache_creation,
+    }
+
+
+def scratchpad_usage_record(sent: object) -> dict | None:
+    """The record for a usage line a scratchpad sent, or None when it is not a JSON object.
+
+    The pad runs cell code, so the host names the conversation, turn and tags from
+    its own trace and keeps only counts, models and role from what the pad sent.
+    """
+    if not isinstance(sent, dict):
+        return None
+
+    def count(key: str) -> int:
+        value = sent.get(key)
+        valid = isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        return value if valid else 0
+
+    def text(key: str) -> str | None:
+        value = sent.get(key)
+        return value if isinstance(value, str) else None
+
+    return _usage_record(
+        role=text("role"), model=text("model"), served_model=text("served_model"),
+        input_tokens=count("input"), output_tokens=count("output"),
+        cache_read=count("cache_read"), cache_creation=count("cache_creation"),
+    )
 
 
 # Providers hold an HTTP pool. Unclosed, httpx2 prints a traceback when the
@@ -907,6 +984,27 @@ def _log_status(*, status: object) -> int | str:
     return status if type(status) is int and 100 <= status <= 599 else "unknown"
 
 
+# Transport errors a stream raises while its body is read. The SDKs wrap
+# transport failures only while they open the request; once the 200 is in,
+# a dying connection surfaces as the raw httpx2 error and the SDK never
+# retried it. Providers catch it next to the SDK's own connection error.
+STREAM_DROP_ERROR = httpx2.TransportError
+
+
+def is_stream_drop(exc: BaseException) -> bool:
+    """True for a connection that died after the response started.
+
+    Providers raise ``connection_error`` for every lost connection and set
+    ``session_backoff`` only once the stream has started, so a failure to
+    connect never matches.
+    """
+    return (
+        isinstance(exc, TransientProviderError)
+        and exc.code == "connection_error"
+        and exc.session_backoff
+    )
+
+
 class ProviderOverloadedError(ConnectionError):
     """Terminal form of a transient failure: the retry budget was exhausted.
 
@@ -1752,12 +1850,17 @@ def _image_too_large(message: object) -> ContentTooLargeError:
     )
 
 
-def _content_rejected() -> ContentValidationError:
-    """The shape refusal, shared by the 400 classifier and the Responses one."""
+def _content_rejected(*, code: str = "content_validation") -> ContentValidationError:
+    """The shape refusal, shared by the 400 classifier and the Responses one.
+
+    The Responses one passes the provider's image code, which names the one
+    image it could not use (`is_image_refusal` reads it).
+    """
     return ContentValidationError(
         "The model provider rejected part of this conversation's content "
         "(an attachment or image in an unsupported format). That content "
-        "will be removed automatically so the conversation can continue."
+        "will be removed automatically so the conversation can continue.",
+        code=code,
     )
 
 
@@ -1844,6 +1947,48 @@ def classify_content_rejection(
     return None
 
 
+# Words a provider's refusal of an image part uses: OpenAI names the part
+# ("image_url is only supported by certain models"), and servers for
+# text-only models name what the model lacks ("not a multimodal model").
+_IMAGE_REFUSAL_WORDS = ("image", "vision", "multimodal", "multi-modal")
+
+
+def is_image_refusal(exc: BaseException) -> bool:
+    """Whether the provider may have refused a request for carrying image
+    parts at all, as it does when the model takes no image input.
+
+    True for the shape rejection ``classify_content_rejection`` raises (a
+    ``ContentValidationError`` with its default code), and for a 400 or 422
+    whose error names an image. The second is how an OpenAI-compatible API
+    refuses an image sent to a model that takes no image input: OpenAI
+    answers chat.completions with "Invalid content type. image_url is only
+    supported by certain models." ``classify_content_rejection`` leaves that
+    400 unnamed on purpose, because its remedy removes every image in the
+    conversation.
+
+    False for a refusal of one image, which says nothing about images in
+    general: ``ContentTooLargeError`` (an image over the provider's size
+    limit), and a Responses API image code (``classify_responses_failure``
+    keeps it on the error), on the error or in a 400's body. False for a
+    ``TransientProviderError`` too, which is a provider fault whatever its
+    text mentions.
+
+    Only "may have": a 400 that merely mentions an image passes. So the
+    caller removes only images it added itself, and treats the refusal as
+    theirs only once the request goes through without them.
+    """
+    if isinstance(exc, (ContentTooLargeError, TransientProviderError)):
+        return False
+    if isinstance(exc, ContentValidationError):
+        return exc.code not in _RESPONSES_IMAGE_CODES
+    if getattr(exc, "status_code", None) not in (400, 422):
+        return False
+    if ProviderErrorBody.parse(getattr(exc, "body", None)).code in _RESPONSES_IMAGE_CODES:
+        return False
+    text = f"{exc} {getattr(exc, 'body', '')}".lower()
+    return any(word in text for word in _IMAGE_REFUSAL_WORDS)
+
+
 # The sentence OpenAI and Azure send when chat.completions refuses function
 # tools for a model that reasons by default, whether or not the request set an
 # effort. Azure documents only this sentence, not the body's `param`.
@@ -1906,6 +2051,8 @@ _RESPONSES_IMAGE_REJECTED_CODES = (
     "unsupported_image_media_type", "empty_image_file",
     "failed_to_download_image", "image_file_not_found",
 )
+# Each names one image the provider could not use (`is_image_refusal`).
+_RESPONSES_IMAGE_CODES = _RESPONSES_IMAGE_TOO_LARGE_CODES + _RESPONSES_IMAGE_REJECTED_CODES
 
 
 def classify_responses_failure(
@@ -1943,7 +2090,7 @@ def classify_responses_failure(
     if code in _RESPONSES_IMAGE_TOO_LARGE_CODES:
         return _image_too_large(message)
     if code in _RESPONSES_IMAGE_REJECTED_CODES:
-        return _content_rejected()
+        return _content_rejected(code=code)
     return None
 
 
@@ -2168,6 +2315,10 @@ class ProviderErrorFilter(logging.Filter):
             provider_error = _provider_error(exc=exc)
             if provider_error is None:
                 continue
+            record._diagnostic_safe_template = True
+            record.error_type = type(exc).__name__
+            record.provider_error = type(provider_error).__name__
+            record.status_code = _log_status(status=getattr(provider_error, "status_code", None))
             record.msg = "Provider operation failed: error_type=%s provider_error=%s status=%s"
             record.args = (
                 type(exc).__name__, type(provider_error).__name__,
@@ -2259,6 +2410,44 @@ class LLMProvider(ABC):
     # Role reported for a call made on this provider outside LLMClient, such
     # as cowork-server's route gate. LLMClient sets it.
     trace_role: str | None = None
+    # Receives each call's usage record instead of the log. A scratchpad sets
+    # it to send the record to its host.
+    usage_sink: Callable[[dict], None] | None = None
+
+    def log_usage(self, *, model: str, usage: Usage, served_model: str | None) -> None:
+        """Report one call's usage to `usage_sink`, or log it when `ANTON_USAGE_LOG` is on.
+
+        Called where the usage is first known, before any check on the reply
+        can raise, so a billed call that then fails is still counted.
+        """
+        if self.usage_sink is None and not usage_log_enabled():
+            return
+        record = _usage_record(
+            role=get_call_role() or self.trace_role, model=model, served_model=served_model,
+            input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
+            cache_read=usage.cache_read_tokens, cache_creation=usage.cache_creation_tokens,
+        )
+        if self.usage_sink is not None:
+            self.usage_sink(record)
+        else:
+            log_usage_record(record)
+
+    @property
+    def reasoning_effort(self) -> str | None:
+        """The effort this provider sends when a call does not override it."""
+        return getattr(self, "_reasoning_effort", None)
+
+    @property
+    def accepts_large_output(self) -> bool:
+        """Whether the endpoint is known to take output budgets up to 64k tokens.
+
+        Known means Anthropic, the Responses API or the MindsHub gateway. The
+        Responses API flavor is also what a host picks for a custom endpoint it
+        configured to speak that API, which in practice is OpenAI or Azure.
+        False for unknown servers: an OpenAI-compatible server with a small
+        context window rejects ``prompt + max_tokens`` above its limit.
+        """
+        return False
 
     def native_web_tools(self) -> set[str]:
         """Subset of {"web_search", "web_fetch"} this provider executes server-side.
@@ -2287,6 +2476,7 @@ class LLMProvider(ABC):
         tool_choice: dict | None = None,
         max_tokens: int = 4096,
         native_web_tools: set[str] | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse: ...
 
     def export_connection_info(self) -> ProviderConnectionInfo:
@@ -2306,8 +2496,12 @@ class LLMProvider(ABC):
         tools: list[dict] | None = None,
         max_tokens: int = 4096,
         native_web_tools: set[str] | None = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Stream LLM responses. Default falls back to complete()."""
+        # Passed only when set: a subclass written before the parameter existed
+        # still works for every call that does not override the effort.
+        extra = {"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}
         response = await self.complete(
             model=model,
             system=system,
@@ -2315,6 +2509,7 @@ class LLMProvider(ABC):
             tools=tools,
             max_tokens=max_tokens,
             native_web_tools=native_web_tools,
+            **extra,
         )
         if response.content:
             yield StreamTextDelta(text=response.content)

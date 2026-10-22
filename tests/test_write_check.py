@@ -1389,11 +1389,121 @@ def test_the_card_names_the_method_the_url_and_the_call():
     assert "A part in braces, `{...}`, is the code that fills in that value when the step runs." in card
 
 
-def test_a_method_the_code_picks_when_it_runs_is_held_and_shown_as_code():
+def test_a_method_the_code_picks_when_it_runs_is_held_and_said_in_words():
+    """The card used to read "This step would send `{row['verb']}` to:", a
+    placeholder standing where the method would. It says in words that the
+    code decides the method, and shows that code."""
     writes = find_cell_writes(code=f"import requests\nrequests.request(row['verb'], {URL!r})",
                               earlier_code=(), snapshots=())
     assert [(w.method, w.url) for w in writes.http] == [("{row['verb']}", URL)]
-    assert "This step would send `{row['verb']}` to:" in _card_prompt(writes)
+    card = _card_prompt(writes)
+    assert "This step would send a request to:" in card
+    assert "The code decides the request's method when it runs, from `row['verb']`." in card
+    assert "`{row['verb']}`" not in card and "send `{" not in card
+
+
+_API_HELPER = (
+    "import requests\nBASE = 'https://erp.example.com/api'\n"
+    "def api(method, path):\n    return requests.request(method, BASE + path)",
+)
+
+
+def test_a_helper_parameter_is_shown_as_what_the_call_passes():
+    """`def api(method, path)` called with a value the code picks: the card
+    names the call's `verb`, the code the person wrote in this step, not the
+    helper's own `{method}`."""
+    writes = find_cell_writes(code="for verb in verbs:\n    api(verb, '/orders/42')",
+                              earlier_code=_API_HELPER, snapshots=())
+    card = _card_prompt(writes)
+    assert "The code decides the request's method when it runs, from `verb`." in card
+    assert "{method}" not in card and "`method`" not in card
+    assert _fenced(card) == [URL, "api(verb, '/orders/42')"]
+
+
+def test_an_address_the_code_picks_whole_is_said_in_words():
+    """A URL that is nothing but run-time code used to show as a bare
+    `{u}` fence, as if it were the address."""
+    writes = find_cell_writes(code="import requests\nfor u in urls:\n    requests.delete(u)",
+                              earlier_code=(), snapshots=())
+    card = _card_prompt(writes)
+    assert "This step would send DELETE to an address the code decides when it runs, from `u`:" in card
+    assert _fenced(card) == ["requests.delete(u)"]
+    assert "{u}" not in card
+    assert "A part in braces" not in card
+
+
+def test_the_refusal_says_a_run_time_method_in_words_too():
+    writes = find_cell_writes(code=f"import requests\nrequests.request(row['verb'], {URL!r})",
+                              earlier_code=(), snapshots=())
+    text = _refusal(writes, "cancelled").content
+    assert f"send a request to `{URL}` (the code decides its method when it runs, from `row['verb']`)" in text
+    assert "send {row" not in text
+
+
+def test_a_helper_that_reassigns_its_parameter_names_its_own_variable():
+    """`api(method, path)` that sets `method = 'DELETE'` for some paths: the
+    caller's `verb` does not decide the method alone, so the card must not
+    say it does. A person who knows `verbs` holds only GET would approve a
+    DELETE."""
+    helper = (
+        "import requests\nBASE = 'https://erp.example.com/api'\n"
+        "def api(method, path):\n    if path.endswith('/42'):\n        method = 'DELETE'\n"
+        "    return requests.request(method, BASE + path)",
+    )
+    writes = find_cell_writes(code="for verb in verbs:\n    api(verb, '/orders/42')",
+                              earlier_code=helper, snapshots=())
+    card = _card_prompt(writes)
+    assert "The code decides the request's method when it runs, from `method`." in card
+    assert "from `verb`" not in card
+
+
+def test_a_written_out_method_cannot_hide_a_held_request_from_the_card():
+    """A method is any text an HTTP library sends. Written into the prose as
+    is, `<!--` and `-->` made Cowork drop the DELETE between them from the
+    card the person approves."""
+    rules = parse_http_write_rules("* https://erp.example.com/api/**")
+    code = (
+        "import requests\nU = 'https://erp.example.com/api/ping'\n"
+        "requests.request('<!--', U)\n"
+        "requests.delete('https://erp.example.com/api/orders/1')\n"
+        "requests.request('-->', U)\n"
+    )
+    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(), http_rules=rules)
+    assert [w.method for w in writes.http] == ["<!--", "DELETE", "-->"]
+
+    card = _card_prompt(writes)
+    assert "<!--" not in card and "-->" not in card
+    assert "This step would send DELETE to:" in re.sub(r"<!--[\s\S]*?-->", "", card)
+    assert "This step would send `<\u200b!--` to:" in card
+    refusal = _refusal(writes, "cancelled").content
+    assert "<!--" not in refusal and "-->" not in refusal
+
+@pytest.mark.parametrize("code,earlier,held", [
+    (f"import requests\nrequests.request(row['verb'], {URL!r})", (),
+     [(2, f"requests.request(row['verb'], {URL!r})", URL)]),
+    ("import requests\nBASE = 'https://erp.example.com/api'\ndef api(method, path):\n"
+     "    return requests.request(method, BASE + path)\nfor verb, path in jobs:\n    api(verb, path)", (),
+     [(4, "return requests.request(method, BASE + path)", "https://erp.example.com/api{path}")]),
+    ("import requests\ndef call(method, url):\n    return requests.request(method, url)\nfor v, u in jobs:\n    call(v, u)",
+     (), [(3, "return requests.request(method, url)", "{url}")]),
+    ("import requests\nfor u in urls:\n    requests.delete(u)", (), [(3, "requests.delete(u)", "{u}")]),
+    ("for v in verbs:\n    api(v, '/orders/42')", _API_HELPER, [(2, "api(v, '/orders/42')", URL)]),
+    ("api(job['m'], job['p'])", _API_HELPER,
+     [(1, "api(job['m'], job['p'])", "https://erp.example.com/api{job['p']}")]),
+    ("api('PUT', '/orders/42')", _API_HELPER, [(1, "api('PUT', '/orders/42')", URL)]),
+    ("api('GET', '/orders/42')", _API_HELPER, []),
+    ("api('POST', '/orders')", _API_HELPER, []),
+    ("import requests\nrequests.get('https://erp.example.com/api/orders')", (), []),
+], ids=["method-from-data", "helper-in-the-cell", "helper-whole-url", "url-from-a-loop",
+        "helper-called-with-a-variable", "helper-called-with-data", "helper-called-with-put",
+        "helper-called-with-get", "helper-called-with-post", "plain-get"])
+def test_the_card_wording_holds_the_same_requests_as_before(code, earlier, held):
+    """Presentation only: each cell holds exactly the requests, lines and
+    addresses the check held before the card said run-time parts in words
+    (values read from the check at anton v2.26.10.19.3)."""
+    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=())
+    assert [(w.line, w.call, w.url) for w in writes.http] == held
+    assert writes.kinds() == (("http",) if held else ())
 
 
 def test_a_client_base_url_is_joined_to_a_relative_path():
@@ -1426,50 +1536,67 @@ def test_a_url_with_a_character_that_does_not_show_as_itself_is_named_with_escap
 
 # ── HTTP endpoints the operator lists ─────────────────────────────────────
 
-MAESTRO = "POST https://maestro.example.com/api/*/orders/*"
+PLANNER = "POST https://planner.example.com/api/*/orders/*"
 
 
 @pytest.mark.parametrize("url, held", [
-    ("'https://maestro.example.com/api/v2/orders/9'", True),
-    ("'https://MAESTRO.example.com/api/v2/orders/9?dry_run=0'", True),
-    ("f'https://maestro.example.com/api/{version}/orders/{order_id}'", True),
-    ("f'{MAESTRO_BASE}/orders/{order_id}'", True),
+    ("'https://planner.example.com/api/v2/orders/9'", True),
+    ("'https://PLANNER.example.com/api/v2/orders/9?dry_run=0'", True),
+    ("f'https://planner.example.com/api/{version}/orders/{order_id}'", True),
+    ("f'{PLANNER_BASE}/orders/{order_id}'", True),
     ("url", True),
-    ("'https://maestro.example.com/api/v2/orders'", False),
-    ("'https://maestro.example.com/api/v2/orders/9/lines'", False),
-    ("'https://maestro.example.com/api/v2/forecasts/9'", False),
+    ("'https://planner.example.com/api/v2/orders'", False),
+    ("'https://planner.example.com/api/v2/orders/9/lines'", False),
+    ("'https://planner.example.com/api/v2/forecasts/9'", False),
     ("f'https://other.example.com/api/{version}/orders/{order_id}'", False),
 ], ids=["literal", "case-and-query", "run-time-segments", "run-time-base", "run-time-whole-url",
         "too-short", "star-stays-in-one-segment", "other-path", "other-host"])
 def test_a_post_to_a_listed_endpoint_is_held(url, held):
-    rules = parse_http_write_rules(MAESTRO)
+    rules = parse_http_write_rules(PLANNER)
     code = f"import requests\nrequests.post({url}, json=order)"
     assert bool(_requests(code, rules=rules)) is held
     assert _requests(code) == [], "with no rule a POST is free"
 
 
 def test_a_rule_names_its_method_or_any():
-    rules = parse_http_write_rules("GET https://maestro.example.com/api/**\n* https://hooks.example.com/**")
-    assert _requests("import requests\nrequests.get('https://maestro.example.com/api/v2/orders/9/lines')",
-                     rules=rules) == [("GET", "https://maestro.example.com/api/v2/orders/9/lines")]
-    assert _requests("import requests\nrequests.post('https://maestro.example.com/api/v2/orders')", rules=rules) == []
+    rules = parse_http_write_rules("GET https://planner.example.com/api/**\n* https://hooks.example.com/**")
+    assert _requests("import requests\nrequests.get('https://planner.example.com/api/v2/orders/9/lines')",
+                     rules=rules) == [("GET", "https://planner.example.com/api/v2/orders/9/lines")]
+    assert _requests("import requests\nrequests.post('https://planner.example.com/api/v2/orders')", rules=rules) == []
     assert _requests("import requests\nrequests.head('https://hooks.example.com/x')", rules=rules) == [
         ("HEAD", "https://hooks.example.com/x")
     ]
 
 
 def test_a_rule_matches_the_url_without_its_query_string():
-    rules = parse_http_write_rules("POST https://maestro.example.com/api/jobs")
-    url = "https://maestro.example.com/api/jobs?run=1&next=/home"
+    rules = parse_http_write_rules("POST https://planner.example.com/api/jobs")
+    url = "https://planner.example.com/api/jobs?run=1&next=/home"
     assert _requests(f"import requests\nrequests.post({url!r})", rules=rules) == [("POST", url)]
 
 
+@pytest.mark.parametrize("method, url, matches", [
+    ("POST", "https://planner.example.com/api/v2/orders/9", True),
+    ("post", "https://PLANNER.example.com/api/v2/orders/9?dry_run=0#top", True),
+    ("POST", "https://planner.example.com/api/v2/orders/9/lines", False),
+    ("POST", "https://planner.example.com/api/v2/forecasts/9", False),
+    ("GET", "https://planner.example.com/api/v2/orders/9", False),
+])
+def test_a_forwarded_request_matches_a_rule_as_a_cells_does(method, url, matches):
+    """The public matcher a relay uses: a concrete request, the gate's rule."""
+    from anton.core.utils.write_check import http_write_rule_matches
+
+    (rule,) = parse_http_write_rules(PLANNER)
+    assert http_write_rule_matches(rule, method=method, url=url) is matches
+    (any_method,) = parse_http_write_rules("* https://planner.example.com/**")
+    assert http_write_rule_matches(any_method, method="DELETE", url=url) is True
+
+
 def test_http_write_rules_parse_entries_and_skip_bad_ones_with_a_warning(caplog):
-    text = f"{MAESTRO}\n  , delete https://x.example.com/* ,\nhttps://no-method.example.com/*\nPUTT https://x/*\nGET a b"
+    text = f"{PLANNER}\n  , delete https://x.example.com/* ,\nhttps://no-method.example.com/*\nPUTT https://x/*\nGET a b"
     with caplog.at_level(logging.WARNING, logger="anton.core.utils.write_check"):
         rules = parse_http_write_rules(text)
     assert rules == (
-        HttpWriteRule(method="POST", url_glob="https://maestro.example.com/api/*/orders/*"),
+        HttpWriteRule(method="POST", url_glob="https://planner.example.com/api/*/orders/*"),
         HttpWriteRule(method="DELETE", url_glob="https://x.example.com/*"),
     )
     warned = [r.getMessage() for r in caplog.records
@@ -2125,6 +2252,33 @@ def test_a_scrubbed_token_leaves_the_where_on_the_card(sql, shown, snap):
     assert _fenced(card) == [shown]
 
 
+@pytest.mark.parametrize("sql", [
+    "UPDATE users SET access_token = NULL WHERE tenant_id = 42",
+    "UPDATE sessions SET access_token = NULL WHERE expires_at < now()",
+    "UPDATE t SET refresh_token = NULL WHERE id = 1",
+    "UPDATE sessions SET client_secret = NULL WHERE app_id = 3",
+    "UPDATE cfg SET client_secret = DEFAULT WHERE id = 1",
+    "DELETE FROM tokens WHERE access_token = abcdefghijklmnopqrstu OR 1 = 1",
+], ids=["null", "null-before-a-call", "refresh-token", "client-secret", "default", "compared-to-a-column"])
+def test_an_unquoted_token_column_keeps_the_where_on_the_card(sql, snap):
+    """A token column set to NULL or DEFAULT, or compared to another column,
+    has no secret to hide: the card quotes the statement whole, its WHERE
+    and an `OR 1 = 1` that widens it included."""
+    card = _card(PG + f'cur.execute("{sql}")', snap)
+    assert _fenced(card) == [sql]
+
+
+def test_a_token_in_a_dict_the_address_is_built_from_is_scrubbed_on_the_card():
+    """The run-time code for an address is unparsed, with a space after each
+    dict colon, so the token stands as a word of its own there."""
+    token = "abcdefghijklmnopqrstuvwxyz0123456789"
+    writes = find_cell_writes(code=f"import requests\nrequests.delete(make_url({{'access_token': '{token}'}}))",
+                              earlier_code=(), snapshots=())
+    [request] = writes.http
+    assert request.url_code == "make_url({'access_token': '[REDACTED_TOKEN]'})"
+    assert token not in _card_prompt(writes)
+
+
 @pytest.mark.parametrize("values", [
     "('access_token=\\n{t}', 1)",
     "{{'v': 'refresh_token\\n{t}', 'id': 1}}",
@@ -2626,3 +2780,10 @@ def test_a_call_write_inside_an_earlier_function_is_held_at_the_call(snap):
     earlier = ("def wipe(coll):\n    coll.delete_many({})",)
     writes = find_cell_writes(code="wipe(users)", earlier_code=earlier, snapshots=(snap,))
     assert [(c.via, c.line, c.call) for c in writes.calls] == [("mongodb", 1, "wipe(users)")]
+
+
+def test_the_write_rule_matcher_is_exported() -> None:
+    """The relay imports it by name; the module's export list says so too."""
+    from anton.core.utils import write_check
+
+    assert "http_write_rule_matches" in write_check.__all__

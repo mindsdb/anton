@@ -32,11 +32,11 @@ WORKDIR /app
 COPY . /app
 
 # Install anton into a venv owned by UID 1000 so the non-root runtime can also `uv pip install`
-# missing packages at turn time. `uv sync --frozen` installs the exact versions
+# missing packages at turn time. `uv sync --locked` installs the exact versions
 # from uv.lock; a bare `uv pip install .` re-resolves at build time, which is
 # what silently pulled anthropic 1.x (httpx2) into pods while the lockfile
-# still pinned 0.x. boto3 is imported by anton at runtime but not declared as
-# a dependency, so add it explicitly (the one unlocked package).
+# still pinned 0.x. The scratchpad group includes the cloud SDK in the same
+# reviewed lock. A stale lock fails instead of changing the selected packages.
 # The empty-ARG guard runs first: with no pretend-version and no .git, hatch-vcs
 # fails deep inside the sync with an error that does not mention the build arg.
 # Fail here instead, naming the cause — and never fall back to a made-up version,
@@ -58,8 +58,7 @@ RUN test -n "$SETUPTOOLS_SCM_PRETEND_VERSION" \
               echo "       so nothing else would ever fail. Keep .git in .dockerignore." >&2; \
               exit 1; }; } \
     && uv venv "$VIRTUAL_ENV" \
-    && UV_PROJECT_ENVIRONMENT="$VIRTUAL_ENV" uv sync --frozen --no-dev --no-cache \
-    && uv pip install --no-cache boto3 \
+    && UV_PROJECT_ENVIRONMENT="$VIRTUAL_ENV" uv sync --locked --no-dev --group scratchpad --no-cache \
     && python -m compileall -q -j 0 -x '/(test|tests|idle_test)/' \
          /usr/local/lib/python3.12 "$VIRTUAL_ENV" /app/anton \
     && chown -R 1000:1000 "$VIRTUAL_ENV"

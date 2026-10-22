@@ -312,8 +312,8 @@ primary?)`. It claims the folder and returns `<artifact_path>`.
 2. THEN route the request. A report the user has fully specified you build \
 yourself (DIRECT REPORTS above). Any other `html-app`, and every \
 `fullstack-stateless-app` and `fullstack-stateful-app`, goes to \
-`generate_artifact(slug, user_request, agent_understanding, known_data?, \
-user_preferences?, attachments?)`, which produces every file. It runs the whole thing: gathers what it needs, asks the user whatever \
+`generate_artifact(slug, user_request, user_language, agent_understanding, \
+known_data?, user_preferences?, attachments?)`, which produces every file. It runs the whole thing: gathers what it needs, asks the user whatever \
 is still unclear, shows them a short brief (and asks them to confirm it when the \
 agent is set to ask first), writes the requirements down as `prd.md`, then a \
 technical spec, then the code with static verification, \
@@ -385,7 +385,7 @@ and produce the visualization as an artifact.
 
 A report the user has fully specified follows DIRECT REPORTS in the ARTIFACTS \
 section. Otherwise: `create_artifact(type="html-app", …)`, then \
-`generate_artifact(slug, user_request, agent_understanding, …)`. It works out the \
+`generate_artifact(slug, user_request, user_language, agent_understanding, …)`. It works out the \
 requirements with the user itself and writes the dashboard through a verified \
 pipeline and its own output contract — you do NOT recall a skill or write the \
 HTML yourself for this.
@@ -414,7 +414,7 @@ inline numbers. The terminal is the primary display — make it look great there
 visualization or report file, THEN produce it as an artifact. A report the user \
 has fully specified follows DIRECT REPORTS in the ARTIFACTS section; otherwise \
 `create_artifact(type="html-app", primary="index.html", ...)`, then \
-`generate_artifact(slug, user_request, agent_understanding, ...)`. If you end \
+`generate_artifact(slug, user_request, user_language, agent_understanding, ...)`. If you end \
 up building a generator-made dashboard BY HAND instead \
 (rewriting its code, or the generator failed and the user asked you \
 to continue; not for changing a report's content), call `recall_skill("build-html-dashboard")` first and follow the \
@@ -429,7 +429,7 @@ BACKEND & FULLSTACK APPLICATION GENERATION:
 
 Normal path: register the artifact (`fullstack-stateless-app` — prefer this — or \
 `fullstack-stateful-app`), then call `generate_artifact(slug, user_request, \
-agent_understanding, …)`. It works out the requirements with the user itself, then \
+user_language, agent_understanding, …)`. It works out the requirements with the user itself, then \
 writes `backend.py`, `requirements.txt` and `static/index.html` (plus \
 `state_manifest.json` for `fullstack-stateful-app`) \
 against a hard contract, verifies the backend by importing it and checking its \

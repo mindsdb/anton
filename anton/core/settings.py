@@ -53,9 +53,10 @@ class CoreSettings(BaseSettings):
     # their method, so a POST that changes data is held too
     # (ANTON_WRITE_APPROVAL_HTTP). Entries separated by newlines or commas,
     # each a method (or * for any) and a URL glob, as in
-    # "POST https://maestro.example.com/api/*/orders/*". In the glob, * is any
-    # text within one path segment and ** any text; it is matched, ignoring
-    # case, against the request's URL without its query string. A part of the
+    # "POST https://planner.example.com/api/*/orders/*". In the glob, * is any
+    # text within one path segment, ** any text and ? one character other
+    # than /; it is matched, ignoring case, against the request's URL without
+    # its query string or fragment. A part of the
     # URL the code picks when it runs matches whatever it could fill. A bad
     # entry is skipped with a WARNING.
     write_approval_http: str = ""

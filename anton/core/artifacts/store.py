@@ -321,7 +321,7 @@ class ArtifactStore:
 
         Returns the updated artifact, or None when the slug is missing.
         """
-        artifact = self._load_silent(slug)
+        artifact = self.read_metadata(slug)
         if artifact is None:
             return None
         if type is not _UNSET and type not in ARTIFACT_TYPES:
@@ -355,7 +355,7 @@ class ArtifactStore:
         for child in self._root.iterdir():
             if not child.is_dir():
                 continue
-            artifact = self._load_silent(child.name)
+            artifact = self.read_metadata(child.name)
             if artifact is not None:
                 # Reconcile against disk so file counts are accurate even
                 # though scratchpad writes bypass the store (see _reconcile_files).
@@ -371,7 +371,7 @@ class ArtifactStore:
         makes scratchpad-written files show up in `files[]` — the agent
         writes them directly to the folder, bypassing the store.
         """
-        artifact = self._load_silent(slug)
+        artifact = self.read_metadata(slug)
         if artifact is None:
             return None
         return self._reconcile_files(artifact)
@@ -387,7 +387,7 @@ class ArtifactStore:
         found: dict[str, Artifact] = {}
         unmatched: list[str] = []
         for key in wanted:
-            artifact = self._load_silent(key) if key else None
+            artifact = self.read_metadata(key) if key else None
             if artifact is None:
                 unmatched.append(key)
             else:
@@ -413,7 +413,7 @@ class ArtifactStore:
             for child in children:
                 if not pending:
                     break
-                artifact = found.get(child.name) or self._load_silent(child.name)
+                artifact = found.get(child.name) or self.read_metadata(child.name)
                 if artifact is not None and artifact.id in pending:
                     pending.discard(artifact.id)
                     found.setdefault(artifact.slug, artifact)
@@ -446,7 +446,7 @@ class ArtifactStore:
         Returns the updated artifact, or None when the slug is
         missing on disk.
         """
-        artifact = self._load_silent(slug)
+        artifact = self.read_metadata(slug)
         if artifact is None:
             return None
         prov_entry = next(
@@ -482,7 +482,7 @@ class ArtifactStore:
         Returns the (possibly refreshed) artifact, or None when the slug
         is missing. See `_reconcile_files` for the why.
         """
-        artifact = self._load_silent(slug)
+        artifact = self.read_metadata(slug)
         if artifact is None:
             return None
         return self._reconcile_files(artifact)
@@ -546,7 +546,7 @@ class ArtifactStore:
     def render_readme(self, slug: str) -> str | None:
         """Re-render README.md from the current metadata. Returns the
         rendered text, or None when the slug is missing."""
-        artifact = self._load_silent(slug)
+        artifact = self.read_metadata(slug)
         if artifact is None:
             return None
         text = self._render_readme_text(artifact)
@@ -569,7 +569,10 @@ class ArtifactStore:
         readme = self._render_readme_text(artifact)
         self.readme_path(artifact.slug).write_text(readme, encoding="utf-8")
 
-    def _load_silent(self, slug: str) -> Artifact | None:
+    def read_metadata(self, slug: str) -> Artifact | None:
+        """The artifact's metadata as stored, without reconciling its file
+        list, so nothing is rewritten; None when the slug escapes the store or
+        the metadata is missing or does not parse."""
         try:
             path = self.metadata_path(slug)
         except ValueError:

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from anton.core.tools.generate_artifact.spend import WIND_DOWN_ROUNDS, SpendGuard
+from tests.streaming_llm import StreamingLLM
 
 
 def _session(reached: bool):
@@ -76,7 +77,7 @@ class _CeilingSession:
         self.calls = 0
         self.question_count = 0
         self.elicitor = None
-        self._llm = SimpleNamespace()
+        self._llm = StreamingLLM()
 
     def spend_ceiling_reached(self) -> bool:
         return self.calls >= self._trips_after
