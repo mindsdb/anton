@@ -566,7 +566,7 @@ async def test_an_unmarked_source_stays_unverified_despite_known_data():
 
 @pytest.mark.parametrize("artifact_type, known_data", [
     ("fullstack-stateless-app", _SITES),
-    ("html-app", "row\n" * 2500),
+    ("html-app", ""),
 ])
 async def test_the_mark_does_not_count_where_known_data_cannot_stand_in_for_code(artifact_type, known_data):
     state = _state(_session_with_plan_sequence(_finish(artifact_type=artifact_type)), known_data=known_data)

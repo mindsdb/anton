@@ -42,7 +42,6 @@ from .state import (
     DATA_LOOP_MAX,
     GEN_LOOP_MAX_RETRIES,
     GEN_VERIFY_MAX_RETRIES,
-    KNOWN_DATA_SPEC_MAX,
     NOT_ENOUGH_DATA_PREFIX,
     RUNAPP_MAX_RETRIES,
     FetchVerdict,
@@ -181,18 +180,15 @@ def _needs_data_loop(state: GenState) -> bool:
 
 
 def _render_required(required: RequiredData) -> str:
-    return "\n".join(
-        f"- {it.name} — from {it.where} ({it.why})" for it in required.items
-    ) or required.reasoning
+    return "\n".join(f"- {it.name} — from {it.where} ({it.why})" for it in required.items)
 
 
 def _pending_required_text(state: GenState, pending: list[str]) -> str:
     """The sources define called covered while nothing vouches for them,
-    each with the reason the next steps need code that reads it."""
+    each with the reason the next steps need code that reads it. Reached only
+    when `known_data_usable` is false: a fullstack type, or no known data."""
     if (state.final_artifact_type or state.artifact_type) != "html-app":
         why = "the backend reads it at run time"
-    elif len((state.known_data or "").strip()) > KNOWN_DATA_SPEC_MAX:
-        why = "the known data is too long to pass to the page builder"
     else:
         why = "no executed code read it and the known data does not hold its values"
     lines = [f"- {s} — needs executed code that reads it: {why}" for s in pending]
@@ -222,7 +218,11 @@ def _not_enough_data(state: GenState, reasoning: str, required: RequiredData | N
     wheres = [it.where for it in (required.items if required else []) if it.where.strip()]
     catalog = state.datasource_catalog
     slugs = [c.slug for c in catalog.connections] if catalog is not None else []
-    mentioned = [s for s in slugs if any(s.casefold() in w.casefold() for w in wheres)]
+    # Whole-word match: a short slug such as `db` must not match "mongodb".
+    mentioned = [
+        s for s in slugs
+        if any(re.search(rf"(?<![\w-]){re.escape(s)}(?![\w-])", w, re.IGNORECASE) for w in wheres)
+    ]
     looked = list(dict.fromkeys((mentioned or slugs[:5]) + wheres))
     if not looked:
         return message
@@ -315,13 +315,14 @@ async def _data_phase(state: GenState) -> str | None:
         if not ok:
             # The sources stay unverified; the next iteration reads the
             # failure in the notes.
-            state.record("fetch_data_sample", "failed", notes[:200])
+            state.record("fetch_data_sample", "fail", notes[:200])
             continue
         state.record("fetch_data_sample", "done", notes[:200])
         fetched_ok = True
-        if forced:
+        if forced and state.data_iterations < DATA_LOOP_MAX:
             # The decisions said the data was not there; the next define
-            # and can-fetch judge what this fetch actually found.
+            # and can-fetch judge what this fetch actually found. With no
+            # iteration left it counts like any fetch whose cell succeeded.
             continue
         # The loop fetched exactly what was declared unverified, so the list
         # clears. Not narrowed item by item: the fetch step works from
@@ -399,7 +400,7 @@ def _spec_context(state: GenState) -> str:
         parts.append(f"## Brief\n{state.brief.strip()}")
     if state.data_notes.strip():
         parts.append("## Data\n" + state.data_notes.strip())
-    known = prompts.known_data_section(state, KNOWN_DATA_SPEC_MAX)
+    known = prompts.known_data_section(state)
     if known:
         parts.append(known)
     if state.web_notes.strip():

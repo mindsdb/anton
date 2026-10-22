@@ -13,7 +13,7 @@ from anton.core.llm.provider import StreamComplete
 from anton.core.tools.generate_artifact import engine, orchestrator, prompts
 from anton.core.tools.generate_artifact.discovery import checkpoint as cp
 from anton.core.tools.generate_artifact.state import (
-    KNOWN_DATA_SPEC_MAX, BrowserCheck, FetchVerdict, GenState, RequiredData, RequiredDataItem,
+    BrowserCheck, FetchVerdict, GenState, RequiredData, RequiredDataItem,
     VerifyResult,
 )
 from anton.utils.datasources import DATASOURCES_HEADER
@@ -1535,28 +1535,19 @@ def test_the_generators_see_the_known_data(tmp_path: Path):
     assert f"{prompts.KNOWN_DATA_HEADER}\n{_SITES}" in ctx
 
 
-def test_long_known_data_is_cut_for_the_generators_at_a_line_break(tmp_path: Path):
-    rows = "\n".join(f"site-{i},{i}.0,{i}.5" for i in range(1000))
+def test_long_known_data_reaches_every_context_whole(tmp_path: Path):
+    """A header line over one long JSON line used to be cut down to the
+    header alone; nothing is cut now."""
+    rows = "Sites (as JSON):\n[" + ",".join(f'{{"site":"s{i}","lat":{i}.5}}' for i in range(600)) + "]"
     st = _state(tmp_path, known_data=rows)
-    section = orchestrator._spec_context(st).split(prompts.KNOWN_DATA_HEADER, 1)[1]
-    shown, marker = section.split("\n(truncated: first ", 1)
-    assert marker.startswith(f"{len(shown.strip())} of {len(rows)} characters shown)")
-    assert len(shown.strip()) <= KNOWN_DATA_SPEC_MAX
-    last = shown.strip().splitlines()[-1]
-    assert last.startswith("site-") and last.endswith(".5")
-
-
-def test_known_data_on_one_line_is_cut_hard_at_the_limit(tmp_path: Path):
-    st = _state(tmp_path, known_data="x" * 9000)
-    section = orchestrator._spec_context(st).split(prompts.KNOWN_DATA_HEADER, 1)[1]
-    assert f"\n{'x' * KNOWN_DATA_SPEC_MAX}\n(truncated: first {KNOWN_DATA_SPEC_MAX} of 9000" in section
-
-
-def test_the_data_decisions_get_the_known_data_whole(tmp_path: Path):
-    rows = "\n".join(f"site-{i},{i}.0,{i}.5" for i in range(1000))
-    st = _state(tmp_path, known_data=rows)
-    _, user = prompts.build_required_data_prompt(st)
-    assert rows in user
+    for context in (
+        orchestrator._spec_context(st),
+        prompts.build_fetch_data_kickoff(st),
+        prompts.build_required_data_prompt(st)[1],
+        prompts.build_can_fetch_prompt(st, "- sites")[1],
+    ):
+        assert f"{prompts.KNOWN_DATA_HEADER}\n{rows}" in context
+        assert "(truncated" not in context
 
 
 def test_without_known_data_no_section_is_added(tmp_path: Path):
@@ -1618,7 +1609,6 @@ async def test_rows_in_known_data_need_no_fetch_when_gathering_did_not_mark_them
     (dict(artifact_type="fullstack-stateless-app", is_fullstack=True, known_data=_SITES),
      "the backend reads it at run time"),
     (dict(known_data=""), "no executed code read it and the known data does not hold its values"),
-    (dict(known_data="row\n" * 2500), "the known data is too long to pass to the page builder"),
 ])
 async def test_an_empty_list_is_rejected_when_nothing_vouches_for_the_sources(
     tmp_path: Path, monkeypatch, kw, why
@@ -1793,7 +1783,25 @@ async def test_a_fetch_without_a_cell_that_succeeded_is_not_data(tmp_path: Path,
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
     notes, ok = await orchestrator._fetch_data_sample(_state(tmp_path))
     assert ok is False
-    assert notes
+    if isinstance(loop_result, dict):
+        assert "(the fetch step ran no cell that succeeded)" in notes
+
+
+async def test_one_cell_that_succeeded_makes_the_fetch_count(tmp_path: Path, monkeypatch):
+    async def fake_run_loop(**kw):
+        return {
+            "files_written": [], "rounds_used": 2, "summary": "read the sites",
+            "scratchpad_execs": [
+                {"name": "pad", "code": "get('/site')", "output": "404", "ok": False},
+                {"name": "pad", "code": "rows = get('/sites')", "output": "13 rows", "ok": True},
+            ],
+        }
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
+    notes, ok = await orchestrator._fetch_data_sample(_state(tmp_path))
+    assert ok is True
+    assert "Scratchpad `pad` (failed):" in notes
+    assert "(the fetch step ran no cell that succeeded)" not in notes
 
 
 async def test_failed_fetches_keep_the_sources_unverified_until_the_loop_gives_up(
@@ -1824,7 +1832,7 @@ async def test_failed_fetches_keep_the_sources_unverified_until_the_loop_gives_u
     assert err.startswith("not enough data: the data loop did not converge")
     assert st.unverified_sources == ["sites"]
     assert st.gathering_complete is False
-    assert [o for o, _ in _outcomes(st, "fetch_data_sample")] == ["failed"] * orchestrator.DATA_LOOP_MAX
+    assert [o for o, _ in _outcomes(st, "fetch_data_sample")] == ["fail"] * orchestrator.DATA_LOOP_MAX
 
 
 async def test_a_no_with_a_connection_gets_one_forced_fetch_then_names_where_it_looked(
@@ -1900,3 +1908,60 @@ def test_the_error_names_the_first_connections_when_none_is_mentioned(tmp_path: 
     st2.forced_fetch_used = True
     assert orchestrator._not_enough_data(st2, "gave up.", None) == "not enough data: gave up. Looked in: a."
     assert orchestrator._not_enough_data(st2, "why?", None) == "not enough data: why? Looked in: a."
+
+
+def test_the_error_names_a_connection_only_when_its_whole_slug_is_mentioned(tmp_path: Path):
+    st = _state(tmp_path, datasource_catalog=_slug_catalog("db", "crm"))
+    st.forced_fetch_used = True
+    required = RequiredData(
+        items=[RequiredDataItem(name="orders", where="mongodb collection on CRM", why="chart")],
+        reasoning="r",
+    )
+    err = orchestrator._not_enough_data(st, "no orders", required)
+    assert err == "not enough data: no orders. Looked in: crm, mongodb collection on CRM."
+
+
+async def test_a_forced_fetch_on_the_last_iteration_counts_when_its_cell_succeeded(
+    tmp_path: Path, monkeypatch
+):
+    """No iteration is left for define to judge it, so it counts like any
+    fetch whose cell succeeded instead of ending in "did not converge"."""
+    st = _unverified(_state(tmp_path, datasource_catalog=_slug_catalog("rest-gw")), "sites")
+    st.session._llm.generate_object = AsyncMock(side_effect=[
+        RequiredData(items=[_SITES_ITEM], reasoning="sites are missing"),
+        FetchVerdict(possible=True, reasoning="rest-gw has them"),
+        RequiredData(items=[_SITES_ITEM], reasoning="sites are missing"),
+        FetchVerdict(possible=True, reasoning="rest-gw has them"),
+        RequiredData(items=[_SITES_ITEM], reasoning="sites are missing"),
+        FetchVerdict(possible=False, reasoning="the endpoint keeps failing"),
+    ])
+    results = iter([("(data fetch step reported: 500)", False)] * 2 + [("read 13 sites", True)])
+
+    async def fake_fetch(state, required_text=""):
+        return next(results)
+
+    monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
+
+    assert await orchestrator._data_phase(st) is None
+    assert st.unverified_sources == [] and st.gathering_complete is True
+    assert [o for o, _ in _outcomes(st, "is_possible_to_fetch")] == ["yes", "yes", "no_but_trying"]
+
+
+async def test_known_data_is_scrubbed_before_any_step_sees_it(tmp_path: Path, monkeypatch):
+    seen = {}
+
+    async def fake_run(state, *, entry):
+        seen["known_data"] = state.known_data
+        return {"status": "generated", "files_written": [], "trace": []}
+
+    monkeypatch.setattr(orchestrator, "run", fake_run)
+    secret = "sk-ant-api03-" + "A" * 40
+    session = _session()
+    session._scratchpads.agent_pads = Mock(return_value=set())
+    await engine.generate(
+        session=session, artifact_type="html-app", artifact_path=tmp_path, slug="a",
+        user_request="map the sites", agent_understanding="a map",
+        known_data=f"site,lat\nToronto,43.7\nfetched with key {secret}",
+    )
+    assert "Toronto,43.7" in seen["known_data"]
+    assert secret not in seen["known_data"]

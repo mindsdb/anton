@@ -144,7 +144,7 @@ def known_data_sources(inp: dict, *, usable: bool) -> set[str]:
     `verified_by: known_data`.
 
     Empty unless `usable` (`state.known_data_usable`): only an html-app's
-    snapshot that reaches the page builder whole can stand in for code. The
+    snapshot can stand in for code. The
     mark is matched loosely — quoted, spaced or followed by a note — because
     every miss sends the run through the data loop.
     """

@@ -7,7 +7,6 @@ from anton.core.tools.generate_artifact.state import (
     DATA_LOOP_MAX,
     GEN_VERIFY_MAX_RETRIES,
     JOURNAL_DETAIL_MAX,
-    KNOWN_DATA_SPEC_MAX,
     RUNAPP_MAX_RETRIES,
     FetchVerdict,
     GenState,
@@ -187,11 +186,10 @@ def _gs(**kw) -> GenState:
     return GenState(**base)
 
 
-def test_known_data_stands_in_for_code_only_for_a_short_html_app_snapshot():
+def test_known_data_stands_in_for_code_only_for_an_html_app_snapshot():
     assert known_data_usable(_gs(known_data="site,lat\nToronto,43.7")) is True
     assert known_data_usable(_gs(known_data="   ")) is False
-    assert known_data_usable(_gs(known_data="x" * (KNOWN_DATA_SPEC_MAX + 1))) is False
-    assert known_data_usable(_gs(known_data="x" * KNOWN_DATA_SPEC_MAX)) is True
+    assert known_data_usable(_gs(known_data="x" * 50_000)) is True
     assert known_data_usable(
         _gs(artifact_type="fullstack-stateless-app", known_data="site,lat\nToronto,43.7")
     ) is False

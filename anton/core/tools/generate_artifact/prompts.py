@@ -28,7 +28,7 @@ from .sub_tools import FILE_BEGIN_MARKER as BEGIN, FILE_END_MARKER as END
 # How much file content fits in one reply, in characters — the unit the model
 # can compare against what it is about to write. Derived from the output budget
 # in state.py; quoted from the constant so the two cannot drift.
-from .state import KNOWN_DATA_SPEC_MAX, REPLY_BODY_CHARS, language_name
+from .state import REPLY_BODY_CHARS, language_name
 
 if TYPE_CHECKING:
     from anton.utils.datasources import CatalogConnection, DatasourceCatalog
@@ -1331,23 +1331,15 @@ def prd_section(state) -> str:
 KNOWN_DATA_HEADER = "## Known data (passed in by the calling agent)"
 
 
-def known_data_section(state, max_chars: int | None = None) -> str:
-    """`known_data` under its header, or "" when there is none.
-
-    `max_chars` is for contexts re-sent on every round. The cut falls on the
-    last line break before the limit, so no data row is left half-written.
-    """
+def known_data_section(state) -> str:
+    """`known_data` under its header, or "" when there is none. Passed whole:
+    it is what the calling agent chose to hand over, and a cut snapshot would
+    be built into the page as if it were complete."""
     text = (getattr(state, "known_data", "") or "").strip()
-    if not text:
-        return ""
-    if max_chars is not None and len(text) > max_chars:
-        cut = text.rfind("\n", 0, max_chars)
-        shown = text[:cut] if cut > 0 else text[:max_chars]
-        text = f"{shown}\n(truncated: first {len(shown)} of {len(text)} characters shown)"
-    return f"{KNOWN_DATA_HEADER}\n{text}"
+    return f"{KNOWN_DATA_HEADER}\n{text}" if text else ""
 
 
-def _brief_and_notes(state, *, known_data_max: int | None = None) -> str:
+def _brief_and_notes(state) -> str:
     parts = [f"## Brief\n{state.brief.strip()}"]
     prd = prd_section(state)
     if prd:
@@ -1356,7 +1348,7 @@ def _brief_and_notes(state, *, known_data_max: int | None = None) -> str:
         parts.append(f"## Data gathered so far\n{state.data_notes.strip()}")
     else:
         parts.append("## Data gathered so far\n(nothing gathered yet)")
-    known = known_data_section(state, known_data_max)
+    known = known_data_section(state)
     if known:
         parts.append(known)
     if getattr(state, "web_notes", "").strip():
@@ -1464,7 +1456,7 @@ def build_fetch_data_kickoff(state, required_text: str = "") -> str:
     # JOURNAL_DETAIL_MAX characters. The pads go here too, because the
     # single-scratchpad guard challenges a new name only once per session
     # and a fetch in a fresh pad would not see the agent's data.
-    parts = [_brief_and_notes(state, known_data_max=KNOWN_DATA_SPEC_MAX)]
+    parts = [_brief_and_notes(state)]
     if required_text.strip():
         parts.append(f"## Data to fetch in this step\n{required_text.strip()}")
     pads = (getattr(state, "scratchpads_context", "") or "").strip()

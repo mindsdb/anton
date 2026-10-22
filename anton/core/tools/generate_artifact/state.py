@@ -33,11 +33,6 @@ GEN_LOOP_MAX_RETRIES: int = 1
 GEN_VERIFY_MAX_RETRIES: int = 1
 RUNAPP_MAX_RETRIES: int = 1
 
-# Longest `known_data` the contexts re-sent on every round carry (the
-# generators' `_spec_context`, the fetch kickoff). A longer one is cut there,
-# so it never verifies a source on its own (`known_data_usable`).
-KNOWN_DATA_SPEC_MAX: int = 8000
-
 # Every "not enough data" error starts with this; the tool handler keys the
 # text it gives the agent on it.
 NOT_ENOUGH_DATA_PREFIX = "not enough data:"
@@ -209,13 +204,12 @@ def language_name(user_language: str | None) -> str:
 def known_data_usable(state) -> bool:
     """Whether `known_data` can stand in for executed code.
 
-    Only for an html-app, whose page embeds a snapshot, and only when the
-    snapshot reaches the page builder whole. A fullstack backend reads its
-    source at run time and needs working access code in `data_notes`.
+    Only for an html-app, whose page embeds a snapshot. A fullstack backend
+    reads its source at run time and needs working access code in
+    `data_notes`.
     """
     artifact_type = state.final_artifact_type or state.artifact_type
-    text = (state.known_data or "").strip()
-    return artifact_type == "html-app" and 0 < len(text) <= KNOWN_DATA_SPEC_MAX
+    return artifact_type == "html-app" and bool((state.known_data or "").strip())
 
 
 @dataclass

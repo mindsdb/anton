@@ -1221,11 +1221,11 @@ def test_the_fetch_kickoff_carries_the_full_list_and_the_pads():
     assert "## Scratchpads already in this session" not in bare
 
 
-def test_the_fetch_kickoff_cuts_long_known_data():
+def test_the_fetch_kickoff_carries_long_known_data_whole():
     rows = "\n".join(f"site-{i},{i}.0" for i in range(2000))
     kickoff = prompts.build_fetch_data_kickoff(_data_state(known_data=rows))
-    assert "(truncated: first " in kickoff
-    assert rows not in kickoff
+    assert rows in kickoff
+    assert "(truncated" not in kickoff
 
 
 def test_the_graph_shows_the_forced_fetch_and_the_loop_back():

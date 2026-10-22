@@ -421,7 +421,9 @@ async def generate(
         primary=primary,
         user_request=user_request,
         agent_understanding=agent_understanding,
-        known_data=known_data,
+        # Scrubbed once here: it reaches every step's prompt and is saved in
+        # discovery.json, and the agent may have pasted a credential with it.
+        known_data=scrub_credentials(known_data),
         user_preferences=user_preferences,
         user_language=user_language,
         datasource_catalog=_datasource_catalog(session),
