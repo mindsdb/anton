@@ -144,9 +144,9 @@ def known_data_sources(inp: dict, *, usable: bool) -> set[str]:
     `verified_by: known_data`.
 
     Empty unless `usable` (`state.known_data_usable`): only an html-app's
-    snapshot can stand in for code. The
-    mark is matched loosely — quoted, spaced or followed by a note — because
-    every miss sends the run through the data loop.
+    snapshot can stand in for code. The mark is matched loosely — quoted,
+    spaced or followed by a note — because every miss sends the run through
+    the data loop.
     """
     if not usable:
         return set()
@@ -157,11 +157,10 @@ def known_data_sources(inp: dict, *, usable: bool) -> set[str]:
     for f in findings:
         if not isinstance(f, dict):
             continue
-        source = str(f.get("source") or "").strip()
-        mark = re.sub(r"[`'\"]", "", str(f.get("verified_by") or "")).strip().casefold()
-        mark = re.sub(r"[\s-]+", "_", mark)
-        if source and mark.startswith("known_data"):
-            covered.add(source_key(source))
+        key = source_key(f.get("source"))
+        mark = re.sub(r"[^a-z]+", "_", str(f.get("verified_by") or "").casefold()).strip("_")
+        if key and mark.startswith("known_data"):
+            covered.add(key)
     return covered
 
 

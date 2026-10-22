@@ -179,10 +179,6 @@ def _needs_data_loop(state: GenState) -> bool:
     return bool(state.unverified_sources)
 
 
-def _render_required(required: RequiredData) -> str:
-    return "\n".join(f"- {it.name} — from {it.where} ({it.why})" for it in required.items)
-
-
 def _pending_required_text(state: GenState, pending: list[str]) -> str:
     """The sources define called covered while nothing vouches for them,
     each with the reason the next steps need code that reads it. Reached only
@@ -272,7 +268,9 @@ async def _data_phase(state: GenState) -> str | None:
         last_required = required
         last_reasoning = required.reasoning
         if required.items:
-            required_text = _render_required(required)
+            required_text = "\n".join(
+                f"- {it.name} — from {it.where} ({it.why})" for it in required.items
+            )
             state.record("define_required_data", "done", required_text)
         else:
             # An empty list is the model's word alone. It is accepted only

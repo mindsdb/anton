@@ -811,13 +811,12 @@ async def _run_loop(
     Returns a result dict ``{files_written, rounds_used, summary,
     scratchpad_execs}`` on success, or a plain error string on failure.
     ``scratchpad_execs`` records every scratchpad ``exec`` the loop ran —
-    ``{name, code, output, ok}`` per call, leaving out a cell that never ran
+    ``{name, code, output, ok}`` per call (``ok`` False for a cell the
+    runtime reported as failed), leaving out a cell that never ran
     (``CELL_NOT_RUN_REASONS``) — so callers can hand the exact data-access
-    code that ran to later FSM steps.
-
-    Each record carries ``ok``: False for a cell the runtime reported as
-    failed. With ``require_files=False`` a loop that ends without ``finish``
-    still returns the dict, ``finished`` False, so the cells it ran survive.
+    code that ran to later FSM steps. With ``require_files=False`` a loop
+    that ends without ``finish`` still returns the dict, ``finished`` False,
+    so the cells it ran survive.
 
     ``spend``, when given, is the run's `SpendGuard`. Once the turn's ceiling
     is reached the loop tells the model to close its file and stop, and gives
