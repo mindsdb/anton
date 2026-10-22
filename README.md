@@ -361,7 +361,7 @@ workflow supplies the major component and consumes the resulting `tag`/`version`
 
 `anton/release-requirements.txt` is generated from the runtime lock with markers and artifact hashes. Both release archives include it. CI rejects a stale export or an archive with a different export. Wheel, source and Git smoke installs install the hashed registry requirements first, then Anton without resolving dependencies again.
 
-The shell and PowerShell installers resolve one release tag to a commit and use that commit's requirements as constraints. They fail if the export is missing. Rerun the installer to select a newer release; a generic `uv tool upgrade` does not apply this contract. These tool installs constrain versions; the release smoke tests additionally enforce artifact hashes.
+The shell and PowerShell installers and the CLI auto-updater resolve one release tag to a commit and use that commit's requirements as constraints. They refuse missing or empty exports before replacing the installation. Rerun the installer to select a newer release; a generic `uv tool upgrade` does not apply this contract. These tool installs constrain versions; the release smoke tests additionally enforce artifact hashes.
 
 To update a dependency deliberately:
 
