@@ -73,6 +73,22 @@ async def test_fsm_failure_is_wrapped_with_report_instruction(tmp_path: Path, mo
     assert "Report this failure to the user" in out
 
 
+async def test_missing_data_tells_the_agent_what_to_ask_the_user_for(tmp_path: Path, monkeypatch):
+    slug = _make_artifact(tmp_path)
+
+    async def fake_generate(**kw):
+        return "not enough data: no connection holds the sites. Looked in: rest-gw."
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    _, out = await _collect(_session(tmp_path), {"slug": slug, "user_request": "build it", "agent_understanding": "an app"})
+    assert out.startswith("Error: the data this artifact needs is not available.")
+    assert "no connection holds the sites. Looked in: rest-gw." in out
+    assert "do NOT build the artifact yourself" in out
+    assert "pass the data in `known_data`" in out
+    assert "artifact generation failed" not in out
+    assert "ask how they want to proceed" not in out
+
+
 async def test_generator_crash_is_wrapped(tmp_path: Path, monkeypatch):
     slug = _make_artifact(tmp_path)
 
