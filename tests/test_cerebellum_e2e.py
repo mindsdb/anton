@@ -59,6 +59,7 @@ def _build_session_with_cerebellum(
     """
     cortex = MagicMock()
     cortex.encode = AsyncMock(return_value=["encoded"])
+    cortex.encoding_gate = MagicMock(return_value=False)  # autopilot
 
     drafts = [
         _LessonDraft(text=text, topic=topic) for text, topic in (lessons or [])

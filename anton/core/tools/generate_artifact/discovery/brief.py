@@ -64,8 +64,8 @@ _DRAFT_BRIEF_TEMPLATE = (
     "PRD{after_prd}.\n\n"
     "{closing}"
     "Write everything — lead-in, section headings, sections, closing line "
-    "— in the same language as the user request; translate the section "
-    "names above. Keep the whole reply under about 25 "
+    "— in the user language, including the section names above. Keep the "
+    "whole reply under about 25 "
     "lines. Reply with the brief only, no other text."
 )
 
@@ -188,12 +188,20 @@ async def show_and_confirm(state: PrdState) -> str:
     async with sub_tools.progress_muted(state.session):
         answer = await sub_tools.ask_via_elicit(state.session, request)
 
+    # A timeout is not a decline: the user stepped away, and the card stays
+    # answerable after the turn. Leaving the brief unconfirmed makes their
+    # later "Accept" a repeat call, which `run_discovery` takes as agreement.
+    if answer.status == "timeout":
+        state.record_qa("Show PRD brief for confirmation", "user did not respond (timeout)")
+        state.trace_log.node("show_and_confirm", "unconfirmed", detail="answer status: timeout")
+        return "unconfirmed"
+
     if answer.status in ("unavailable", "limit", "error"):
         state.trace_log.node("show_and_confirm", "unconfirmed", detail=f"answer status: {answer.status}")
         return "unconfirmed"
 
-    if answer.status in ("cancelled", "timeout"):
-        state.record_qa("Show PRD brief for confirmation", f"user did not respond ({answer.status})")
+    if answer.status == "cancelled":
+        state.record_qa("Show PRD brief for confirmation", "user did not respond (cancelled)")
         state.trace_log.node("show_and_confirm", "cancelled", detail=f"answer status: {answer.status}")
         return "cancelled"
 
@@ -258,6 +266,7 @@ async def redraw_brief(state: PrdState) -> None:
     the same result the correction would have had without the new source.
     """
     from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
+    from anton.core.llm.structured import usable_tool_call
 
     brief, response = await sub_tools.plan_step(
         state, sub_tools.STEP_REDRAW_BRIEF, doing="redrawing the brief"
@@ -265,7 +274,10 @@ async def redraw_brief(state: PrdState) -> None:
 
     declared = None
     new_type = ""
-    for tc in getattr(response, "tool_calls", None) or []:
+    # A reply cut off while the run winds down is kept for its text, but a
+    # damaged call in it must not overwrite the declared sources.
+    calls = response.tool_calls if usable_tool_call(response) else []
+    for tc in calls:
         if tc.name != "finish_gathering":
             continue
         inp = tc.input or {}

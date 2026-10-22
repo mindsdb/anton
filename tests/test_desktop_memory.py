@@ -106,9 +106,10 @@ def test_background_memory_defaults_on(tmp_path, memory_dirs):
 
 
 def test_the_shared_gate_truth_table(tmp_path, memory_dirs):
-    """`_background_memory_active` is the single gate on all four automatic call
-    sites (vacuum x2, identity extraction, scratchpad consolidation), so its
-    truth table is their contract. Only cloud's override should close it."""
+    """`_background_memory_active` is the single gate on all five automatic call
+    sites (vacuum x2, identity extraction, scratchpad consolidation, the
+    cerebellum flush), so its truth table is their contract. Only cloud's
+    override should close it."""
     assert _desktop_session(tmp_path, memory_dirs)._background_memory_active is True
 
     off = _desktop_session(tmp_path, memory_dirs, background_memory=False)
@@ -124,8 +125,9 @@ def test_the_shared_gate_truth_table(tmp_path, memory_dirs):
 
 
 def test_cerebellum_and_acc_flushes_fire_by_default(tmp_path, memory_dirs, monkeypatch):
-    """Both guard on cortex.mode as well, so they need the desktop default proved
-    separately from the four `_background_memory_active` sites."""
+    """The ACC flush has its own inline gate on cortex.mode and `_background_memory`,
+    so it needs the desktop default proved separately. The cerebellum flush goes
+    through `_background_memory_active`, and is checked here alongside it."""
     spawned = []
     monkeypatch.setattr(session_mod.asyncio, "create_task",
                         lambda coro, **kw: (spawned.append(coro), coro.close())[0])

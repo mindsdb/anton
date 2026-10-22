@@ -14,6 +14,7 @@ from anton.core.tools.tool_handlers import (
     handle_update_artifact_metadata,
 )
 from anton.core.artifacts.listing import FIELDS as ARTIFACT_LIST_FIELDS
+from anton.core.utils.scratchpad import SCRATCHPAD_ACTIONS
 from anton.core.tools.text_file import DEFAULT_LINE_COUNT, MAX_OUTPUT_CHARS
 
 from dataclasses import dataclass, replace
@@ -94,7 +95,12 @@ SCRATCHPAD_TOOL = ToolDef(
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["exec", "view", "reset", "remove", "dump", "install"],
+                "enum": list(SCRATCHPAD_ACTIONS),
+                "description": (
+                    "What to do: `exec` runs `code` in the scratchpad, `view` shows its "
+                    "cells, `dump` renders them as a notebook, `install` installs "
+                    "`packages`, `reset` clears its state and `remove` deletes it."
+                ),
             },
             "name": {"type": "string", "description": "Scratchpad name"},
             "code": {
@@ -186,7 +192,8 @@ CREATE_ARTIFACT_TOOL = ToolDef(
         "AFTER REGISTERING a web artifact (html-app, fullstack-stateless-app, "
         "or fullstack-stateful-app): a report the user has fully specified you "
         "build yourself (DIRECT REPORTS in the ARTIFACTS section); anything else "
-        "goes to `generate_artifact(slug, user_request, agent_understanding, ...)`, "
+        "goes to `generate_artifact(slug, user_request, user_language, "
+        "agent_understanding, ...)`, "
         "which works out the requirements with the user, writes every file, and "
         "verifies its own output. For `document`, "
         "`dataset`, `image` and `mixed` there is no generator: write the "
@@ -327,7 +334,10 @@ LIST_ARTIFACTS_TOOL = ToolDef(
             "fields": {
                 "type": "array",
                 "items": {"type": "string", "enum": list(ARTIFACT_LIST_FIELDS)},
-                "description": "Fields to return instead of the default set; `slug` is always included.",
+                "description": (
+                    "Fields to return instead of the default set. Every artifact is "
+                    "headed by its slug whatever you ask for, so the slug needs no field."
+                ),
             },
             "match": {
                 "type": "array",
@@ -425,6 +435,13 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "- `slug`: the artifact slug from a prior `create_artifact` call.\n"
         "- `user_request`: the user's request, as close to their original "
         "wording as possible.\n"
+        "- `user_language`: the language the user writes to you in, by its "
+        "English name (\"English\", \"Russian\", \"Spanish\"). Judge it by "
+        "the user's own messages, not by the data, the attachments or this "
+        "conversation's system text. The pipeline asks its questions and "
+        "writes the brief, `prd.md`, `spec.md` and the page's text in this "
+        "language. If the user wants the page in another language, say so in "
+        "`agent_understanding`.\n"
         "- `agent_understanding`: what the user asked for, in your words — "
         "only what they said or what plainly follows from it. Do NOT add "
         "features, screens, mechanics or styling of your own: the pipeline "
@@ -454,7 +471,7 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "relay both to the user when non-empty.\n"
         "- `needs_confirmation` — a brief was drafted but the user could not "
         "be asked. Show `brief_summary`; if they agree, call again with the "
-        "SAME `user_request`.\n"
+        "SAME `user_request` and `user_language`.\n"
         "- `cancelled` — the user declined. Do not build the artifact by "
         "hand.\n"
         "- `stopped_over_budget` — the turn ran out of tokens and the "
@@ -478,6 +495,14 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
                     "as possible. This identifies the work: a repeat call "
                     "carrying the same request continues where the previous "
                     "one stopped, a different one starts over."
+                ),
+            },
+            "user_language": {
+                "type": "string",
+                "maxLength": 40,
+                "description": (
+                    "English name of the language the user writes to you "
+                    "in, e.g. \"Russian\"."
                 ),
             },
             "agent_understanding": {
@@ -525,7 +550,7 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
                 ),
             },
         },
-        "required": ["slug", "user_request", "agent_understanding"],
+        "required": ["slug", "user_request", "user_language", "agent_understanding"],
     },
     handler=handle_generate_artifact,
     prompt=(
@@ -540,12 +565,16 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "  1. Call `create_artifact` to register the slug and pick the type "
         "(one of html-app, fullstack-stateless-app, fullstack-stateful-app).\n"
         "  2. Call `generate_artifact(slug=<slug>, user_request=..., "
-        "agent_understanding=..., known_data?, user_preferences?, attachments?)`. It asks "
+        "user_language=..., agent_understanding=..., known_data?, "
+        "user_preferences?, attachments?)`. It asks "
         "the user anything it still needs, so do not pre-interview them for "
-        "it.\n"
+        "it. `user_language` is the language the user writes to you in; "
+        "talk to the user in that language while the artifact is built and "
+        "when you report the result.\n"
         "  3. Follow the `instruction` in the result. `needs_confirmation` "
         "means show `brief_summary` and, if the user agrees, call again with "
-        "the SAME `user_request` — that repeat call IS the confirmation. A "
+        "the SAME `user_request` and `user_language` — that repeat call IS "
+        "the confirmation. A "
         "correction goes in `agent_understanding`, with `user_request` left "
         "as it was.\n"
         "Do NOT call `launch_backend` for a fullstack artifact built this "
@@ -818,9 +847,10 @@ ASK_USER_TOOL = ToolDef(
         'Returns {"status":"answered","values":["<value>"]} — or "text" when the '
         'user typed their own answer instead of picking, possibly alongside '
         '"values". Other statuses: "cancelled" (the user declined to answer), '
-        '"timeout", "error". On cancelled/timeout/error do NOT call this tool '
-        "again for the same question: either proceed on an assumption you state "
-        "out loud, or ask in plain text and end your turn.\n\n"
+        '"timeout", "error". On cancelled/timeout do NOT call this tool again '
+        "and do NOT act on an assumed answer: end your turn and say the "
+        "question is still waiting for them. Their answer arrives as their "
+        "next message. On error, ask in plain text and end your turn.\n\n"
         "Ask one question at a time."
     ),
     # This is where the carve-out from CONVERSATION DISCIPLINE's "never ask and
@@ -841,8 +871,9 @@ ASK_USER_TOOL = ToolDef(
         "answer arrives inside the current turn, so continue with it immediately. "
         "Open-ended questions still go in plain text with the turn ended. Ask one "
         "question at a time either way. If `ask_user` comes back cancelled, "
-        "timeout or error, do not re-ask: proceed on an assumption you state out "
-        "loud, or ask in plain text and end your turn."
+        "timeout or error, do not re-ask and do not act on an assumed answer — "
+        "for an approval, that assumption is the approval. End your turn and "
+        "say the question is still open."
     ),
     input_schema={
         "type": "object",

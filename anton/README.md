@@ -131,7 +131,7 @@ And the Hipocampus also is controlled as follows:
 | Brain Structure | Module | What It Does |
 |---|---|---|
 | **Hippocampus** (CA3/CA1) | `hippocampus.py` | The storage engine. Reads and writes individual memory traces (engrams) to markdown files. One instance per scope — it doesn't decide *what* to remember, just executes storage and retrieval. |
-| **Prefrontal Cortex** (dlPFC/vmPFC) | `cortex.py` | The executive coordinator. Manages two hippocampi (global + project), decides which memories to load into the LLM's context window, gates whether new memories need confirmation. |
+| **Prefrontal Cortex** (dlPFC/vmPFC) | `cortex.py` | The executive coordinator. Manages two hippocampi (global + project), plus an optional read-only one an operator manages, decides which memories to load into the LLM's context window, gates whether new memories need confirmation. |
 | **Medial Temporal Lobe** (episodic) | `episodes.py` | Raw episodic memory. Logs every conversation turn as timestamped JSONL — user input, assistant responses, tool calls, scratchpad output. Searchable via the `recall` tool. Like HSAM: never forgets. |
 | **Hippocampal Replay** (SWS consolidation) | `consolidator.py` | After a scratchpad session ends, replays what happened in compressed form and extracts durable lessons via a fast LLM call. Like sleep — offline, post-hoc, selective. |
 | **Striatum** (procedural memory) | `skills.py` | Long-term procedural memory. Stores reusable skills as multi-stage directories (declarative → chunks → code). The LLM retrieves skills on demand via the `recall_skill` tool, the way the basal ganglia activates a learned action sequence in response to a familiar context. |
@@ -293,9 +293,13 @@ When a turn begins, the Cortex assembles memories into the system prompt. This i
 4. **Global lessons** — semantic knowledge, most recent first (~1000 tokens)
 5. **Project lessons** — scope-specific facts, most recent first (~1000 tokens)
 
-Total budget: ~5800 tokens, about 3% of a 200K context window.
+Total budget: ~5800 tokens, about 3% of a 200K context window. An operator's read-only layer adds its own budgets on top (see below).
 
-The Cortex inserts these as labeled sections in the system prompt (`## Your Memory — Identity`, `## Your Memory — Global Rules`, etc.) so the LLM knows they're its own memories, not user instructions. The `anton.md` user-written context is injected *after* memory, giving user instructions higher priority.
+When the host passes an operator's read-only layer (`managed_hc`, see [the Cortex section](#cortexpy--executive-coordinator)), its rules and lessons come first, under `## Operator Memory — Rules` and `## Operator Memory — Lessons`, ahead of Identity. The first of those headings carries one line telling the model that the operator's rules and lessons win over Your Memory when the two conflict.
+
+The Cortex inserts these as labeled sections in the system prompt (`## Your Memory — Identity`, `## Your Memory — Global Rules`, etc.) so the LLM knows they're its own memories, not user instructions. The `anton.md` user-written context comes earlier in the prompt, ahead of memory. Memory changes every turn, so it rides the tail, followed only by workspace discovery, and everything above it stays cache-stable (`prompt_builder.py`).
+
+A host that sets `ChatSessionConfig.deployment_identity` also passes `learned_memory_scope`: `personal`, `shared`, `off` or `unavailable`. An omitted scope counts as `unavailable`. The memory part of the prompt then opens with `## Learned memory status`. That section tells the model whether learned memory is on, shared, off or unavailable, and whether the global and project stores hold saved content (`memory_presence()`, read before any retrieval filter). It also says that product instructions and operator rules are not remembered user preferences. With `shared`, the person tiers render as `## Shared Memory — Identity`, `## Shared Memory — Global Rules`, etc., and the operator's line says its rules win over Shared Memory. With `off` or `unavailable`, the Cortex skips the global and project stores, so only the status section and the operator's layer render. Without a deployment identity, the session ignores the scope and the prompt keeps the labels above.
 
 ### Moment B — Scratchpad Tool Description (Procedural Priming)
 
@@ -305,7 +309,7 @@ When scratchpads are active, relevant lessons are appended to the scratchpad too
 scratchpad_tool["description"] += f"\n\nLessons from past sessions:\n{wisdom}"
 ```
 
-This combines scratchpad-related "when" rules + scratchpad-related lessons from both scopes, ordered by confidence tier (high, then medium/unset, then low) and recency within a tier, trimmed to a token budget (default 2000/scope, ~4 chars/token). The content comes from `cortex.get_scratchpad_context()`, which calls `recall_scratchpad_wisdom()` on both hippocampi.
+This combines scratchpad-related "when" rules + scratchpad-related lessons from both scopes, ordered by confidence tier (high, then medium/unset, then low) and recency within a tier, trimmed to a token budget (default 2000/scope, ~4 chars/token). The content comes from `cortex.get_scratchpad_context()`, which calls `recall_scratchpad_wisdom()` on both hippocampi, after the operator's layer when there is one. A deployment session passes its `learned_memory_scope` here too: `shared` labels the person's lines `Shared learned memory:`, and `off` or `unavailable` leaves them out.
 
 ## The `memorize` Tool
 
@@ -357,7 +361,7 @@ Like the Locus Coeruleus-Norepinephrine system that controls how aggressively th
 | **copilot** | Auto-save high-confidence memories, confirm ambiguous ones after the answer | Moderate NE — selective encoding |
 | **off** | Never save (still reads existing memory) | Suppressed — encoding blocked |
 
-Configure via `/setup` > Memory, or the `ANTON_MEMORY_MODE` environment variable.
+Configure via `/setup` > Memory, or the `ANTON_MEMORY_MODE` environment variable. `ANTON_MEMORY_ENABLED=false` runs the cortex in **off** whatever the mode says (`AntonSettings.effective_memory_mode`).
 
 **The encoding gate logic** (in `cortex.py`):
 ```python
@@ -548,13 +552,13 @@ For Anton, the "motor command" is a scratchpad cell. Before the cell runs, the L
 
 ### Decoupling: Hooks Live in the Dispatcher, Not the Runtime
 
-The Cerebellum operates via two observer hooks called from the scratchpad tool dispatcher (`handle_scratchpad`), NOT from the runtime backend itself:
+The Cerebellum operates via two observer hooks called from the two scratchpad exec paths, NOT from the runtime backend itself. The main agent's cells run through the inline streaming exec in `ChatSession._stream_and_handle_tools`, on every host. The `handle_scratchpad` dispatcher's exec branch runs the cells of the `generate_artifact` sub-loops. Both fire the hooks the same way:
 
 ```
-handle_scratchpad (orchestration layer)
-  ├─ build prelim Cell from tool input
+handle_scratchpad / _stream_and_handle_tools (orchestration layer)
+  ├─ preliminary_cell(...) from tool input
   ├─ FIRE pre-execute observers ──→ Cerebellum.on_pre_execute (counter)
-  ├─ pad.execute(code, ...)        (pure execution — runtime never sees observers)
+  ├─ pad.execute(...) / pad.execute_streaming(...)   (pure execution — runtime never sees observers)
   ├─ FIRE post-execute observers ─→ Cerebellum.on_post_execute (buffer if errored)
   └─ return formatted result
 ```
@@ -567,11 +571,11 @@ Most cells succeed cleanly. The Cerebellum's `on_post_execute` hook checks `cell
 
 ### Batched Per-Turn Diff
 
-When errored cells exist, they accumulate in a buffer across the turn. At end-of-turn, `_schedule_cerebellum_flush()` fires `Cerebellum.flush()` as a fire-and-forget background task. The user gets their reply immediately while the diff runs in parallel:
+When errored cells exist, they accumulate in a buffer across the turn. A cancelled turn drops its buffer (`Cerebellum.reset()`), so no later flush learns from it. At end-of-turn, `_schedule_cerebellum_flush()` fires `Cerebellum.flush()` as a fire-and-forget background task. The user gets their reply immediately while the diff runs in parallel:
 
 1. The buffered cells get formatted into a compact post-mortem prompt
 2. One LLM call via `LLMClient.generate_object_code` (the cheap coding model) returns a `_DiffPassResult` Pydantic model with extracted lessons
-3. Each lesson is wrapped as an `Engram` with `kind="lesson"`, `topic="scratchpad"`, `source="consolidation"`, and routed through `Cortex.encode()` — the same path manual lessons and the consolidator already use
+3. Each lesson is wrapped as an `Engram` with `kind="lesson"`, `topic="scratchpad"`, `source="consolidation"`, `confidence="medium"`, and checked against the cortex's encoding gate, the same split the consolidator makes. In autopilot it is routed through `Cortex.encode()`, the same path manual lessons and the consolidator already use. In copilot the gate holds it back, and it goes on `session._pending_memory_confirmations` for the person to confirm. The CLI asks before its next prompt; a host that never reads that queue writes nothing
 4. Future scratchpad cells see those lessons via the existing `recall_scratchpad_wisdom()` injection into the scratchpad tool description (confidence tier + recency ordered, budget-limited — not all lessons are guaranteed to survive the cut)
 
 The cerebellum is a **producer** only — it generates new lesson entries for the existing storage and retrieval pipeline. There's no parallel storage system, no separate `corrections.md` file. Whatever the consolidator and `/memorize` write to, the cerebellum also writes to.
@@ -812,6 +816,7 @@ The Hippocampus handles one scope (global OR project) and is the canonical file-
 | `recall_lessons(token_budget)` | `lessons.md` (budget-limited, most recent first) | Anterior Temporal Lobe |
 | `recall_topic(slug)` | `topics/{slug}.md` | Cortical Association Areas |
 | `recall_scratchpad_wisdom(token_budget)` | scratchpad-related "when" rules + scratchpad-related lessons (confidence tier + recency ordered, budget-limited) | Procedural memory |
+| `memory_presence()` | `profile.md`, `rules.md`, `lessons.md` and legacy `topics/*.md`, before any retrieval filter. Returns `empty`, `present` or `unavailable`; a failed read never returns `empty` | Metamemory (feeling of knowing) |
 
 **Encoding methods:**
 | Method | Writes | Behavior |
@@ -822,17 +827,31 @@ The Hippocampus handles one scope (global OR project) and is the canonical file-
 
 ### `cortex.py` — Executive Coordinator
 
-The Cortex manages two Hippocampus instances and orchestrates all declarative memory operations. It is also the encoding endpoint that the cerebellum and consolidator route their generated lessons through.
+The Cortex manages two Hippocampus instances (plus an optional read-only third, below) and orchestrates all declarative memory operations. It is also the encoding endpoint that the cerebellum and consolidator route their generated lessons through.
 
 | Method | Purpose |
 |---|---|
-| `build_memory_context()` | Assemble memories for system prompt injection (~5800 token budget) |
-| `get_scratchpad_context()` | Combine scratchpad wisdom from both scopes for tool description injection. **This is the channel the cerebellum's lessons flow through into future code generation.** |
+| `build_memory_context(user_message, *, learned_memory_scope=None)` | Assemble memories for system prompt injection (~5800 token budget, plus the operator layer's when there is one). A `learned_memory_scope` adds the `## Learned memory status` section and names the person tiers `Your Memory` or `Shared Memory`; `off` and `unavailable` skip those tiers. None keeps the default prompt. |
+| `get_scratchpad_context(*, learned_memory_scope=None)` | Combine scratchpad wisdom from both scopes for tool description injection. **This is the channel the cerebellum's lessons flow through into future code generation.** `shared` labels the person's lines `Shared learned memory:`; `off` and `unavailable` leave them out. |
 | `encode(engrams)` | Route engrams to correct hippocampus by scope. Returns action log. Called by `/memorize`, the consolidator, and the cerebellum. |
 | `encoding_gate(engram)` | Check if an engram needs user confirmation (mode-dependent) |
 | `needs_compaction()` | Check if any file exceeds the threshold |
 | `compact_all()` | LLM-assisted deduplication on all oversized files. Uses `generate_object_code(_CompactionResult, ...)`. The model names survivors by index, so compaction drops entries — it never rewrites or merges them. |
 | `maybe_update_identity(message)` | Extract identity facts from user message via `generate_object_code(_IdentityFacts, ...)`. Background, fires every 5 turns. |
+
+#### The operator's read-only layer (`managed_hc`)
+
+A host that serves several people can give every one of them the same rules and lessons. It passes a third store, keyword-only: `Cortex(global_hc=..., project_hc=..., managed_hc=Hippocampus(<read-only folder>))`. The folder holds the usual `rules.md` and `lessons.md`. In `rules.md`, only `- ` bullets under `## Always`, `## Never` and `## When` reach the agent.
+
+- **System prompt.** The layer's rules render first, under `## Operator Memory — Rules`, then its lessons under `## Operator Memory — Lessons`. The first of those headings carries one line saying the operator's rules and lessons win over Your Memory when the two conflict. Identity and the person's own sections follow, unchanged. With `learned_memory_scope="shared"`, that line and the person's headings say Shared Memory instead. With `off` or `unavailable`, only the status section and the layer's sections render.
+- **Scratchpad tool description.** When the layer has scratchpad wisdom, it comes first under `Operator (applies to everyone, wins on conflict):`, and the person's global then project wisdom follows under `Your own:`. When the layer has none, the person's lines render alone, unlabeled. With `learned_memory_scope="shared"`, the person's lines always sit under `Shared learned memory:`, with or without the layer's wisdom. With `off` or `unavailable`, they are left out.
+- **Budgets.** The layer has its own budgets, counted apart from the person's tiers. It keeps about 4,000 characters of lessons and 8,000 of scratchpad wisdom. Its always and never rules load in full. Past 6,000 characters of rules, with at least 1,000 characters of when-rules, its when-rules go through the same relevance filter as the person's, in the same concurrent gather. Past the lessons budget, anton drops the lines nearest the top of `lessons.md` first, without a warning. Put the lessons that must always reach the agent at the bottom, or keep the file under 4,000 characters.
+- **Never written.** `encode`, compaction, vacuum and identity extraction name only `global_hc` and `project_hc`, so the cerebellum, the consolidator, `memorize` and the ACC can't reach it. The layer's entries don't count toward the compaction threshold. The ACC's end-of-turn de-dupe reads the layer's rules too, so it doesn't copy an operator rule into the person's tier. Only the ACC checks the layer: `memorize`, the consolidator and the cerebellum de-dupe inside the person's tier alone, so one of them can save a verbatim copy of an operator rule or lesson there, and that entry then renders under both `## Operator Memory` and `## Your Memory` headings.
+- **Never read.** The layer's `profile.md`. Identity comes only from `global_hc`.
+- **Topics.** The `## Minds — Datasource Context` section reads only `project_hc`, because the layer belongs to no project. A layer lesson tagged `topic:minds-datasource` is an ordinary operator lesson: it renders under `## Operator Memory — Lessons` and counts toward that layer's lesson budget.
+- **Project-profile move.** Each construction moves identity lines that landed in project scope up to `global_hc`, never to `managed_hc`. When `global_hc` can't be written (a read-only folder), the move logs `memory: project profile not moved (<error type>)`, leaves the project lines in place for a later turn, and the turn goes on.
+
+With `managed_hc` unset (the default), the system prompt and the scratchpad description are byte-identical to a Cortex without the layer.
 
 ### `episodes.py` — Episodic Memory
 
@@ -858,13 +877,13 @@ The EpisodicMemory handles raw conversation logging and recall.
 
 | Method | Purpose |
 |---|---|
-| `on_pre_execute(cell)` | Pre-execute hook called by `handle_scratchpad`. Counter only in v1. |
+| `on_pre_execute(cell)` | Pre-execute hook called by both scratchpad exec paths. Counter only. |
 | `on_post_execute(cell)` | Post-execute hook. Cheap path skips clean cells; errored/warning cells get buffered. |
-| `flush()` | Run the batched diff pass on all buffered cells, encode lessons via Cortex, clear buffer. Fire-and-forget at end-of-turn. |
-| `reset()` | Drop the buffer without encoding (used when a turn is cancelled mid-flight). |
+| `flush()` | Run the batched diff pass on all buffered cells, encode or queue the lessons, clear buffer. Fire-and-forget at end-of-turn. |
+| `reset()` | Drop the buffer without encoding. `turn_stream` calls it when a turn is cancelled, and `_schedule_cerebellum_flush` calls it in place of a flush when automatic memory passes are off. |
 | `buffered_count` | Number of cells waiting for the next flush. |
 | `_run_diff(cells)` | Internal: send buffered cells to `generate_object_code(_DiffPassResult, ...)` and return validated lessons. |
-| `_encode_lessons(lessons)` | Internal: wrap lessons as Engrams (`kind="lesson"`, `topic="scratchpad"`, `source="consolidation"`) and route through `Cortex.encode()`. |
+| `_encode_lessons(lessons)` | Internal: wrap lessons as Engrams (`kind="lesson"`, `topic="scratchpad"`, `source="consolidation"`), route the ones the encoding gate passes through `Cortex.encode()`, and hand the rest to `queue_for_confirmation`. |
 
 ### `acc.py` — Anterior Cingulate Cortex (turn-level)
 
@@ -979,7 +998,8 @@ The ACC is constructed with `has_similar_lesson=_acc_has_similar`, a closure tha
    → Stores cortex as self._cortex
    → Stores episodic as self._episodic
    → Initializes self._skill_store = SkillStore() (procedural memory)
-   → Initializes self._cerebellum = Cerebellum(cortex=self._cortex, llm=self._llm)
+   → Initializes self._cerebellum = Cerebellum(cortex=self._cortex, llm=self._llm,
+     queue_for_confirmation=self._queue_memory_confirmations)
    → Initializes self._scratchpad_observers = [self._cerebellum]
    → Initializes self._pending_memory_confirmations = []
 
@@ -998,13 +1018,17 @@ The ACC is constructed with `has_similar_lesson=_acc_has_similar`, a closure tha
    → "memorize" → handle_memorize() → cortex.encode()
    → "recall" → handle_recall() → episodic.recall_formatted()
    → "recall_skill" → handle_recall_skill() → SkillStore.load() + increment_recommended()
-   → "scratchpad" exec → handle_scratchpad() fires pre/post observers around pad.execute()
+   → "scratchpad" exec → never dispatched: runs inline in _stream_and_handle_tools (see 6)
+   → other "scratchpad" actions → handle_scratchpad()
+     (its exec branch is reached from the generate_artifact sub-loops only)
 
-6. handle_scratchpad (tool_handlers.py) — observer dispatch:
-   → Build prelim Cell from tool input (code + description + estimated_time)
+6. Scratchpad exec observer dispatch, run by both handle_scratchpad (tool_handlers.py)
+   and the inline streaming exec in _stream_and_handle_tools (session.py):
+   → preliminary_cell(...) from tool input (code + description + estimated_time)
    → _fire_pre_execute(session, prelim_cell) → cerebellum.on_pre_execute (counter)
-   → pad.execute(...) — pure execution, runtime never sees observers
+   → pad.execute(...) or pad.execute_streaming(...): pure execution, runtime never sees observers
    → _fire_post_execute(session, cell) → cerebellum.on_post_execute (buffer if errored)
+     (skipped when the exec is cancelled or raises, so no cell exists)
 
 7. turn_stream():
    → Logs user input to episodic memory (before LLM call)
@@ -1017,10 +1041,13 @@ The ACC is constructed with `has_similar_lesson=_acc_has_similar`, a closure tha
    → _maybe_consolidate_scratchpads() → background asyncio.create_task
 
 9. End of turn (turn / turn_stream):
+   → A cancelled turn (Stop, closed generator, or _cancel_event) → cerebellum.reset()
    → Every 5 turns → cortex.maybe_update_identity() as background task
    → _schedule_cerebellum_flush() → fire-and-forget background task
+     (drops the buffer instead when background_memory is off, there is no cortex, or memory mode is "off")
      → Runs cerebellum diff on all buffered cells
-     → Encodes extracted lessons via cortex.encode()
+     → Encodes extracted lessons via cortex.encode(), or queues them for
+       confirmation when the encoding gate holds them back (copilot)
      → Lessons appear in next turn's scratchpad tool description automatically
 
 10. Before user prompt (_chat_loop):
@@ -1062,6 +1089,6 @@ The ACC is constructed with `has_similar_lesson=_acc_has_similar`, a closure tha
 | Topic files | Cortical association | Unlimited | On demand |
 | Skill procedures | Striatum (full skills) | Variable per skill | On demand (`recall_skill` tool) — only when the LLM recognizes a match |
 | Episodic recall | MTL episodic | Variable | On demand (`recall` tool) |
-| **Total in prompt** | **Working memory** | **~5800 tokens + ~50/skill** | ~3% of 200K context |
+| **Total in prompt** | **Working memory** | **~5800 tokens + ~50/skill, plus the operator layer's budgets** | ~3% of 200K context |
 
 The procedural memory list scales linearly with the number of saved skills but stays cheap (~50 tokens each — slug + one-line `description`). The full skill procedures are *paid for only when retrieved*, the same way the prefrontal cortex doesn't keep every procedural memory loaded — it has fast pattern recognition that flags relevance and pulls the full procedure from storage on demand.

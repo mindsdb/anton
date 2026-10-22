@@ -7,6 +7,7 @@ neither has to re-derive it — only the task-specific instructions differ.
 from __future__ import annotations
 
 from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES_ORDERED
+from anton.core.llm.prompts import ANTON_NOTE
 # The heading `build_datasource_context` renders, so the kickoff reads the same
 # whether or not anything is connected.
 from anton.utils.datasources import DATASOURCES_HEADER
@@ -163,11 +164,16 @@ GATHERING_CONTINUE = (
     "Continue gathering: call `finish_gathering` again once ready."
 )
 
-# No language rule here on purpose. With an all-English context, "write in
-# the language of the user request" made the model pick an unrelated language
-# (Russian, Spanish) for these notes, and the brief and the PRD continued in
-# it. The brief carries its own language rule and follows the request without
-# this one.
+# Sent only with the retry of a discovery call the output budget cut off. The
+# cut reply is not in the conversation, so "continue" would have nothing to
+# continue from: the model is asked for the whole reply again, compactly.
+DISCOVERY_TRUNCATED_NUDGE = (
+    f"{ANTON_NOTE} Your previous reply to this step ran out of its output-token budget "
+    "and was discarded. Reply to the step again, in full. Keep your deliberation "
+    "brief and the reply compact. If the step needs a tool call, make it right "
+    "away and keep its arguments small."
+)
+
 _GATHERING_TEMPLATE = (
     "## Your task\n"
     "Answer three questions and record the answers with `finish_gathering`:\n"
@@ -201,7 +207,9 @@ _GATHERING_TEMPLATE = (
     "page in this step. A source you name in `data_sources` but did not "
     "touch is fetched before generation starts — naming one is how you "
     "request that.\n"
-    "- Keep the whole `finish_gathering` call under about 30 lines.\n\n"
+    "- Keep the whole `finish_gathering` call under about 30 lines.\n"
+    "- Keep names of tables, fields, files and APIs as they are, whatever "
+    "language you write in.\n\n"
     "## When there is no external data\n"
     "Call `finish_gathering` at once: no scratchpad, no web search, no "
     "description of the page."
@@ -246,7 +254,9 @@ _REDRAW_RESTATE = (
     "Then call `finish_gathering` to re-state the artifact type and the data "
     "sources the corrected artifact needs. This is REQUIRED: if the "
     "correction introduces a source nobody has fetched yet, that call is the "
-    "only thing that will cause it to be fetched."
+    "only thing that will cause it to be fetched. For each source declared "
+    "earlier that the corrected artifact still needs, use exactly the name it "
+    "was declared with, whatever language you write in."
 )
 
 _REDRAW_CORRECTION_ACT_FIRST = (
@@ -284,14 +294,19 @@ def step_message(step: str, state: PrdState, *, extra: str = "") -> str:
     """The user message that switches the pipeline to `step`.
 
     Carries every mutable value the step needs — current artifact type,
-    remaining question budget — because the system prompt cannot.
+    user language, remaining question budget — because the system prompt
+    cannot.
     """
-    from ..state import gathering_question_budget
+    from ..state import gathering_question_budget, language_name
     from . import sub_tools
 
+    language = language_name(state.user_language)
     header = (
         f"STEP: {step}\n"
         f"Current artifact type: {state.final_artifact_type or state.artifact_type}\n"
+        f"User language: {language}. Write everything meant for the user, and "
+        f"every note and document, in {language}, even where earlier messages "
+        "use another language.\n"
     )
     if step == sub_tools.STEP_GATHERING:
         header += (

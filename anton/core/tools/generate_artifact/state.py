@@ -19,6 +19,8 @@ from .attachments import Attachment
 
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
+    from anton.core.artifacts.live_app_slots import LiveAppLaunchError, LiveAppLaunchResult
+    from anton.core.artifacts.render_check import RenderScreenshot, RenderStatus, ViewCoverage
     from anton.utils.datasources import DatasourceCatalog
 
 # ── Budgets (see design spec) ────────────────────────────────────────────────
@@ -41,12 +43,10 @@ JOURNAL_DETAIL_MAX: int = 300
 # their internal thinking from the same budget (a 25 842-character spec was
 # measured dying at 8192 output tokens).
 #
-# The two values are what the MindsHub gateway actually accepts, not round
-# numbers: measured 2026-08-24 against `api.mindshub.ai/v1`, alias `opus` —
-# 8192/16384/20480 answer normally, 24576 and above return HTTP 500. That 500
-# is classified as a transient provider error, so an over-large budget does not
-# fail fast; it burns the retry ladder first. Raise both together, and re-measure
-# before doing so.
+# The gateway used to answer HTTP 500 above 20480 output tokens for a
+# non-streamed call; it now assembles such calls from an internal stream, so
+# that limit is gone. These calls are streamed anyway. Re-measure before
+# raising them.
 SPEC_MAX_TOKENS: int = 16384
 SPEC_MAX_TOKENS_RETRY: int = 20480
 
@@ -88,6 +88,12 @@ GEN_WRITE_MAX_TOKENS: int = 20480
 # Deliberately conservative: overshooting costs the whole part (a body with no
 # end marker writes nothing), undershooting costs one extra round.
 REPLY_BODY_CHARS: int = 30_000
+
+# Effort ceiling for every model call the pipeline makes. At the top efforts the
+# model spends up to 23k tokens thinking before a two-thousand-character brief,
+# which costs minutes per step and runs non-streamed calls past the gateway's
+# time budget; the pipeline's steps are bounded and do not need that depth.
+ARTIFACT_EFFORT_CEILING = "high"
 
 # Reserved out of MAX_QUESTIONS_PER_TURN for the brief phase: one
 # `show_and_confirm` call plus up to two "revise brief, show again" cycles.
@@ -143,12 +149,49 @@ class VerifyResult:
         return not self.errors
 
 
+@dataclass(frozen=True)
+class BrowserCheck:
+    """One load of the page in a browser, or why the page was not loaded.
+
+    `status` is `passed` or `failed` when a browser loaded the page (`verdict`
+    holds its findings as verifier messages), `unverified` when none did or
+    the check could not vouch for it (`reason` says why; the verdict is
+    empty). `findings_listed` says whether `reason` also lists what an
+    unverified check still found. `screenshot` is the render check's
+    desktop view, when it sent one. `coverage` names the views a browser
+    that loaded the page measured and the tabs and toggles it left
+    unopened; None when no browser loaded it.
+    """
+
+    status: "RenderStatus"
+    verdict: VerifyResult = field(default_factory=VerifyResult)
+    reason: str = ""
+    findings_listed: bool = False
+    screenshot: "RenderScreenshot | None" = None
+    coverage: "ViewCoverage | None" = None
+
+
 # ── FSM state ────────────────────────────────────────────────────────────────
 @dataclass
 class StepResult:
     node: str
     outcome: str
     detail: str = ""
+
+
+# Language for a direct caller that names none (bench runs, tests); the tool
+# handler requires `user_language`. A concrete name, never "the language of
+# the user request": that wording made the model pick an unrelated language.
+DEFAULT_USER_LANGUAGE = "English"
+# Longest `user_language` the tool accepts. A language name fits; a sentence
+# about the user would be quoted into every step header and change the
+# call fingerprint each time it is reworded.
+MAX_USER_LANGUAGE_CHARS = 40
+
+
+def language_name(user_language: str | None) -> str:
+    """The language every step writes in, as the prompts name it."""
+    return " ".join((user_language or "").split()) or DEFAULT_USER_LANGUAGE
 
 
 @dataclass
@@ -189,6 +232,26 @@ class GenState:
     # learn that a check was skipped rather than passed (S-03).
     verify_warnings: list[str] = field(default_factory=list)
     checks_skipped: list[str] = field(default_factory=list)
+    # The latest browser load of the page this run: `passed`, `failed`, or
+    # `unverified` when no browser loaded it or the check could not vouch for
+    # it. None until a browser step runs. The result reports whether it
+    # passed, and the session records it for the end-of-turn line.
+    browser_status: "RenderStatus | None" = None
+    # Whether the latest load was unverified and its `checks_skipped` line
+    # lists what the check still found. The session then lists those
+    # findings no second time this turn.
+    browser_findings_listed: bool = False
+    # The render check's desktop view of the latest load, when it sent one.
+    # Reaches the calling agent as an image beside the result.
+    browser_screenshot: "RenderScreenshot | None" = None
+    # The views the latest load measured and the tabs and toggles it left
+    # unopened, or None when no browser loaded the page. Beside a pass, the
+    # result names both, so the agent calls only those views verified.
+    browser_coverage: "ViewCoverage | None" = None
+    # The page the latest load checked, by its path inside the artifact
+    # folder (`index.html`); it captions the screenshot. The generator may
+    # have named it differently from the primary the run started with.
+    browser_page: str = ""
     # Files the user attached to the conversation, as the tool call named
     # them (S-01). Data files are read by the gathering step; assets are
     # copied into the artifact by `orchestrator._stage_attachments`.
@@ -198,6 +261,11 @@ class GenState:
     # cannot reach its `/api/*`, so the file path is not one.
     app_url: str | None = None
     app_port: int | None = None
+    # A fullstack app launched into an app slot (`live_app_slots`): its
+    # address, slot and the declared connections it didn't get. No port.
+    live_app: "LiveAppLaunchResult | None" = None
+    # Why a live app's launch didn't happen, when no new backend could fix it.
+    launch_failure: "LiveAppLaunchError | None" = None
     trace: list[StepResult] = field(default_factory=list)
     error: str | None = None
     trace_log: "GenTrace | NullTrace" = field(default_factory=NullTrace)
@@ -207,6 +275,11 @@ class GenState:
     # is called from synchronous FSM code that cannot await a full queue, and
     # `QueueFull` there would abort a generation over a progress line.
     progress: "asyncio.Queue[str | None] | None" = None
+    # Steps that already showed an "attempt 2" line for a truncation retry.
+    # Later retries of the same step show only on the live status line, which
+    # every retry sets, so a gathering run with several cut rounds does not
+    # repeat the same row.
+    retry_announced: set[str] = field(default_factory=set)
     # Where this run entered the pipeline (`discovery.checkpoint.ENTRY_*`,
     # set by `orchestrator.run`): a resumed run has fewer steps ahead of it,
     # and the `N of M` on every progress line counts only those.
@@ -225,6 +298,9 @@ class GenState:
     agent_understanding: str = ""
     known_data: str = ""
     user_preferences: str = ""
+    # English name of the language the user writes in, as the calling agent
+    # stated it. Read through `language_name`.
+    user_language: str = ""
     # The session's connections as data (slugs and DS_* names, no values), or
     # None when nothing is connected. Filled by the entry point; rendered whole
     # as `datasource_context`, and for only the declared sources by the
@@ -282,6 +358,11 @@ class GenState:
     # `announce_brief` sent it in this call, or (acting first) an earlier turn
     # showed it — set by `orchestrator.run` from the entry. Not persisted.
     brief_shown: bool = False
+    # A gathering question timed out. The user is away, so the brief is
+    # written but not shown for confirmation: the run hands back
+    # `needs_confirmation`, and their late answer to the still-open card
+    # arrives as a repeat call carrying it. Not persisted.
+    question_unanswered: bool = False
     # Installed by the entry point. None on the bench harness and in unit
     # tests that construct a state directly, so every read goes through
     # `winding_down()`.

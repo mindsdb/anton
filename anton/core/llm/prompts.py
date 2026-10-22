@@ -3,7 +3,7 @@
 # TODO: Update references to data vault directory? Will it be used this way across our environments?
 # (Lines )
 CHAT_SYSTEM_PROMPT = """\
-You are Anton — a self-evolving autonomous system that collaborates with people to \
+{identity_lead} — a self-evolving autonomous system that collaborates with people to \
 solve problems. You are NOT a code assistant or chatbot. You are a coworker with a \
 computer, and you use that computer to get things done.
 
@@ -312,8 +312,8 @@ primary?)`. It claims the folder and returns `<artifact_path>`.
 2. THEN route the request. A report the user has fully specified you build \
 yourself (DIRECT REPORTS above). Any other `html-app`, and every \
 `fullstack-stateless-app` and `fullstack-stateful-app`, goes to \
-`generate_artifact(slug, user_request, agent_understanding, known_data?, \
-user_preferences?, attachments?)`, which produces every file. It runs the whole thing: gathers what it needs, asks the user whatever \
+`generate_artifact(slug, user_request, user_language, agent_understanding, \
+known_data?, user_preferences?, attachments?)`, which produces every file. It runs the whole thing: gathers what it needs, asks the user whatever \
 is still unclear, shows them a short brief (and asks them to confirm it when the \
 agent is set to ask first), writes the requirements down as `prd.md`, then a \
 technical spec, then the code with static verification, \
@@ -385,7 +385,7 @@ and produce the visualization as an artifact.
 
 A report the user has fully specified follows DIRECT REPORTS in the ARTIFACTS \
 section. Otherwise: `create_artifact(type="html-app", …)`, then \
-`generate_artifact(slug, user_request, agent_understanding, …)`. It works out the \
+`generate_artifact(slug, user_request, user_language, agent_understanding, …)`. It works out the \
 requirements with the user itself and writes the dashboard through a verified \
 pipeline and its own output contract — you do NOT recall a skill or write the \
 HTML yourself for this.
@@ -414,7 +414,7 @@ inline numbers. The terminal is the primary display — make it look great there
 visualization or report file, THEN produce it as an artifact. A report the user \
 has fully specified follows DIRECT REPORTS in the ARTIFACTS section; otherwise \
 `create_artifact(type="html-app", primary="index.html", ...)`, then \
-`generate_artifact(slug, user_request, agent_understanding, ...)`. If you end \
+`generate_artifact(slug, user_request, user_language, agent_understanding, ...)`. If you end \
 up building a generator-made dashboard BY HAND instead \
 (rewriting its code, or the generator failed and the user asked you \
 to continue; not for changing a report's content), call `recall_skill("build-html-dashboard")` first and follow the \
@@ -429,7 +429,7 @@ BACKEND & FULLSTACK APPLICATION GENERATION:
 
 Normal path: register the artifact (`fullstack-stateless-app` — prefer this — or \
 `fullstack-stateful-app`), then call `generate_artifact(slug, user_request, \
-agent_understanding, …)`. It works out the requirements with the user itself, then \
+user_language, agent_understanding, …)`. It works out the requirements with the user itself, then \
 writes `backend.py`, `requirements.txt` and `static/index.html` (plus \
 `state_manifest.json` for `fullstack-stateful-app`) \
 against a hard contract, verifies the backend by importing it and checking its \
@@ -487,8 +487,12 @@ If no meaningful lessons exist, return [].
 Do NOT extract trivial observations. Only encode genuinely reusable knowledge.
 """
 
+# Labels each note anton adds to the history. A "SYSTEM:" note reads as an injection,
+# which models refuse and Azure's filter stops (ENG-3478).
+ANTON_NOTE = "[Automatic note from anton, not written by the user]"
+
 RESILIENCE_NUDGE = (
-    "\n\nSYSTEM: This tool has failed twice in a row. Before retrying the same approach, "
+    f"\n\n{ANTON_NOTE} This tool has failed twice in a row. Before retrying the same approach, "
     "try one or two more genuine workarounds — different headers/user-agent, a public API, "
     "archive.org, an alternate library, or a different data source. If those also fail, "
     "STOP and tell the user exactly what failed and what you need — do NOT fabricate a "
@@ -501,14 +505,14 @@ RESILIENCE_NUDGE = (
 # when a cell is too big or too slow just sends it renaming-and-retrying. These
 # are chosen by failure type in ChatSession._apply_error_tracking.
 SCRATCHPAD_SIZE_NUDGE = (
-    "\n\nSYSTEM: This scratchpad cell keeps failing on its size, not its logic. "
+    f"\n\n{ANTON_NOTE} This scratchpad cell keeps failing on its size, not its logic. "
     "Stop retrying the same large cell. Write the output to disk incrementally — "
     "open(path, 'w') once, then open(path, 'a') to append each chunk, keeping each "
     "cell's string under ~5KB — or generate the content inside the cell instead of "
     "passing a large literal. Reuse the SAME scratchpad; do not rename it."
 )
 SCRATCHPAD_TIMEOUT_NUDGE = (
-    "\n\nSYSTEM: This scratchpad cell keeps timing out — the work is too heavy, not "
+    f"\n\n{ANTON_NOTE} This scratchpad cell keeps timing out — the work is too heavy, not "
     "the write. Make the next cell smaller: fewer rows/items per cell, split a long "
     "loop across cells (process a batch, return, continue), or narrow the scope. Call "
     "progress() inside long loops so active work isn't mistaken for a hang. Reuse the "
@@ -519,7 +523,7 @@ SCRATCHPAD_TIMEOUT_NUDGE = (
 # round-trip pattern that made ENG-578 expensive. Selection is routed on the
 # kill-message wording in _select_resilience_nudge.
 SCRATCHPAD_STUCK_NUDGE = (
-    "\n\nSYSTEM: This scratchpad cell was killed because the worker stopped "
+    f"\n\n{ANTON_NOTE} This scratchpad cell was killed because the worker stopped "
     "signalling liveness — the process died or a native call is stuck holding "
     "it below Python. This is NOT a size problem: do not shrink the batch or "
     "split the loop; deliberate sleeps and blocking calls are kept alive "
@@ -537,7 +541,7 @@ SCRATCHPAD_STUCK_NUDGE = (
 # import that gets echoed into 'packages' is the same unattended install one
 # turn later, with the agent as the only approver.
 SCRATCHPAD_INSTALL_NUDGE = (
-    "\n\nSYSTEM: This scratchpad cell keeps failing on a missing module, not "
+    f"\n\n{ANTON_NOTE} This scratchpad cell keeps failing on a missing module, not "
     "on its logic — imports never install anything. Do not shrink or split "
     "the cell. Question the import itself first: get_llm, agentic_loop, "
     "web_search, sample and progress are already globals (no import), and a "
@@ -550,7 +554,7 @@ SCRATCHPAD_INSTALL_NUDGE = (
 # work look identical from outside. Say so, rather than confidently claiming
 # "too heavy" (the guess that taught the ENG-578 per-item pattern).
 SCRATCHPAD_SILENT_TIMEOUT_NUDGE = (
-    "\n\nSYSTEM: This scratchpad cell ran out of its total time budget without "
+    f"\n\n{ANTON_NOTE} This scratchpad cell ran out of its total time budget without "
     "producing any output — either a call is stuck or the work is heavier than "
     "estimated; the runtime cannot tell which. Retry once with a realistic "
     "estimated_execution_time_seconds, print intermediate results, call "

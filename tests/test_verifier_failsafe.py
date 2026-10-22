@@ -152,6 +152,10 @@ async def test_verifier_exception_yields_real_message_not_silent_stop(workspace)
         # model to restate a path from memory: asked where the file went, it
         # named the path it MEANT to write and the user went looking there.
         assert any("Your reply above stands" in t for t in history_texts)
+        # A "SYSTEM:" note that says "do not mention" reads as an injection (ENG-3478).
+        note = next(t for t in history_texts if _HANDBACK_ANCHOR in t)
+        assert note.startswith(_CHECK_NOTE)
+        assert "SYSTEM:" not in note and "Do not mention" not in note
         assert any(
             "Never state a path you intended to write" in t for t in history_texts
         )

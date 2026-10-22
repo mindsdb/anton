@@ -23,6 +23,8 @@ import functools
 import inspect
 import json
 import logging
+from anton.diagnostics import configure_logging, make_formatter
+from structlog.contextvars import bind_contextvars, bound_contextvars
 import os
 import sys
 import time
@@ -118,6 +120,7 @@ def _stderr_log_handler(*, stream: TextIO) -> logging.Handler:
     sends to it, so no logged traceback prints a provider error body."""
     handler = logging.StreamHandler(stream)
     handler.addFilter(ProviderErrorFilter())
+    handler.setFormatter(make_formatter())
     return handler
 
 
@@ -136,7 +139,8 @@ def _isolated_protocol_stdout():
     sys.stdout = sys.stderr
     # The entrypoint owns the pod's logging. `force` replaces any root handler
     # configured before main(), so the filtered handler is the only one on stderr.
-    logging.basicConfig(handlers=[_stderr_log_handler(stream=sys.stderr)], level=logging.INFO, force=True)
+    configure_logging(stream=sys.stderr)
+    logging.getLogger().handlers[0].addFilter(ProviderErrorFilter())
 
     def emit(event: dict) -> None:
         data = (json.dumps(event) + "\n").encode("utf-8")
@@ -225,6 +229,13 @@ async def _settle_memory(session) -> None:
 async def stream_turn(
     raw_line: str, emit, session_builder=None, stdin: BinaryIO | None = None
 ) -> None:
+    with bound_contextvars(conversation_id=None):
+        await _stream_turn(raw_line, emit, session_builder, stdin)
+
+
+async def _stream_turn(
+    raw_line: str, emit, session_builder=None, stdin: BinaryIO | None = None
+) -> None:
     """Parse the request, run one turn, and emit exactly one terminal event.
 
     Streaming: assistant text is emitted as ``delta`` events as it arrives, then
@@ -281,6 +292,7 @@ async def stream_turn(
     elicitor = None
     try:
         req = TurnRequestV1.from_json(raw_line)
+        bind_contextvars(conversation_id=req.conversation_id)
         build = functools.partial(builder, req)
         if req.interactive and stdin is not None:
             # Before the build: the build is what registers `ask_user`, and a
@@ -292,15 +304,7 @@ async def stream_turn(
         # seconds (a turn-key OAuth token fetch per connector) — run it off
         # the event loop thread so the heartbeat ticker above keeps firing
         # instead of the controller seeing the turn go silent and stall it.
-        session = await asyncio.get_running_loop().run_in_executor(None, build)
-        # Length of the seeded history — everything anton appends past this
-        # index belongs to this turn. Captured BEFORE turn_stream, so the
-        # current turn's user input lands inside the slice and is trimmed off
-        # below. Guarded: a session double without `.history` skips capture and
-        # the turn degrades to text-only replay (mirrors cowork-server's
-        # in-process harness).
-        seed_len = len(session.history) if hasattr(session, "history") else None
-        compacted = False  # set if anton summarizes history mid-turn
+        session = await asyncio.to_thread(build)
         # Fold in any attachments cowork-server staged into the workspace (read
         # off the mount, so image bytes never crossed the stdin wire). Plain
         # string when there are none. Never fail the turn over this — degrade to
@@ -353,7 +357,7 @@ async def stream_turn(
                 wire({"kind": "tool_end", "id": event.id,
                       "args": args[:MAX_STEP_CHARS]})
             elif isinstance(event, StreamTaskProgress):
-                logger.info("progress [%s]: %s", event.phase, event.message)
+                logger.info("Turn progress", extra={"event": "turn_progress"})
                 phase = event.phase or ""
                 # A tool_progress line with an id is a step announcement: the
                 # first one opens the renderer's step, every one is a step the
@@ -388,8 +392,7 @@ async def stream_turn(
                       "action": event.action,
                       "content": _clip_result_content(event.content or "")})
             elif isinstance(event, StreamContextCompacted):
-                logger.info("context compacted: %s", event.message)
-                compacted = True
+                logger.debug("Context compacted", extra={"event": "context_compacted"})
                 wire({"kind": "compacted", "message": event.message})
             elif isinstance(event, StreamAskUser):
                 logger.info("ask_user question: %s", event.id)
@@ -436,14 +439,14 @@ async def stream_turn(
         # Pre-terminal for the same reason as memory and skills: cowork stops
         # reading the stream at the terminal event.
         #
-        # Skipped after a mid-turn compaction: session.history was reassigned,
-        # so seed_len no longer marks this turn's start and slicing could drop
-        # rows or surface an orphan tool_result whose tool_use was summarized
-        # away — an invalid replay. Text-only replay stays valid, so degrade to
-        # it. The failure paths below never reach this line, so a failed or
-        # torn-down turn degrades the same way.
-        if seed_len is not None and not compacted:
-            turn_slice = session.history[seed_len:]
+        # `turn_messages` reads every list the turn wrote to, so a turn that
+        # compacted or hard-truncated mid-turn sends its rows too, beside the
+        # compaction frame above. The failure paths below never reach this
+        # line, so a failed or torn-down turn degrades to text-only replay.
+        # Guarded: a session double without `turn_messages` skips capture and
+        # the turn degrades the same way.
+        if hasattr(session, "turn_messages"):
+            turn_slice = session.turn_messages()
             # Drop this turn's user input (and anything before the first
             # assistant message) so the slice starts where the model replied.
             while turn_slice and (
@@ -460,7 +463,7 @@ async def stream_turn(
         terminal_emitted = True
     except Exception as exc:
         # ProviderErrorFilter omits provider bodies from diagnostics; the wire is unchanged.
-        logger.exception("cloud turn failed")
+        logger.exception("cloud turn failed", extra={"event": "turn_failed", "reason": "execution_failed"})
         failed = {"kind": "turn_failed", "error": _scrub(exc)}
         # A billing stop's reset instant rides beside the string, so the host
         # can say when the limit lifts. `reset_at` is already a normalized
