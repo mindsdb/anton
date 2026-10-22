@@ -132,6 +132,38 @@ def string_list(value) -> list[str]:
     return [item for item in cleaned if item]
 
 
+def source_key(name: str) -> str:
+    """A declared source's name for matching: the model re-types it in
+    `data_findings`, and spacing and case drift between the two."""
+    return " ".join(str(name or "").split()).casefold()
+
+
+def known_data_sources(inp: dict, *, usable: bool) -> set[str]:
+    """`source_key`s of the findings a `finish_gathering` call marked
+    `verified_by: known_data`.
+
+    Empty unless `usable` (`state.known_data_usable`): only an html-app's
+    snapshot that reaches the page builder whole can stand in for code. The
+    mark is matched loosely — quoted, spaced or followed by a note — because
+    every miss sends the run through the data loop.
+    """
+    if not usable:
+        return set()
+    findings = inp.get("data_findings")
+    if not isinstance(findings, list):
+        return set()
+    covered: set[str] = set()
+    for f in findings:
+        if not isinstance(f, dict):
+            continue
+        source = str(f.get("source") or "").strip()
+        mark = re.sub(r"[`'\"]", "", str(f.get("verified_by") or "")).strip().casefold()
+        mark = re.sub(r"[\s-]+", "_", mark)
+        if source and mark.startswith("known_data"):
+            covered.add(source_key(source))
+    return covered
+
+
 def render_gathering_notes(inp: dict) -> str:
     """Markdown record of a `finish_gathering` call, built by code.
 
