@@ -1329,14 +1329,23 @@ def prd_section(state) -> str:
 
 
 KNOWN_DATA_HEADER = "## Known data (passed in by the calling agent)"
+KNOWN_DATA_FOOTER = "--- end of known data ---"
 
 
 def known_data_section(state) -> str:
     """`known_data` under its header, or "" when there is none. Passed whole:
     it is what the calling agent chose to hand over, and a cut snapshot would
-    be built into the page as if it were complete."""
+    be built into the page as if it were complete. Closed by a footer for the
+    same reason as the PRD: the agent's markdown may carry `##` headings of
+    its own."""
     text = (getattr(state, "known_data", "") or "").strip()
-    return f"{KNOWN_DATA_HEADER}\n{text}" if text else ""
+    return f"{KNOWN_DATA_HEADER}\n{text}\n{KNOWN_DATA_FOOTER}" if text else ""
+
+
+def datasources_or_none(state) -> str:
+    """The `## Connected Data Sources` section, or the same header over
+    "(none)" so a step can tell "nothing connected" from a missing section."""
+    return (state.datasource_context or "").strip() or f"{DATASOURCES_HEADER}\n(none)"
 
 
 def _brief_and_notes(state) -> str:
@@ -1362,8 +1371,7 @@ def _brief_and_notes(state) -> str:
 def _data_sources_context(state) -> str:
     """What the data decisions may draw on: the connections, the public
     sources and the pads the calling agent already filled."""
-    connections = (state.datasource_context or "").strip() or f"{DATASOURCES_HEADER}\n(none)"
-    parts = [connections]
+    parts = [datasources_or_none(state)]
     for extra in (getattr(state, "public_sources", None), getattr(state, "scratchpads_context", "")):
         if extra and extra.strip():
             parts.append(extra.strip())

@@ -10,10 +10,10 @@ from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES_ORDERED
 from anton.core.llm.prompts import ANTON_NOTE
 # The heading `build_datasource_context` renders, so the kickoff reads the same
 # whether or not anything is connected.
-from anton.utils.datasources import DATASOURCES_HEADER
+from anton.utils.datasources import DATASOURCES_HEADER  # noqa: F401  (re-exported: tests import it from here)
 
 from ..attachments import render_for_gathering
-from ..prompts import KNOWN_DATA_HEADER
+from ..prompts import KNOWN_DATA_HEADER, datasources_or_none
 from .state import PrdState
 
 
@@ -109,9 +109,7 @@ def build_call_kickoff(state: PrdState) -> str:
     # backend generator receive (`build_datasource_context`): slugs and
     # DS_* names, never values. Without it a request over "the orders table"
     # sends the gathering model looking for connections blind.
-    connections = (state.datasource_context or "").strip() or (
-        f"{DATASOURCES_HEADER}\n(none)"
-    )
+    connections = datasources_or_none(state)
     pads = (state.scratchpads_context or "").strip()
     attached = render_for_gathering(state.attachments)
     return (

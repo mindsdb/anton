@@ -1559,11 +1559,15 @@ def test_without_known_data_no_section_is_added(tmp_path: Path):
 # ── the data loop: "nothing missing" exit and the list the fetch gets ───────
 
 
-def _slug_catalog(*slugs: str) -> SimpleNamespace:
-    """A `DatasourceCatalog` stand-in: the slugs and the rendered section."""
+def _slug_catalog(*slugs: str, labels: dict[str, str] | None = None) -> SimpleNamespace:
+    """A `DatasourceCatalog` stand-in: the connections' names and the rendered section."""
+    labels = labels or {}
     rendered = DATASOURCES_HEADER + "\n" + "\n".join(f"- {s} (REST API)" for s in slugs)
     return SimpleNamespace(
-        connections=tuple(SimpleNamespace(slug=s) for s in slugs),
+        connections=tuple(
+            SimpleNamespace(slug=s, label=labels.get(s, ""), engine="", engine_name="")
+            for s in slugs
+        ),
         render=lambda slugs=None: rendered,
     )
 
@@ -1910,22 +1914,29 @@ def test_the_error_names_the_first_connections_when_none_is_mentioned(tmp_path: 
     assert orchestrator._not_enough_data(st2, "why?", None) == "not enough data: why? Looked in: a."
 
 
-def test_the_error_names_a_connection_only_when_its_whole_slug_is_mentioned(tmp_path: Path):
-    st = _state(tmp_path, datasource_catalog=_slug_catalog("db", "crm"))
+def test_the_error_names_the_connections_the_required_data_mentions(tmp_path: Path):
+    """The backend prompt's rule: slug or label, 3+ characters, so `db`
+    does not match inside "mongodb"."""
+    st = _state(tmp_path, datasource_catalog=_slug_catalog("db", "crm", "wh1", labels={"wh1": "Warehouse"}))
     st.forced_fetch_used = True
     required = RequiredData(
-        items=[RequiredDataItem(name="orders", where="mongodb collection on CRM", why="chart")],
+        items=[
+            RequiredDataItem(name="orders", where="mongodb collection on CRM", why="chart"),
+            RequiredDataItem(name="stock", where="the warehouse tables", why="chart"),
+        ],
         reasoning="r",
     )
-    err = orchestrator._not_enough_data(st, "no orders", required)
-    assert err == "not enough data: no orders. Looked in: crm, mongodb collection on CRM."
+    err = orchestrator._not_enough_data(st, "no orders ", required)
+    assert err == (
+        "not enough data: no orders. Looked in: crm, wh1, "
+        "mongodb collection on CRM, the warehouse tables."
+    )
 
 
-async def test_a_forced_fetch_on_the_last_iteration_counts_when_its_cell_succeeded(
-    tmp_path: Path, monkeypatch
-):
-    """No iteration is left for define to judge it, so it counts like any
-    fetch whose cell succeeded instead of ending in "did not converge"."""
+async def test_no_forced_fetch_when_no_iteration_is_left_to_judge_it(tmp_path: Path, monkeypatch):
+    """A forced fetch runs after can-fetch said no; only the next define can
+    tell whether it found anything. On the last iteration there is no next
+    define, so the "no" stands."""
     st = _unverified(_state(tmp_path, datasource_catalog=_slug_catalog("rest-gw")), "sites")
     st.session._llm.generate_object = AsyncMock(side_effect=[
         RequiredData(items=[_SITES_ITEM], reasoning="sites are missing"),
@@ -1935,16 +1946,56 @@ async def test_a_forced_fetch_on_the_last_iteration_counts_when_its_cell_succeed
         RequiredData(items=[_SITES_ITEM], reasoning="sites are missing"),
         FetchVerdict(possible=False, reasoning="the endpoint keeps failing"),
     ])
-    results = iter([("(data fetch step reported: 500)", False)] * 2 + [("read 13 sites", True)])
+    fetched = []
 
     async def fake_fetch(state, required_text=""):
-        return next(results)
+        fetched.append(required_text)
+        return "(data fetch step reported: 500)", False
 
     monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
 
-    assert await orchestrator._data_phase(st) is None
-    assert st.unverified_sources == [] and st.gathering_complete is True
-    assert [o for o, _ in _outcomes(st, "is_possible_to_fetch")] == ["yes", "yes", "no_but_trying"]
+    err = await orchestrator._data_phase(st)
+    assert len(fetched) == 2
+    assert err == "not enough data: the endpoint keeps failing"
+    assert st.forced_fetch_used is False
+    assert [o for o, _ in _outcomes(st, "is_possible_to_fetch")] == ["yes", "yes", "no"]
+
+
+async def test_a_rejected_empty_list_does_not_become_the_users_reason(tmp_path: Path, monkeypatch):
+    """Define said the rows are there; the loop rejected that and every fetch
+    failed. The error must not tell the user the data was there."""
+    st = _unverified(_state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True), "sites")
+    st.session._llm.generate_object = AsyncMock(
+        side_effect=lambda schema_class, **kw: (
+            RequiredData(items=[], reasoning="the rows are already in the known data")
+            if schema_class is RequiredData
+            else FetchVerdict(possible=True, reasoning="the pad has it")
+        )
+    )
+
+    async def fake_fetch(state, required_text=""):
+        return "(data fetch step reported: 500)", False
+
+    monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
+
+    err = await orchestrator._data_phase(st)
+    assert err.startswith("not enough data: the data loop did not converge")
+    assert err.endswith("Last assessment: no executed code read sites")
+    assert "already in the known data" not in err
+
+
+def test_a_backend_heading_in_known_data_does_not_replace_the_specs(tmp_path: Path):
+    from anton.core.tools.generate_artifact import engine as gen_engine
+
+    (tmp_path / "spec.md").write_text("## Backend\n- `GET /api/sites` — the sites\n", encoding="utf-8")
+    st = _state(
+        tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True,
+        known_data="## Backend\n- GET /api/regions\n\nsite,lat\nToronto,43.7",
+    )
+    ctx = orchestrator._spec_context(st)
+    assert set(gen_engine._declared_api_paths(ctx)) == {"/api/sites"}
+    assert ctx.index("## Technical specification") < ctx.index(prompts.KNOWN_DATA_HEADER)
+    assert ctx.rstrip().endswith(prompts.KNOWN_DATA_FOOTER) or prompts.KNOWN_DATA_FOOTER in ctx
 
 
 async def test_known_data_is_scrubbed_before_any_step_sees_it(tmp_path: Path, monkeypatch):

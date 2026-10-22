@@ -201,6 +201,11 @@ def language_name(user_language: str | None) -> str:
     return " ".join((user_language or "").split()) or DEFAULT_USER_LANGUAGE
 
 
+def settled_artifact_type(state) -> str:
+    """The type gathering settled on, or the registered one before it ran."""
+    return state.final_artifact_type or state.artifact_type
+
+
 def known_data_usable(state) -> bool:
     """Whether `known_data` can stand in for executed code.
 
@@ -208,8 +213,7 @@ def known_data_usable(state) -> bool:
     reads its source at run time and needs working access code in
     `data_notes`.
     """
-    artifact_type = state.final_artifact_type or state.artifact_type
-    return artifact_type == "html-app" and bool((state.known_data or "").strip())
+    return settled_artifact_type(state) == "html-app" and bool((state.known_data or "").strip())
 
 
 @dataclass

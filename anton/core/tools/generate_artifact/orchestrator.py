@@ -49,6 +49,7 @@ from .state import (
     RequiredData,
     VerifyResult,
     known_data_usable,
+    settled_artifact_type,
 )
 
 if TYPE_CHECKING:
@@ -183,7 +184,7 @@ def _pending_required_text(state: GenState, pending: list[str]) -> str:
     """The sources define called covered while nothing vouches for them,
     each with the reason the next steps need code that reads it. Reached only
     when `known_data_usable` is false: a fullstack type, or no known data."""
-    if (state.final_artifact_type or state.artifact_type) != "html-app":
+    if settled_artifact_type(state) != "html-app":
         why = "the backend reads it at run time"
     else:
         why = "no executed code read it and the known data does not hold its values"
@@ -208,18 +209,16 @@ def _not_enough_data(state: GenState, reasoning: str, required: RequiredData | N
     """The "not enough data" error. After a forced fetch it names where the
     fetch looked: the connections the required data mentions (or the first
     few when it mentions none), then where each item was expected."""
-    message = f"{NOT_ENOUGH_DATA_PREFIX} {reasoning}"
+    message = f"{NOT_ENOUGH_DATA_PREFIX} {reasoning.strip()}"
     if not state.forced_fetch_used:
         return message
     wheres = [it.where for it in (required.items if required else []) if it.where.strip()]
     catalog = state.datasource_catalog
-    slugs = [c.slug for c in catalog.connections] if catalog is not None else []
-    # Whole-word match: a short slug such as `db` must not match "mongodb".
-    mentioned = [
-        s for s in slugs
-        if any(re.search(rf"(?<![\w-]){re.escape(s)}(?![\w-])", w, re.IGNORECASE) for w in wheres)
-    ]
-    looked = list(dict.fromkeys((mentioned or slugs[:5]) + wheres))
+    connections = list(catalog.connections) if catalog is not None else []
+    # The rule the backend prompt matches declared sources to connections by.
+    lowered = [w.lower() for w in wheres]
+    mentioned = [c.slug for c in connections if prompts._is_declared(c, lowered)]
+    looked = list(dict.fromkeys((mentioned or [c.slug for c in connections[:5]]) + wheres))
     if not looked:
         return message
     # The agent quotes this to the user, so the reasoning ends as a sentence.
@@ -284,6 +283,9 @@ async def _data_phase(state: GenState) -> str | None:
                 return None
             required_text = _pending_required_text(state, pending)
             state.record("define_required_data", "nothing_missing_rejected", ", ".join(pending))
+            # Define's own reasoning says the data is there; an error built
+            # from it would tell the user the opposite of what happened.
+            last_reasoning = f"no executed code read {', '.join(pending)}"
 
         state.step_started("is_possible_to_fetch", attempt=state.data_iterations)
         can: FetchVerdict = await _decide(
@@ -295,8 +297,13 @@ async def _data_phase(state: GenState) -> str | None:
         if not can.possible:
             # One real attempt before giving up while a connection exists:
             # the verdict is a model's reading of a catalog that lists no
-            # endpoints, and it has said "no" to data that was there.
-            if state.datasource_catalog is not None and not state.forced_fetch_used:
+            # endpoints, and it has said "no" to data that was there. Only
+            # while an iteration remains for define to judge what it found.
+            if (
+                state.datasource_catalog is not None
+                and not state.forced_fetch_used
+                and state.data_iterations + 1 < DATA_LOOP_MAX
+            ):
                 state.forced_fetch_used = forced = True
                 state.record("is_possible_to_fetch", "no_but_trying", can.reasoning)
             else:
@@ -317,10 +324,9 @@ async def _data_phase(state: GenState) -> str | None:
             continue
         state.record("fetch_data_sample", "done", notes[:200])
         fetched_ok = True
-        if forced and state.data_iterations < DATA_LOOP_MAX:
+        if forced:
             # The decisions said the data was not there; the next define
-            # and can-fetch judge what this fetch actually found. With no
-            # iteration left it counts like any fetch whose cell succeeded.
+            # and can-fetch judge what this fetch actually found.
             continue
         # The loop fetched exactly what was declared unverified, so the list
         # clears. Not narrowed item by item: the fetch step works from
@@ -398,9 +404,6 @@ def _spec_context(state: GenState) -> str:
         parts.append(f"## Brief\n{state.brief.strip()}")
     if state.data_notes.strip():
         parts.append("## Data\n" + state.data_notes.strip())
-    known = prompts.known_data_section(state)
-    if known:
-        parts.append(known)
     if state.web_notes.strip():
         parts.append(state.web_notes.strip())
     attached = attachments.render_for_generation(state.attachments)
@@ -409,6 +412,11 @@ def _spec_context(state: GenState) -> str:
     spec_path = state.artifact_path / TECH_SPEC_FILENAME
     if spec_path.is_file():
         parts.append("## Technical specification\n" + spec_path.read_text(encoding="utf-8"))
+    # After spec.md: the agent's markdown may carry a `## Backend` of its own,
+    # and `engine._declared_api_paths` reads the first one in this context.
+    known = prompts.known_data_section(state)
+    if known:
+        parts.append(known)
     journal = state.journal()
     if journal:
         parts.append("## Progress journal (steps completed so far)\n" + journal)
