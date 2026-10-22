@@ -279,3 +279,28 @@ def test_developer_token_is_marked_secret_and_login_customer_id_is_not(monkeypat
     monkeypatch.setattr("anton.minds_client.minds_request", lambda *a, **kw: _GOOGLE_ADS_RESPONSE)
     record = _google_ads_vault().read_record("google_ads", "primary")
     assert record["secure_keys"] == ["access_token", "developer_token"]
+
+
+def test_method_passes_through_so_mcp_wiring_sees_the_connection(monkeypatch):
+    from anton.core.mcp.wiring import _method_of
+
+    monkeypatch.setattr(
+        "anton.minds_client.minds_request",
+        lambda *a, **kw: b'{"access_token": "tok", "_method": "mcp"}',
+    )
+    vault = _vault(connections=[{"engine": "notion", "name": "acme"}])
+    assert _method_of(vault, "notion", "acme") == "mcp"
+    env = vault.env_for("notion", "acme", flat=True)
+    assert env == {"DS_ACCESS_TOKEN": "tok", "DS_AUTH_TYPE": "oauth"}
+
+
+def test_response_without_method_is_not_treated_as_mcp(monkeypatch):
+    """HubSpot on cloud: auth sends no `_method`, so wiring keeps skipping it."""
+    monkeypatch.setattr(
+        "anton.minds_client.minds_request",
+        lambda *a, **kw: b'{"access_token": "tok", "account_email": "a@b.com"}',
+    )
+    from anton.core.mcp.wiring import _method_of
+
+    vault = _vault(connections=[{"engine": "hubspot", "name": "acme"}])
+    assert _method_of(vault, "hubspot", "acme") is None
