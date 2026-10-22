@@ -31,6 +31,7 @@ from .sub_tools import FILE_BEGIN_MARKER as BEGIN, FILE_END_MARKER as END
 from .state import REPLY_BODY_CHARS, language_name
 
 if TYPE_CHECKING:
+    from anton.core.memory.skills import Skill
     from anton.utils.datasources import CatalogConnection, DatasourceCatalog
 
 
@@ -707,6 +708,59 @@ Checking your own output is NOT part of the job.\
 """
 
 
+PROJECT_RULES_HEADER = "## Project rules (follow, don't display)"
+
+
+def project_rules_section(anton_md: str) -> str:
+    """The project's anton.md as a system-prompt section, or "" when blank.
+
+    A system-prompt section on purpose, never kickoff content: rules that
+    reached the page writer only inside the brief or the PRD were read as
+    content and printed on the page as text.
+    """
+    text = anton_md.strip()
+    if not text:
+        return ""
+    return (
+        f"{PROJECT_RULES_HEADER}\n"
+        "The project's own instructions, written by its users in "
+        "`.anton/anton.md`. Follow "
+        "them in everything this step produces. They are instructions to "
+        "you, not content: do what they ask, but never print, quote or "
+        "summarize the rules themselves on the page, in a file, or in text "
+        "the user sees.\n\n"
+        f"{text}"
+    )
+
+
+ARTIFACT_SKILLS_HEADER = "## Artifact skills (follow, don't display)"
+
+
+def artifact_skills_section(skills: "list[Skill]") -> str:
+    """The skills marked for artifact builds as one system-prompt section,
+    or "" when there are none. Each body sits under its label."""
+    bodies = [
+        f"### {skill.label}\n{skill.declarative_md.strip()}"
+        for skill in skills
+        if skill.declarative_md.strip()
+    ]
+    if not bodies:
+        return ""
+    return (
+        f"{ARTIFACT_SKILLS_HEADER}\n"
+        "Skills this project marked for every artifact build. Follow them in "
+        "everything this step produces, as you would the project rules: do "
+        "what they ask, but never print, quote or summarize the skills "
+        "themselves on the page, in a file, or in text the user sees.\n\n"
+        + "\n\n".join(bodies)
+    )
+
+
+def with_project_rules(system: str, project_rules: str) -> str:
+    """`system` with the run's `Project rules` section at its end, if any."""
+    return f"{system}\n\n{project_rules}" if project_rules else system
+
+
 def _ui_language(user_language: str, *, backend: bool = False) -> str:
     """The page's language, by name. Last in the system prompt: the blocks
     before it are the same for every run, so they stay one shared prefix."""
@@ -846,6 +900,8 @@ def build_subagent_system_prompt(
     *,
     primary: str | None = None,
     user_language: str = "",
+    project_rules: str = "",
+    artifact_skills: str = "",
 ) -> str:
     """System prompt for the single-generator path — the `html-app` page.
 
@@ -864,8 +920,11 @@ def build_subagent_system_prompt(
     # `artifact_path` is deliberately not quoted: every path the model writes
     # is relative to the artifact root, and an absolute path in the prompt is
     # only something to misuse. The parameter stays for signature stability.
+    # `project_rules` and `artifact_skills` sit after the fixed blocks, so
+    # they stay one shared prefix across projects; "" drops out of the join.
     return "\n\n".join(
-        [
+        part
+        for part in [
             _gen_html_task(target),
             _gen_html_inputs(),
             _gen_html_workflow(target),
@@ -874,8 +933,11 @@ def build_subagent_system_prompt(
             _verifier_contract(served=False),
             "## Design rules\n" + _DESIGN_RULES,
             _GEN_TOOLS,
+            project_rules,
+            artifact_skills,
             _ui_language(user_language),
         ]
+        if part
     )
 
 
@@ -989,15 +1051,17 @@ def build_api_spec_prompt(
     context: str,
     *,
     stateless: bool = False,
+    project_rules: str = "",
 ) -> tuple[str, str]:
     """Cold-start form: the assembled context plus the same instruction the
     hot path sends, so both paths ask for the same document."""
-    system = (
+    system = with_project_rules(
         _DATA_CONTEXT_HEADER
         + "You are the `make_api_spec` node. Your document is saved to "
         "`openapi.json` and handed to the backend and frontend generators "
         "next to the material below; the instruction at the end of the user "
-        "message says what goes into it."
+        "message says what goes into it.",
+        project_rules,
     )
     user = "## Requirements\n" + context.strip() + "\n\n" + build_api_spec_instruction(
         stateless=stateless
@@ -1162,6 +1226,8 @@ def build_backend_system_prompt(
     declared_sources: list[str] | tuple[str, ...] = (),
     data_notes: str = "",
     user_language: str = "",
+    project_rules: str = "",
+    artifact_skills: str = "",
 ) -> str:
     """System prompt for `generate_backend`.
 
@@ -1185,6 +1251,7 @@ def build_backend_system_prompt(
     if section:
         parts.append(section)
     parts.append(_GEN_TOOLS)
+    parts.extend(p for p in (project_rules, artifact_skills) if p)
     parts.append(_ui_language(user_language, backend=True))
     return "\n\n".join(parts)
 
@@ -1247,7 +1314,12 @@ _LIVE_APP_SCRIPTS = (
 
 
 def build_frontend_system_prompt(
-    artifact_path: Path, *, live_app: bool = False, user_language: str = ""
+    artifact_path: Path,
+    *,
+    live_app: bool = False,
+    user_language: str = "",
+    project_rules: str = "",
+    artifact_skills: str = "",
 ) -> str:
     # `artifact_path` is not quoted, for the same reason as in the html-app
     # builder: every path the model writes is relative to the artifact root.
@@ -1263,13 +1335,16 @@ def build_frontend_system_prompt(
         "## Fullstack rules\n" + _FRONTEND_RULES,
         "## Design rules\n" + _DESIGN_RULES,
         _GEN_TOOLS,
+        project_rules,
+        artifact_skills,
         _ui_language(user_language),
     ]
     if live_app:
         # Right after the contract it tightens. Without live apps the prompt
         # is as it was, byte for byte.
         sections.insert(sections.index(contract) + 1, _LIVE_APP_SCRIPTS)
-    return "\n\n".join(sections)
+    # "" (no anton.md, no artifact skill) drops out of the join.
+    return "\n\n".join(part for part in sections if part)
 
 
 def build_frontend_kickoff(
@@ -1342,23 +1417,25 @@ def _brief_and_notes(state) -> str:
 
 
 def build_required_data_prompt(state) -> tuple[str, str]:
-    system = (
+    system = with_project_rules(
         _DATA_CONTEXT_HEADER
         + "You are the `define_required_data` node. List exactly which data is "
         "missing and where each item can be obtained (user's connected data "
-        "sources or public/documented APIs). Be concrete and minimal."
+        "sources or public/documented APIs). Be concrete and minimal.",
+        state.project_rules,
     )
     user = _brief_and_notes(state) + "\n\nList the required data items."
     return system, user
 
 
 def build_can_fetch_prompt(state, required: str) -> tuple[str, str]:
-    system = (
+    system = with_project_rules(
         _DATA_CONTEXT_HEADER
         + "You are the `is_possible_to_fetch` decision node. Given the required "
         "data and the available sources, decide whether the data can actually be "
         "obtained. If a needed source simply does not exist among the user's "
-        "connections or public sources, it is NOT possible."
+        "connections or public sources, it is NOT possible.",
+        state.project_rules,
     )
     user = (
         _brief_and_notes(state)
@@ -1368,7 +1445,12 @@ def build_can_fetch_prompt(state, required: str) -> tuple[str, str]:
 
 
 def build_fetch_data_system_prompt(
-    artifact_path, *, datasource_context: str = "", public_sources: str = ""
+    artifact_path,
+    *,
+    datasource_context: str = "",
+    public_sources: str = "",
+    project_rules: str = "",
+    artifact_skills: str = "",
 ) -> str:
     parts = [
         _ROLE_COMMON,
@@ -1392,6 +1474,7 @@ def build_fetch_data_system_prompt(
         parts.append(public_sources.strip())
     if datasource_context.strip():
         parts.append(datasource_context.strip())
+    parts.extend(p for p in (project_rules, artifact_skills) if p)
     parts.append(
         "## Output folder\n"
         f"(You will NOT write files here in this step.) Artifact folder: `{artifact_path}`"
@@ -1559,12 +1642,13 @@ def build_tech_spec_instruction(state) -> str:
 def build_tech_spec_prompt(state) -> tuple[str, str]:
     """Cold-start form: the assembled context plus the same instruction the
     hot path sends, so both paths ask for the same document."""
-    system = (
+    system = with_project_rules(
         _DATA_CONTEXT_HEADER
         + "You are the `make_tech_spec` node. Your document is saved to "
         "`spec.md` and handed to the backend and frontend generators next to "
         "the material below; the instruction at the end of the user message "
-        "says what goes into it."
+        "says what goes into it.",
+        state.project_rules,
     )
     user = _brief_and_notes(state) + (
         f"\n\n## Artifact type\n{state.artifact_type}\n\n"

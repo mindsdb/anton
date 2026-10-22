@@ -64,6 +64,9 @@ _DEFAULT_SKILLS_ROOT = Path("~/.anton/skills").expanduser()
 # same label shadows the built-in.
 _BUILTIN_SKILLS_ROOT = Path(__file__).parent / "builtin_skills"
 
+# One value of a skill's `applies_to` list.
+_APPLIES_TO_VALUE_RE = re.compile(r"[a-z0-9_-]+")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data classes
@@ -104,10 +107,23 @@ class Skill:
     created_at: str
     provenance: str  # "manual" | "consolidator" | "builtin" | "host"
     when_to_use: str = ""
+    # The SKILL.md `applies_to` key, at the top level or under `metadata`
+    # (the parser folds the first into the second), as written. See
+    # `for_artifacts`.
+    applies_to: str = ""
     stage_1_present: bool = True
     stage_2_present: bool = False
     stage_3_present: bool = False
     stats: SkillStats = field(default_factory=SkillStats)
+
+    @property
+    def for_artifacts(self) -> bool:
+        """Whether `applies_to` names `artifacts`.
+
+        One value, a comma- or space-separated list, or a YAML list, which
+        the parser keeps as its `str()` ("['artifacts', 'chat']").
+        """
+        return "artifacts" in _APPLIES_TO_VALUE_RE.findall(self.applies_to.lower())
 
     def to_stats_dict(self) -> dict:
         return {
@@ -284,6 +300,7 @@ class SkillStore:
         root: Path | None = None,
         builtin_root: Path | None = None,
         extra_roots: list[Path] | None = None,
+        artifact_roots: list[Path] | None = None,
     ) -> None:
         self.root = Path(root) if root is not None else _DEFAULT_SKILLS_ROOT
         # Resolved at construction so tests can monkeypatch the module default.
@@ -294,6 +311,11 @@ class SkillStore:
         # skills for its own tools). Take precedence over anton's packaged
         # built-ins; user skills under `root` still shadow everything.
         self.extra_roots: list[Path] = [Path(p) for p in extra_roots or []]
+        # Folders the host trusts for artifact builds (`list_for_artifacts`);
+        # None when it named none.
+        self.artifact_roots: list[Path] | None = (
+            None if artifact_roots is None else [Path(p) for p in artifact_roots]
+        )
 
     def _readonly_roots(self) -> list[Path]:
         """Host roots first (they win on label collisions), then built-ins."""
@@ -332,6 +354,7 @@ class SkillStore:
             declarative_md=fm.instructions,
             created_at=fm.metadata.get("created_at", ""),
             provenance=fm.metadata.get("provenance", "manual"),
+            applies_to=fm.metadata.get("applies_to", ""),
             stage_1_present=True,
             stage_2_present=(d / "references").is_dir(),
             stage_3_present=(d / "scripts").is_dir(),
@@ -425,6 +448,38 @@ class SkillStore:
         out.sort(key=lambda s: s.label)
         return out
 
+    def list_for_artifacts(self) -> list[Skill]:
+        """The skills an artifact build follows without a recall, by label.
+
+        A skill qualifies when it is marked (`Skill.for_artifacts`) and its
+        folder, with links resolved, sits under a trusted folder: anton's
+        built-ins always, plus `artifact_roots` when the host named them.
+        Resolving matters because a host names the folders its own links
+        point into, so a real folder planted where one of its links was
+        resolves elsewhere and is left out.
+
+        With no `artifact_roots`, a store with host roots trusts nothing
+        else: a host's writable root can hold other people's skills, and
+        only the host can tell them apart. A store without host roots (the
+        CLI) also trusts `root`, the user's own library.
+        """
+        trusted = [self.builtin_root]
+        if self.artifact_roots is not None:
+            trusted += self.artifact_roots
+        elif not self.extra_roots:
+            trusted.append(self.root)
+        trusted_resolved = [p.resolve() for p in trusted]
+        out: list[Skill] = []
+        for d in self._iter_skill_dirs():
+            resolved = d.resolve()
+            if not any(resolved.is_relative_to(t) for t in trusted_resolved):
+                continue
+            skill = self._skill_from_dir(d)
+            if skill is not None and skill.for_artifacts:
+                out.append(skill)
+        out.sort(key=lambda s: s.label)
+        return out
+
     def list_summaries(self) -> list[dict]:
         """Lightweight listing for prompt-building.
 
@@ -502,6 +557,7 @@ class SkillStore:
             "display_name": skill.name,
             "provenance": skill.provenance,
             "created_at": skill.created_at,
+            "applies_to": skill.applies_to,
         }.items() if v}
 
         description = skill.description
