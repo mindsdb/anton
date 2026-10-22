@@ -1324,7 +1324,26 @@ def prd_section(state) -> str:
     return f"{PRD_SECTION_HEADER}\n{body}\n{PRD_SECTION_FOOTER}" if body else ""
 
 
-def _brief_and_notes(state) -> str:
+KNOWN_DATA_HEADER = "## Known data (passed in by the calling agent)"
+
+
+def known_data_section(state, max_chars: int | None = None) -> str:
+    """`known_data` under its header, or "" when there is none.
+
+    `max_chars` is for contexts re-sent on every round. The cut falls on the
+    last line break before the limit, so no data row is left half-written.
+    """
+    text = (getattr(state, "known_data", "") or "").strip()
+    if not text:
+        return ""
+    if max_chars is not None and len(text) > max_chars:
+        cut = text.rfind("\n", 0, max_chars)
+        shown = text[:cut] if cut > 0 else text[:max_chars]
+        text = f"{shown}\n(truncated: first {len(shown)} of {len(text)} characters shown)"
+    return f"{KNOWN_DATA_HEADER}\n{text}"
+
+
+def _brief_and_notes(state, *, known_data_max: int | None = None) -> str:
     parts = [f"## Brief\n{state.brief.strip()}"]
     prd = prd_section(state)
     if prd:
@@ -1333,6 +1352,9 @@ def _brief_and_notes(state) -> str:
         parts.append(f"## Data gathered so far\n{state.data_notes.strip()}")
     else:
         parts.append("## Data gathered so far\n(nothing gathered yet)")
+    known = known_data_section(state, known_data_max)
+    if known:
+        parts.append(known)
     if getattr(state, "web_notes", "").strip():
         parts.append(state.web_notes.strip())
     journal = state.journal()

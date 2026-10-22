@@ -10,10 +10,11 @@ import pytest
 
 from anton.core.datasources.data_vault import LocalDataVault
 from anton.core.llm.provider import StreamComplete
-from anton.core.tools.generate_artifact import orchestrator
+from anton.core.tools.generate_artifact import orchestrator, prompts
 from anton.core.tools.generate_artifact.discovery import checkpoint as cp
 from anton.core.tools.generate_artifact.state import (
-    BrowserCheck, FetchVerdict, GenState, RequiredData, RequiredDataItem, VerifyResult,
+    KNOWN_DATA_SPEC_MAX, BrowserCheck, FetchVerdict, GenState, RequiredData, RequiredDataItem,
+    VerifyResult,
 )
 
 
@@ -1519,3 +1520,44 @@ async def test_tail_log_is_scrubbed_off_the_event_loop(tmp_path: Path, monkeypat
     await orchestrator._tail_log(_state(tmp_path))
 
     assert scrub_threads and loop_thread not in scrub_threads
+
+
+# ── known_data in the node and generator contexts ───────────────────────────
+
+_SITES = "site,lat,lon\nToronto,43.7,-79.4\nAustin,30.3,-97.7"
+
+
+def test_the_generators_see_the_known_data(tmp_path: Path):
+    st = _state(tmp_path, known_data=_SITES)
+    ctx = orchestrator._spec_context(st)
+    assert f"{prompts.KNOWN_DATA_HEADER}\n{_SITES}" in ctx
+
+
+def test_long_known_data_is_cut_for_the_generators_at_a_line_break(tmp_path: Path):
+    rows = "\n".join(f"site-{i},{i}.0,{i}.5" for i in range(1000))
+    st = _state(tmp_path, known_data=rows)
+    section = orchestrator._spec_context(st).split(prompts.KNOWN_DATA_HEADER, 1)[1]
+    shown, marker = section.split("\n(truncated: first ", 1)
+    assert marker.startswith(f"{len(shown.strip())} of {len(rows)} characters shown)")
+    assert len(shown.strip()) <= KNOWN_DATA_SPEC_MAX
+    last = shown.strip().splitlines()[-1]
+    assert last.startswith("site-") and last.endswith(".5")
+
+
+def test_known_data_on_one_line_is_cut_hard_at_the_limit(tmp_path: Path):
+    st = _state(tmp_path, known_data="x" * 9000)
+    section = orchestrator._spec_context(st).split(prompts.KNOWN_DATA_HEADER, 1)[1]
+    assert f"\n{'x' * KNOWN_DATA_SPEC_MAX}\n(truncated: first {KNOWN_DATA_SPEC_MAX} of 9000" in section
+
+
+def test_the_data_decisions_get_the_known_data_whole(tmp_path: Path):
+    rows = "\n".join(f"site-{i},{i}.0,{i}.5" for i in range(1000))
+    st = _state(tmp_path, known_data=rows)
+    _, user = prompts.build_required_data_prompt(st)
+    assert rows in user
+
+
+def test_without_known_data_no_section_is_added(tmp_path: Path):
+    st = _state(tmp_path)
+    assert prompts.KNOWN_DATA_HEADER not in orchestrator._spec_context(st)
+    assert prompts.KNOWN_DATA_HEADER not in prompts._brief_and_notes(st)

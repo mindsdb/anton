@@ -358,3 +358,9 @@ def test_the_pipeline_prompt_does_not_promise_a_confirmation():
     assert "for confirmation" not in text
     assert "the user agreed to" not in text
     assert "`draft_brief` — a short brief shown to the user" in text
+
+
+def test_call_kickoff_names_the_known_data_section_as_the_rules_quote_it():
+    from anton.core.tools.generate_artifact.prompts import KNOWN_DATA_HEADER
+
+    assert f"{KNOWN_DATA_HEADER}\n" in build_call_kickoff(_state())

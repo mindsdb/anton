@@ -13,6 +13,7 @@ from anton.core.llm.prompts import ANTON_NOTE
 from anton.utils.datasources import DATASOURCES_HEADER
 
 from ..attachments import render_for_gathering
+from ..prompts import KNOWN_DATA_HEADER
 from .state import PrdState
 
 
@@ -116,7 +117,7 @@ def build_call_kickoff(state: PrdState) -> str:
     return (
         f"## User request\n{state.user_request}\n\n"
         f"## Agent's understanding\n{state.agent_understanding}\n\n"
-        f"## Known data\n{state.known_data or '(none provided)'}\n\n"
+        f"{KNOWN_DATA_HEADER}\n{state.known_data or '(none provided)'}\n\n"
         + (f"{attached}\n\n" if attached else "")
         + (f"{pads}\n\n" if pads else "")
         + f"## User preferences\n{state.user_preferences or '(none known)'}\n\n"

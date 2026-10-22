@@ -42,6 +42,7 @@ from .state import (
     DATA_LOOP_MAX,
     GEN_LOOP_MAX_RETRIES,
     GEN_VERIFY_MAX_RETRIES,
+    KNOWN_DATA_SPEC_MAX,
     RUNAPP_MAX_RETRIES,
     FetchVerdict,
     GenState,
@@ -305,6 +306,9 @@ def _spec_context(state: GenState) -> str:
         parts.append(f"## Brief\n{state.brief.strip()}")
     if state.data_notes.strip():
         parts.append("## Data\n" + state.data_notes.strip())
+    known = prompts.known_data_section(state, KNOWN_DATA_SPEC_MAX)
+    if known:
+        parts.append(known)
     if state.web_notes.strip():
         parts.append(state.web_notes.strip())
     attached = attachments.render_for_generation(state.attachments)
