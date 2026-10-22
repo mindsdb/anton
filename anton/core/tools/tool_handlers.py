@@ -633,12 +633,28 @@ def record_page_checks(
         listed.update(findings_listed)
 
 
+def _builder_model(session: "ChatSession") -> str | None:
+    """The model generate_artifact's calls go to here when it is not the
+    agent's own, else None. Its screenshot refusals are kept apart, since they
+    say nothing about the agent's model."""
+    from anton.core.llm.client import routed_model
+
+    model = routed_model()
+    agent = getattr(getattr(session, "_llm", None), "planning_model", None)
+    return model if model is not None and model != agent else None
+
+
 def render_screenshots_refused(session: "ChatSession") -> bool:
-    """Whether the model refused a request carrying a render-check screenshot
-    in this session and took it without one
+    """Whether the model the check's screenshot goes to refused a request
+    carrying a render-check screenshot in this session and took it without one
     (`ChatSession._confirm_render_screenshots_refused`), so checks ask the
-    service for none and the findings go to the agent without one. A test
-    double without the flag gets screenshots."""
+    service for none and the findings go to the model without one. Inside
+    generate_artifact on a model of its own, that is the builder's model
+    (`_builder_model`); everywhere else the agent's. A test double without the
+    flag gets screenshots."""
+    builder = _builder_model(session)
+    if builder is not None:
+        return builder in getattr(session, "_builder_screenshots_refused", ())
     return getattr(session, "_render_screenshots_refused", False) is True
 
 
@@ -656,9 +672,13 @@ def images_refused(session: "ChatSession") -> bool:
 def record_render_screenshots_refused(session: "ChatSession") -> None:
     """Remember that the model refused a request carrying a render-check
     screenshot and took it without one, for a caller outside the session's
-    own turn loop (generate_artifact's retry). Later checks then ask for no
-    screenshot (`render_screenshots_refused`)."""
-    session._render_screenshots_refused = True
+    own turn loop (generate_artifact's retry). Later checks for that model then
+    ask for no screenshot (`render_screenshots_refused`)."""
+    builder = _builder_model(session)
+    if builder is None:
+        session._render_screenshots_refused = True
+        return
+    session._builder_screenshots_refused = {*getattr(session, "_builder_screenshots_refused", ()), builder}
 
 
 def page_check_lines(store, *, checks: "dict[PageKey, RenderStatus]") -> list[str]:
@@ -1441,14 +1461,18 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         if isinstance(raw_attachments, list) else []
 
     folder = store.folder_for(slug)
+    from anton.core.llm.client import model_route
     from anton.core.llm.effort import effort_ceiling_of
     from anton.core.tools.generate_artifact import generate
-    from anton.core.tools.generate_artifact.state import ARTIFACT_EFFORT_CEILING
+    from anton.core.tools.generate_artifact.state import ARTIFACT_EFFORT_CEILING, artifact_model_route
+
+    route = artifact_model_route()
 
     async def _at_artifact_effort(coro):
-        # Entered inside the task, so the cap lives in the task's own context
-        # and never reaches the agent loop draining this handler.
-        with effort_ceiling_of(getattr(session, "_llm", None), ARTIFACT_EFFORT_CEILING):
+        # Entered inside the task, so the cap and the builder's model live in
+        # the task's own context and never reach the agent loop draining this
+        # handler.
+        with effort_ceiling_of(getattr(session, "_llm", None), ARTIFACT_EFFORT_CEILING), model_route(route):
             return await coro
 
     queue: "asyncio.Queue[str | None]" = asyncio.Queue()

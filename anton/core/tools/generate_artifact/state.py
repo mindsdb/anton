@@ -7,11 +7,14 @@ return the Pydantic verdict models below. Verifiers return `VerifyResult`.
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
+
+from anton.core.llm.client import ModelRoute
 
 from .debug_trace import NullTrace, GenTrace  # noqa: F401  (GenTrace re-exported for typing)
 from .progress import PEEK_GROUPS, LivePeek, StepCounter, label_for, plan_steps
@@ -94,6 +97,25 @@ REPLY_BODY_CHARS: int = 30_000
 # which costs minutes per step and runs non-streamed calls past the gateway's
 # time budget; the pipeline's steps are bounded and do not need that depth.
 ARTIFACT_EFFORT_CEILING = "high"
+
+# The builder's own model and effort, which the host passes in the process
+# environment. The ceiling above still caps the effort.
+ARTIFACT_MODEL_ENV_VAR = "ANTON_ARTIFACT_MODEL"
+ARTIFACT_EFFORT_ENV_VAR = "ANTON_ARTIFACT_REASONING_EFFORT"
+
+
+def artifact_model_route() -> ModelRoute | None:
+    """The model and effort every call of the pipeline asks for, or None to
+    build on the agent's own, as with the variable unset or blank.
+
+    Read from the process environment alone, as the render check's address is
+    (`configured_url` in anton/core/artifacts/render_check.py). A blank effort
+    sends none, so the model runs its own default.
+    """
+    model = os.environ.get(ARTIFACT_MODEL_ENV_VAR, "").strip()
+    if not model:
+        return None
+    return ModelRoute(model=model, effort=os.environ.get(ARTIFACT_EFFORT_ENV_VAR, "").strip() or None)
 
 # Reserved out of MAX_QUESTIONS_PER_TURN for the brief phase: one
 # `show_and_confirm` call plus up to two "revise brief, show again" cycles.
