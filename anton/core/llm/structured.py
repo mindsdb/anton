@@ -32,7 +32,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Awaitable, Callable, NoReturn
 
-from .provider import StructuredOutputError
+from .provider import ProviderErrorBody, StructuredOutputError
 
 
 # Default output-budget ladder for forced-schema calls: first attempt, then
@@ -57,12 +57,94 @@ def no_preamble_instruction(schema_class) -> str:
     the budget ladder rather than replacing it. Tool name comes off the
     schema class so it can't go stale.
     """
-    name = getattr(schema_class, "__name__", str(schema_class))
+    return _call_first_instruction(getattr(schema_class, "__name__", str(schema_class)))
+
+
+def _call_first_instruction(tool_name: str) -> str:
     return (
-        f"\n\nCall the {name} tool immediately as your first action. Do not "
+        f"\n\nCall the {tool_name} tool immediately as your first action. Do not "
         "think out loud, restate the conversation, or explain your reasoning "
         "before calling it — put any brief justification in the tool's fields."
     )
+
+
+# What a 400 that refuses a forced tool choice says beside `tool_choice`:
+# Anthropic's Claude 5.5 models ("... are not supported for this model."), an
+# older Claude with thinking on ("... forces tool use"), and OpenAI-compatible
+# servers that spell it "unsupported".
+_FORCED_CHOICE_REFUSAL_WORDS = ("not supported", "unsupported", "forces tool use")
+
+# (provider, base_url, model) that refused a forced tool choice. Process-wide,
+# like `_CACHE_BREAKPOINT_REFUSED` in openai.py, because Cowork builds a provider
+# per turn and the scratchpad builds one per call: one refusal is enough.
+_FORCED_CHOICE_REFUSED: set[tuple[str, str, str]] = set()
+
+
+def refuses_forced_tool_choice(exc: BaseException) -> bool:
+    """True when a 400 refuses the request's forced ``tool_choice`` itself.
+
+    Reads the provider's own message, not the model name: MindsHub's Claude ids
+    carry no "claude". Only an SDK error carries a body, so anton's own typed
+    errors, such as the reasoning-effort ``RequestRefusedError`` a provider
+    raises for its 400, never match.
+    """
+    if getattr(exc, "status_code", None) != 400:
+        return False
+    parsed = ProviderErrorBody.parse(getattr(exc, "body", None))
+    message = parsed.envelope.message or parsed.top.message
+    text = message.lower() if isinstance(message, str) else ""
+    return "tool_choice" in text and any(word in text for word in _FORCED_CHOICE_REFUSAL_WORDS)
+
+
+def forced_choice_key(provider, model: str) -> tuple[str, str, str]:
+    """The refusal memory's key for ``model`` on ``provider``'s endpoint.
+
+    A trailing slash and a missing base_url are normalised, as the completion
+    verifier's latch key is (`_shared_verifier_latch` in session.py).
+    """
+    conn = provider.export_connection_info()
+    return (conn.provider, (conn.base_url or "").rstrip("/"), model)
+
+
+async def send_structured(
+    send: Callable[[dict | None, str], Awaitable[Any]],
+    *,
+    key: tuple[str, str, str],
+    tool: dict,
+    system: str,
+    budget: int,
+):
+    """Send one forced-schema call and return the response to unwrap.
+
+    ``send(tool_choice, system)`` makes one request. The first forces ``tool``,
+    unless ``key`` already refused a forced choice. A refusal is remembered for
+    ``key``, and the call goes again with no ``tool_choice`` and a line asking
+    for the tool first. It sends no choice rather than ``"auto"``: a proxy that
+    checks requests can refuse ``"auto"`` on chat completions, and Anthropic's
+    API reads a request with tools and no choice as ``auto``. An unforced reply with no tool call,
+    and not cut off by ``budget``, gets one more try, so one call sends at most
+    three requests. The caller's own checks then raise `StructuredOutputError`
+    for a reply that is still unusable, as they do for a forced one.
+
+    Shared by `LLMClient._generate_object_with` and the scratchpad's
+    `_ScratchpadLLM.generate_object`, so both sites retry the same way.
+    """
+    if key not in _FORCED_CHOICE_REFUSED:
+        try:
+            return await send({"type": "tool", "name": tool["name"]}, system)
+        except Exception as exc:
+            if not refuses_forced_tool_choice(exc):
+                raise
+            logging.getLogger(__name__).warning(
+                "forced tool_choice refused for %s; its structured calls go without one", key[2]
+            )
+            _FORCED_CHOICE_REFUSED.add(key)
+    instruction = _call_first_instruction(tool["name"])
+    unforced = system if system.endswith(instruction) else system + instruction
+    response = await send(None, unforced)
+    if response.tool_calls or looks_truncated(response, budget):
+        return response
+    return await send(None, unforced)
 
 
 def truncation_verdict(exc: StructuredOutputError) -> str:
