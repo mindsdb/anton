@@ -28,7 +28,8 @@ caller; the desktop harness (`cowork-server`, Stage 2) is the other.
 
 Three entry points:
   - `discover_mcp_tools_async` / `discover_mcp_tools` (sync wrapper) — the
-    full path: for every `method == "mcp"` connection, open a session,
+    full path: for every connection whose method is in `MCP_METHODS`
+    ("mcp", or "genie-mcp" for Databricks Genie), open a session,
     discover + filter + namespace its tools. Returns the `ToolDef`s to fold
     into `ChatSessionConfig.tools` plus the open `McpSession`s a caller must
     keep alive for the turn and close at its end (there is no `ChatSession`
@@ -50,7 +51,7 @@ from typing import TYPE_CHECKING, Any
 from anton.core.mcp.access import AccessMode
 from anton.core.mcp.client import McpSession
 from anton.core.mcp.registry import discover_tool_defs
-from anton.core.mcp.servers import mcp_server_url
+from anton.core.mcp.servers import MCP_METHODS, mcp_server_url, resolve_mcp_endpoint
 
 if TYPE_CHECKING:
     from anton.core.datasources.data_vault import DataVault
@@ -84,8 +85,8 @@ def _access_mode_of(vault: "DataVault", engine: str, name: str) -> AccessMode:
 async def discover_mcp_tools_async(
     vault: "DataVault", connections: list[dict[str, str]]
 ) -> tuple[list["ToolDef"], list[McpSession]]:
-    """Discover native tools for every `method == "mcp"` connection in
-    `connections`. Returns `(tool_defs, open_sessions)` — fold `tool_defs`
+    """Discover native tools for every connection in `connections` whose
+    method is in `MCP_METHODS`. Returns `(tool_defs, open_sessions)` — fold `tool_defs`
     into `ChatSessionConfig.tools` (and, on the cloud path, into
     `tool_allowlist`) and keep `open_sessions` alive for the turn, closing
     each at turn end.
@@ -101,13 +102,14 @@ async def discover_mcp_tools_async(
     # restore_namespaced_env), not something introduced or fixable here.
     # This first pass over `connections` is cheap and sequential regardless;
     # only the per-connection MCP round-trips below are worth parallelizing.
-    mcp_connections: list[tuple[str, str]] = []
+    mcp_connections: list[tuple[str, str, str]] = []
     for connection in connections:
         engine, name = connection.get("engine"), connection.get("name")
         if not engine or not name:
             continue
-        if _method_of(vault, engine, name) == "mcp":
-            mcp_connections.append((engine, name))
+        method = _method_of(vault, engine, name)
+        if method in MCP_METHODS:
+            mcp_connections.append((engine, name, method))
     if not mcp_connections:
         return [], []
 
@@ -117,12 +119,12 @@ async def discover_mcp_tools_async(
     # silently collide with the first's under ToolRegistry's
     # skip-duplicate-by-name behavior. Left out for the common single-
     # connection case so its tool names stay exactly what they've always been.
-    engine_counts = Counter(engine for engine, _ in mcp_connections)
+    engine_counts = Counter(engine for engine, _, _ in mcp_connections)
 
     results = await asyncio.gather(
         *(
-            _discover_one(vault, engine, name, disambiguate=engine_counts[engine] > 1)
-            for engine, name in mcp_connections
+            _discover_one(vault, engine, name, method, disambiguate=engine_counts[engine] > 1)
+            for engine, name, method in mcp_connections
         )
     )
 
@@ -136,26 +138,50 @@ async def discover_mcp_tools_async(
 
 
 async def _discover_one(
-    vault: "DataVault", engine: str, name: str, *, disambiguate: bool
+    vault: "DataVault", engine: str, name: str, method: str, *, disambiguate: bool
 ) -> tuple[list["ToolDef"], McpSession | None]:
     """One connection's open-session-then-discover step, isolated so
     `discover_mcp_tools_async` can run every connection concurrently via
     `asyncio.gather` — a bad connector never fails the whole turn over it,
-    it just contributes `([], None)`."""
-    url = mcp_server_url(engine)
-    if url is None:
-        logger.warning("discover_mcp_tools: no known MCP server URL for engine %s", engine)
-        return [], None
-    access_token = (vault.load(engine, name) or {}).get("access_token")
-    if not access_token:
-        logger.warning("discover_mcp_tools: no access token for %s/%s", engine, name)
+    it just contributes `([], None)`.
+
+    A "genie-mcp" connection whose access mode is "none" is skipped before
+    its token is minted, since it registers no tools. A "genie-mcp" failure
+    before discovery is logged with the engine, the connection name and the
+    exception class only: its token request or a 401 at `initialize` can
+    carry values that must never reach a log line."""
+    genie = method != "mcp"
+    if genie:
+        try:
+            if _access_mode_of(vault, engine, name) == "none":
+                return [], None
+            endpoint = await resolve_mcp_endpoint(
+                engine, method, vault.load(engine, name) or {}, connection_name=name
+            )
+        except Exception as exc:
+            logger.warning("discover_mcp_tools: could not resolve %s/%s: %s", engine, name, type(exc).__name__)
+            return [], None
+    else:
+        endpoint = await resolve_mcp_endpoint(engine, method, vault.load(engine, name) or {}, connection_name=name)
+    if endpoint is None:
+        if genie:
+            logger.warning("discover_mcp_tools: incomplete Genie connection %s/%s", engine, name)
+        elif mcp_server_url(engine) is None:
+            logger.warning("discover_mcp_tools: no known MCP server URL for engine %s", engine)
+        else:
+            logger.warning("discover_mcp_tools: no access token for %s/%s", engine, name)
         return [], None
 
-    mcp_session = McpSession(url=url, access_token=access_token)
+    mcp_session = McpSession(url=endpoint.url, access_token=endpoint.access_token, redact_errors=genie)
     try:
         await mcp_session.__aenter__()
-    except Exception:
-        logger.exception("discover_mcp_tools: failed to open MCP session for %s/%s", engine, name)
+    except Exception as exc:
+        if genie:
+            logger.warning(
+                "discover_mcp_tools: failed to open MCP session for %s/%s: %s", engine, name, type(exc).__name__
+            )
+        else:
+            logger.exception("discover_mcp_tools: failed to open MCP session for %s/%s", engine, name)
         return [], None
     try:
         access_mode = _access_mode_of(vault, engine, name)
@@ -164,9 +190,13 @@ async def _discover_one(
             engine=engine,
             access_mode=access_mode,
             connection_name=name if disambiguate else None,
+            held_secrets=endpoint.held_secrets,
         )
-    except Exception:
-        logger.exception("discover_mcp_tools: tool discovery failed for %s/%s", engine, name)
+    except Exception as exc:
+        if genie:
+            logger.warning("discover_mcp_tools: tool discovery failed for %s/%s: %s", engine, name, type(exc).__name__)
+        else:
+            logger.exception("discover_mcp_tools: tool discovery failed for %s/%s", engine, name)
         await mcp_session.__aexit__(None, None, None)
         return [], None
     return tool_defs, mcp_session
@@ -186,12 +216,16 @@ def discover_mcp_tools(
 async def close_mcp_sessions(sessions: list[McpSession]) -> None:
     """Close every session `discover_mcp_tools[_async]` opened. Best-effort:
     one session failing to close cleanly must not stop the others, or mask
-    whatever the turn was already tearing down for."""
+    whatever the turn was already tearing down for. A session opened with
+    `redact_errors` is logged by exception class only."""
     for session in sessions:
         try:
             await session.__aexit__(None, None, None)
-        except Exception:
-            logger.exception("close_mcp_sessions: error closing an MCP session")
+        except Exception as exc:
+            if session.redact_errors:
+                logger.warning("close_mcp_sessions: error closing an MCP session: %s", type(exc).__name__)
+            else:
+                logger.exception("close_mcp_sessions: error closing an MCP session")
 
 
 async def call_mcp_tool(engine: str, access_token: str, tool_name: str, **kwargs: Any) -> str | list[dict]:

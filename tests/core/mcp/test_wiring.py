@@ -1,9 +1,27 @@
 from __future__ import annotations
 
+import asyncio
+import contextvars
+
+import httpx2
 import pytest
 
-from anton.core.mcp import wiring
+from anton.core.datasources.data_vault import LocalDataVault
+from anton.core.mcp import registry, servers, wiring
 from anton.core.mcp.client import McpSession
+from anton.core.mcp.databricks import GenieCredentialsRefused, genie_mcp_url
+from anton.core.mcp.servers import McpEndpoint
+from anton.utils.datasources import begin_ds_turn_scope, scrub_credentials
+
+HOST = "dbc-1.cloud.databricks.com"
+SECRET = "sentinel-secret-1"
+TOKEN = "sentinel-token"
+GENIE_FIELDS = {
+    "_method": "genie-mcp",
+    "workspace_url": f"https://{HOST}/",
+    "client_id": "cid",
+    "_client_secret": SECRET,
+}
 
 
 class FakeDataVault:
@@ -143,3 +161,376 @@ async def test_call_mcp_tool_raises_on_a_tool_level_error(monkeypatch, stub_mcp_
     )
     with pytest.raises(RuntimeError):
         await wiring.call_mcp_tool("hubspot", "tok", "boom")
+
+
+class RecordingLogger:
+    """Stands in for a module logger and keeps every formatted line."""
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def _record(self, message: str, *args, **kwargs) -> None:
+        self.lines.append(message % args if args else message)
+
+    debug = info = warning = error = exception = _record
+
+
+@pytest.fixture()
+def genie_vault(tmp_path) -> LocalDataVault:
+    """A real file vault holding one Genie connection."""
+    vault = LocalDataVault(tmp_path)
+    vault.save("databricks", "genie-1", dict(GENIE_FIELDS))
+    return vault
+
+
+@pytest.fixture()
+def minted(monkeypatch) -> list[tuple[str, str, str]]:
+    """Patch `mint_token` to record its arguments and hand back the sentinel token."""
+    calls: list[tuple[str, str, str]] = []
+
+    async def fake_mint(host, client_id, client_secret, *, transport=None):
+        calls.append((host, client_id, client_secret))
+        return TOKEN
+
+    monkeypatch.setattr(servers, "mint_token", fake_mint)
+    return calls
+
+
+@pytest.fixture()
+def opened_sessions(monkeypatch, genie_stub_server) -> list[dict]:
+    """Point every `McpSession` wiring opens at the Genie stub, recording url and token."""
+    opened: list[dict] = []
+
+    def fake_session_factory(*, url=None, access_token=None, **kwargs):
+        opened.append({"url": url, "access_token": access_token})
+        return McpSession(server=genie_stub_server)
+
+    monkeypatch.setattr(wiring, "McpSession", fake_session_factory)
+    return opened
+
+
+async def test_a_genie_connection_is_discovered_with_a_minted_token(genie_vault, minted, opened_sessions):
+    tool_defs, sessions = await wiring.discover_mcp_tools_async(
+        genie_vault, [{"engine": "databricks", "name": "genie-1"}]
+    )
+    try:
+        assert {d.name for d in tool_defs} == {
+            "databricks__genie_ask",
+            "databricks__genie_poll_response",
+            "databricks__genie_get_query_result",
+            "databricks__genie_cancel_response",
+        }
+        assert minted == [(HOST, "cid", SECRET)]
+        assert opened_sessions == [{"url": genie_mcp_url(HOST), "access_token": TOKEN}]
+    finally:
+        await wiring.close_mcp_sessions(sessions)
+
+
+def test_the_secret_is_not_in_the_genie_connection_environment(tmp_path):
+    vault = LocalDataVault(tmp_path)
+    vault.save("databricks", "genie-1", dict(GENIE_FIELDS))
+    env = vault.env_for("databricks", "genie-1")
+    assert env["DS_DATABRICKS_GENIE_1__WORKSPACE_URL"] == f"https://{HOST}/"
+    assert env["DS_DATABRICKS_GENIE_1__CLIENT_ID"] == "cid"
+    assert not any(SECRET in value for value in env.values())
+
+
+async def test_refused_credentials_skip_the_connection_and_log_no_secret(
+    genie_vault, opened_sessions, monkeypatch
+):
+    async def refused(host, client_id, client_secret, *, transport=None):
+        raise GenieCredentialsRefused("Databricks refused the service principal's client ID or secret")
+
+    monkeypatch.setattr(servers, "mint_token", refused)
+    recorder = RecordingLogger()
+    monkeypatch.setattr(wiring, "logger", recorder)
+
+    tool_defs, sessions = await wiring.discover_mcp_tools_async(
+        genie_vault, [{"engine": "databricks", "name": "genie-1"}]
+    )
+
+    assert (tool_defs, sessions) == ([], [])
+    assert opened_sessions == []
+    assert any("databricks" in line and "genie-1" in line and "GenieCredentialsRefused" in line for line in recorder.lines)
+    assert not any(SECRET in line for line in recorder.lines)
+
+
+async def test_a_bad_stored_host_is_skipped_without_a_request(tmp_path, minted, opened_sessions, monkeypatch):
+    vault = LocalDataVault(tmp_path)
+    vault.save("databricks", "genie-1", {**GENIE_FIELDS, "workspace_url": "https://evil.example.com"})
+    recorder = RecordingLogger()
+    monkeypatch.setattr(wiring, "logger", recorder)
+
+    tool_defs, sessions = await wiring.discover_mcp_tools_async(
+        vault, [{"engine": "databricks", "name": "genie-1"}]
+    )
+
+    assert (tool_defs, sessions) == ([], [])
+    assert minted == []
+    assert opened_sessions == []
+    assert any("InvalidWorkspaceHost" in line for line in recorder.lines)
+    assert not any("evil" in line for line in recorder.lines)
+
+
+async def test_a_rejected_token_at_connect_skips_the_connection(genie_vault, minted, monkeypatch):
+    request = httpx2.Request("POST", genie_mcp_url(HOST))
+    response = httpx2.Response(401, request=request, text=f"rejected {TOKEN}")
+    rejection = ExceptionGroup(
+        "unhandled errors in a TaskGroup",
+        [httpx2.HTTPStatusError(f"401 for {TOKEN}", request=request, response=response)],
+    )
+
+    class RejectedSession:
+        """A session whose connect fails the way a 401 at `initialize` does."""
+
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+        async def __aenter__(self):
+            raise rejection
+
+    monkeypatch.setattr(wiring, "McpSession", RejectedSession)
+    recorder = RecordingLogger()
+    monkeypatch.setattr(wiring, "logger", recorder)
+
+    tool_defs, sessions = await wiring.discover_mcp_tools_async(
+        genie_vault, [{"engine": "databricks", "name": "genie-1"}]
+    )
+
+    assert (tool_defs, sessions) == ([], [])
+    assert any("databricks" in line and "genie-1" in line and "ExceptionGroup" in line for line in recorder.lines)
+    assert not any(TOKEN in line or SECRET in line for line in recorder.lines)
+
+
+async def test_hubspot_and_notion_connections_are_unchanged(monkeypatch, stub_mcp_server):
+    assert await servers.resolve_mcp_endpoint("hubspot", "mcp", {"access_token": "tok-h"}, connection_name="acme") == McpEndpoint(
+        "https://mcp.hubspot.com", "tok-h"
+    )
+    assert await servers.resolve_mcp_endpoint("notion", "mcp", {"access_token": "tok-n"}, connection_name="acme") == McpEndpoint(
+        "https://mcp.notion.com/mcp", "tok-n"
+    )
+    assert await servers.resolve_mcp_endpoint("hubspot", "mcp", {}, connection_name="acme") is None
+    assert await servers.resolve_mcp_endpoint("hubspot", "genie-mcp", dict(GENIE_FIELDS), connection_name="acme") is None
+
+    opened: list[dict] = []
+
+    def fake_session_factory(*, url=None, access_token=None, **kwargs):
+        opened.append({"url": url, "access_token": access_token})
+        return McpSession(server=stub_mcp_server)
+
+    monkeypatch.setattr(wiring, "McpSession", fake_session_factory)
+    vault = FakeDataVault(
+        {
+            ("hubspot", "acme"): {"_method": "mcp", "_access_mode": "write", "access_token": "tok-h"},
+            ("notion", "acme"): {"_method": "mcp", "_access_mode": "write", "access_token": "tok-n"},
+        }
+    )
+    tool_defs, sessions = await wiring.discover_mcp_tools_async(
+        vault, [{"engine": "hubspot", "name": "acme"}, {"engine": "notion", "name": "acme"}]
+    )
+    try:
+        assert {d.name for d in tool_defs} == {"hubspot__add", "hubspot__boom", "notion__add", "notion__boom"}
+        assert sorted(opened, key=lambda item: item["url"]) == [
+            {"url": "https://mcp.hubspot.com", "access_token": "tok-h"},
+            {"url": "https://mcp.notion.com/mcp", "access_token": "tok-n"},
+        ]
+        outcome = await next(d for d in tool_defs if d.name == "hubspot__add").handler(None, {"a": 2, "b": 3})
+        assert (outcome.content, outcome.ok, outcome.reason) == ("5", True, "")
+    finally:
+        await wiring.close_mcp_sessions(sessions)
+
+
+async def test_the_secret_and_token_are_scrubbed_in_the_turn(genie_vault, minted, opened_sessions, monkeypatch):
+    """Discovery runs before the turn opens its scrub scope (and on the cloud
+    path in another thread), so the Genie handler itself must hold the values."""
+
+    async def instant_answer(session, conversation_id, response_id, **kwargs):
+        return {"status": "completed", "conversation_id": conversation_id, "response_id": response_id}
+
+    monkeypatch.setattr(registry, "wait_for_genie_answer", instant_answer)
+    tool_defs, sessions = await asyncio.create_task(
+        wiring.discover_mcp_tools_async(genie_vault, [{"engine": "databricks", "name": "genie-1"}]),
+        context=contextvars.Context(),
+    )
+    ask = next(d for d in tool_defs if d.name == "databricks__genie_ask")
+
+    async def turn() -> str:
+        begin_ds_turn_scope()
+        outcome = await asyncio.create_task(ask.handler(None, {"question": "What was revenue?"}))
+        assert outcome.ok is True
+        return scrub_credentials(f"secret={SECRET} token={TOKEN}")
+
+    try:
+        scrubbed = await asyncio.create_task(turn(), context=contextvars.Context())
+    finally:
+        await wiring.close_mcp_sessions(sessions)
+
+    assert SECRET not in scrubbed
+    assert TOKEN not in scrubbed
+    assert scrubbed == "secret=[DS_DATABRICKS_GENIE_1__CLIENT_SECRET] token=[DS_DATABRICKS_GENIE_1__ACCESS_TOKEN]"
+
+
+async def test_an_mcp_connection_keeps_its_discovery_logs(monkeypatch):
+    """HubSpot and Notion keep naming what is missing and log a failed open with its traceback."""
+    calls: list[tuple[str, str]] = []
+
+    class LevelLogger:
+        """Records each call's level and formatted line."""
+
+        def warning(self, message, *args, **kwargs):
+            calls.append(("warning", message % args))
+
+        def exception(self, message, *args, **kwargs):
+            calls.append(("exception", message % args))
+
+    class FailingSession:
+        """A session whose connect fails."""
+
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+        async def __aenter__(self):
+            raise ConnectionError("down")
+
+    monkeypatch.setattr(wiring, "logger", LevelLogger())
+    monkeypatch.setattr(wiring, "McpSession", FailingSession)
+    vault = FakeDataVault(
+        {
+            ("hubspot", "no-token"): {"_method": "mcp"},
+            ("future", "acme"): {"_method": "mcp", "access_token": "tok"},
+            ("notion", "acme"): {"_method": "mcp", "access_token": "tok"},
+        }
+    )
+    await wiring.discover_mcp_tools_async(
+        vault,
+        [
+            {"engine": "hubspot", "name": "no-token"},
+            {"engine": "future", "name": "acme"},
+            {"engine": "notion", "name": "acme"},
+        ],
+    )
+
+    assert sorted(calls) == [
+        ("exception", "discover_mcp_tools: failed to open MCP session for notion/acme"),
+        ("warning", "discover_mcp_tools: no access token for hubspot/no-token"),
+        ("warning", "discover_mcp_tools: no known MCP server URL for engine future"),
+    ]
+
+
+class CallRecorder:
+    """Stands in for a module logger and keeps each call's level, line and kwargs."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict]] = []
+
+    def _make(level: str):
+        def record(self, message, *args, **kwargs):
+            self.calls.append((level, message % args if args else message, kwargs))
+
+        return record
+
+    debug = _make("debug")
+    info = _make("info")
+    warning = _make("warning")
+    error = _make("error")
+    exception = _make("exception")
+
+
+async def _failing_discovery(*args, **kwargs):
+    """Stands in for `discover_tool_defs` when `tools/list` fails."""
+    raise ConnectionError("list failed with a secret detail")
+
+
+async def test_a_genie_listing_failure_logs_the_class_only_without_a_traceback(
+    genie_vault, minted, opened_sessions, monkeypatch
+):
+    recorder = CallRecorder()
+    monkeypatch.setattr(wiring, "logger", recorder)
+    monkeypatch.setattr(wiring, "discover_tool_defs", _failing_discovery)
+
+    result = await wiring.discover_mcp_tools_async(genie_vault, [{"engine": "databricks", "name": "genie-1"}])
+
+    assert result == ([], [])
+    assert len(recorder.calls) == 1
+    level, line, kwargs = recorder.calls[0]
+    assert level == "warning"
+    assert "exc_info" not in kwargs
+    assert "databricks" in line and "genie-1" in line and "ConnectionError" in line
+    assert "secret detail" not in line
+
+
+async def test_an_mcp_listing_failure_keeps_its_traceback_log(monkeypatch, stub_mcp_server):
+    recorder = CallRecorder()
+    monkeypatch.setattr(wiring, "logger", recorder)
+    monkeypatch.setattr(wiring, "discover_tool_defs", _failing_discovery)
+    monkeypatch.setattr(wiring, "McpSession", lambda **kw: McpSession(server=stub_mcp_server))
+    vault = FakeDataVault({("hubspot", "acme"): {"_method": "mcp", "access_token": "tok"}})
+
+    result = await wiring.discover_mcp_tools_async(vault, [{"engine": "hubspot", "name": "acme"}])
+
+    assert result == ([], [])
+    assert [(level, line) for level, line, _ in recorder.calls] == [
+        ("exception", "discover_mcp_tools: tool discovery failed for hubspot/acme")
+    ]
+
+
+async def test_only_a_genie_session_redacts_its_errors(genie_vault, minted, monkeypatch, stub_mcp_server):
+    """Discovery marks the Genie session, whose errors can carry its token, and leaves HubSpot's as it was."""
+    flags: dict[str, bool] = {}
+
+    def recording_factory(*, url=None, access_token=None, redact_errors=False, **kwargs):
+        flags["genie" if url and HOST in url else "hubspot"] = redact_errors
+        return McpSession(server=stub_mcp_server, redact_errors=redact_errors)
+
+    monkeypatch.setattr(wiring, "McpSession", recording_factory)
+    genie_vault.save("hubspot", "crm", {"_method": "mcp", "access_token": "tok"})
+    _, sessions = await asyncio.wait_for(
+        wiring.discover_mcp_tools_async(
+            genie_vault, [{"engine": "databricks", "name": "genie-1"}, {"engine": "hubspot", "name": "crm"}]
+        ),
+        timeout=5,
+    )
+    await asyncio.wait_for(wiring.close_mcp_sessions(sessions), timeout=5)
+
+    assert flags == {"genie": True, "hubspot": False}
+
+
+class _FailingClose:
+    """A session whose close raises an error carrying a secret detail."""
+
+    def __init__(self, *, redact_errors: bool) -> None:
+        self.redact_errors = redact_errors
+
+    async def __aexit__(self, *exc_info) -> None:
+        raise ConnectionError("close failed with a secret detail")
+
+
+async def test_closing_a_redacting_session_logs_the_class_only(monkeypatch):
+    recorder = CallRecorder()
+    monkeypatch.setattr(wiring, "logger", recorder)
+
+    await asyncio.wait_for(
+        wiring.close_mcp_sessions([_FailingClose(redact_errors=True), _FailingClose(redact_errors=False)]),
+        timeout=5,
+    )
+
+    assert recorder.calls == [
+        ("warning", "close_mcp_sessions: error closing an MCP session: ConnectionError", {}),
+        ("exception", "close_mcp_sessions: error closing an MCP session", {}),
+    ]
+
+
+async def test_a_genie_connection_with_tools_off_mints_no_token_and_opens_no_session(
+    tmp_path, minted, opened_sessions
+):
+    """Access mode "none" registers no tools, so discovery must not pay for a token or a session."""
+    vault = LocalDataVault(tmp_path)
+    vault.save("databricks", "genie-1", {**GENIE_FIELDS, "_access_mode": "none"})
+
+    result = await asyncio.wait_for(
+        wiring.discover_mcp_tools_async(vault, [{"engine": "databricks", "name": "genie-1"}]), timeout=5
+    )
+
+    assert result == ([], [])
+    assert minted == []
+    assert opened_sessions == []

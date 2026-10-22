@@ -138,6 +138,14 @@ TOOL_ACCESS: dict[str, dict[str, str]] = {
         "notion-memory-search": "read",
         "notion-get-file-download-urls": "read",
     },
+    # Genie One, seen live 2026-10-20: it answers questions over the workspace's
+    # data and cannot change it, so all four are read; anything it adds later is write.
+    "databricks": {
+        "genie_ask": "read",
+        "genie_poll_response": "read",
+        "genie_get_query_result": "read",
+        "genie_cancel_response": "read",
+    },
 }
 
 
@@ -185,6 +193,14 @@ TOOL_OUTPUT: dict[str, dict[str, ToolOutput]] = {
         "notion-list-favorite-pages": "metadata",  # page titles and ids
         "notion-list-recent-pages": "metadata",  # page titles and ids
         "notion-get-file-download-urls": "metadata",  # signed file links
+    },
+    "databricks": {
+        # RECORDS
+        "genie_ask": "records",  # Genie's answer over the workspace's tables
+        "genie_poll_response": "records",  # the same answer, once Genie finishes
+        "genie_get_query_result": "records",  # the rows behind an answer
+        # METADATA
+        "genie_cancel_response": "metadata",  # only confirms the cancel
     },
 }
 
