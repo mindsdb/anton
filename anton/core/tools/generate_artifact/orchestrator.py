@@ -48,6 +48,7 @@ from .state import (
     GenState,
     RequiredData,
     VerifyResult,
+    known_data_usable,
 )
 
 if TYPE_CHECKING:
@@ -80,7 +81,7 @@ async def _decide(state: GenState, schema, prompt_pair, node: str) -> object:
     return result
 
 
-async def _fetch_data_sample(state: GenState) -> str:
+async def _fetch_data_sample(state: GenState, required_text: str = "") -> str:
     """Run a scratchpad loop that pulls a data sample; return its summary."""
     if state.public_sources is None:
         state.public_sources = _public_data_sources_skill(state.session)
@@ -92,8 +93,9 @@ async def _fetch_data_sample(state: GenState) -> str:
                 state.artifact_path,
                 datasource_context=state.datasource_context,
                 public_sources=state.public_sources,
+                user_language=state.user_language,
             ),
-            kickoff=prompts.build_fetch_data_kickoff(state),
+            kickoff=prompts.build_fetch_data_kickoff(state, required_text),
             artifact_path=state.artifact_path,
             require_files=False,
             node_label="fetch_data_sample",
@@ -103,7 +105,7 @@ async def _fetch_data_sample(state: GenState) -> str:
     finally:
         state.peek_done("fetch_data_sample")
     if isinstance(result, str):
-        # Loop failed — surface as a note so the next is_data_enough sees it.
+        # Loop failed — surface as a note so the next define / can-fetch decision sees it.
         return f"(data fetch step reported: {result})"
     if result.get("over_budget"):
         # The guard is sticky, so the caller's next `winding_down()` check is
@@ -168,6 +170,38 @@ def _needs_data_loop(state: GenState) -> bool:
     return bool(state.unverified_sources)
 
 
+def _render_required(required: RequiredData) -> str:
+    return "\n".join(
+        f"- {it.name} — from {it.where} ({it.why})" for it in required.items
+    ) or required.reasoning
+
+
+def _pending_required_text(state: GenState, pending: list[str]) -> str:
+    """The sources define called covered while nothing vouches for them,
+    each with the reason the next steps need code that reads it."""
+    if (state.final_artifact_type or state.artifact_type) != "html-app":
+        why = "the backend reads it at run time"
+    elif len((state.known_data or "").strip()) > KNOWN_DATA_SPEC_MAX:
+        why = "the known data is too long to pass to the page builder"
+    else:
+        why = "no executed code read it and the known data does not hold its values"
+    lines = [f"- {s} — needs executed code that reads it: {why}" for s in pending]
+    lines.append(
+        "Run code that reads these sources even if their values appear under "
+        "the known data: the next steps need working access code."
+    )
+    return "\n".join(lines)
+
+
+def _mark_data_covered(state: GenState) -> None:
+    state.unverified_sources = []
+    # `finish_gathering` is the only other place that vouches for the data,
+    # and a gathering that ended without it never will — so without this the
+    # loop could not exit at all (I-41). The flag reaches the next
+    # checkpoint, so a resumed run does not pay for this phase again.
+    state.gathering_complete = True
+
+
 async def _data_phase(state: GenState) -> str | None:
     """The emergency data loop: define -> can-fetch -> fetch, bounded.
 
@@ -180,6 +214,11 @@ async def _data_phase(state: GenState) -> str | None:
     if not _needs_data_loop(state):
         state.record("data_check", "skipped", "gathering already covered the data")
         return None
+
+    # Loaded before the first decision, not on the first fetch: the decisions
+    # judge what can be fetched, and the public sources are part of that.
+    if state.public_sources is None:
+        state.public_sources = _public_data_sources_skill(state.session)
 
     last_reasoning = "the gathering phase did not verify the data it declared"
     while state.data_iterations < DATA_LOOP_MAX:
@@ -199,11 +238,21 @@ async def _data_phase(state: GenState) -> str | None:
             state, RequiredData, prompts.build_required_data_prompt(state),
             "define_required_data",
         )
-        required_text = "\n".join(
-            f"- {it.name} — from {it.where} ({it.why})" for it in required.items
-        ) or required.reasoning
-        state.record("define_required_data", "done", required_text)
         last_reasoning = required.reasoning
+        if required.items:
+            required_text = _render_required(required)
+            state.record("define_required_data", "done", required_text)
+        else:
+            # An empty list is the model's word alone. It is accepted only
+            # where nothing it could skip is at stake: no declared source is
+            # waiting, or the rows really can sit in `known_data`.
+            pending = list(state.unverified_sources)
+            if not pending or known_data_usable(state):
+                state.record("define_required_data", "nothing_missing", required.reasoning)
+                _mark_data_covered(state)
+                return None
+            required_text = _pending_required_text(state, pending)
+            state.record("define_required_data", "nothing_missing_rejected", ", ".join(pending))
 
         state.step_started("is_possible_to_fetch", attempt=state.data_iterations)
         can: FetchVerdict = await _decide(
@@ -218,21 +267,13 @@ async def _data_phase(state: GenState) -> str | None:
         state.record("is_possible_to_fetch", "yes", can.reasoning)
 
         state.step_started("fetch_data_sample", attempt=state.data_iterations)
-        notes = await _fetch_data_sample(state)
+        notes = await _fetch_data_sample(state, required_text)
         state.data_iterations += 1
         state.data_notes = (state.data_notes + "\n\n" + notes).strip()
         # The loop fetched exactly what was declared unverified, so the list
         # clears. Not narrowed item by item: the fetch step works from
         # `define_required_data`'s consolidated list, not per source.
-        state.unverified_sources = []
-        # Condition 1 is satisfied by the same fetch. `finish_gathering` is
-        # the only other place that vouches for the data, and a gathering
-        # that ended without it (plain text, round budget, budget stop) never
-        # will — so without this line the loop could not exit at all, and
-        # three successful fetches ended in "not enough data" (I-41). The
-        # flag then reaches the next checkpoint, so a resumed run does not
-        # pay for this phase again.
-        state.gathering_complete = True
+        _mark_data_covered(state)
         state.record("fetch_data_sample", "done", notes[:200])
 
         if not _needs_data_loop(state):

@@ -10,12 +10,13 @@ import pytest
 
 from anton.core.datasources.data_vault import LocalDataVault
 from anton.core.llm.provider import StreamComplete
-from anton.core.tools.generate_artifact import orchestrator, prompts
+from anton.core.tools.generate_artifact import engine, orchestrator, prompts
 from anton.core.tools.generate_artifact.discovery import checkpoint as cp
 from anton.core.tools.generate_artifact.state import (
     KNOWN_DATA_SPEC_MAX, BrowserCheck, FetchVerdict, GenState, RequiredData, RequiredDataItem,
     VerifyResult,
 )
+from anton.utils.datasources import DATASOURCES_HEADER
 
 
 def _no_browser(entry, *, cell_sandbox, screenshot=True):
@@ -106,7 +107,7 @@ async def test_data_phase_exits_after_one_successful_fetch(tmp_path: Path, monke
         side_effect=lambda schema_class, **kw: gen_obj(schema_class, **kw)
     )
 
-    async def fake_fetch(state):
+    async def fake_fetch(state, required_text=""):
         return "pulled a sample"
     monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
 
@@ -802,7 +803,7 @@ async def test_data_phase_still_fetches_when_a_source_is_unverified(
     st.session._llm.generate_object = AsyncMock(side_effect=seq)
     fetched = {"n": 0}
 
-    async def fake_fetch(state):
+    async def fake_fetch(state, required_text=""):
         fetched["n"] += 1
         return "pulled totals"
 
@@ -1561,3 +1562,194 @@ def test_without_known_data_no_section_is_added(tmp_path: Path):
     st = _state(tmp_path)
     assert prompts.KNOWN_DATA_HEADER not in orchestrator._spec_context(st)
     assert prompts.KNOWN_DATA_HEADER not in prompts._brief_and_notes(st)
+
+
+# ── the data loop: "nothing missing" exit and the list the fetch gets ───────
+
+
+def _slug_catalog(*slugs: str) -> SimpleNamespace:
+    """A `DatasourceCatalog` stand-in: the slugs and the rendered section."""
+    rendered = DATASOURCES_HEADER + "\n" + "\n".join(f"- {s} (REST API)" for s in slugs)
+    return SimpleNamespace(
+        connections=tuple(SimpleNamespace(slug=s) for s in slugs),
+        render=lambda slugs=None: rendered,
+    )
+
+
+def _unverified(st, *sources):
+    st.gathering_complete = True
+    st.declared_sources = list(sources)
+    st.unverified_sources = list(sources)
+    return st
+
+
+def _outcomes(st, node):
+    return [(s.outcome, s.detail) for s in st.trace if s.node == node]
+
+
+async def test_rows_in_known_data_need_no_fetch_when_gathering_did_not_mark_them(
+    tmp_path: Path, monkeypatch
+):
+    st = _unverified(_state(tmp_path, known_data=_SITES, datasource_catalog=_slug_catalog("rest-gw")), "sites")
+    st.public_sources = "## Public data sources\n- open-meteo"
+    seen = []
+
+    async def gen_obj(schema_class, *, system, messages):
+        seen.append((schema_class, messages[0]["content"]))
+        return RequiredData(items=[], reasoning="the rows are in the known data")
+
+    st.session._llm.generate_object = AsyncMock(side_effect=gen_obj)
+
+    async def no_fetch(state, required_text=""):
+        raise AssertionError("nothing is missing, so nothing is fetched")
+
+    monkeypatch.setattr(orchestrator, "_fetch_data_sample", no_fetch)
+
+    assert await orchestrator._data_phase(st) is None
+    assert st.unverified_sources == [] and st.gathering_complete is True
+    assert [s for s, _ in seen] == [RequiredData]
+    user = seen[0][1]
+    assert "- rest-gw (REST API)" in user and "open-meteo" in user and "Toronto,43.7,-79.4" in user
+    assert _outcomes(st, "define_required_data")[0][0] == "nothing_missing"
+
+
+@pytest.mark.parametrize("kw, why", [
+    (dict(artifact_type="fullstack-stateless-app", is_fullstack=True, known_data=_SITES),
+     "the backend reads it at run time"),
+    (dict(known_data=""), "no executed code read it and the known data does not hold its values"),
+    (dict(known_data="row\n" * 2500), "the known data is too long to pass to the page builder"),
+])
+async def test_an_empty_list_is_rejected_when_nothing_vouches_for_the_sources(
+    tmp_path: Path, monkeypatch, kw, why
+):
+    st = _unverified(_state(tmp_path, **kw), "sites")
+    users = {}
+
+    async def gen_obj(schema_class, *, system, messages):
+        users[schema_class] = messages[0]["content"]
+        if schema_class is RequiredData:
+            return RequiredData(items=[], reasoning="nothing is missing")
+        return FetchVerdict(possible=True, reasoning="the pad has it")
+
+    st.session._llm.generate_object = AsyncMock(side_effect=gen_obj)
+    got = {}
+
+    async def fake_fetch(state, required_text=""):
+        got["text"] = required_text
+        return "pulled sites"
+
+    monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
+
+    assert await orchestrator._data_phase(st) is None
+    assert _outcomes(st, "define_required_data") == [("nothing_missing_rejected", "sites")]
+    expected_line = f"- sites — needs executed code that reads it: {why}"
+    assert expected_line in users[FetchVerdict]
+    assert expected_line in got["text"]
+    assert "Run code that reads these sources even if their values appear under the known data" in got["text"]
+
+
+async def test_a_page_without_external_data_needs_no_fetch(tmp_path: Path, monkeypatch):
+    """Gathering ended without `finish_gathering` and declared nothing: an
+    empty list is accepted, as a successful fetch used to be (I-41)."""
+    st = _state(tmp_path)
+    st.gathering_complete = False
+    st.session._llm.generate_object = AsyncMock(
+        return_value=RequiredData(items=[], reasoning="the page needs no external data")
+    )
+
+    async def no_fetch(state, required_text=""):
+        raise AssertionError("nothing to fetch")
+
+    monkeypatch.setattr(orchestrator, "_fetch_data_sample", no_fetch)
+
+    assert await orchestrator._data_phase(st) is None
+    assert st.gathering_complete is True
+    assert st.session._llm.generate_object.await_count == 1
+
+
+@pytest.mark.parametrize("artifact_type, fetches", [
+    ("html-app", 0),
+    ("fullstack-stateless-app", 1),
+])
+async def test_a_repeat_call_builds_from_the_known_data_it_brings(
+    tmp_path: Path, monkeypatch, artifact_type, fetches
+):
+    """The call `not enough data` recommends: same request, data in
+    `known_data`. It enters at the spec phase, so gathering never runs."""
+    art = tmp_path / "art"
+    art.mkdir()
+    fullstack = artifact_type != "html-app"
+    first = _unverified(
+        _state(art, artifact_type=artifact_type, is_fullstack=fullstack, user_request="map the sites"),
+        "sites",
+    )
+    orchestrator._save_checkpoint(first, cp.STAGE_PRD_WRITTEN)
+    stored = cp.load(art)
+    assert cp.decide_entry(stored, request_fp=cp.request_fingerprint("map the sites")) == cp.ENTRY_SPEC
+
+    again = _state(
+        art, artifact_type=artifact_type, is_fullstack=fullstack,
+        user_request="map the sites", known_data=_SITES,
+    )
+    engine._restore(again, stored)
+    assert again.unverified_sources == ["sites"]
+
+    again.session._llm.generate_object = AsyncMock(
+        side_effect=lambda schema_class, **kw: (
+            RequiredData(items=[], reasoning="the rows are in the known data")
+            if schema_class is RequiredData
+            else FetchVerdict(possible=True, reasoning="the pad has it")
+        )
+    )
+    fetched = []
+
+    async def fake_fetch(state, required_text=""):
+        fetched.append(required_text)
+        return "pulled sites"
+
+    monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
+
+    assert await orchestrator._data_phase(again) is None
+    assert len(fetched) == fetches
+    if fetches:
+        assert "the backend reads it at run time" in fetched[0]
+        assert "Run code that reads these sources" in fetched[0]
+
+
+async def test_the_fetch_gets_the_full_list_define_wrote(tmp_path: Path, monkeypatch):
+    long_why = "needed for the chart " * 30
+    st = _unverified(_state(tmp_path), "orders")
+    st.session._llm.generate_object = AsyncMock(side_effect=[
+        RequiredData(items=[RequiredDataItem(name="orders", where="rest-gw /orders", why=long_why)], reasoning="r"),
+        FetchVerdict(possible=True, reasoning="yes"),
+    ])
+    got = {}
+
+    async def fake_fetch(state, required_text=""):
+        got["text"] = required_text
+        return "pulled orders"
+
+    monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
+
+    await orchestrator._data_phase(st)
+    expected = f"- orders — from rest-gw /orders ({long_why})"
+    assert got["text"] == expected
+    assert _outcomes(st, "define_required_data") == [("done", expected)]
+
+
+async def test_the_fetch_loop_gets_the_list_the_pads_and_the_language(tmp_path: Path, monkeypatch):
+    st = _state(
+        tmp_path, user_language="Spanish",
+        scratchpads_context="## Scratchpads already in this session\n- main (3 cells)",
+    )
+    seen = {}
+
+    async def fake_run_loop(**kw):
+        seen.update(kw)
+        return {"files_written": [], "rounds_used": 1, "summary": "s", "scratchpad_execs": []}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
+    await orchestrator._fetch_data_sample(st, "- sites — from rest-gw (map)")
+    assert "Write `reasoning` and any summary in Spanish." in seen["system"]
+    assert "## Data to fetch in this step\n- sites — from rest-gw (map)" in seen["kickoff"]
+    assert "- main (3 cells)" in seen["kickoff"]
