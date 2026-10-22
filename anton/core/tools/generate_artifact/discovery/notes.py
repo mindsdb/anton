@@ -45,7 +45,8 @@ def render_exec_notes(
         out = " ".join((e.get("output") or "").split())
         if len(out) > EXEC_OUTPUT_MAX:
             out = out[:EXEC_OUTPUT_MAX] + " …"
-        block = f"Scratchpad `{e.get('name')}`:\n```python\n{code}\n```"
+        failed = " (failed)" if e.get("ok") is False else ""
+        block = f"Scratchpad `{e.get('name')}`{failed}:\n```python\n{code}\n```"
         if out:
             block += f"\nOutput: {out}"
         blocks.append(block)
