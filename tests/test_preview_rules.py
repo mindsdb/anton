@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from anton.core.tools.generate_artifact import prompts, verifiers
 
@@ -29,21 +34,48 @@ def test_the_verifier_contract_names_the_external_resource_warning():
         assert "the app preview does not load it" in " ".join(prompt.split())
 
 
-def test_a_caught_view_error_is_logged_where_the_browser_check_sees_it():
+def test_every_view_starts_through_the_helper_after_the_browser_gate():
     """A per-view `try`/`catch` that only wrote "This view failed to load"
     into the map panel kept the error that broke the map out of the browser
-    check, which counts console errors: the catch logged none. The rule
-    follows the browser-gate bullet in both frontend prompts, and keeps the
-    storage helper, whose throw is expected in the preview frame, off
-    `console.error`."""
+    check, which counts console errors: the catch logged none. Both frontend
+    prompts now prescribe one helper for every view's setup, after the
+    browser-gate bullet, and keep the storage helper, whose throw is expected
+    in the preview frame, off `console.error`."""
     for prompt in (
         prompts.build_subagent_system_prompt(Path("/tmp/a")),
         prompts.build_frontend_system_prompt(Path("/tmp/a")),
     ):
         gate = prompt.index("Where a headless browser is available")
-        rule = prompt.index("catch (e) { console.error(e); el.textContent")
+        rule = prompt.index(prompts.VIEW_HELPER_JS)
         storage = prompt.index("stays silent or uses `console.warn`")
         assert gate < rule < storage < prompt.index("Not checked by the verifier")
+        assert "Start every view through this one helper" in prompt
+
+
+def test_a_tabs_views_start_through_the_helper_too():
+    """The tab rule starts a tab's charts on its first visit, from the click
+    handler, where an uncaught throw stops that tab's other views."""
+    for prompt in (
+        prompts.build_subagent_system_prompt(Path("/tmp/a")),
+        prompts.build_frontend_system_prompt(Path("/tmp/a")),
+    ):
+        tab_rule = prompt.index("Multi-tab dashboards")
+        helper = prompt.index("function runView(name, el, setup)")
+        # The tab rule sits in the design rules, after the contract that
+        # defines the helper it names.
+        assert helper < tab_rule
+        assert "`initChartsFor(name)` starts each view on that tab through `runView`" in prompt
+
+
+def test_the_helper_names_the_failed_view_first_in_both_channels():
+    """The render check cuts a finding at 300 characters, and an `Error`
+    logged as an argument renders as its whole stack, so a view name logged
+    after it can fall past the cut. The helper builds both messages as
+    strings that start with the view's name."""
+    helper = prompts.VIEW_HELPER_JS
+    assert "console.error(name + ' failed: ' + why)" in helper
+    assert "reportError(new Error(name + ': ' + why))" in helper
+    assert "el.setAttribute('data-view-failed', name)" in helper
 
 
 _GENERATOR_PROMPTS = (
@@ -140,3 +172,57 @@ def test_the_skill_says_which_preview_blocks_what():
     ):
         assert reason in skill, reason
 
+
+def test_the_skill_carries_the_builders_helper_word_for_word():
+    """A hand-built page follows the skill, a built one the builder's prompt:
+    one helper text, so a page fails a view the same way either way. The
+    skill's build step and tab rule start every view through it."""
+    skill = _skill()
+    assert prompts.VIEW_HELPER_JS in skill
+    assert "Define the `runView` helper from item 10 first, and start every view through it" in skill
+    assert "`initChartsFor(name)` starts each view on that tab through `runView` (item 10)" in skill
+    assert "catch (e) { console.error(e); el.textContent" not in skill
+
+
+# Runs the helper against stub elements. `queueMicrotask` and a timer let a
+# rejected promise settle before the report.
+_HELPER_HARNESS = r"""
+const errors = [], reported = [];
+const element = (id) => ({id, attrs: {}, textContent: 'chart',
+  setAttribute(k, v) { this.attrs[k] = v; }});
+global.console = {error: (...args) => errors.push(args)};
+global.reportError = (err) => reported.push(err instanceof Error ? err.message : String(err));
+eval(process.argv[1] + `
+const map = element('world-map'), globe = element('globe'), chart = element('trend-chart');
+runView('Shipment map', map, () => { undefinedThing.draw(); });
+runView('Globe', globe, async () => { await null; throw new Error('atlas fetch failed'); });
+runView('Trend chart', chart, (el) => { el.textContent = 'drawn'; });
+runView('Missing panel', null, (el) => { el.textContent = 'x'; });
+let after = 'script went on';
+setTimeout(() => process.stdout.write(JSON.stringify({
+  errors, reported, after,
+  map: [map.attrs['data-view-failed'] || null, map.textContent],
+  globe: [globe.attrs['data-view-failed'] || null, globe.textContent],
+  chart: [chart.attrs['data-view-failed'] || null, chart.textContent],
+})), 20);
+`);
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_the_helper_keeps_a_failed_view_to_itself():
+    """A throw, a rejected promise and a missing element each fail only
+    their own view: the script goes on, the healthy view draws, and each
+    failure is marked, worded and reported with the view's name first."""
+    out = json.loads(subprocess.run(
+        ["node", "-e", _HELPER_HARNESS, prompts.VIEW_HELPER_JS],
+        text=True, capture_output=True, check=True,
+    ).stdout)
+    assert out["after"] == "script went on"
+    assert out["chart"] == [None, "drawn"]
+    assert out["map"] == ["Shipment map", "Shipment map could not load."]
+    assert out["globe"] == ["Globe", "Globe could not load."]
+    assert [args[0].split(":")[0] for args in out["errors"]] == ["Shipment map failed", "Missing panel failed", "Globe failed"]
+    assert all(len(args) == 1 for args in out["errors"])
+    assert out["reported"][0].startswith("Shipment map: ")
+    assert out["reported"][2] == "Globe: atlas fetch failed"
