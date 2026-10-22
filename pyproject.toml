@@ -75,6 +75,9 @@ clipboard = [
 ]
 
 [dependency-groups]
+scratchpad = [
+    "boto3==1.43.117",
+]
 dev = [
     "pytest>=9.0.0",
     "pytest-asyncio>=0.24",
@@ -91,6 +94,9 @@ anton = "anton.cli:app"
 [tool.hatch.version]
 source = "vcs"
 fallback-version = "2.0.0-dev"
+
+[tool.uv]
+exclude-newer = "2026-10-21T20:14:43Z"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
