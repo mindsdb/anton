@@ -26,7 +26,7 @@ import logging
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
 
@@ -245,20 +245,20 @@ def _read_memory_entries(path: Path) -> tuple[list[str], list[str]]:
 # Rules + lessons in one tier above which that tier is due for compaction.
 COMPACTION_THRESHOLD = 20
 
+# A file with fewer entries is left alone: too short to be worth a model call.
+COMPACTION_MIN_ENTRIES = 8
+
 
 @dataclass(frozen=True)
 class CompactionInput:
-    """One memory file's entries as read before the compaction model call.
+    """One memory file's entries as read before the compaction model call."""
 
-    `kind` is "rules" or "lesson".
-    """
-
-    kind: str
+    kind: Literal["rules", "lesson"]
     sections: list[str]
     entries: list[str]
 
 
-def read_compaction_input(path: Path, kind: str) -> CompactionInput:
+def read_compaction_input(path: Path, kind: Literal["rules", "lesson"]) -> CompactionInput:
     """Read a memory file for compaction. Plain file I/O, kept apart from the
     model call so a server can run it off its event loop."""
     sections, entries = _read_memory_entries(path)
@@ -316,7 +316,7 @@ async def plan_compaction(llm: LLMClient, source: CompactionInput) -> Compaction
     model call, or an answer that kept nothing.
     """
     sections, entries = source.sections, source.entries
-    if len(entries) < 8:
+    if len(entries) < COMPACTION_MIN_ENTRIES:
         return None
 
     # Numbers replace the `- ` marker so each line carries one, and the
@@ -329,7 +329,7 @@ async def plan_compaction(llm: LLMClient, source: CompactionInput) -> Compaction
     try:
         # The response is a list of integers, so it no longer scales with
         # the file. The ladder stays because the narration some models emit
-        # before the forced tool call does not shrink with it (ENG-1084).
+        # before the forced tool call does not shrink with it.
         result: _CompactionResult = await generate_with_truncation_retry(
             llm.generate_object_code,
             _CompactionResult,
@@ -352,7 +352,7 @@ async def plan_compaction(llm: LLMClient, source: CompactionInput) -> Compaction
     except Exception as exc:
         # Don't corrupt memory on failure — but never silently: an
         # unlogged swallow made a dead memory subsystem indistinguishable
-        # from a working one (ENG-1084). Type name only; the message can
+        # from a working one. Type name only; the message can
         # quote conversation-derived content.
         logger.warning(
             "memory-compaction failed (%s) — keeping the file as-is",
@@ -955,7 +955,9 @@ Do NOT add, modify, or summarize rules — return them verbatim.
             return
         asyncio.create_task(self.compact_all())
 
-    async def _compact_file(self, hc: Hippocampus, path: Path, kind: str) -> None:
+    async def _compact_file(
+        self, hc: Hippocampus, path: Path, kind: Literal["rules", "lesson"]
+    ) -> None:
         """Compact a single memory file using LLM-assisted deduplication."""
         if not path.is_file():
             return
