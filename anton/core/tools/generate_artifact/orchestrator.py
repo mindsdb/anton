@@ -227,7 +227,8 @@ def _not_enough_data(state: GenState, reasoning: str, required: RequiredData | N
     if not looked:
         return message
     # The agent quotes this to the user, so the reasoning ends as a sentence.
-    return f"{message.rstrip('.')}. Looked in: {', '.join(looked)}."
+    base = message if message.endswith((".", "!", "?")) else message + "."
+    return f"{base} Looked in: {', '.join(looked)}."
 
 
 async def _data_phase(state: GenState) -> str | None:

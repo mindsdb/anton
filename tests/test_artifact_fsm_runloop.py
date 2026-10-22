@@ -510,6 +510,36 @@ async def test_round_budget_without_files_is_still_an_error(tmp_path: Path):
     assert "round budget" in result
 
 
+async def test_round_budget_of_a_fetch_without_files_hands_the_cells_to_the_caller(
+    tmp_path: Path, monkeypatch
+):
+    """A fetch writes no files: running out of rounds is not an error, the
+    caller still gets the recorded cells and `finished: False`."""
+    import anton.core.tools.tool_handlers as tool_handlers
+
+    monkeypatch.setattr(
+        tool_handlers, "handle_scratchpad", AsyncMock(return_value="cell ok: 10 rows")
+    )
+    session = AsyncMock()
+    session._scratchpads.cell_sandbox = None
+    exec_resp = _resp([ToolCall(
+        id="1", name="scratchpad",
+        input={"action": "exec", "name": "pad", "code": "print(1)"},
+    )])
+    session._llm.plan_stream = _stream_mock(exec_resp)
+    session._llm.code_stream = _stream_mock(exec_resp)
+
+    result = await _run_loop(
+        session=session, system="s", kickoff="k", artifact_path=tmp_path,
+        require_files=False, node_label="fetch_data_sample",
+    )
+    assert isinstance(result, dict)
+    assert result["finished"] is False
+    assert result["files_written"] == []
+    assert len(result["scratchpad_execs"]) > 0
+    assert all(e["code"] == "print(1)" for e in result["scratchpad_execs"])
+
+
 async def test_finished_flag_is_true_on_a_clean_finish(tmp_path: Path):
     session = AsyncMock()
     session._scratchpads.cell_sandbox = None

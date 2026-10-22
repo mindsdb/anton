@@ -1403,7 +1403,7 @@ def build_required_data_prompt(state) -> tuple[str, str]:
     user = (
         _brief_and_notes(state)
         + "\n\n" + _data_sources_context(state)
-        + "\n\nList the required data items."
+        + "\n\nList the data items still missing (an empty list when nothing is missing)."
     )
     return system, user
 

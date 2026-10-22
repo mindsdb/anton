@@ -1651,7 +1651,8 @@ async def test_an_empty_list_is_rejected_when_nothing_vouches_for_the_sources(
 
 async def test_a_page_without_external_data_needs_no_fetch(tmp_path: Path, monkeypatch):
     """Gathering ended without `finish_gathering` and declared nothing: an
-    empty list is accepted, as a successful fetch used to be (I-41)."""
+    empty list is accepted, as a successful fetch used to be: a gathering
+    without finish_gathering must still be able to leave the loop."""
     st = _state(tmp_path)
     st.gathering_complete = False
     st.session._llm.generate_object = AsyncMock(
@@ -1898,3 +1899,4 @@ def test_the_error_names_the_first_connections_when_none_is_mentioned(tmp_path: 
     st2 = _state(tmp_path, datasource_catalog=_slug_catalog("a"))
     st2.forced_fetch_used = True
     assert orchestrator._not_enough_data(st2, "gave up.", None) == "not enough data: gave up. Looked in: a."
+    assert orchestrator._not_enough_data(st2, "why?", None) == "not enough data: why? Looked in: a."
