@@ -1753,3 +1753,21 @@ async def test_the_fetch_loop_gets_the_list_the_pads_and_the_language(tmp_path: 
     assert "Write `reasoning` and any summary in Spanish." in seen["system"]
     assert "## Data to fetch in this step\n- sites — from rest-gw (map)" in seen["kickoff"]
     assert "- main (3 cells)" in seen["kickoff"]
+
+
+def test_a_repeat_call_without_known_data_builds_from_the_saved_copy(tmp_path: Path):
+    art = tmp_path / "art"
+    art.mkdir()
+    orchestrator._save_checkpoint(_state(art, user_request="map", known_data=_SITES), cp.STAGE_PRD_WRITTEN)
+    stored = cp.load(art)
+    assert stored.known_data == _SITES
+
+    again = _state(art, user_request="map")
+    engine._restore(again, stored)
+    assert again.known_data == _SITES
+    assert again.call_changed is False
+
+    other = _state(art, user_request="map", known_data="site,lat\nOslo,59.9")
+    engine._restore(other, stored)
+    assert other.known_data == "site,lat\nOslo,59.9"
+    assert other.call_changed is True

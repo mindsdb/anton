@@ -548,6 +548,10 @@ def _restore(state, stored) -> None:
         state.attachments = [
             a for a in (Attachment.from_dict(d) for d in stored.attachments) if a is not None
         ]
+    # Before the fingerprint: the saved fingerprint was taken over this same
+    # text, so a call that omits it is not a change.
+    if not (state.known_data or "").strip():
+        state.known_data = stored.known_data
     state.call_changed = stored.call_fingerprint != cp.call_fingerprint(
         state.agent_understanding, state.known_data, state.user_preferences,
         state.user_language,

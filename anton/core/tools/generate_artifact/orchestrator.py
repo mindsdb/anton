@@ -1517,6 +1517,7 @@ def _save_checkpoint(state: GenState, stage: str) -> None:
             assumptions=list(state.assumptions),
             open_points=list(state.open_points),
             attachments=[a.to_dict() for a in state.attachments],
+            known_data=state.known_data,
         ),
     )
 
