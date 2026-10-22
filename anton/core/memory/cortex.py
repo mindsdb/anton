@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -240,6 +240,145 @@ def _read_memory_entries(path: Path) -> tuple[list[str], list[str]]:
             sections.append(section)
             entries.append(stripped)
     return sections, entries
+
+
+# Rules + lessons in one tier above which that tier is due for compaction.
+COMPACTION_THRESHOLD = 20
+
+
+@dataclass(frozen=True)
+class CompactionInput:
+    """One memory file's entries as read before the compaction model call.
+
+    `kind` is "rules" or "lesson".
+    """
+
+    kind: str
+    sections: list[str]
+    entries: list[str]
+
+
+def read_compaction_input(path: Path, kind: str) -> CompactionInput:
+    """Read a memory file for compaction. Plain file I/O, kept apart from the
+    model call so a server can run it off its event loop."""
+    sections, entries = _read_memory_entries(path)
+    return CompactionInput(kind=kind, sections=sections, entries=entries)
+
+
+@dataclass(frozen=True)
+class CompactionPlan:
+    """The rebuilt file for one compaction, not yet written."""
+
+    source: CompactionInput
+    content: str
+    kept: int
+
+    def apply(self, hc: Hippocampus) -> bool:
+        """Write the plan to `hc`'s file of the same kind; returns whether it was written."""
+        path = hc._rules_path if self.source.kind == "rules" else hc._lessons_path
+        # The rebuild comes from the read before the model call. A memory
+        # written meanwhile, by this session or another process sharing the
+        # file, is on disk but not in that read, so a rewrite would erase it.
+        # The check and the replace run under the file's writer lock;
+        # compaction can wait for a later pass, the memory cannot be recovered.
+        if not hc.rewrite_if_unchanged(
+            path,
+            self.content,
+            read=_read_memory_entries,
+            snapshot=(self.source.sections, self.source.entries),
+        ):
+            logger.info(
+                "memory-compaction: %s changed during the model call "
+                "(%d entries read, %d now), skipped",
+                path.name,
+                len(self.source.entries),
+                len(_read_memory_entries(path)[1]),
+            )
+            return False
+
+        # The only record that the file changed size, and the only pressure
+        # against over-pruning: naming survivors by index makes dropping most
+        # of the file a *shorter* answer than keeping it, so the call itself no
+        # longer penalises it. Counts only — the entries are user content.
+        logger.info(
+            "memory-compaction: %s kept %d of %d entries",
+            path.name,
+            self.kept,
+            len(self.source.entries),
+        )
+        return True
+
+
+async def plan_compaction(llm: LLMClient, source: CompactionInput) -> CompactionPlan | None:
+    """Ask the coding model which entries to keep and rebuild the file from them.
+
+    Touches no file. None when there is nothing to do: a short file, a failed
+    model call, or an answer that kept nothing.
+    """
+    sections, entries = source.sections, source.entries
+    if len(entries) < 8:
+        return None
+
+    # Numbers replace the `- ` marker so each line carries one, and the
+    # `<!-- ... -->` comment stays: its `ts` is how the model can tell which
+    # of two overlapping entries supersedes the other.
+    numbered = "\n".join(
+        f"{i}. {entry.removeprefix('- ')}" for i, entry in enumerate(entries, 1)
+    )
+
+    try:
+        # The response is a list of integers, so it no longer scales with
+        # the file. The ladder stays because the narration some models emit
+        # before the forced tool call does not shrink with it (ENG-1084).
+        result: _CompactionResult = await generate_with_truncation_retry(
+            llm.generate_object_code,
+            _CompactionResult,
+            system=_COMPACTION_PROMPT + no_preamble_instruction(_CompactionResult),
+            messages=[{"role": "user", "content": numbered}],
+            budgets=(4096, 8192),
+            log=logger,
+            subsystem="memory-compaction",
+        )
+        # Entries are copied from `entries`, never from the response, so a
+        # bad index costs at most the entry it failed to name and can never
+        # alter one. Walking the file also bounds the indices for free:
+        # duplicates collapse into the set, invented ones never come up.
+        keep = set(result.keep)
+        kept = [
+            pair
+            for i, pair in enumerate(zip(sections, entries), 1)
+            if i in keep
+        ]
+    except Exception as exc:
+        # Don't corrupt memory on failure — but never silently: an
+        # unlogged swallow made a dead memory subsystem indistinguishable
+        # from a working one (ENG-1084). Type name only; the message can
+        # quote conversation-derived content.
+        logger.warning(
+            "memory-compaction failed (%s) — keeping the file as-is",
+            type(exc).__name__,
+        )
+        return None
+
+    # Nothing usable came back — a model that named no valid index gets to
+    # leave memory alone, not to empty it.
+    if not kept:
+        return None
+
+    # Rebuild the file. Every entry still carries the `- ` prefix it was
+    # selected by, so nothing here has to re-add one.
+    if source.kind == "rules":
+        # Each entry goes back under its own heading and no other, so the
+        # rewrite is idempotent — a rule cannot be filed twice.
+        lines = ["# Rules\n"]
+        for name in _RULE_SECTIONS:
+            lines.append(f"## {name.capitalize()}")
+            lines.extend(e for s, e in kept if s == name)
+            lines.append("")
+        content = "\n".join(lines[:-1]) + "\n"
+    else:
+        content = "\n".join(["# Lessons", *(e for _, e in kept)]) + "\n"
+    return CompactionPlan(source=source, content=content, kept=len(kept))
 
 
 class Cortex:
@@ -757,7 +896,6 @@ Do NOT add, modify, or summarize rules — return them verbatim.
 
     # --- Compaction: Systems Consolidation + Synaptic Homeostasis ---
 
-    _COMPACTION_THRESHOLD = 20  # entries before compaction triggers
     _VACUUM_INTERVAL = 10  # check compaction every N turns
 
     def needs_compaction(self) -> bool:
@@ -768,8 +906,8 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         consolidation/pruning is triggered.
         """
         return (
-            self.global_hc.entry_count() > self._COMPACTION_THRESHOLD
-            or self.project_hc.entry_count() > self._COMPACTION_THRESHOLD
+            self.global_hc.entry_count() > COMPACTION_THRESHOLD
+            or self.project_hc.entry_count() > COMPACTION_THRESHOLD
         )
 
     async def compact_all(self) -> None:
@@ -784,7 +922,7 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         for hc in (self.global_hc, self.project_hc):
             if not isinstance(hc, Hippocampus):
                 continue  # compaction is file-specific; non-file backends skip
-            if hc.entry_count() > self._COMPACTION_THRESHOLD:
+            if hc.entry_count() > COMPACTION_THRESHOLD:
                 await self._compact_file(hc, hc._lessons_path, "lesson")
                 await self._compact_file(hc, hc._rules_path, "rules")
 
@@ -821,99 +959,9 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         """Compact a single memory file using LLM-assisted deduplication."""
         if not path.is_file():
             return
-
-        sections, entries = _read_memory_entries(path)
-
-        if len(entries) < 8:
-            return
-
-        # Numbers replace the `- ` marker so each line carries one, and the
-        # `<!-- ... -->` comment stays: its `ts` is how the model can tell which
-        # of two overlapping entries supersedes the other.
-        numbered = "\n".join(
-            f"{i}. {entry.removeprefix('- ')}" for i, entry in enumerate(entries, 1)
-        )
-
-        try:
-            # The response is a list of integers, so it no longer scales with
-            # the file. The ladder stays because the narration some models emit
-            # before the forced tool call does not shrink with it (ENG-1084).
-            result: _CompactionResult = await generate_with_truncation_retry(
-                self._llm.generate_object_code,
-                _CompactionResult,
-                system=_COMPACTION_PROMPT + no_preamble_instruction(_CompactionResult),
-                messages=[{"role": "user", "content": numbered}],
-                budgets=(4096, 8192),
-                log=logger,
-                subsystem="memory-compaction",
-            )
-            # Entries are copied from `entries`, never from the response, so a
-            # bad index costs at most the entry it failed to name and can never
-            # alter one. Walking the file also bounds the indices for free:
-            # duplicates collapse into the set, invented ones never come up.
-            keep = set(result.keep)
-            kept = [
-                pair
-                for i, pair in enumerate(zip(sections, entries), 1)
-                if i in keep
-            ]
-        except Exception as exc:
-            # Don't corrupt memory on failure — but never silently: an
-            # unlogged swallow made a dead memory subsystem indistinguishable
-            # from a working one (ENG-1084). Type name only; the message can
-            # quote conversation-derived content.
-            logger.warning(
-                "memory-compaction failed (%s) — keeping the file as-is",
-                type(exc).__name__,
-            )
-            return
-
-        # Nothing usable came back — a model that named no valid index gets to
-        # leave memory alone, not to empty it.
-        if not kept:
-            return
-
-        # Rebuild the file. Every entry still carries the `- ` prefix it was
-        # selected by, so nothing here has to re-add one.
-        if kind == "rules":
-            # Each entry goes back under its own heading and no other, so the
-            # rewrite is idempotent — a rule cannot be filed twice.
-            lines = ["# Rules\n"]
-            for name in _RULE_SECTIONS:
-                lines.append(f"## {name.capitalize()}")
-                lines.extend(e for s, e in kept if s == name)
-                lines.append("")
-            new_content = "\n".join(lines[:-1]) + "\n"
-        else:
-            new_content = "\n".join(["# Lessons", *(e for _, e in kept)]) + "\n"
-
-        # The rebuild comes from the read above, and the model call sat between
-        # them. A memory written meanwhile, by this session or another process
-        # sharing the file, is on disk but not in that read, so a rewrite would
-        # erase it. The check and the replace run under the file's writer lock;
-        # compaction can wait for a later pass, the memory cannot be recovered.
-        if not hc.rewrite_if_unchanged(
-            path, new_content, read=_read_memory_entries, snapshot=(sections, entries)
-        ):
-            logger.info(
-                "memory-compaction: %s changed during the model call "
-                "(%d entries read, %d now), skipped",
-                path.name,
-                len(entries),
-                len(_read_memory_entries(path)[1]),
-            )
-            return
-
-        # The only record that the file changed size, and the only pressure
-        # against over-pruning: naming survivors by index makes dropping most
-        # of the file a *shorter* answer than keeping it, so the call itself no
-        # longer penalises it. Counts only — the entries are user content.
-        logger.info(
-            "memory-compaction: %s kept %d of %d entries",
-            path.name,
-            len(kept),
-            len(entries),
-        )
+        plan = await plan_compaction(self._llm, read_compaction_input(path, kind))
+        if plan is not None:
+            plan.apply(hc)
 
     async def maybe_update_identity(self, user_message: str) -> None:
         """Check if conversation reveals identity facts worth profiling.

@@ -14,7 +14,12 @@ import pytest
 from anton.core.backends.base import Cell
 from anton.core.memory.cerebellum import Cerebellum, _DiffPassResult, _LessonDraft
 from anton.core.memory.base import MemoryRead
-from anton.core.memory.cortex import Cortex, _CompactionResult
+from anton.core.memory.cortex import (
+    Cortex,
+    _CompactionResult,
+    plan_compaction,
+    read_compaction_input,
+)
 from anton.core.memory.hippocampus import Engram, Hippocampus
 from anton.core.session import ChatSession
 from anton.core.tools.tool_handlers import handle_memorize
@@ -1075,6 +1080,78 @@ class TestCompactRulesFile:
         await self._compact(dirs, hc, keep=list(range(1, 12)))
         assert "Hand-added note" in hc._rules_path.read_text()
         assert len(hc.get_rules()) == 11
+
+
+class TestCompactionHalves:
+    """A host that holds its own locks runs the read, the model call and the
+    write apart, without building a Cortex."""
+
+    @staticmethod
+    def _lessons(path: Path, count: int) -> Hippocampus:
+        hc = Hippocampus(path)
+        for i in range(count):
+            hc.encode_lesson(f"Fact number {i}", topic=f"t{i}")
+        return hc
+
+    async def test_planning_touches_no_file(self, dirs):
+        hc = self._lessons(dirs[0], 10)
+        hc.rewrite_identity(["Name: Ada"])
+        before = {p.name: p.read_bytes() for p in dirs[0].iterdir()}
+
+        source = read_compaction_input(hc._lessons_path, "lesson")
+        plan = await plan_compaction(_CompactionLLM(keep=[1, 2]), source)
+
+        assert plan is not None and plan.kept == 2
+        assert {p.name: p.read_bytes() for p in dirs[0].iterdir()} == before
+
+    async def test_applying_a_plan_leaves_the_profile_alone(self, dirs):
+        """Building a Cortex moves and clears profile lines; the halves must not."""
+        hc = self._lessons(dirs[0], 10)
+        hc.rewrite_identity(["Name: Ada"])
+        project = Hippocampus(dirs[1])
+        project.rewrite_identity(["Timezone: UTC"])
+        profiles = [h._profile_path.read_bytes() for h in (hc, project)]
+
+        plan = await plan_compaction(
+            _CompactionLLM(keep=[1]), read_compaction_input(hc._lessons_path, "lesson")
+        )
+        assert plan.apply(hc) is True
+
+        assert [h._profile_path.read_bytes() for h in (hc, project)] == profiles
+        assert len(hc.get_lessons()) == 1
+
+    async def test_a_lesson_saved_between_plan_and_apply_survives(self, dirs):
+        hc = self._lessons(dirs[0], 10)
+        plan = await plan_compaction(
+            _CompactionLLM(keep=[1]), read_compaction_input(hc._lessons_path, "lesson")
+        )
+        hc.encode_lesson("Saved while the plan waited", topic="late")
+
+        assert plan.apply(hc) is False
+        assert len(hc.get_lessons()) == 11
+
+    async def test_a_plan_writes_the_file_of_its_kind_in_the_given_store(self, dirs):
+        hc = self._lessons(dirs[0], 10)
+        copy = Hippocampus(dirs[1])
+        copy._lessons_path.write_bytes(hc._lessons_path.read_bytes())
+        plan = await plan_compaction(
+            _CompactionLLM(keep=[1]), read_compaction_input(hc._lessons_path, "lesson")
+        )
+
+        assert plan.apply(copy) is True
+        assert len(copy.get_lessons()) == 1
+        assert len(hc.get_lessons()) == 10
+        assert not copy._rules_path.exists()
+
+    async def test_nothing_to_plan_returns_none(self, dirs):
+        short = self._lessons(dirs[0], 7)
+        assert await plan_compaction(
+            _CompactionLLM(keep=[1]), read_compaction_input(short._lessons_path, "lesson")
+        ) is None
+        full = self._lessons(dirs[1], 10)
+        assert await plan_compaction(
+            _CompactionLLM(keep=[]), read_compaction_input(full._lessons_path, "lesson")
+        ) is None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
