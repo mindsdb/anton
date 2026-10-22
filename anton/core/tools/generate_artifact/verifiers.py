@@ -601,7 +601,7 @@ def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, scree
         verdict = _render_verdict(outcome.findings)
         return BrowserCheck(
             status="passed" if verdict.ok else "failed", verdict=verdict, screenshot=outcome.screenshot,
-            coverage=outcome.coverage,
+            coverage=outcome.coverage, views=tuple(outcome.views),
         )
     findings = lint_html(entry.resolve(), cell_sandbox=cell_sandbox)
     if findings is None:

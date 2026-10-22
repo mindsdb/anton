@@ -34,7 +34,7 @@ from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS, scratchpad_action
 from . import sub_tools
 from .debug_trace import NullTrace
 from .spend import WIND_DOWN_ROUNDS
-from .state import GEN_WRITE_MAX_TOKENS, SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY
+from .state import GEN_WRITE_MAX_TOKENS, SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY, BrowserCheckFailed
 from .streaming import _call_with_stream_retry, _drain_stream
 from .verifiers import normalise_api_path
 from .prompts import (
@@ -373,11 +373,13 @@ async def generate(
     primary: str | None = None,
     progress: "asyncio.Queue[str | None] | None" = None,
     attachments: "list[str] | tuple[str, ...]" = (),
-) -> dict | str:
+) -> "dict | str | BrowserCheckFailed":
     """Run the whole artifact pipeline: gather, agree, specify, build.
 
-    Returns a result dict carrying a ``status``, or a single error string
-    naming the node where the machine stopped.
+    Returns a result dict carrying a ``status``, a single error string
+    naming the node where the machine stopped, or ``BrowserCheckFailed``
+    when an html-app's last build failed only its browser check and its
+    page waits on disk for the agent to repair.
 
     Where the run STARTS is decided here, from what the artifact folder
     already holds. Two independent checks, neither of which guesses intent
@@ -478,6 +480,8 @@ async def generate(
         session._artifact_progress = None
     if isinstance(result, str):
         trace.run_result(ok=False, error=result)
+    elif isinstance(result, BrowserCheckFailed):
+        trace.run_result(ok=False, error=result.error)
     else:
         # Without the screenshot: the trace would write its whole base64,
         # up to a megabyte, on every run. The handler takes it out of the
@@ -487,7 +491,7 @@ async def generate(
     return result
 
 
-def _record_page_check(session, *, state, result: dict | str) -> None:
+def _record_page_check(session, *, state, result: "dict | str | BrowserCheckFailed") -> None:
     """Tell the session how this run left its page: its last browser check,
     or `unverified` when the run wrote a page no browser loaded. A run that
     wrote no page (stopped at the brief, refused, cancelled) records nothing.
@@ -497,9 +501,17 @@ def _record_page_check(session, *, state, result: dict | str) -> None:
     it still found, the agent reads that in the result's `checks_skipped`,
     which only a dict result carries, so the session records the page as
     listed and the cell checks after this run list those findings no second
-    time this turn."""
+    time this turn.
+
+    A page whose last build failed its browser check is recorded under the
+    file that check loaded, with the views it measured, so the cell that
+    repairs that file replaces this record and is held to those views."""
     from anton.core.tools.tool_handlers import PageKey, record_page_checks
 
+    if isinstance(result, BrowserCheckFailed):
+        key = PageKey(slug=state.slug, page=result.page)
+        record_page_checks(session, checks={key: "failed"}, failed_views={key: result.views})
+        return
     if isinstance(result, dict) and result.get("status") in ("cancelled", "needs_confirmation"):
         return
     wrote_page = any(name.endswith(".html") for name in state.files_written)

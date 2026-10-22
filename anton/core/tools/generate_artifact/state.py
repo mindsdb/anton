@@ -20,7 +20,7 @@ from .attachments import Attachment
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
     from anton.core.artifacts.live_app_slots import LiveAppLaunchError, LiveAppLaunchResult
-    from anton.core.artifacts.render_check import RenderScreenshot, RenderStatus, ViewCoverage
+    from anton.core.artifacts.render_check import CheckedView, RenderScreenshot, RenderStatus, ViewCoverage
     from anton.utils.datasources import DatasourceCatalog
 
 # ── Budgets (see design spec) ────────────────────────────────────────────────
@@ -160,7 +160,9 @@ class BrowserCheck:
     unverified check still found. `screenshot` is the render check's
     desktop view, when it sent one. `coverage` names the views a browser
     that loaded the page measured and the tabs and toggles it left
-    unopened; None when no browser loaded it.
+    unopened; None when no browser loaded it. `views` are those views as
+    the render check listed them, empty from the local browser, which
+    presses nothing and lists none.
     """
 
     status: "RenderStatus"
@@ -169,6 +171,29 @@ class BrowserCheck:
     findings_listed: bool = False
     screenshot: "RenderScreenshot | None" = None
     coverage: "ViewCoverage | None" = None
+    views: "tuple[CheckedView, ...]" = ()
+
+
+@dataclass(frozen=True)
+class BrowserCheckFailed:
+    """How a run ends when its last build passed the static checks and
+    failed its browser check. The page that build wrote stays on disk, and
+    the agent repairs it in a scratchpad cell instead of the run building
+    it again.
+
+    `page` is the file the check loaded, relative to the artifact folder.
+    `findings` are the check's findings as the build's verdict worded them,
+    `views` the views it measured, `screenshot` its view of the page when it
+    sent one. `error` is the run's terminal message, for the trace. All of
+    it comes from the last build's own check: an earlier build's browser
+    fields on `GenState` can name a page a later build deleted.
+    """
+
+    page: str
+    findings: tuple[str, ...]
+    views: "tuple[CheckedView, ...]"
+    screenshot: "RenderScreenshot | None"
+    error: str
 
 
 # ── FSM state ────────────────────────────────────────────────────────────────

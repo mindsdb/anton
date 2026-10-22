@@ -146,6 +146,7 @@ from anton.core.tools.tool_handlers import (
     snapshot_existing_artifacts,
 )
 from anton.core.artifacts.render_check import (
+    CheckedView,
     RenderStatus,
     confirm_refused_screenshots,
     confirm_refused_tool_images,
@@ -2114,6 +2115,15 @@ class ChatSession:
         # `checks_skipped`. A later unverified check of such a page lists
         # none (`tool_handlers.check_cell_artifacts`). Reset every turn.
         self._unverified_findings_listed: set[PageKey] = set()
+        # The repair cells each page used this turn: cells that changed a
+        # page whose last check this turn failed. A page gets
+        # `tool_handlers.REPAIR_CELLS` of them (`check_cell_artifacts`).
+        # Reset every turn.
+        self._repair_cells: dict[PageKey, int] = {}
+        # The views the check that failed a page this turn measured, kept
+        # until the page passes. A repair cell whose check no longer finds
+        # one of them fails (`tool_handlers._check_pages`). Reset every turn.
+        self._failed_views: dict[PageKey, tuple[CheckedView, ...]] = {}
         # Set once the model refused a request carrying render-check
         # screenshots and took it without them
         # (`_confirm_render_screenshots_refused`). From then on the checks'
@@ -5455,6 +5465,8 @@ class ChatSession:
         self._artifacts_touched = set()
         self._page_checks = {}
         self._unverified_findings_listed = set()
+        self._repair_cells = {}
+        self._failed_views = {}
         # What the project held when this turn began: a cell may delete or
         # rename a file it wrote this turn without asking, not one from before.
         if self._write_gate is not None:
