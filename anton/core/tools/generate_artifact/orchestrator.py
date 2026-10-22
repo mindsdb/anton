@@ -43,6 +43,7 @@ from .state import (
     GEN_LOOP_MAX_RETRIES,
     GEN_VERIFY_MAX_RETRIES,
     KNOWN_DATA_SPEC_MAX,
+    NOT_ENOUGH_DATA_PREFIX,
     RUNAPP_MAX_RETRIES,
     FetchVerdict,
     GenState,
@@ -81,8 +82,13 @@ async def _decide(state: GenState, schema, prompt_pair, node: str) -> object:
     return result
 
 
-async def _fetch_data_sample(state: GenState, required_text: str = "") -> str:
-    """Run a scratchpad loop that pulls a data sample; return its summary."""
+async def _fetch_data_sample(state: GenState, required_text: str = "") -> tuple[str, bool]:
+    """Run a scratchpad loop that pulls a data sample.
+
+    Returns the notes for `data_notes` and whether the loop ran at least one
+    cell that succeeded — the only evidence the data loop accepts that data
+    was read.
+    """
     if state.public_sources is None:
         state.public_sources = _public_data_sources_skill(state.session)
     try:
@@ -106,17 +112,21 @@ async def _fetch_data_sample(state: GenState, required_text: str = "") -> str:
         state.peek_done("fetch_data_sample")
     if isinstance(result, str):
         # Loop failed — surface as a note so the next define / can-fetch decision sees it.
-        return f"(data fetch step reported: {result})"
+        return f"(data fetch step reported: {result})", False
     if result.get("over_budget"):
         # The guard is sticky, so the caller's next `winding_down()` check is
         # what stops the pipeline. Said plainly rather than folded into a
         # summary, which would read as a fetch that completed.
-        return "(data fetch stopped: the turn's budget ran out mid-fetch)"
+        return "(data fetch stopped: the turn's budget ran out mid-fetch)", False
     summary = result.get("summary") or "(fetch produced no summary)"
-    exec_notes = _render_exec_notes(result.get("scratchpad_execs") or [])
+    execs = result.get("scratchpad_execs") or []
+    exec_notes = _render_exec_notes(execs)
     if exec_notes:
         summary += "\n\n" + exec_notes
-    return summary
+    ok = any(e.get("ok", True) for e in execs)
+    if not ok:
+        summary += "\n\n(the fetch step ran no cell that succeeded)"
+    return summary, ok
 
 
 def _absorb_discovery_notes(state: GenState) -> None:
@@ -202,6 +212,24 @@ def _mark_data_covered(state: GenState) -> None:
     state.gathering_complete = True
 
 
+def _not_enough_data(state: GenState, reasoning: str, required: RequiredData | None) -> str:
+    """The "not enough data" error. After a forced fetch it names where the
+    fetch looked: the connections the required data mentions (or the first
+    few when it mentions none), then where each item was expected."""
+    message = f"{NOT_ENOUGH_DATA_PREFIX} {reasoning}"
+    if not state.forced_fetch_used:
+        return message
+    wheres = [it.where for it in (required.items if required else []) if it.where.strip()]
+    catalog = state.datasource_catalog
+    slugs = [c.slug for c in catalog.connections] if catalog is not None else []
+    mentioned = [s for s in slugs if any(s.casefold() in w.casefold() for w in wheres)]
+    looked = list(dict.fromkeys((mentioned or slugs[:5]) + wheres))
+    if not looked:
+        return message
+    # The agent quotes this to the user, so the reasoning ends as a sentence.
+    return f"{message.rstrip('.')}. Looked in: {', '.join(looked)}."
+
+
 async def _data_phase(state: GenState) -> str | None:
     """The emergency data loop: define -> can-fetch -> fetch, bounded.
 
@@ -221,6 +249,8 @@ async def _data_phase(state: GenState) -> str | None:
         state.public_sources = _public_data_sources_skill(state.session)
 
     last_reasoning = "the gathering phase did not verify the data it declared"
+    last_required: RequiredData | None = None
+    fetched_ok = False
     while state.data_iterations < DATA_LOOP_MAX:
         if state.winding_down():
             # Not an error: whatever was fetched stays in `data_notes` and
@@ -238,6 +268,7 @@ async def _data_phase(state: GenState) -> str | None:
             state, RequiredData, prompts.build_required_data_prompt(state),
             "define_required_data",
         )
+        last_required = required
         last_reasoning = required.reasoning
         if required.items:
             required_text = _render_required(required)
@@ -245,9 +276,10 @@ async def _data_phase(state: GenState) -> str | None:
         else:
             # An empty list is the model's word alone. It is accepted only
             # where nothing it could skip is at stake: no declared source is
-            # waiting, or the rows really can sit in `known_data`.
+            # waiting, the rows really can sit in `known_data`, or a fetch in
+            # this call already read data.
             pending = list(state.unverified_sources)
-            if not pending or known_data_usable(state):
+            if not pending or known_data_usable(state) or fetched_ok:
                 state.record("define_required_data", "nothing_missing", required.reasoning)
                 _mark_data_covered(state)
                 return None
@@ -260,28 +292,47 @@ async def _data_phase(state: GenState) -> str | None:
             prompts.build_can_fetch_prompt(state, required_text),
             "is_possible_to_fetch",
         )
+        forced = False
         if not can.possible:
-            state.record("is_possible_to_fetch", "no", can.reasoning)
-            state.error = f"not enough data: {can.reasoning}"
-            return state.error
-        state.record("is_possible_to_fetch", "yes", can.reasoning)
+            # One real attempt before giving up while a connection exists:
+            # the verdict is a model's reading of a catalog that lists no
+            # endpoints, and it has said "no" to data that was there.
+            if state.datasource_catalog is not None and not state.forced_fetch_used:
+                state.forced_fetch_used = forced = True
+                state.record("is_possible_to_fetch", "no_but_trying", can.reasoning)
+            else:
+                state.record("is_possible_to_fetch", "no", can.reasoning)
+                state.error = _not_enough_data(state, can.reasoning, required)
+                return state.error
+        else:
+            state.record("is_possible_to_fetch", "yes", can.reasoning)
 
         state.step_started("fetch_data_sample", attempt=state.data_iterations)
-        notes = await _fetch_data_sample(state, required_text)
+        notes, ok = await _fetch_data_sample(state, required_text)
         state.data_iterations += 1
         state.data_notes = (state.data_notes + "\n\n" + notes).strip()
+        if not ok:
+            # The sources stay unverified; the next iteration reads the
+            # failure in the notes.
+            state.record("fetch_data_sample", "failed", notes[:200])
+            continue
+        state.record("fetch_data_sample", "done", notes[:200])
+        fetched_ok = True
+        if forced:
+            # The decisions said the data was not there; the next define
+            # and can-fetch judge what this fetch actually found.
+            continue
         # The loop fetched exactly what was declared unverified, so the list
         # clears. Not narrowed item by item: the fetch step works from
         # `define_required_data`'s consolidated list, not per source.
         _mark_data_covered(state)
-        state.record("fetch_data_sample", "done", notes[:200])
+        return None
 
-        if not _needs_data_loop(state):
-            return None
-
-    state.error = (
-        f"not enough data: the data loop did not converge within {DATA_LOOP_MAX} "
-        f"iterations. Last assessment: {last_reasoning}"
+    state.error = _not_enough_data(
+        state,
+        f"the data loop did not converge within {DATA_LOOP_MAX} iterations. "
+        f"Last assessment: {last_reasoning}",
+        last_required,
     )
     return state.error
 

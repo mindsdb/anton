@@ -38,6 +38,10 @@ RUNAPP_MAX_RETRIES: int = 1
 # so it never verifies a source on its own (`known_data_usable`).
 KNOWN_DATA_SPEC_MAX: int = 8000
 
+# Every "not enough data" error starts with this; the tool handler keys the
+# text it gives the agent on it.
+NOT_ENOUGH_DATA_PREFIX = "not enough data:"
+
 # Per-line detail cap for GenState.journal() — keeps the journal compact when
 # a step's detail is long (full text still lives in data_notes / trace_log).
 JOURNAL_DETAIL_MAX: int = 300
@@ -240,6 +244,9 @@ class GenState:
     prd: str = ""
     data_notes: str = ""
     data_iterations: int = 0
+    # The data loop's one fetch against a "not possible" verdict was spent.
+    # Per call, never persisted: a repeat call gets its own attempt.
+    forced_fetch_used: bool = False
     api_spec: str | None = None
     files_written: list[str] = field(default_factory=list)
     # Generation inputs (spec.md, openapi.json) rather than user-facing output:

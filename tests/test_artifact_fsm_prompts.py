@@ -1226,3 +1226,10 @@ def test_the_fetch_kickoff_cuts_long_known_data():
     kickoff = prompts.build_fetch_data_kickoff(_data_state(known_data=rows))
     assert "(truncated: first " in kickoff
     assert rows not in kickoff
+
+
+def test_the_graph_shows_the_forced_fetch_and_the_loop_back():
+    g = prompts.FSM_DIGRAPH
+    assert 'is_possible_to_fetch -> fetch_data_sample    [label="no, once, when connections exist"]' in g
+    assert "fetch_data_sample    -> define_required_data" in g
+    assert 'fetch_data_sample    -> not_enough_data      [label="iterations exhausted"]' in g

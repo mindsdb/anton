@@ -64,7 +64,10 @@ digraph artifact_generation {
     define_required_data -> is_possible_to_fetch [label="data missing"];
     is_possible_to_fetch -> fetch_data_sample    [label="yes"];
     is_possible_to_fetch -> not_enough_data      [label="no"];
+    is_possible_to_fetch -> fetch_data_sample    [label="no, once, when connections exist"];
     fetch_data_sample    -> make_tech_spec       [label="data fetched"];
+    fetch_data_sample    -> define_required_data [label="fetch failed, or after the forced fetch"];
+    fetch_data_sample    -> not_enough_data      [label="iterations exhausted"];
     make_tech_spec       -> is_fullstack;
     is_fullstack         -> make_api_spec        [label="yes"];
     is_fullstack         -> generate_frontend    [label="no"];

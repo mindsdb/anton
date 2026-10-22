@@ -108,7 +108,7 @@ async def test_data_phase_exits_after_one_successful_fetch(tmp_path: Path, monke
     )
 
     async def fake_fetch(state, required_text=""):
-        return "pulled a sample"
+        return "pulled a sample", True
     monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
 
     err = await orchestrator._data_phase(st)
@@ -133,11 +133,12 @@ async def test_fetch_data_sample_appends_exec_code(tmp_path: Path, monkeypatch):
         }
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
-    notes = await orchestrator._fetch_data_sample(st)
+    notes, ok = await orchestrator._fetch_data_sample(st)
     assert notes.startswith("pulled 100 rows")
     assert "### Code executed while fetching" in notes
     assert "df = q('select 1')" in notes
     assert "Output: ok 100 rows" in notes
+    assert ok is True
 
 
 def test_render_exec_notes_caps_and_drops_oldest():
@@ -805,7 +806,7 @@ async def test_data_phase_still_fetches_when_a_source_is_unverified(
 
     async def fake_fetch(state, required_text=""):
         fetched["n"] += 1
-        return "pulled totals"
+        return "pulled totals", True
 
     monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
 
@@ -1636,7 +1637,7 @@ async def test_an_empty_list_is_rejected_when_nothing_vouches_for_the_sources(
 
     async def fake_fetch(state, required_text=""):
         got["text"] = required_text
-        return "pulled sites"
+        return "pulled sites", True
 
     monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
 
@@ -1705,7 +1706,7 @@ async def test_a_repeat_call_builds_from_the_known_data_it_brings(
 
     async def fake_fetch(state, required_text=""):
         fetched.append(required_text)
-        return "pulled sites"
+        return "pulled sites", True
 
     monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
 
@@ -1727,7 +1728,7 @@ async def test_the_fetch_gets_the_full_list_define_wrote(tmp_path: Path, monkeyp
 
     async def fake_fetch(state, required_text=""):
         got["text"] = required_text
-        return "pulled orders"
+        return "pulled orders", True
 
     monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
 
@@ -1771,3 +1772,129 @@ def test_a_repeat_call_without_known_data_builds_from_the_saved_copy(tmp_path: P
     engine._restore(other, stored)
     assert other.known_data == "site,lat\nOslo,59.9"
     assert other.call_changed is True
+
+
+# ── the fetch verdict and the forced fetch ──────────────────────────────────
+
+_SITES_ITEM = RequiredDataItem(name="sites", where="rest-gw /sites endpoint", why="map")
+
+
+@pytest.mark.parametrize("loop_result", [
+    "generator exceeded round budget (20) without writing any files.",
+    {"files_written": [], "rounds_used": 1, "summary": "nothing", "scratchpad_execs": []},
+    {"files_written": [], "rounds_used": 1, "summary": "tried",
+     "scratchpad_execs": [{"name": "pad", "code": "get('/sites')", "output": "401", "ok": False}]},
+])
+async def test_a_fetch_without_a_cell_that_succeeded_is_not_data(tmp_path: Path, monkeypatch, loop_result):
+    async def fake_run_loop(**kw):
+        return loop_result
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
+    notes, ok = await orchestrator._fetch_data_sample(_state(tmp_path))
+    assert ok is False
+    assert notes
+
+
+async def test_failed_fetches_keep_the_sources_unverified_until_the_loop_gives_up(
+    tmp_path: Path, monkeypatch
+):
+    st = _state(tmp_path)
+    st.gathering_complete = False
+    st.declared_sources = ["sites"]
+    st.unverified_sources = ["sites"]
+    st.session._llm.generate_object = AsyncMock(
+        side_effect=lambda schema_class, **kw: (
+            RequiredData(items=[_SITES_ITEM], reasoning="sites are missing")
+            if schema_class is RequiredData
+            else FetchVerdict(possible=True, reasoning="rest-gw has them")
+        )
+    )
+    fetched = []
+
+    async def fake_fetch(state, required_text=""):
+        fetched.append(state.data_notes)
+        return "(data fetch step reported: 401)", False
+
+    monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
+
+    err = await orchestrator._data_phase(st)
+    assert len(fetched) == orchestrator.DATA_LOOP_MAX
+    assert "(data fetch step reported: 401)" in fetched[1], "the next iteration did not see the failure"
+    assert err.startswith("not enough data: the data loop did not converge")
+    assert st.unverified_sources == ["sites"]
+    assert st.gathering_complete is False
+    assert [o for o, _ in _outcomes(st, "fetch_data_sample")] == ["failed"] * orchestrator.DATA_LOOP_MAX
+
+
+async def test_a_no_with_a_connection_gets_one_forced_fetch_then_names_where_it_looked(
+    tmp_path: Path, monkeypatch
+):
+    st = _unverified(_state(tmp_path, datasource_catalog=_slug_catalog("rest-gw", "crm")), "sites")
+    st.session._llm.generate_object = AsyncMock(
+        side_effect=lambda schema_class, **kw: (
+            RequiredData(items=[_SITES_ITEM], reasoning="sites are missing")
+            if schema_class is RequiredData
+            else FetchVerdict(possible=False, reasoning="no source holds the sites")
+        )
+    )
+    fetched = []
+
+    async def fake_fetch(state, required_text=""):
+        fetched.append(required_text)
+        return "listed the endpoints, no sites", True
+
+    monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
+
+    err = await orchestrator._data_phase(st)
+    assert len(fetched) == 1
+    assert err == "not enough data: no source holds the sites. Looked in: rest-gw, rest-gw /sites endpoint."
+    assert "crm" not in err
+    assert [o for o, _ in _outcomes(st, "is_possible_to_fetch")] == ["no_but_trying", "no"]
+
+
+async def test_a_forced_fetch_that_finds_the_data_lets_the_build_go_on(tmp_path: Path, monkeypatch):
+    st = _unverified(
+        _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True,
+               datasource_catalog=_slug_catalog("rest-gw")),
+        "sites",
+    )
+    st.session._llm.generate_object = AsyncMock(side_effect=[
+        RequiredData(items=[_SITES_ITEM], reasoning="sites are missing"),
+        FetchVerdict(possible=False, reasoning="not sure any source has them"),
+        RequiredData(items=[], reasoning="the fetch read the sites"),
+    ])
+
+    async def fake_fetch(state, required_text=""):
+        return "read 13 sites from rest-gw", True
+
+    monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
+
+    assert await orchestrator._data_phase(st) is None
+    assert st.unverified_sources == [] and st.gathering_complete is True
+    assert _outcomes(st, "define_required_data")[-1][0] == "nothing_missing"
+
+
+async def test_a_no_without_connections_fails_without_a_fetch(tmp_path: Path, monkeypatch):
+    st = _unverified(_state(tmp_path), "sites")
+    st.session._llm.generate_object = AsyncMock(side_effect=[
+        RequiredData(items=[_SITES_ITEM], reasoning="sites are missing"),
+        FetchVerdict(possible=False, reasoning="nothing is connected"),
+    ])
+
+    async def no_fetch(state, required_text=""):
+        raise AssertionError("no connection, no forced fetch")
+
+    monkeypatch.setattr(orchestrator, "_fetch_data_sample", no_fetch)
+
+    err = await orchestrator._data_phase(st)
+    assert err == "not enough data: nothing is connected"
+
+
+def test_the_error_names_the_first_connections_when_none_is_mentioned(tmp_path: Path):
+    st = _state(tmp_path, datasource_catalog=_slug_catalog("a", "b", "c", "d", "e", "f"))
+    st.forced_fetch_used = True
+    err = orchestrator._not_enough_data(st, "gave up", None)
+    assert err == "not enough data: gave up. Looked in: a, b, c, d, e."
+    st2 = _state(tmp_path, datasource_catalog=_slug_catalog("a"))
+    st2.forced_fetch_used = True
+    assert orchestrator._not_enough_data(st2, "gave up.", None) == "not enough data: gave up. Looked in: a."
