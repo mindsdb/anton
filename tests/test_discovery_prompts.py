@@ -385,3 +385,10 @@ def test_the_finish_gathering_schema_mentions_the_known_data_mark():
     assert "is not verified" in props["data_sources"]["description"]
     verified_by = props["data_findings"]["items"]["properties"]["verified_by"]["description"]
     assert "`known_data`" in verified_by
+
+
+def test_the_redraw_asks_for_the_known_data_mark():
+    from anton.core.tools.generate_artifact.discovery import prompts as discovery_prompts
+
+    assert "data_findings" in discovery_prompts._REDRAW_RESTATE
+    assert 'verified_by: "known_data"' in discovery_prompts._REDRAW_RESTATE

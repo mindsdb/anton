@@ -264,7 +264,9 @@ _REDRAW_RESTATE = (
     "correction introduces a source nobody has fetched yet, that call is the "
     "only thing that will cause it to be fetched. For each source declared "
     "earlier that the corrected artifact still needs, use exactly the name it "
-    "was declared with, whatever language you write in."
+    "was declared with, whatever language you write in. For a source whose "
+    "rows or values are under `" + KNOWN_DATA_HEADER + "`, also pass a "
+    "`data_findings` entry with `verified_by: \"known_data\"`."
 )
 
 _REDRAW_CORRECTION_ACT_FIRST = (
