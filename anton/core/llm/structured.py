@@ -30,9 +30,9 @@ the subprocess already imports from `anton.core.*` at boot.
 from __future__ import annotations
 
 import logging
-from typing import Any, Awaitable, Callable, NoReturn
+from typing import Any, Awaitable, Callable, NamedTuple, NoReturn
 
-from .provider import ProviderErrorBody, StructuredOutputError
+from .provider import LLMResponse, ProviderErrorBody, StructuredOutputError
 
 
 # Default output-budget ladder for forced-schema calls: first attempt, then
@@ -74,10 +74,19 @@ def _call_first_instruction(tool_name: str) -> str:
 # servers that spell it "unsupported".
 _FORCED_CHOICE_REFUSAL_WORDS = ("not supported", "unsupported", "forces tool use")
 
-# (provider, base_url, model) that refused a forced tool choice. Process-wide,
-# like `_CACHE_BREAKPOINT_REFUSED` in openai.py, because Cowork builds a provider
-# per turn and the scratchpad builds one per call: one refusal is enough.
-_FORCED_CHOICE_REFUSED: set[tuple[str, str, str]] = set()
+
+class ForcedChoiceKey(NamedTuple):
+    """The refusal memory's key: a provider, its endpoint and a model."""
+
+    provider: str
+    base_url: str
+    model: str
+
+
+# The keys that refused a forced tool choice. Process-wide, like
+# `_CACHE_BREAKPOINT_REFUSED` in openai.py, because Cowork builds a provider per
+# turn and the scratchpad builds one per call: one refusal is enough.
+_FORCED_CHOICE_REFUSED: set[ForcedChoiceKey] = set()
 
 
 def refuses_forced_tool_choice(exc: BaseException) -> bool:
@@ -96,24 +105,24 @@ def refuses_forced_tool_choice(exc: BaseException) -> bool:
     return "tool_choice" in text and any(word in text for word in _FORCED_CHOICE_REFUSAL_WORDS)
 
 
-def forced_choice_key(provider, model: str) -> tuple[str, str, str]:
+def forced_choice_key(provider, model: str) -> ForcedChoiceKey:
     """The refusal memory's key for ``model`` on ``provider``'s endpoint.
 
     A trailing slash and a missing base_url are normalised, as the completion
     verifier's latch key is (`_shared_verifier_latch` in session.py).
     """
     conn = provider.export_connection_info()
-    return (conn.provider, (conn.base_url or "").rstrip("/"), model)
+    return ForcedChoiceKey(conn.provider, (conn.base_url or "").rstrip("/"), model)
 
 
 async def send_structured(
-    send: Callable[[dict | None, str], Awaitable[Any]],
+    send: Callable[[dict | None, str], Awaitable[LLMResponse]],
     *,
-    key: tuple[str, str, str],
+    key: ForcedChoiceKey,
     tool: dict,
     system: str,
     budget: int,
-):
+) -> LLMResponse:
     """Send one forced-schema call and return the response to unwrap.
 
     ``send(tool_choice, system)`` makes one request. The first forces ``tool``,
@@ -121,10 +130,11 @@ async def send_structured(
     ``key``, and the call goes again with no ``tool_choice`` and a line asking
     for the tool first. It sends no choice rather than ``"auto"``: a proxy that
     checks requests can refuse ``"auto"`` on chat completions, and Anthropic's
-    API reads a request with tools and no choice as ``auto``. An unforced reply with no tool call,
-    and not cut off by ``budget``, gets one more try, so one call sends at most
-    three requests. The caller's own checks then raise `StructuredOutputError`
-    for a reply that is still unusable, as they do for a forced one.
+    API reads a request with tools and no choice as ``auto``. An unforced reply
+    with no tool call, and not cut off by ``budget``, gets one more try, so one
+    call sends at most three requests. The caller's own checks then raise
+    `StructuredOutputError` for a reply that is still unusable, as they do for a
+    forced one.
 
     Shared by `LLMClient._generate_object_with` and the scratchpad's
     `_ScratchpadLLM.generate_object`, so both sites retry the same way.
@@ -136,7 +146,7 @@ async def send_structured(
             if not refuses_forced_tool_choice(exc):
                 raise
             logging.getLogger(__name__).warning(
-                "forced tool_choice refused for %s; its structured calls go without one", key[2]
+                "forced tool_choice refused for %s; its structured calls go without one", key.model
             )
             _FORCED_CHOICE_REFUSED.add(key)
     instruction = _call_first_instruction(tool["name"])
@@ -354,9 +364,9 @@ def build_structured_tool(schema_class) -> tuple[dict, type, bool]:
         A 3-tuple of:
 
         - **tool_dict**: ready to pass as ``tools=[tool_dict]`` to
-          ``provider.complete()``. The caller should also pass
-          ``tool_choice={"type": "tool", "name": tool_dict["name"]}``
-          to force the LLM to call this specific tool.
+          ``provider.complete()``. Send it through `send_structured`,
+          which forces this tool and resends a call whose forced choice
+          the model refused without it.
         - **validator_class**: the Pydantic class to call
           ``model_validate()`` on (the wrapper for the list case,
           the original class otherwise).
