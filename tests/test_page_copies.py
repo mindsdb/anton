@@ -119,6 +119,71 @@ def test_past_the_turns_limit_the_newest_pages_keep_their_copies(tmp_path, monke
     assert pages.main_previous(old) is None
 
 
+def test_a_page_that_cannot_fit_the_turns_limit_is_never_read(tmp_path, monkeypatch):
+    monkeypatch.setattr(page_copies, "MAX_TURN_COPY_BYTES", 10)
+    store = ArtifactStore(tmp_path / "artifacts")
+    small = _artifact(store, "Small", pages={"index.html": "<p/>"})
+    big = _artifact(store, "Big", pages={"index.html": "<p>too big</p>"})
+    asked: list[Path] = []
+    read_page = page_copies._read_page
+
+    def recording(path, *, cell_sandbox):
+        asked.append(path)
+        return read_page(path, cell_sandbox=cell_sandbox)
+
+    monkeypatch.setattr(page_copies, "_read_page", recording)
+
+    pages = TurnPages()
+    pages.capture(store, cell_sandbox=None)
+
+    assert asked == [store.root / small / "index.html"]
+    assert pages.main_previous(small) is not None and pages.main_previous(big) is None
+
+
+def test_a_capture_that_failed_keeps_no_copies_later(tmp_path, monkeypatch):
+    """A later capture would copy pages the turn already edited: no copies
+    is safer than late ones."""
+    store = ArtifactStore(tmp_path / "artifacts")
+    slug = _artifact(store)
+    pages = TurnPages()
+    read_copies = pages._read_copies
+    calls = []
+
+    def failing_once(store, *, cell_sandbox):
+        calls.append(None)
+        if len(calls) == 1:
+            raise OSError("disk went away")
+        read_copies(store, cell_sandbox=cell_sandbox)
+
+    monkeypatch.setattr(pages, "_read_copies", failing_once)
+
+    with pytest.raises(OSError):
+        pages.capture(store, cell_sandbox=None)
+    (store.root / slug / "index.html").write_text("<p>edited</p>")
+    pages.capture(store, cell_sandbox=None)
+
+    assert pages.captured is True
+    assert pages.main_previous(slug) is None
+
+
+async def test_once_the_turn_has_its_copies_a_capture_does_nothing(tmp_path, monkeypatch, caplog):
+    from anton.core.tools import tool_handlers
+
+    store = ArtifactStore(tmp_path / "artifacts")
+    _artifact(store)
+    session = SimpleNamespace(_turn_pages=TurnPages(), _scratchpads=None)
+    await tool_handlers.capture_turn_pages(session, store)
+    assert session._turn_pages.captured is True
+
+    def fail(*args, **kwargs):
+        raise AssertionError("capture called again")
+
+    monkeypatch.setattr(TurnPages, "capture", fail)
+    await tool_handlers.capture_turn_pages(session, store)
+
+    assert "keeping the turn's copies" not in caplog.text
+
+
 def test_without_the_render_check_service_nothing_is_kept(tmp_path, monkeypatch):
     monkeypatch.delenv("ANTON_RENDER_CHECK_URL")
     _, slug, _, pages = _captured(tmp_path)

@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import logging
 import os
+import stat
 import threading
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from anton.core.artifacts import render_check
@@ -32,8 +33,9 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
-# The most page text one turn keeps. Past it the oldest artifacts' pages go
-# without a copy, so they are neither compared nor put back.
+# The most page text one turn keeps. Pages are taken newest first while
+# they fit, so a page that does not fit goes without a copy: it is neither
+# compared nor put back.
 MAX_TURN_COPY_BYTES = 64 * 1024 * 1024
 # A fullstack app's page calls its backend, which the render check does not
 # run, so no check loads it and nothing compares it.
@@ -43,19 +45,47 @@ _FULLSTACK_TYPES = frozenset({"fullstack-stateless-app", "fullstack-stateful-app
 def main_page_name(folder: Path, primary: str | None) -> str | None:
     """The artifact's main page in FOLDER, as the cell check picks it: its
     primary when that is an `.html` file there, else `index.html`, else its
-    first `.html` content file by name. None without a page."""
+    first `.html` content file by name. None without a page. The primary
+    and `index.html` are looked up directly; only without either is the
+    folder walked."""
     from anton.core.artifacts.store import iter_content_files
 
+    for name in (primary, "index.html"):
+        if name is not None and _is_content_page(folder, name):
+            return name
     pages = sorted(
         path.relative_to(folder).as_posix()
         for path, _ in iter_content_files(folder)
         if path.suffix.lower() == ".html"
     )
-    if primary in pages:
-        return primary
-    if "index.html" in pages:
-        return "index.html"
     return pages[0] if pages else None
+
+
+def _is_content_page(folder: Path, name: str) -> bool:
+    """Whether NAME, a path relative to FOLDER, is an `.html` file that
+    `iter_content_files` would yield: a regular file reached through real
+    folders, never a link, outside the housekeeping names and bytecode.
+    Each part must be listed under its exact name, as the walk lists it,
+    also where the file system ignores case."""
+    from anton.core.artifacts.internal_files import NON_CONTENT_NAMES, is_bytecode_name
+
+    parts = name.split("/")
+    if any(part in ("", ".", "..") for part in parts) or parts[0] in NON_CONTENT_NAMES:
+        return False
+    if any(is_bytecode_name(part) for part in parts) or PurePosixPath(name).suffix.lower() != ".html":
+        return False
+    path = folder
+    try:
+        for index, part in enumerate(parts):
+            if part not in os.listdir(path):
+                return False
+            path = path / part
+            mode = path.lstat().st_mode
+            if not (stat.S_ISREG(mode) if index == len(parts) - 1 else stat.S_ISDIR(mode)):
+                return False
+    except OSError:
+        return False
+    return True
 
 
 def _read_page(path: Path, *, cell_sandbox: CellSandbox | None) -> bytes | None:
@@ -108,8 +138,17 @@ class TurnPages:
         with self._capture_lock:
             if self._captured:
                 return
-            self._read_copies(store, cell_sandbox=cell_sandbox)
-            self._captured = True
+            try:
+                self._read_copies(store, cell_sandbox=cell_sandbox)
+            finally:
+                # A later capture would copy pages the turn may have edited
+                # by then: no copies is safer than late ones.
+                self._captured = True
+
+    @property
+    def captured(self) -> bool:
+        """Whether this turn already took its copies (or tried and failed)."""
+        return self._captured
 
     def _read_copies(self, store, *, cell_sandbox: CellSandbox | None) -> None:
         """`capture`'s reads, under its lock."""
@@ -118,7 +157,7 @@ class TurnPages:
         root = store.root
         if not root.is_dir():
             return
-        candidates: list[tuple[int, PageKey, Path]] = []
+        candidates: list[tuple[int, int, PageKey, Path]] = []
         for child in root.iterdir():
             if not child.is_dir() or not (child / "metadata.json").is_file():
                 continue
@@ -129,13 +168,18 @@ class TurnPages:
             if name is None:
                 continue
             try:
-                mtime = (child / name).lstat().st_mtime_ns
+                info = (child / name).lstat()
             except OSError:
                 continue
-            candidates.append((mtime, PageKey(slug=child.name, page=name), child / name))
+            candidates.append((info.st_mtime_ns, info.st_size, PageKey(slug=child.name, page=name), child / name))
         copies: dict[PageKey, bytes] = {}
         total = 0
-        for _, key, path in sorted(candidates, key=lambda candidate: candidate[0], reverse=True):
+        for _, size, key, path in sorted(candidates, key=lambda candidate: candidate[0], reverse=True):
+            # A page that cannot fit is not read at all; the read below is
+            # still measured, since the page may have grown since.
+            if size > render_check.MAX_PAGE_BYTES or total + size > MAX_TURN_COPY_BYTES:
+                _log.debug("no copy of %s/%s for this turn", key.slug, key.page)
+                continue
             data = _read_page(path, cell_sandbox=cell_sandbox)
             if data is not None:
                 try:

@@ -949,7 +949,7 @@ async def capture_turn_pages(session: "ChatSession", store) -> None:
     from anton.core.artifacts.page_copies import TurnPages
 
     turn_pages = getattr(session, "_turn_pages", None)
-    if not isinstance(turn_pages, TurnPages) or store is None:
+    if not isinstance(turn_pages, TurnPages) or store is None or turn_pages.captured:
         return
     try:
         await asyncio.to_thread(
