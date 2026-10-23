@@ -29,7 +29,15 @@ from anton.core.utils.scratchpad import (
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
     from anton.core.artifacts.live_app_slots import LaunchFailure
-    from anton.core.artifacts.render_check import CheckedView, RenderCheckOutcome, RenderScreenshot, RenderStatus
+    from anton.core.artifacts.page_copies import TurnPages
+    from anton.core.artifacts.render_check import (
+        CheckedView,
+        Comparison,
+        ComparisonNotes,
+        RenderCheckOutcome,
+        RenderScreenshot,
+        RenderStatus,
+    )
     from anton.core.tools.generate_artifact.state import BrowserCheckFailed
 
 
@@ -270,6 +278,10 @@ class ArtifactLint:
     repaired: frozenset[PageKey] = frozenset()
     # The views each check this cell made that failed its page measured.
     failed_views: "dict[PageKey, tuple[CheckedView, ...]]" = field(default_factory=dict)
+    # Each page's comparison with how the turn found it, from this cell's
+    # checks, but for a page anton put back: that comparison described the
+    # page it replaced.
+    comparisons: "dict[PageKey, Comparison]" = field(default_factory=dict)
 
 
 _STATUS_RANK = {"passed": 0, "unverified": 1, "failed": 2}
@@ -408,6 +420,48 @@ def _removed_views(measured_when_failed: "tuple[CheckedView, ...]", outcome: "Re
     return [view for view in measured_when_failed if view.pressed not in found]
 
 
+def _notes_to_show(
+    turn_pages: "TurnPages | None", key: PageKey, comparison: "Comparison | None"
+) -> "ComparisonNotes":
+    """What COMPARISON names, less the `blank` and `removed` the agent was
+    already shown for KEY this turn (`TurnPages.notes_to_show`)."""
+    from anton.core.artifacts.render_check import comparison_notes
+
+    notes = comparison_notes(comparison)
+    if turn_pages is None or comparison is None or not comparison.informative:
+        return notes
+    return turn_pages.notes_to_show(key, notes)
+
+
+def _comparison_lines(label: str, notes: "ComparisonNotes") -> list[str]:
+    """The lines that tell the agent what this turn's edits did to views
+    that worked when the turn began."""
+    from anton.core.artifacts.render_check import agree, joined
+
+    lines: list[str] = []
+    if notes.broke:
+        them = agree(notes.broke, "it", "them")
+        lines.append(
+            f"{label} — {joined(notes.broke)} drew before this turn's edits and "
+            f"{agree(notes.broke, 'fails', 'fail')} now: this turn's edits broke {them}. Fix {them} and keep "
+            f"the {agree(notes.broke, 'view', 'views')}"
+        )
+    if notes.blank:
+        them = agree(notes.blank, "it", "them")
+        lines.append(
+            f"{label} — {joined(notes.blank)} showed a graphic before this turn's edits and "
+            f"{agree(notes.blank, 'shows', 'show')} none now. If the user did not ask to remove {them}, the "
+            f"edits broke {them}: fix {them}"
+        )
+    if notes.removed:
+        lines.append(
+            f"{label} — this turn's edits removed {joined(notes.removed)}. If the user did not ask for that, "
+            f"put {agree(notes.removed, 'it', 'them')} back; if they did, tell them "
+            f"{agree(notes.removed, 'it is', 'they are')} gone"
+        )
+    return lines
+
+
 def _check_pages(
     store,
     pages: list[_ChangedPage],
@@ -418,6 +472,7 @@ def _check_pages(
     failing: frozenset[PageKey] = frozenset(),
     repairs_used: "dict[PageKey, int] | None" = None,
     failed_views: "dict[PageKey, tuple[CheckedView, ...]] | None" = None,
+    turn_pages: "TurnPages | None" = None,
 ) -> ArtifactLint:
     """Load the changed artifacts' pages in a browser.
 
@@ -465,6 +520,14 @@ def _check_pages(
     measured, fails, even after an unverified check in between: a repair
     fixes a view, it never removes one. The views each failed check
     measured come back in `failed_views`.
+
+    With `turn_pages`, each page with a copy of how the turn found it is
+    sent with that copy while a whole check's time is left of the cell's
+    budget, and the service's comparison follows the page's lines: the
+    views the turn's edits broke, left without a graphic or removed
+    (`_comparison_lines`), each set once a turn (`TurnPages.notes_to_show`).
+    An unverified check names none. The comparisons come back in
+    `comparisons`.
     """
     from anton.core.artifacts import render_check
     from anton.core.artifacts.html_lint import discover_browser, lint_html
@@ -478,6 +541,7 @@ def _check_pages(
     failed_views = failed_views or {}
     repaired: set[PageKey] = set()
     views_of_failed: "dict[PageKey, tuple[CheckedView, ...]]" = {}
+    comparisons: "dict[PageKey, Comparison]" = {}
 
     def _repairs_left_after(page: _ChangedPage) -> int:
         """The repair cells PAGE has left this turn once this check is done.
@@ -561,17 +625,24 @@ def _check_pages(
             messages.append(f"{label} — {_FULLSTACK_PAGE_SKIP}")
             page_checks[page.key(store)] = "unverified"
             continue
+        key = page.key(store)
         remaining = deadline - time.monotonic()
         if remaining < _RENDER_CHECK_MIN_SECONDS:
             outcome = render_check.RenderCheckUnavailable(
                 reason="the browser checks after this cell ran out of time before this page"
             )
         else:
+            previous_html = turn_pages.previous(key) if turn_pages is not None else None
+            if previous_html is not None and remaining < render_check.TIMEOUT_SECONDS:
+                # The service checks the previous page in what is left of its
+                # own deadline, unaware of this one: a request cut short here
+                # would cost the page its own verdict, not just the comparison.
+                _log.debug("comparison skipped: %.0f s left", remaining)
+                previous_html = None
             outcome = render_check.check_file(
                 page.path, cell_sandbox=cell_sandbox, screenshot=screenshot and not shot_failed,
-                timeout=min(render_check.TIMEOUT_SECONDS, remaining),
+                timeout=min(render_check.TIMEOUT_SECONDS, remaining), previous_html=previous_html,
             )
-        key = page.key(store)
         left = _repairs_left_after(page)
         removed = _removed_views(failed_views.get(key, ()), outcome)
         status: "RenderStatus" = "failed" if removed else outcome.status
@@ -579,6 +650,11 @@ def _check_pages(
         failed = status == "failed"
         if failed:
             views_of_failed[key] = tuple(outcome.views)
+        comparison = outcome.comparison
+        if comparison is not None and status != "unverified":
+            # An unverified check names no change: what its comparison lacks
+            # says nothing about the page.
+            comparisons[key] = comparison
         if failed and left <= 0:
             # The page failed with no repair cells left this turn: no
             # findings and no screenshot, nothing that sends the agent back
@@ -599,6 +675,7 @@ def _check_pages(
                     "The views behind them were not checked: say so, and never call them verified, "
                     "tested or working"
                 )
+            messages += _comparison_lines(label, _notes_to_show(turn_pages, key, comparison))
             continue
         if outcome.status == "unverified":
             messages.append(f"{label} — not checked in a browser: {outcome.unverified_reason}")
@@ -627,10 +704,12 @@ def _check_pages(
         if more:
             messages.append(f"{label} — and {more} more distinct findings, not listed")
         if failed:
+            messages += _comparison_lines(label, _notes_to_show(turn_pages, key, comparison))
             messages.append(f"{label} — {_repairs_left_line(left)}")
     return ArtifactLint(
         messages=messages, screenshot=shot, screenshot_page=shot_page, page_checks=page_checks,
         findings_listed=frozenset(findings_listed), repaired=frozenset(repaired), failed_views=views_of_failed,
+        comparisons=comparisons,
     )
 
 
@@ -644,6 +723,7 @@ def lint_changed_artifact_files(
     failing: frozenset[PageKey] = frozenset(),
     repairs_used: "dict[PageKey, int] | None" = None,
     failed_views: "dict[PageKey, tuple[CheckedView, ...]] | None" = None,
+    turn_pages: "TurnPages | None" = None,
 ) -> ArtifactLint:
     """Run the format-appropriate checker on artifact folders this cell
     changed (any content file written, replaced, added or removed since
@@ -657,7 +737,8 @@ def lint_changed_artifact_files(
     asks it for no screenshot. An unverified check of a page in
     `findings_listed_earlier` lists no findings, a page in `failing` is
     held to its repair budget after its `repairs_used`, and a page in
-    `failed_views` to those views (`_check_pages`).
+    `failed_views` to those views. `turn_pages` gives each page its copy of
+    how the turn found it (`_check_pages`).
     """
     linters = _artifact_linters(cell_sandbox=cell_sandbox)
     after = snapshot_existing_artifacts(store)
@@ -694,7 +775,7 @@ def lint_changed_artifact_files(
     checked = _check_pages(
         store, pages, cell_sandbox=cell_sandbox, screenshot=screenshot,
         findings_listed_earlier=findings_listed_earlier,
-        failing=failing, repairs_used=repairs_used, failed_views=failed_views,
+        failing=failing, repairs_used=repairs_used, failed_views=failed_views, turn_pages=turn_pages,
     )
     return replace(checked, messages=messages + checked.messages)
 
@@ -819,6 +900,26 @@ def cell_content_with_lint(text: str, lint: ArtifactLint, *, cell_ok: bool) -> "
     return [{"type": "text", "text": text}, *render_check.screenshot_blocks(lint.screenshot, page=lint.screenshot_page)]
 
 
+async def capture_turn_pages(session: "ChatSession", store) -> None:
+    """Keep this turn's copy of each artifact's main page before a cell or a
+    generate_artifact run may change one (`page_copies.TurnPages.capture`).
+    Off the event loop: the pages can add up to tens of megabytes. A
+    session without the record (a test double) keeps none. Never raises."""
+    import asyncio
+
+    from anton.core.artifacts.page_copies import TurnPages
+
+    turn_pages = getattr(session, "_turn_pages", None)
+    if not isinstance(turn_pages, TurnPages) or store is None:
+        return
+    try:
+        await asyncio.to_thread(
+            turn_pages.capture, store, cell_sandbox=cell_sandbox_of(getattr(session, "_scratchpads", None))
+        )
+    except Exception:
+        _log.warning("keeping the turn's copies of the artifacts' pages failed", exc_info=True)
+
+
 async def check_cell_artifacts(
     session: "ChatSession", *, store, before: dict[str, ArtifactFiles]
 ) -> ArtifactLint:
@@ -836,8 +937,14 @@ async def check_cell_artifacts(
     gets `REPAIR_CELLS` of them per turn. Until a check passes the page,
     every check of it is held to the views the check that first failed it
     measured (`_check_pages`).
+
+    Each page with a copy of how the turn found it is compared with it, and
+    the comparisons are kept for the turn's last lines (`_check_pages`,
+    `TurnPages.record`).
     """
     import asyncio
+
+    from anton.core.artifacts.page_copies import TurnPages
 
     track_edits_since(session, store, before)
     live_app_lines = await _relaunch_live_apps(session, store, before)
@@ -852,13 +959,16 @@ async def check_cell_artifacts(
     repairs_used = dict(used) if isinstance(used, dict) else {}
     measured = getattr(session, "_failed_views", None)
     failed_views = dict(measured) if isinstance(measured, dict) else {}
+    turn_pages = getattr(session, "_turn_pages", None)
+    if not isinstance(turn_pages, TurnPages):
+        turn_pages = None
     try:
         # The checkers take seconds; run them off the event loop.
         lint = await asyncio.to_thread(
             lint_changed_artifact_files, store, before,
             cell_sandbox=cell_sandbox_of(getattr(session, "_scratchpads", None)), screenshot=not refused,
             findings_listed_earlier=findings_listed_earlier,
-            failing=failing, repairs_used=repairs_used, failed_views=failed_views,
+            failing=failing, repairs_used=repairs_used, failed_views=failed_views, turn_pages=turn_pages,
         )
     except Exception:
         # Best-effort: a lint crash must never fail the cell's own result.
@@ -868,6 +978,8 @@ async def check_cell_artifacts(
         session, checks=lint.page_checks, findings_listed=lint.findings_listed,
         repaired=lint.repaired, failed_views=lint.failed_views,
     )
+    if turn_pages is not None:
+        turn_pages.record(lint.comparisons)
     if refused:
         # A service that sends a screenshot it was not asked for.
         return replace(lint, screenshot=None, screenshot_page="", live_app_lines=live_app_lines)
@@ -1985,6 +2097,9 @@ async def handle_scratchpad(
         # an artifact edit the cell makes is attributed below (see
         # `track_edits_since`).
         artifact_store = resolve_artifact_store(session)
+        if artifact_store is not None:
+            # Before anything this cell writes: the pages as the turn found them.
+            await capture_turn_pages(session, artifact_store)
         before_artifacts = (
             snapshot_existing_artifacts(artifact_store)
             if artifact_store is not None
