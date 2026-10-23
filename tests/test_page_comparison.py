@@ -178,3 +178,122 @@ async def test_the_turn_ends_naming_a_view_an_edit_removed(service, project, pol
     ]
     session._scratchpads = SimpleNamespace(cell_sandbox=None)
     assert ChatSession._unverified_page_lines(session) == []
+
+
+# ── Putting the page back ────────────────────────────────────────────────────
+
+_FAILED_MAP = (200, {
+    **_answer("failed", findings=[_BLANK_MAP], views=_VIEWS, unopened=[]),
+    "comparison": _comparison(broken_views=[_BROKE_MAP], **_GLOBE_GONE),
+}, 0.0)
+
+
+def _sandboxed(store: ArtifactStore, policy) -> SimpleNamespace:
+    return _session(
+        _scratchpads=SimpleNamespace(cell_sandbox=policy), _workspace=SimpleNamespace(artifacts_dir=store.root),
+    )
+
+
+async def test_a_page_the_turn_broke_past_its_repair_cells_goes_back_as_it_was(service, project, policy):
+    store, slug = _artifact(project)
+    session = _sandboxed(store, policy)
+    key = tool_handlers.PageKey(slug, "index.html")
+    service.answer(_FAILED_MAP)
+
+    await _cell(session, store, slug, "breaks the map")
+    await _cell(session, store, slug, "first repair")
+    last = await _cell(session, store, slug, "second repair")
+
+    assert last.messages == [f"{slug}/index.html — {tool_handlers._RESTORED}"]
+    assert (store.root / slug / "index.html").read_text() == _BEFORE
+    assert session._page_checks == {key: "passed"}
+    assert session._failed_views == {}
+    # Only the line for the page put back: what the broken version lost is not the user's page any more.
+    assert ChatSession._unverified_page_lines(session) == [
+        "“Control tower”: the edit could not be made safely, so the page is back as it was before this turn."
+    ]
+
+
+async def test_a_page_that_failed_the_same_way_before_the_turn_stays(service, tmp_path):
+    store, slug = _artifact(tmp_path)
+    session = _session()
+    service.answer((200, {
+        **_answer("failed", findings=[_BLANK_MAP], views=_VIEWS, unopened=[]),
+        "comparison": _comparison(previous_status="failed"),
+    }, 0.0))
+
+    for text in ("edit", "first repair"):
+        await _cell(session, store, slug, text)
+    last = await _cell(session, store, slug, "second repair")
+
+    assert last.messages == [f"{slug}/index.html — {tool_handlers._NO_REPAIRS_LEFT}"]
+    assert (store.root / slug / "index.html").read_text() == _PAGE.replace("hi", "second repair")
+
+
+async def test_a_page_that_could_not_be_put_back_says_no_repair_cells_are_left(service, tmp_path, monkeypatch):
+    store, slug = _artifact(tmp_path)
+    session = _session()
+    service.answer(_FAILED_MAP)
+    monkeypatch.setattr(TurnPages, "restore", lambda self, key, store: False)
+
+    for text in ("edit", "first repair"):
+        await _cell(session, store, slug, text)
+    last = await _cell(session, store, slug, "second repair")
+
+    assert last.messages == [f"{slug}/index.html — {tool_handlers._NO_REPAIRS_LEFT}"]
+    assert session._page_checks == {tool_handlers.PageKey(slug, "index.html"): "failed"}
+
+
+async def test_a_page_put_back_without_a_comparison_is_neither_failed_nor_unverified(service, project, policy):
+    """No check this turn vouched for the page the turn found, but it is that
+    page, byte for byte: the turn ends with the line that it went back, and
+    no line that it failed or was not verified."""
+    store, slug = _artifact(project)
+    session = _sandboxed(store, policy)
+    service.answer((200, _answer("failed", findings=[_BLANK_MAP], views=_VIEWS, unopened=[]), 0.0))
+
+    for text in ("edit", "first repair", "second repair"):
+        await _cell(session, store, slug, text)
+
+    assert (store.root / slug / "index.html").read_text() == _BEFORE
+    assert session._page_checks == {}
+    assert session._failed_views == {}
+    assert ChatSession._unverified_page_lines(session) == [
+        "“Control tower”: the edit could not be made safely, so the page is back as it was before this turn."
+    ]
+
+
+async def test_a_page_put_back_forgets_the_views_its_broken_version_failed_on(service, tmp_path):
+    """The page failed before the turn too, so it goes back as failed, but
+    the next edit is held to the views of the page the turn found, not to
+    those of the version anton replaced."""
+    store, slug = _artifact(tmp_path)
+    session = _session()
+    key = tool_handlers.PageKey(slug, "index.html")
+    service.answer((200, {
+        **_answer("failed", findings=[_BLANK_MAP], views=_VIEWS, unopened=[]),
+        "comparison": _comparison(previous_status="failed", broken_views=[_BROKE_MAP]),
+    }, 0.0))
+
+    for text in ("edit", "first repair", "second repair"):
+        await _cell(session, store, slug, text)
+
+    assert (store.root / slug / "index.html").read_text() == _BEFORE
+    assert session._page_checks == {key: "failed"}
+    assert session._failed_views == {}
+
+
+async def test_after_the_page_went_back_a_new_edit_hears_its_blank_view_again(service, tmp_path):
+    store, slug = _artifact(tmp_path)
+    session = _session()
+    blank = (200, {
+        **_answer("failed", findings=[_BLANK_MAP], views=_VIEWS, unopened=[]),
+        "comparison": _comparison(broken_views=[_BROKE_MAP, _BLANK_DETAILS]),
+    }, 0.0)
+    service.answer(blank, blank, blank, _passed(broken_views=[_BLANK_DETAILS]))
+
+    for text in ("edit", "first repair", "second repair"):
+        await _cell(session, store, slug, text)
+    after = await _cell(session, store, slug, "a new edit")
+
+    assert any("“Details” showed a graphic" in message for message in after.messages)

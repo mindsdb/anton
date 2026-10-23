@@ -242,6 +242,13 @@ _NO_REPAIRS_LEFT = (
     "again this turn. Tell the user it failed its browser check and may not display correctly in "
     "the preview"
 )
+# Said instead of `_NO_REPAIRS_LEFT` when anton put the page back as the turn
+# found it (`page_copies.TurnPages.restore`).
+_RESTORED = (
+    "failed the browser check with no repair cells left, so anton put back the page as it was before this "
+    "turn: do not edit it again this turn. Tell the user the edit could not be made safely and the page is as "
+    "it was"
+)
 _FULLSTACK_PAGE_SKIP = (
     "not checked in a browser: a fullstack app's page calls its backend, which "
     "the render check does not run"
@@ -282,6 +289,8 @@ class ArtifactLint:
     # checks, but for a page anton put back: that comparison described the
     # page it replaced.
     comparisons: "dict[PageKey, Comparison]" = field(default_factory=dict)
+    # The pages this cell's checks put back as the turn found them.
+    restored: frozenset[PageKey] = frozenset()
 
 
 _STATUS_RANK = {"passed": 0, "unverified": 1, "failed": 2}
@@ -527,7 +536,9 @@ def _check_pages(
     views the turn's edits broke, left without a graphic or removed
     (`_comparison_lines`), each set once a turn (`TurnPages.notes_to_show`).
     An unverified check names none. The comparisons come back in
-    `comparisons`.
+    `comparisons`. A page that fails with none left goes back to how the turn
+    found it when the turn's edits made it worse (`TurnPages.should_restore`),
+    and its line says so; the pages put back come back in `restored`.
     """
     from anton.core.artifacts import render_check
     from anton.core.artifacts.html_lint import discover_browser, lint_html
@@ -542,6 +553,7 @@ def _check_pages(
     repaired: set[PageKey] = set()
     views_of_failed: "dict[PageKey, tuple[CheckedView, ...]]" = {}
     comparisons: "dict[PageKey, Comparison]" = {}
+    put_back: set[PageKey] = set()
 
     def _repairs_left_after(page: _ChangedPage) -> int:
         """The repair cells PAGE has left this turn once this check is done.
@@ -658,7 +670,23 @@ def _check_pages(
         if failed and left <= 0:
             # The page failed with no repair cells left this turn: no
             # findings and no screenshot, nothing that sends the agent back
-            # to edit it.
+            # to edit it. A page the turn's edits made worse goes back to how
+            # the turn found it.
+            if turn_pages is not None and turn_pages.should_restore(key, comparison):
+                before = turn_pages.status_before(key, comparison)
+                if turn_pages.restore(key, store):
+                    put_back.add(key)
+                    if before == "unverified":
+                        # The page the turn found, which no check this turn
+                        # vouched for: no status, so no line that it failed or
+                        # was not verified.
+                        page_checks.pop(key, None)
+                    else:
+                        page_checks[key] = before
+                    views_of_failed.pop(key, None)
+                    comparisons.pop(key, None)
+                    messages.append(f"{label} — {_RESTORED}")
+                    continue
             messages.append(f"{label} — {_NO_REPAIRS_LEFT}")
             continue
         if outcome.screenshot is not None and (shot is None or (failed and not shot_failed)):
@@ -709,7 +737,7 @@ def _check_pages(
     return ArtifactLint(
         messages=messages, screenshot=shot, screenshot_page=shot_page, page_checks=page_checks,
         findings_listed=frozenset(findings_listed), repaired=frozenset(repaired), failed_views=views_of_failed,
-        comparisons=comparisons,
+        comparisons=comparisons, restored=frozenset(put_back),
     )
 
 
@@ -787,6 +815,7 @@ def record_page_checks(
     findings_listed: frozenset[PageKey] = frozenset(),
     repaired: frozenset[PageKey] = frozenset(),
     failed_views: "dict[PageKey, tuple[CheckedView, ...]] | None" = None,
+    restored: frozenset[PageKey] = frozenset(),
 ) -> None:
     """Remember, for this turn, how each page last fared in a browser, and
     which pages an unverified check already listed findings for.
@@ -800,7 +829,9 @@ def record_page_checks(
     Each page in `repaired` used one more repair cell this turn. A failed
     page keeps the views in `failed_views` from the first check that failed
     it, so a later failed repair can't lower the bar for the next one, and
-    loses them once a check passes it.
+    loses them once a check passes it. Each page in `restored` was put back
+    as the turn found it: it loses its `_failed_views`, and its record unless
+    `checks` names it.
     Best-effort, like `_track_artifact`: a session without the record (a
     test double) loses nothing else.
     """
@@ -821,6 +852,14 @@ def record_page_checks(
                 measured.pop(key, None)
         for key, views in (failed_views or {}).items():
             measured.setdefault(key, views)
+    # A page put back is the one the turn found: the views its broken
+    # version failed on no longer hold it, and with no status known for it
+    # (absent from `checks`) it has no record at all.
+    for key in restored:
+        if isinstance(measured, dict):
+            measured.pop(key, None)
+        if isinstance(record, dict) and key not in checks:
+            record.pop(key, None)
 
 
 def render_screenshots_refused(session: "ChatSession") -> bool:
@@ -976,7 +1015,7 @@ async def check_cell_artifacts(
         return ArtifactLint(live_app_lines=live_app_lines)
     record_page_checks(
         session, checks=lint.page_checks, findings_listed=lint.findings_listed,
-        repaired=lint.repaired, failed_views=lint.failed_views,
+        repaired=lint.repaired, failed_views=lint.failed_views, restored=lint.restored,
     )
     if turn_pages is not None:
         turn_pages.record(lint.comparisons)
