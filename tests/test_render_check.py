@@ -735,9 +735,10 @@ def test_a_page_with_thousands_of_findings_reaches_the_agent_bounded(service, tm
     lint = tool_handlers.lint_changed_artifact_files(store, {slug: tool_handlers.ArtifactFiles()})
 
     shown = render_check.MAX_FINDINGS_SHOWN
-    assert len(lint.messages) == shown + 1
+    assert len(lint.messages) == shown + 2
     assert lint.messages[0] == f"{slug}/index.html — console_error (desktop): missing value for row 0"
-    assert lint.messages[-1] == f"{slug}/index.html — and {10_000 - shown} more distinct findings, not listed"
+    assert lint.messages[-2] == f"{slug}/index.html — and {10_000 - shown} more distinct findings, not listed"
+    assert lint.messages[-1] == f"{slug}/index.html — {tool_handlers._repairs_left_line(tool_handlers.REPAIR_CELLS)}"
 
     check = verifiers.verify_frontend_live(store.root / slug / "index.html", cell_sandbox=None)
     assert check.status == "failed"
@@ -1663,6 +1664,7 @@ def test_a_page_that_failed_gets_no_line_for_the_toggles_the_check_did_not_press
 
     assert [line.removeprefix(f"{slug}/index.html — ") for line in lint.messages] == [
         f"loading_label (desktop): {_LOADING['detail']}",
+        tool_handlers._repairs_left_line(tool_handlers.REPAIR_CELLS),
     ]
 
 
@@ -1740,7 +1742,10 @@ def test_a_cell_that_changes_only_a_file_the_page_loads_checks_the_page(service,
 
     assert [r["body"]["html"] for r in service.requests] == [(store.root / slug / "index.html").read_text()]
     assert lint.page_checks == {(slug, "index.html"): "failed"}
-    assert lint.messages == [f"{slug}/index.html — separate_file (desktop): dashboard_data.js"]
+    assert lint.messages == [
+        f"{slug}/index.html — separate_file (desktop): dashboard_data.js",
+        f"{slug}/index.html — {tool_handlers._repairs_left_line(tool_handlers.REPAIR_CELLS)}",
+    ]
     assert tool_handlers.page_check_lines(store, checks=session._page_checks) == [
         "“Map” failed the browser check, so it may not display correctly in the preview."
     ]
@@ -3419,3 +3424,182 @@ def test_the_skill_says_what_checks_a_hand_built_page_now():
     assert "a hand-built page gets no automatic check" not in skill
     assert "A hand-built page gets the browser check too" in skill
     assert "not checked in a browser" in skill
+
+
+# ── Repairing a page that failed its browser check ───────────────────────────
+
+_ROUTES_ERROR = {
+    "kind": "console_error", "viewport": "desktop",
+    "detail": "console.error: Route network failed: ROUTES is not defined",
+}
+
+
+def _repair_session() -> SimpleNamespace:
+    return SimpleNamespace(
+        _page_checks={}, _unverified_findings_listed=set(), _repair_cells={}, _failed_views={}, _scratchpads=None,
+    )
+
+
+def _failed_build(session, slug: str, page: str, views=_VIEWS) -> None:
+    """generate_artifact's last build of PAGE failed its browser check, which
+    measured VIEWS. The state's primary is the one the artifact held before
+    the run, which a failed run never moved."""
+    from anton.core.artifacts.render_check import CheckedView
+    from anton.core.tools.generate_artifact import engine
+    from anton.core.tools.generate_artifact.state import BrowserCheckFailed
+
+    engine._record_page_check(
+        session,
+        state=SimpleNamespace(slug=slug, browser_status="failed", files_written=[page], is_fullstack=False, primary="index.html"),
+        result=BrowserCheckFailed(
+            page=page, findings=("x",), views=tuple(CheckedView.model_validate(v) for v in views),
+            screenshot=None, error="Frontend verification failed after 2 attempt(s): x",
+        ),
+    )
+
+
+async def _repair_cell(session, store, slug: str, page: str, text: str):
+    before = tool_handlers.snapshot_existing_artifacts(store)
+    (store.root / slug / page).write_text(_PAGE.replace("hi", text))
+    return await tool_handlers.check_cell_artifacts(session, store=store, before=before)
+
+
+@pytest.mark.parametrize("page", ["index.html", "dashboard.html"])
+async def test_a_passing_repair_of_the_page_the_build_wrote_ends_the_turn_without_the_failed_line(
+    service, tmp_path, page
+):
+    """The failed build's record keys on the file its check loaded, so a
+    repair of that file replaces it, whatever the build named the page."""
+    store, slug = _artifact_with_pages(tmp_path, page)
+    session = _repair_session()
+    _failed_build(session, slug, page)
+    key = tool_handlers.PageKey(slug, page)
+    assert session._page_checks == {key: "failed"}
+    service.answer((200, _answer("passed", views=_VIEWS, unopened=[]), 0.0))
+
+    lint = await _repair_cell(session, store, slug, page, "repaired")
+
+    assert lint.messages == [f"{slug}/{page} — loaded in a browser the way the app preview loads it, {_CHECKED}: no problems found"]
+    assert session._page_checks == {key: "passed"}
+    assert session._repair_cells == {key: 1}
+    assert session._failed_views == {}
+    assert tool_handlers.page_check_lines(store, checks=session._page_checks) == []
+
+
+async def test_the_second_failed_repair_lists_no_findings_and_says_none_are_left(service, tmp_path):
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    session = _repair_session()
+    _failed_build(session, slug, "index.html")
+    key = tool_handlers.PageKey(slug, "index.html")
+    service.answer((200, _answer("failed", findings=[_ROUTES_ERROR], views=_VIEWS, unopened=[]), 0.0))
+    label = f"{slug}/index.html"
+
+    first = await _repair_cell(session, store, slug, "index.html", "first repair")
+    second = await _repair_cell(session, store, slug, "index.html", "second repair")
+
+    assert first.messages == [
+        f"{label} — console_error (desktop): {_ROUTES_ERROR['detail']}",
+        f"{label} — {tool_handlers._repairs_left_line(1)}",
+    ]
+    assert first.screenshot is not None
+    assert second.messages == [f"{label} — {tool_handlers._NO_REPAIRS_LEFT}"]
+    assert second.screenshot is None
+    assert session._repair_cells == {key: 2}
+    assert tool_handlers.page_check_lines(store, checks=session._page_checks) == [
+        "“Map” failed the browser check, so it may not display correctly in the preview."
+    ]
+
+
+async def test_a_repair_that_drops_a_view_the_failed_check_measured_fails(service, tmp_path):
+    """The failed build's check measured the page as it opens and behind
+    "Map" and "3D Globe". The repair's check passes, but finds no "3D
+    Globe": the repair removed the view instead of fixing it."""
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    session = _repair_session()
+    _failed_build(session, slug, "index.html")
+    key = tool_handlers.PageKey(slug, "index.html")
+    service.answer((200, _answer("passed", views=_VIEWS[:2], unopened=[]), 0.0))
+
+    lint = await _repair_cell(session, store, slug, "index.html", "no globe")
+
+    label = f"{slug}/index.html"
+    assert lint.messages == [
+        f"{label} — failed: this repair removed views the check that failed the page measured, at desktop and "
+        "phone sizes, behind “3D Globe”. A repair fixes the code a finding names and keeps every view: put them back",
+        f"{label} — {tool_handlers._repairs_left_line(1)}",
+    ]
+    assert session._page_checks == {key: "failed"}
+    # The bar stays where the build's check set it, for the next repair too.
+    assert [view.pressed for view in session._failed_views[key]] == [None, "Map", "3D Globe"]
+
+
+async def test_a_view_the_repairs_check_found_but_had_no_time_to_press_is_not_removed(service, tmp_path):
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    session = _repair_session()
+    _failed_build(session, slug, "index.html")
+    service.answer((200, _answer(
+        "passed", views=_VIEWS[:2], unopened=[{"label": "3D Globe", "reason": _TIME_RAN_OUT}],
+    ), 0.0))
+
+    await _repair_cell(session, store, slug, "index.html", "globe left unpressed")
+
+    assert session._page_checks == {tool_handlers.PageKey(slug, "index.html"): "passed"}
+
+
+async def test_an_unverified_check_in_between_still_holds_the_page_to_the_failed_views(service, tmp_path):
+    """The first repair's check gives no verdict, so the page's last check
+    is unverified, not failed. The next cell drops "3D Globe" and its check
+    passes: it still fails, since no check has passed the page."""
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    session = _repair_session()
+    _failed_build(session, slug, "index.html")
+    key = tool_handlers.PageKey(slug, "index.html")
+    service.answer((503, b"not ready", 0.0), (200, _answer("passed", views=_VIEWS[:2], unopened=[]), 0.0))
+
+    await _repair_cell(session, store, slug, "index.html", "service down")
+    lint = await _repair_cell(session, store, slug, "index.html", "no globe")
+
+    label = f"{slug}/index.html"
+    assert lint.messages == [
+        f"{label} — failed: this repair removed views the check that failed the page measured, at desktop and "
+        "phone sizes, behind “3D Globe”. A repair fixes the code a finding names and keeps every view: put them back",
+        f"{label} — {tool_handlers._repairs_left_line(1)}",
+    ]
+    assert session._page_checks == {key: "failed"}
+
+
+async def test_a_page_that_passed_and_fails_again_counts_the_repairs_it_already_used(service, tmp_path):
+    """A repair passes, then a later edit that turn breaks the page. The page
+    spent one repair cell, so the failed check says one is left, and the
+    next failed repair says none are."""
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    session = _repair_session()
+    _failed_build(session, slug, "index.html")
+    failed = (200, _answer("failed", findings=[_ROUTES_ERROR], views=_VIEWS, unopened=[]), 0.0)
+    service.answer((200, _answer("passed", views=_VIEWS, unopened=[]), 0.0), failed, failed)
+
+    await _repair_cell(session, store, slug, "index.html", "repair passes")
+    broken = await _repair_cell(session, store, slug, "index.html", "a later edit breaks it")
+    last = await _repair_cell(session, store, slug, "index.html", "second repair")
+
+    label = f"{slug}/index.html"
+    assert broken.messages[-1] == f"{label} — {tool_handlers._repairs_left_line(1)}"
+    assert last.messages == [f"{label} — {tool_handlers._NO_REPAIRS_LEFT}"]
+    assert session._repair_cells == {tool_handlers.PageKey(slug, "index.html"): 2}
+
+
+async def test_a_page_built_by_hand_gets_the_same_repair_budget(service, tmp_path):
+    """A page's first failed check isn't a repair, whoever built the page:
+    the cells after it are."""
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    session = _repair_session()
+    key = tool_handlers.PageKey(slug, "index.html")
+    service.answer((200, _answer("failed", findings=[_ROUTES_ERROR], views=_VIEWS, unopened=[]), 0.0))
+
+    built = await _repair_cell(session, store, slug, "index.html", "built by hand")
+    await _repair_cell(session, store, slug, "index.html", "first repair")
+    last = await _repair_cell(session, store, slug, "index.html", "second repair")
+
+    assert built.messages[-1] == f"{slug}/index.html — {tool_handlers._repairs_left_line(2)}"
+    assert session._repair_cells == {key: 2}
+    assert last.messages == [f"{slug}/index.html — {tool_handlers._NO_REPAIRS_LEFT}"]

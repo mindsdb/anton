@@ -14,7 +14,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from anton.core.artifacts.internal_files import (
     API_SPEC_FILENAME,
@@ -43,6 +43,8 @@ from .state import (
     GEN_LOOP_MAX_RETRIES,
     GEN_VERIFY_MAX_RETRIES,
     RUNAPP_MAX_RETRIES,
+    BrowserCheck,
+    BrowserCheckFailed,
     FetchVerdict,
     GenState,
     RequiredData,
@@ -754,10 +756,45 @@ def _read_frontend_html(state: GenState, written: list[str]) -> str | None:
     return entry.read_text(encoding="utf-8") if entry is not None else None
 
 
-async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str | None:
+def _adopt_entry_as_primary(state: GenState, entry_file: Path) -> None:
+    """Point the html-app's primary at the page its build wrote and checked.
+
+    The model may have named the file differently — bring metadata in line
+    with the fact, or the renderer opens the wrong file. Only for the page
+    the run ends with: if a later attempt still runs, its cleanup deletes
+    this file and a primary written now would dangle. The name is the one
+    just checked, not re-guessed from the list: with `partials.html`
+    written before `index.html`, the first `.html` is a file no verifier
+    opened (I-45).
+    """
+    actual = entry_file.relative_to(state.artifact_path).as_posix()
+    if actual != (state.primary or HTML_APP_DEFAULT_PRIMARY):
+        from anton.core.tools.tool_handlers import resolve_artifact_store
+
+        store = resolve_artifact_store(state.session)
+        if store is not None:
+            store.update(state.slug, primary=actual)
+        state.primary = actual
+
+
+class _AttemptCheck(NamedTuple):
+    """An attempt's own browser check and the page it loaded."""
+
+    check: BrowserCheck
+    entry: Path
+
+
+async def _gen_verify_frontend(
+    state: GenState, extra_context: str = ""
+) -> "str | BrowserCheckFailed | None":
     """Generate and verify the page. `extra_context` rides on the first
     kickoff — the browser findings from `_run_and_verify_app` when the
-    served fullstack page failed to load cleanly (S-02)."""
+    served fullstack page failed to load cleanly (S-02).
+
+    An html-app whose last build passed the static checks and failed its
+    browser check ends with `BrowserCheckFailed`: that build's page stays
+    on disk, and the agent repairs it. Every other failure ends with the
+    terminal error string."""
     if state.is_fullstack:
         system = prompts.build_frontend_system_prompt(
             state.artifact_path,
@@ -787,8 +824,13 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
     # The `.html` files the previous attempt reported writing. Known on the
     # verify-failure path only: a loop failure returns a message, not a result.
     stale_html: list[str] = []
+    # This attempt's own browser check and the page it loaded, when the
+    # attempt got that far. Reset every attempt: `state.browser_*` keep an
+    # earlier attempt's values, which can name a page this attempt deleted.
+    last_check: _AttemptCheck | None = None
     for attempt in range(GEN_LOOP_MAX_RETRIES + GEN_VERIFY_MAX_RETRIES + 1):
         state.step_started("generate_frontend", attempt=attempt)
+        last_check = None
         if attempt > 0:
             # With append, a retry would extend the truncated remains of the
             # previous attempt. Delete deterministically: the "first chunk is
@@ -888,6 +930,7 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
                 state.browser_screenshot = live.screenshot
                 state.browser_coverage = live.coverage
                 state.browser_page = entry_file.relative_to(state.artifact_path).as_posix()
+                last_check = _AttemptCheck(check=live, entry=entry_file)
                 if live.status == "failed":
                     failed_shot = live.screenshot
                 if live.status == "unverified":
@@ -908,22 +951,8 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
             errors=list(verdict.errors), warnings=list(verdict.warnings),
         )
         if verdict.ok:
-            # The model may have named the file differently — bring metadata in
-            # line with the fact, or the renderer opens the wrong file. Only after
-            # successful verification: if both attempts fail, the attempt-1 cleanup
-            # deletes the file and a primary written earlier would dangle. The
-            # name is the one that was just verified, not re-guessed from the
-            # list: with `partials.html` written before `index.html`, the first
-            # `.html` is a file no verifier opened (I-45).
             if not state.is_fullstack:
-                actual = entry_file.relative_to(state.artifact_path).as_posix()
-                if actual != (state.primary or HTML_APP_DEFAULT_PRIMARY):
-                    from anton.core.tools.tool_handlers import resolve_artifact_store
-
-                    store = resolve_artifact_store(state.session)
-                    if store is not None:
-                        store.update(state.slug, primary=actual)
-                    state.primary = actual
+                _adopt_entry_as_primary(state, entry_file)
             state.record("verify_frontend", "ok", "; ".join(verdict.warnings))
             state.verify_warnings.extend(f"frontend: {w}" for w in verdict.warnings)
             return None
@@ -936,6 +965,19 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
         "frontend", verify_failures=verify_failures, verdict=verdict,
         last_loop_error=last_loop_error,
     )
+    if verify_failures > GEN_VERIFY_MAX_RETRIES and last_check is not None and last_check.check.status == "failed":
+        # The last build passed the static checks, since the browser check
+        # runs only then, and failed in a browser. Its page is the one left
+        # on disk: the agent repairs that page against these findings.
+        live, entry_file = last_check
+        _adopt_entry_as_primary(state, entry_file)
+        return BrowserCheckFailed(
+            page=entry_file.relative_to(state.artifact_path).as_posix(),
+            findings=tuple(live.verdict.errors),
+            views=live.views,
+            screenshot=live.screenshot,
+            error=state.error,
+        )
     return state.error
 
 
@@ -1565,7 +1607,7 @@ def _stopped_over_budget(state: GenState, detail: str) -> dict:
     }
 
 
-async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
+async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> "dict | str | BrowserCheckFailed":
     """Walk the whole pipeline from wherever this call is entitled to start.
     Meanwhile the check after each cell leaves this artifact's live app
     alone: the run step is the run's only launch, and a cell in one write
@@ -1580,7 +1622,7 @@ async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
         building.discard(state.slug)
 
 
-async def _run(state: GenState, *, entry: str) -> dict | str:
+async def _run(state: GenState, *, entry: str) -> "dict | str | BrowserCheckFailed":
     state.entry = entry
     if state.is_fullstack and (refusal := _fullstack_refusal(state)) is not None:
         # A fullstack artifact is done only once its backend runs: refuse
