@@ -431,19 +431,6 @@ def _removed_views(measured_when_failed: "tuple[CheckedView, ...]", outcome: "Re
     return [view for view in measured_when_failed if view.pressed not in found]
 
 
-def _notes_to_show(
-    turn_pages: "TurnPages | None", key: PageKey, comparison: "Comparison | None"
-) -> "ComparisonNotes":
-    """What COMPARISON names, less the `blank` and `removed` the agent was
-    already shown for KEY this turn (`TurnPages.notes_to_show`)."""
-    from anton.core.artifacts.render_check import comparison_notes
-
-    notes = comparison_notes(comparison)
-    if turn_pages is None or comparison is None or not comparison.informative:
-        return notes
-    return turn_pages.notes_to_show(key, notes)
-
-
 def _comparison_lines(label: str, notes: "ComparisonNotes") -> list[str]:
     """The lines that tell the agent what this turn's edits did to views
     that worked when the turn began."""
@@ -545,6 +532,7 @@ def _check_pages(
     """
     from anton.core.artifacts import render_check
     from anton.core.artifacts.html_lint import discover_browser, lint_html
+    from anton.core.artifacts.page_copies import page_order
 
     messages: list[str] = []
     page_checks: "dict[PageKey, RenderStatus]" = {}
@@ -580,8 +568,14 @@ def _check_pages(
         return metadata[page.slug].primary if metadata[page.slug] is not None else None
 
     def _order(page: _ChangedPage) -> tuple:
-        rel = page.key(store).page
-        return (rel != _primary(page), rel != "index.html", rel)
+        return page_order(page.key(store).page, _primary(page))
+
+    def _notes(key: PageKey, comparison: "Comparison | None") -> "ComparisonNotes":
+        """What COMPARISON names, less what the agent was already shown for
+        KEY this turn (`TurnPages.notes_to_show`)."""
+        if turn_pages is None:
+            return render_check.comparison_notes(comparison)
+        return turn_pages.notes_to_show(key, comparison)
 
     edited_slugs = {page.slug for page in pages if page.edited}
     # Each artifact's main page, its first by `_order`: its primary, else
@@ -709,7 +703,7 @@ def _check_pages(
                     "The views behind them were not checked: say so, and never call them verified, "
                     "tested or working"
                 )
-            messages += _comparison_lines(label, _notes_to_show(turn_pages, key, comparison))
+            messages += _comparison_lines(label, _notes(key, comparison))
             continue
         if outcome.status == "unverified":
             messages.append(f"{label} — not checked in a browser: {outcome.unverified_reason}")
@@ -738,7 +732,7 @@ def _check_pages(
         if more:
             messages.append(f"{label} — and {more} more distinct findings, not listed")
         if failed:
-            messages += _comparison_lines(label, _notes_to_show(turn_pages, key, comparison))
+            messages += _comparison_lines(label, _notes(key, comparison))
             messages.append(f"{label} — {_repairs_left_line(left)}")
     return ArtifactLint(
         messages=messages, screenshot=shot, screenshot_page=shot_page, page_checks=page_checks,
@@ -897,6 +891,11 @@ def record_render_screenshots_refused(session: "ChatSession") -> None:
     session._render_screenshots_refused = True
 
 
+def _display_name(metadata, slug: str) -> str:
+    """The artifact's name for a line the user reads, else its slug."""
+    return metadata.name if metadata is not None and metadata.name.strip() else slug
+
+
 def page_check_lines(store, *, checks: "dict[PageKey, RenderStatus]") -> list[str]:
     """One line for each artifact with a page that did not pass its last
     browser check, naming the artifact, for the end of the agent's final
@@ -912,7 +911,7 @@ def page_check_lines(store, *, checks: "dict[PageKey, RenderStatus]") -> list[st
         if status == "passed":
             continue
         metadata = store.read_metadata(slug) if store is not None else None
-        name = metadata.name if metadata is not None and metadata.name.strip() else slug
+        name = _display_name(metadata, slug)
         if live_apps and status == "unverified" and metadata is not None and metadata.type in _FULLSTACK_TYPES:
             # A live app opens at its own address, never in the preview.
             lines.append(f"“{name}” was not checked in a browser: it is a live app, so open it at its address to check it.")
@@ -953,10 +952,10 @@ async def capture_turn_pages(session: "ChatSession", store) -> None:
     session without the record (a test double) keeps none. Never raises."""
     import asyncio
 
-    from anton.core.artifacts.page_copies import TurnPages
+    from anton.core.artifacts.page_copies import turn_pages_of
 
-    turn_pages = getattr(session, "_turn_pages", None)
-    if not isinstance(turn_pages, TurnPages) or store is None or turn_pages.captured:
+    turn_pages = turn_pages_of(session)
+    if turn_pages is None or store is None or turn_pages.captured:
         return
     try:
         await asyncio.to_thread(
@@ -990,7 +989,7 @@ async def check_cell_artifacts(
     """
     import asyncio
 
-    from anton.core.artifacts.page_copies import TurnPages
+    from anton.core.artifacts.page_copies import turn_pages_of
 
     track_edits_since(session, store, before)
     live_app_lines = await _relaunch_live_apps(session, store, before)
@@ -1005,9 +1004,7 @@ async def check_cell_artifacts(
     repairs_used = dict(used) if isinstance(used, dict) else {}
     measured = getattr(session, "_failed_views", None)
     failed_views = dict(measured) if isinstance(measured, dict) else {}
-    turn_pages = getattr(session, "_turn_pages", None)
-    if not isinstance(turn_pages, TurnPages):
-        turn_pages = None
+    turn_pages = turn_pages_of(session)
     try:
         # The checkers take seconds; run them off the event loop.
         lint = await asyncio.to_thread(
@@ -1528,6 +1525,11 @@ def _record_put_back(session: "ChatSession", key: PageKey, back: _PageBack) -> N
         record_page_checks(session, checks={}, restored=frozenset({key}))
 
 
+def _with_put_back(text: str, restored: _PageBack | None) -> str:
+    """TEXT, ending with `_PAGE_PUT_BACK` when anton put the page back."""
+    return f"{text}\n\n{_PAGE_PUT_BACK}" if restored is not None else text
+
+
 def _rolls_back(result) -> bool:
     """Whether a generate_artifact run's outcome leaves the page to put back
     as it was when the run started: a failure (str) or a budget stop, not a
@@ -1832,23 +1834,26 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     from anton.core.tools.generate_artifact import generate
     from anton.core.tools.generate_artifact.state import ARTIFACT_EFFORT_CEILING
 
-    from anton.core.artifacts.page_copies import TurnPages
+    from anton.core.artifacts.page_copies import turn_pages_of
 
     await capture_turn_pages(session, store)
-    turn_pages = getattr(session, "_turn_pages", None)
-    if not isinstance(turn_pages, TurnPages):
-        turn_pages = None
+    turn_pages = turn_pages_of(session)
     previous_page = turn_pages.main_previous(slug) if turn_pages is not None else None
     # The page as this run found it, which a run that ends without a page
     # leaves behind; it is the turn's copy only when no earlier edit this turn
     # changed the page, and going back to the copy would undo such an edit.
+    # Kept only when it is not the copy (`as_found`): the copy stands in for it.
     run_start: bytes | None = None
+    existed_at_start = False
     as_found = False
     status_at_start: "RenderStatus | None" = None
     views_at_start: "tuple[CheckedView, ...] | None" = None
     if previous_page is not None:
         run_start = await asyncio.to_thread(turn_pages.read_current, previous_page[0], store)
-        as_found = run_start is not None and run_start == turn_pages.copy_bytes(previous_page[0])
+        existed_at_start = run_start is not None
+        as_found = existed_at_start and run_start == turn_pages.copy_bytes(previous_page[0])
+        if as_found:
+            run_start = None
         checks = getattr(session, "_page_checks", None)
         status_at_start = checks.get(previous_page[0]) if isinstance(checks, dict) else None
         measured = getattr(session, "_failed_views", None)
@@ -1863,7 +1868,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         already is: how that page fared, or None when nothing was written.
         Never raises: it also runs from a done-callback, where an exception
         would reach only the event loop's log."""
-        if run_start is None:
+        if not existed_at_start:
             return None
         key = previous_page[0]
         try:
@@ -1930,7 +1935,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         async for marker in _drain_progress(queue):
             yield marker
         result = await task
-        if run_start is not None and _rolls_back(result):
+        if existed_at_start and _rolls_back(result):
             restored = await asyncio.to_thread(_put_back)
         handled = True
     except Exception as exc:  # last-resort: never escalate to the dispatcher
@@ -1938,14 +1943,14 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
             # The run's last write must land before the page goes back.
             task.cancel()
             await asyncio.wait({task})
-        if run_start is not None:
+        if existed_at_start:
             restored = await asyncio.to_thread(_put_back)
         handled = True
         if restored is not None:
             _record_put_back(session, previous_page[0], restored)
         text = _generation_failed(f"generator crashed: {exc}")
         yield ToolOutcome(
-            content=f"{text}\n\n{_PAGE_PUT_BACK}" if restored is not None else text,
+            content=_with_put_back(text, restored),
             ok=False,
             reason=type(exc).__name__,
         )
@@ -1956,7 +1961,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         # → `aclose()` → GeneratorExit): without it, generation would carry on
         # writing files into the artifact folder with nobody left to report to.
         task.cancel()
-        if not handled and run_start is not None:
+        if not handled and existed_at_start:
             task.add_done_callback(_on_abandoned)
     if restored is not None:
         # Over the run's own record of its page (`engine._record_page_check`).
@@ -1975,7 +1980,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         _track_artifact(session, store, slug, summary="Generated artifact files")
         text = _generation_failed(result)
         yield ToolOutcome(
-            content=f"{text}\n\n{_PAGE_PUT_BACK}" if restored is not None else text, ok=False, reason="pipeline"
+            content=_with_put_back(text, restored), ok=False, reason="pipeline"
         )
         return
     if restored is not None:

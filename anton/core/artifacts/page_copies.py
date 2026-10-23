@@ -39,9 +39,6 @@ _log = logging.getLogger(__name__)
 # they fit, so a page that does not fit goes without a copy: it is neither
 # compared nor put back.
 MAX_TURN_COPY_BYTES = 64 * 1024 * 1024
-# A fullstack app's page calls its backend, which the render check does not
-# run, so no check loads it and nothing compares it.
-_FULLSTACK_TYPES = frozenset({"fullstack-stateless-app", "fullstack-stateful-app"})
 
 
 def main_page_name(folder: Path, primary: str | None) -> str | None:
@@ -55,12 +52,18 @@ def main_page_name(folder: Path, primary: str | None) -> str | None:
     for name in (primary, "index.html"):
         if name is not None and _is_content_page(folder, name):
             return name
-    pages = sorted(
+    pages = (
         path.relative_to(folder).as_posix()
         for path, _ in iter_content_files(folder)
         if path.suffix.lower() == ".html"
     )
-    return pages[0] if pages else None
+    return min(pages, key=lambda rel: page_order(rel, primary), default=None)
+
+
+def page_order(rel: str, primary: str | None) -> tuple:
+    """The sort key that puts an artifact's main page first among its pages:
+    its primary, else `index.html`, else the first by name."""
+    return (rel != primary, rel != "index.html", rel)
 
 
 def _is_content_page(folder: Path, name: str) -> bool:
@@ -91,16 +94,29 @@ def _is_content_page(folder: Path, name: str) -> bool:
 
 
 def _read_page(path: Path, *, cell_sandbox: CellSandbox | None) -> bytes | None:
-    """PATH's bytes, read the way `render_check.check_file` reads a page:
-    only where the person's own cells may read, never through a link, never
-    past `render_check.MAX_PAGE_BYTES`. None when it can't be read so."""
+    """PATH's bytes, read the way `render_check.check_file` reads a page
+    (`render_check.read_page_bytes`), or None when it can't be read so."""
     try:
-        real = Path(os.path.realpath(path))
-        if cell_sandbox is not None and not cell_sandbox.allows_read(real):
-            return None
-        return read_bytes_nofollow(real.anchor, real, limit=render_check.MAX_PAGE_BYTES)
+        return render_check.read_page_bytes(path, cell_sandbox=cell_sandbox)
     except OSError:
         return None
+
+
+def _decoded(data: bytes | None) -> str | None:
+    """DATA as UTF-8 text, or None when there is none or it is not UTF-8."""
+    if data is None:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def turn_pages_of(session) -> TurnPages | None:
+    """SESSION's `TurnPages` for this turn, or None when it keeps none (a
+    test double)."""
+    turn_pages = getattr(session, "_turn_pages", None)
+    return turn_pages if isinstance(turn_pages, TurnPages) else None
 
 
 class TurnPages:
@@ -119,7 +135,8 @@ class TurnPages:
         # instead of finding none.
         self._capture_lock = threading.Lock()
         self._captured = False
-        self._copies: dict[PageKey, bytes] = {}
+        # Validated UTF-8, decoded once; it encodes back to the same bytes.
+        self._copies: dict[PageKey, str] = {}
         # Each page's latest comparison whose previous page the service
         # checked, in the order the turn's last lines name the pages.
         self._comparisons: dict[PageKey, Comparison] = {}
@@ -154,14 +171,14 @@ class TurnPages:
 
     def _read_copies(self, store, *, cell_sandbox: CellSandbox | None) -> None:
         """`capture`'s reads, under its lock."""
-        from anton.core.tools.tool_handlers import PageKey
+        from anton.core.tools.tool_handlers import _FULLSTACK_TYPES, PageKey
 
         root = store.root
         if not root.is_dir():
             return
         candidates: list[tuple[int, int, PageKey, Path]] = []
         for child in root.iterdir():
-            if not child.is_dir() or not (child / "metadata.json").is_file():
+            if not child.is_dir():
                 continue
             metadata = store.read_metadata(child.name)
             if metadata is None or metadata.type in _FULLSTACK_TYPES:
@@ -174,33 +191,26 @@ class TurnPages:
             except OSError:
                 continue
             candidates.append((info.st_mtime_ns, info.st_size, PageKey(slug=child.name, page=name), child / name))
-        copies: dict[PageKey, bytes] = {}
+        copies: dict[PageKey, str] = {}
         total = 0
         for _, size, key, path in sorted(candidates, key=lambda candidate: candidate[0], reverse=True):
-            # A page that cannot fit is not read at all; the read below is
-            # still measured, since the page may have grown since.
-            if size > render_check.MAX_PAGE_BYTES or total + size > MAX_TURN_COPY_BYTES:
-                _log.debug("no copy of %s/%s for this turn", key.slug, key.page)
-                continue
-            data = _read_page(path, cell_sandbox=cell_sandbox)
-            if data is not None:
-                try:
-                    data.decode("utf-8")
-                except UnicodeDecodeError:
-                    data = None
-            if data is None or total + len(data) > MAX_TURN_COPY_BYTES:
+            # A page that cannot fit is not read at all; the read is still
+            # measured, since the page may have grown since.
+            fits = size <= render_check.MAX_PAGE_BYTES and total + size <= MAX_TURN_COPY_BYTES
+            data = _read_page(path, cell_sandbox=cell_sandbox) if fits else None
+            text = _decoded(data)
+            if text is None or total + len(data) > MAX_TURN_COPY_BYTES:
                 _log.debug("no copy of %s/%s for this turn", key.slug, key.page)
                 continue
             total += len(data)
-            copies[key] = data
+            copies[key] = text
         with self._lock:
             self._copies.update(copies)
 
     def previous(self, key: PageKey) -> str | None:
         """KEY's page as the turn found it, or None without a copy."""
         with self._lock:
-            data = self._copies.get(key)
-        return None if data is None else data.decode("utf-8")
+            return self._copies.get(key)
 
     def main_previous(self, slug: str) -> tuple[PageKey, str] | None:
         """SLUG's main page as the turn found it, with its key, or None."""
@@ -251,7 +261,8 @@ class TurnPages:
     def copy_bytes(self, key: PageKey) -> bytes | None:
         """KEY's page as the turn found it, byte for byte, or None."""
         with self._lock:
-            return self._copies.get(key)
+            text = self._copies.get(key)
+        return None if text is None else text.encode("utf-8")
 
     def read_current(self, key: PageKey, store) -> bytes | None:
         """KEY's page on disk, read under the store root, never through a
@@ -264,13 +275,24 @@ class TurnPages:
         except OSError:
             return None
 
-    def _write(self, key: PageKey, store, data: bytes, *, before: str) -> bool:
+    def _on_disk_is(self, key: PageKey, store, data: bytes) -> bool:
+        """Whether KEY's page on disk is DATA, byte for byte. The page is
+        read (`read_current`) only when its `lstat` size matches; a page
+        that can't be stat'ed or read differs. Blocks on file I/O."""
+        try:
+            if os.lstat(store.root / key.slug / key.page).st_size != len(data):
+                return False
+        except OSError:
+            return False
+        return self.read_current(key, store) == data
+
+    def _write(self, key: PageKey, store, data: bytes) -> bool:
         """Write DATA over KEY's page through a rename that never follows a
         link. Whether it did; a failure is logged."""
         try:
             replace_bytes_nofollow(store.root, store.root / key.slug / key.page, data)
         except OSError:
-            _log.warning("could not put %s/%s back as it was before %s", key.slug, key.page, before, exc_info=True)
+            _log.warning("could not put %s/%s back", key.slug, key.page, exc_info=True)
             return False
         return True
 
@@ -281,7 +303,7 @@ class TurnPages:
         the lines the agent saw about it are forgotten: they described the
         page anton replaced."""
         data = self.copy_bytes(key)
-        if data is None or not self._write(key, store, data, before="this turn"):
+        if data is None or not self._write(key, store, data):
             return False
         with self._lock:
             self._restored[key] = None
@@ -296,16 +318,16 @@ class TurnPages:
         made, not to how the turn found it, so it does not read as put back
         and its comparisons stay. Blocks on file I/O: call it off the event
         loop."""
-        if self.read_current(key, store) == data:
+        if self._on_disk_is(key, store, data):
             return False
-        return self._write(key, store, data, before="this run")
+        return self._write(key, store, data)
 
     def is_as_found(self, key: PageKey, store) -> bool:
         """Whether KEY's page on disk is, byte for byte, its copy. False
         without a copy or when the page can't be read (`read_current`).
         Blocks on a file read: call it off the event loop."""
         data = self.copy_bytes(key)
-        return data is not None and self.read_current(key, store) == data
+        return data is not None and self._on_disk_is(key, store, data)
 
     def restore_if_changed(self, key: PageKey, store) -> bool:
         """`restore`, unless the page on disk already is its copy: for the
@@ -329,12 +351,17 @@ class TurnPages:
             for key in edited:
                 self._restored.pop(key, None)
 
-    def notes_to_show(self, key: PageKey, notes: ComparisonNotes) -> ComparisonNotes:
-        """NOTES for the agent, less the `blank` and `removed` it was already
-        shown for KEY this turn: a view drawn late reads as blank on every
-        check, and the same line on every cell would send the agent back to
-        fix it each time. A changed set is shown whole. `broke` always
-        stays: the page failed, and its repair cells bound the edits."""
+    def notes_to_show(self, key: PageKey, comparison: Comparison | None) -> ComparisonNotes:
+        """What COMPARISON names for the agent (`comparison_notes`), less the
+        `blank` and `removed` it was already shown for KEY this turn: a view
+        drawn late reads as blank on every check, and the same line on every
+        cell would send the agent back to fix it each time. A changed set is
+        shown whole. `broke` always stays: the page failed, and its repair
+        cells bound the edits. A comparison that says nothing changes
+        nothing."""
+        notes = comparison_notes(comparison)
+        if comparison is None or not comparison.informative:
+            return notes
         shown = (tuple(notes.blank), tuple(notes.removed))
         with self._lock:
             if self._shown.get(key) == shown:
@@ -380,5 +407,6 @@ class TurnPages:
 
 def _artifact_name(store, slug: str) -> str:
     """The artifact's name for a line the user reads, else its slug."""
-    metadata = store.read_metadata(slug) if store is not None else None
-    return metadata.name if metadata is not None and metadata.name.strip() else slug
+    from anton.core.tools.tool_handlers import _display_name
+
+    return _display_name(store.read_metadata(slug) if store is not None else None, slug)

@@ -738,6 +738,23 @@ def _says_busy(response: httpx.Response) -> bool:
         return False
 
 
+class _ReadRefused(PermissionError):
+    """The sandbox policy does not let the person's cells read the page.
+    Its own type, so a refused read is told apart from a file the OS would
+    not open (EACCES)."""
+
+
+def read_page_bytes(path: Path, *, cell_sandbox: CellSandbox | None) -> bytes:
+    """PATH's bytes, read as `check_file` reads a page: only where the
+    person's own cells may read (a `PermissionError` otherwise), never
+    through a link, never past `MAX_PAGE_BYTES` (EFBIG). Raises OSError."""
+    # Resolving a name that agent code is swapping can itself fail.
+    real = Path(os.path.realpath(path))
+    if cell_sandbox is not None and not cell_sandbox.allows_read(real):
+        raise _ReadRefused(f"{real} is outside the files this conversation may read")
+    return read_bytes_nofollow(real.anchor, real, limit=MAX_PAGE_BYTES)
+
+
 def check_file(
     path: Path,
     *,
@@ -761,12 +778,9 @@ def check_file(
     """
     started = time.monotonic()
     try:
-        # Inside the try: resolving a name that agent code is swapping can
-        # itself fail.
-        real = Path(os.path.realpath(path))
-        if cell_sandbox is not None and not cell_sandbox.allows_read(real):
-            return RenderCheckUnavailable(reason="the page is outside the files this conversation may read")
-        data = read_bytes_nofollow(real.anchor, real, limit=MAX_PAGE_BYTES)
+        data = read_page_bytes(path, cell_sandbox=cell_sandbox)
+    except _ReadRefused:
+        return RenderCheckUnavailable(reason="the page is outside the files this conversation may read")
     except OSError as exc:
         if exc.errno == errno.EFBIG:
             return RenderCheckUnavailable(

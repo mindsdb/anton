@@ -1480,7 +1480,7 @@ def _result_shell(state: GenState) -> dict:
 
     changes = comparison_notes(state.comparison)
     if changes.found:
-        shell["changes_from_previous"] = {"broke": changes.broke, "blank": changes.blank, "removed": changes.removed}
+        shell["changes_from_previous"] = changes._asdict()
     # Seen live: the agent presented `<path>/static/index.html` as the
     # entry point of a fullstack app: the
     # port was in the trace, the URL nowhere, and the system prompt's "prefer

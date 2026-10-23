@@ -530,12 +530,13 @@ def _record_page_check(session, *, state, result: "dict | str | BrowserCheckFail
     reads as put back, whatever the comparison says. Any other outcome keeps
     none: the state's comparison may be an earlier attempt's, or a page the
     run renamed, and the page goes back."""
+    from anton.core.artifacts.page_copies import turn_pages_of
     from anton.core.tools.tool_handlers import PageKey, record_page_checks
 
     if isinstance(result, BrowserCheckFailed):
         key = PageKey(slug=state.slug, page=result.page)
         record_page_checks(session, checks={key: "failed"}, failed_views={key: result.views})
-        turn_pages = getattr(session, "_turn_pages", None)
+        turn_pages = turn_pages_of(session)
         if turn_pages is not None:
             turn_pages.record({key: result.comparison} if result.comparison is not None else {}, edited={key})
         return
@@ -556,7 +557,7 @@ def _record_page_check(session, *, state, result: "dict | str | BrowserCheckFail
     )
     if not isinstance(result, dict) or result.get("status", "generated") != "generated":
         return
-    turn_pages = getattr(session, "_turn_pages", None)
+    turn_pages = turn_pages_of(session)
     if turn_pages is None:
         return
     browser_page = getattr(state, "browser_page", "")

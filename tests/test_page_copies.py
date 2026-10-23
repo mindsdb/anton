@@ -366,22 +366,35 @@ def test_a_page_edited_after_it_was_put_back_is_no_longer_restored_without_a_com
 def test_the_same_blank_and_removed_views_are_shown_once_and_broke_always():
     key = PageKey("x", "index.html")
     pages = TurnPages()
+    comparison = _comparison(broken_views=[_BROKE_MAP, _BLANK_DETAILS], removed_views=[{"pressed": "Globe"}])
     notes = ComparisonNotes(broke=["“Map”"], blank=["“Details”"], removed=["“Globe”"])
 
-    assert pages.notes_to_show(key, notes) == notes
-    assert pages.notes_to_show(key, notes) == ComparisonNotes(broke=["“Map”"], blank=[], removed=[])
-    changed = notes._replace(removed=["“Globe”", "“Routes”"])
-    assert pages.notes_to_show(key, changed) == changed
+    assert pages.notes_to_show(key, comparison) == notes
+    assert pages.notes_to_show(key, comparison) == ComparisonNotes(broke=["“Map”"], blank=[], removed=[])
+    changed = comparison.model_copy(update={"removed_controls": ["Routes"]})
+    assert pages.notes_to_show(key, changed) == notes._replace(removed=["“Globe”", "“Routes”"])
+
+
+def test_a_comparison_that_says_nothing_shows_nothing_and_keeps_what_was_shown():
+    key = PageKey("x", "index.html")
+    pages = TurnPages()
+    comparison = _comparison(broken_views=[_BLANK_DETAILS])
+    pages.notes_to_show(key, comparison)
+
+    assert pages.notes_to_show(key, None) == ComparisonNotes(broke=[], blank=[], removed=[])
+    assert pages.notes_to_show(key, _comparison(**_NOT_CHECKED)) == ComparisonNotes(broke=[], blank=[], removed=[])
+    assert pages.notes_to_show(key, comparison).blank == []
 
 
 def test_after_a_restore_the_same_notes_are_shown_again(tmp_path):
     store, _, key, pages = _captured(tmp_path)
+    comparison = _comparison(broken_views=[_BLANK_DETAILS])
     notes = ComparisonNotes(broke=[], blank=["“Details”"], removed=[])
-    pages.notes_to_show(key, notes)
+    pages.notes_to_show(key, comparison)
 
     pages.restore(key, store)
 
-    assert pages.notes_to_show(key, notes) == notes
+    assert pages.notes_to_show(key, comparison) == notes
 
 
 def test_the_turns_last_lines_name_what_it_broke_blanked_and_removed(tmp_path):
