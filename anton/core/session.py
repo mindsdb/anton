@@ -5,6 +5,7 @@ import contextvars
 import functools
 import hashlib
 import httpx2 as httpx
+import inspect
 import random
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field, replace
@@ -2070,11 +2071,18 @@ class ChatSession:
 
         coding_provider = config.llm_client.coding_provider
         coding_conn = coding_provider.export_connection_info()
+        # The live key, so a pad can follow a credential renewed after it
+        # started. Only a real coroutine method qualifies: a provider without
+        # one, or a test double, leaves the pad on the exported key.
+        key_supplier = getattr(coding_provider, "current_api_key", None)
+        if not inspect.iscoroutinefunction(key_supplier):
+            key_supplier = None
         self._scratchpads = ScratchpadManager(
             runtime_factory=config.runtime_factory,
             coding_provider=coding_conn.provider,
             coding_model=config.llm_client.coding_model,
             coding_api_key=coding_conn.api_key or "",
+            coding_api_key_supplier=key_supplier,
             coding_base_url=coding_conn.base_url or "",
             cells=config.cells,
             workspace_path=config.workspace.base if config.workspace else None,
