@@ -3640,7 +3640,41 @@ def test_check_file_sends_the_previous_page(service, tmp_path):
 
 
 def test_the_request_cap_is_the_services_for_two_pages():
-    assert render_check.MAX_BODY_BYTES == 4 * render_check.MAX_PAGE_BYTES + 2048 == 33556480
+    assert render_check.MAX_BODY_BYTES == 2 * render_check.MAX_PAGE_BYTES + 1024 == 16778240
+    assert render_check.MAX_COMPARED_BODY_BYTES == 4 * render_check.MAX_PAGE_BYTES + 2048 == 33556480
+
+
+def test_a_request_with_the_previous_page_is_held_to_the_larger_cap(service, monkeypatch):
+    """The page as it was before the turn doubles what a request may carry,
+    so only such a request gets the larger cap; a request with one page is
+    still refused here past the single-page cap, with a reason."""
+    monkeypatch.setattr(render_check, "MAX_BODY_BYTES", 3 * 1024)
+    monkeypatch.setattr(render_check, "MAX_COMPARED_BODY_BYTES", 16 * 1024)
+    page = "x" * 4096
+
+    alone = check_html(page)
+    compared = check_html(page, previous_html=page)
+
+    assert alone.status == "unverified"
+    assert alone.unverified_reason == (
+        "the page's request is 4 KB once JSON-escaped, over the render check's 0 MB request limit"
+    )
+    assert compared.status == "passed"
+    assert len(service.requests) == 1 and service.requests[0]["body"]["previous_html"] == page
+
+
+def test_a_compared_request_over_the_larger_cap_names_it(service, monkeypatch):
+    monkeypatch.setattr(render_check, "MAX_BODY_BYTES", 1024 * 1024)
+    monkeypatch.setattr(render_check, "MAX_COMPARED_BODY_BYTES", 2 * 1024 * 1024)
+    page = "\x01" * (200 * 1024)
+
+    result = check_html(page, previous_html=page)
+
+    assert result.status == "unverified"
+    assert result.unverified_reason == (
+        "the page's request is 2400 KB once JSON-escaped, over the render check's 2 MB request limit"
+    )
+    assert service.requests == []
 
 
 def test_a_previous_page_over_the_size_limit_is_not_sent(service, monkeypatch):

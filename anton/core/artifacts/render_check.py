@@ -76,10 +76,11 @@ BUSY_RETRY_MIN_SECONDS = 5.0
 MAX_PAGE_BYTES = 8 * 1024 * 1024
 # The service refuses a larger request body with 413; anton does not send
 # one. JSON escaping doubles every quote, backslash and newline of a page,
-# so each of the two pages a request may carry (the page and the page as it
-# was before the turn) needs up to twice its size, plus the rest of the
-# request. The service's own cap is the same.
-MAX_BODY_BYTES = 4 * MAX_PAGE_BYTES + 2048
+# so a request with one page needs up to twice its size plus the rest of
+# the request; one that also carries the page as it was before the turn,
+# twice that. The service's own caps are the same.
+MAX_BODY_BYTES = 2 * MAX_PAGE_BYTES + 1024
+MAX_COMPARED_BODY_BYTES = 4 * MAX_PAGE_BYTES + 2048
 # anton reads at most this much of an error answer, to tell a busy service
 # from one that cannot check.
 MAX_ERROR_BODY_BYTES = 4096
@@ -645,10 +646,11 @@ def check_html(
     body = RenderCheckRequest(
         html=html, screenshot=screenshot, previous_html=previous_html
     ).model_dump_json(exclude_none=True).encode("utf-8")
-    if len(body) > MAX_BODY_BYTES:
+    body_cap = MAX_BODY_BYTES if previous_html is None else MAX_COMPARED_BODY_BYTES
+    if len(body) > body_cap:
         return RenderCheckUnavailable(
             reason=f"the page's request is {len(body) // 1024} KB once JSON-escaped, over the render "
-            f"check's {MAX_BODY_BYTES // (1024 * 1024)} MB request limit"
+            f"check's {body_cap // (1024 * 1024)} MB request limit"
         )
     started = time.monotonic()
     reply = _post(base, body=body, timeout=timeout)
@@ -745,6 +747,7 @@ def check_file(
     timeout: float = TIMEOUT_SECONDS,
 ) -> RenderCheckOutcome:
     """Read the page at `path` and ask the service to load it. Never raises.
+
     `previous_html` goes to the service as `check_html` sends it.
 
     This process reads the file outside the sandbox, so under a policy it
