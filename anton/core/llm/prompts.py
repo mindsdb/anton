@@ -297,14 +297,16 @@ each value of column `key`, filtering the rows shown in a region named \
 tables and text as shown), `rt.update(path, {element_id: new_content})` \
 (replaces those elements' content in any page; a section keeps its heading) \
 and `rt.insert(path, new_content, before=element_id)` (or `after=`). Write \
-your own HTML for anything they do not cover.
+your own HTML for anything they do not cover, wrapped in `rt.Html` (a plain \
+string shows as text).
 - To change an existing report, edit only what the request asks and keep the \
 rest, including the artifact itself, its look and any file the user asked you \
 not to change. Change the saved page in place with rt.update and rt.insert, \
 whether or not report_tools made it, rather than rewriting it.
 - Before you answer, re-read what you saved and compare it with the data. Keep \
 the reply short, since the report holds the detail: the findings, what you \
-checked, and what you did not (for example, that no browser was used).
+checked, and what you did not (for example, that no browser was used). Name \
+only figures and parts the saved page shows.
 
 WORKFLOW:
 1. REGISTER FIRST, always: call `create_artifact(name, description, type, \

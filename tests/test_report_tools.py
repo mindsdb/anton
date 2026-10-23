@@ -74,6 +74,16 @@ def test_table_accepts_dict_rows_and_right_aligns_numbers():
     assert '<th scope="col" class=num>Gap</th>' in html and "<td class=num>40</td>" in html
 
 
+def test_a_wide_table_shows_its_rows_as_cards_on_a_phone():
+    columns = ["Id", "Type", "Site", "Date", "Qty"]
+    wide = rt.table(columns, [["EX-1", "Late Supply", "PLT-PEN", "2026-11-27", 1500]], id="all")
+    assert '<table id="all" class="cards">' in wide
+    assert '<td data-label="Type">Late Supply</td>' in wide and '<td data-label="Qty" class=num>1500</td>' in wide
+    assert "cards" not in rt.table(COLS, ROWS) and "data-label" not in rt.table(COLS, ROWS)
+    # Cells may wrap between words, never inside one: that squeezed columns to a letter.
+    assert "overflow-wrap:anywhere" not in rt._CSS
+
+
 def test_table_rejects_a_row_of_the_wrong_length():
     with pytest.raises(ValueError):
         rt.table(COLS, [["only", "two"]])
@@ -285,6 +295,20 @@ def test_check_reports_markup_shown_as_text(tmp_path):
     rt.check(code)  # inside code or pre it is intended
     plain = rt.save(tmp_path / "plain.html", _page(rt.para("Stock < demand > 0; ids <P1>.")))
     rt.check(plain)
+
+
+def test_check_reports_a_style_script_or_svg_passed_as_a_plain_string(tmp_path):
+    svg = '<svg viewBox="0 0 10 10"><path d="M0 0 L10 10"/></svg>'
+    drawn = rt.save(tmp_path / "svg.html", _page(rt.section("Map", svg, id="map")))
+    with pytest.raises(ValueError, match=r"HTML tags shown as text: \['<svg viewBox.*rt\.Html\(markup\)"):
+        rt.check(drawn)
+    styled = rt.save(tmp_path / "style.html", _page(rt.section("Detail", rt.para("Rows."), id="detail")))
+    rt.insert(styled, "<style>.x{color:red}</style><script>go()</script>", after="detail")
+    assert rt.shown_markup(styled.read_text()) == ["<style>", "</style>", "<script>"]
+    fixed = rt.save(tmp_path / "fixed.html", _page(rt.section("Map", rt.Html(svg), id="map")))
+    rt.insert(fixed, rt.Html("<style>.x{color:red}</style>"), after="map")
+    rt.check(fixed)
+    rt.check(rt.save(tmp_path / "area.html", _page(rt.Html("<textarea>&lt;svg&gt;</textarea>"))))
 
 
 def test_insert_adds_new_parts_to_a_page_not_made_with_these_helpers(tmp_path):
