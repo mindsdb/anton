@@ -307,13 +307,14 @@ service's `comparison` names the views the turn's edits broke, left without
 a graphic or removed. A view that broke fails the page, so its repair cells
 apply. The others are not failures, and the agent hears about each set once
 a turn. When a page the turn's edits made worse fails with no repair cells
-left, anton puts the copy back; so does a `generate_artifact` run on an
-existing artifact that ends any way but with a built page or a page to
-repair, including a run the turn abandons. On a sandboxed deployment the
-turn ends with a line for each page put back and for each view broken,
-blanked or removed (`TurnPages.end_lines`). A service that predates the
-comparison answers such a request 400, and the page reads as unverified:
-the release ships the service and anton together.
+left, anton puts the copy back. So does a `generate_artifact` run that is
+the first to change an existing artifact's page that turn, when it fails,
+stops over budget, crashes or is abandoned by the turn; a run that never
+wrote (cancelled, needs confirmation) puts nothing back. On a sandboxed
+deployment the turn ends with a line for each page put back and for each
+view broken, blanked or removed (`TurnPages.end_lines`). A service that
+predates the comparison answers such a request 400, and the page reads as
+unverified: the release ships the service and anton together.
 
 The service also presses each tab and toggle it finds, and a pass vouches
 only for the views it measured. The cell check's line for a passed page

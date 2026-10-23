@@ -524,7 +524,8 @@ def _record_page_check(session, *, state, result: "dict | str | BrowserCheckFail
     repairs that file replaces this record and is held to those views.
 
     The run's comparison with the page as the turn found it goes to the
-    turn's record too (`TurnPages.record`)."""
+    turn's record too (`TurnPages.record`), under the page the browser check
+    loaded."""
     from anton.core.tools.tool_handlers import PageKey, record_page_checks
 
     if isinstance(result, BrowserCheckFailed):
@@ -552,7 +553,8 @@ def _record_page_check(session, *, state, result: "dict | str | BrowserCheckFail
     turn_pages = getattr(session, "_turn_pages", None)
     comparison = getattr(state, "comparison", None)
     if turn_pages is not None and comparison is not None:
-        turn_pages.record({key: comparison})
+        browser_page = getattr(state, "browser_page", "")
+        turn_pages.record({PageKey(slug=state.slug, page=browser_page) if browser_page else key: comparison})
 
 
 def _restore(state, stored) -> None:

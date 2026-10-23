@@ -574,9 +574,10 @@ def verify_frontend_live(
     sandbox policy refuses. `screenshot=False` asks the service for no
     screenshot. `previous_html`, the page as the turn found it, asks the
     render-check service to compare the two; a loaded page's `comparison`
-    carries the answer. The local browser compares nothing. A loaded page's `coverage` names the views the browser
-    measured: the service's, with the tabs and toggles it did not press, or
-    the page as it opens from the local browser, which presses nothing.
+    carries the answer. The local browser compares nothing. A loaded page's
+    `coverage` names the views the browser measured: the service's, with the
+    tabs and toggles it did not press, or the page as it opens from the
+    local browser, which presses nothing.
 
     `unverified` when no browser loaded the page or the check could not
     vouch for it (no browser configured, a timeout, a library the check

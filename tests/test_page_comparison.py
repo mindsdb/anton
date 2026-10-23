@@ -27,7 +27,7 @@ from anton.core.tools.generate_artifact.state import BrowserCheckFailed
 from anton.core.tools import tool_handlers
 from anton.core.tools.progress import ToolProgress
 from anton.core.tools.registry import ToolOutcome
-from anton.core.tools.tool_handlers import handle_generate_artifact
+from anton.core.tools.tool_handlers import PageKey, handle_generate_artifact
 from tests.test_render_check import (  # noqa: F401  (policy, project and service are fixtures)
     _PAGE,
     _TIMEOUT,
@@ -399,6 +399,19 @@ def test_the_runs_comparison_reaches_the_turns_record(tmp_path):
     ]
 
 
+def test_a_builds_comparison_is_kept_under_the_page_its_check_loaded():
+    session = _session()
+
+    engine._record_page_check(session, state=SimpleNamespace(
+        slug="dash", browser_status="passed", browser_findings_listed=False, files_written=["app/main.html"],
+        is_fullstack=False, primary="index.html", browser_page="app/main.html",
+        comparison=Comparison.model_validate(_comparison()),
+    ), result={"status": "generated"})
+
+    assert session._turn_pages.status_before(PageKey("dash", "app/main.html"), None) == "passed"
+    assert session._turn_pages.status_before(PageKey("dash", "index.html"), None) == "unverified"
+
+
 def test_a_build_left_to_repairs_comparison_reaches_the_turns_record(tmp_path):
     session = _session()
     comparison = Comparison.model_validate(_comparison(broken_views=[_BROKE_MAP]))
@@ -506,13 +519,14 @@ async def test_a_built_page_or_one_left_to_repair_stays(configured, tmp_path, mo
     assert (store.root / slug / "index.html").read_text() == _HALF
 
 
-async def test_a_run_that_never_touched_the_page_writes_nothing(configured, tmp_path, monkeypatch):
+@pytest.mark.parametrize("status", ["needs_confirmation", "cancelled"])
+async def test_a_run_that_never_touched_the_page_writes_nothing(configured, tmp_path, monkeypatch, status):
     store, slug = _artifact(tmp_path)
     page = store.root / slug / "index.html"
     inode = page.stat().st_ino
 
     async def fake_generate(**kw):
-        return {"status": "needs_confirmation", "files_written": [], "summary": "s", "trace": []}
+        return {"status": status, "files_written": [], "summary": "s", "trace": []}
 
     monkeypatch.setattr(gen_pkg, "generate", fake_generate)
     result = await _result(_gen_session(store), slug)
@@ -648,3 +662,57 @@ async def test_a_page_put_back_drops_what_the_replaced_build_changed(configured,
     assert data["restored"] == "The page is back as it was before this run."
     assert "changes_from_previous" not in data
     assert tool_handlers._CHANGES_INSTRUCTION not in data["instruction"]
+
+
+@pytest.mark.parametrize("outcome", [
+    {"status": "needs_confirmation", "files_written": [], "summary": "s", "trace": []},
+    "Frontend verification failed after 2 attempt(s): x",
+    _OVER_BUDGET,
+])
+async def test_a_run_after_an_edit_this_turn_leaves_that_edit(configured, tmp_path, monkeypatch, outcome):
+    store, slug = _artifact(tmp_path)
+    session = _gen_session(store)
+    page = store.root / slug / "index.html"
+    # A cell earlier in the turn: the turn's copies, then its edit.
+    await tool_handlers.capture_turn_pages(session, store)
+    page.write_text("<p>the edit the user asked for</p>")
+
+    async def fake_generate(**kw):
+        return dict(outcome) if isinstance(outcome, dict) else outcome
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    result = await _result(session, slug)
+
+    assert page.read_text() == "<p>the edit the user asked for</p>"
+    assert tool_handlers._PAGE_PUT_BACK not in result.content
+
+
+async def test_a_page_put_back_keeps_how_it_last_fared(configured, tmp_path, monkeypatch):
+    store, slug = _artifact(tmp_path)
+    session = _gen_session(store)
+    key = PageKey(slug, "index.html")
+    # An earlier check this turn found the page as the turn found it passing.
+    session._turn_pages.record({key: Comparison.model_validate(_comparison())})
+    monkeypatch.setattr(gen_pkg, "generate", _run(_OVER_BUDGET))
+
+    await _result(session, slug)
+
+    assert (store.root / slug / "index.html").read_text() == _BEFORE
+    assert session._page_checks[key] == "passed"
+
+
+async def test_a_page_put_back_drops_the_replaced_builds_screenshot_and_browser_fields(
+    configured, tmp_path, monkeypatch
+):
+    store, slug = _artifact(tmp_path)
+    outcome = {**_OVER_BUDGET, "screenshot": object(), "screenshot_page": "index.html", "verified_in_browser": True,
+               "browser_checked": ["the page as it opens"], "browser_unchecked": []}
+    monkeypatch.setattr(gen_pkg, "generate", _run(outcome))
+
+    result = await _result(_gen_session(store), slug)
+
+    assert isinstance(result.content, str)
+    data = json.loads(result.content)
+    for name in ("screenshot", "screenshot_page", "verified_in_browser", "browser_checked", "browser_unchecked"):
+        assert name not in data
+    assert data["instruction"].endswith(tool_handlers._RESTORED_INSTRUCTION)

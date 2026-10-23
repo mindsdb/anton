@@ -223,14 +223,27 @@ class TurnPages:
             self._shown.pop(key, None)
         return True
 
-    def restore_if_changed(self, key: PageKey, store) -> bool:
-        """`restore`, unless the page on disk already is its copy: for the
-        outcomes of a generate_artifact run, which may have left it alone."""
+    def is_as_found(self, key: PageKey, store) -> bool:
+        """Whether KEY's page on disk is, byte for byte, its copy. False
+        without a copy or when the page can't be read: read under the store
+        root, never through a link, never past `render_check.MAX_PAGE_BYTES`.
+        Blocks on a file read: call it off the event loop."""
         with self._lock:
             data = self._copies.get(key)
         if data is None:
             return False
-        if _read_page(store.root / key.slug / key.page, cell_sandbox=None) == data:
+        try:
+            current = read_bytes_nofollow(
+                store.root, store.root / key.slug / key.page, limit=render_check.MAX_PAGE_BYTES
+            )
+        except OSError:
+            return False
+        return current == data
+
+    def restore_if_changed(self, key: PageKey, store) -> bool:
+        """`restore`, unless the page on disk already is its copy: for the
+        outcomes of a generate_artifact run, which may have left it alone."""
+        if self.is_as_found(key, store):
             return False
         return self.restore(key, store)
 

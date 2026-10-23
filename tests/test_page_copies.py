@@ -177,6 +177,18 @@ def test_restore_if_changed_writes_only_a_changed_or_missing_page(tmp_path):
     assert page.read_text() == "<p>before</p>"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="links below the root are refused where dir_fd exists")
+def test_a_link_at_the_page_never_reads_as_the_page_the_turn_found(tmp_path):
+    store, slug, key, pages = _captured(tmp_path)
+    outside = tmp_path / "outside.html"
+    outside.write_text("<p>before</p>")
+    page = store.root / slug / "index.html"
+    page.unlink()
+    page.symlink_to(outside)
+
+    assert pages.is_as_found(key, store) is False
+
+
 @pytest.mark.parametrize(("latest", "earlier", "restore"), [
     (_comparison(), None, True),
     (_comparison(previous_status="failed"), None, False),
