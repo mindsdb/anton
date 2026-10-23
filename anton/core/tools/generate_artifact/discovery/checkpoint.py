@@ -125,6 +125,10 @@ class DiscoveryCheckpoint:
     # `Attachment.to_dict()` records: a resumed run must still know
     # which files the user provided, and which assets were already staged.
     attachments: list[dict] = field(default_factory=list)
+    # The data the calling agent passed in. A repeat call that leaves
+    # `known_data` empty builds from this copy: a source verified by it on
+    # the earlier call must not reach the generators without its rows.
+    known_data: str = ""
 
 
 def load(artifact_path: Path) -> DiscoveryCheckpoint | None:

@@ -42,8 +42,8 @@ if TYPE_CHECKING:
 FSM_DIGRAPH = """\
 digraph artifact_generation {
     rankdir=TB;
-    is_data_enough       [shape=diamond, label="Is there enough data to solve the task?"];
-    define_required_data [shape=box,     label="Determine the required data"];
+    data_verified        [shape=diamond, label="Did gathering verify every declared source?"];
+    define_required_data [shape=box,     label="Determine the data still missing"];
     is_possible_to_fetch [shape=diamond, label="Is it possible to fetch the data?"];
     fetch_data_sample    [shape=box,     label="Fetch a data sample"];
     not_enough_data      [shape=ellipse, label="Error: not enough data"];
@@ -57,13 +57,17 @@ digraph artifact_generation {
     run_app              [shape=box,     label="Launch the application"];
     verify_fullstack     [shape=box,     label="Verify the application is running"];
 
-    // entry node = is_data_enough
-    is_data_enough       -> make_tech_spec       [label="yes"];
-    is_data_enough       -> define_required_data [label="no"];
-    define_required_data -> is_possible_to_fetch;
+    // entry node = data_verified
+    data_verified        -> make_tech_spec       [label="yes"];
+    data_verified        -> define_required_data [label="no"];
+    define_required_data -> make_tech_spec       [label="nothing missing"];
+    define_required_data -> is_possible_to_fetch [label="data missing"];
     is_possible_to_fetch -> fetch_data_sample    [label="yes"];
     is_possible_to_fetch -> not_enough_data      [label="no"];
-    fetch_data_sample    -> is_data_enough;
+    is_possible_to_fetch -> fetch_data_sample    [label="no, once, when connections exist"];
+    fetch_data_sample    -> make_tech_spec       [label="data fetched"];
+    fetch_data_sample    -> define_required_data [label="fetch failed, or after the forced fetch"];
+    fetch_data_sample    -> not_enough_data      [label="iterations exhausted"];
     make_tech_spec       -> is_fullstack;
     is_fullstack         -> make_api_spec        [label="yes"];
     is_fullstack         -> generate_frontend    [label="no"];
@@ -1324,6 +1328,26 @@ def prd_section(state) -> str:
     return f"{PRD_SECTION_HEADER}\n{body}\n{PRD_SECTION_FOOTER}" if body else ""
 
 
+KNOWN_DATA_HEADER = "## Known data (passed in by the calling agent)"
+KNOWN_DATA_FOOTER = "--- end of known data ---"
+
+
+def known_data_section(state) -> str:
+    """`known_data` under its header, or "" when there is none. Passed whole:
+    it is what the calling agent chose to hand over, and a cut snapshot would
+    be built into the page as if it were complete. Closed by a footer for the
+    same reason as the PRD: the agent's markdown may carry `##` headings of
+    its own."""
+    text = (getattr(state, "known_data", "") or "").strip()
+    return f"{KNOWN_DATA_HEADER}\n{text}\n{KNOWN_DATA_FOOTER}" if text else ""
+
+
+def datasources_or_none(state) -> str:
+    """The `## Connected Data Sources` section, or the same header over
+    "(none)" so a step can tell "nothing connected" from a missing section."""
+    return (state.datasource_context or "").strip() or f"{DATASOURCES_HEADER}\n(none)"
+
+
 def _brief_and_notes(state) -> str:
     parts = [f"## Brief\n{state.brief.strip()}"]
     prd = prd_section(state)
@@ -1333,6 +1357,9 @@ def _brief_and_notes(state) -> str:
         parts.append(f"## Data gathered so far\n{state.data_notes.strip()}")
     else:
         parts.append("## Data gathered so far\n(nothing gathered yet)")
+    known = known_data_section(state)
+    if known:
+        parts.append(known)
     if getattr(state, "web_notes", "").strip():
         parts.append(state.web_notes.strip())
     journal = state.journal()
@@ -1341,14 +1368,43 @@ def _brief_and_notes(state) -> str:
     return "\n\n".join(parts)
 
 
+def _data_sources_context(state) -> str:
+    """What the data decisions may draw on: the connections, the public
+    sources and the pads the calling agent already filled."""
+    parts = [datasources_or_none(state)]
+    for extra in (getattr(state, "public_sources", None), getattr(state, "scratchpads_context", "")):
+        if extra and extra.strip():
+            parts.append(extra.strip())
+    return "\n\n".join(parts)
+
+
+def _reasoning_language(user_language: str) -> str:
+    """`reasoning` becomes the "not enough data" text the agent quotes to the
+    user, so it is pinned to the run's language like every other step."""
+    return (
+        "## Language\n"
+        f"Write `reasoning` and any summary in {language_name(user_language)}. "
+        "Keep names of tables, fields, files and APIs as they are."
+    )
+
+
 def build_required_data_prompt(state) -> tuple[str, str]:
     system = (
         _DATA_CONTEXT_HEADER
         + "You are the `define_required_data` node. List exactly which data is "
-        "missing and where each item can be obtained (user's connected data "
-        "sources or public/documented APIs). Be concrete and minimal."
+        "still missing and where each item can be obtained (user's connected "
+        "data sources, public/documented APIs or the scratchpads listed). Be "
+        "concrete and minimal. Data whose values are already under known data "
+        "or gathered data is not missing; a description of data (where it "
+        "lives, its columns) without the values is not the data. Return an "
+        "empty `items` list when nothing is missing.\n\n"
+        + _reasoning_language(state.user_language)
     )
-    user = _brief_and_notes(state) + "\n\nList the required data items."
+    user = (
+        _brief_and_notes(state)
+        + "\n\n" + _data_sources_context(state)
+        + "\n\nList the data items still missing (an empty list when nothing is missing)."
+    )
     return system, user
 
 
@@ -1357,18 +1413,21 @@ def build_can_fetch_prompt(state, required: str) -> tuple[str, str]:
         _DATA_CONTEXT_HEADER
         + "You are the `is_possible_to_fetch` decision node. Given the required "
         "data and the available sources, decide whether the data can actually be "
-        "obtained. If a needed source simply does not exist among the user's "
-        "connections or public sources, it is NOT possible."
+        "obtained. It is possible when a listed connection, public source or "
+        "scratchpad can provide it. It is NOT possible only when none of them can.\n\n"
+        + _reasoning_language(state.user_language)
     )
     user = (
         _brief_and_notes(state)
+        + "\n\n" + _data_sources_context(state)
         + f"\n\n## Required data\n{required}\n\nIs it possible to fetch this data?"
     )
     return system, user
 
 
 def build_fetch_data_system_prompt(
-    artifact_path, *, datasource_context: str = "", public_sources: str = ""
+    artifact_path, *, datasource_context: str = "", public_sources: str = "",
+    user_language: str = "",
 ) -> str:
     parts = [
         _ROLE_COMMON,
@@ -1392,6 +1451,7 @@ def build_fetch_data_system_prompt(
         parts.append(public_sources.strip())
     if datasource_context.strip():
         parts.append(datasource_context.strip())
+    parts.append(_reasoning_language(user_language))
     parts.append(
         "## Output folder\n"
         f"(You will NOT write files here in this step.) Artifact folder: `{artifact_path}`"
@@ -1399,13 +1459,23 @@ def build_fetch_data_system_prompt(
     return "\n\n".join(parts)
 
 
-def build_fetch_data_kickoff(state) -> str:
-    return (
-        _brief_and_notes(state)
-        + "\n\nUse the `scratchpad` tool to fetch a data sample, then call "
+def build_fetch_data_kickoff(state, required_text: str = "") -> str:
+    # The list goes here in full: the journal cuts each step to
+    # JOURNAL_DETAIL_MAX characters. The pads go here too, because the
+    # single-scratchpad guard challenges a new name only once per session
+    # and a fetch in a fresh pad would not see the agent's data.
+    parts = [_brief_and_notes(state)]
+    if required_text.strip():
+        parts.append(f"## Data to fetch in this step\n{required_text.strip()}")
+    pads = (getattr(state, "scratchpads_context", "") or "").strip()
+    if pads:
+        parts.append(pads)
+    parts.append(
+        "Use the `scratchpad` tool to fetch a data sample, then call "
         "`finish` with a precise summary of the scratchpads/cells and the "
         "schema/sample you observed."
     )
+    return "\n\n".join(parts)
 
 
 # ---------------------------------------------------------------------------

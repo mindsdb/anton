@@ -421,7 +421,9 @@ async def generate(
         primary=primary,
         user_request=user_request,
         agent_understanding=agent_understanding,
-        known_data=known_data,
+        # Scrubbed once here: it reaches every step's prompt and is saved in
+        # discovery.json, and the agent may have pasted a credential with it.
+        known_data=scrub_credentials(known_data),
         user_preferences=user_preferences,
         user_language=user_language,
         datasource_catalog=_datasource_catalog(session),
@@ -548,6 +550,10 @@ def _restore(state, stored) -> None:
         state.attachments = [
             a for a in (Attachment.from_dict(d) for d in stored.attachments) if a is not None
         ]
+    # Before the fingerprint: the saved fingerprint was taken over this same
+    # text, so a call that omits it is not a change.
+    if not (state.known_data or "").strip():
+        state.known_data = stored.known_data
     state.call_changed = stored.call_fingerprint != cp.call_fingerprint(
         state.agent_understanding, state.known_data, state.user_preferences,
         state.user_language,
@@ -805,9 +811,12 @@ async def _run_loop(
     Returns a result dict ``{files_written, rounds_used, summary,
     scratchpad_execs}`` on success, or a plain error string on failure.
     ``scratchpad_execs`` records every scratchpad ``exec`` the loop ran —
-    ``{name, code, output}`` per call, leaving out a cell that never ran
+    ``{name, code, output, ok}`` per call (``ok`` False for a cell the
+    runtime reported as failed), leaving out a cell that never ran
     (``CELL_NOT_RUN_REASONS``) — so callers can hand the exact data-access
-    code that ran to later FSM steps.
+    code that ran to later FSM steps. With ``require_files=False`` a loop
+    that ends without ``finish`` still returns the dict, ``finished`` False,
+    so the cells it ran survive.
 
     ``spend``, when given, is the run's `SpendGuard`. Once the turn's ceiling
     is reached the loop tells the model to close its file and stop, and gives
@@ -987,6 +996,16 @@ async def _run_loop(
 
         if not response.tool_calls:
             tail = (response.content or "").strip()
+            if not require_files:
+                # A fetch that ended in prose still ran its cells; they are
+                # what the caller judges, not the missing `finish`.
+                return {
+                    "files_written": files_written,
+                    "rounds_used": round_idx + 1,
+                    "summary": tail[:300],
+                    "scratchpad_execs": scratchpad_execs,
+                    "finished": False,
+                }
             return (
                 f"generator stopped without writing files "
                 f"(round {round_idx + 1}/{MAX_ROUNDS}). "
@@ -1058,6 +1077,10 @@ async def _run_loop(
                             "name": str(inp.get("name") or ""),
                             "code": str(inp.get("code") or ""),
                             "output": sub_tools.result_text(content),
+                            # A cell the runtime reported as failed is no
+                            # working access code: the fetch verdict and the
+                            # notes renderer read this.
+                            "ok": getattr(outcome, "ok", None) is not False,
                         }
                     )
                 trace.scratchpad(node=node_label, input=inp, output=content)
@@ -1096,7 +1119,7 @@ async def _run_loop(
         # complete 48 KB page was deleted and regenerated because the model
         # burned its last rounds self-checking). The
         # `finished` flag tells the caller how the loop ended.
-        if not files_written:
+        if not files_written and require_files:
             return (
                 f"generator exceeded round budget ({MAX_ROUNDS}) without "
                 "writing any files."

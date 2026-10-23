@@ -436,3 +436,43 @@ def test_the_default_brief_is_the_confirm_variant():
     assert "- Proposals — one line per `assumption`" in text
     assert "End with two short lines" in text
     assert "- Assumptions —" not in text
+
+
+_SITES = "site,lat,lon\nToronto,43.7,-79.4"
+
+
+async def test_redraw_lets_a_new_source_whose_rows_are_in_known_data_count_as_verified(tmp_path):
+    state = _state(tmp_path, known_data=_SITES)
+    state.declared_sources = ["orders"]
+    state.session._llm.plan = AsyncMock(return_value=_redraw_response(
+        "## Goal\nRedrawn.",
+        data_sources=["orders", "sites"],
+        data_findings=[{"source": "sites", "verified_by": "known_data"}],
+    ))
+    await brief.redraw_brief(state)
+    assert state.unverified_sources == []
+
+
+async def test_redraw_keeps_a_source_that_was_still_unverified(tmp_path):
+    state = _state(tmp_path)
+    state.declared_sources = ["orders"]
+    state.unverified_sources = ["orders"]
+    state.session._llm.plan = AsyncMock(return_value=_redraw_response(
+        "## Goal\nRedrawn.", data_sources=["orders", "returns"],
+    ))
+    await brief.redraw_brief(state)
+    assert state.unverified_sources == ["orders", "returns"]
+
+
+async def test_redraw_to_a_fullstack_type_does_not_honour_the_mark(tmp_path):
+    state = _state(tmp_path, known_data=_SITES)
+    state.declared_sources = []
+    state.session._llm.plan = AsyncMock(return_value=_redraw_response(
+        "## Goal\nRedrawn.",
+        artifact_type="fullstack-stateless-app",
+        data_sources=["sites"],
+        data_findings=[{"source": "sites", "verified_by": "known_data"}],
+    ))
+    await brief.redraw_brief(state)
+    assert state.final_artifact_type == "fullstack-stateless-app"
+    assert state.unverified_sources == ["sites"]

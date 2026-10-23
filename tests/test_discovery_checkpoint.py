@@ -22,6 +22,7 @@ def _cp(**over) -> cp.DiscoveryCheckpoint:
         web_notes="- https://example.com/x — Title",
         assumptions=["dark theme"],
         open_points=["count cancelled orders?"],
+        known_data="site,lat\nToronto,43.7",
     )
     base.update(over)
     return cp.DiscoveryCheckpoint(**base)
@@ -110,6 +111,14 @@ def test_load_defaults_the_lists_a_pre_feature_file_lacks(tmp_path: Path):
     loaded = cp.load(tmp_path)
     assert loaded is not None
     assert loaded.assumptions == [] and loaded.open_points == []
+
+
+def test_load_defaults_known_data_for_a_file_written_before_it(tmp_path: Path):
+    payload = {"pipeline_stage": cp.STAGE_PRD_WRITTEN, "brief_markdown": "## Goal"}
+    (tmp_path / DISCOVERY_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
+    loaded = cp.load(tmp_path)
+    assert loaded is not None
+    assert loaded.known_data == ""
 
 
 # ── entry decision ──────────────────────────────────────────────────────────
