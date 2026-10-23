@@ -505,6 +505,7 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
   ```python
   todos = Collection(get_store(), "todos")   # built inside the route
   await todos.put("id1", {"text": "buy milk"})
+  item = await todos.get("id1")    # None if missing; an item written by put also carries pk, sk, _key, _v
   items = await todos.list()
   n = await Collection(get_store(), "counters").increment("visits", field="n")
   ```
@@ -513,6 +514,27 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
   is read back ONLY through the same `Collection` (`get`/`list`) — never
   with raw `store.get(...)`/`store.query(...)` on your own pk/sk, which
   finds nothing. Pick one style per piece of data and stick to it.
+- CHANGE A STORED DOCUMENT by reading it, modifying it and putting it back
+  with the `_v` it was read with. If another request wrote in between, the
+  put raises `ConditionalCheckFailed` and writes nothing, instead of
+  silently overwriting that write; answer 409. Handle a missing document
+  first, and make sure some endpoint creates it, e.g. a "new game" route
+  calling `await games.put("current", new_game(), if_not_exists=True)`;
+  until then this route answers 404:
+  ```python
+  from fastapi import HTTPException
+  from anton_state import ConditionalCheckFailed
+
+  games = Collection(get_store(), "games")
+  game = await games.get("current")
+  if game is None:
+      raise HTTPException(status_code=404, detail="no game")
+  game["moves"].append(cell)
+  try:
+      await games.put("current", game, if_version=game["_v"])
+  except ConditionalCheckFailed:
+      raise HTTPException(status_code=409, detail="state changed, reload")
+  ```
   Low-level `store` methods (all async; there is NO `scan()` and NO secondary
   indexes — `query` has no `index=` argument):
   * `await store.get(pk, sk=None)` → one item or `None`
@@ -521,7 +543,7 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
   * `await store.delete(pk, sk=None)`
   * `await store.query(pk, *, sk_prefix=None, filters=None, limit=None)`
   * `await store.increment(pk, sk=None, *, field, by=1)` — atomic counter;
-    do NOT hand-roll read-modify-write
+    never read-modify-write a counter by hand
   * `await store.update(pk, sk=None, *, set_fields=None, add_fields=None,
     if_version=None)` — atomic partial update
 - An item that `increment`/`update` CREATES carries NO `pk`/`sk` attributes
@@ -1212,24 +1234,42 @@ def build_backend_kickoff(
 FULLSTACK_FRONTEND_TARGET = "static/index.html"
 
 
-def build_frontend_system_prompt(artifact_path: Path, *, user_language: str = "") -> str:
+# A live app's page opens at its own address, whose content security policy
+# loads scripts from one host only, so the verifier fails any other script.
+_LIVE_APP_SCRIPTS = (
+    "## Live app scripts\n"
+    "This app runs as a live app, whose content security policy loads scripts and "
+    "stylesheets only from `https://cdn.jsdelivr.net`, and images and fonts only from the "
+    "page itself. A script from any other host, or one written as `//cdn.jsdelivr.net/...`, "
+    "fails the step instead of warning, in a `<script src>`, an import or an import map "
+    "alike: load every library as `https://cdn.jsdelivr.net/npm/<package>@<version>/...`."
+)
+
+
+def build_frontend_system_prompt(
+    artifact_path: Path, *, live_app: bool = False, user_language: str = ""
+) -> str:
     # `artifact_path` is not quoted, for the same reason as in the html-app
     # builder: every path the model writes is relative to the artifact root.
     target = FULLSTACK_FRONTEND_TARGET
-    return "\n\n".join(
-        [
-            _gen_html_task(target, fullstack=True),
-            _gen_html_inputs(fullstack=True),
-            _gen_html_workflow(target, fullstack=True),
-            _gen_html_output_protocol(target),
-            _GEN_SIZE_RULES,
-            _verifier_contract(served=True),
-            "## Fullstack rules\n" + _FRONTEND_RULES,
-            "## Design rules\n" + _DESIGN_RULES,
-            _GEN_TOOLS,
-            _ui_language(user_language),
-        ]
-    )
+    contract = _verifier_contract(served=True)
+    sections = [
+        _gen_html_task(target, fullstack=True),
+        _gen_html_inputs(fullstack=True),
+        _gen_html_workflow(target, fullstack=True),
+        _gen_html_output_protocol(target),
+        _GEN_SIZE_RULES,
+        contract,
+        "## Fullstack rules\n" + _FRONTEND_RULES,
+        "## Design rules\n" + _DESIGN_RULES,
+        _GEN_TOOLS,
+        _ui_language(user_language),
+    ]
+    if live_app:
+        # Right after the contract it tightens. Without live apps the prompt
+        # is as it was, byte for byte.
+        sections.insert(sections.index(contract) + 1, _LIVE_APP_SCRIPTS)
+    return "\n\n".join(sections)
 
 
 def build_frontend_kickoff(

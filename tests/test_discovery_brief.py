@@ -15,6 +15,7 @@ from anton.core.interaction.elicit import AskAnswer
 from anton.core.llm.provider import LLMResponse, ToolCall, Usage
 from anton.core.tools.generate_artifact.discovery import brief
 from anton.core.tools.generate_artifact.discovery.state import PrdState
+from tests.streaming_llm import StreamingLLM
 
 
 def _response(content: str) -> LLMResponse:
@@ -29,7 +30,7 @@ def _state(artifact_path: Path, **over) -> PrdState:
     # reach that branch.
     base = dict(
         session=SimpleNamespace(
-            _llm=SimpleNamespace(plan=AsyncMock()),
+            _llm=StreamingLLM(plan=AsyncMock()),
             question_count=0,
             elicitor=None,
             emit=AsyncMock(),
@@ -159,6 +160,18 @@ async def test_show_and_confirm_logs_a_node_per_outcome(monkeypatch):
     state.brief = "## Goal\n..."
     await brief.show_and_confirm(state)
     trace.node.assert_called_once_with("show_and_confirm", "accepted", detail="user picked accept")
+
+
+async def test_show_and_confirm_timeout_is_unconfirmed_not_cancelled(monkeypatch):
+    """A user who stepped away did not decline: their later Accept on the
+    still-open card has to resume the run, not find it cancelled."""
+    async def fake_elicit(session, request):
+        return AskAnswer(status="timeout")
+
+    monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_elicit)
+    state = _state(Path("/tmp/x"))
+    state.brief = "## Goal\n..."
+    assert await brief.show_and_confirm(state) == "unconfirmed"
 
 
 @pytest.mark.parametrize("status", ["limit", "unavailable", "error"])

@@ -230,7 +230,7 @@ async def test_the_verifier_checks_are_unchanged(tmp_path, monkeypatch, parent_e
     pythonpath = str(Path(tempfile.gettempdir()) / "anton_state_pp")
     assert calls == [
         (
-            ("/venv/bin/python", "-m", "py_compile", "backend.py"),
+            ("/venv/bin/python", "-I", "-B", "-X", "utf8", "-c", verifiers._SYNTAX_CHECK_SCRIPT),
             {
                 "cwd": str(artifact),
                 "stdout": asyncio.subprocess.PIPE,
@@ -238,12 +238,12 @@ async def test_the_verifier_checks_are_unchanged(tmp_path, monkeypatch, parent_e
             },
         ),
         (
-            ("/venv/bin/python", "-c", verifiers._INTROSPECT_SCRIPT),
+            ("/venv/bin/python", "-B", "-c", verifiers._INTROSPECT_SCRIPT),
             {
                 "cwd": str(artifact),
                 "stdout": asyncio.subprocess.PIPE,
                 "stderr": asyncio.subprocess.PIPE,
-                "env": {**_environ(), "PYTHONPATH": pythonpath},
+                "env": {**_environ(), "PYTHONPATH": pythonpath, "PYTHONDONTWRITEBYTECODE": "1"},
             },
         ),
     ]
@@ -280,6 +280,7 @@ async def test_the_backend_launch_is_unchanged(tmp_path, monkeypatch, parent_env
         FROM_DOTENV="1",
         DS_PG_MAIN__PASSWORD="artifact-ds",
         PYTHONPATH=str(Path(tempfile.gettempdir()) / "anton_state_pp"),
+        PYTHONDONTWRITEBYTECODE="1",
     )
     assert set(kwargs) == {"cwd", "stdout", "stderr", "stdin", "preexec_fn", "env"}
     assert kwargs["cwd"] == str(folder)

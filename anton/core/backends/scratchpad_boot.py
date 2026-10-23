@@ -13,6 +13,8 @@ from anton.core.backends.wire import (
     MISSING_MODULE_HINT,
     RESULT_START,
     RESULT_END,
+    USAGE_MARKER,
+    USAGE_MARKER_ENV,
     heal_surrogate_source,
 )
 
@@ -520,9 +522,20 @@ if _scratchpad_model:
             set_trace_context,
         )
 
+        _send_usage = os.environ.get(USAGE_MARKER_ENV) == "1"
+
+        def _send_usage_to_host(record):
+            # One locked line, like every other _real_stdout writer (see _wire_lock).
+            with _wire_lock:
+                _real_stdout.write(USAGE_MARKER + " " + json.dumps(record, default=str) + "\n")
+                _real_stdout.flush()
+
         def _new_llm_provider():
             """Build a provider from the pad's model settings. The only place one is built."""
-            return _ProviderClass(**_llm_provider_kwargs)
+            provider = _ProviderClass(**_llm_provider_kwargs)
+            if _send_usage:
+                provider.usage_sink = _send_usage_to_host
+            return provider
 
         # Built at boot so a bad setting fails here, leaving the helpers
         # undefined, and so web_search() can ask native_web_tools() without a
