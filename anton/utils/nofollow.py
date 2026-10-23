@@ -216,31 +216,7 @@ def replace_text_nofollow(
     someone else's file) is unlinked first and the file is created fresh, so
     the write never lands in an existing file.
     """
-    parts = relative_parts(root, path)
-    tmp_name = parts[-1] + ".tmp"
-    if _IS_WINDOWS:
-        target = Path(path)
-        if create_parents:
-            target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(tmp_name)
-        tmp.write_text(text, encoding="utf-8")
-        tmp.replace(target)
-        return
-    with opened_dir_nofollow(root, parts[:-1], create=create_parents) as dir_fd:
-        try:
-            os.unlink(tmp_name, dir_fd=dir_fd)
-        except FileNotFoundError:
-            pass
-        fd = _open_at(
-            tmp_name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC,
-            0o666,
-            dir_fd=dir_fd,
-            shown=Path(path).with_name(tmp_name),
-        )
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-        os.replace(tmp_name, parts[-1], src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    _replace_nofollow(root, path, text, create_parents=create_parents, regular_only=False)
 
 
 def replace_bytes_nofollow(root: Path | str, path: Path | str, data: bytes) -> None:
@@ -251,24 +227,39 @@ def replace_bytes_nofollow(root: Path | str, path: Path | str, data: bytes) -> N
     folder): the rename would replace the link rather than what it points
     to, and a caller putting a file back means the file it read.
     """
+    _replace_nofollow(root, path, data, create_parents=False, regular_only=True)
+
+
+def _replace_nofollow(
+    root: Path | str, path: Path | str, data: str | bytes, *, create_parents: bool, regular_only: bool
+) -> None:
+    """The write behind `replace_text_nofollow` (``str``, as UTF-8) and
+    `replace_bytes_nofollow` (``bytes``); ``regular_only`` refuses a
+    ``path`` that holds anything but a regular file."""
     parts = relative_parts(root, path)
     tmp_name = parts[-1] + ".tmp"
     if _IS_WINDOWS:
         target = Path(path)
-        if target.is_symlink() or (target.exists() and not target.is_file()):
+        if regular_only and (target.is_symlink() or (target.exists() and not target.is_file())):
             raise OSError(errno.EINVAL, "not a regular file", os.fspath(path))
+        if create_parents:
+            target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_name(tmp_name)
-        tmp.write_bytes(data)
+        if isinstance(data, str):
+            tmp.write_text(data, encoding="utf-8")
+        else:
+            tmp.write_bytes(data)
         tmp.replace(target)
         return
-    with opened_dir_nofollow(root, parts[:-1]) as dir_fd:
-        try:
-            held = os.stat(parts[-1], dir_fd=dir_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            pass
-        else:
-            if not stat.S_ISREG(held.st_mode):
-                raise OSError(errno.EINVAL, "not a regular file", os.fspath(path))
+    with opened_dir_nofollow(root, parts[:-1], create=create_parents) as dir_fd:
+        if regular_only:
+            try:
+                held = os.stat(parts[-1], dir_fd=dir_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                if not stat.S_ISREG(held.st_mode):
+                    raise OSError(errno.EINVAL, "not a regular file", os.fspath(path))
         try:
             os.unlink(tmp_name, dir_fd=dir_fd)
         except FileNotFoundError:
@@ -280,7 +271,8 @@ def replace_bytes_nofollow(root: Path | str, path: Path | str, data: bytes) -> N
             dir_fd=dir_fd,
             shown=Path(path).with_name(tmp_name),
         )
-        with os.fdopen(fd, "wb") as handle:
+        handle = os.fdopen(fd, "w", encoding="utf-8") if isinstance(data, str) else os.fdopen(fd, "wb")
+        with handle:
             handle.write(data)
         os.replace(tmp_name, parts[-1], src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
 
