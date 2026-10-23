@@ -40,6 +40,15 @@ _log = logging.getLogger(__name__)
 # compared nor put back.
 MAX_TURN_COPY_BYTES = 64 * 1024 * 1024
 
+# The artifact types of a fullstack app, whose page the render-check service
+# does not load.
+FULLSTACK_TYPES = frozenset({"fullstack-stateless-app", "fullstack-stateful-app"})
+
+
+def display_name(metadata, slug: str) -> str:
+    """The artifact's name for a line the user reads, else its slug."""
+    return metadata.name if metadata is not None and metadata.name.strip() else slug
+
 
 def main_page_name(folder: Path, primary: str | None) -> str | None:
     """The artifact's main page in FOLDER, as the cell check picks it: its
@@ -171,17 +180,17 @@ class TurnPages:
 
     def _read_copies(self, store, *, cell_sandbox: CellSandbox | None) -> None:
         """`capture`'s reads, under its lock."""
-        from anton.core.tools.tool_handlers import _FULLSTACK_TYPES, PageKey
+        from anton.core.tools.tool_handlers import PageKey
 
         root = store.root
         if not root.is_dir():
             return
         candidates: list[tuple[int, int, PageKey, Path]] = []
         for child in root.iterdir():
-            if not child.is_dir():
+            if not child.is_dir() or not (child / "metadata.json").is_file():
                 continue
             metadata = store.read_metadata(child.name)
-            if metadata is None or metadata.type in _FULLSTACK_TYPES:
+            if metadata is None or metadata.type in FULLSTACK_TYPES:
                 continue
             name = main_page_name(child, metadata.primary)
             if name is None:
@@ -407,6 +416,4 @@ class TurnPages:
 
 def _artifact_name(store, slug: str) -> str:
     """The artifact's name for a line the user reads, else its slug."""
-    from anton.core.tools.tool_handlers import _display_name
-
-    return _display_name(store.read_metadata(slug) if store is not None else None, slug)
+    return display_name(store.read_metadata(slug) if store is not None else None, slug)

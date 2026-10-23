@@ -95,6 +95,24 @@ def test_no_copy_of_a_fullstack_page_a_page_over_the_limit_or_one_not_utf8(tmp_p
     assert [pages.main_previous(slug) is not None for slug in (app, big, latin, ok)] == [False, False, False, True]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="symbolic links need privileges on Windows")
+def test_a_folder_without_metadata_is_skipped_without_a_warning(tmp_path, caplog):
+    store = ArtifactStore(tmp_path / "artifacts")
+    slug = _artifact(store)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "index.html").write_text("<p>other</p>")
+    os.symlink(elsewhere, store.root / "linked")
+    (store.root / "stray").mkdir()
+
+    pages = TurnPages()
+    with caplog.at_level("DEBUG"):
+        pages.capture(store, cell_sandbox=None)
+
+    assert not [record for record in caplog.records if record.levelname in ("WARNING", "ERROR")]
+    assert pages.main_previous(slug) is not None
+
+
 def test_no_copy_of_a_page_the_persons_cells_may_not_read(tmp_path):
     store = ArtifactStore(tmp_path / "artifacts")
     slug = _artifact(store)

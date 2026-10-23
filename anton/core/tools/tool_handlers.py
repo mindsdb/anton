@@ -9,6 +9,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, NamedTuple
 
+from anton.core.artifacts.page_copies import FULLSTACK_TYPES as _FULLSTACK_TYPES
+from anton.core.artifacts.page_copies import display_name as _display_name
 from anton.core.backends.base import Cell
 from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
 from anton.core.tools.registry import ToolOutcome
@@ -230,9 +232,6 @@ _SANDBOX_BROWSER_SKIP = (
     "which starts no browser"
 )
 _SANDBOX_OFFICE_SKIP = "LibreOffice check skipped: agent code runs in a sandbox on this deployment"
-# Said on each page of a fullstack app a cell edits, which the render-check
-# service does not load (`_check_pages`).
-_FULLSTACK_TYPES = frozenset({"fullstack-stateless-app", "fullstack-stateful-app"})
 # The cells that may repair one page in one turn: cells that change a page
 # whose last browser check this turn failed, however it came to fail. Past
 # them the check after a cell lists no findings for the page.
@@ -889,11 +888,6 @@ def record_render_screenshots_refused(session: "ChatSession") -> None:
     own turn loop (generate_artifact's retry). Later checks then ask for no
     screenshot (`render_screenshots_refused`)."""
     session._render_screenshots_refused = True
-
-
-def _display_name(metadata, slug: str) -> str:
-    """The artifact's name for a line the user reads, else its slug."""
-    return metadata.name if metadata is not None and metadata.name.strip() else slug
 
 
 def page_check_lines(store, *, checks: "dict[PageKey, RenderStatus]") -> list[str]:
