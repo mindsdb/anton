@@ -321,6 +321,19 @@ def test_a_page_compared_after_it_was_put_back_is_no_longer_restored(tmp_path):
     assert pages.end_lines(store, checks={}) == []
 
 
+def test_a_page_edited_after_it_was_put_back_is_no_longer_restored_without_a_comparison(tmp_path):
+    store, _, key, pages = _captured(tmp_path)
+    other = PageKey("other", "index.html")
+    pages.restore(key, store)
+
+    pages.record({}, edited=[other])
+    assert pages.end_lines(store, checks={}) == [_BACK]
+    pages.record({key: _comparison(**_NOT_CHECKED)}, edited=[key])
+
+    assert pages.has_restored() is False
+    assert pages.end_lines(store, checks={}) == []
+
+
 def test_the_same_blank_and_removed_views_are_shown_once_and_broke_always():
     key = PageKey("x", "index.html")
     pages = TurnPages()

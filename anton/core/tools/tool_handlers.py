@@ -291,6 +291,8 @@ class ArtifactLint:
     comparisons: "dict[PageKey, Comparison]" = field(default_factory=dict)
     # The pages this cell's checks put back as the turn found them.
     restored: frozenset[PageKey] = frozenset()
+    # The pages this cell edited, whatever their checks found.
+    edited: frozenset[PageKey] = frozenset()
 
 
 _STATUS_RANK = {"passed": 0, "unverified": 1, "failed": 2}
@@ -538,7 +540,8 @@ def _check_pages(
     An unverified check names none. The comparisons come back in
     `comparisons`. A page that fails with none left goes back to how the turn
     found it when the turn's edits made it worse (`TurnPages.should_restore`),
-    and its line says so; the pages put back come back in `restored`.
+    and its line says so; the pages put back come back in `restored`. The
+    pages this cell edited come back in `edited`.
     """
     from anton.core.artifacts import render_check
     from anton.core.artifacts.html_lint import discover_browser, lint_html
@@ -554,6 +557,7 @@ def _check_pages(
     views_of_failed: "dict[PageKey, tuple[CheckedView, ...]]" = {}
     comparisons: "dict[PageKey, Comparison]" = {}
     put_back: set[PageKey] = set()
+    edited = frozenset(page.key(store) for page in pages if page.edited)
 
     def _repairs_left_after(page: _ChangedPage) -> int:
         """The repair cells PAGE has left this turn once this check is done.
@@ -625,7 +629,9 @@ def _check_pages(
                 continue
             messages += [f"{label} — {f.message()}" for f in findings]
             messages.append(f"{label} — {_repairs_left_line(left)}")
-        return ArtifactLint(messages=messages, page_checks=page_checks, repaired=frozenset(repaired))
+        return ArtifactLint(
+            messages=messages, page_checks=page_checks, repaired=frozenset(repaired), edited=edited
+        )
 
     # Whether `shot` is a failed page's: until one is, every page is asked
     # for a screenshot, so the agent sees the page it has to fix.
@@ -737,7 +743,7 @@ def _check_pages(
     return ArtifactLint(
         messages=messages, screenshot=shot, screenshot_page=shot_page, page_checks=page_checks,
         findings_listed=frozenset(findings_listed), repaired=frozenset(repaired), failed_views=views_of_failed,
-        comparisons=comparisons, restored=frozenset(put_back),
+        comparisons=comparisons, restored=frozenset(put_back), edited=edited,
     )
 
 
@@ -1018,7 +1024,8 @@ async def check_cell_artifacts(
         repaired=lint.repaired, failed_views=lint.failed_views, restored=lint.restored,
     )
     if turn_pages is not None:
-        turn_pages.record(lint.comparisons)
+        # A page this very cell put back stays put back.
+        turn_pages.record(lint.comparisons, edited=lint.edited - lint.restored)
     if refused:
         # A service that sends a screenshot it was not asked for.
         return replace(lint, screenshot=None, screenshot_page="", live_app_lines=live_app_lines)

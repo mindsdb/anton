@@ -18,7 +18,7 @@ import logging
 import os
 import stat
 import threading
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -291,16 +291,19 @@ class TurnPages:
             return False
         return self.restore(key, store)
 
-    def record(self, comparisons: Mapping[PageKey, Comparison]) -> None:
+    def record(self, comparisons: Mapping[PageKey, Comparison], *, edited: Iterable[PageKey] = ()) -> None:
         """Keep each page's latest comparison that says something; one whose
         previous page the service did not check leaves the earlier one. A
-        page compared after anton put it back was edited since, so it no
-        longer reads as put back."""
+        page compared after anton put it back, or in EDITED (rewritten by a
+        cell, whatever its check said), was edited since, so it no longer
+        reads as put back."""
         with self._lock:
             for key, comparison in comparisons.items():
                 if not comparison.informative:
                     continue
                 self._comparisons[key] = comparison
+                self._restored.pop(key, None)
+            for key in edited:
                 self._restored.pop(key, None)
 
     def notes_to_show(self, key: PageKey, notes: ComparisonNotes) -> ComparisonNotes:

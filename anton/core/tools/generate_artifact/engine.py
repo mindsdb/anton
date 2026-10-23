@@ -523,9 +523,11 @@ def _record_page_check(session, *, state, result: "dict | str | BrowserCheckFail
     file that check loaded, with the views it measured, so the cell that
     repairs that file replaces this record and is held to those views.
 
-    The run's comparison with the page as the turn found it goes to the
-    turn's record too (`TurnPages.record`), under the page the browser check
-    loaded."""
+    The comparison of a built page (a `generated` result, or a build left
+    to repair) with the page as the turn found it goes to the turn's record
+    too (`TurnPages.record`), under the page the browser check loaded. Any
+    other outcome keeps none: the state's comparison may be an earlier
+    attempt's, or a page the run renamed, and the page goes back."""
     from anton.core.tools.tool_handlers import PageKey, record_page_checks
 
     if isinstance(result, BrowserCheckFailed):
@@ -550,6 +552,8 @@ def _record_page_check(session, *, state, result: "dict | str | BrowserCheckFail
         checks={key: state.browser_status or "unverified"},
         findings_listed=frozenset({key}) if listed else frozenset(),
     )
+    if not isinstance(result, dict) or result.get("status", "generated") != "generated":
+        return
     turn_pages = getattr(session, "_turn_pages", None)
     comparison = getattr(state, "comparison", None)
     if turn_pages is not None and comparison is not None:

@@ -316,6 +316,24 @@ async def test_after_the_page_went_back_a_new_edit_hears_its_blank_view_again(se
     assert any("“Details” showed a graphic" in message for message in after.messages)
 
 
+async def test_a_page_edited_again_after_it_went_back_no_longer_reads_as_put_back(service, project, policy):
+    """The cell after the restore rewrote the page, and its check could not
+    vouch for it: the turn must not end saying the page is as it was."""
+    store, slug = _artifact(project)
+    session = _sandboxed(store, policy)
+    service.answer(_FAILED_MAP, _FAILED_MAP, _FAILED_MAP, (503, {"detail": "the render check isn't ready: starting"}, 0.0))
+
+    for text in ("breaks the map", "first repair", "second repair"):
+        await _cell(session, store, slug, text)
+    assert any("back as it was" in line for line in ChatSession._unverified_page_lines(session))
+    await _cell(session, store, slug, "a new edit")
+
+    assert (store.root / slug / "index.html").read_text() == _PAGE.replace("hi", "a new edit")
+    assert ChatSession._unverified_page_lines(session) == [
+        "“Control tower” was not verified in a browser, so it may not display correctly in the preview."
+    ]
+
+
 # ── generate_artifact's builds ───────────────────────────────────────────────
 
 
@@ -410,6 +428,24 @@ def test_a_builds_comparison_is_kept_under_the_page_its_check_loaded():
 
     assert session._turn_pages.status_before(PageKey("dash", "app/main.html"), None) == "passed"
     assert session._turn_pages.status_before(PageKey("dash", "index.html"), None) == "unverified"
+
+
+@pytest.mark.parametrize("result", [
+    pytest.param("the run stopped at the brief", id="str"),
+    pytest.param({"status": "stopped_over_budget"}, id="stopped-over-budget"),
+])
+def test_a_run_that_built_no_page_keeps_no_comparison(tmp_path, result):
+    """The state's comparison may be an earlier attempt's, or a page the run
+    renamed, and the page is about to go back: it describes no page."""
+    session = _session()
+
+    engine._record_page_check(session, state=SimpleNamespace(
+        slug="dash", browser_status="passed", browser_findings_listed=False, files_written=["index.html"],
+        is_fullstack=False, primary="index.html", comparison=Comparison.model_validate(_comparison(**_GLOBE_GONE)),
+    ), result=result)
+
+    store = ArtifactStore(tmp_path / "artifacts")
+    assert session._turn_pages.end_lines(store, checks=session._page_checks) == []
 
 
 def test_a_build_left_to_repairs_comparison_reaches_the_turns_record(tmp_path):
