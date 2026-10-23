@@ -1153,6 +1153,41 @@ class TestCompactionHalves:
             _CompactionLLM(keep=[]), read_compaction_input(full._lessons_path, "lesson")
         ) is None
 
+    async def test_text_that_is_not_an_entry_is_kept(self, dirs):
+        """A line typed into the file without `- ` survives the rewrite."""
+        hc = Hippocampus(dirs[0])
+        rules = "\n".join(f"- Rule number {i}" for i in range(10))
+        hc._rules_path.parent.mkdir(parents=True, exist_ok=True)
+        hc._rules_path.write_text(
+            f"# Rules\nOur fiscal year starts in April.\n\n## Always\n{rules}\n"
+        )
+        lessons = self._lessons(dirs[1], 10)
+        lessons._lessons_path.write_text(
+            lessons._lessons_path.read_text().replace("# Lessons\n", "# Lessons\nAsk Ana first.\n")
+        )
+
+        for store, path, kind in ((hc, hc._rules_path, "rules"), (lessons, lessons._lessons_path, "lesson")):
+            plan = await plan_compaction(
+                _CompactionLLM(keep=[1, 2]), read_compaction_input(path, kind)
+            )
+            assert plan.apply(store) is True
+
+        assert "Our fiscal year starts in April." in hc._rules_path.read_text()
+        assert len(hc.get_rules()) == 2
+        assert "Ask Ana first." in lessons._lessons_path.read_text()
+        assert len(lessons.get_lessons()) == 2
+
+    async def test_an_edit_to_text_that_is_not_an_entry_stops_the_rewrite(self, dirs):
+        hc = self._lessons(dirs[0], 10)
+        plan = await plan_compaction(
+            _CompactionLLM(keep=[1]), read_compaction_input(hc._lessons_path, "lesson")
+        )
+        edited = hc._lessons_path.read_text().replace("# Lessons\n", "# Lessons\nTyped meanwhile.\n")
+        hc._lessons_path.write_text(edited)
+
+        assert plan.apply(hc) is False
+        assert hc._lessons_path.read_text() == edited
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # The operator's read-only layer

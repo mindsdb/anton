@@ -216,30 +216,45 @@ def _rule_section(engram: Engram) -> str:
     return (engram.kind or _RULE_SECTIONS[0]).lower()
 
 
-def _read_memory_entries(path: Path) -> tuple[list[str], list[str]]:
-    """Read a memory file's `- ` entries with the section each one sits under.
+# The lines a compaction rebuild writes itself, lowercased.
+_REBUILT_HEADINGS = frozenset(
+    {"# rules", "# lessons", *(f"## {name}" for name in _RULE_SECTIONS)}
+)
+
+
+def _read_memory_text(path: Path) -> str | None:
+    """A memory file's text; None when it is gone."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+
+
+def _parse_memory_entries(text: str) -> tuple[list[str], list[str], list[str]]:
+    """A memory file's `- ` entries with the section each one sits under, and
+    its other lines that a rebuild does not write itself.
 
     Entries above the first heading (a hand-edited file) are kept rather than
     dropped, under the same heading the keyword pass defaulted to. Headings
-    outside `_RULE_SECTIONS` fold into the first one too.
+    outside `_RULE_SECTIONS` fold into the first one too. The other lines are
+    text a person typed into the file; a rebuild must carry them over.
     """
     sections: list[str] = []
     entries: list[str] = []
+    notes: list[str] = []
     section = _RULE_SECTIONS[0]
-    try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        # A file removed under a running compaction has no entries to keep.
-        return sections, entries
     for line in text.splitlines():
         stripped = line.strip()
+        if stripped.startswith("- "):
+            sections.append(section)
+            entries.append(stripped)
+            continue
         if stripped.startswith("## "):
             heading = stripped[3:].lower()
             section = heading if heading in _RULE_SECTIONS else _RULE_SECTIONS[0]
-        elif stripped.startswith("- "):
-            sections.append(section)
-            entries.append(stripped)
-    return sections, entries
+        if stripped and stripped.lower() not in _REBUILT_HEADINGS:
+            notes.append(line.rstrip())
+    return sections, entries, notes
 
 
 # Rules + lessons in one tier above which that tier is due for compaction.
@@ -251,18 +266,22 @@ COMPACTION_MIN_ENTRIES = 8
 
 @dataclass(frozen=True)
 class CompactionInput:
-    """One memory file's entries as read before the compaction model call."""
+    """One memory file as read before the compaction model call."""
 
     kind: Literal["rules", "lesson"]
+    # The whole file, None when it is missing: the apply compares against it.
+    text: str | None
     sections: list[str]
     entries: list[str]
+    notes: list[str]
 
 
 def read_compaction_input(path: Path, kind: Literal["rules", "lesson"]) -> CompactionInput:
     """Read a memory file for compaction. Plain file I/O, kept apart from the
     model call so a server can run it off its event loop."""
-    sections, entries = _read_memory_entries(path)
-    return CompactionInput(kind=kind, sections=sections, entries=entries)
+    text = _read_memory_text(path)
+    sections, entries, notes = _parse_memory_entries(text or "")
+    return CompactionInput(kind=kind, text=text, sections=sections, entries=entries, notes=notes)
 
 
 @dataclass(frozen=True)
@@ -279,20 +298,20 @@ class CompactionPlan:
         # The rebuild comes from the read before the model call. A memory
         # written meanwhile, by this session or another process sharing the
         # file, is on disk but not in that read, so a rewrite would erase it.
-        # The check and the replace run under the file's writer lock;
-        # compaction can wait for a later pass, the memory cannot be recovered.
+        # The whole text is compared, so an edit to a line that is not an entry
+        # counts too. The check and the replace run under the file's writer
+        # lock; compaction can wait for a later pass, the memory cannot be
+        # recovered.
         if not hc.rewrite_if_unchanged(
-            path,
-            self.content,
-            read=_read_memory_entries,
-            snapshot=(self.source.sections, self.source.entries),
+            path, self.content, read=_read_memory_text, snapshot=self.source.text
         ):
+            now = _read_memory_text(path)
             logger.info(
                 "memory-compaction: %s changed during the model call "
                 "(%d entries read, %d now), skipped",
                 path.name,
                 len(self.source.entries),
-                len(_read_memory_entries(path)[1]),
+                len(_parse_memory_entries(now or "")[1]),
             )
             return False
 
@@ -366,18 +385,20 @@ async def plan_compaction(llm: LLMClient, source: CompactionInput) -> Compaction
         return None
 
     # Rebuild the file. Every entry still carries the `- ` prefix it was
-    # selected by, so nothing here has to re-add one.
+    # selected by, so nothing here has to re-add one. Typed text that is not
+    # an entry goes back right under the title, in its original order.
+    notes = [*source.notes, ""] if source.notes else []
     if source.kind == "rules":
         # Each entry goes back under its own heading and no other, so the
         # rewrite is idempotent — a rule cannot be filed twice.
-        lines = ["# Rules\n"]
+        lines = ["# Rules", "", *notes]
         for name in _RULE_SECTIONS:
             lines.append(f"## {name.capitalize()}")
             lines.extend(e for s, e in kept if s == name)
             lines.append("")
         content = "\n".join(lines[:-1]) + "\n"
     else:
-        content = "\n".join(["# Lessons", *(e for _, e in kept)]) + "\n"
+        content = "\n".join(["# Lessons", *notes, *(e for _, e in kept)]) + "\n"
     return CompactionPlan(source=source, content=content, kept=len(kept))
 
 
