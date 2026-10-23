@@ -14,7 +14,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from anton.core.artifacts.internal_files import (
     API_SPEC_FILENAME,
@@ -777,6 +777,13 @@ def _adopt_entry_as_primary(state: GenState, entry_file: Path) -> None:
         state.primary = actual
 
 
+class _AttemptCheck(NamedTuple):
+    """An attempt's own browser check and the page it loaded."""
+
+    check: BrowserCheck
+    entry: Path
+
+
 async def _gen_verify_frontend(
     state: GenState, extra_context: str = ""
 ) -> "str | BrowserCheckFailed | None":
@@ -820,7 +827,7 @@ async def _gen_verify_frontend(
     # This attempt's own browser check and the page it loaded, when the
     # attempt got that far. Reset every attempt: `state.browser_*` keep an
     # earlier attempt's values, which can name a page this attempt deleted.
-    last_check: "tuple[BrowserCheck, Path] | None" = None
+    last_check: _AttemptCheck | None = None
     for attempt in range(GEN_LOOP_MAX_RETRIES + GEN_VERIFY_MAX_RETRIES + 1):
         state.step_started("generate_frontend", attempt=attempt)
         last_check = None
@@ -923,7 +930,7 @@ async def _gen_verify_frontend(
                 state.browser_screenshot = live.screenshot
                 state.browser_coverage = live.coverage
                 state.browser_page = entry_file.relative_to(state.artifact_path).as_posix()
-                last_check = (live, entry_file)
+                last_check = _AttemptCheck(check=live, entry=entry_file)
                 if live.status == "failed":
                     failed_shot = live.screenshot
                 if live.status == "unverified":
@@ -958,7 +965,7 @@ async def _gen_verify_frontend(
         "frontend", verify_failures=verify_failures, verdict=verdict,
         last_loop_error=last_loop_error,
     )
-    if verify_failures > GEN_VERIFY_MAX_RETRIES and last_check is not None and last_check[0].status == "failed":
+    if verify_failures > GEN_VERIFY_MAX_RETRIES and last_check is not None and last_check.check.status == "failed":
         # The last build passed the static checks, since the browser check
         # runs only then, and failed in a browser. Its page is the one left
         # on disk: the agent repairs that page against these findings.

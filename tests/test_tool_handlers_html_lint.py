@@ -257,13 +257,13 @@ def test_the_local_browser_holds_a_failed_page_to_the_same_repair_budget(monkeyp
     )
     store, slug = _dashboard(tmp_path)
     key = tool_handlers.PageKey(slug, "index.html")
-    repairs_left = {key: tool_handlers.REPAIR_CELLS}
-    for left in (1, 0):
+    for used in range(tool_handlers.REPAIR_CELLS):
         before = tool_handlers.snapshot_existing_artifacts(store)
-        (store.root / slug / "index.html").write_text(f"<html><body><script>boom({left})</script></body></html>")
-        lint = tool_handlers.lint_changed_artifact_files(store, before, repairs_left=repairs_left)
+        (store.root / slug / "index.html").write_text(f"<html><body><script>boom({used})</script></body></html>")
+        lint = tool_handlers.lint_changed_artifact_files(
+            store, before, failing=frozenset({key}), repairs_used={key: used},
+        )
         assert lint.repaired == frozenset({key})
-        repairs_left = {key: left}
 
     assert lint.messages == [f"{slug}/index.html — {tool_handlers._NO_REPAIRS_LEFT}"]
     assert lint.page_checks == {key: "failed"}

@@ -415,7 +415,8 @@ def _check_pages(
     cell_sandbox: CellSandbox | None,
     screenshot: bool,
     findings_listed_earlier: frozenset[PageKey] = frozenset(),
-    repairs_left: "dict[PageKey, int] | None" = None,
+    failing: frozenset[PageKey] = frozenset(),
+    repairs_used: "dict[PageKey, int] | None" = None,
     failed_views: "dict[PageKey, tuple[CheckedView, ...]] | None" = None,
 ) -> ArtifactLint:
     """Load the changed artifacts' pages in a browser.
@@ -454,14 +455,16 @@ def _check_pages(
     out) leaves the next one free to list. The pages this call lists
     findings for come back in `findings_listed`.
 
-    A page in `repairs_left` failed its last check this turn, so a cell that
+    A page in `failing` failed its last check this turn, so a cell that
     edited it repaired it, and it comes back in `repaired`. Each failed page
-    gets a line with the repair cells it has left; once a repair fails with
-    none left, its line says so and lists no findings, so the agent stops
-    editing a page it cannot fix this turn. A repair whose check no longer
-    finds a view in `failed_views`, the views the check that failed it
-    measured, fails: a repair fixes a view, it never removes one. The views
-    each failed check measured come back in `failed_views`.
+    gets a line with the repair cells it has left this turn, after the
+    `repairs_used` it already spent; once a page fails with none left, its
+    line says so and lists no findings, so the agent stops editing a page it
+    cannot fix this turn. A check that no longer finds a view in
+    `failed_views`, the views the check that first failed the page
+    measured, fails, even after an unverified check in between: a repair
+    fixes a view, it never removes one. The views each failed check
+    measured come back in `failed_views`.
     """
     from anton.core.artifacts import render_check
     from anton.core.artifacts.html_lint import discover_browser, lint_html
@@ -471,19 +474,20 @@ def _check_pages(
     findings_listed: set[PageKey] = set()
     shot = None
     shot_page = ""
-    repairs_left = repairs_left or {}
+    repairs_used = repairs_used or {}
     failed_views = failed_views or {}
     repaired: set[PageKey] = set()
     views_of_failed: "dict[PageKey, tuple[CheckedView, ...]]" = {}
 
-    def _repair(page: _ChangedPage) -> tuple[bool, int]:
-        """Whether this cell repaired PAGE, and the repair cells PAGE has
-        left once this check is done."""
+    def _repairs_left_after(page: _ChangedPage) -> int:
+        """The repair cells PAGE has left this turn once this check is done.
+        A cell that edited a page in `failing` repaired it, and spends one."""
         key = page.key(store)
-        if page.edited and key in repairs_left:
+        left = REPAIR_CELLS - repairs_used.get(key, 0)
+        if page.edited and key in failing:
             repaired.add(key)
-            return True, repairs_left[key] - 1
-        return False, REPAIR_CELLS
+            left -= 1
+        return left
 
     # `read_metadata`, not `open`: `open` reconciles the file list and may
     # rewrite the metadata, which a check must not do.
@@ -536,7 +540,7 @@ def _check_pages(
                 messages.append(f"{label} — not checked in a browser: {reason}")
                 page_checks[page.key(store)] = "unverified"
                 continue
-            _, left = _repair(page)
+            left = _repairs_left_after(page)
             page_checks[page.key(store)] = "failed" if findings else "passed"
             if not findings:
                 continue
@@ -568,16 +572,17 @@ def _check_pages(
                 timeout=min(render_check.TIMEOUT_SECONDS, remaining),
             )
         key = page.key(store)
-        repair, left = _repair(page)
-        removed = _removed_views(failed_views.get(key, ()), outcome) if repair else []
+        left = _repairs_left_after(page)
+        removed = _removed_views(failed_views.get(key, ()), outcome)
         status: "RenderStatus" = "failed" if removed else outcome.status
         page_checks[key] = status
         failed = status == "failed"
         if failed:
             views_of_failed[key] = tuple(outcome.views)
         if failed and left <= 0:
-            # The page's last repair failed: no findings and no screenshot,
-            # nothing that sends the agent back to edit it.
+            # The page failed with no repair cells left this turn: no
+            # findings and no screenshot, nothing that sends the agent back
+            # to edit it.
             messages.append(f"{label} — {_NO_REPAIRS_LEFT}")
             continue
         if outcome.screenshot is not None and (shot is None or (failed and not shot_failed)):
@@ -636,7 +641,8 @@ def lint_changed_artifact_files(
     cell_sandbox: CellSandbox | None = None,
     screenshot: bool = True,
     findings_listed_earlier: frozenset[PageKey] = frozenset(),
-    repairs_left: "dict[PageKey, int] | None" = None,
+    failing: frozenset[PageKey] = frozenset(),
+    repairs_used: "dict[PageKey, int] | None" = None,
     failed_views: "dict[PageKey, tuple[CheckedView, ...]] | None" = None,
 ) -> ArtifactLint:
     """Run the format-appropriate checker on artifact folders this cell
@@ -649,9 +655,9 @@ def lint_changed_artifact_files(
     sandbox. The render-check service still loads pages there: only the
     page's text leaves this process (`_check_pages`). `screenshot=False`
     asks it for no screenshot. An unverified check of a page in
-    `findings_listed_earlier` lists no findings, and a page in
-    `repairs_left` is held to its repair budget and to `failed_views`
-    (`_check_pages`).
+    `findings_listed_earlier` lists no findings, a page in `failing` is
+    held to its repair budget after its `repairs_used`, and a page in
+    `failed_views` to those views (`_check_pages`).
     """
     linters = _artifact_linters(cell_sandbox=cell_sandbox)
     after = snapshot_existing_artifacts(store)
@@ -688,7 +694,7 @@ def lint_changed_artifact_files(
     checked = _check_pages(
         store, pages, cell_sandbox=cell_sandbox, screenshot=screenshot,
         findings_listed_earlier=findings_listed_earlier,
-        repairs_left=repairs_left, failed_views=failed_views,
+        failing=failing, repairs_used=repairs_used, failed_views=failed_views,
     )
     return replace(checked, messages=messages + checked.messages)
 
@@ -827,8 +833,9 @@ async def check_cell_artifacts(
 
     A cell that changes a page whose last check this turn failed is a
     repair cell, here or after generate_artifact's failed build: each page
-    gets `REPAIR_CELLS` of them per turn, and each is held to the views the
-    check that failed the page measured (`_check_pages`).
+    gets `REPAIR_CELLS` of them per turn. Until a check passes the page,
+    every check of it is held to the views the check that first failed it
+    measured (`_check_pages`).
     """
     import asyncio
 
@@ -838,13 +845,11 @@ async def check_cell_artifacts(
     listed = getattr(session, "_unverified_findings_listed", None)
     findings_listed_earlier = frozenset(listed) if isinstance(listed, set) else frozenset()
     checks = getattr(session, "_page_checks", None)
+    failing = frozenset(
+        key for key, status in (checks.items() if isinstance(checks, dict) else ()) if status == "failed"
+    )
     used = getattr(session, "_repair_cells", None)
-    used = used if isinstance(used, dict) else {}
-    repairs_left = {
-        key: REPAIR_CELLS - used.get(key, 0)
-        for key, status in (checks.items() if isinstance(checks, dict) else ())
-        if status == "failed"
-    }
+    repairs_used = dict(used) if isinstance(used, dict) else {}
     measured = getattr(session, "_failed_views", None)
     failed_views = dict(measured) if isinstance(measured, dict) else {}
     try:
@@ -853,7 +858,7 @@ async def check_cell_artifacts(
             lint_changed_artifact_files, store, before,
             cell_sandbox=cell_sandbox_of(getattr(session, "_scratchpads", None)), screenshot=not refused,
             findings_listed_earlier=findings_listed_earlier,
-            repairs_left=repairs_left, failed_views=failed_views,
+            failing=failing, repairs_used=repairs_used, failed_views=failed_views,
         )
     except Exception:
         # Best-effort: a lint crash must never fail the cell's own result.
@@ -1367,7 +1372,7 @@ async def _drain_progress(queue):
         yield ToolProgress(line)
 
 
-async def _generate_with_progress_close(coro, queue) -> "dict | str":
+async def _generate_with_progress_close(coro, queue) -> "dict | str | BrowserCheckFailed":
     """Await `coro`, then close the progress channel exactly once.
 
     The sentinel goes in a `finally` so the handler's drain loop terminates

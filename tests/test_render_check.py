@@ -3546,6 +3546,48 @@ async def test_a_view_the_repairs_check_found_but_had_no_time_to_press_is_not_re
     assert session._page_checks == {tool_handlers.PageKey(slug, "index.html"): "passed"}
 
 
+async def test_an_unverified_check_in_between_still_holds_the_page_to_the_failed_views(service, tmp_path):
+    """The first repair's check gives no verdict, so the page's last check
+    is unverified, not failed. The next cell drops "3D Globe" and its check
+    passes: it still fails, since no check has passed the page."""
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    session = _repair_session()
+    _failed_build(session, slug, "index.html")
+    key = tool_handlers.PageKey(slug, "index.html")
+    service.answer((503, b"not ready", 0.0), (200, _answer("passed", views=_VIEWS[:2], unopened=[]), 0.0))
+
+    await _repair_cell(session, store, slug, "index.html", "service down")
+    lint = await _repair_cell(session, store, slug, "index.html", "no globe")
+
+    label = f"{slug}/index.html"
+    assert lint.messages == [
+        f"{label} — failed: this repair removed views the check that failed the page measured, at desktop and "
+        "phone sizes, behind “3D Globe”. A repair fixes the code a finding names and keeps every view: put them back",
+        f"{label} — {tool_handlers._repairs_left_line(1)}",
+    ]
+    assert session._page_checks == {key: "failed"}
+
+
+async def test_a_page_that_passed_and_fails_again_counts_the_repairs_it_already_used(service, tmp_path):
+    """A repair passes, then a later edit that turn breaks the page. The page
+    spent one repair cell, so the failed check says one is left, and the
+    next failed repair says none are."""
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    session = _repair_session()
+    _failed_build(session, slug, "index.html")
+    failed = (200, _answer("failed", findings=[_ROUTES_ERROR], views=_VIEWS, unopened=[]), 0.0)
+    service.answer((200, _answer("passed", views=_VIEWS, unopened=[]), 0.0), failed, failed)
+
+    await _repair_cell(session, store, slug, "index.html", "repair passes")
+    broken = await _repair_cell(session, store, slug, "index.html", "a later edit breaks it")
+    last = await _repair_cell(session, store, slug, "index.html", "second repair")
+
+    label = f"{slug}/index.html"
+    assert broken.messages[-1] == f"{label} — {tool_handlers._repairs_left_line(1)}"
+    assert last.messages == [f"{label} — {tool_handlers._NO_REPAIRS_LEFT}"]
+    assert session._repair_cells == {tool_handlers.PageKey(slug, "index.html"): 2}
+
+
 async def test_a_page_built_by_hand_gets_the_same_repair_budget(service, tmp_path):
     """A page's first failed check isn't a repair, whoever built the page:
     the cells after it are."""

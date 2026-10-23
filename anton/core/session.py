@@ -2121,8 +2121,9 @@ class ChatSession:
         # Reset every turn.
         self._repair_cells: dict[PageKey, int] = {}
         # The views the check that failed a page this turn measured, kept
-        # until the page passes. A repair cell whose check no longer finds
-        # one of them fails (`tool_handlers._check_pages`). Reset every turn.
+        # until the page passes. Until then, a check of the page that no
+        # longer finds one of them fails, even after an unverified check in
+        # between (`tool_handlers._check_pages`). Reset every turn.
         self._failed_views: dict[PageKey, tuple[CheckedView, ...]] = {}
         # Set once the model refused a request carrying render-check
         # screenshots and took it without them
