@@ -8,6 +8,8 @@ import re
 import uuid
 from typing import TYPE_CHECKING
 
+from rich.markup import escape
+
 from anton.core.tools.tool_defs import ToolDef
 from anton.utils.datasources import _SCRUB_MARKER
 
@@ -705,10 +707,10 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
                 "publish their own copy by running /publish and choosing 'new'."
             )
         except Exception as e:
-            # Only a 404 says the report is gone, so publishing it afresh
-            # without report_id is safe. After a timeout, a 5xx or a 409 the
-            # report may still exist, and a retry would publish a copy under
-            # a new URL.
+            # Only a 404 from the upload itself says the report is gone, so
+            # publishing it afresh without report_id is safe. After a timeout,
+            # a 5xx, a 409 or a failed or timed-out async job the report may
+            # still exist, and a retry would publish a copy under a new URL.
             gone = isinstance(e, urllib.error.HTTPError) and e.code == 404
             if report_id and gone:
                 try:
@@ -722,11 +724,11 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
                         access_version=access_version,
                     )
                 except Exception as e2:
-                    console.print(f"  [anton.error]Publish failed: {e2}[/]")
+                    console.print(f"  [anton.error]Publish failed: {escape(str(e2))}[/]")
                     console.print()
                     return f"PUBLISH FAILED: {e2}"
             else:
-                console.print(f"  [anton.error]Publish failed: {e}[/]")
+                console.print(f"  [anton.error]Publish failed: {escape(str(e))}[/]")
                 console.print()
                 return f"PUBLISH FAILED: {e}"
 
