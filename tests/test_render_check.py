@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -609,6 +610,30 @@ def test_check_file_never_follows_a_link_out_of_the_persons_files(service, tmp_p
     result = check_file(link, cell_sandbox=policy)
     assert result.status == "unverified"
     assert "outside the files this conversation may read" in result.unverified_reason
+    assert service.requests == []
+
+
+def test_a_refused_read_and_an_unreadable_page_read_differently(service, tmp_path, project, policy):
+    outside = tmp_path / "outside.html"
+    outside.write_text(_PAGE)
+    refused = check_file(outside, cell_sandbox=policy)
+    assert refused.status == "unverified"
+    assert refused.unverified_reason == "the page is outside the files this conversation may read"
+    with pytest.raises(PermissionError):
+        render_check.read_page_bytes(outside, cell_sandbox=policy)
+    assert service.requests == []
+
+    if sys.platform == "win32" or os.geteuid() == 0:
+        pytest.skip("a file mode does not stop this process from reading")
+    locked = project / "locked.html"
+    locked.write_text(_PAGE)
+    locked.chmod(0o000)
+    try:
+        unreadable = check_file(locked, cell_sandbox=policy)
+    finally:
+        locked.chmod(0o644)
+    assert unreadable.status == "unverified"
+    assert unreadable.unverified_reason.startswith("the page could not be read")
     assert service.requests == []
 
 

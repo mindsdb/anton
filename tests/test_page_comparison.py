@@ -621,6 +621,29 @@ async def test_a_run_the_turn_abandoned_puts_the_page_back_once_it_stops(configu
     await _until(lambda: (store.root / slug / "index.html").read_text() == _BEFORE)
 
 
+async def test_a_run_the_turn_abandoned_puts_the_page_back_when_the_executor_refuses_new_work(
+    configured, tmp_path, monkeypatch
+):
+    store, slug = _artifact(tmp_path)
+
+    async def fake_generate(**kw):
+        (kw["artifact_path"] / "index.html").write_text(_HALF)
+        kw["progress"].put_nowait("Writing the page")
+        await asyncio.Event().wait()
+
+    def refuse(self, executor, func, *args):
+        raise RuntimeError("cannot schedule new futures after shutdown")
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    agen = handle_generate_artifact(_gen_session(store), _tc(slug))
+    assert await agen.__anext__() == ToolProgress("Writing the page")
+    monkeypatch.setattr(asyncio.BaseEventLoop, "run_in_executor", refuse)
+
+    await agen.aclose()
+
+    await _until(lambda: (store.root / slug / "index.html").read_text() == _BEFORE)
+
+
 @pytest.mark.parametrize(("outcome", "put_back"), [(_GENERATED, False), (_LEFT_TO_REPAIR, False), (_OVER_BUDGET, True)])
 async def test_closing_the_handler_after_the_run_ended_follows_the_runs_outcome(
     configured, tmp_path, monkeypatch, outcome, put_back
