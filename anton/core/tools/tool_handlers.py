@@ -835,8 +835,9 @@ def record_page_checks(
     Each page in `repaired` used one more repair cell this turn. A failed
     page keeps the views in `failed_views` from the first check that failed
     it, so a later failed repair can't lower the bar for the next one, and
-    loses them once a check passes it. Each page in `restored` was put back
-    as the turn found it: it loses its `_failed_views`, and its record unless
+    loses them once a check passes it. Each page in `restored` was put back,
+    as the turn found it or as a generate_artifact run found it with no
+    status known: it loses its `_failed_views`, and its record unless
     `checks` names it.
     Best-effort, like `_track_artifact`: a session without the record (a
     test double) loses nothing else.
@@ -858,9 +859,9 @@ def record_page_checks(
                 measured.pop(key, None)
         for key, views in (failed_views or {}).items():
             measured.setdefault(key, views)
-    # A page put back is the one the turn found: the views its broken
-    # version failed on no longer hold it, and with no status known for it
-    # (absent from `checks`) it has no record at all.
+    # A page put back is no longer the version that was checked: the views
+    # that version failed on no longer hold it, and with no status known for
+    # it (absent from `checks`) it has no record at all.
     for key in restored:
         if isinstance(measured, dict):
             measured.pop(key, None)
@@ -1498,26 +1499,31 @@ _CHANGES_INSTRUCTION = (
 class _PageBack(NamedTuple):
     """A page `handle_generate_artifact` put back as it was when the run
     started: how that page last fared (None when no check this turn did),
-    and whether it is also the page as the turn found it."""
+    whether it is also the page as the turn found it, and the views a failed
+    check of it measured then."""
 
     status: "RenderStatus | None"
     as_found: bool
+    failed_views: "tuple[CheckedView, ...] | None" = None
 
 
 def _record_put_back(session: "ChatSession", key: PageKey, back: _PageBack) -> None:
     """Record a page `handle_generate_artifact` put back, over the run's own
     record of it. As the turn found it: with its status, or with no record
     when no check this turn vouched for it (`record_page_checks(restored=)`).
-    As an earlier edit this turn left it: with that edit's last status, its
-    `_failed_views` kept since they describe that page, or without one the
-    run's record is dropped."""
+    As an earlier edit this turn left it: with that edit's last status and
+    `_failed_views`, which the run's own checks may have dropped, or without
+    a status the run's record is dropped."""
     if back.as_found:
         record_page_checks(
             session, checks={} if back.status in (None, "unverified") else {key: back.status},
             restored=frozenset({key}),
         )
     elif back.status is not None:
-        record_page_checks(session, checks={key: back.status})
+        record_page_checks(
+            session, checks={key: back.status},
+            failed_views={key: back.failed_views} if back.failed_views is not None else None,
+        )
     else:
         record_page_checks(session, checks={}, restored=frozenset({key}))
 
@@ -1839,11 +1845,14 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     run_start: bytes | None = None
     as_found = False
     status_at_start: "RenderStatus | None" = None
+    views_at_start: "tuple[CheckedView, ...] | None" = None
     if previous_page is not None:
         run_start = await asyncio.to_thread(turn_pages.read_current, previous_page[0], store)
         as_found = run_start is not None and run_start == turn_pages.copy_bytes(previous_page[0])
         checks = getattr(session, "_page_checks", None)
         status_at_start = checks.get(previous_page[0]) if isinstance(checks, dict) else None
+        measured = getattr(session, "_failed_views", None)
+        views_at_start = measured.get(previous_page[0]) if isinstance(measured, dict) else None
     # Shared with the run: `_embed_attachments` writes the page under the
     # lock unless `abandoned` is set, which `_put_back` sets first.
     page_lock = threading.Lock()
@@ -1863,7 +1872,9 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
                 if as_found:
                     status = turn_pages.status_before(key, None)
                     return _PageBack(status, True) if turn_pages.restore_if_changed(key, store) else None
-                return _PageBack(status_at_start, False) if turn_pages.write_back(key, store, run_start) else None
+                if not turn_pages.write_back(key, store, run_start):
+                    return None
+                return _PageBack(status_at_start, False, views_at_start)
         except Exception:
             _log.warning("could not put %s back as it was before this run", slug, exc_info=True)
             return None

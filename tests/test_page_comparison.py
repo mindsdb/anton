@@ -448,6 +448,29 @@ def test_a_run_that_built_no_page_keeps_no_comparison(tmp_path, result):
     assert session._turn_pages.end_lines(store, checks=session._page_checks) == []
 
 
+@pytest.mark.parametrize("result", [
+    pytest.param({"status": "generated"}, id="generated"),
+    pytest.param(BrowserCheckFailed(page="index.html", findings=("x",), views=(), screenshot=None, error="e"),
+                 id="left-to-repair"),
+])
+async def test_a_run_that_rewrote_a_page_put_back_no_longer_reads_as_put_back(configured, tmp_path, result):
+    """A cell put the page back, then a run rebuilt it with no comparison
+    that says something: the turn must not end saying the page is as it was."""
+    store, slug = _artifact(tmp_path)
+    session = _gen_session(store)
+    key = PageKey(slug, "index.html")
+    await tool_handlers.capture_turn_pages(session, store)
+    (store.root / slug / "index.html").write_text("<p>broken</p>")
+    assert session._turn_pages.restore(key, store)
+
+    engine._record_page_check(session, state=SimpleNamespace(
+        slug=slug, browser_status="passed", browser_findings_listed=False, files_written=["index.html"],
+        is_fullstack=False, primary="index.html", comparison=None,
+    ), result=result)
+
+    assert session._turn_pages.has_restored() is False
+
+
 def test_a_build_left_to_repairs_comparison_reaches_the_turns_record(tmp_path):
     session = _session()
     comparison = Comparison.model_validate(_comparison(broken_views=[_BROKE_MAP]))
@@ -763,6 +786,31 @@ async def test_a_page_put_back_to_an_edit_this_turn_keeps_how_that_edit_fared(co
 
     assert page.read_text() == "<p>the edit the user asked for</p>"
     assert session._page_checks[key] == "passed"
+
+
+async def test_a_page_put_back_to_a_failed_edit_keeps_the_views_its_repair_is_held_to(
+    configured, tmp_path, monkeypatch
+):
+    """The run's own check passed before it failed, which drops the failed
+    views; the page goes back to the failed edit, so they come back too."""
+    store, slug = _artifact(tmp_path)
+    session = _gen_session(store)
+    key = PageKey(slug, "index.html")
+    views = ("the page as it opens",)
+    page = await _edited_this_turn(session, store, slug, status="failed")
+    session._failed_views[key] = views
+
+    async def fake_generate(**kw):
+        page.write_text(_HALF)
+        tool_handlers.record_page_checks(kw["session"], checks={key: "passed"})
+        return dict(_OVER_BUDGET)
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    await _result(session, slug)
+
+    assert page.read_text() == "<p>the edit the user asked for</p>"
+    assert session._page_checks[key] == "failed"
+    assert session._failed_views[key] == views
 
 
 async def test_a_handler_that_crashed_mid_run_stops_the_run_before_it_puts_the_page_back(

@@ -525,17 +525,19 @@ def _record_page_check(session, *, state, result: "dict | str | BrowserCheckFail
 
     The comparison of a built page (a `generated` result, or a build left
     to repair) with the page as the turn found it goes to the turn's record
-    too (`TurnPages.record`), under the page the browser check loaded. Any
-    other outcome keeps none: the state's comparison may be an earlier
-    attempt's, or a page the run renamed, and the page goes back."""
+    too (`TurnPages.record`), under the page the browser check loaded, and
+    a page anton put back earlier this turn that the build rewrote no longer
+    reads as put back, whatever the comparison says. Any other outcome keeps
+    none: the state's comparison may be an earlier attempt's, or a page the
+    run renamed, and the page goes back."""
     from anton.core.tools.tool_handlers import PageKey, record_page_checks
 
     if isinstance(result, BrowserCheckFailed):
         key = PageKey(slug=state.slug, page=result.page)
         record_page_checks(session, checks={key: "failed"}, failed_views={key: result.views})
         turn_pages = getattr(session, "_turn_pages", None)
-        if turn_pages is not None and result.comparison is not None:
-            turn_pages.record({key: result.comparison})
+        if turn_pages is not None:
+            turn_pages.record({key: result.comparison} if result.comparison is not None else {}, edited={key})
         return
     if isinstance(result, dict) and result.get("status") in ("cancelled", "needs_confirmation"):
         return
@@ -555,10 +557,14 @@ def _record_page_check(session, *, state, result: "dict | str | BrowserCheckFail
     if not isinstance(result, dict) or result.get("status", "generated") != "generated":
         return
     turn_pages = getattr(session, "_turn_pages", None)
+    if turn_pages is None:
+        return
+    browser_page = getattr(state, "browser_page", "")
+    checked = PageKey(slug=state.slug, page=browser_page) if browser_page else key
     comparison = getattr(state, "comparison", None)
-    if turn_pages is not None and comparison is not None:
-        browser_page = getattr(state, "browser_page", "")
-        turn_pages.record({PageKey(slug=state.slug, page=browser_page) if browser_page else key: comparison})
+    turn_pages.record(
+        {checked: comparison} if comparison is not None else {}, edited={checked} if wrote_page else ()
+    )
 
 
 def _restore(state, stored) -> None:
