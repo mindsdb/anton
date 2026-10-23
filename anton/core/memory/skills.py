@@ -316,6 +316,13 @@ class SkillStore:
         self.artifact_roots: list[Path] | None = (
             None if artifact_roots is None else [Path(p) for p in artifact_roots]
         )
+        # Read now, when the host names the trusted folders at the start of
+        # its turn: they are paths, so a skill deleted during the turn and
+        # made again under its name by someone else would otherwise be
+        # followed. None without host-named folders, read live instead.
+        self._pinned_artifact_skills: list[Skill] | None = (
+            None if self.artifact_roots is None else self._trusted_artifact_skills()
+        )
 
     def _readonly_roots(self) -> list[Path]:
         """Host roots first (they win on label collisions), then built-ins."""
@@ -461,18 +468,31 @@ class SkillStore:
         With no `artifact_roots`, a store with host roots trusts nothing
         else: a host's writable root can hold other people's skills, and
         only the host can tell them apart. A store without host roots (the
-        CLI) also trusts `root`, the user's own library.
+        CLI) also trusts every skill listed in `root`, the user's own
+        library, links to folders elsewhere included.
+
+        With `artifact_roots`, the skills are the ones read when the store
+        was built, so a turn follows what its host trusted when it began.
         """
+        if self._pinned_artifact_skills is not None:
+            return list(self._pinned_artifact_skills)
+        return self._trusted_artifact_skills()
+
+    def _trusted_artifact_skills(self) -> list[Skill]:
+        """`list_for_artifacts`, read from disk now."""
         trusted = [self.builtin_root]
         if self.artifact_roots is not None:
             trusted += self.artifact_roots
-        elif not self.extra_roots:
-            trusted.append(self.root)
+        # Nobody else writes the CLI's library, so where its links lead is
+        # the user's choice, not a planted folder.
+        own_library = self.artifact_roots is None and not self.extra_roots
         trusted_resolved = [p.resolve() for p in trusted]
         out: list[Skill] = []
         for d in self._iter_skill_dirs():
-            resolved = d.resolve()
-            if not any(resolved.is_relative_to(t) for t in trusted_resolved):
+            listed_in_own = own_library and d.parent == self.root
+            if not listed_in_own and not any(
+                d.resolve().is_relative_to(t) for t in trusted_resolved
+            ):
                 continue
             skill = self._skill_from_dir(d)
             if skill is not None and skill.for_artifacts:

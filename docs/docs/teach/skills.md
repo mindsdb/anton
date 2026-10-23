@@ -47,7 +47,7 @@ applies_to: artifacts
 - Use only Chart.js for every chart.
 ```
 
-Every build then gets the skill's steps: the page writers, the backend writer and the step that fetches data. The build follows them and never shows them on the page. Your project's `.anton/anton.md` reaches every build step the same way, as rules to follow, not text to show.
+The page writers, the backend writer and the step that fetches data then get the skill's instructions. The build follows them and never shows them on the page. Your project's `.anton/anton.md` reaches every build step the same way, as rules to follow, not text to show.
 
 In the CLI, a build follows the marked skills in your own library and anton's built-in ones. An app that runs Anton names which other skill folders a build may follow. A skill someone else shares with you isn't one of them; it still works when Anton recalls it.
 

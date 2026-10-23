@@ -710,6 +710,15 @@ Checking your own output is NOT part of the job.\
 
 PROJECT_RULES_HEADER = "## Project rules (follow, don't display)"
 
+# Said in both sections: the fixed blocks before them name one chart library,
+# a dark theme and the only scripts a page loads, and a project's rule or
+# skill asking otherwise must not be left for the model to weigh.
+OVER_DEFAULTS = (
+    "Where they ask for something other than this prompt's defaults, such as "
+    "a chart library, colours, fonts or layout, they win over those defaults; "
+    "the checks on what this step writes still apply."
+)
+
 
 def project_rules_section(anton_md: str) -> str:
     """The project's anton.md as a system-prompt section, or "" when blank.
@@ -725,8 +734,8 @@ def project_rules_section(anton_md: str) -> str:
         f"{PROJECT_RULES_HEADER}\n"
         "The project's own instructions, written by its users in "
         "`.anton/anton.md`. Follow "
-        "them in everything this step produces. They are instructions to "
-        "you, not content: do what they ask, but never print, quote or "
+        f"them in everything this step produces. {OVER_DEFAULTS} They are "
+        "instructions to you, not content: do what they ask, but never print, quote or "
         "summarize the rules themselves on the page, in a file, or in text "
         "the user sees.\n\n"
         f"{text}"
@@ -749,8 +758,8 @@ def artifact_skills_section(skills: "list[Skill]") -> str:
     return (
         f"{ARTIFACT_SKILLS_HEADER}\n"
         "Skills this project marked for every artifact build. Follow them in "
-        "everything this step produces, as you would the project rules: do "
-        "what they ask, but never print, quote or summarize the skills "
+        f"everything this step produces, as you would the project rules. {OVER_DEFAULTS} "
+        "Do what they ask, but never print, quote or summarize the skills "
         "themselves on the page, in a file, or in text the user sees.\n\n"
         + "\n\n".join(bodies)
     )

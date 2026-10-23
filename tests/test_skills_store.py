@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -375,6 +376,44 @@ class TestListForArtifacts:
         store = SkillStore(root=root, builtin_root=builtins)
 
         assert [s.label for s in store.list_for_artifacts()] == ["builtin-marked", "mine-marked"]
+
+    def test_a_cli_store_follows_a_skill_linked_into_its_library(
+        self, tmp_path: Path, builtins: Path
+    ):
+        """A CLI user may keep skills in a dotfiles repo and link them in;
+        nobody else writes that library."""
+        elsewhere = tmp_path / "dotfiles"
+        _write_skill_md(elsewhere, "linked-marked", "applies_to: artifacts\n")
+        root = tmp_path / "user"
+        root.mkdir()
+        (root / "linked-marked").symlink_to(elsewhere / "linked-marked", target_is_directory=True)
+        store = SkillStore(root=root, builtin_root=builtins)
+
+        assert [s.label for s in store.list_for_artifacts()] == ["builtin-marked", "linked-marked"]
+
+    def test_a_host_store_follows_what_it_trusted_when_built(self, tmp_path: Path, builtins: Path):
+        """The host names its folders by path when the turn starts. A skill
+        deleted during the turn and made again under its name by someone
+        else is not what the build follows."""
+        own_store = tmp_path / "own"
+        _write_skill_md(own_store, "own-marked", "applies_to: artifacts\n")
+        turn = tmp_path / "turn"
+        turn.mkdir()
+        (turn / "own-marked").symlink_to(own_store / "own-marked", target_is_directory=True)
+        store = SkillStore(
+            root=turn, builtin_root=builtins, extra_roots=[tmp_path / "managed"],
+            artifact_roots=[own_store / "own-marked"],
+        )
+
+        shutil.rmtree(own_store / "own-marked")
+        (own_store / "own-marked").mkdir()
+        (own_store / "own-marked" / "SKILL.md").write_text(
+            "---\nname: own-marked\ndescription: d\napplies_to: artifacts\n---\nSOMEONE-ELSES\n",
+            encoding="utf-8",
+        )
+
+        followed = {s.label: s.declarative_md for s in store.list_for_artifacts()}
+        assert followed["own-marked"].strip() == "Use only Chart.js."
 
     def test_a_host_store_with_no_named_roots_follows_only_the_builtins(
         self, tmp_path: Path, builtins: Path

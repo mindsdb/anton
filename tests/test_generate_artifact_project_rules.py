@@ -62,6 +62,7 @@ def test_every_step_carries_the_rules_under_the_heading(tmp_path):
         rules = system[system.index(prompts.PROJECT_RULES_HEADER):]
         assert RULE in rules, step
         assert NEVER_SHOWN in rules, step
+        assert prompts.OVER_DEFAULTS in rules, step
 
 
 def test_no_anton_md_leaves_every_prompt_as_it_was(tmp_path):
