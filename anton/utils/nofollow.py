@@ -243,6 +243,48 @@ def replace_text_nofollow(
         os.replace(tmp_name, parts[-1], src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
 
 
+def replace_bytes_nofollow(root: Path | str, path: Path | str, data: bytes) -> None:
+    """Write ``data`` to ``<path>.tmp`` and rename it over ``path`` in the
+    pinned parent, byte for byte, as `replace_text_nofollow` writes text.
+
+    Refuses a ``path`` that holds anything but a regular file (a link, a
+    folder): the rename would replace the link rather than what it points
+    to, and a caller putting a file back means the file it read.
+    """
+    parts = relative_parts(root, path)
+    tmp_name = parts[-1] + ".tmp"
+    if _IS_WINDOWS:
+        target = Path(path)
+        if target.is_symlink() or (target.exists() and not target.is_file()):
+            raise OSError(errno.EINVAL, "not a regular file", os.fspath(path))
+        tmp = target.with_name(tmp_name)
+        tmp.write_bytes(data)
+        tmp.replace(target)
+        return
+    with opened_dir_nofollow(root, parts[:-1]) as dir_fd:
+        try:
+            held = os.stat(parts[-1], dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            if not stat.S_ISREG(held.st_mode):
+                raise OSError(errno.EINVAL, "not a regular file", os.fspath(path))
+        try:
+            os.unlink(tmp_name, dir_fd=dir_fd)
+        except FileNotFoundError:
+            pass
+        fd = _open_at(
+            tmp_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC,
+            0o666,
+            dir_fd=dir_fd,
+            shown=Path(path).with_name(tmp_name),
+        )
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.replace(tmp_name, parts[-1], src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+
+
 def unlink_matching_nofollow(
     root: Path | str, folder: Path | str, *, patterns: tuple[str, ...]
 ) -> None:
