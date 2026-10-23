@@ -1467,6 +1467,41 @@ def _generation_failed(reason: str) -> str:
     )
 
 
+# Ends a generate_artifact result after anton put the page back as the turn
+# found it.
+_PAGE_PUT_BACK = "The page is back as it was before this run."
+# Joins the instruction of a result that carries `changes_from_previous`.
+_CHANGES_INSTRUCTION = (
+    "`changes_from_previous` names the views this build broke (`broke`), left without a graphic (`blank`) or "
+    "removed (`removed`), against the page as it was before this turn. Name each one to the user, unless the "
+    "user asked for that change."
+)
+
+
+def _record_put_back(session: "ChatSession", key: PageKey, status: "RenderStatus") -> None:
+    """Record a page `handle_generate_artifact` put back as the turn found it:
+    with STATUS, how that page last fared, or with no record when no check
+    this turn vouched for it (`record_page_checks(restored=)`)."""
+    record_page_checks(
+        session, checks={} if status == "unverified" else {key: status}, restored=frozenset({key})
+    )
+
+
+def _rolls_back(result) -> bool:
+    """Whether a generate_artifact run's outcome leaves the page to put back
+    as the turn found it: any outcome but a built page (`generated`) and a
+    page left for the agent to repair (`BrowserCheckFailed`). An outcome
+    that never touched the page (`cancelled`, `needs_confirmation`) rolls
+    back too, which writes nothing (`TurnPages.restore_if_changed`)."""
+    from anton.core.tools.generate_artifact.state import BrowserCheckFailed
+
+    if isinstance(result, BrowserCheckFailed):
+        return False
+    if isinstance(result, dict):
+        return result.get("status", "generated") != "generated"
+    return True
+
+
 async def _drain_progress(queue):
     """Yield ToolProgress markers, staying silent while a question is open.
 
@@ -1670,6 +1705,12 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     page whose last build failed only its browser check: that one comes
     back for the agent to repair (`_browser_check_failed_outcome`).
 
+    On an artifact whose main page the turn found on disk, each build is
+    compared with that page (`GenState.previous_page`), and any outcome but
+    a built page or a page left to repair puts it back as the turn found it
+    (`_rolls_back`, `TurnPages.restore_if_changed`): a failure, a budget
+    stop, a crash, and a run the turn abandoned, once its task is done.
+
     An async generator rather than a plain coroutine: a full run
     takes minutes, and a tool that emits nothing for minutes reads as a hang.
     Step starts arrive on an `asyncio.Queue` and are yielded as `ToolProgress`
@@ -1681,6 +1722,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     """
     import asyncio
     import json
+    import threading
 
     from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
     from anton.core.tools.registry import ToolOutcome
@@ -1745,6 +1787,40 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     from anton.core.tools.generate_artifact import generate
     from anton.core.tools.generate_artifact.state import ARTIFACT_EFFORT_CEILING
 
+    await capture_turn_pages(session, store)
+    turn_pages = getattr(session, "_turn_pages", None)
+    previous_page = turn_pages.main_previous(slug) if turn_pages is not None else None
+    # Shared with the run: `_embed_attachments` writes the page under the
+    # lock unless `abandoned` is set, which `_put_back` sets first.
+    page_lock = threading.Lock()
+    abandoned = threading.Event()
+
+    def _put_back() -> "RenderStatus | None":
+        """Put the page back as the turn found it, unless it already is: the
+        status that page had, or None when nothing was put back. Never
+        raises: it also runs from a done-callback, where an exception would
+        reach only the event loop's log."""
+        if previous_page is None:
+            return None
+        key = previous_page[0]
+        try:
+            with page_lock:
+                abandoned.set()
+                status = turn_pages.status_before(key, None)
+                return status if turn_pages.restore_if_changed(key, store) else None
+        except Exception:
+            _log.warning("could not put %s back as it was before this run", slug, exc_info=True)
+            return None
+
+    def _on_abandoned(done: "asyncio.Task") -> None:
+        """The host closed this handler before it read the run's outcome:
+        once the run is done, put the page back when its outcome calls for
+        it, off the event loop. Checked by the finished task, so a write the
+        run makes after `cancel()` lands before the page goes back."""
+        if not done.cancelled() and done.exception() is None and not _rolls_back(done.result()):
+            return
+        asyncio.get_running_loop().run_in_executor(None, _put_back)
+
     async def _at_artifact_effort(coro):
         # Entered inside the task, so the cap lives in the task's own context
         # and never reaches the agent loop draining this handler.
@@ -1768,18 +1844,32 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
                     primary=artifact.primary,
                     progress=queue,
                     attachments=attachments,
+                    previous_page=previous_page,
+                    page_lock=page_lock,
+                    abandoned=abandoned,
                 ),
                 queue,
             )
         )
     )
+    restored: "RenderStatus | None" = None
+    handled = False
     try:
         async for marker in _drain_progress(queue):
             yield marker
         result = await task
+        if previous_page is not None and _rolls_back(result):
+            restored = await asyncio.to_thread(_put_back)
+        handled = True
     except Exception as exc:  # last-resort: never escalate to the dispatcher
+        if previous_page is not None:
+            restored = await asyncio.to_thread(_put_back)
+        handled = True
+        if restored is not None:
+            _record_put_back(session, previous_page[0], restored)
+        text = _generation_failed(f"generator crashed: {exc}")
         yield ToolOutcome(
-            content=_generation_failed(f"generator crashed: {exc}"),
+            content=f"{text}\n\n{_PAGE_PUT_BACK}" if restored is not None else text,
             ok=False,
             reason=type(exc).__name__,
         )
@@ -1790,6 +1880,11 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         # → `aclose()` → GeneratorExit): without it, generation would carry on
         # writing files into the artifact folder with nobody left to report to.
         task.cancel()
+        if not handled and previous_page is not None:
+            task.add_done_callback(_on_abandoned)
+    if restored is not None:
+        # Over the run's own record of its page (`engine._record_page_check`).
+        _record_put_back(session, previous_page[0], restored)
 
     from anton.core.tools.generate_artifact.state import BrowserCheckFailed
 
@@ -1802,8 +1897,15 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         # A failed run still worked inside the artifact folder on its way to
         # failing, so the turn touched the artifact.
         _track_artifact(session, store, slug, summary="Generated artifact files")
-        yield ToolOutcome(content=_generation_failed(result), ok=False, reason="pipeline")
+        text = _generation_failed(result)
+        yield ToolOutcome(
+            content=f"{text}\n\n{_PAGE_PUT_BACK}" if restored is not None else text, ok=False, reason="pipeline"
+        )
         return
+    if restored is not None:
+        result["restored"] = _PAGE_PUT_BACK
+        # It described the build anton just replaced.
+        result.pop("changes_from_previous", None)
 
     status = result.get("status", "generated")
     # `cancelled` is the one outcome that wrote nothing at all: the user
@@ -1825,14 +1927,15 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     instruction_key = status
     if status == "generated" and not result.get("verified_in_browser"):
         instruction_key = "generated_live_app" if result.get("live_app") else "generated_unverified"
+    instruction = _STATUS_INSTRUCTIONS.get(instruction_key, _STATUS_INSTRUCTIONS["generated_unverified"])
+    if result.get("changes_from_previous"):
+        instruction = f"{instruction} {_CHANGES_INSTRUCTION}"
     text = json.dumps(
         {
             "slug": slug,
             "path": str(folder),
             **result,
-            "instruction": _STATUS_INSTRUCTIONS.get(
-                instruction_key, _STATUS_INSTRUCTIONS["generated_unverified"]
-            ),
+            "instruction": instruction,
         },
         indent=2,
     )

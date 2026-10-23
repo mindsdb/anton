@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import anton.core.tools.generate_artifact as gen_pkg
 from anton.core.artifacts import ArtifactStore
 from anton.core.artifacts.page_copies import TurnPages
 from anton.core.artifacts.render_check import Comparison
@@ -21,6 +24,9 @@ from anton.core.session import ChatSession
 from anton.core.tools.generate_artifact import engine, orchestrator, verifiers
 from anton.core.tools.generate_artifact.state import BrowserCheckFailed
 from anton.core.tools import tool_handlers
+from anton.core.tools.progress import ToolProgress
+from anton.core.tools.registry import ToolOutcome
+from anton.core.tools.tool_handlers import handle_generate_artifact
 from tests.test_render_check import (  # noqa: F401  (policy, project and service are fixtures)
     _PAGE,
     _TIMEOUT,
@@ -403,3 +409,232 @@ def test_a_build_left_to_repairs_comparison_reaches_the_turns_record(tmp_path):
     assert session._turn_pages.end_lines(store, checks=session._page_checks) == [
         "“dash”: “Map” drew before this turn and fails now."
     ]
+
+
+# ── generate_artifact puts the page back ─────────────────────────────────────
+
+_HALF = "<p>half written</p>"
+_GENERATED = {"status": "generated", "files_written": ["index.html"], "summary": "s", "trace": []}
+_OVER_BUDGET = {"status": "stopped_over_budget", "files_written": [], "summary": "s", "trace": []}
+_LEFT_TO_REPAIR = BrowserCheckFailed(page="index.html", findings=("x",), views=(), screenshot=None, error="e")
+
+
+@pytest.fixture
+def configured(monkeypatch):
+    """A render-check service to compare with: copies are kept only then."""
+    monkeypatch.setenv("ANTON_RENDER_CHECK_URL", "http://127.0.0.1:9")
+
+
+def _tc(slug: str) -> dict:
+    return {"slug": slug, "user_request": "make it premium", "agent_understanding": "restyle", "user_language": "English"}
+
+
+def _gen_session(store: ArtifactStore) -> SimpleNamespace:
+    return _session(_workspace=SimpleNamespace(artifacts_dir=store.root))
+
+
+def _run(outcome):
+    """A run that half-writes the page, then ends with OUTCOME (raised when it is an exception)."""
+    async def fake_generate(**kw):
+        (kw["artifact_path"] / "index.html").write_text(_HALF)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        # A copy: the handler adds keys to a dict result.
+        return dict(outcome) if isinstance(outcome, dict) else outcome
+
+    return fake_generate
+
+
+async def _result(session, slug: str) -> ToolOutcome:
+    result = None
+    async for item in handle_generate_artifact(session, _tc(slug)):
+        if not isinstance(item, ToolProgress):
+            result = item
+    return result
+
+
+async def _until(condition, timeout: float = 2.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not condition():
+        assert loop.time() < deadline, "timed out"
+        await asyncio.sleep(0.01)
+
+
+@pytest.mark.parametrize("outcome", ["Frontend verification failed after 2 attempt(s): x", _OVER_BUDGET])
+async def test_a_run_that_did_not_build_the_page_puts_it_back(configured, tmp_path, monkeypatch, outcome):
+    store, slug = _artifact(tmp_path)
+    session = _gen_session(store)
+    monkeypatch.setattr(gen_pkg, "generate", _run(outcome))
+
+    result = await _result(session, slug)
+
+    assert (store.root / slug / "index.html").read_text() == _BEFORE
+    assert "The page is back as it was before this run." in result.content
+    # No status is known for the page the turn found, so it has no record: no line that it failed.
+    assert session._page_checks == {}
+
+
+async def test_a_crashed_run_puts_the_page_back_before_it_says_so(configured, tmp_path, monkeypatch):
+    store, slug = _artifact(tmp_path)
+    monkeypatch.setattr(gen_pkg, "generate", _run(RuntimeError("kaput")))
+
+    async for item in handle_generate_artifact(_gen_session(store), _tc(slug)):
+        if isinstance(item, ToolOutcome):
+            assert (store.root / slug / "index.html").read_text() == _BEFORE
+            assert "kaput" in item.content
+            assert item.content.endswith("The page is back as it was before this run.")
+
+
+@pytest.mark.parametrize("outcome", [_GENERATED, _LEFT_TO_REPAIR])
+async def test_a_built_page_or_one_left_to_repair_stays(configured, tmp_path, monkeypatch, outcome):
+    store, slug = _artifact(tmp_path)
+    monkeypatch.setattr(gen_pkg, "generate", _run(outcome))
+
+    await _result(_gen_session(store), slug)
+
+    assert (store.root / slug / "index.html").read_text() == _HALF
+
+
+async def test_a_run_that_never_touched_the_page_writes_nothing(configured, tmp_path, monkeypatch):
+    store, slug = _artifact(tmp_path)
+    page = store.root / slug / "index.html"
+    inode = page.stat().st_ino
+
+    async def fake_generate(**kw):
+        return {"status": "needs_confirmation", "files_written": [], "summary": "s", "trace": []}
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    result = await _result(_gen_session(store), slug)
+
+    assert page.stat().st_ino == inode
+    assert "restored" not in json.loads(result.content)
+
+
+async def test_a_new_artifact_has_nothing_to_put_back(configured, tmp_path, monkeypatch):
+    store = ArtifactStore(tmp_path / "artifacts")
+    slug = store.create(name="New", description="d", type="html-app", primary="index.html").slug
+    monkeypatch.setattr(gen_pkg, "generate", _run("Frontend verification failed after 2 attempt(s): x"))
+
+    await _result(_gen_session(store), slug)
+
+    assert (store.root / slug / "index.html").read_text() == _HALF
+
+
+async def test_a_run_the_turn_abandoned_puts_the_page_back_once_it_stops(configured, tmp_path, monkeypatch):
+    store, slug = _artifact(tmp_path)
+
+    async def fake_generate(**kw):
+        (kw["artifact_path"] / "index.html").write_text(_HALF)
+        kw["progress"].put_nowait("Writing the page")
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    agen = handle_generate_artifact(_gen_session(store), _tc(slug))
+    assert await agen.__anext__() == ToolProgress("Writing the page")
+
+    await agen.aclose()
+
+    await _until(lambda: (store.root / slug / "index.html").read_text() == _BEFORE)
+
+
+@pytest.mark.parametrize(("outcome", "put_back"), [(_GENERATED, False), (_LEFT_TO_REPAIR, False), (_OVER_BUDGET, True)])
+async def test_closing_the_handler_after_the_run_ended_follows_the_runs_outcome(
+    configured, tmp_path, monkeypatch, outcome, put_back
+):
+    store, slug = _artifact(tmp_path)
+    page = store.root / slug / "index.html"
+
+    async def fake_generate(**kw):
+        page.write_text(_HALF)
+        kw["progress"].put_nowait("Wrote the page")
+        return dict(outcome) if isinstance(outcome, dict) else outcome
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    agen = handle_generate_artifact(_gen_session(store), _tc(slug))
+    assert await agen.__anext__() == ToolProgress("Wrote the page")
+
+    await agen.aclose()
+
+    if put_back:
+        await _until(lambda: page.read_text() == _BEFORE)
+    else:
+        await asyncio.sleep(0.1)
+        assert page.read_text() == _HALF
+
+
+async def test_an_embed_still_running_when_the_turn_ends_writes_nothing_over_the_restored_page(
+    configured, tmp_path, monkeypatch
+):
+    store, slug = _artifact(tmp_path)
+    page = store.root / slug / "index.html"
+    started, release, done = threading.Event(), threading.Event(), threading.Event()
+
+    async def fake_generate(**kw):
+        page.write_text(_HALF)
+
+        def embed():
+            # Stands in for `_embed_attachments`, whose thread outlives the cancelled run.
+            started.set()
+            release.wait(5)
+            with kw["page_lock"]:
+                if not kw["abandoned"].is_set():
+                    page.write_text("<p>embedded</p>")
+            done.set()
+
+        kw["progress"].put_nowait("Embedding")
+        await asyncio.to_thread(embed)
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    agen = handle_generate_artifact(_gen_session(store), _tc(slug))
+    assert await agen.__anext__() == ToolProgress("Embedding")
+    # Cancelling the run before a thread picks up `embed` would drop it unrun.
+    await _until(started.is_set)
+
+    await agen.aclose()
+    await _until(lambda: page.read_text() == _BEFORE)
+    release.set()
+    await _until(done.is_set)
+
+    assert page.read_text() == _BEFORE
+
+
+async def test_a_put_back_that_raises_is_logged_not_raised(configured, tmp_path, monkeypatch, caplog):
+    store, slug = _artifact(tmp_path)
+    monkeypatch.setattr(gen_pkg, "generate", _run("Frontend verification failed after 2 attempt(s): x"))
+
+    def boom(self, key, store):
+        raise RuntimeError("disk")
+
+    monkeypatch.setattr(TurnPages, "restore_if_changed", boom)
+
+    result = await _result(_gen_session(store), slug)
+
+    assert "The page is back" not in result.content
+    assert "could not put" in caplog.text
+
+
+async def test_a_rebuild_that_removed_views_tells_the_agent_to_name_them(configured, tmp_path, monkeypatch):
+    store, slug = _artifact(tmp_path)
+    outcome = {**_GENERATED, "verified_in_browser": True,
+               "changes_from_previous": {"broke": [], "blank": [], "removed": ["“Globe”"]}}
+    monkeypatch.setattr(gen_pkg, "generate", _run(outcome))
+
+    result = await _result(_gen_session(store), slug)
+
+    data = json.loads(result.content)
+    assert data["changes_from_previous"]["removed"] == ["“Globe”"]
+    assert tool_handlers._CHANGES_INSTRUCTION in data["instruction"]
+
+
+async def test_a_page_put_back_drops_what_the_replaced_build_changed(configured, tmp_path, monkeypatch):
+    store, slug = _artifact(tmp_path)
+    outcome = {**_OVER_BUDGET, "changes_from_previous": {"broke": ["“Map”"], "blank": [], "removed": []}}
+    monkeypatch.setattr(gen_pkg, "generate", _run(outcome))
+
+    result = await _result(_gen_session(store), slug)
+
+    data = json.loads(result.content)
+    assert data["restored"] == "The page is back as it was before this run."
+    assert "changes_from_previous" not in data
+    assert tool_handlers._CHANGES_INSTRUCTION not in data["instruction"]
