@@ -242,6 +242,35 @@ def test_restore_if_changed_writes_only_a_changed_or_missing_page(tmp_path):
     assert page.read_text() == "<p>before</p>"
 
 
+def test_write_back_puts_a_mid_turn_page_back_without_marking_it_restored(tmp_path, caplog):
+    store, slug, key, pages = _captured(tmp_path)
+    page = store.root / slug / "index.html"
+    page.write_text("<p>the edit</p>")
+    pages.record({key: _comparison(removed_views=[{"pressed": "Globe"}], removed_controls=["Globe"])})
+    run_start = pages.read_current(key, store)
+    inode = page.stat().st_ino
+
+    assert pages.write_back(key, store, run_start) is False
+    assert page.stat().st_ino == inode
+    page.write_text("<p>half written</p>")
+    assert pages.write_back(key, store, run_start) is True
+
+    assert page.read_text() == "<p>the edit</p>"
+    assert pages.has_restored() is False
+    assert pages.end_lines(store, checks={}) == ["“Control tower” no longer has “Globe”: this turn removed it."]
+    shutil.rmtree(store.root / slug)
+    assert pages.write_back(key, store, run_start) is False
+    assert "could not put" in caplog.text
+
+
+def test_the_page_on_disk_and_its_copy_read_byte_for_byte(tmp_path):
+    store, slug, key, pages = _captured(tmp_path, pages={"index.html": b"<p>a\r\nb</p>"})
+    assert pages.copy_bytes(key) == pages.read_current(key, store) == b"<p>a\r\nb</p>"
+    assert pages.copy_bytes(PageKey("other", "index.html")) is None
+    (store.root / slug / "index.html").unlink()
+    assert pages.read_current(key, store) is None
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="links below the root are refused where dir_fd exists")
 def test_a_link_at_the_page_never_reads_as_the_page_the_turn_found(tmp_path):
     store, slug, key, pages = _captured(tmp_path)

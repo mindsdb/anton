@@ -4,9 +4,11 @@ A follow-up edit can break or drop a view that worked before the turn. The
 check after each cell and generate_artifact's browser check send the
 render-check service the page kept here (`previous_html`), and the service
 compares the two (`render_check.Comparison`). When an edit breaks a page
-past its repair cells, or a rebuild ends without a page, anton puts the
-copy back (`TurnPages.restore`). What the turn broke, blanked, removed or
-put back closes the agent's final message (`TurnPages.end_lines`).
+past its repair cells, anton puts the copy back (`TurnPages.restore`); a
+rebuild that ends without a page puts back the page as the run found it,
+the copy when no earlier edit this turn changed it (`TurnPages.write_back`).
+What the turn broke, blanked, removed or put back closes the agent's final
+message (`TurnPages.end_lines`).
 
 Copies are kept only with the render-check service configured: without it
 nothing compares them. `ChatSession` holds one `TurnPages` per turn.
@@ -246,20 +248,40 @@ class TurnPages:
         with self._lock:
             return bool(self._restored)
 
+    def copy_bytes(self, key: PageKey) -> bytes | None:
+        """KEY's page as the turn found it, byte for byte, or None."""
+        with self._lock:
+            return self._copies.get(key)
+
+    def read_current(self, key: PageKey, store) -> bytes | None:
+        """KEY's page on disk, read under the store root, never through a
+        link, never past `render_check.MAX_PAGE_BYTES`; None when it can't
+        be read so. Blocks on a file read: call it off the event loop."""
+        try:
+            return read_bytes_nofollow(
+                store.root, store.root / key.slug / key.page, limit=render_check.MAX_PAGE_BYTES
+            )
+        except OSError:
+            return None
+
+    def _write(self, key: PageKey, store, data: bytes, *, before: str) -> bool:
+        """Write DATA over KEY's page through a rename that never follows a
+        link. Whether it did; a failure is logged."""
+        try:
+            replace_bytes_nofollow(store.root, store.root / key.slug / key.page, data)
+        except OSError:
+            _log.warning("could not put %s/%s back as it was before %s", key.slug, key.page, before, exc_info=True)
+            return False
+        return True
+
     def restore(self, key: PageKey, store) -> bool:
         """Put KEY's copy back, byte for byte, through a rename that never
         follows a link. Whether it did; a failure is logged. The page then
         reads as put back in the turn's last lines, and its comparison and
         the lines the agent saw about it are forgotten: they described the
         page anton replaced."""
-        with self._lock:
-            data = self._copies.get(key)
-        if data is None:
-            return False
-        try:
-            replace_bytes_nofollow(store.root, store.root / key.slug / key.page, data)
-        except OSError:
-            _log.warning("could not put %s/%s back as it was before this turn", key.slug, key.page, exc_info=True)
+        data = self.copy_bytes(key)
+        if data is None or not self._write(key, store, data, before="this turn"):
             return False
         with self._lock:
             self._restored[key] = None
@@ -267,22 +289,23 @@ class TurnPages:
             self._shown.pop(key, None)
         return True
 
+    def write_back(self, key: PageKey, store, data: bytes) -> bool:
+        """Put DATA, the page as a generate_artifact run found it, back over
+        KEY's page, unless the page on disk already is DATA. Whether it
+        wrote; a failure is logged. The page goes back to a version the turn
+        made, not to how the turn found it, so it does not read as put back
+        and its comparisons stay. Blocks on file I/O: call it off the event
+        loop."""
+        if self.read_current(key, store) == data:
+            return False
+        return self._write(key, store, data, before="this run")
+
     def is_as_found(self, key: PageKey, store) -> bool:
         """Whether KEY's page on disk is, byte for byte, its copy. False
-        without a copy or when the page can't be read: read under the store
-        root, never through a link, never past `render_check.MAX_PAGE_BYTES`.
+        without a copy or when the page can't be read (`read_current`).
         Blocks on a file read: call it off the event loop."""
-        with self._lock:
-            data = self._copies.get(key)
-        if data is None:
-            return False
-        try:
-            current = read_bytes_nofollow(
-                store.root, store.root / key.slug / key.page, limit=render_check.MAX_PAGE_BYTES
-            )
-        except OSError:
-            return False
-        return current == data
+        data = self.copy_bytes(key)
+        return data is not None and self.read_current(key, store) == data
 
     def restore_if_changed(self, key: PageKey, store) -> bool:
         """`restore`, unless the page on disk already is its copy: for the

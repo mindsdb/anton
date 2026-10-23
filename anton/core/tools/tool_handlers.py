@@ -1474,8 +1474,8 @@ def _generation_failed(reason: str) -> str:
     )
 
 
-# Ends a generate_artifact result after anton put the page back as the turn
-# found it.
+# Ends a generate_artifact result after anton put the page back as it was
+# when the run started.
 _PAGE_PUT_BACK = "The page is back as it was before this run."
 # Joins the instruction of a dict result whose page anton put back.
 _RESTORED_INSTRUCTION = (
@@ -1495,20 +1495,39 @@ _CHANGES_INSTRUCTION = (
 )
 
 
-def _record_put_back(session: "ChatSession", key: PageKey, status: "RenderStatus") -> None:
-    """Record a page `handle_generate_artifact` put back as the turn found it:
-    with STATUS, how that page last fared, or with no record when no check
-    this turn vouched for it (`record_page_checks(restored=)`)."""
-    record_page_checks(
-        session, checks={} if status == "unverified" else {key: status}, restored=frozenset({key})
-    )
+class _PageBack(NamedTuple):
+    """A page `handle_generate_artifact` put back as it was when the run
+    started: how that page last fared (None when no check this turn did),
+    and whether it is also the page as the turn found it."""
+
+    status: "RenderStatus | None"
+    as_found: bool
+
+
+def _record_put_back(session: "ChatSession", key: PageKey, back: _PageBack) -> None:
+    """Record a page `handle_generate_artifact` put back, over the run's own
+    record of it. As the turn found it: with its status, or with no record
+    when no check this turn vouched for it (`record_page_checks(restored=)`).
+    As an earlier edit this turn left it: with that edit's last status, its
+    `_failed_views` kept since they describe that page, or without one the
+    run's record is dropped."""
+    if back.as_found:
+        record_page_checks(
+            session, checks={} if back.status in (None, "unverified") else {key: back.status},
+            restored=frozenset({key}),
+        )
+    elif back.status is not None:
+        record_page_checks(session, checks={key: back.status})
+    else:
+        record_page_checks(session, checks={}, restored=frozenset({key}))
 
 
 def _rolls_back(result) -> bool:
     """Whether a generate_artifact run's outcome leaves the page to put back
-    as the turn found it: a failure (str) or a budget stop, not a built page
-    (`generated`), a page left for the agent to repair (`BrowserCheckFailed`)
-    or an outcome that wrote nothing (`cancelled`, `needs_confirmation`)."""
+    as it was when the run started: a failure (str) or a budget stop, not a
+    built page (`generated`), a page left for the agent to repair
+    (`BrowserCheckFailed`) or an outcome that wrote nothing (`cancelled`,
+    `needs_confirmation`)."""
     from anton.core.tools.generate_artifact.state import BrowserCheckFailed
 
     if isinstance(result, BrowserCheckFailed):
@@ -1722,10 +1741,14 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     back for the agent to repair (`_browser_check_failed_outcome`).
 
     On an artifact whose main page the turn found on disk, each build is
-    compared with that page (`GenState.previous_page`). When this run is the
-    first to change the page this turn, a failure, a budget stop, a crash,
-    and a run the turn abandoned (once its task is done) put the page back
-    as the turn found it (`_rolls_back`, `TurnPages.restore_if_changed`).
+    compared with that page (`GenState.previous_page`). A failure, a budget
+    stop, a crash, and a run the turn abandoned (once its task is done) put
+    the main page back as it was when the run started (`_rolls_back`): as
+    the turn found it when the run was the first to change it
+    (`TurnPages.restore_if_changed`), else as an earlier edit this turn left
+    it (`TurnPages.write_back`). A run that never wrote (cancelled, needs
+    confirmation) puts nothing back, and a page missing when the run started
+    is never deleted.
 
     An async generator rather than a plain coroutine: a full run
     takes minutes, and a tool that emits nothing for minutes reads as a hang.
@@ -1810,29 +1833,37 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     if not isinstance(turn_pages, TurnPages):
         turn_pages = None
     previous_page = turn_pages.main_previous(slug) if turn_pages is not None else None
-    # Only a run that is the first to change the page this turn puts it back:
-    # going back to the turn's copy would also undo an earlier cell's edit.
-    rolls_back_to_turn_start = previous_page is not None and await asyncio.to_thread(
-        turn_pages.is_as_found, previous_page[0], store
-    )
+    # The page as this run found it, which a run that ends without a page
+    # leaves behind; it is the turn's copy only when no earlier edit this turn
+    # changed the page, and going back to the copy would undo such an edit.
+    run_start: bytes | None = None
+    as_found = False
+    status_at_start: "RenderStatus | None" = None
+    if previous_page is not None:
+        run_start = await asyncio.to_thread(turn_pages.read_current, previous_page[0], store)
+        as_found = run_start is not None and run_start == turn_pages.copy_bytes(previous_page[0])
+        checks = getattr(session, "_page_checks", None)
+        status_at_start = checks.get(previous_page[0]) if isinstance(checks, dict) else None
     # Shared with the run: `_embed_attachments` writes the page under the
     # lock unless `abandoned` is set, which `_put_back` sets first.
     page_lock = threading.Lock()
     abandoned = threading.Event()
 
-    def _put_back() -> "RenderStatus | None":
-        """Put the page back as the turn found it, unless it already is: the
-        status that page had, or None when nothing was put back. Never
-        raises: it also runs from a done-callback, where an exception would
-        reach only the event loop's log."""
-        if not rolls_back_to_turn_start:
+    def _put_back() -> _PageBack | None:
+        """Put the page back as it was when the run started, unless it
+        already is: how that page fared, or None when nothing was written.
+        Never raises: it also runs from a done-callback, where an exception
+        would reach only the event loop's log."""
+        if run_start is None:
             return None
         key = previous_page[0]
         try:
             with page_lock:
                 abandoned.set()
-                status = turn_pages.status_before(key, None)
-                return status if turn_pages.restore_if_changed(key, store) else None
+                if as_found:
+                    status = turn_pages.status_before(key, None)
+                    return _PageBack(status, True) if turn_pages.restore_if_changed(key, store) else None
+                return _PageBack(status_at_start, False) if turn_pages.write_back(key, store, run_start) else None
         except Exception:
             _log.warning("could not put %s back as it was before this run", slug, exc_info=True)
             return None
@@ -1844,7 +1875,12 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         run makes after `cancel()` lands before the page goes back."""
         if not done.cancelled() and done.exception() is None and not _rolls_back(done.result()):
             return
-        asyncio.get_running_loop().run_in_executor(None, _put_back)
+        try:
+            asyncio.get_running_loop().run_in_executor(None, _put_back)
+        except RuntimeError:
+            # The default executor is shut down, so the loop is closing:
+            # blocking it briefly is the lesser cost.
+            _put_back()
 
     async def _at_artifact_effort(coro):
         # Entered inside the task, so the cap lives in the task's own context
@@ -1877,17 +1913,21 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
             )
         )
     )
-    restored: "RenderStatus | None" = None
+    restored: _PageBack | None = None
     handled = False
     try:
         async for marker in _drain_progress(queue):
             yield marker
         result = await task
-        if rolls_back_to_turn_start and _rolls_back(result):
+        if run_start is not None and _rolls_back(result):
             restored = await asyncio.to_thread(_put_back)
         handled = True
     except Exception as exc:  # last-resort: never escalate to the dispatcher
-        if rolls_back_to_turn_start:
+        if not task.done():
+            # The run's last write must land before the page goes back.
+            task.cancel()
+            await asyncio.wait({task})
+        if run_start is not None:
             restored = await asyncio.to_thread(_put_back)
         handled = True
         if restored is not None:
@@ -1905,7 +1945,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         # → `aclose()` → GeneratorExit): without it, generation would carry on
         # writing files into the artifact folder with nobody left to report to.
         task.cancel()
-        if not handled and rolls_back_to_turn_start:
+        if not handled and run_start is not None:
             task.add_done_callback(_on_abandoned)
     if restored is not None:
         # Over the run's own record of its page (`engine._record_page_check`).

@@ -700,27 +700,102 @@ async def test_a_page_put_back_drops_what_the_replaced_build_changed(configured,
     assert tool_handlers._CHANGES_INSTRUCTION not in data["instruction"]
 
 
-@pytest.mark.parametrize("outcome", [
-    {"status": "needs_confirmation", "files_written": [], "summary": "s", "trace": []},
-    "Frontend verification failed after 2 attempt(s): x",
-    _OVER_BUDGET,
-])
-async def test_a_run_after_an_edit_this_turn_leaves_that_edit(configured, tmp_path, monkeypatch, outcome):
-    store, slug = _artifact(tmp_path)
-    session = _gen_session(store)
+async def _edited_this_turn(session, store, slug: str, *, status=None) -> Path:
+    """A cell earlier in the turn: the turn's copies, then its edit, and
+    STATUS, how that cell's check found the edit."""
     page = store.root / slug / "index.html"
-    # A cell earlier in the turn: the turn's copies, then its edit.
     await tool_handlers.capture_turn_pages(session, store)
     page.write_text("<p>the edit the user asked for</p>")
+    if status is not None:
+        session._page_checks[PageKey(slug, "index.html")] = status
+    return page
+
+
+@pytest.mark.parametrize("outcome", ["Frontend verification failed after 2 attempt(s): x", _OVER_BUDGET])
+async def test_a_run_after_an_edit_this_turn_goes_back_to_that_edit(configured, tmp_path, monkeypatch, outcome):
+    """The page goes back as the run found it, which is not how the turn
+    found it: the run says so, the turn's last lines do not."""
+    store, slug = _artifact(tmp_path)
+    session = _gen_session(store)
+    page = await _edited_this_turn(session, store, slug)
+    monkeypatch.setattr(gen_pkg, "generate", _run(outcome))
+
+    result = await _result(session, slug)
+
+    assert page.read_text() == "<p>the edit the user asked for</p>"
+    assert tool_handlers._PAGE_PUT_BACK in result.content
+    if isinstance(outcome, dict):
+        assert json.loads(result.content)["restored"] == tool_handlers._PAGE_PUT_BACK
+    assert session._turn_pages.has_restored() is False
+    assert session._turn_pages.end_lines(store, checks=session._page_checks) == []
+
+
+async def test_a_run_after_an_edit_this_turn_that_wrote_nothing_leaves_it(configured, tmp_path, monkeypatch):
+    store, slug = _artifact(tmp_path)
+    session = _gen_session(store)
+    page = await _edited_this_turn(session, store, slug)
+    inode = page.stat().st_ino
 
     async def fake_generate(**kw):
-        return dict(outcome) if isinstance(outcome, dict) else outcome
+        return {"status": "needs_confirmation", "files_written": [], "summary": "s", "trace": []}
 
     monkeypatch.setattr(gen_pkg, "generate", fake_generate)
     result = await _result(session, slug)
 
+    assert page.stat().st_ino == inode
+    assert "restored" not in json.loads(result.content)
+
+
+async def test_a_page_put_back_to_an_edit_this_turn_keeps_how_that_edit_fared(configured, tmp_path, monkeypatch):
+    store, slug = _artifact(tmp_path)
+    session = _gen_session(store)
+    key = PageKey(slug, "index.html")
+    page = await _edited_this_turn(session, store, slug, status="passed")
+
+    async def fake_generate(**kw):
+        page.write_text(_HALF)
+        # As `engine._record_page_check` records a run that wrote a page no browser loaded.
+        tool_handlers.record_page_checks(kw["session"], checks={key: "unverified"})
+        return "Frontend verification failed after 2 attempt(s): x"
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    await _result(session, slug)
+
     assert page.read_text() == "<p>the edit the user asked for</p>"
-    assert tool_handlers._PAGE_PUT_BACK not in result.content
+    assert session._page_checks[key] == "passed"
+
+
+async def test_a_handler_that_crashed_mid_run_stops_the_run_before_it_puts_the_page_back(
+    configured, tmp_path, monkeypatch
+):
+    store, slug = _artifact(tmp_path)
+    page = store.root / slug / "index.html"
+    tasks: list[asyncio.Task] = []
+
+    async def fake_generate(**kw):
+        tasks.append(asyncio.current_task())
+        page.write_text(_HALF)
+        kw["progress"].put_nowait("Writing the page")
+        await asyncio.sleep(0.2)
+        page.write_text("<p>late</p>")
+
+    async def broken_drain(queue):
+        yield ToolProgress(await queue.get())
+        raise RuntimeError("progress broke")
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    monkeypatch.setattr(tool_handlers, "_drain_progress", broken_drain)
+    outcomes = 0
+
+    async for item in handle_generate_artifact(_gen_session(store), _tc(slug)):
+        if isinstance(item, ToolOutcome):
+            outcomes += 1
+            assert tasks[0].done()
+            assert page.read_text() == _BEFORE
+            await asyncio.sleep(0.3)
+            assert page.read_text() == _BEFORE
+
+    assert outcomes == 1
 
 
 async def test_a_page_put_back_keeps_how_it_last_fared(configured, tmp_path, monkeypatch):
