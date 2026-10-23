@@ -16,7 +16,10 @@ import pytest
 
 from anton.core.artifacts import ArtifactStore
 from anton.core.artifacts.page_copies import TurnPages
+from anton.core.artifacts.render_check import Comparison
 from anton.core.session import ChatSession
+from anton.core.tools.generate_artifact import engine, orchestrator, verifiers
+from anton.core.tools.generate_artifact.state import BrowserCheckFailed
 from anton.core.tools import tool_handlers
 from tests.test_render_check import (  # noqa: F401  (policy, project and service are fixtures)
     _PAGE,
@@ -24,6 +27,8 @@ from tests.test_render_check import (  # noqa: F401  (policy, project and servic
     _VIEWS,
     _answer,
     _comparison,
+    _gen_state,
+    _writes_page,
     policy,
     project,
     service,
@@ -297,3 +302,104 @@ async def test_after_the_page_went_back_a_new_edit_hears_its_blank_view_again(se
     after = await _cell(session, store, slug, "a new edit")
 
     assert any("“Details” showed a graphic" in message for message in after.messages)
+
+
+# ── generate_artifact's builds ───────────────────────────────────────────────
+
+
+def test_the_generators_check_sends_the_page_as_it_was_and_keeps_the_comparison(service, tmp_path):
+    page = tmp_path / "index.html"
+    page.write_text(_PAGE)
+    service.answer(_passed(**_GLOBE_GONE))
+
+    live = verifiers.verify_frontend_live(page, cell_sandbox=None, previous_html=_BEFORE)
+    verifiers.verify_frontend_live(page, cell_sandbox=None)
+
+    assert service.requests[0]["body"]["previous_html"] == _BEFORE
+    assert "previous_html" not in service.requests[1]["body"]
+    assert [view.pressed for view in live.comparison.removed_views] == ["Globe"]
+
+
+async def test_each_build_is_compared_with_the_page_as_the_turn_found_it(service, project, policy, monkeypatch):
+    st = _gen_state(project, policy)
+    st.previous_page = (tool_handlers.PageKey("dash", "index.html"), _BEFORE)
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", _writes_page(project, []))
+    service.answer(_passed(**_GLOBE_GONE))
+
+    assert await orchestrator._gen_verify_frontend(st) is None
+
+    assert service.requests[0]["body"]["previous_html"] == _BEFORE
+    assert orchestrator._result_shell(st)["changes_from_previous"] == {
+        "broke": [], "blank": [], "removed": ["“Globe”"],
+    }
+
+
+async def test_a_new_artifacts_build_is_compared_with_nothing(service, project, policy, monkeypatch):
+    st = _gen_state(project, policy)
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", _writes_page(project, []))
+
+    assert await orchestrator._gen_verify_frontend(st) is None
+
+    assert "previous_html" not in service.requests[0]["body"]
+    assert "changes_from_previous" not in orchestrator._result_shell(st)
+
+
+async def test_a_build_left_to_repair_carries_its_comparison(service, project, policy, monkeypatch):
+    st = _gen_state(project, policy)
+    st.previous_page = (tool_handlers.PageKey("dash", "index.html"), _BEFORE)
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", _writes_page(project, []))
+    service.answer(_FAILED_MAP)
+
+    result = await orchestrator._gen_verify_frontend(st)
+
+    assert isinstance(result, BrowserCheckFailed)
+    assert result.comparison is not None and result.comparison.has_new_problem
+
+
+def test_embedding_writes_nothing_once_the_run_is_abandoned(tmp_path, monkeypatch):
+    st = _gen_state(tmp_path)
+    st.attachments = [object()]
+    page = tmp_path / "index.html"
+    page.write_text(_PAGE)
+    monkeypatch.setattr(orchestrator.attachments, "embed_assets", lambda html, *args, **kwargs: html + "<!-- embedded -->")
+
+    st.abandoned.set()
+    orchestrator._embed_attachments(st, page)
+    assert page.read_text() == _PAGE
+
+    st.abandoned.clear()
+    orchestrator._embed_attachments(st, page)
+    assert page.read_text().endswith("<!-- embedded -->")
+
+
+def test_the_runs_comparison_reaches_the_turns_record(tmp_path):
+    session = _session()
+    comparison = Comparison.model_validate(_comparison(**_GLOBE_GONE))
+
+    engine._record_page_check(session, state=SimpleNamespace(
+        slug="dash", browser_status="passed", browser_findings_listed=False, files_written=["index.html"],
+        is_fullstack=False, primary="index.html", comparison=comparison,
+    ), result={"status": "generated"})
+
+    store = ArtifactStore(tmp_path / "artifacts")
+    assert session._turn_pages.end_lines(store, checks=session._page_checks) == [
+        "“dash” no longer has “Globe”: this turn removed it."
+    ]
+
+
+def test_a_build_left_to_repairs_comparison_reaches_the_turns_record(tmp_path):
+    session = _session()
+    comparison = Comparison.model_validate(_comparison(broken_views=[_BROKE_MAP]))
+
+    engine._record_page_check(
+        session,
+        state=SimpleNamespace(slug="dash", browser_status="failed", files_written=["index.html"],
+                              is_fullstack=False, primary="index.html"),
+        result=BrowserCheckFailed(page="index.html", findings=("x",), views=(), screenshot=None, error="e",
+                                  comparison=comparison),
+    )
+
+    store = ArtifactStore(tmp_path / "artifacts")
+    assert session._turn_pages.end_lines(store, checks=session._page_checks) == [
+        "“dash”: “Map” drew before this turn and fails now."
+    ]

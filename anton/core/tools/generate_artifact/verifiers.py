@@ -553,7 +553,9 @@ def verify_frontend(
     return VerifyResult(errors=errors, warnings=warnings)
 
 
-def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, screenshot: bool = True) -> BrowserCheck:
+def verify_frontend_live(
+    entry: Path, *, cell_sandbox: CellSandbox | None, screenshot: bool = True, previous_html: str | None = None
+) -> BrowserCheck:
     """Load the written page once in a browser.
 
     The class of defects the text checks above cannot see: a script that
@@ -570,7 +572,9 @@ def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, scree
     runs in its own container and only the page's text leaves this process.
     Otherwise the local Electron browser loads it (`html_lint`), which a
     sandbox policy refuses. `screenshot=False` asks the service for no
-    screenshot. A loaded page's `coverage` names the views the browser
+    screenshot. `previous_html`, the page as the turn found it, asks the
+    render-check service to compare the two; a loaded page's `comparison`
+    carries the answer. The local browser compares nothing. A loaded page's `coverage` names the views the browser
     measured: the service's, with the tabs and toggles it did not press, or
     the page as it opens from the local browser, which presses nothing.
 
@@ -591,7 +595,9 @@ def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, scree
     app directory, not the cwd.
     """
     if render_check.configured_url() is not None:
-        outcome = render_check.check_file(entry.resolve(), cell_sandbox=cell_sandbox, screenshot=screenshot)
+        outcome = render_check.check_file(
+            entry.resolve(), cell_sandbox=cell_sandbox, screenshot=screenshot, previous_html=previous_html
+        )
         if outcome.status == "unverified":
             found = render_check.unverified_findings(outcome)
             return BrowserCheck(
@@ -601,7 +607,7 @@ def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, scree
         verdict = _render_verdict(outcome.findings)
         return BrowserCheck(
             status="passed" if verdict.ok else "failed", verdict=verdict, screenshot=outcome.screenshot,
-            coverage=outcome.coverage, views=tuple(outcome.views),
+            coverage=outcome.coverage, views=tuple(outcome.views), comparison=outcome.comparison,
         )
     findings = lint_html(entry.resolve(), cell_sandbox=cell_sandbox)
     if findings is None:
