@@ -296,6 +296,28 @@ check free to list what it finds. So the agent fixes them once and then
 reports the page as unverified, instead of editing a page that may work
 on every cell.
 
+Each check also compares the page with how it was when the turn began.
+Before the turn's first cell or `generate_artifact` run, anton keeps a copy
+of every artifact's main page but a fullstack app's
+(`page_copies.TurnPages.capture`): newest first, at most 64 MiB a turn,
+read the way the check reads a page. A check of a page with a copy sends it
+as `previous_html`, unless less than a whole check's time
+(`render_check.TIMEOUT_SECONDS`) is left of the cell's budget, and the
+service's `comparison` names the views the turn's edits broke, left without
+a graphic or removed. A view that broke fails the page, so its repair cells
+apply. The others are not failures, and the agent hears about each set once
+a turn. When a page the turn's edits made worse fails with no repair cells
+left, anton puts the copy back. A `generate_artifact` run on an existing
+artifact that fails, stops over budget, crashes or is abandoned by the
+turn puts the main page back as it was when the run started: as the turn
+found it, when the run was the first to change it. A run that never wrote
+(cancelled, needs confirmation) puts nothing back. On a sandboxed
+deployment the turn ends with a line for each page put back as the turn
+found it and for each view broken, blanked or removed
+(`TurnPages.end_lines`). A service that
+predates the comparison answers such a request 400, and the page reads as
+unverified: the release ships the service and anton together.
+
 The service also presses each tab and toggle it finds, and a pass vouches
 only for the views it measured. The cell check's line for a passed page
 names them: the page as it opens and the view behind each tab or toggle the

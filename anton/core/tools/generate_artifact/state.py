@@ -7,6 +7,7 @@ return the Pydantic verdict models below. Verifiers return `VerifyResult`.
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -20,7 +21,8 @@ from .attachments import Attachment
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
     from anton.core.artifacts.live_app_slots import LiveAppLaunchError, LiveAppLaunchResult
-    from anton.core.artifacts.render_check import CheckedView, RenderScreenshot, RenderStatus, ViewCoverage
+    from anton.core.artifacts.render_check import CheckedView, Comparison, RenderScreenshot, RenderStatus, ViewCoverage
+    from anton.core.tools.tool_handlers import PageKey
     from anton.utils.datasources import DatasourceCatalog
 
 # ── Budgets (see design spec) ────────────────────────────────────────────────
@@ -162,7 +164,9 @@ class BrowserCheck:
     that loaded the page measured and the tabs and toggles it left
     unopened; None when no browser loaded it. `views` are those views as
     the render check listed them, empty from the local browser, which
-    presses nothing and lists none.
+    presses nothing and lists none. `comparison` is the render check's
+    comparison with the page as the turn found it, when the check was sent
+    one.
     """
 
     status: "RenderStatus"
@@ -172,6 +176,7 @@ class BrowserCheck:
     screenshot: "RenderScreenshot | None" = None
     coverage: "ViewCoverage | None" = None
     views: "tuple[CheckedView, ...]" = ()
+    comparison: "Comparison | None" = None
 
 
 @dataclass(frozen=True)
@@ -187,6 +192,8 @@ class BrowserCheckFailed:
     sent one. `error` is the run's terminal message, for the trace. All of
     it comes from the last build's own check: an earlier build's browser
     fields on `GenState` can name a page a later build deleted.
+    `comparison` is that check's comparison with the page as the turn found
+    it, when there was one.
     """
 
     page: str
@@ -194,6 +201,7 @@ class BrowserCheckFailed:
     views: "tuple[CheckedView, ...]"
     screenshot: "RenderScreenshot | None"
     error: str
+    comparison: "Comparison | None" = None
 
 
 # ── FSM state ────────────────────────────────────────────────────────────────
@@ -277,6 +285,18 @@ class GenState:
     # folder (`index.html`); it captions the screenshot. The generator may
     # have named it differently from the primary the run started with.
     browser_page: str = ""
+    # The artifact's main page as it was when the turn began, and its key:
+    # each build's browser check is compared with it. None for a new
+    # artifact, a fullstack app, or without the render-check service.
+    previous_page: "tuple[PageKey, str] | None" = None
+    # The latest browser check's comparison with `previous_page`.
+    comparison: "Comparison | None" = None
+    # Held while `_embed_attachments` rewrites the page. The tool handler sets
+    # `abandoned` under it before it puts the page back for a run the turn
+    # gave up on: the embedding thread outlives the cancelled task and must
+    # not write over the restored page.
+    page_lock: threading.Lock = field(default_factory=threading.Lock)
+    abandoned: threading.Event = field(default_factory=threading.Event)
     # Files the user attached to the conversation, as the tool call named
     # them (S-01). Data files are read by the gathering step; assets are
     # copied into the artifact by `orchestrator._stage_attachments`.

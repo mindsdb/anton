@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -159,7 +160,9 @@ def test_a_check_without_a_screenshot_asks_for_none(service):
 
 
 def test_the_request_model_is_the_contract_and_nothing_more():
-    assert RenderCheckRequest(html="x").model_dump() == {"html": "x", "screenshot": True}
+    assert RenderCheckRequest(html="x").model_dump() == {"html": "x", "screenshot": True, "previous_html": None}
+    # What `check_html` sends without a previous page: the body an older service accepts.
+    assert RenderCheckRequest(html="x").model_dump(exclude_none=True) == {"html": "x", "screenshot": True}
     with pytest.raises(ValueError):
         RenderCheckRequest(html="x", extra=1)
 
@@ -607,6 +610,30 @@ def test_check_file_never_follows_a_link_out_of_the_persons_files(service, tmp_p
     result = check_file(link, cell_sandbox=policy)
     assert result.status == "unverified"
     assert "outside the files this conversation may read" in result.unverified_reason
+    assert service.requests == []
+
+
+def test_a_refused_read_and_an_unreadable_page_read_differently(service, tmp_path, project, policy):
+    outside = tmp_path / "outside.html"
+    outside.write_text(_PAGE)
+    refused = check_file(outside, cell_sandbox=policy)
+    assert refused.status == "unverified"
+    assert refused.unverified_reason == "the page is outside the files this conversation may read"
+    with pytest.raises(PermissionError):
+        render_check.read_page_bytes(outside, cell_sandbox=policy)
+    assert service.requests == []
+
+    if sys.platform == "win32" or os.geteuid() == 0:
+        pytest.skip("a file mode does not stop this process from reading")
+    locked = project / "locked.html"
+    locked.write_text(_PAGE)
+    locked.chmod(0o000)
+    try:
+        unreadable = check_file(locked, cell_sandbox=policy)
+    finally:
+        locked.chmod(0o644)
+    assert unreadable.status == "unverified"
+    assert unreadable.unverified_reason.startswith("the page could not be read")
     assert service.requests == []
 
 
@@ -3603,3 +3630,172 @@ async def test_a_page_built_by_hand_gets_the_same_repair_budget(service, tmp_pat
     assert built.messages[-1] == f"{slug}/index.html — {tool_handlers._repairs_left_line(2)}"
     assert session._repair_cells == {key: 2}
     assert last.messages == [f"{slug}/index.html — {tool_handlers._NO_REPAIRS_LEFT}"]
+
+
+# ── Comparing with the page as it was before the turn ────────────────────────
+
+_OLD_PAGE = _PAGE.replace("hi", "before")
+
+
+def _comparison(**fields) -> dict:
+    """A `comparison` the service sends beside its answer: the previous page
+    checked completely, and nothing found, unless FIELDS say otherwise."""
+    return {
+        "previous": "complete", "previous_status": "passed", "compared": [],
+        "removal_checked": "all", "removed_views": [], "broken_views": [], "removed_controls": [],
+        **fields,
+    }
+
+
+def test_a_request_without_the_previous_page_leaves_the_key_out(service):
+    check_html(_PAGE, previous_html=None)
+    assert service.requests[0]["body"] == {"html": _PAGE, "screenshot": True}
+
+
+def test_a_request_with_the_previous_page_sends_it(service):
+    check_html(_PAGE, previous_html=_OLD_PAGE)
+    assert service.requests[0]["body"] == {"html": _PAGE, "screenshot": True, "previous_html": _OLD_PAGE}
+
+
+def test_check_file_sends_the_previous_page(service, tmp_path):
+    page = tmp_path / "index.html"
+    page.write_text(_PAGE)
+    check_file(page, cell_sandbox=None, previous_html=_OLD_PAGE)
+    assert service.requests[0]["body"]["previous_html"] == _OLD_PAGE
+
+
+def test_the_request_cap_is_the_services_for_two_pages():
+    assert render_check.MAX_BODY_BYTES == 2 * render_check.MAX_PAGE_BYTES + 1024 == 16778240
+    assert render_check.MAX_COMPARED_BODY_BYTES == 4 * render_check.MAX_PAGE_BYTES + 2048 == 33556480
+
+
+def test_a_request_with_the_previous_page_is_held_to_the_larger_cap(service, monkeypatch):
+    """The page as it was before the turn doubles what a request may carry,
+    so only such a request gets the larger cap; a request with one page is
+    still refused here past the single-page cap, with a reason."""
+    monkeypatch.setattr(render_check, "MAX_BODY_BYTES", 3 * 1024)
+    monkeypatch.setattr(render_check, "MAX_COMPARED_BODY_BYTES", 16 * 1024)
+    page = "x" * 4096
+
+    alone = check_html(page)
+    compared = check_html(page, previous_html=page)
+
+    assert alone.status == "unverified"
+    assert alone.unverified_reason == (
+        "the page's request is 4 KB once JSON-escaped, over the render check's 0 MB request limit"
+    )
+    assert compared.status == "passed"
+    assert len(service.requests) == 1 and service.requests[0]["body"]["previous_html"] == page
+
+
+def test_a_compared_request_over_the_larger_cap_names_it(service, monkeypatch):
+    monkeypatch.setattr(render_check, "MAX_BODY_BYTES", 1024 * 1024)
+    monkeypatch.setattr(render_check, "MAX_COMPARED_BODY_BYTES", 2 * 1024 * 1024)
+    page = "\x01" * (200 * 1024)
+
+    result = check_html(page, previous_html=page)
+
+    assert result.status == "unverified"
+    assert result.unverified_reason == (
+        "the page's request is 2400 KB once JSON-escaped, over the render check's 2 MB request limit"
+    )
+    assert service.requests == []
+
+
+def test_a_previous_page_over_the_size_limit_is_not_sent(service, monkeypatch):
+    monkeypatch.setattr(render_check, "MAX_PAGE_BYTES", 1024)
+
+    result = check_html(_PAGE, previous_html="x" * 2048)
+
+    assert result.status == "unverified"
+    assert result.unverified_reason == (
+        "the page as it was before this turn is 2 KB, over the render check's 0 MB limit"
+    )
+    assert service.requests == []
+
+
+def test_the_comparison_parses(service):
+    broken = {"pressed": "Map", "reason": "new_problem", "viewports": ["desktop", "phone"], "findings": [_BLANK]}
+    service.answer((200, {**_answer("failed", findings=[_BLANK]), "comparison": _comparison(
+        compared=[{"pressed": "Map", "viewports": ["desktop", "phone"]}],
+        removed_views=[{"pressed": "Globe"}], removed_controls=["Globe"], broken_views=[broken],
+    )}, 0.0))
+
+    result = check_html(_PAGE, previous_html=_OLD_PAGE)
+
+    assert result.status == "failed"
+    comparison = result.comparison
+    assert comparison.previous == "complete" and comparison.previous_status == "passed"
+    assert [view.pressed for view in comparison.removed_views] == ["Globe"]
+    assert comparison.removed_controls == ["Globe"]
+    assert comparison.broken_views[0].reason == "new_problem"
+    assert comparison.broken_views[0].findings[0].detail == _BLANK["detail"]
+    assert comparison.informative and comparison.has_new_problem
+
+
+def test_an_answer_without_a_comparison_has_none(service):
+    assert check_html(_PAGE).comparison is None
+
+
+def test_no_answer_has_no_comparison():
+    assert RenderCheckUnavailable(reason="x").comparison is None
+
+
+def test_a_comparison_that_does_not_parse_is_dropped_and_the_verdict_kept(service, caplog):
+    service.answer((200, {**_answer("failed", findings=[_BLANK]), "comparison": {"previous": "sometimes"}}, 0.0))
+
+    result = check_html(_PAGE, previous_html=_OLD_PAGE)
+
+    assert result.status == "failed"
+    assert [finding.detail for finding in result.findings] == [_BLANK["detail"]]
+    assert result.comparison is None
+    assert "comparison that does not parse" in caplog.text
+
+
+def test_a_service_that_rejects_the_previous_page_is_unverified_and_logged(service, caplog):
+    """No second ask without the previous page: anton newer than its service
+    is a release built wrong, not a case to work around."""
+    service.answer((400, {"detail": "extra fields not permitted"}, 0.0))
+
+    result = check_html(_PAGE, previous_html=_OLD_PAGE)
+
+    assert result.status == "unverified"
+    assert result.unverified_reason == "the render-check service rejected the request (HTTP 400)"
+    assert len(service.requests) == 1
+    assert "it may predate page comparison" in caplog.text
+
+
+_NO_VIEW = {"reason": "no_view", "viewports": ["phone"], "findings": []}
+_NEW_PROBLEM = {"reason": "new_problem", "viewports": ["desktop"], "findings": []}
+
+
+@pytest.mark.parametrize(("comparison", "notes"), [
+    (None, ([], [], [])),
+    (_comparison(previous="not_checked", previous_status=None, removed_controls=["Globe"]), ([], [], [])),
+    # The new page's check was cut short: nothing compared, no removal seen.
+    (_comparison(removal_checked="none", removed_controls=["Globe"]), ([], [], [])),
+    (_comparison(), ([], [], [])),
+    (
+        _comparison(broken_views=[
+            {"pressed": None, **_NEW_PROBLEM}, {"pressed": "Map", **_NEW_PROBLEM},
+            {"pressed": "Map", **_NO_VIEW}, {"pressed": "Details", **_NO_VIEW},
+        ]),
+        (["the page as it opens", "“Map”"], ["“Map”", "“Details”"], []),
+    ),
+    (
+        _comparison(removed_views=[{"pressed": "Globe"}], removed_controls=["Globe", "Dark mode"]),
+        ([], [], ["“Globe”", "“Dark mode”"]),
+    ),
+])
+def test_the_notes_name_each_view_once(comparison, notes):
+    from anton.core.artifacts.render_check import Comparison, comparison_notes
+
+    parsed = None if comparison is None else Comparison.model_validate(comparison)
+    assert tuple(comparison_notes(parsed)) == notes
+
+
+def test_labels_join_as_a_sentence_says_them():
+    from anton.core.artifacts.render_check import agree, joined
+
+    assert [joined(["a"]), joined(["a", "b"]), joined(["a", "b", "c"])] == ["a", "a and b", "a, b and c"]
+    assert [agree(["a"], "it", "them"), agree(["a", "b"], "it", "them")] == ["it", "them"]

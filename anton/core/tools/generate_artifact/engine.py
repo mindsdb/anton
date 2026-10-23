@@ -51,7 +51,10 @@ from .prompts import (
 )
 
 if TYPE_CHECKING:
+    import threading
+
     from anton.chat_session import ChatSession
+    from anton.core.tools.tool_handlers import PageKey
 
 logger = logging.getLogger(__name__)
 
@@ -373,6 +376,9 @@ async def generate(
     primary: str | None = None,
     progress: "asyncio.Queue[str | None] | None" = None,
     attachments: "list[str] | tuple[str, ...]" = (),
+    previous_page: "tuple[PageKey, str] | None" = None,
+    page_lock: "threading.Lock | None" = None,
+    abandoned: "threading.Event | None" = None,
 ) -> "dict | str | BrowserCheckFailed":
     """Run the whole artifact pipeline: gather, agree, specify, build.
 
@@ -393,6 +399,11 @@ async def generate(
 
     ``attachments`` are absolute paths of files the user attached to the
     conversation (S-01); see `attachments.py` for what happens to each kind.
+
+    ``previous_page`` is the artifact's main page as the turn found it, which
+    each build's browser check is compared with. ``page_lock`` and
+    ``abandoned`` are shared with the tool handler, which puts the page back
+    for a run the turn gave up on (`GenState.page_lock`).
     """
     from .attachments import resolve_attachments
     from .discovery import checkpoint as cp
@@ -432,7 +443,12 @@ async def generate(
         progress=progress,
         spend=SpendGuard(session=session),
         act_first=bool(getattr(session, "act_first", False)),
+        previous_page=previous_page,
     )
+    if page_lock is not None:
+        state.page_lock = page_lock
+    if abandoned is not None:
+        state.abandoned = abandoned
     # The fence in `resolve_attachments` needs the workspace the paths are
     # supposed to be inside of; a session without one (bench, some tests)
     # gets the strict reading, not a permissive one.
@@ -505,12 +521,24 @@ def _record_page_check(session, *, state, result: "dict | str | BrowserCheckFail
 
     A page whose last build failed its browser check is recorded under the
     file that check loaded, with the views it measured, so the cell that
-    repairs that file replaces this record and is held to those views."""
+    repairs that file replaces this record and is held to those views.
+
+    The comparison of a built page (a `generated` result, or a build left
+    to repair) with the page as the turn found it goes to the turn's record
+    too (`TurnPages.record`), under the page the browser check loaded, and
+    a page anton put back earlier this turn that the build rewrote no longer
+    reads as put back, whatever the comparison says. Any other outcome keeps
+    none: the state's comparison may be an earlier attempt's, or a page the
+    run renamed, and the page goes back."""
+    from anton.core.artifacts.page_copies import turn_pages_of
     from anton.core.tools.tool_handlers import PageKey, record_page_checks
 
     if isinstance(result, BrowserCheckFailed):
         key = PageKey(slug=state.slug, page=result.page)
         record_page_checks(session, checks={key: "failed"}, failed_views={key: result.views})
+        turn_pages = turn_pages_of(session)
+        if turn_pages is not None:
+            turn_pages.record({key: result.comparison} if result.comparison is not None else {}, edited={key})
         return
     if isinstance(result, dict) and result.get("status") in ("cancelled", "needs_confirmation"):
         return
@@ -526,6 +554,17 @@ def _record_page_check(session, *, state, result: "dict | str | BrowserCheckFail
         session,
         checks={key: state.browser_status or "unverified"},
         findings_listed=frozenset({key}) if listed else frozenset(),
+    )
+    if not isinstance(result, dict) or result.get("status", "generated") != "generated":
+        return
+    turn_pages = turn_pages_of(session)
+    if turn_pages is None:
+        return
+    browser_page = getattr(state, "browser_page", "")
+    checked = PageKey(slug=state.slug, page=browser_page) if browser_page else key
+    comparison = getattr(state, "comparison", None)
+    turn_pages.record(
+        {checked: comparison} if comparison is not None else {}, edited={checked} if wrote_page else ()
     )
 
 

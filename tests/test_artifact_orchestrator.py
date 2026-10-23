@@ -17,7 +17,7 @@ from anton.core.tools.generate_artifact.state import (
 )
 
 
-def _no_browser(entry, *, cell_sandbox, screenshot=True):
+def _no_browser(entry, *, cell_sandbox, screenshot=True, previous_html=None):
     """`verify_frontend_live` where no browser can load the page."""
     return BrowserCheck(
         status="unverified",
@@ -977,7 +977,7 @@ _BROWSER_ERROR = (
 _SHOT = "iVBORw0KGgo="
 
 
-def _failed_in_a_browser(entry, *, cell_sandbox, screenshot=True):
+def _failed_in_a_browser(entry, *, cell_sandbox, screenshot=True, previous_html=None):
     """`verify_frontend_live` where a browser loaded the page, measured it as
     it opens and behind "Routes", and failed it."""
     from anton.core.artifacts.render_check import CheckedView, RenderScreenshot
@@ -1118,7 +1118,7 @@ async def test_frontend_browser_findings_trigger_a_regeneration_with_the_message
     ])
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
     monkeypatch.setattr(
-        orchestrator.verifiers, "verify_frontend_live", lambda entry, *, cell_sandbox, screenshot=True: _loaded(next(live_verdicts))
+        orchestrator.verifiers, "verify_frontend_live", lambda entry, *, cell_sandbox, screenshot=True, previous_html=None: _loaded(next(live_verdicts))
     )
 
     err = await orchestrator._gen_verify_frontend(st)
@@ -1169,7 +1169,7 @@ async def test_frontend_browser_check_is_not_run_for_fullstack(tmp_path: Path, m
         )
         return {"files_written": ["static/index.html"], "rounds_used": 1, "summary": "s"}
 
-    def must_not_run(entry, *, cell_sandbox, screenshot=True):
+    def must_not_run(entry, *, cell_sandbox, screenshot=True, previous_html=None):
         raise AssertionError("the browser check must not run for a fullstack frontend")
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
@@ -1192,7 +1192,7 @@ async def test_frontend_browser_check_waits_for_the_static_checks_to_pass(
         (tmp_path / "index.html").write_text(html)
         return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
 
-    def fake_live(entry, *, cell_sandbox, screenshot=True):
+    def fake_live(entry, *, cell_sandbox, screenshot=True, previous_html=None):
         calls["live"] += 1
         return _loaded(VerifyResult())
 
@@ -1217,7 +1217,7 @@ async def test_the_browser_check_asks_for_no_screenshot_once_the_model_refused_o
         (tmp_path / "index.html").write_text(_VALID_HTML)
         return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
 
-    def fake_live(entry, *, cell_sandbox, screenshot=True):
+    def fake_live(entry, *, cell_sandbox, screenshot=True, previous_html=None):
         asked.append(screenshot)
         return _loaded(VerifyResult())
 
@@ -1382,7 +1382,7 @@ async def test_warnings_of_the_accepted_frontend_attempt_reach_the_result(tmp_pa
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
     monkeypatch.setattr(orchestrator.verifiers, "verify_frontend", fake_verify)
-    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", lambda entry, *, cell_sandbox, screenshot=True: _loaded(VerifyResult()))
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", lambda entry, *, cell_sandbox, screenshot=True, previous_html=None: _loaded(VerifyResult()))
 
     assert await orchestrator._gen_verify_frontend(st) is None
     assert st.verify_warnings == ["frontend: Significant blocks have no stable `id` attributes."]
