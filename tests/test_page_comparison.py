@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -63,10 +64,15 @@ def _artifact(root: Path) -> tuple[ArtifactStore, str]:
 
 async def _cell(session, store, slug: str, text: str):
     """One cell that rewrites the page, run as `handle_scratchpad` runs one:
-    the turn's copies, the snapshot, the write, the check."""
+    the turn's copies, the snapshot, the write, the check. The page's mtime
+    is set back first: a same-size write within one mtime tick would look
+    unchanged to the snapshot."""
+    page = store.root / slug / "index.html"
     await tool_handlers.capture_turn_pages(session, store)
+    if page.exists():
+        os.utime(page, ns=(1_000_000_000, 1_000_000_000))
     before = tool_handlers.snapshot_existing_artifacts(store)
-    (store.root / slug / "index.html").write_text(_PAGE.replace("hi", text))
+    page.write_text(_PAGE.replace("hi", text))
     return await tool_handlers.check_cell_artifacts(session, store=store, before=before)
 
 
@@ -478,12 +484,16 @@ async def test_a_run_that_did_not_build_the_page_puts_it_back(configured, tmp_pa
 async def test_a_crashed_run_puts_the_page_back_before_it_says_so(configured, tmp_path, monkeypatch):
     store, slug = _artifact(tmp_path)
     monkeypatch.setattr(gen_pkg, "generate", _run(RuntimeError("kaput")))
+    outcomes = 0
 
     async for item in handle_generate_artifact(_gen_session(store), _tc(slug)):
         if isinstance(item, ToolOutcome):
+            outcomes += 1
             assert (store.root / slug / "index.html").read_text() == _BEFORE
             assert "kaput" in item.content
             assert item.content.endswith("The page is back as it was before this run.")
+
+    assert outcomes == 1
 
 
 @pytest.mark.parametrize("outcome", [_GENERATED, _LEFT_TO_REPAIR])
