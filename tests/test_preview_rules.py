@@ -50,6 +50,7 @@ def test_every_view_starts_through_the_helper_after_the_browser_gate():
         storage = prompt.index("stays silent or uses `console.warn`")
         assert gate < rule < storage < prompt.index("Not checked by the verifier")
         assert "Start every view through this one helper" in prompt
+        assert "Await or return every promise the setup starts" in prompt
 
 
 def test_a_tabs_views_start_through_the_helper_too():

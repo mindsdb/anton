@@ -320,6 +320,9 @@ _CAUGHT_ERRORS = """\
   Call it with the view's title as the page shows it, its element and its
   setup function, which may be `async`:
   `runView('Shipment map', document.getElementById('world-map'), drawMap);`.
+  Await or return every promise the setup starts, such as the atlas's
+  `d3.json(...)`. Don't end it with a `.catch` of your own: the helper must
+  see the failure to name and mark the view.
   Keep the helper as written: its `console.error` and `reportError` name the
   failed view to the browser check and to the preview's error list, and
   `data-view-failed` lets the check find the failed view whatever its

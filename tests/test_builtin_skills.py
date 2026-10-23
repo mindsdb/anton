@@ -752,6 +752,9 @@ class TestPipelineContractMirrored:
         # both hear its name.
         "function runView(name, el, setup)",
         "data-view-failed",
+        # A promise the setup neither awaits nor returns, or ends with its
+        # own `.catch`, fails outside the helper, unnamed and unmarked.
+        "Await or return every promise the setup starts",
         # Storage throws on every load in the preview frame, so a helper
         # that logs that throw as an error fails a page that works.
         "stays silent or uses `console.warn`",
