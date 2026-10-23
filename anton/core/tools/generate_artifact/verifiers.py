@@ -903,6 +903,7 @@ def evaluate_backend(
     artifact_type: str = "",
     state_manifest: str | None = None,
     api_operations: set[str] | None = None,
+    live_app: bool = False,
 ) -> tuple[VerifyResult, list[str]]:
     """Pure contract evaluation of a generated backend.
 
@@ -911,7 +912,10 @@ def evaluate_backend(
     `state_manifest` is the raw text of `state_manifest.json` (None = the file
     does not exist) — read by the async glue, validated here to stay pure.
     `api_operations` (from `contract_operations`) is what `openapi.json`
-    promises; None skips the comparison.
+    promises; None skips the comparison. `live_app` is set for a backend that
+    runs in an app slot, which installs nothing, so its `requirements.txt`
+    needs no core package line; `verify_backend` has already refused any
+    package it names that isn't installed.
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -977,14 +981,18 @@ def evaluate_backend(
         )
 
     req_names = _requirement_names(requirements)
-    for core in _CORE_REQS:
-        if core not in req_names:
-            # Self-evidencing message: show what WAS parsed, so a mismatch
-            # between the file and this parser is visible to the retry loop.
-            errors.append(
-                f"requirements.txt must list `{core}`. Parsed package names: "
-                + (", ".join(sorted(req_names)) or "(none)")
-            )
+    # Every other launch installs `requirements.txt`, so it must name the core
+    # packages. An app slot installs nothing and runs the ones in its image,
+    # whatever the file lists.
+    if not live_app:
+        for core in _CORE_REQS:
+            if core not in req_names:
+                # Self-evidencing message: show what WAS parsed, so a mismatch
+                # between the file and this parser is visible to the retry loop.
+                errors.append(
+                    f"requirements.txt must list `{core}`. Parsed package names: "
+                    + (", ".join(sorted(req_names)) or "(none)")
+                )
     if "anton-state" in req_names:
         # Applies to every type: the package is not on any registry, so pip
         # fails on the line. The install step filters it defensively, but the
@@ -1337,5 +1345,5 @@ async def verify_backend(
     return evaluate_backend(
         introspection, source, req_text,
         artifact_type=artifact_type, state_manifest=state_manifest,
-        api_operations=api_operations,
+        api_operations=api_operations, live_app=live_app,
     )

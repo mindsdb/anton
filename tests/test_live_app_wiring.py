@@ -730,6 +730,40 @@ async def test_the_generators_backend_check_installs_nothing_only_for_a_live_app
     assert seen.get("live_app", False) is on
 
 
+@pytest.mark.parametrize("on", [True, False])
+async def test_the_generators_backend_is_written_to_the_package_rule_it_is_checked_against(
+    tmp_path, policy, monkeypatch, on
+):
+    from anton.core.tools.generate_artifact.state import VerifyResult
+
+    if on:
+        monkeypatch.setenv(las.SLOTS_ENV_VAR, _SLOTS)
+    else:
+        monkeypatch.delenv(las.SLOTS_ENV_VAR, raising=False)
+    seen: dict = {}
+
+    async def fake_loop(**kw):
+        seen["system"] = kw["system"]
+        return {"files_written": ["backend.py"], "rounds_used": 1, "summary": "s"}
+
+    async def fake_verify(**kw):
+        return VerifyResult(errors=[]), []
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_backend", fake_verify)
+    monkeypatch.setattr(orchestrator, "_map_datasources", lambda s, k: ([], []))
+    await orchestrator._gen_verify_backend(_gen_state(tmp_path, policy))
+    assert ("## Live app packages" in seen["system"]) is on
+
+
+@pytest.mark.parametrize("stateless", [True, False])
+def test_only_a_live_apps_backend_prompt_carries_its_package_rule(tmp_path, stateless):
+    plain = prompts.build_backend_system_prompt(tmp_path, stateless=stateless)
+    live = prompts.build_backend_system_prompt(tmp_path, stateless=stateless, live_app=True)
+    assert "## Live app packages" in live and "## Live app packages" not in plain
+    assert live.replace("\n\n" + prompts._LIVE_APP_PACKAGES, "") == plain
+
+
 def test_only_a_live_apps_frontend_prompt_carries_its_script_rule(tmp_path):
     plain = prompts.build_frontend_system_prompt(tmp_path)
     live = prompts.build_frontend_system_prompt(tmp_path, live_app=True)
