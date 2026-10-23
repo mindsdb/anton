@@ -14,7 +14,12 @@ import pytest
 from anton.core.backends.base import Cell
 from anton.core.memory.cerebellum import Cerebellum, _DiffPassResult, _LessonDraft
 from anton.core.memory.base import MemoryRead
-from anton.core.memory.cortex import Cortex, _CompactionResult
+from anton.core.memory.cortex import (
+    Cortex,
+    _CompactionResult,
+    plan_compaction,
+    read_compaction_input,
+)
 from anton.core.memory.hippocampus import Engram, Hippocampus
 from anton.core.session import ChatSession
 from anton.core.tools.tool_handlers import handle_memorize
@@ -829,6 +834,106 @@ class TestCompactFile:
         await cortex._compact_file(hc, hc._lessons_path, "lesson")
         assert hc._lessons_path.read_text() == before
 
+    async def test_an_entry_saved_while_the_model_answers_survives(self, dirs, caplog):
+        """The rebuild comes from the read before the model call. A memory
+        written in between is on disk but not in that read, so a rewrite from
+        it would erase the memory."""
+        hc = self._lessons(dirs, 10)
+        reached_model = asyncio.Event()
+        answer = asyncio.Event()
+
+        class _Held(_CompactionLLM):
+            async def generate_object_code(self, schema, *, system, messages, max_tokens):
+                reached_model.set()
+                await answer.wait()
+                return await super().generate_object_code(
+                    schema, system=system, messages=messages, max_tokens=max_tokens
+                )
+
+        # keep=[1] would drop nine entries, so a rewrite and a skip leave
+        # different files; a merge of the late entry would too.
+        llm = _Held(keep=[1])
+        cortex = Cortex(global_hc=hc, project_hc=Hippocampus(dirs[1]), llm_client=llm)
+        compaction = asyncio.create_task(
+            cortex._compact_file(hc, hc._lessons_path, "lesson")
+        )
+        await reached_model.wait()
+        before = self._entries(hc)
+        hc.encode_lesson("Fact learned while compaction waited", topic="late")
+        answer.set()
+        with caplog.at_level(logging.INFO, logger="anton.core.memory.cortex"):
+            await compaction
+
+        entries = self._entries(hc)
+        assert entries[:10] == before
+        assert "while compaction waited" in entries[10]
+        skipped = [r.getMessage() for r in caplog.records if "skipped" in r.getMessage()]
+        assert len(skipped) == 1
+        assert "10 entries read, 11 now" in skipped[0]
+        assert "while compaction waited" not in skipped[0]
+
+    async def test_a_rule_saved_while_the_model_answers_survives(self, dirs, caplog):
+        """Rules go through a full-file rewrite on save, not an append, so the
+        change the re-read must notice is a rebuilt file."""
+        hc = Hippocampus(dirs[0])
+        for i in range(10):
+            hc.encode_rule(f"When topic {i} comes up, do thing {i}", kind="when")
+        reached_model = asyncio.Event()
+        answer = asyncio.Event()
+
+        class _Held(_CompactionLLM):
+            async def generate_object_code(self, schema, *, system, messages, max_tokens):
+                reached_model.set()
+                await answer.wait()
+                return await super().generate_object_code(
+                    schema, system=system, messages=messages, max_tokens=max_tokens
+                )
+
+        cortex = Cortex(
+            global_hc=hc, project_hc=Hippocampus(dirs[1]), llm_client=_Held(keep=[1])
+        )
+        compaction = asyncio.create_task(
+            cortex._compact_file(hc, hc._rules_path, "rules")
+        )
+        await reached_model.wait()
+        hc.encode_rule("When compaction is waiting, keep this rule", kind="when")
+        answer.set()
+        with caplog.at_level(logging.INFO, logger="anton.core.memory.cortex"):
+            await compaction
+
+        rules = [e.text for e in hc.get_rules()]
+        assert len(rules) == 11
+        assert "When compaction is waiting, keep this rule" in rules
+        assert any("10 entries read, 11 now" in r.getMessage() for r in caplog.records)
+
+    async def test_a_file_removed_while_the_model_answers_stays_removed(self, dirs, caplog):
+        hc = self._lessons(dirs, 10)
+        reached_model = asyncio.Event()
+        answer = asyncio.Event()
+
+        class _Held(_CompactionLLM):
+            async def generate_object_code(self, schema, *, system, messages, max_tokens):
+                reached_model.set()
+                await answer.wait()
+                return await super().generate_object_code(
+                    schema, system=system, messages=messages, max_tokens=max_tokens
+                )
+
+        cortex = Cortex(
+            global_hc=hc, project_hc=Hippocampus(dirs[1]), llm_client=_Held(keep=[1])
+        )
+        compaction = asyncio.create_task(
+            cortex._compact_file(hc, hc._lessons_path, "lesson")
+        )
+        await reached_model.wait()
+        hc._lessons_path.unlink()
+        answer.set()
+        with caplog.at_level(logging.INFO, logger="anton.core.memory.cortex"):
+            await compaction
+
+        assert not hc._lessons_path.exists()
+        assert any("10 entries read, 0 now" in r.getMessage() for r in caplog.records)
+
     async def test_short_file_is_not_sent_to_the_model(self, dirs):
         hc = self._lessons(dirs, 7)
         llm = await self._compact(dirs, hc, keep=[1])
@@ -975,6 +1080,78 @@ class TestCompactRulesFile:
         await self._compact(dirs, hc, keep=list(range(1, 12)))
         assert "Hand-added note" in hc._rules_path.read_text()
         assert len(hc.get_rules()) == 11
+
+
+class TestCompactionHalves:
+    """A host that holds its own locks runs the read, the model call and the
+    write apart, without building a Cortex."""
+
+    @staticmethod
+    def _lessons(path: Path, count: int) -> Hippocampus:
+        hc = Hippocampus(path)
+        for i in range(count):
+            hc.encode_lesson(f"Fact number {i}", topic=f"t{i}")
+        return hc
+
+    async def test_planning_touches_no_file(self, dirs):
+        hc = self._lessons(dirs[0], 10)
+        hc.rewrite_identity(["Name: Ada"])
+        before = {p.name: p.read_bytes() for p in dirs[0].iterdir()}
+
+        source = read_compaction_input(hc._lessons_path, "lesson")
+        plan = await plan_compaction(_CompactionLLM(keep=[1, 2]), source)
+
+        assert plan is not None and plan.kept == 2
+        assert {p.name: p.read_bytes() for p in dirs[0].iterdir()} == before
+
+    async def test_applying_a_plan_leaves_the_profile_alone(self, dirs):
+        """Building a Cortex moves and clears profile lines; the halves must not."""
+        hc = self._lessons(dirs[0], 10)
+        hc.rewrite_identity(["Name: Ada"])
+        project = Hippocampus(dirs[1])
+        project.rewrite_identity(["Timezone: UTC"])
+        profiles = [h._profile_path.read_bytes() for h in (hc, project)]
+
+        plan = await plan_compaction(
+            _CompactionLLM(keep=[1]), read_compaction_input(hc._lessons_path, "lesson")
+        )
+        assert plan.apply(hc) is True
+
+        assert [h._profile_path.read_bytes() for h in (hc, project)] == profiles
+        assert len(hc.get_lessons()) == 1
+
+    async def test_a_lesson_saved_between_plan_and_apply_survives(self, dirs):
+        hc = self._lessons(dirs[0], 10)
+        plan = await plan_compaction(
+            _CompactionLLM(keep=[1]), read_compaction_input(hc._lessons_path, "lesson")
+        )
+        hc.encode_lesson("Saved while the plan waited", topic="late")
+
+        assert plan.apply(hc) is False
+        assert len(hc.get_lessons()) == 11
+
+    async def test_a_plan_writes_the_file_of_its_kind_in_the_given_store(self, dirs):
+        hc = self._lessons(dirs[0], 10)
+        copy = Hippocampus(dirs[1])
+        copy._lessons_path.write_bytes(hc._lessons_path.read_bytes())
+        plan = await plan_compaction(
+            _CompactionLLM(keep=[1]), read_compaction_input(hc._lessons_path, "lesson")
+        )
+
+        assert plan.apply(copy) is True
+        assert len(copy.get_lessons()) == 1
+        assert len(hc.get_lessons()) == 10
+        assert not copy._rules_path.exists()
+
+    async def test_nothing_to_plan_returns_none(self, dirs):
+        short = self._lessons(dirs[0], 7)
+        assert await plan_compaction(
+            _CompactionLLM(keep=[1]), read_compaction_input(short._lessons_path, "lesson")
+        ) is None
+        full = self._lessons(dirs[1], 10)
+        assert await plan_compaction(
+            _CompactionLLM(keep=[]), read_compaction_input(full._lessons_path, "lesson")
+        ) is None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
