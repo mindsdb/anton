@@ -46,7 +46,8 @@ JOURNAL_DETAIL_MAX: int = 300
 # The gateway used to answer HTTP 500 above 20480 output tokens for a
 # non-streamed call; it now assembles such calls from an internal stream, so
 # that limit is gone. These calls are streamed anyway. Re-measure before
-# raising them.
+# raising them. A top effort's larger streamed budget replaces both
+# (engine._budget_for_effort).
 SPEC_MAX_TOKENS: int = 16384
 SPEC_MAX_TOKENS_RETRY: int = 20480
 
@@ -72,6 +73,8 @@ SPEC_MAX_TOKENS_RETRY: int = 20480
 # The planning model is also less token-efficient on this content (1.57
 # characters per token against the coding model's 2.62), so 8192 bought it
 # ~12 800 characters — under the size of an average artifact.
+#
+# A top effort's larger streamed budget replaces it (engine._budget_for_effort).
 GEN_WRITE_MAX_TOKENS: int = 20480
 
 # The same budget restated in CHARACTERS, because that is the unit the model

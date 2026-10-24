@@ -1,8 +1,9 @@
 """The effort an operator sets is the effort the completion check and the page builder send.
 
-These run the real completion check and the real generate_artifact pipeline over a provider set to
-each effort, and read what each call asks the provider for: the effort it sends and its output
-budget. The budget follows the effort, so the same reads show that it still does.
+These run the real completion check, the real generate_artifact pipeline and its spec call over a
+provider set to each effort, and read what each call asks the provider for: the effort it sends and
+its output budget. The budget follows the effort, and at the top efforts it raises the spec's fixed
+budgets, which the model's hidden thinking otherwise uses up.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,6 +20,7 @@ from anton.core.artifacts import ArtifactStore
 from anton.core.llm.client import LLMClient
 from anton.core.llm.provider import LLMProvider, LLMResponse, StreamComplete, StreamTextDelta, ToolCall, Usage
 from anton.core.session import _VERIFIER_TOKEN_BUDGETS, ChatSession, ChatSessionConfig
+from anton.core.tools.generate_artifact import engine
 from anton.core.tools.tool_defs import ToolDef
 
 PROBE_TOOL = "probe"
@@ -172,3 +175,24 @@ async def test_the_builders_first_call_sends_the_configured_effort_and_its_budge
 
     # The agent's own call, then the builder's first: the same effort and budget.
     assert provider.sent == [SentCall(kind="stream", effort=effort, max_tokens=budget)] * 2
+
+
+@pytest.mark.parametrize(
+    ("effort", "budgets"),
+    [("max", [65536, 65536]), ("xhigh", [32768, 32768]), ("high", [16384, 20480]), ("medium", [16384, 20480])],
+)
+async def test_a_cut_spec_is_retried_with_budgets_that_rise_with_the_effort(effort, budgets):
+    cut = LLMResponse(content="", tool_calls=[], usage=Usage(input_tokens=10, output_tokens=budgets[0]),
+                      stop_reason="length")
+    provider = _EffortProvider(effort, streams=[_stream_of(cut), _stream_of(_text_response("# Spec"))])
+    client = LLMClient(
+        planning_provider=provider, planning_model="planner",
+        coding_provider=provider, coding_model="coder",
+    )
+
+    body, error = await engine._plan_whole_document(
+        SimpleNamespace(_llm=client), system="s", user="u", node_label="make_tech_spec",
+    )
+
+    assert (body, error) == ("# Spec", None)
+    assert provider.sent == [SentCall(kind="stream", effort=effort, max_tokens=budget) for budget in budgets]

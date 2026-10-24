@@ -599,6 +599,31 @@ async def test_every_round_gets_the_raised_budget_including_round_zero(
     assert session._llm.code_stream.call_args.kwargs["max_tokens"] == GEN_WRITE_MAX_TOKENS
 
 
+async def test_a_top_effort_raises_each_rounds_budget_to_its_roles_streamed_budget(
+    tmp_path: Path,
+):
+    """Hidden thinking spends from the round's budget: measured at max on
+    `sonnet-5-5`, every round spent all of 20480 thinking and wrote nothing.
+    Round 0 runs on the planning model and later rounds on the coding model,
+    so each takes its own role's streamed budget when that one is larger."""
+    session = AsyncMock()
+    session._scratchpads.cell_sandbox = None
+    session._llm.stream_budget = Mock(side_effect={"planning": 65536, "coding": 32768}.get)
+    session._llm.plan_stream = _stream_mock(
+        _resp([ToolCall(id="1", name="write_file", input={"path": "index.html"})],
+              body=_body("<html></html>"))
+    )
+    session._llm.code_stream = _stream_mock(
+        _resp([ToolCall(id="2", name="finish", input={"summary": "ok"})])
+    )
+    await _run_loop(
+        session=session, system="s", kickoff="k", artifact_path=tmp_path,
+        node_label="generate_frontend",
+    )
+    assert session._llm.plan_stream.call_args.kwargs["max_tokens"] == 65536
+    assert session._llm.code_stream.call_args.kwargs["max_tokens"] == 32768
+
+
 async def test_truncation_on_a_write_round_is_judged_against_its_own_budget(
     tmp_path: Path,
 ):
