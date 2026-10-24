@@ -799,6 +799,11 @@ def _ds_keys(source: str) -> list[str]:
     return sorted(set(_DS_KEY.findall(source)))
 
 
+def _canonical_name(name: str) -> str:
+    """A package name as PEP 503 normalizes it."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
 def _requirement_names(requirements: str) -> set[str]:
     """PEP 503-normalized package names from requirements.txt lines.
 
@@ -814,7 +819,7 @@ def _requirement_names(requirements: str) -> set[str]:
             continue
         m = _REQ_NAME.match(line)
         if m:
-            names.add(re.sub(r"[-_.]+", "-", m.group(0)).lower())
+            names.add(_canonical_name(m.group(0)))
     return names
 
 
@@ -1230,19 +1235,21 @@ _REQUIREMENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 def _missing_here(packages: Sequence[str]) -> list[str]:
-    """The requirements this process's environment lacks, by name. A live
-    app's slot runs this same image with nothing installed, so it lacks them
-    too; the scratchpad venv reaches the same packages through its `.pth`."""
-    from importlib.metadata import PackageNotFoundError, distribution
+    """The requirements a live app's slot lacks, by name. The slot runs this
+    same image with nothing installed, and imports from the base interpreter's
+    packages and this process's, as the scratchpad venv does (system site
+    packages, and its `.pth`). This process's own environment alone misses
+    what only the base interpreter holds, such as `mangum`."""
+    import site
+    import sys
+    from importlib.metadata import distributions
 
+    paths = [*sys.path, *site.getsitepackages([sys.base_prefix])]
+    installed = {_canonical_name(d.metadata["Name"]) for d in distributions(path=paths) if d.metadata["Name"]}
     missing: list[str] = []
     for line in packages:
         match = _REQUIREMENT_NAME.match(line.strip())
-        if match is None:
-            continue
-        try:
-            distribution(match.group())
-        except PackageNotFoundError:
+        if match is not None and _canonical_name(match.group()) not in installed:
             missing.append(match.group())
     return missing
 
@@ -1263,7 +1270,7 @@ async def verify_backend(
     Under the pool's sandbox policy both checks run through the launcher, and
     the import sees `ds_env` (the artifact's own `DS_*`) instead of the
     server's. For a live app nothing is installed, since its app slot
-    installs nothing: a requirement this environment lacks fails the check
+    installs nothing: a requirement the slot lacks fails the check
     instead, before any launch card.
     """
     backend_py = artifact_path / "backend.py"

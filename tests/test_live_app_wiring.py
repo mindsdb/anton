@@ -788,6 +788,21 @@ async def test_a_live_apps_backend_installs_nothing_and_names_what_it_lacks(tmp_
     assert "`surely-not-installed-pkg-29`" in error and "pydantic" not in error
 
 
+def test_a_live_apps_requirement_in_the_base_interpreter_alone_passes(tmp_path, monkeypatch):
+    """The image holds `mangum` and pandas in the base interpreter, not in the
+    server's own environment; the slot imports from both, so the check does."""
+    base = tmp_path / "base-site-packages"
+    (base / "only_in_base-1.0.dist-info").mkdir(parents=True)
+    (base / "only_in_base-1.0.dist-info" / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: only_in_base\nVersion: 1.0\n", encoding="utf-8"
+    )
+    monkeypatch.setattr("site.getsitepackages", lambda prefixes=None: [str(base)])
+
+    assert verifiers._missing_here(["Only-In-Base>=1", "surely-not-installed-pkg-29"]) == [
+        "surely-not-installed-pkg-29"
+    ]
+
+
 async def test_without_a_sandbox_live_apps_dont_apply(tmp_path, live_apps_on):
     state = _gen_state(tmp_path, None)
     assert orchestrator._runs_live_apps(state) is False
