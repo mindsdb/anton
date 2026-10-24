@@ -1,12 +1,9 @@
-"""Reasoning-effort ordering and the output budgets that depend on it."""
+"""The output budgets that depend on the reasoning effort."""
 
 from __future__ import annotations
 
-import contextlib
 import inspect
 from typing import Any
-
-EFFORT_ORDER: tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 # Hidden reasoning spends from the same max_tokens as the visible answer.
 # Measured on real agent steps: high and xhigh stay under 2.5k output tokens,
@@ -17,15 +14,6 @@ STREAM_BUDGET_BY_EFFORT: dict[str, int] = {"high": 16384, "xhigh": 32768, "max":
 MAX_STREAM_BUDGET = 65536
 
 TRUNCATION_RETRY_NOTE = "The answer was cut off — trying again"
-
-
-def capped(effort: str | None, ceiling: str | None) -> str | None:
-    """``effort`` lowered to ``ceiling``; values outside the ladder pass through."""
-    if effort is None or ceiling is None:
-        return effort
-    if effort not in EFFORT_ORDER or ceiling not in EFFORT_ORDER:
-        return effort
-    return min(effort, ceiling, key=EFFORT_ORDER.index)
 
 
 def stream_budget_for(effort: object, default: int) -> int:
@@ -52,13 +40,3 @@ def client_stream_budget(llm: Any, role: str, *, default: int = 8192) -> int:
             return budget
     budget = getattr(llm, "max_tokens", None)
     return budget if isinstance(budget, int) and budget > 0 else default
-
-
-def effort_ceiling_of(llm: Any, level: str) -> contextlib.AbstractContextManager:
-    """``llm.effort_ceiling(level)``, or a no-op for clients without it."""
-    method = getattr(llm, "effort_ceiling", None)
-    if callable(method) and not inspect.iscoroutinefunction(method):
-        manager = method(level)
-        if hasattr(manager, "__enter__") and hasattr(manager, "__exit__"):
-            return manager
-    return contextlib.nullcontext()
