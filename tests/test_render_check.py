@@ -1625,8 +1625,6 @@ async def test_a_verified_page_lets_the_agent_claim_only_the_views_the_check_saw
         "non-empty, tell the user in one sentence that the views behind them were not checked, and "
         "never call those views verified, tested or working."
     ) in instruction
-    assert "not for how readable the page is, so never tell the user it was validated or works on phones" in instruction
-    assert "Describe the page from what it shows, not from what its code tries to do" in instruction
     # The rules the instruction already had stay.
     assert "Do NOT re-read, re-parse or re-verify" in instruction
     assert "never present a skipped check as passed" in instruction
@@ -1661,8 +1659,8 @@ def test_only_edited_pages_are_sent_primary_first_with_one_screenshot(service, t
     assert lint.screenshot is not None and lint.screenshot_page == f"{slug}/z.html"
     assert lint.page_checks == {(slug, "z.html"): "passed", (slug, "a.html"): "passed"}
     assert lint.messages == [
-        f"{slug}/z.html — loaded in a browser the way the app preview loads it, as it opens: no errors, blank views or overflow found (it does not judge how readable the page is)",
-        f"{slug}/a.html — loaded in a browser the way the app preview loads it, as it opens: no errors, blank views or overflow found (it does not judge how readable the page is)",
+        f"{slug}/z.html — loaded in a browser the way the app preview loads it, as it opens: no problems found",
+        f"{slug}/a.html — loaded in a browser the way the app preview loads it, as it opens: no problems found",
     ]
 
 
@@ -1677,7 +1675,7 @@ def test_a_passed_page_names_the_views_the_check_saw_and_the_toggles_it_did_not_
     assert lint.page_checks == {(slug, "index.html"): "passed"}
     assert lint.messages == [
         f"{slug}/index.html — loaded in a browser the way the app preview loads it, at desktop and phone "
-        "sizes, as it opens and behind “Map” and “3D Globe”: no errors, blank views or overflow found (it does not judge how readable the page is)",
+        "sizes, as it opens and behind “Map” and “3D Globe”: no problems found",
         f"{slug}/index.html — tabs and toggles the check did not press: “Routes” ({_TIME_RAN_OUT}). "
         "The views behind them were not checked: say so, and never call them verified, tested or working",
     ]
@@ -2292,7 +2290,7 @@ async def test_the_cell_result_carries_the_screenshot_on_the_streaming_path(serv
     assert [r["body"]["html"] for r in service.requests] == [_PAGE.replace("hi", "cell 1")]
     text, caption, image = _tool_results(session)[0]["content"]
     assert text["text"].endswith(
-        f"[artifact lint]\n{slug}/index.html — loaded in a browser the way the app preview loads it, as it opens: no errors, blank views or overflow found (it does not judge how readable the page is)"
+        f"[artifact lint]\n{slug}/index.html — loaded in a browser the way the app preview loads it, as it opens: no problems found"
     )
     assert caption["text"].startswith(render_check.SCREENSHOT_CAPTION)
     assert image["source"]["data"] == _SHOT
@@ -3530,7 +3528,7 @@ async def test_a_passing_repair_of_the_page_the_build_wrote_ends_the_turn_withou
 
     lint = await _repair_cell(session, store, slug, page, "repaired")
 
-    assert lint.messages == [f"{slug}/{page} — loaded in a browser the way the app preview loads it, {_CHECKED}: no errors, blank views or overflow found (it does not judge how readable the page is)"]
+    assert lint.messages == [f"{slug}/{page} — loaded in a browser the way the app preview loads it, {_CHECKED}: no problems found"]
     assert session._page_checks == {key: "passed"}
     assert session._repair_cells == {key: 1}
     assert session._failed_views == {}

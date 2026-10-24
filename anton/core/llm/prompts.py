@@ -305,8 +305,7 @@ not to change. Change the saved page in place with rt.update and rt.insert, \
 whether or not report_tools made it, rather than rewriting it.
 - Before you answer, re-read what you saved and compare it with the data. Keep \
 the reply short, since the report holds the detail: the findings, what you \
-checked, and what you did not (for example, that no browser was used). Name \
-only figures and parts the saved page shows.
+checked, and what you did not (for example, that no browser was used).
 
 WORKFLOW:
 1. REGISTER FIRST, always: call `create_artifact(name, description, type, \

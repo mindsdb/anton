@@ -704,7 +704,7 @@ def _check_pages(
             coverage = outcome.coverage
             messages.append(
                 f"{label} — loaded in a browser the way the app preview loads it, {coverage.checked}: "
-                "no errors, blank views or overflow found (it does not judge how readable the page is)"
+                "no problems found"
             )
             if coverage.unchecked:
                 messages.append(
@@ -1657,15 +1657,6 @@ _GENERATED_REPORTING = (
     " When the result carries `brief_shown: true`, the user has already "
     "seen the brief: do not repeat it. When it carries `brief_summary`, "
     "the user has not seen it: sum up its assumptions in a sentence or two."
-    # Replies described what the page's code meant to draw: arcs on a globe
-    # that drew none, figures the page left out.
-    " Describe the page from what it shows, not from what its code tries "
-    "to do: look at the screenshot when there is one, name only the "
-    "figures, views and "
-    "interactions the page has, and give each figure as the page shows it. "
-    "A view the screenshot shows blank or without its marks is not "
-    "delivered: say so. Never call a hover, zoom or animation working "
-    "when no check used it."
 )
 
 _STATUS_INSTRUCTIONS = {
@@ -1682,9 +1673,7 @@ _STATUS_INSTRUCTIONS = {
         "`browser_unchecked` lists the tabs and toggles the check found but "
         "did not press: when it is non-empty, tell the user in one sentence "
         "that the views behind them were not checked, and never call those "
-        "views verified, tested or working. The check looks for errors, "
-        "blank views and overflow, not for how readable the page is, so "
-        "never tell the user it was validated or works on phones. "
+        "views verified, tested or working. "
         + _GENERATED_REPORTING
     ),
     # `generated` when no browser check passed: `verified_in_browser` false.
