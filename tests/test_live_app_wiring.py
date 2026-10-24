@@ -730,6 +730,40 @@ async def test_the_generators_backend_check_installs_nothing_only_for_a_live_app
     assert seen.get("live_app", False) is on
 
 
+@pytest.mark.parametrize("on", [True, False])
+async def test_the_generators_backend_is_written_to_the_package_rule_it_is_checked_against(
+    tmp_path, policy, monkeypatch, on
+):
+    from anton.core.tools.generate_artifact.state import VerifyResult
+
+    if on:
+        monkeypatch.setenv(las.SLOTS_ENV_VAR, _SLOTS)
+    else:
+        monkeypatch.delenv(las.SLOTS_ENV_VAR, raising=False)
+    seen: dict = {}
+
+    async def fake_loop(**kw):
+        seen["system"] = kw["system"]
+        return {"files_written": ["backend.py"], "rounds_used": 1, "summary": "s"}
+
+    async def fake_verify(**kw):
+        return VerifyResult(errors=[]), []
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_backend", fake_verify)
+    monkeypatch.setattr(orchestrator, "_map_datasources", lambda s, k: ([], []))
+    await orchestrator._gen_verify_backend(_gen_state(tmp_path, policy))
+    assert ("## Live app packages" in seen["system"]) is on
+
+
+@pytest.mark.parametrize("stateless", [True, False])
+def test_only_a_live_apps_backend_prompt_carries_its_package_rule(tmp_path, stateless):
+    plain = prompts.build_backend_system_prompt(tmp_path, stateless=stateless)
+    live = prompts.build_backend_system_prompt(tmp_path, stateless=stateless, live_app=True)
+    assert "## Live app packages" in live and "## Live app packages" not in plain
+    assert live.replace("\n\n" + prompts._LIVE_APP_PACKAGES, "") == plain
+
+
 def test_only_a_live_apps_frontend_prompt_carries_its_script_rule(tmp_path):
     plain = prompts.build_frontend_system_prompt(tmp_path)
     live = prompts.build_frontend_system_prompt(tmp_path, live_app=True)
@@ -752,6 +786,21 @@ async def test_a_live_apps_backend_installs_nothing_and_names_what_it_lacks(tmp_
     )
     (error,) = verdict.errors
     assert "`surely-not-installed-pkg-29`" in error and "pydantic" not in error
+
+
+def test_a_live_apps_requirement_in_the_base_interpreter_alone_passes(tmp_path, monkeypatch):
+    """The image holds `mangum` and pandas in the base interpreter, not in the
+    server's own environment; the slot imports from both, so the check does."""
+    base = tmp_path / "base-site-packages"
+    (base / "only_in_base-1.0.dist-info").mkdir(parents=True)
+    (base / "only_in_base-1.0.dist-info" / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: only_in_base\nVersion: 1.0\n", encoding="utf-8"
+    )
+    monkeypatch.setattr("site.getsitepackages", lambda prefixes=None: [str(base)])
+
+    assert verifiers._missing_here(["Only-In-Base>=1", "surely-not-installed-pkg-29"]) == [
+        "surely-not-installed-pkg-29"
+    ]
 
 
 async def test_without_a_sandbox_live_apps_dont_apply(tmp_path, live_apps_on):

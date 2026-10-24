@@ -1154,6 +1154,17 @@ def _is_declared(connection: "CatalogConnection", declared: list[str]) -> bool:
     return any(tok in d for d in declared for tok in tokens)
 
 
+# A live app's backend runs in an app slot that installs nothing, so the
+# verifier checks only that each package the file names is installed here.
+_LIVE_APP_PACKAGES = (
+    "## Live app packages\n"
+    "This app runs as a live app, in an app slot that installs nothing: it runs only the "
+    "packages already installed here, `fastapi`, `mangum` and `uvicorn` among them. So "
+    "`requirements.txt` is not installed. A package it names that isn't installed here "
+    "fails the step, and `fastapi`, `mangum` and `uvicorn` need no line."
+)
+
+
 def build_backend_system_prompt(
     artifact_path: Path,
     *,
@@ -1162,6 +1173,7 @@ def build_backend_system_prompt(
     declared_sources: list[str] | tuple[str, ...] = (),
     data_notes: str = "",
     user_language: str = "",
+    live_app: bool = False,
 ) -> str:
     """System prompt for `generate_backend`.
 
@@ -1171,16 +1183,21 @@ def build_backend_system_prompt(
     model writes is relative to the artifact root.
     """
     target = "backend.py"
+    contract = _gen_backend_verifier_contract(stateless=stateless)
     parts = [
         _gen_backend_task(stateless=stateless),
         _gen_html_inputs(fullstack=True, backend=True),
         _gen_backend_workflow(stateless=stateless),
         _gen_html_output_protocol(target, example=_PYTHON_BODY_EXAMPLE),
         _GEN_SIZE_RULES_PYTHON,
-        _gen_backend_verifier_contract(stateless=stateless),
+        contract,
         "## Backend rules\n" + _BACKEND_RULES,
         "## State rules\n" + (_STATELESS_RULES if stateless else _STATEFUL_RULES),
     ]
+    if live_app:
+        # Right after the contract, whose requirements line it replaces.
+        # Without live apps the prompt is as it was, byte for byte.
+        parts.insert(parts.index(contract) + 1, _LIVE_APP_PACKAGES)
     section = _datasource_section(datasources, declared_sources, data_notes)
     if section:
         parts.append(section)
