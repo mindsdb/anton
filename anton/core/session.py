@@ -2090,6 +2090,7 @@ class ChatSession:
         self._skill_store = SkillStore(
             root=getattr(s, "skills_root", None),
             extra_roots=getattr(s, "skills_extra_roots", None),
+            artifact_roots=getattr(s, "skills_artifact_roots", None),
         )
         # Where `create_skill_draft` stages skills the agent builds. None means
         # the host stages none, and the tool is not registered at all.

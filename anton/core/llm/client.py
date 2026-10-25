@@ -630,8 +630,10 @@ class LLMClient:
         """
         from anton.core.llm.structured import (
             build_structured_tool,
+            forced_choice_key,
             looks_truncated,
             raise_unusable_tool_call,
+            send_structured,
             unwrap_structured_response,
         )
 
@@ -640,31 +642,38 @@ class LLMClient:
         budget = max_tokens or self._max_tokens
 
         listener = self.usage_listener
-        response = await self._guarded_call(
-            operation=lambda: _call_with_auth_confirmation(
-                lambda: provider.complete(
-                    model=model,
-                    system=system,
-                    messages=messages,
-                    tools=[tool],
-                    tool_choice={"type": "tool", "name": tool["name"]},
-                    max_tokens=budget,
+
+        async def send(tool_choice: dict | None, prompt: str):
+            response = await self._guarded_call(
+                operation=lambda: _call_with_auth_confirmation(
+                    lambda: provider.complete(
+                        model=model,
+                        system=prompt,
+                        messages=messages,
+                        tools=[tool],
+                        tool_choice=tool_choice,
+                        max_tokens=budget,
+                    ),
+                    role=role,
                 ),
                 role=role,
-            ),
-            role=role,
-            model=model,
-            max_tokens=budget,
+                model=model,
+                max_tokens=budget,
+            )
+            # Count BEFORE the no-tool-call raise below: a structured call that
+            # failed (and its bigger-budget retry) still spent real tokens
+            # (ENG-1288). The role is PASSED, not inferred from model equality:
+            # deployments exist where planning and coding resolve to the same
+            # model (cowork-server's Gemini defaults are identical across all
+            # three roles), and inference collapsed every generate_object_code
+            # call — verifier verdicts, compaction, identity extraction — into
+            # `planning`, defeating the split this exists to provide (#309 review).
+            self._notify_usage(role, model, response.usage, listener)
+            return response
+
+        response = await send_structured(
+            send, key=forced_choice_key(provider, model), tool=tool, system=system, budget=budget
         )
-        # Count BEFORE the no-tool-call raise below: a structured call that
-        # failed (and its bigger-budget retry) still spent real tokens
-        # (ENG-1288). The role is PASSED, not inferred from model equality:
-        # deployments exist where planning and coding resolve to the same
-        # model (cowork-server's Gemini defaults are identical across all
-        # three roles), and inference collapsed every generate_object_code
-        # call — verifier verdicts, compaction, identity extraction — into
-        # `planning`, defeating the split this exists to provide (#309 review).
-        self._notify_usage(role, model, response.usage, listener)
 
         # No call at all, or one whose arguments were cut mid-value. `repaired`
         # cannot wait for the validation branch below: the dict parses, and it

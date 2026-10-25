@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -305,3 +306,170 @@ class TestDiskFormat:
             assert stage_key in stats
             assert stats[stage_key]["recommended"] == 0
             assert stats[stage_key]["used"] == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# applies_to: the mark that feeds a skill to artifact builds
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _write_skill_md(store_root: Path, label: str, frontmatter: str) -> None:
+    d = store_root / label
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(
+        f"---\nname: {label}\ndescription: Chart rules.\n{frontmatter}---\nUse only Chart.js.\n",
+        encoding="utf-8",
+    )
+
+
+class TestAppliesTo:
+    @pytest.mark.parametrize(
+        "frontmatter",
+        [
+            "applies_to: artifacts\n",
+            "metadata:\n  applies_to: artifacts\n",
+            "applies_to: [chat, artifacts]\n",
+            "applies_to: chat, artifacts\n",
+            "applies_to: Artifacts\n",
+        ],
+    )
+    def test_a_marked_skill_is_for_artifacts(
+        self, store: SkillStore, store_root: Path, frontmatter: str
+    ):
+        _write_skill_md(store_root, "chart-rules", frontmatter)
+        skill = store.load("chart-rules")
+        assert skill is not None
+        assert skill.for_artifacts is True
+
+    @pytest.mark.parametrize(
+        "frontmatter", ["", "applies_to: chat\n", "applies_to: artifacts-preview\n"]
+    )
+    def test_an_unmarked_skill_is_not_for_artifacts(
+        self, store: SkillStore, store_root: Path, frontmatter: str
+    ):
+        _write_skill_md(store_root, "chart-rules", frontmatter)
+        skill = store.load("chart-rules")
+        assert skill is not None
+        assert skill.for_artifacts is False
+
+    def test_save_keeps_the_mark(self, store: SkillStore):
+        store.save(_make_skill(applies_to="artifacts"))
+        loaded = store.load("csv-summary")
+        assert loaded is not None
+        assert loaded.applies_to == "artifacts"
+        assert loaded.for_artifacts is True
+
+
+class TestListForArtifacts:
+    """Which marked skills an artifact build follows without a recall."""
+
+    @pytest.fixture()
+    def builtins(self, tmp_path: Path) -> Path:
+        root = tmp_path / "builtins"
+        _write_skill_md(root, "builtin-marked", "applies_to: artifacts\n")
+        return root
+
+    def test_a_cli_store_follows_its_own_marked_skills(self, tmp_path: Path, builtins: Path):
+        root = tmp_path / "user"
+        _write_skill_md(root, "mine-marked", "applies_to: artifacts\n")
+        _write_skill_md(root, "mine-plain", "")
+        store = SkillStore(root=root, builtin_root=builtins)
+
+        assert [s.label for s in store.list_for_artifacts()] == ["builtin-marked", "mine-marked"]
+
+    def test_a_cli_store_follows_a_skill_linked_into_its_library(
+        self, tmp_path: Path, builtins: Path
+    ):
+        """A CLI user may keep skills in a dotfiles repo and link them in;
+        nobody else writes that library."""
+        elsewhere = tmp_path / "dotfiles"
+        _write_skill_md(elsewhere, "linked-marked", "applies_to: artifacts\n")
+        root = tmp_path / "user"
+        root.mkdir()
+        (root / "linked-marked").symlink_to(elsewhere / "linked-marked", target_is_directory=True)
+        store = SkillStore(root=root, builtin_root=builtins)
+
+        assert [s.label for s in store.list_for_artifacts()] == ["builtin-marked", "linked-marked"]
+
+    def test_a_host_store_follows_what_it_trusted_when_built(self, tmp_path: Path, builtins: Path):
+        """The host names its folders by path when the turn starts. A skill
+        deleted during the turn and made again under its name by someone
+        else is not what the build follows."""
+        own_store = tmp_path / "own"
+        _write_skill_md(own_store, "own-marked", "applies_to: artifacts\n")
+        turn = tmp_path / "turn"
+        turn.mkdir()
+        (turn / "own-marked").symlink_to(own_store / "own-marked", target_is_directory=True)
+        store = SkillStore(
+            root=turn, builtin_root=builtins, extra_roots=[tmp_path / "managed"],
+            artifact_roots=[own_store / "own-marked"],
+        )
+
+        shutil.rmtree(own_store / "own-marked")
+        (own_store / "own-marked").mkdir()
+        (own_store / "own-marked" / "SKILL.md").write_text(
+            "---\nname: own-marked\ndescription: d\napplies_to: artifacts\n---\nSOMEONE-ELSES\n",
+            encoding="utf-8",
+        )
+
+        followed = {s.label: s.declarative_md for s in store.list_for_artifacts()}
+        assert followed["own-marked"].strip() == "Use only Chart.js."
+
+    def test_a_host_store_with_no_named_roots_follows_only_the_builtins(
+        self, tmp_path: Path, builtins: Path
+    ):
+        root, shared = tmp_path / "turn", tmp_path / "shared"
+        _write_skill_md(root, "writable-marked", "applies_to: artifacts\n")
+        _write_skill_md(shared, "shared-marked", "applies_to: artifacts\n")
+        store = SkillStore(root=root, builtin_root=builtins, extra_roots=[shared])
+
+        assert [s.label for s in store.list_for_artifacts()] == ["builtin-marked"]
+
+    def test_only_folders_the_host_names_are_followed(self, tmp_path: Path, builtins: Path):
+        """The turn's root links the asker's own skills; managed and shared
+        skills come as host roots; the host names its own store and the
+        managed folder only."""
+        own_store, managed, shared = tmp_path / "own", tmp_path / "managed", tmp_path / "shared"
+        _write_skill_md(own_store, "own-marked", "applies_to: artifacts\n")
+        _write_skill_md(managed, "managed-marked", "applies_to: artifacts\n")
+        _write_skill_md(shared, "shared-marked", "applies_to: artifacts\n")
+        turn = tmp_path / "turn"
+        turn.mkdir()
+        (turn / "own-marked").symlink_to(own_store / "own-marked", target_is_directory=True)
+        store = SkillStore(
+            root=turn, builtin_root=builtins, extra_roots=[managed, shared],
+            artifact_roots=[own_store, managed],
+        )
+
+        assert [s.label for s in store.list_for_artifacts()] == [
+            "builtin-marked", "managed-marked", "own-marked",
+        ]
+
+    def test_a_real_folder_planted_in_the_turn_root_is_not_followed(
+        self, tmp_path: Path, builtins: Path
+    ):
+        """Agent code can write the turn's root; only the host's links into a
+        named folder count."""
+        own_store = tmp_path / "own"
+        _write_skill_md(own_store, "own-marked", "applies_to: artifacts\n")
+        turn = tmp_path / "turn"
+        _write_skill_md(turn, "planted", "applies_to: artifacts\n")
+        store = SkillStore(
+            root=turn, builtin_root=builtins, extra_roots=[tmp_path / "managed"],
+            artifact_roots=[own_store],
+        )
+
+        assert [s.label for s in store.list_for_artifacts()] == ["builtin-marked"]
+
+    def test_a_link_into_an_unnamed_folder_is_not_followed(self, tmp_path: Path, builtins: Path):
+        other_store = tmp_path / "someone-else"
+        _write_skill_md(other_store, "theirs", "applies_to: artifacts\n")
+        turn = tmp_path / "turn"
+        turn.mkdir()
+        (turn / "theirs").symlink_to(other_store / "theirs", target_is_directory=True)
+        store = SkillStore(
+            root=turn, builtin_root=builtins, extra_roots=[tmp_path / "managed"],
+            artifact_roots=[tmp_path / "own"],
+        )
+
+        assert [s.label for s in store.list_for_artifacts()] == ["builtin-marked"]

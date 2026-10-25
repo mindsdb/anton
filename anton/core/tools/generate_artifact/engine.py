@@ -415,7 +415,7 @@ async def generate(
     """
     from .attachments import resolve_attachments
     from .discovery import checkpoint as cp
-    from .orchestrator import _datasource_catalog, run
+    from .orchestrator import _artifact_skills, _datasource_catalog, _project_rules, run
     from .spend import SpendGuard
     from .state import GenState
     from .debug_trace import make_trace
@@ -446,6 +446,8 @@ async def generate(
         user_preferences=user_preferences,
         user_language=user_language,
         datasource_catalog=_datasource_catalog(session),
+        project_rules=_project_rules(session),
+        artifact_skills=_artifact_skills(session),
         scratchpads_context=_scratchpads_context(session),
         trace_log=trace,
         progress=progress,
@@ -591,6 +593,7 @@ async def _generate_api_spec(
     messages: list[dict] | None = None,
     tools: list[dict] | None = None,
     system_override: str | None = None,
+    project_rules: str = "",
     on_text=None,
 ) -> str:
     """One-shot planning call → OpenAPI specification (JSON).
@@ -601,7 +604,9 @@ async def _generate_api_spec(
     that history as the model's own replies. They travel together: a history
     sent under a different system prompt would discard the prefix cache the
     shared region exists to keep. Without ``messages`` the cold-start prompt
-    carries the assembled context in front of the same instruction.
+    carries the assembled context in front of the same instruction, and
+    ``project_rules`` in its system prompt (the hot path's carries them
+    already).
 
     The reply is parsed and checked for shape (`_api_spec_problem`), and its
     paths against the ones `spec.md` lists under `## Backend` when ``context``
@@ -612,7 +617,9 @@ async def _generate_api_spec(
         system = system_override
         user = build_api_spec_instruction(stateless=stateless)
     else:
-        system, user = build_api_spec_prompt(context, stateless=stateless)
+        system, user = build_api_spec_prompt(
+            context, stateless=stateless, project_rules=project_rules
+        )
     declared = _declared_api_paths(context)
     if declared:
         # Naming the paths up front: told only to copy them from spec.md, the

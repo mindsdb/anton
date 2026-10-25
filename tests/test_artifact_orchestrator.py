@@ -190,11 +190,47 @@ async def test_gen_verify_backend_retries_once_then_succeeds(tmp_path: Path, mon
     monkeypatch.setattr(orchestrator.verifiers, "verify_backend", fake_verify)
     monkeypatch.setattr(orchestrator, "_map_datasources", fake_map)
     monkeypatch.setattr(orchestrator, "_declare_datasources", fake_declare)
+    # "REF" stands in for a connection reference, so the verify env, built on
+    # every host, can't be resolved from it.
+    monkeypatch.setattr(orchestrator, "_verify_datasource_env", lambda state: {})
 
     err = await orchestrator._gen_verify_backend(st)
     assert err is None
     assert calls["gen"] == 2  # one retry
     assert declared["refs"] == ["REF"]
+
+
+async def test_gen_verify_backend_hands_the_import_its_own_connections_without_a_sandbox(
+    tmp_path: Path, monkeypatch
+):
+    """The import check gets only the connections backend.py reads on every
+    host, as the launch does, not only under a sandbox."""
+    st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
+    st.api_spec = "{}"
+    seen = {}
+
+    async def fake_loop(**kw):
+        (tmp_path / "backend.py").write_text("x")
+        return {"files_written": ["backend.py"], "rounds_used": 1, "summary": "s"}
+
+    async def fake_verify(**kw):
+        seen.update(kw)
+        return VerifyResult(errors=[]), []
+
+    async def fake_declare(state, refs):
+        pass
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_backend", fake_verify)
+    monkeypatch.setattr(orchestrator, "_cell_sandbox", lambda state: None)
+    monkeypatch.setattr(orchestrator, "_map_datasources", lambda session, keys: ([], []))
+    monkeypatch.setattr(orchestrator, "_declare_datasources", fake_declare)
+    monkeypatch.setattr(
+        orchestrator, "_verify_datasource_env", lambda state: {"DS_PG_MAIN__PASSWORD": "pw"}
+    )
+
+    assert await orchestrator._gen_verify_backend(st) is None
+    assert seen["ds_env"] == {"DS_PG_MAIN__PASSWORD": "pw"}
 
 
 async def test_declare_datasources_writes_an_empty_list_to_clear_the_previous_one(

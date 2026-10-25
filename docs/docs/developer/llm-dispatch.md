@@ -53,7 +53,14 @@ works:
 2. A synthetic tool is built whose `input_schema` is that schema.
 3. The provider is called with `tool_choice={"type": "tool", "name": tool_name}` —
    this *forces* the LLM to call the tool rather than returning text.
-4. The tool-call input is validated through `model_validate()` and returned as
+4. Some models refuse a forced choice with a 400 that names `tool_choice`:
+   Claude Opus 5.5, Sonnet 5.5 and Fable 5.1, and an older Claude with thinking
+   on. `send_structured` then sends the call once more with no `tool_choice`
+   and a line asking for the tool first, and remembers the refusal for that
+   endpoint and model while the process runs, so later calls there skip the
+   forced choice. An unforced reply with no tool call gets one more try, so a
+   call sends at most three requests.
+5. The tool-call input is validated through `model_validate()` and returned as
    a typed instance (or `list[Model]` for list annotations).
 
 ### Why it beats asking for JSON in text
