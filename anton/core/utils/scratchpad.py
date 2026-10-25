@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict
 
@@ -375,12 +375,20 @@ async def ask_approval_card(
     such memory."""
     from anton.core.interaction.elicit import AskOption
 
-    _, cause = await ask_approval_choice(
+    choice = await ask_approval_choice(
         session, prompt,
         options=(AskOption(value="approve", label="Approve", detail=approve_detail),),
         cancel_detail=cancel_detail, log_label=log_label,
     )
-    return cause
+    return choice.cause
+
+
+class ApprovalChoice(NamedTuple):
+    """What came of an approval card: the option the person chose, or why
+    none was approved. Exactly one of the two is set."""
+
+    value: str | None
+    cause: RefusalCause | None
 
 
 async def ask_approval_choice(
@@ -390,7 +398,7 @@ async def ask_approval_choice(
     options: tuple[AskOption, ...],
     cancel_detail: str = "Leave things as they are",
     log_label: str = "write approval",
-) -> tuple[str | None, RefusalCause | None]:
+) -> ApprovalChoice:
     """Choose one host-built action, or return why none was approved.
 
     The gate remembers unanswered cards exactly as ask_approval_card does.
@@ -400,7 +408,7 @@ async def ask_approval_choice(
 
     gate = getattr(session, "_write_gate", None)
     if isinstance(gate, WriteGate) and gate.unanswered:
-        return None, "unanswered_earlier"
+        return ApprovalChoice(None, "unanswered_earlier")
     request = ApprovalRequest(
         prompt=prompt,
         options=(*options, AskOption(value="cancel", label="Cancel", detail=cancel_detail)),
@@ -410,19 +418,19 @@ async def ask_approval_choice(
         answer = await elicit(session, f"write:{uuid.uuid4().hex}", request, counted=False)
     except Exception as exc:
         logger.warning("%s: the question failed (%s)", log_label, type(exc).__name__)
-        return None, "error"
+        return ApprovalChoice(None, "error")
     offered = {option.value for option in options}
     if answer.status == "answered" and len(answer.values) == 1 and not answer.text:
         value = answer.values[0]
         if value in offered and value != "cancel":
-            return value, None
+            return ApprovalChoice(value, None)
     if answer.status in ("answered", "cancelled"):
-        return None, "cancelled"
+        return ApprovalChoice(None, "cancelled")
     if answer.status == "timeout" and isinstance(gate, WriteGate):
         gate.unanswered = True
     if answer.status in ("timeout", "unavailable"):
-        return None, answer.status
-    return None, "error"
+        return ApprovalChoice(None, answer.status)
+    return ApprovalChoice(None, "error")
 
 
 def _log_decision(*, writes: CellWrites, status: DecisionStatus) -> None:

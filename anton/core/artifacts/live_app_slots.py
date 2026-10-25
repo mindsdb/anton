@@ -846,6 +846,9 @@ class LaunchDecision(BaseModel):
 # ---------------------------------------------------------------------------
 
 NO_HOST_MESSAGE = "Not launched: live apps need a host that records who launches them, and this session has none."
+OLD_HOST_MESSAGE = (
+    "Not launched: this host's live-app support is older than this agent. Ask the operator to update it."
+)
 NO_SLOT_MESSAGE = "Not launched: no live-app slot answered. Ask the operator to check the stack's app slots."
 
 
@@ -994,6 +997,9 @@ def plan_slot(
     if selected is not None:
         if not any(_same_plan(choice, selected) for choice in mine):
             raise _slots_changed()
+        if running_slot(statuses, app_id, launcher) is not None:
+            # The same app started elsewhere while the card waited.
+            raise _slots_changed()
         return selected
     own = running_slot(statuses, app_id, launcher)
     if own is not None:
@@ -1005,7 +1011,10 @@ def plan_slot(
     if mine and (len(mine) >= limit or not free):
         raise SlotSelectionRequired(mine)
     if free:
-        if limit < len(statuses) and len(answering) != len(statuses):
+        # A slot that gave no answer may run one of this person's apps. Only
+        # when such slots could bring them to the cap is the count unknown.
+        unknown = len(statuses) - len(answering)
+        if len(mine) + unknown >= limit:
             raise LiveAppLaunchError(
                 "Not launched: a slot did not answer, so your running-app count cannot be checked. Try again shortly.",
                 cause="no_slot",
@@ -1060,7 +1069,7 @@ async def _choose_replacement(
                 + f"; slot {choice.index + 1}"),
     ) for value, choice in offered.items())
     try:
-        value, cause = await ask_approval_choice(
+        choice = await ask_approval_choice(
             session, prompt + "\n\nChoose which of your running apps to stop and replace. Nothing changes until you choose.",
             options=options, log_label="live app replacement",
         )
@@ -1068,6 +1077,7 @@ async def _choose_replacement(
         if decision is not None:
             _log_launch_decision(decision.model_copy(update={"status": "stopped"}))
         raise
+    value, cause = choice.value, choice.cause
     if decision is not None:
         _log_launch_decision(decision.model_copy(update={
             "status": cause or ("approved" if value in offered else "error"),
@@ -1135,6 +1145,12 @@ def _launch_failure(error: SlotRefused) -> LiveAppLaunchError:
     )
 
 
+def _host_shares_slots(host: LiveAppHost) -> bool:
+    """Whether `host` has the calls that share slots across its workers. An
+    older host has only the launch records."""
+    return all(callable(getattr(host, name, None)) for name in ("launch_lock", "slots_full", "slots_available"))
+
+
 class _LaunchSetup(NamedTuple):
     host: LiveAppHost
     addresses: tuple[str, ...]
@@ -1143,12 +1159,14 @@ class _LaunchSetup(NamedTuple):
 
 def _launch_setup(session) -> _LaunchSetup:
     """What every launch from `session` needs. Raises `LiveAppLaunchError`
-    when none can succeed: no host, or a broken setting. Checked before any
-    slot is touched, since an address that fails after a launch would leave
-    an app running that nobody recorded."""
+    when none can succeed: no host, an older host, or a broken setting.
+    Checked before any slot is touched, since an address that fails after a
+    launch would leave an app running that nobody recorded."""
     host: LiveAppHost | None = getattr(session, "_live_app_host", None)
     if host is None:
         raise LiveAppLaunchError(NO_HOST_MESSAGE, cause="no_host")
+    if not _host_shares_slots(host):
+        raise LiveAppLaunchError(OLD_HOST_MESSAGE, cause="no_host")
     try:
         addresses = live_app_slot_addresses()
         approved = load_approved_connections()
@@ -1355,11 +1373,6 @@ async def launch_live_app(
                     )
                 except SlotSelectionRequired:
                     raise _slots_changed() from None
-                if plan.replaces is not None and not _same_plan(plan, approved_plan):
-                    raise LiveAppLaunchError(
-                        "Not launched: the app slots changed while the card waited. Ask to launch it again.",
-                        cause="slots_changed",
-                    )
         except BaseException as exc:
             if claimed is None:
                 raise
@@ -1616,23 +1629,35 @@ async def running_app_address(session, *, folder: Path) -> str | None:
         return None
 
 
-async def stop_live_app(session, *, folder: Path) -> None:
+async def stop_live_app(session, *, folder: Path) -> int | None:
     """Stop the app a slot runs from `folder` for this session's launcher, if
     one does: a generation that gave up on it. The host hears of it as a
-    launch that failed. Never raises an `Exception`."""
+    launch that failed. Returns the slot number whose app may still run when
+    the stop failed, as when other launches held the host's lock past its
+    limit or the slot gave no status under the lock; None when the app
+    stopped or none ran. Never raises an `Exception`."""
     running = await _running_app(session, folder)
     if running is None:
-        return
+        return None
     host, client = running.host, running.client
+    if not _host_shares_slots(host):
+        _log.warning("live app stop skipped: the host has no launch lock")
+        return running.slot
     try:
         async with host.launch_lock():
             async with _slot_locks().setdefault(client.address, asyncio.Lock()):
-                if not _holds(await _read_status(client), running.app_id, host.launcher):
-                    return
+                current = await _read_status(client)
+                if current is None:
+                    _log.warning("live app stop failed (no status)")
+                    return running.slot
+                if not _holds(current, running.app_id, host.launcher):
+                    return None
                 await _claim(host, client, running.slot)
                 await _stop_claimed(host, client, running.slot)
     except Exception as exc:
         _log.warning("live app stop failed (%s)", type(exc).__name__)
+        return running.slot
+    return None
 
 
 def launch_paths_changed(before: dict[str, object], after: dict[str, object]) -> bool:

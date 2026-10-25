@@ -37,6 +37,7 @@ from anton.core.artifacts.live_app_slots import (
     SlotUnavailable,
 )
 from anton.core.artifacts.models import DatasourceRef
+from anton.core.utils.scratchpad import ApprovalChoice
 from anton.diagnostics import make_formatter
 
 _SLOTS = ("http://live-app-1:8001", "http://live-app-2:8001", "http://live-app-3:8001")
@@ -235,7 +236,9 @@ def cards(monkeypatch) -> Cards:
     async def choose(session, prompt, *, options, **kwargs):
         asked.append(prompt)
         asked.options = options
-        return (options[asked.pick].value, None) if asked.answer is None else (None, asked.answer)
+        return ApprovalChoice(options[asked.pick].value, None) if asked.answer is None else ApprovalChoice(
+            None, asked.answer,
+        )
 
     monkeypatch.setattr(scratchpad, "ask_approval_card", ask)
     monkeypatch.setattr(scratchpad, "ask_approval_choice", choose)
@@ -1466,10 +1469,49 @@ async def test_stopping_an_app_stops_only_that_folders_app(tmp_path, slots, appr
     _runs_from(slots[0], folder)
     _runs_from(slots[1], _artifact(tmp_path / "theirs"), _OTHER)
     session = _session()
-    await las.stop_live_app(session, folder=folder)
+    assert await las.stop_live_app(session, folder=folder) is None
     assert slots[0].resets == 1 and slots[1].resets == 0
     assert session._live_app_host.events == [("claim", 1), ("launch_failed", 1)]
-    await las.stop_live_app(_session(), folder=tmp_path / "nothing-runs-here")
+    assert await las.stop_live_app(_session(), folder=tmp_path / "nothing-runs-here") is None
+
+
+async def test_a_stop_whose_lock_timed_out_names_the_slot_the_app_may_still_run_in(tmp_path, slots, approved, cards):
+    """Other launches held the host's lock past its limit: the stop touches
+    nothing and says which slot's app may still run."""
+    import contextlib
+
+    class BusyHost(FakeHost):
+        @contextlib.asynccontextmanager
+        async def launch_lock(self):
+            raise LiveAppLaunchError("Live app slots are busy. Try launching again shortly.", cause="slot_busy")
+            yield
+
+    folder = _artifact(tmp_path)
+    _runs_from(slots[1], folder)
+    host = BusyHost()
+    assert await las.stop_live_app(_session(host), folder=folder) == 2
+    assert slots[1].resets == 0 and slots[1].app.artifact == folder.name
+    assert host.events == []
+
+
+async def test_a_stop_whose_slot_gives_no_status_under_the_lock_names_the_slot(tmp_path, slots, approved, cards):
+    """The slot stopped answering while the stop waited for the host's lock:
+    the stop can't tell whether the app still runs, so it touches nothing
+    and names the slot."""
+    import contextlib
+
+    class SilentHost(FakeHost):
+        @contextlib.asynccontextmanager
+        async def launch_lock(self):
+            slots[1].down = True
+            yield
+
+    folder = _artifact(tmp_path)
+    _runs_from(slots[1], folder)
+    host = SilentHost()
+    assert await las.stop_live_app(_session(host), folder=folder) == 2
+    assert slots[1].resets == 0 and slots[1].app.artifact == folder.name
+    assert host.events == []
 
 
 async def test_a_stop_during_the_reset_still_tells_the_host_the_app_stopped(tmp_path, slots, approved, cards):
@@ -1537,8 +1579,44 @@ async def test_a_first_launch_refused_says_nothing_was_started(tmp_path, slots, 
 def test_the_launch_blocker_names_why_no_launch_can_succeed(slots, approved, monkeypatch):
     assert las.live_app_launch_blocker(_session()) is None
     assert las.live_app_launch_blocker(SimpleNamespace(_data_vault=None)).cause == "no_host"
+    monkeypatch.setenv(las.PER_PERSON_ENV_VAR, "0")
+    assert las.live_app_launch_blocker(_session()).cause == "launches_disabled"
+    monkeypatch.delenv(las.PER_PERSON_ENV_VAR)
     monkeypatch.delenv(las.CONNECTIONS_FILE_ENV_VAR)
     assert las.live_app_launch_blocker(_session()).cause == "config"
+
+
+class _OlderHost:
+    """A host from before slots were shared: launch records only."""
+
+    def __init__(self):
+        self.launcher = _ME
+        self.launch_token = _TOKEN
+        self.events: list[tuple] = []
+
+    async def claim(self, slot: int) -> None:
+        self.events.append(("claim", slot))
+
+    async def launched(self, launch) -> None:
+        self.events.append(("launched", launch))
+
+    async def launch_failed(self, slot: int) -> None:
+        self.events.append(("launch_failed", slot))
+
+
+async def test_an_older_host_refuses_the_launch_and_its_stop_does_not_crash(tmp_path, slots, approved, cards):
+    folder = _artifact(tmp_path)
+    host = _OlderHost()
+    session = _session(host)
+    blocker = las.live_app_launch_blocker(session)
+    assert blocker.cause == "no_host" and str(blocker) == las.OLD_HOST_MESSAGE
+    with pytest.raises(LiveAppLaunchError) as raised:
+        await las.launch_live_app(session, slug="sales-demo", folder=folder, datasources=())
+    assert raised.value.cause == "no_host" and "Ask the operator to update it" in str(raised.value)
+    assert cards == [] and all(s.requests == [] for s in slots)
+    _runs_from(slots[1], folder)
+    assert await las.stop_live_app(session, folder=folder) == 2
+    assert slots[1].resets == 0 and host.events == []
 
 
 # ── The card through the gate ────────────────────────────────────────────────
@@ -1806,13 +1884,76 @@ async def test_stale_selected_launch_is_not_replaced(tmp_path, slots, approved, 
     async def choose(session, prompt, *, options, **kwargs):
         slots[0].run("colleague", _OTHER, started_at="2026-10-21T04:01:00Z")
         slots[0].boot += 1
-        return options[0].value, None
+        return ApprovalChoice(options[0].value, None)
     monkeypatch.setattr(scratchpad, "ask_approval_choice", choose)
     with pytest.raises(LiveAppLaunchError) as raised:
         await las.launch_live_app(_session(), slug="notes", folder=_artifact(tmp_path, "notes"), datasources=())
     assert raised.value.cause == "slots_changed"
     assert slots[0].app.artifact == "colleague"
     assert all(s.resets == 0 and s.requests == [] for s in slots)
+
+
+async def test_a_pick_made_while_the_same_app_started_elsewhere_replaces_nothing(tmp_path, slots, approved,
+                                                                                  monkeypatch):
+    """A second tab launches the same app while the first tab's card waits:
+    the first tab's pick would start a second copy, so nothing stops."""
+    from anton.core.utils import scratchpad
+    monkeypatch.setenv(las.PER_PERSON_ENV_VAR, "2")
+    folder = _artifact(tmp_path, "notes")
+    slots[0].run("clock", _ME, started_at="2026-10-21T04:00:00Z")
+    slots[1].run("counter", _ME, started_at="2026-10-21T04:10:00Z")
+
+    async def choose(session, prompt, *, options, **kwargs):
+        # The second tab replaced counter with this same app meanwhile.
+        slots[1].boot += 1
+        _runs_from(slots[1], folder, started_at="2026-10-21T04:20:00Z")
+        return ApprovalChoice(options[0].value, None)
+
+    monkeypatch.setattr(scratchpad, "ask_approval_choice", choose)
+    with pytest.raises(LiveAppLaunchError) as raised:
+        await las.launch_live_app(_session(), slug="notes", folder=folder, datasources=())
+    assert raised.value.cause == "slots_changed"
+    assert slots[0].app.artifact == "clock" and slots[0].resets == 0
+    assert slots[1].app.artifact == "notes" and slots[1].requests == []
+
+
+async def test_two_people_racing_for_one_free_slot_leave_the_second_refused_by_name(tmp_path, slots, approved,
+                                                                                    monkeypatch):
+    """Both pass the card seeing one free slot. The first to launch takes it;
+    the second is refused as slots full, naming the winner's app and email,
+    and its host records the refusal so it hears when a slot frees."""
+    from anton.core.utils import scratchpad
+    third = LiveAppLauncher(subject="sub-cy", email="cy@example.com")
+    slots[1].run("clock", _OTHER, started_at="2026-10-21T04:00:00Z")
+    slots[2].run("counter", _OTHER, started_at="2026-10-21T04:10:00Z")
+    both = asyncio.Event()
+    waiting = 0
+
+    async def ask(session, prompt, **kwargs):
+        nonlocal waiting
+        waiting += 1
+        if waiting == 2:
+            both.set()
+        await both.wait()
+
+    monkeypatch.setattr(scratchpad, "ask_approval_card", ask)
+    hosts = (FakeHost(_ME), FakeHost(third))
+    results = await asyncio.gather(*(
+        las.launch_live_app(_session(host), slug=name, folder=_artifact(tmp_path, name), datasources=())
+        for host, name in zip(hosts, ("notes-c", "notes-d"))
+    ), return_exceptions=True)
+    won = [i for i, r in enumerate(results) if isinstance(r, las.LiveAppLaunchResult)]
+    lost = [i for i, r in enumerate(results) if isinstance(r, LiveAppLaunchError)]
+    assert len(won) == 1 and len(lost) == 1
+    (winner,), (loser,) = won, lost
+    refusal = results[loser]
+    assert refusal.cause == "slots_full"
+    text = str(refusal)
+    assert f"slot 1 runs `notes-{'cd'[winner]}` for {hosts[winner].launcher.email}" in text
+    assert "bo@example.com" in text
+    assert (hosts[winner].refused, hosts[loser].refused) == (0, 1)
+    assert slots[0].app.launcher == hosts[winner].launcher
+    assert all(slot.resets == 0 for slot in slots)
 
 
 async def test_simultaneous_same_person_launches_cannot_exceed_cap(tmp_path, slots, approved, monkeypatch):
@@ -1897,6 +2038,19 @@ def test_unknown_slot_cannot_hide_another_app_when_cap_is_lower():
     assert raised.value.cause == "no_slot"
 
 
+def test_an_unknown_slot_that_cant_reach_the_cap_leaves_a_free_slot_free_to_take():
+    """A slot restarting after an idle stop doesn't refuse a person who holds
+    no apps: one unknown slot can't bring them to a cap of two."""
+    assert las.plan_slot([_status(1), None, _status(3)], "new", _ME, per_person=2) == las.SlotPlan(0)
+
+
+def test_an_unknown_slot_that_could_reach_the_cap_refuses():
+    statuses = [_status(1, state="running", app=_app("clock", _ME, "2026-10-21T04:00:00Z")), None, _status(3)]
+    with pytest.raises(LiveAppLaunchError, match="running-app count") as raised:
+        las.plan_slot(statuses, "new", _ME, per_person=2)
+    assert raised.value.cause == "no_slot"
+
+
 async def test_exited_capacity_notifies_waiters_before_another_launch_consumes_it(tmp_path, slots, approved, cards):
     for slot in slots:
         slot.run("colleague", _OTHER, started_at="2026-10-21T04:00:00Z")
@@ -1913,6 +2067,23 @@ async def test_exited_capacity_notifies_waiters_before_another_launch_consumes_i
     assert all(slot.resets == 0 for slot in slots[1:])
 
 
+async def test_a_launch_into_an_empty_slot_notifies_waiters_before_it_records(tmp_path, slots, approved, cards):
+    """A slot restarted empty before any poll saw it: the launch that finds it
+    tells the host a slot is free before it takes the slot."""
+    slots[1].run("colleague", _OTHER, started_at="2026-10-21T04:00:00Z")
+    slots[2].run("colleague-2", _OTHER, started_at="2026-10-21T04:01:00Z")
+
+    class Host(FakeHost):
+        async def launched(self, launch):
+            assert self.available >= 1
+            await super().launched(launch)
+
+    host = Host()
+    result = await las.launch_live_app(_session(host), slug="notes", folder=_artifact(tmp_path), datasources=())
+    assert result.slot == 1 and host.available >= 1
+    assert host.events[-1][0] == "launched"
+
+
 @pytest.mark.parametrize("cause", ["cancelled", "timeout", "unavailable", "error", "unanswered_earlier", "stopped"])
 async def test_replacement_logs_every_refusal_and_stop(tmp_path, slots, approved, monkeypatch, caplog, cause):
     from anton.core.utils import scratchpad
@@ -1923,7 +2094,7 @@ async def test_replacement_logs_every_refusal_and_stop(tmp_path, slots, approved
     async def choose(*args, **kwargs):
         if cause == "stopped":
             raise asyncio.CancelledError
-        return None, cause
+        return ApprovalChoice(None, cause)
 
     monkeypatch.setattr(scratchpad, "ask_approval_choice", choose)
     error = asyncio.CancelledError if cause == "stopped" else LiveAppLaunchError

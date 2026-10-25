@@ -1087,7 +1087,7 @@ _LIVE_APP_FAILURE_REASONS: "dict[LaunchFailure, str]" = {
     "slot_unavailable": "live_app_unavailable",
     "slots_full": "live_app_slots_full",
     "slots_changed": "live_app_slots_full",
-    "slot_busy": "live_app_slots_full",
+    "slot_busy": "live_app_slots_busy",
     "launch_files": "live_app_invalid_files",
     "missing_package": "live_app_missing_package",
     "app_not_ready": "launch_failed",

@@ -273,7 +273,10 @@ async def test_with_live_apps_on_a_fullstack_run_gets_past_the_sandbox_refusal(t
     connections.write_text('{"version": 1, "connections": []}', encoding="utf-8")
     monkeypatch.setenv(las.CONNECTIONS_FILE_ENV_VAR, str(connections))
     state = _gen_state(tmp_path, policy)
-    state.session._live_app_host = SimpleNamespace(launcher=None, launch_token="t" * 64)
+    state.session._live_app_host = SimpleNamespace(
+        launcher=None, launch_token="t" * 64,
+        launch_lock=lambda: None, slots_full=lambda: None, slots_available=lambda: None,
+    )
     assert await orchestrator.run(state, entry=cp.ENTRY_SPEC) == "stopped for the test"
     assert reached == ["data"]
 
@@ -382,6 +385,7 @@ async def test_a_launch_a_new_backend_cant_fix_ends_the_run_as_not_launched(tmp_
 @pytest.mark.parametrize("cause, ok, reason", [
     ("launch_not_approved", True, "live_app_not_approved"),
     ("slots_full", False, "live_app_slots_full"),
+    ("slot_busy", False, "live_app_slots_busy"),
     ("no_slot", False, "live_app_unavailable"),
 ])
 def test_a_generation_that_didnt_launch_reads_as_launch_backend_does(cause, ok, reason):
@@ -389,7 +393,17 @@ def test_a_generation_that_didnt_launch_reads_as_launch_backend_does(cause, ok, 
     assert "launch_backend" in tool_handlers._STATUS_INSTRUCTIONS["not_launched"]
 
 
-async def test_a_run_that_gives_up_stops_the_app_it_launched(tmp_path, policy, live_apps_on, monkeypatch, gen_store):
+# What the run says when the stop of the app it gave up on didn't go
+# through: `stop_live_app` returned the slot, 2 here.
+_STILL_RUNS = (
+    "The app may still be running in slot 2: the run could not stop it. "
+    "It stops by itself after a while with no requests."
+)
+
+
+@pytest.mark.parametrize("left", [None, 2], ids=["stopped", "lock-timeout"])
+async def test_a_run_that_gives_up_stops_the_app_it_launched(tmp_path, policy, live_apps_on, monkeypatch, gen_store,
+                                                             left):
     stopped: list[Path] = []
 
     async def launch(session, **kwargs):
@@ -400,6 +414,7 @@ async def test_a_run_that_gives_up_stops_the_app_it_launched(tmp_path, policy, l
 
     async def stop(session, *, folder):
         stopped.append(folder)
+        return left
 
     monkeypatch.setattr(las, "launch_live_app", launch)
     monkeypatch.setattr(las, "stop_live_app", stop)
@@ -408,14 +423,17 @@ async def test_a_run_that_gives_up_stops_the_app_it_launched(tmp_path, policy, l
     error = await orchestrator._run_and_verify_app(state)
     assert error.startswith("Application failed to launch: health check GET /api/health returned 500")
     assert error.count("Traceback: boom") == 1
+    assert ("may still be running" in error) is (left is not None)
+    assert error.endswith(f"\n\n{_STILL_RUNS}") is (left is not None)
     assert stopped == [tmp_path]
     assert state.app_url is None and state.live_app is None
 
 
+@pytest.mark.parametrize("left", [None, 2], ids=["stopped", "lock-timeout"])
 @pytest.mark.parametrize("stop", ["Error: the backend could not be rebuilt.", orchestrator.OVER_BUDGET],
                          ids=["error", "over-budget"])
 async def test_a_regeneration_that_ends_the_run_stops_the_app_it_launched(tmp_path, policy, live_apps_on,
-                                                                          monkeypatch, gen_store, stop):
+                                                                          monkeypatch, gen_store, stop, left):
     stopped: list[Path] = []
 
     async def launch(session, **kwargs):
@@ -426,15 +444,22 @@ async def test_a_regeneration_that_ends_the_run_stops_the_app_it_launched(tmp_pa
 
     async def record_stop(session, *, folder):
         stopped.append(folder)
+        return left
 
     monkeypatch.setattr(las, "launch_live_app", launch)
     monkeypatch.setattr(las, "stop_live_app", record_stop)
     monkeypatch.setattr(orchestrator, "_gen_verify_backend", regenerate)
     state = _gen_state(tmp_path, policy)
-    assert await orchestrator._run_and_verify_app(state) == stop
+    returned = await orchestrator._run_and_verify_app(state)
     assert stopped == [tmp_path]
     result = orchestrator._stopped_over_budget(state, "the backend could not be rebuilt in time")
     assert "url" not in result and "live_app" not in result
+    note = f"\n\n{_STILL_RUNS}" if left is not None else ""
+    if stop is orchestrator.OVER_BUDGET:
+        assert returned is orchestrator.OVER_BUDGET
+        assert result["detail"] == "the backend could not be rebuilt in time" + note
+    else:
+        assert returned == state.error == stop + note
 
 
 _FAILED_CHECK = "health check GET /api/health returned 500 (expected 200)."
@@ -516,6 +541,29 @@ async def test_any_other_relaunch_failure_stops_the_earlier_app(tmp_path, policy
     assert result["detail"] == (
         f"Not launched: {cause}. The app this run launched earlier failed its check, so the run stopped it: "
         + _FAILED_CHECK
+    )
+
+
+async def test_a_relaunch_failure_whose_stop_failed_says_where_the_app_may_still_run(tmp_path, policy, live_apps_on,
+                                                                                    monkeypatch, gen_store):
+    """The stop timed out on the host's lock: the run never says it stopped
+    the app, and names the slot it may still run in."""
+    _launches(
+        monkeypatch,
+        _result(probe=(ProbeResult(path="/api/health", status=500),)),
+        LiveAppLaunchError("Not launched: slot_busy.", cause="slot_busy"),
+    )
+
+    async def lock_timed_out(session, *, folder):
+        return 2
+
+    monkeypatch.setattr(las, "stop_live_app", lock_timed_out)
+    state = _gen_state(tmp_path, policy)
+    assert await orchestrator._run_and_verify_app(state) is orchestrator.NOT_LAUNCHED
+    result = orchestrator._not_launched(state)
+    assert "url" not in result and "live_app" not in result
+    assert result["detail"] == (
+        f"Not launched: slot_busy. The app this run launched earlier failed its check: {_FAILED_CHECK} {_STILL_RUNS}"
     )
 
 
@@ -730,6 +778,40 @@ async def test_the_generators_backend_check_installs_nothing_only_for_a_live_app
     assert seen.get("live_app", False) is on
 
 
+@pytest.mark.parametrize("on", [True, False])
+async def test_the_generators_backend_is_written_to_the_package_rule_it_is_checked_against(
+    tmp_path, policy, monkeypatch, on
+):
+    from anton.core.tools.generate_artifact.state import VerifyResult
+
+    if on:
+        monkeypatch.setenv(las.SLOTS_ENV_VAR, _SLOTS)
+    else:
+        monkeypatch.delenv(las.SLOTS_ENV_VAR, raising=False)
+    seen: dict = {}
+
+    async def fake_loop(**kw):
+        seen["system"] = kw["system"]
+        return {"files_written": ["backend.py"], "rounds_used": 1, "summary": "s"}
+
+    async def fake_verify(**kw):
+        return VerifyResult(errors=[]), []
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_backend", fake_verify)
+    monkeypatch.setattr(orchestrator, "_map_datasources", lambda s, k: ([], []))
+    await orchestrator._gen_verify_backend(_gen_state(tmp_path, policy))
+    assert ("## Live app packages" in seen["system"]) is on
+
+
+@pytest.mark.parametrize("stateless", [True, False])
+def test_only_a_live_apps_backend_prompt_carries_its_package_rule(tmp_path, stateless):
+    plain = prompts.build_backend_system_prompt(tmp_path, stateless=stateless)
+    live = prompts.build_backend_system_prompt(tmp_path, stateless=stateless, live_app=True)
+    assert "## Live app packages" in live and "## Live app packages" not in plain
+    assert live.replace("\n\n" + prompts._LIVE_APP_PACKAGES, "") == plain
+
+
 def test_only_a_live_apps_frontend_prompt_carries_its_script_rule(tmp_path):
     plain = prompts.build_frontend_system_prompt(tmp_path)
     live = prompts.build_frontend_system_prompt(tmp_path, live_app=True)
@@ -752,6 +834,21 @@ async def test_a_live_apps_backend_installs_nothing_and_names_what_it_lacks(tmp_
     )
     (error,) = verdict.errors
     assert "`surely-not-installed-pkg-29`" in error and "pydantic" not in error
+
+
+def test_a_live_apps_requirement_in_the_base_interpreter_alone_passes(tmp_path, monkeypatch):
+    """The image holds `mangum` and pandas in the base interpreter, not in the
+    server's own environment; the slot imports from both, so the check does."""
+    base = tmp_path / "base-site-packages"
+    (base / "only_in_base-1.0.dist-info").mkdir(parents=True)
+    (base / "only_in_base-1.0.dist-info" / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: only_in_base\nVersion: 1.0\n", encoding="utf-8"
+    )
+    monkeypatch.setattr("site.getsitepackages", lambda prefixes=None: [str(base)])
+
+    assert verifiers._missing_here(["Only-In-Base>=1", "surely-not-installed-pkg-29"]) == [
+        "surely-not-installed-pkg-29"
+    ]
 
 
 async def test_without_a_sandbox_live_apps_dont_apply(tmp_path, live_apps_on):

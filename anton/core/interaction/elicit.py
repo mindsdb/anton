@@ -50,6 +50,9 @@ MAX_QUESTIONS_PER_TURN = 8
 # model should narrow the question instead.
 MIN_OPTIONS = 2
 MAX_OPTIONS = 10
+# A host-built approval card (`ApprovalRequest`) may offer more: room for
+# fifteen of a person's apps plus Cancel.
+MAX_APPROVAL_OPTIONS = 16
 
 # The `answer_hint` of every host that renders a question as a card with
 # buttons, a free-form input and a Skip control (cowork desktop and web).
@@ -171,7 +174,7 @@ def validate_request(request: AskRequest) -> bool:
     if isinstance(request, ApprovalRequest):
         if request.kind != "choice" or request.select != "one" or request.allow_custom or request.default_value:
             return False
-        limit = 16
+        limit = MAX_APPROVAL_OPTIONS
     if request.kind != "choice":
         return True
     if not MIN_OPTIONS <= len(request.options) <= limit:
