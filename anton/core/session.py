@@ -651,9 +651,10 @@ def _build_finish_authorization_request(message: str) -> tuple[str, list[dict]]:
 #
 # An EXHAUSTED ladder counts toward the latch. `retrying` is false at the last
 # budget, so the only truncation that ever reaches the latch check is one that
-# blew past 4096 after already blowing past 2048 — never a single sample of a
-# model's verbosity. Against the distribution above that is a statement about
-# the model. Typed transients never latch, see `_TRANSIENT_VERDICT_ERRORS`.
+# blew past the ladder's last budget after already blowing past its first —
+# never a single sample of a model's verbosity. Against the distribution above
+# that is a statement about the model. Typed transients never latch, see
+# `_TRANSIENT_VERDICT_ERRORS`.
 #
 # Accepted cost, worth knowing: unlike a rejected `tool_choice`, this is a
 # STOCHASTIC failure. Two unlucky ladders with no successful verdict between
@@ -662,6 +663,24 @@ def _build_finish_authorization_request(message: str) -> tuple[str, list[dict]]:
 # clears, and the shorter window at `_VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED`
 # are what bound that.
 _VERIFIER_TOKEN_BUDGETS = (2048, 4096)
+
+# At max the model thinks before it calls the verdict tool, and its thinking
+# spends from the same budget (ENG-3719). Replayed at max through MindsHub on
+# 2026-10-24, the 2048 try was cut 3 of 3 on `sonnet-5-5` and `opus-5-5`, and
+# the 4096 retry 2 of 3 on `opus-5-5`, so the check latched. The call is not
+# streamed, so its last budget must also finish inside the gateway's 110 s for
+# a whole non-streamed request: at max the slowest 8192-token non-streamed call
+# took 73.9 s on `opus-5-5`. Replayed on 2026-10-25, a 4096 first try gave its
+# verdict 6 of 6 on both models, in 3 to 23 s. Below max the ladder above
+# holds: a verdict at xhigh took 457 of 2048.
+_VERIFIER_TOKEN_BUDGETS_AT_MAX = (4096, 8192)
+
+
+def _verifier_token_budgets(llm) -> tuple[int, ...]:
+    """The verdict call's budget ladder at the coding role's effort."""
+    effort = getattr(getattr(llm, "coding_provider", None), "reasoning_effort", None)
+    return _VERIFIER_TOKEN_BUDGETS_AT_MAX if effort == "max" else _VERIFIER_TOKEN_BUDGETS
+
 
 # Verdict-call failures that are transient by nature rather than statements about
 # the model's capability. The latch exists for a model that *cannot* produce a
@@ -7401,7 +7420,8 @@ class ChatSession:
             # unbinds `exc` at the end of each clause, hence the copy.
             verdict_exc: BaseException | None = None
             # Skipped when Jev decided; otherwise exactly the LLM verifier as before.
-            for attempt, budget in enumerate(() if jev_decided else _VERIFIER_TOKEN_BUDGETS):
+            verdict_budgets = () if jev_decided else _verifier_token_budgets(self._llm)
+            for attempt, budget in enumerate(verdict_budgets):
                 try:
                     verdict = await self._llm.generate_object_code(
                         _VerifierVerdict,
@@ -7415,9 +7435,7 @@ class ChatSession:
                     # model narrated past `budget` before it reached the tool call
                     # (ENG-1081). Retry with more room. Any other structured-output
                     # failure won't be fixed by a bigger budget, so don't pay for it.
-                    retrying = exc.truncated and attempt + 1 < len(
-                        _VERIFIER_TOKEN_BUDGETS
-                    )
+                    retrying = exc.truncated and attempt + 1 < len(verdict_budgets)
                     verdict_failure = "truncated" if exc.truncated else "hard"
                     verdict_exc = exc
                     # WARNING only when this attempt ends the loop: a truncation
