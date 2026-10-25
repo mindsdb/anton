@@ -60,6 +60,8 @@ dependencies = [
     "packaging>=21.0",
     "pyyaml>=6.0",
     "dill==0.3.8",
+    # Offline GeoNames place lookup for artifact generation.
+    "geonamescache==3.0.1",
     "truststore>=0.10.4",
     # Reads .xlsx artifacts for the structural lint
     "openpyxl>=3.1,<4",
