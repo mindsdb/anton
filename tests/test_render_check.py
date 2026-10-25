@@ -3688,7 +3688,20 @@ def test_a_request_with_the_previous_page_is_held_to_the_larger_cap(service, mon
     assert len(service.requests) == 1 and service.requests[0]["body"]["previous_html"] == page
 
 
-def test_a_compared_request_over_the_larger_cap_names_it(service, monkeypatch):
+def test_a_compared_request_over_the_larger_cap_checks_the_page_alone(service, monkeypatch):
+    """The page alone fits its own cap: the comparison never costs it its
+    verdict. JSON escapes each \\x01 as six bytes."""
+    monkeypatch.setattr(render_check, "MAX_BODY_BYTES", 1024 * 1024)
+    monkeypatch.setattr(render_check, "MAX_COMPARED_BODY_BYTES", 2 * 1024 * 1024)
+    page, previous = "\x01" * (160 * 1024), "\x01" * (190 * 1024)
+
+    result = check_html(page, previous_html=previous)
+
+    assert result.status == "passed"
+    assert [sorted(request["body"]) for request in service.requests] == [["html", "screenshot"]]
+
+
+def test_a_page_over_its_own_cap_is_unverified_with_or_without_the_previous_page(service, monkeypatch):
     monkeypatch.setattr(render_check, "MAX_BODY_BYTES", 1024 * 1024)
     monkeypatch.setattr(render_check, "MAX_COMPARED_BODY_BYTES", 2 * 1024 * 1024)
     page = "\x01" * (200 * 1024)
@@ -3697,21 +3710,18 @@ def test_a_compared_request_over_the_larger_cap_names_it(service, monkeypatch):
 
     assert result.status == "unverified"
     assert result.unverified_reason == (
-        "the page's request is 2400 KB once JSON-escaped, over the render check's 2 MB request limit"
+        "the page's request is 1200 KB once JSON-escaped, over the render check's 1 MB request limit"
     )
     assert service.requests == []
 
 
-def test_a_previous_page_over_the_size_limit_is_not_sent(service, monkeypatch):
+def test_a_previous_page_over_the_size_limit_is_not_sent_and_the_page_is_checked_alone(service, monkeypatch):
     monkeypatch.setattr(render_check, "MAX_PAGE_BYTES", 1024)
 
     result = check_html(_PAGE, previous_html="x" * 2048)
 
-    assert result.status == "unverified"
-    assert result.unverified_reason == (
-        "the page as it was before this turn is 2 KB, over the render check's 0 MB limit"
-    )
-    assert service.requests == []
+    assert result.status == "passed"
+    assert [request["body"] for request in service.requests] == [{"html": _PAGE, "screenshot": True}]
 
 
 def test_the_comparison_parses(service):
@@ -3752,17 +3762,29 @@ def test_a_comparison_that_does_not_parse_is_dropped_and_the_verdict_kept(servic
     assert "comparison that does not parse" in caplog.text
 
 
-def test_a_service_that_rejects_the_previous_page_is_unverified_and_logged(service, caplog):
-    """No second ask without the previous page: anton newer than its service
-    is a release built wrong, not a case to work around."""
-    service.answer((400, {"detail": "extra fields not permitted"}, 0.0))
+def test_a_service_that_rejects_the_previous_page_is_asked_again_with_the_page_alone(service, caplog):
+    """An anton newer than its service keeps every page's own verdict, with
+    no comparison, instead of reading every edited page as unverified."""
+    service.answer((400, {"detail": "extra fields not permitted"}, 0.0), (200, _answer("passed"), 0.0))
+
+    result = check_html(_PAGE, previous_html=_OLD_PAGE)
+
+    assert (result.status, result.comparison) == ("passed", None)
+    assert [sorted(request["body"]) for request in service.requests] == [
+        ["html", "previous_html", "screenshot"], ["html", "screenshot"],
+    ]
+    assert "it may predate page comparison" in caplog.text
+
+
+def test_a_400_to_the_page_alone_is_unverified_with_no_third_ask(service):
+    service.answer((400, {"detail": "the request isn't a render check request"}, 0.0))
 
     result = check_html(_PAGE, previous_html=_OLD_PAGE)
 
     assert result.status == "unverified"
     assert result.unverified_reason == "the render-check service rejected the request (HTTP 400)"
-    assert len(service.requests) == 1
-    assert "it may predate page comparison" in caplog.text
+    assert len(service.requests) == 2
+    assert check_html(_PAGE).status == "unverified" and len(service.requests) == 3
 
 
 _NO_VIEW = {"reason": "no_view", "viewports": ["phone"], "findings": []}
@@ -3770,21 +3792,28 @@ _NEW_PROBLEM = {"reason": "new_problem", "viewports": ["desktop"], "findings": [
 
 
 @pytest.mark.parametrize(("comparison", "notes"), [
-    (None, ([], [], [])),
-    (_comparison(previous="not_checked", previous_status=None, removed_controls=["Globe"]), ([], [], [])),
+    (None, ([], [], [], [])),
+    (_comparison(previous="not_checked", previous_status=None, removed_controls=["Globe"]), ([], [], [], [])),
     # The new page's check was cut short: nothing compared, no removal seen.
-    (_comparison(removal_checked="none", removed_controls=["Globe"]), ([], [], [])),
-    (_comparison(), ([], [], [])),
+    (_comparison(removal_checked="none", removed_controls=["Globe"]), ([], [], [], [])),
+    (_comparison(), ([], [], [], [])),
     (
         _comparison(broken_views=[
             {"pressed": None, **_NEW_PROBLEM}, {"pressed": "Map", **_NEW_PROBLEM},
             {"pressed": "Map", **_NO_VIEW}, {"pressed": "Details", **_NO_VIEW},
         ]),
-        (["the page as it opens", "“Map”"], ["“Map”", "“Details”"], []),
+        (["the page as it opens", "“Map”"], ["“Map”", "“Details”"], [], []),
     ),
     (
         _comparison(removed_views=[{"pressed": "Globe"}], removed_controls=["Globe", "Dark mode"]),
-        ([], [], ["“Globe”", "“Dark mode”"]),
+        ([], [], ["“Globe”", "“Dark mode”"], []),
+    ),
+    (
+        _comparison(compared=[{"pressed": "Ports", "viewports": ["desktop", "phone"]}], shrunk_views=[
+            {"pressed": "Ports", "view": "svg#ports", "viewports": ["desktop", "phone"], "before": 26, "after": 5},
+            {"pressed": None, "view": "table#lanes", "viewports": ["desktop"], "before": 40, "after": 12},
+        ]),
+        ([], [], [], ["“Ports” (svg#ports: 5 of 26 marks)", "the page as it opens (table#lanes: 12 of 40 marks)"]),
     ),
 ])
 def test_the_notes_name_each_view_once(comparison, notes):
@@ -3799,3 +3828,9 @@ def test_labels_join_as_a_sentence_says_them():
 
     assert [joined(["a"]), joined(["a", "b"]), joined(["a", "b", "c"])] == ["a", "a and b", "a, b and c"]
     assert [agree(["a"], "it", "them"), agree(["a", "b"], "it", "them")] == ["it", "them"]
+
+
+def test_a_comparison_from_a_service_without_shrunk_views_parses_with_none():
+    from anton.core.artifacts.render_check import Comparison
+
+    assert Comparison.model_validate(_comparison()).shrunk_views == []

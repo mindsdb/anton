@@ -432,7 +432,7 @@ def _removed_views(measured_when_failed: "tuple[CheckedView, ...]", outcome: "Re
 
 def _comparison_lines(label: str, notes: "ComparisonNotes") -> list[str]:
     """The lines that tell the agent what this turn's edits did to views
-    that worked when the turn began."""
+    that worked when the turn began: broke, blanked, removed or shrank."""
     from anton.core.artifacts.render_check import agree, joined
 
     lines: list[str] = []
@@ -455,6 +455,14 @@ def _comparison_lines(label: str, notes: "ComparisonNotes") -> list[str]:
             f"{label} — this turn's edits removed {joined(notes.removed)}. If the user did not ask for that, "
             f"put {agree(notes.removed, 'it', 'them')} back; if they did, tell them "
             f"{agree(notes.removed, 'it is', 'they are')} gone"
+        )
+    if notes.shrank:
+        them = agree(notes.shrank, "it", "them")
+        lines.append(
+            f"{label} — {joined(notes.shrank)} {agree(notes.shrank, 'shows', 'show')} fewer than half the marks "
+            f"{agree(notes.shrank, 'it', 'they')} showed before this turn's edits. If the user did not ask to show "
+            f"less, the edits lost data: fix {them}; if they did, tell them what "
+            f"{agree(notes.shrank, 'it shows', 'they show')} now"
         )
     return lines
 
@@ -1481,9 +1489,9 @@ _REPLACED_BUILD_FIELDS = (
 )
 # Joins the instruction of a result that carries `changes_from_previous`.
 _CHANGES_INSTRUCTION = (
-    "`changes_from_previous` names the views this build broke (`broke`), left without a graphic (`blank`) or "
-    "removed (`removed`), against the page as it was before this turn. Name each one to the user, unless the "
-    "user asked for that change."
+    "`changes_from_previous` names the views this build broke (`broke`), left without a graphic (`blank`), "
+    "removed (`removed`) or left fewer than half their marks (`shrank`), against the page as it was before this "
+    "turn. Name each one to the user, unless the user asked for that change."
 )
 
 
@@ -2051,19 +2059,23 @@ def _browser_check_failed_outcome(
     no nudge."""
     from anton.core.artifacts import render_check
 
-    text = json.dumps(
-        {
-            "slug": slug,
-            "path": str(folder),
-            "status": "browser_check_failed",
-            "page": result.page,
-            "findings": list(result.findings),
-            "views_measured": render_check.view_coverage(views=result.views).checked,
-            "repair_cells": REPAIR_CELLS,
-            "instruction": _STATUS_INSTRUCTIONS["browser_check_failed"],
-        },
-        indent=2,
-    )
+    outcome = {
+        "slug": slug,
+        "path": str(folder),
+        "status": "browser_check_failed",
+        "page": result.page,
+        "findings": list(result.findings),
+        "views_measured": render_check.view_coverage(views=result.views).checked,
+        "repair_cells": REPAIR_CELLS,
+    }
+    instruction = _STATUS_INSTRUCTIONS["browser_check_failed"]
+    # A rebuild of an existing page is compared with the page as the turn
+    # found it: the repair starts knowing what the build broke or dropped.
+    changes = render_check.comparison_notes(result.comparison)
+    if changes.found:
+        outcome["changes_from_previous"] = changes._asdict()
+        instruction = f"{instruction} {_CHANGES_INSTRUCTION}"
+    text = json.dumps({**outcome, "instruction": instruction}, indent=2)
     if result.screenshot is None or render_screenshots_refused(session):
         return ToolOutcome(content=text, ok=True)
     blocks = render_check.screenshot_blocks(result.screenshot, page=f"{slug}/{result.page}")

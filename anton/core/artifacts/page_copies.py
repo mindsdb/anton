@@ -7,8 +7,8 @@ compares the two (`render_check.Comparison`). When an edit breaks a page
 past its repair cells, anton puts the copy back (`TurnPages.restore`); a
 rebuild that ends without a page puts back the page as the run found it,
 the copy when no earlier edit this turn changed it (`TurnPages.write_back`).
-What the turn broke, blanked, removed or put back closes the agent's final
-message (`TurnPages.end_lines`).
+What the turn broke, blanked, removed, shrank or put back closes the
+agent's final message (`TurnPages.end_lines`).
 
 Copies are kept only with the render-check service configured: without it
 nothing compares them. `ChatSession` holds one `TurnPages` per turn.
@@ -144,13 +144,16 @@ class TurnPages:
         # instead of finding none.
         self._capture_lock = threading.Lock()
         self._captured = False
-        # Validated UTF-8, decoded once; it encodes back to the same bytes.
-        self._copies: dict[PageKey, str] = {}
+        # Each page's bytes, validated as UTF-8 when read. Kept as bytes, not
+        # text: a `str` holding one character past U+FFFF, such as an emoji,
+        # takes four bytes for every character of the page.
+        self._copies: dict[PageKey, bytes] = {}
         # Each page's latest comparison whose previous page the service
         # checked, in the order the turn's last lines name the pages.
         self._comparisons: dict[PageKey, Comparison] = {}
-        # Per page, the `blank` and `removed` labels last shown to the agent.
-        self._shown: dict[PageKey, tuple[tuple[str, ...], tuple[str, ...]]] = {}
+        # Per page, the `blank`, `removed` and shrunk views last shown to the
+        # agent; a shrunk view by its state and name, whatever its counts.
+        self._shown: dict[PageKey, tuple[tuple, tuple, tuple]] = {}
         self._restored: dict[PageKey, None] = {}
 
     def capture(self, store, *, cell_sandbox: CellSandbox | None) -> None:
@@ -200,26 +203,25 @@ class TurnPages:
             except OSError:
                 continue
             candidates.append((info.st_mtime_ns, info.st_size, PageKey(slug=child.name, page=name), child / name))
-        copies: dict[PageKey, str] = {}
+        copies: dict[PageKey, bytes] = {}
         total = 0
         for _, size, key, path in sorted(candidates, key=lambda candidate: candidate[0], reverse=True):
             # A page that cannot fit is not read at all; the read is still
             # measured, since the page may have grown since.
             fits = size <= render_check.MAX_PAGE_BYTES and total + size <= MAX_TURN_COPY_BYTES
             data = _read_page(path, cell_sandbox=cell_sandbox) if fits else None
-            text = _decoded(data)
-            if text is None or total + len(data) > MAX_TURN_COPY_BYTES:
+            if _decoded(data) is None or total + len(data) > MAX_TURN_COPY_BYTES:
                 _log.debug("no copy of %s/%s for this turn", key.slug, key.page)
                 continue
             total += len(data)
-            copies[key] = text
+            copies[key] = data
         with self._lock:
             self._copies.update(copies)
 
     def previous(self, key: PageKey) -> str | None:
-        """KEY's page as the turn found it, or None without a copy."""
-        with self._lock:
-            return self._copies.get(key)
+        """KEY's page as the turn found it, as text, or None without a copy."""
+        data = self.copy_bytes(key)
+        return None if data is None else data.decode("utf-8")
 
     def main_previous(self, slug: str) -> tuple[PageKey, str] | None:
         """SLUG's main page as the turn found it, with its key, or None."""
@@ -270,8 +272,7 @@ class TurnPages:
     def copy_bytes(self, key: PageKey) -> bytes | None:
         """KEY's page as the turn found it, byte for byte, or None."""
         with self._lock:
-            text = self._copies.get(key)
-        return None if text is None else text.encode("utf-8")
+            return self._copies.get(key)
 
     def read_current(self, key: PageKey, store) -> bytes | None:
         """KEY's page on disk, read under the store root, never through a
@@ -362,28 +363,30 @@ class TurnPages:
 
     def notes_to_show(self, key: PageKey, comparison: Comparison | None) -> ComparisonNotes:
         """What COMPARISON names for the agent (`comparison_notes`), less the
-        `blank` and `removed` it was already shown for KEY this turn: a view
-        drawn late reads as blank on every check, and the same line on every
-        cell would send the agent back to fix it each time. A changed set is
-        shown whole. `broke` always stays: the page failed, and its repair
-        cells bound the edits. A comparison that says nothing changes
-        nothing."""
+        `blank`, `removed` and `shrank` it was already shown for KEY this
+        turn: a view drawn late reads as blank, or with few marks, on every
+        check, and the same line on every cell would send the agent back to
+        fix it each time. A shrunk view counts as shown by its state and
+        name, whatever its counts. A changed set is shown whole. `broke`
+        always stays: the page failed, and its repair cells bound the edits.
+        A comparison that says nothing changes nothing."""
         notes = comparison_notes(comparison)
         if comparison is None or not comparison.informative:
             return notes
-        shown = (tuple(notes.blank), tuple(notes.removed))
+        shrunk = tuple(dict.fromkeys((view.pressed, view.view) for view in comparison.shrunk_views))
+        shown = (tuple(notes.blank), tuple(notes.removed), shrunk)
         with self._lock:
             if self._shown.get(key) == shown:
-                return notes._replace(blank=[], removed=[])
+                return notes._replace(blank=[], removed=[], shrank=[])
             self._shown[key] = shown
         return notes
 
     def end_lines(self, store, *, checks: Mapping[PageKey, RenderStatus]) -> list[str]:
         """The lines that close the turn's final message, written by anton
         whatever the reply claims: each page put back, and what the turn
-        broke, blanked or removed on each compared page. A page whose last
-        check in CHECKS passed gets no line for a view that broke: that
-        check may have seen it fixed without comparing."""
+        broke, blanked, removed or shrank on each compared page. A page
+        whose last check in CHECKS passed gets no line for a view that
+        broke: that check may have seen it fixed without comparing."""
         with self._lock:
             restored = list(self._restored)
             comparisons = dict(self._comparisons)
@@ -410,6 +413,11 @@ class TurnPages:
                 lines.append(
                     f"“{name}” no longer has {joined(notes.removed)}: this turn removed "
                     f"{agree(notes.removed, 'it', 'them')}."
+                )
+            if notes.shrank:
+                lines.append(
+                    f"“{name}”: {joined(notes.shrank)} {agree(notes.shrank, 'shows', 'show')} fewer than half "
+                    f"the marks {agree(notes.shrank, 'it', 'they')} showed before this turn."
                 )
         return lines
 

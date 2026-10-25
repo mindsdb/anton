@@ -385,10 +385,10 @@ def test_the_same_blank_and_removed_views_are_shown_once_and_broke_always():
     key = PageKey("x", "index.html")
     pages = TurnPages()
     comparison = _comparison(broken_views=[_BROKE_MAP, _BLANK_DETAILS], removed_views=[{"pressed": "Globe"}])
-    notes = ComparisonNotes(broke=["“Map”"], blank=["“Details”"], removed=["“Globe”"])
+    notes = ComparisonNotes(broke=["“Map”"], blank=["“Details”"], removed=["“Globe”"], shrank=[])
 
     assert pages.notes_to_show(key, comparison) == notes
-    assert pages.notes_to_show(key, comparison) == ComparisonNotes(broke=["“Map”"], blank=[], removed=[])
+    assert pages.notes_to_show(key, comparison) == ComparisonNotes(broke=["“Map”"], blank=[], removed=[], shrank=[])
     changed = comparison.model_copy(update={"removed_controls": ["Routes"]})
     assert pages.notes_to_show(key, changed) == notes._replace(removed=["“Globe”", "“Routes”"])
 
@@ -399,15 +399,15 @@ def test_a_comparison_that_says_nothing_shows_nothing_and_keeps_what_was_shown()
     comparison = _comparison(broken_views=[_BLANK_DETAILS])
     pages.notes_to_show(key, comparison)
 
-    assert pages.notes_to_show(key, None) == ComparisonNotes(broke=[], blank=[], removed=[])
-    assert pages.notes_to_show(key, _comparison(**_NOT_CHECKED)) == ComparisonNotes(broke=[], blank=[], removed=[])
+    assert pages.notes_to_show(key, None) == ComparisonNotes(broke=[], blank=[], removed=[], shrank=[])
+    assert pages.notes_to_show(key, _comparison(**_NOT_CHECKED)) == ComparisonNotes(broke=[], blank=[], removed=[], shrank=[])
     assert pages.notes_to_show(key, comparison).blank == []
 
 
 def test_after_a_restore_the_same_notes_are_shown_again(tmp_path):
     store, _, key, pages = _captured(tmp_path)
     comparison = _comparison(broken_views=[_BLANK_DETAILS])
-    notes = ComparisonNotes(broke=[], blank=["“Details”"], removed=[])
+    notes = ComparisonNotes(broke=[], blank=["“Details”"], removed=[], shrank=[])
     pages.notes_to_show(key, comparison)
 
     pages.restore(key, store)
@@ -431,3 +431,40 @@ def test_the_turns_last_lines_name_what_it_broke_blanked_and_removed(tmp_path):
     assert pages.end_lines(store, checks={key: "passed"})[0] == (
         "“Control tower”: “Details” showed a graphic before this turn and shows none now."
     )
+
+
+_SHRUNK_PORTS = {"pressed": "Ports", "view": "svg#ports", "viewports": ["desktop"], "before": 26, "after": 5}
+
+
+def test_a_shrunk_view_is_shown_once_by_its_state_and_name_whatever_its_counts():
+    """A view still drawing its markers reads with a different count on each check: the same view
+    is not named to the agent again for that."""
+    key = PageKey("x", "index.html")
+    pages = TurnPages()
+
+    assert pages.notes_to_show(key, _comparison(shrunk_views=[_SHRUNK_PORTS])).shrank == [
+        "“Ports” (svg#ports: 5 of 26 marks)",
+    ]
+    assert pages.notes_to_show(key, _comparison(shrunk_views=[{**_SHRUNK_PORTS, "after": 7}])).shrank == []
+    another = {**_SHRUNK_PORTS, "pressed": "Lanes", "view": "table#lanes"}
+    assert len(pages.notes_to_show(key, _comparison(shrunk_views=[_SHRUNK_PORTS, another])).shrank) == 2
+
+
+def test_the_turns_last_lines_name_a_view_that_shrank_even_when_the_page_passed(tmp_path):
+    store, _, key, pages = _captured(tmp_path)
+    pages.record({key: _comparison(shrunk_views=[_SHRUNK_PORTS])})
+
+    assert pages.end_lines(store, checks={key: "passed"}) == [
+        "“Control tower”: “Ports” (svg#ports: 5 of 26 marks) shows fewer than half the marks it showed before this turn.",
+    ]
+
+
+def test_a_copy_is_kept_as_the_pages_bytes_not_as_wider_text(tmp_path):
+    """One character past U+FFFF makes Python keep a whole str at four bytes a character, so the
+    turn keeps the page's bytes and decodes them only for a request."""
+    page = "<p>\U0001f6a2</p>" + "x" * 100_000
+    store, _, key, pages = _captured(tmp_path, pages={"index.html": page})
+
+    assert pages.previous(key) == page
+    assert pages.copy_bytes(key) == page.encode("utf-8")
+    assert sys.getsizeof(pages._copies[key]) < 2 * len(page.encode("utf-8"))
