@@ -1,21 +1,11 @@
 import asyncio
-
-
 from types import SimpleNamespace
-
-
 from unittest.mock import AsyncMock,MagicMock,patch
-
 
 import pytest
 
-
 from anton.core.llm.reasoning import current_effort,scoped_effort
-
-
 from anton.core.llm.openai import OpenAIProvider
-
-
 from anton.core.llm.anthropic import AnthropicProvider
 
 
@@ -85,3 +75,16 @@ def test_exception_restores_effort_and_invalid_values_do_not_enter_a_scope():
     with pytest.raises(ValueError):
         with scoped_effort(''):pass
     assert current_effort('default')=='default'
+
+
+async def test_gathering_override_ends_before_the_writer_or_next_user_turn(tmp_path,monkeypatch):
+    from anton.core.tools.generate_artifact import fast_static
+    from anton.core.tools.generate_artifact.discovery import engine
+    from anton.core.tools.generate_artifact.state import GenState
+    monkeypatch.setenv('ANTON_STATIC_GATHER_EFFORT','medium')
+    observed=[]
+    async def gather(state):observed.append(current_effort('default'))
+    monkeypatch.setattr(engine,'run_gathering_loop',gather)
+    state=GenState(session=SimpleNamespace(history=[]),artifact_type='html-app',artifact_path=tmp_path,slug='measures',act_first=True)
+    assert await fast_static.prepare(state) is False
+    assert observed==['medium'] and current_effort('default')=='default'
