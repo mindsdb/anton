@@ -81,9 +81,9 @@ FINISH_GATHERING_SCHEMA: dict = {
                     "Short names of the data sources this artifact reads "
                     '(e.g. "orders table", "the article at <url>"). Empty '
                     "when the artifact needs no external data. A source "
-                    "named here that has had no code run against it is "
+                    "named here that is not verified (see the rules) is "
                     "fetched before generation starts, so naming one you "
-                    "have not touched is how you ask for it."
+                    "have not verified is how you ask for it."
                 ),
             },
             "data_findings": {
@@ -99,7 +99,10 @@ FINISH_GATHERING_SCHEMA: dict = {
                             "type": "string",
                             "description": (
                                 "How the sample was obtained: scratchpad "
-                                "name and cell, or the URL fetched."
+                                "name and cell, the URL fetched, or "
+                                "`known_data` when the rows or values are "
+                                "already in the known data the calling "
+                                "agent passed in."
                             ),
                         },
                         "shape": {

@@ -945,6 +945,23 @@ def test_skills_reach_the_skill_store(tmp_path, monkeypatch, skills_tmp):
     assert root.is_relative_to(skills_tmp)
 
 
+def test_a_marked_org_skill_is_recalled_but_no_artifact_build_follows_it(
+    tmp_path, monkeypatch, skills_tmp
+):
+    """The org's tree holds every member's skills, and the pod names no
+    folder an artifact build may trust, so builds follow only built-ins."""
+    marked = {"chart-rules": {"files": {"SKILL.md": (
+        "---\nname: chart-rules\ndescription: d\napplies_to: artifacts\n---\n"
+        "Use only Chart.js.\n"
+    )}}}
+    session = _real_cloud_session(tmp_path, monkeypatch, skills=marked)
+    store = session._skill_store
+
+    assert store.artifact_roots == []
+    assert store.load("chart-rules") is not None
+    assert "chart-rules" not in [s.label for s in store.list_for_artifacts()]
+
+
 def test_skills_root_is_a_fresh_dir_outside_the_workspace(tmp_path, monkeypatch, skills_tmp):
     _, cfg = _build(tmp_path, monkeypatch, skills=_SKILLS)
     assert cfg.settings.skills_root.is_relative_to(skills_tmp)

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from anton.core.llm.client import ModelRoute
 
@@ -36,6 +36,10 @@ GEN_LOOP_MAX_RETRIES: int = 1
 GEN_VERIFY_MAX_RETRIES: int = 1
 RUNAPP_MAX_RETRIES: int = 1
 
+# Every "not enough data" error starts with this; the tool handler keys the
+# text it gives the agent on it.
+NOT_ENOUGH_DATA_PREFIX = "not enough data:"
+
 # Per-line detail cap for GenState.journal() — keeps the journal compact when
 # a step's detail is long (full text still lives in data_notes / trace_log).
 JOURNAL_DETAIL_MAX: int = 300
@@ -49,7 +53,8 @@ JOURNAL_DETAIL_MAX: int = 300
 # The gateway used to answer HTTP 500 above 20480 output tokens for a
 # non-streamed call; it now assembles such calls from an internal stream, so
 # that limit is gone. These calls are streamed anyway. Re-measure before
-# raising them.
+# raising them. A top effort's larger streamed budget replaces both
+# (engine._budget_for_effort).
 SPEC_MAX_TOKENS: int = 16384
 SPEC_MAX_TOKENS_RETRY: int = 20480
 
@@ -75,6 +80,8 @@ SPEC_MAX_TOKENS_RETRY: int = 20480
 # The planning model is also less token-efficient on this content (1.57
 # characters per token against the coding model's 2.62), so 8192 bought it
 # ~12 800 characters — under the size of an average artifact.
+#
+# A top effort's larger streamed budget replaces it (engine._budget_for_effort).
 GEN_WRITE_MAX_TOKENS: int = 20480
 
 # The same budget restated in CHARACTERS, because that is the unit the model
@@ -92,14 +99,8 @@ GEN_WRITE_MAX_TOKENS: int = 20480
 # end marker writes nothing), undershooting costs one extra round.
 REPLY_BODY_CHARS: int = 30_000
 
-# Effort ceiling for every model call the pipeline makes. At the top efforts the
-# model spends up to 23k tokens thinking before a two-thousand-character brief,
-# which costs minutes per step and runs non-streamed calls past the gateway's
-# time budget; the pipeline's steps are bounded and do not need that depth.
-ARTIFACT_EFFORT_CEILING = "high"
-
 # The builder's own model and effort, which the host passes in the process
-# environment. The ceiling above still caps the effort.
+# environment.
 ARTIFACT_MODEL_ENV_VAR = "ANTON_ARTIFACT_MODEL"
 ARTIFACT_EFFORT_ENV_VAR = "ANTON_ARTIFACT_REASONING_EFFORT"
 
@@ -149,7 +150,10 @@ class RequiredDataItem(BaseModel):
 class RequiredData(BaseModel):
     """`define_required_data`: what data is needed and where to get it."""
 
-    items: list[RequiredDataItem]
+    items: list[RequiredDataItem] = Field(
+        description="Data still missing for the task, one entry per item. "
+        "Empty when nothing is missing."
+    )
     reasoning: str
 
 
@@ -216,6 +220,21 @@ def language_name(user_language: str | None) -> str:
     return " ".join((user_language or "").split()) or DEFAULT_USER_LANGUAGE
 
 
+def settled_artifact_type(state) -> str:
+    """The type gathering settled on, or the registered one before it ran."""
+    return state.final_artifact_type or state.artifact_type
+
+
+def known_data_usable(state) -> bool:
+    """Whether `known_data` can stand in for executed code.
+
+    Only for an html-app, whose page embeds a snapshot. A fullstack backend
+    reads its source at run time and needs working access code in
+    `data_notes`.
+    """
+    return settled_artifact_type(state) == "html-app" and bool((state.known_data or "").strip())
+
+
 @dataclass
 class GenState:
     session: "ChatSession | Any"
@@ -242,6 +261,9 @@ class GenState:
     prd: str = ""
     data_notes: str = ""
     data_iterations: int = 0
+    # The data loop's one fetch against a "not possible" verdict was spent.
+    # Per call, never persisted: a repeat call gets its own attempt.
+    forced_fetch_used: bool = False
     api_spec: str | None = None
     files_written: list[str] = field(default_factory=list)
     # Generation inputs (spec.md, openapi.json) rather than user-facing output:
@@ -328,6 +350,16 @@ class GenState:
     # as `datasource_context`, and for only the declared sources by the
     # backend prompt.
     datasource_catalog: "DatasourceCatalog | None" = None
+    # The project's anton.md as the `## Project rules` section
+    # (`prompts.project_rules_section`), or "" when it has none. Read once per
+    # call by the entry point and placed in every step's system prompt. Not
+    # persisted, so an edit to anton.md applies from the next call.
+    project_rules: str = ""
+    # The skills the host trusts for artifact builds
+    # (`SkillStore.list_for_artifacts`) as the `## Artifact skills` section
+    # (`prompts.artifact_skills_section`), or "". Read with `project_rules`;
+    # the page writers, the backend writer and the fetch step get it.
+    artifact_skills: str = ""
     # The `## Scratchpads already in this session` section of the gathering
     # kickoff (`discovery.prompts.render_scratchpads_context`): the pads the
     # calling agent already ran, so the step reuses them instead of guessing
@@ -362,6 +394,10 @@ class GenState:
     # correction the notes are full of the PREVIOUS gathering's cells, and an
     # emptiness check would read that as "everything is covered".
     unverified_sources: list[str] = field(default_factory=list)
+    # Declared sources that only the `known_data` mark verified. A new
+    # iteration that brings no `known_data` puts them back in
+    # `unverified_sources`: nothing else vouches for them.
+    known_data_verified: list[str] = field(default_factory=list)
     # Raw material for the deterministic renderers in discovery/notes.py.
     scratchpad_execs: list[dict] = field(default_factory=list)
     web_calls: list[dict] = field(default_factory=list)

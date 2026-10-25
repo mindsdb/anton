@@ -3,12 +3,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar
 
-from .effort import EFFORT_ORDER, capped, stream_budget_for
+from .effort import (
+    SILENCE_COVERED_BUDGET,
+    SILENT_TOKENS_PER_SECOND,
+    STREAM_BUDGET_BY_EFFORT,
+    stream_budget_for,
+)
 from .liveness import ModelCallTracker, current_turn_tracker
 from .provider import (
     LLMProvider,
@@ -25,11 +30,6 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-# Set by `LLMClient.effort_ceiling`. A ContextVar so a pipeline can cap every
-# call it makes, including those in tasks it gathers, without threading the
-# cap through each call site.
-_EFFORT_CEILING: ContextVar[str | None] = ContextVar("anton_effort_ceiling", default=None)
-
 
 @dataclass(frozen=True)
 class ModelRoute:
@@ -43,8 +43,8 @@ class ModelRoute:
     effort: str | None = None
 
 
-# Set by `model_route`. A ContextVar for the ceiling's reason: every call a
-# pipeline makes, in the tasks it gathers too, asks for the route's model.
+# Set by `model_route`. A ContextVar, so every call a pipeline makes, in the
+# tasks it gathers too, asks for the route's model.
 _MODEL_ROUTE: ContextVar[ModelRoute | None] = ContextVar("anton_model_route", default=None)
 
 
@@ -53,9 +53,9 @@ def model_route(route: ModelRoute | None) -> Iterator[None]:
     """Send every planning, coding and structured call inside to ``route``'s
     model and effort, whichever `LLMClient` makes it. None changes nothing.
 
-    Enter it as `LLMClient.effort_ceiling` is entered: in a plain coroutine or
-    around a single ``await``, never across a ``yield``. The ceiling still caps
-    the route's effort.
+    Enter it in a plain coroutine or around a single ``await``, never across a
+    ``yield``: an async generator has no context of its own, so the route would
+    leak to whatever consumes it.
     """
     if route is None:
         yield
@@ -236,50 +236,22 @@ class LLMClient:
         """
         return current_turn_tracker()
 
-    @contextlib.contextmanager
-    def effort_ceiling(self, level: str):
-        """Cap the reasoning effort of every planning and coding call inside.
-
-        The cap lives in a module-level ContextVar, so it applies to every
-        ``LLMClient`` used inside the block, not only the instance whose method
-        was entered.
-
-        A nested block can only lower the cap. Enter it in a plain coroutine or
-        around a single ``await``, never across a ``yield``: an async generator
-        has no context of its own, so the cap would leak to whatever consumes
-        it, and the reset fails when the generator is closed from another
-        context.
-        """
-        outer = _EFFORT_CEILING.get()
-        if outer is None:
-            effective = level
-        elif level in EFFORT_ORDER:
-            effective = capped(level, outer)
-        else:
-            # An unknown level cannot be compared, so it must not lift the cap.
-            effective = outer
-        token = _EFFORT_CEILING.set(effective)
-        try:
-            yield
-        finally:
-            _EFFORT_CEILING.reset(token)
-
     @staticmethod
     def _effective_effort(provider: LLMProvider) -> str | None:
+        """The effort a call sends: a `model_route`'s inside one, else the provider's own."""
         route = _MODEL_ROUTE.get()
-        effort = route.effort if route is not None else getattr(provider, "reasoning_effort", None)
-        return capped(effort, _EFFORT_CEILING.get())
+        return route.effort if route is not None else getattr(provider, "reasoning_effort", None)
 
-    @classmethod
-    def _effort_kwargs(cls, provider: LLMProvider) -> dict:
-        """``reasoning_effort=`` for the provider call, only when the cap or a
-        route changed it. A route with no effort over a provider that has one
-        sends ``""``, so the provider sends none (`call_effort`)."""
-        effective = cls._effective_effort(provider)
+    @staticmethod
+    def _effort_kwargs(provider: LLMProvider) -> dict:
+        """``reasoning_effort=`` for the provider call, only when a `model_route`
+        changed it. A route with no effort over a provider that has one sends
+        ``""``, so the provider sends none (`call_effort`)."""
+        route = _MODEL_ROUTE.get()
         own = getattr(provider, "reasoning_effort", None)
-        if effective == own:
+        if route is None or route.effort == own:
             return {}
-        return {"reasoning_effort": effective if effective is not None else ""}
+        return {"reasoning_effort": route.effort if route.effort is not None else ""}
 
     def _record_served_unless_routed(self, response) -> None:
         """`_record_served`, except for a call `model_route` sent to another
@@ -287,16 +259,19 @@ class LLMClient:
         if _MODEL_ROUTE.get() is None:
             self._record_served(response)
 
-    def stream_budget(self, role: str = "planning") -> int:
+    def stream_budget(
+        self, role: str = "planning", *, by_effort: Mapping[str, int] = STREAM_BUDGET_BY_EFFORT
+    ) -> int:
         """Output budget a streamed call of ``role`` gets when it passes none.
 
         Only endpoints known to take large outputs get the effort table; any
-        other keeps the client default.
+        other keeps the client default. ``by_effort`` is the table, for a call
+        that needs more room at an effort than the default table gives.
         """
         provider = self._coding_provider if role == "coding" else self._planning_provider
         if getattr(provider, "accepts_large_output", False) is not True:
             return self._max_tokens
-        return stream_budget_for(self._effective_effort(provider), self._max_tokens)
+        return stream_budget_for(self._effective_effort(provider), self._max_tokens, by_effort)
 
     async def aclose(self) -> None:
         """Close provider transports. The three roles may share objects."""
@@ -335,18 +310,20 @@ class LLMClient:
     def _idle_timeout_for(self, *, max_tokens: int) -> float | None:
         """The idle deadline for one call with this output budget, or None for none.
 
-        Every call gets the same deadline. The budget is a parameter so a call
-        that may think longer can be given a longer deadline here, in one
-        place, without touching the call sites. A deadline above the OpenAI
-        and Anthropic SDKs' default 600 s read timeout needs that timeout
-        raised too: on an endpoint that sends no keepalives, a streamed call
-        that goes quiet after its response starts ends at 600 s with a
-        read-timeout error instead of this deadline.
+        The configured deadline, raised for a budget above
+        `SILENCE_COVERED_BUDGET`, whose hidden thinking can outlast it: one
+        second per `SILENT_TOKENS_PER_SECOND` tokens of the budget, so 655 s at
+        65536 and 1280 s at 128000, never below the configured deadline. The
+        providers raise their SDK read timeout to `LONGEST_SILENCE_S`, since on
+        an endpoint that sends no keepalives a streamed call that goes quiet
+        ends at the SDK's read timeout instead of this deadline.
         """
         idle_s = self.model_call_idle_timeout_s
         # `not idle_s > 0` rather than `idle_s <= 0`, so NaN reads as off.
         if idle_s is None or not idle_s > 0:
             return None
+        if max_tokens > SILENCE_COVERED_BUDGET:
+            return float(max(idle_s, max_tokens / SILENT_TOKENS_PER_SECOND))
         return float(idle_s)
 
     def _timed_out(

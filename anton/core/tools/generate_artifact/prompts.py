@@ -31,6 +31,7 @@ from .sub_tools import FILE_BEGIN_MARKER as BEGIN, FILE_END_MARKER as END
 from .state import REPLY_BODY_CHARS, language_name
 
 if TYPE_CHECKING:
+    from anton.core.memory.skills import Skill
     from anton.utils.datasources import CatalogConnection, DatasourceCatalog
 
 
@@ -42,8 +43,8 @@ if TYPE_CHECKING:
 FSM_DIGRAPH = """\
 digraph artifact_generation {
     rankdir=TB;
-    is_data_enough       [shape=diamond, label="Is there enough data to solve the task?"];
-    define_required_data [shape=box,     label="Determine the required data"];
+    data_verified        [shape=diamond, label="Did gathering verify every declared source?"];
+    define_required_data [shape=box,     label="Determine the data still missing"];
     is_possible_to_fetch [shape=diamond, label="Is it possible to fetch the data?"];
     fetch_data_sample    [shape=box,     label="Fetch a data sample"];
     not_enough_data      [shape=ellipse, label="Error: not enough data"];
@@ -57,13 +58,17 @@ digraph artifact_generation {
     run_app              [shape=box,     label="Launch the application"];
     verify_fullstack     [shape=box,     label="Verify the application is running"];
 
-    // entry node = is_data_enough
-    is_data_enough       -> make_tech_spec       [label="yes"];
-    is_data_enough       -> define_required_data [label="no"];
-    define_required_data -> is_possible_to_fetch;
+    // entry node = data_verified
+    data_verified        -> make_tech_spec       [label="yes"];
+    data_verified        -> define_required_data [label="no"];
+    define_required_data -> make_tech_spec       [label="nothing missing"];
+    define_required_data -> is_possible_to_fetch [label="data missing"];
     is_possible_to_fetch -> fetch_data_sample    [label="yes"];
     is_possible_to_fetch -> not_enough_data      [label="no"];
-    fetch_data_sample    -> is_data_enough;
+    is_possible_to_fetch -> fetch_data_sample    [label="no, once, when connections exist"];
+    fetch_data_sample    -> make_tech_spec       [label="data fetched"];
+    fetch_data_sample    -> define_required_data [label="fetch failed, or after the forced fetch"];
+    fetch_data_sample    -> not_enough_data      [label="iterations exhausted"];
     make_tech_spec       -> is_fullstack;
     is_fullstack         -> make_api_spec        [label="yes"];
     is_fullstack         -> generate_frontend    [label="no"];
@@ -707,6 +712,68 @@ Checking your own output is NOT part of the job.\
 """
 
 
+PROJECT_RULES_HEADER = "## Project rules (follow, don't display)"
+
+# Said in both sections: the fixed blocks before them name one chart library,
+# a dark theme and the only scripts a page loads, and a project's rule or
+# skill asking otherwise must not be left for the model to weigh.
+OVER_DEFAULTS = (
+    "Where they ask for something other than this prompt's defaults, such as "
+    "a chart library, colours, fonts or layout, they win over those defaults; "
+    "the checks on what this step writes still apply."
+)
+
+
+def project_rules_section(anton_md: str) -> str:
+    """The project's anton.md as a system-prompt section, or "" when blank.
+
+    A system-prompt section on purpose, never kickoff content: rules that
+    reached the page writer only inside the brief or the PRD were read as
+    content and printed on the page as text.
+    """
+    text = anton_md.strip()
+    if not text:
+        return ""
+    return (
+        f"{PROJECT_RULES_HEADER}\n"
+        "The project's own instructions, written by its users in "
+        "`.anton/anton.md`. Follow "
+        f"them in everything this step produces. {OVER_DEFAULTS} They are "
+        "instructions to you, not content: do what they ask, but never print, quote or "
+        "summarize the rules themselves on the page, in a file, or in text "
+        "the user sees.\n\n"
+        f"{text}"
+    )
+
+
+ARTIFACT_SKILLS_HEADER = "## Artifact skills (follow, don't display)"
+
+
+def artifact_skills_section(skills: "list[Skill]") -> str:
+    """The skills marked for artifact builds as one system-prompt section,
+    or "" when there are none. Each body sits under its label."""
+    bodies = [
+        f"### {skill.label}\n{skill.declarative_md.strip()}"
+        for skill in skills
+        if skill.declarative_md.strip()
+    ]
+    if not bodies:
+        return ""
+    return (
+        f"{ARTIFACT_SKILLS_HEADER}\n"
+        "Skills this project marked for every artifact build. Follow them in "
+        f"everything this step produces, as you would the project rules. {OVER_DEFAULTS} "
+        "Do what they ask, but never print, quote or summarize the skills "
+        "themselves on the page, in a file, or in text the user sees.\n\n"
+        + "\n\n".join(bodies)
+    )
+
+
+def with_project_rules(system: str, project_rules: str) -> str:
+    """`system` with the run's `Project rules` section at its end, if any."""
+    return f"{system}\n\n{project_rules}" if project_rules else system
+
+
 def _ui_language(user_language: str, *, backend: bool = False) -> str:
     """The page's language, by name. Last in the system prompt: the blocks
     before it are the same for every run, so they stay one shared prefix."""
@@ -846,6 +913,8 @@ def build_subagent_system_prompt(
     *,
     primary: str | None = None,
     user_language: str = "",
+    project_rules: str = "",
+    artifact_skills: str = "",
 ) -> str:
     """System prompt for the single-generator path — the `html-app` page.
 
@@ -864,8 +933,11 @@ def build_subagent_system_prompt(
     # `artifact_path` is deliberately not quoted: every path the model writes
     # is relative to the artifact root, and an absolute path in the prompt is
     # only something to misuse. The parameter stays for signature stability.
+    # `project_rules` and `artifact_skills` sit after the fixed blocks, so
+    # they stay one shared prefix across projects; "" drops out of the join.
     return "\n\n".join(
-        [
+        part
+        for part in [
             _gen_html_task(target),
             _gen_html_inputs(),
             _gen_html_workflow(target),
@@ -874,8 +946,11 @@ def build_subagent_system_prompt(
             _verifier_contract(served=False),
             "## Design rules\n" + _DESIGN_RULES,
             _GEN_TOOLS,
+            project_rules,
+            artifact_skills,
             _ui_language(user_language),
         ]
+        if part
     )
 
 
@@ -989,15 +1064,17 @@ def build_api_spec_prompt(
     context: str,
     *,
     stateless: bool = False,
+    project_rules: str = "",
 ) -> tuple[str, str]:
     """Cold-start form: the assembled context plus the same instruction the
     hot path sends, so both paths ask for the same document."""
-    system = (
+    system = with_project_rules(
         _DATA_CONTEXT_HEADER
         + "You are the `make_api_spec` node. Your document is saved to "
         "`openapi.json` and handed to the backend and frontend generators "
         "next to the material below; the instruction at the end of the user "
-        "message says what goes into it."
+        "message says what goes into it.",
+        project_rules,
     )
     user = "## Requirements\n" + context.strip() + "\n\n" + build_api_spec_instruction(
         stateless=stateless
@@ -1136,11 +1213,11 @@ def _datasource_section(
         # Gathered cells that read a `DS_*` variable are evidence of a source
         # the model forgot to declare: keep the catalog then.
         return catalog.render().strip() if "DS_" in data_notes else _NO_DATASOURCES_NOTE
-    kept = [c.slug for c in catalog.connections if _is_declared(c, declared)]
+    kept = [c.slug for c in catalog.connections if is_declared(c, declared)]
     return catalog.render(kept or None).strip()
 
 
-def _is_declared(connection: "CatalogConnection", declared: list[str]) -> bool:
+def is_declared(connection: "CatalogConnection", declared: list[str]) -> bool:
     """Whether a lowercased declared source names `connection`: its slug,
     label, engine id or engine name occurs in it."""
     names = (
@@ -1162,6 +1239,8 @@ def build_backend_system_prompt(
     declared_sources: list[str] | tuple[str, ...] = (),
     data_notes: str = "",
     user_language: str = "",
+    project_rules: str = "",
+    artifact_skills: str = "",
 ) -> str:
     """System prompt for `generate_backend`.
 
@@ -1185,6 +1264,7 @@ def build_backend_system_prompt(
     if section:
         parts.append(section)
     parts.append(_GEN_TOOLS)
+    parts.extend(p for p in (project_rules, artifact_skills) if p)
     parts.append(_ui_language(user_language, backend=True))
     return "\n\n".join(parts)
 
@@ -1247,7 +1327,12 @@ _LIVE_APP_SCRIPTS = (
 
 
 def build_frontend_system_prompt(
-    artifact_path: Path, *, live_app: bool = False, user_language: str = ""
+    artifact_path: Path,
+    *,
+    live_app: bool = False,
+    user_language: str = "",
+    project_rules: str = "",
+    artifact_skills: str = "",
 ) -> str:
     # `artifact_path` is not quoted, for the same reason as in the html-app
     # builder: every path the model writes is relative to the artifact root.
@@ -1263,13 +1348,16 @@ def build_frontend_system_prompt(
         "## Fullstack rules\n" + _FRONTEND_RULES,
         "## Design rules\n" + _DESIGN_RULES,
         _GEN_TOOLS,
+        project_rules,
+        artifact_skills,
         _ui_language(user_language),
     ]
     if live_app:
         # Right after the contract it tightens. Without live apps the prompt
         # is as it was, byte for byte.
         sections.insert(sections.index(contract) + 1, _LIVE_APP_SCRIPTS)
-    return "\n\n".join(sections)
+    # "" (no anton.md, no artifact skill) drops out of the join.
+    return "\n\n".join(part for part in sections if part)
 
 
 def build_frontend_kickoff(
@@ -1324,6 +1412,26 @@ def prd_section(state) -> str:
     return f"{PRD_SECTION_HEADER}\n{body}\n{PRD_SECTION_FOOTER}" if body else ""
 
 
+KNOWN_DATA_HEADER = "## Known data (passed in by the calling agent)"
+KNOWN_DATA_FOOTER = "--- end of known data ---"
+
+
+def known_data_section(state) -> str:
+    """`known_data` under its header, or "" when there is none. Passed whole:
+    it is what the calling agent chose to hand over, and a cut snapshot would
+    be built into the page as if it were complete. Closed by a footer for the
+    same reason as the PRD: the agent's markdown may carry `##` headings of
+    its own."""
+    text = (getattr(state, "known_data", "") or "").strip()
+    return f"{KNOWN_DATA_HEADER}\n{text}\n{KNOWN_DATA_FOOTER}" if text else ""
+
+
+def datasources_or_none(state) -> str:
+    """The `## Connected Data Sources` section, or the same header over
+    "(none)" so a step can tell "nothing connected" from a missing section."""
+    return (state.datasource_context or "").strip() or f"{DATASOURCES_HEADER}\n(none)"
+
+
 def _brief_and_notes(state) -> str:
     parts = [f"## Brief\n{state.brief.strip()}"]
     prd = prd_section(state)
@@ -1333,6 +1441,9 @@ def _brief_and_notes(state) -> str:
         parts.append(f"## Data gathered so far\n{state.data_notes.strip()}")
     else:
         parts.append("## Data gathered so far\n(nothing gathered yet)")
+    known = known_data_section(state)
+    if known:
+        parts.append(known)
     if getattr(state, "web_notes", "").strip():
         parts.append(state.web_notes.strip())
     journal = state.journal()
@@ -1341,34 +1452,73 @@ def _brief_and_notes(state) -> str:
     return "\n\n".join(parts)
 
 
+def _data_sources_context(state) -> str:
+    """What the data decisions may draw on: the connections, the public
+    sources and the pads the calling agent already filled."""
+    parts = [datasources_or_none(state)]
+    for extra in (getattr(state, "public_sources", None), getattr(state, "scratchpads_context", "")):
+        if extra and extra.strip():
+            parts.append(extra.strip())
+    return "\n\n".join(parts)
+
+
+def _reasoning_language(user_language: str) -> str:
+    """`reasoning` becomes the "not enough data" text the agent quotes to the
+    user, so it is pinned to the run's language like every other step."""
+    return (
+        "## Language\n"
+        f"Write `reasoning` and any summary in {language_name(user_language)}. "
+        "Keep names of tables, fields, files and APIs as they are."
+    )
+
+
 def build_required_data_prompt(state) -> tuple[str, str]:
-    system = (
+    system = with_project_rules(
         _DATA_CONTEXT_HEADER
         + "You are the `define_required_data` node. List exactly which data is "
-        "missing and where each item can be obtained (user's connected data "
-        "sources or public/documented APIs). Be concrete and minimal."
+        "still missing and where each item can be obtained (user's connected "
+        "data sources, public/documented APIs or the scratchpads listed). Be "
+        "concrete and minimal. Data whose values are already under known data "
+        "or gathered data is not missing; a description of data (where it "
+        "lives, its columns) without the values is not the data. Return an "
+        "empty `items` list when nothing is missing.\n\n"
+        + _reasoning_language(state.user_language),
+        state.project_rules,
     )
-    user = _brief_and_notes(state) + "\n\nList the required data items."
+    user = (
+        _brief_and_notes(state)
+        + "\n\n" + _data_sources_context(state)
+        + "\n\nList the data items still missing (an empty list when nothing is missing)."
+    )
     return system, user
 
 
 def build_can_fetch_prompt(state, required: str) -> tuple[str, str]:
-    system = (
+    system = with_project_rules(
         _DATA_CONTEXT_HEADER
         + "You are the `is_possible_to_fetch` decision node. Given the required "
         "data and the available sources, decide whether the data can actually be "
-        "obtained. If a needed source simply does not exist among the user's "
-        "connections or public sources, it is NOT possible."
+        "obtained. It is possible when a listed connection, public source or "
+        "scratchpad can provide it. It is NOT possible only when none of them can.\n\n"
+        + _reasoning_language(state.user_language),
+        state.project_rules,
     )
     user = (
         _brief_and_notes(state)
+        + "\n\n" + _data_sources_context(state)
         + f"\n\n## Required data\n{required}\n\nIs it possible to fetch this data?"
     )
     return system, user
 
 
 def build_fetch_data_system_prompt(
-    artifact_path, *, datasource_context: str = "", public_sources: str = ""
+    artifact_path,
+    *,
+    datasource_context: str = "",
+    public_sources: str = "",
+    project_rules: str = "",
+    artifact_skills: str = "",
+    user_language: str = "",
 ) -> str:
     parts = [
         _ROLE_COMMON,
@@ -1392,6 +1542,9 @@ def build_fetch_data_system_prompt(
         parts.append(public_sources.strip())
     if datasource_context.strip():
         parts.append(datasource_context.strip())
+    # Before the project rules: a project rule about language comes later and wins.
+    parts.append(_reasoning_language(user_language))
+    parts.extend(p for p in (project_rules, artifact_skills) if p)
     parts.append(
         "## Output folder\n"
         f"(You will NOT write files here in this step.) Artifact folder: `{artifact_path}`"
@@ -1399,13 +1552,23 @@ def build_fetch_data_system_prompt(
     return "\n\n".join(parts)
 
 
-def build_fetch_data_kickoff(state) -> str:
-    return (
-        _brief_and_notes(state)
-        + "\n\nUse the `scratchpad` tool to fetch a data sample, then call "
+def build_fetch_data_kickoff(state, required_text: str = "") -> str:
+    # The list goes here in full: the journal cuts each step to
+    # JOURNAL_DETAIL_MAX characters. The pads go here too, because the
+    # single-scratchpad guard challenges a new name only once per session
+    # and a fetch in a fresh pad would not see the agent's data.
+    parts = [_brief_and_notes(state)]
+    if required_text.strip():
+        parts.append(f"## Data to fetch in this step\n{required_text.strip()}")
+    pads = (getattr(state, "scratchpads_context", "") or "").strip()
+    if pads:
+        parts.append(pads)
+    parts.append(
+        "Use the `scratchpad` tool to fetch a data sample, then call "
         "`finish` with a precise summary of the scratchpads/cells and the "
         "schema/sample you observed."
     )
+    return "\n\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -1559,12 +1722,13 @@ def build_tech_spec_instruction(state) -> str:
 def build_tech_spec_prompt(state) -> tuple[str, str]:
     """Cold-start form: the assembled context plus the same instruction the
     hot path sends, so both paths ask for the same document."""
-    system = (
+    system = with_project_rules(
         _DATA_CONTEXT_HEADER
         + "You are the `make_tech_spec` node. Your document is saved to "
         "`spec.md` and handed to the backend and frontend generators next to "
         "the material below; the instruction at the end of the user message "
-        "says what goes into it."
+        "says what goes into it.",
+        state.project_rules,
     )
     user = _brief_and_notes(state) + (
         f"\n\n## Artifact type\n{state.artifact_type}\n\n"

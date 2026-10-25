@@ -29,6 +29,7 @@ from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
 from anton.core.backends.sandbox import cell_sandbox_of
 from anton.utils.datasources import scrub_credentials
 from anton.core.llm.client import asked_model, routed_model
+from anton.core.llm.effort import WRITE_BUDGET_BY_EFFORT, client_stream_budget
 from anton.core.llm.structured import looks_truncated
 from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS, scratchpad_action
 
@@ -52,6 +53,8 @@ from .prompts import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from anton.chat_session import ChatSession
 
 logger = logging.getLogger(__name__)
@@ -192,6 +195,21 @@ _SPEC_COMPACT_NUDGE = (
 )
 
 
+def _budget_for_effort(
+    session: "ChatSession", floor: int, role: str, *, by_effort: Mapping[str, int] | None = None
+) -> int:
+    """``floor``, or the streamed budget the client gives ``role`` at its effort when that is larger.
+
+    Hidden thinking spends from the same budget as the answer, and at the top
+    efforts it outgrows the fixed ones: measured 2026-10-24 on `sonnet-5-5` at
+    max, a spec call spent all of 16384 and every write round all of 20480
+    thinking, and wrote nothing. The effort table only raises a budget, so high
+    and below keep the fixed ones. ``by_effort`` is the table, when the call
+    needs another one (`WRITE_BUDGET_BY_EFFORT` for a write round).
+    """
+    return max(floor, client_stream_budget(getattr(session, "_llm", None), role, by_effort=by_effort))
+
+
 async def _plan_whole_document(
     session: "ChatSession",
     *,
@@ -204,7 +222,11 @@ async def _plan_whole_document(
     tools: list[dict] | None = None,
     on_text=None,
 ) -> tuple[str, str | None]:
-    """One planning call for a whole specification, retried once with more room.
+    """One planning call for a whole specification, retried once asking for a compact version.
+
+    At high and below the retry also gets more room (16384, then 20480).
+    Above high, on an endpoint that takes large outputs, both tries get the
+    role's effort budget instead.
 
     Returns ``(body, error)``; exactly one of the two is set.
 
@@ -245,7 +267,10 @@ async def _plan_whole_document(
     cannot see a cut that stopped just under the cap.
     """
     trace = trace or NullTrace()
-    budgets = (SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY)
+    budgets = (
+        _budget_for_effort(session, SPEC_MAX_TOKENS, "planning"),
+        _budget_for_effort(session, SPEC_MAX_TOKENS_RETRY, "planning"),
+    )
     response = None
     extra = ""
     attempt = 0
@@ -290,7 +315,7 @@ async def _plan_whole_document(
     used = getattr(getattr(response, "usage", None), "output_tokens", None)
     return "", (
         f"{node_label}: the specification hit the output limit "
-        f"({used} tokens against a {SPEC_MAX_TOKENS_RETRY} budget) and was "
+        f"({used} tokens against a {budgets[-1]} budget) and was "
         "still incomplete after a retry asking for a compact version."
     )
 
@@ -396,7 +421,7 @@ async def generate(
     """
     from .attachments import resolve_attachments
     from .discovery import checkpoint as cp
-    from .orchestrator import _datasource_catalog, run
+    from .orchestrator import _artifact_skills, _datasource_catalog, _project_rules, run
     from .spend import SpendGuard
     from .state import GenState
     from .debug_trace import make_trace
@@ -423,10 +448,14 @@ async def generate(
         primary=primary,
         user_request=user_request,
         agent_understanding=agent_understanding,
-        known_data=known_data,
+        # Scrubbed once here: it reaches every step's prompt and is saved in
+        # discovery.json, and the agent may have pasted a credential with it.
+        known_data=scrub_credentials(known_data),
         user_preferences=user_preferences,
         user_language=user_language,
         datasource_catalog=_datasource_catalog(session),
+        project_rules=_project_rules(session),
+        artifact_skills=_artifact_skills(session),
         scratchpads_context=_scratchpads_context(session),
         trace_log=trace,
         progress=progress,
@@ -455,7 +484,7 @@ async def generate(
     )
     state.record("entry", entry, "" if stored is None else stored.pipeline_stage)
     if entry != cp.ENTRY_FULL and stored is not None:
-        _restore(state, stored)
+        _restore(state, stored, entry=entry)
         _load_prd(state)
         # Only where the spec phase is skipped: every other entry rewrites
         # the contract in `_make_api_spec`, and `_invalidate_specs` has
@@ -519,7 +548,7 @@ def _record_page_check(session, *, state, result: dict | str) -> None:
     )
 
 
-def _restore(state, stored) -> None:
+def _restore(state, stored, *, entry: str = "") -> None:
     """Rebuild in memory what the discovery phases produced last time.
 
     Everything phase E reads has to come back, not just the PRD: the
@@ -529,6 +558,9 @@ def _restore(state, stored) -> None:
     `call_changed` is the only derived value — it says whether this call
     brought a correction, and it decides whether the brief is redrawn or
     reused verbatim. An optimization, never a confirmation signal.
+
+    `entry` decides whether a call without `known_data` inherits the saved
+    copy: only a call that continues the same run does.
     """
     from .discovery import checkpoint as cp
 
@@ -550,6 +582,23 @@ def _restore(state, stored) -> None:
         state.attachments = [
             a for a in (Attachment.from_dict(d) for d in stored.attachments) if a is not None
         ]
+    state.known_data_verified = list(stored.known_data_verified)
+    # Before the fingerprint: the saved fingerprint was taken over this same
+    # text, so a call that omits it is not a change.
+    if not (state.known_data or "").strip():
+        if entry == cp.ENTRY_NEW_ITERATION:
+            # The previous run finished, and new work brings its own data:
+            # rows from an earlier call may be what the user asked to drop.
+            # Without them nothing vouches for the sources they verified, so
+            # the data loop reads those again.
+            state.unverified_sources += [
+                s for s in state.known_data_verified if s not in state.unverified_sources
+            ]
+            state.known_data_verified = []
+        else:
+            # The same run continuing (a confirmation, a resume after a
+            # stop): its brief and PRD were drawn from these rows.
+            state.known_data = stored.known_data
     state.call_changed = stored.call_fingerprint != cp.call_fingerprint(
         state.agent_understanding, state.known_data, state.user_preferences,
         state.user_language,
@@ -572,6 +621,7 @@ async def _generate_api_spec(
     messages: list[dict] | None = None,
     tools: list[dict] | None = None,
     system_override: str | None = None,
+    project_rules: str = "",
     on_text=None,
 ) -> str:
     """One-shot planning call → OpenAPI specification (JSON).
@@ -582,7 +632,9 @@ async def _generate_api_spec(
     that history as the model's own replies. They travel together: a history
     sent under a different system prompt would discard the prefix cache the
     shared region exists to keep. Without ``messages`` the cold-start prompt
-    carries the assembled context in front of the same instruction.
+    carries the assembled context in front of the same instruction, and
+    ``project_rules`` in its system prompt (the hot path's carries them
+    already).
 
     The reply is parsed and checked for shape (`_api_spec_problem`), and its
     paths against the ones `spec.md` lists under `## Backend` when ``context``
@@ -593,7 +645,9 @@ async def _generate_api_spec(
         system = system_override
         user = build_api_spec_instruction(stateless=stateless)
     else:
-        system, user = build_api_spec_prompt(context, stateless=stateless)
+        system, user = build_api_spec_prompt(
+            context, stateless=stateless, project_rules=project_rules
+        )
     declared = _declared_api_paths(context)
     if declared:
         # Naming the paths up front: told only to copy them from spec.md, the
@@ -807,9 +861,12 @@ async def _run_loop(
     Returns a result dict ``{files_written, rounds_used, summary,
     scratchpad_execs}`` on success, or a plain error string on failure.
     ``scratchpad_execs`` records every scratchpad ``exec`` the loop ran —
-    ``{name, code, output}`` per call, leaving out a cell that never ran
+    ``{name, code, output, ok}`` per call (``ok`` False for a cell the
+    runtime reported as failed), leaving out a cell that never ran
     (``CELL_NOT_RUN_REASONS``) — so callers can hand the exact data-access
-    code that ran to later FSM steps.
+    code that ran to later FSM steps. With ``require_files=False`` a loop
+    that ends without ``finish`` still returns the dict, ``finished`` False,
+    so the cells it ran survive.
 
     ``spend``, when given, is the run's `SpendGuard`. Once the turn's ceiling
     is reached the loop tells the model to close its file and stop, and gives
@@ -878,7 +935,10 @@ async def _run_loop(
         # model is also less token-efficient on this content (1.57 characters
         # per token against the coding model's 2.62), so 8192 bought it barely
         # 12 800 characters — less than an average artifact.
-        budget = GEN_WRITE_MAX_TOKENS
+        budget = _budget_for_effort(
+            session, GEN_WRITE_MAX_TOKENS, "planning" if first_round else "coding",
+            by_effort=WRITE_BUDGET_BY_EFFORT,
+        )
         # Truncation must be judged against the budget THIS round ran on.
         # Against the client default instead, every reply over 8192 tokens
         # would be called truncated and its last tool call rejected — exactly
@@ -992,6 +1052,16 @@ async def _run_loop(
 
         if not response.tool_calls:
             tail = (response.content or "").strip()
+            if not require_files:
+                # A fetch that ended in prose still ran its cells; they are
+                # what the caller judges, not the missing `finish`.
+                return {
+                    "files_written": files_written,
+                    "rounds_used": round_idx + 1,
+                    "summary": tail[:300],
+                    "scratchpad_execs": scratchpad_execs,
+                    "finished": False,
+                }
             return (
                 f"generator stopped without writing files "
                 f"(round {round_idx + 1}/{MAX_ROUNDS}). "
@@ -1063,6 +1133,10 @@ async def _run_loop(
                             "name": str(inp.get("name") or ""),
                             "code": str(inp.get("code") or ""),
                             "output": sub_tools.result_text(content),
+                            # A cell the runtime reported as failed is no
+                            # working access code: the fetch verdict and the
+                            # notes renderer read this.
+                            "ok": getattr(outcome, "ok", None) is not False,
                         }
                     )
                 trace.scratchpad(node=node_label, input=inp, output=content)
@@ -1101,7 +1175,7 @@ async def _run_loop(
         # complete 48 KB page was deleted and regenerated because the model
         # burned its last rounds self-checking). The
         # `finished` flag tells the caller how the loop ended.
-        if not files_written:
+        if not files_written and require_files:
             return (
                 f"generator exceeded round budget ({MAX_ROUNDS}) without "
                 "writing any files."

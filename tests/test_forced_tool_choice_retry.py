@@ -263,12 +263,11 @@ async def test_a_second_try_that_calls_the_tool_returns_its_object():
     assert len(endpoint.sent) == 3
 
 
-async def test_the_retry_keeps_the_builder_effort_cap():
+async def test_the_retry_keeps_the_configured_effort_above_high():
     endpoint = Endpoint(RESPONSES, _refuse_forced(RESPONSES))
     client = _client(_provider(endpoint, effort="xhigh"))
-    with client.effort_ceiling("high"):
-        await client.generate_object(Answer, system="Decide.", messages=USER)
-    assert [sent.effort for sent in endpoint.sent] == ["high", "high"]
+    await client.generate_object(Answer, system="Decide.", messages=USER)
+    assert [sent.effort for sent in endpoint.sent] == ["xhigh", "xhigh"]
 
 
 async def test_a_prompt_that_already_asks_for_the_tool_first_is_sent_as_is():

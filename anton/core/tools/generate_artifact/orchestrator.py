@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import re
 import urllib.error
 import urllib.request
@@ -43,16 +44,21 @@ from .state import (
     DATA_LOOP_MAX,
     GEN_LOOP_MAX_RETRIES,
     GEN_VERIFY_MAX_RETRIES,
+    NOT_ENOUGH_DATA_PREFIX,
     RUNAPP_MAX_RETRIES,
     FetchVerdict,
     GenState,
     RequiredData,
     VerifyResult,
+    known_data_usable,
+    settled_artifact_type,
 )
 
 if TYPE_CHECKING:
     from anton.core.artifacts.render_check import RenderScreenshot
     from anton.utils.datasources import DatasourceCatalog
+
+logger = logging.getLogger(__name__)
 
 
 # Sentinel returned by a generation node that stopped because the turn ran
@@ -80,8 +86,13 @@ async def _decide(state: GenState, schema, prompt_pair, node: str) -> object:
     return result
 
 
-async def _fetch_data_sample(state: GenState) -> str:
-    """Run a scratchpad loop that pulls a data sample; return its summary."""
+async def _fetch_data_sample(state: GenState, required_text: str = "") -> tuple[str, bool]:
+    """Run a scratchpad loop that pulls a data sample.
+
+    Returns the notes for `data_notes` and whether the loop ran at least one
+    cell that succeeded — the only evidence the data loop accepts that data
+    was read.
+    """
     if state.public_sources is None:
         state.public_sources = _public_data_sources_skill(state.session)
     try:
@@ -92,8 +103,11 @@ async def _fetch_data_sample(state: GenState) -> str:
                 state.artifact_path,
                 datasource_context=state.datasource_context,
                 public_sources=state.public_sources,
+                project_rules=state.project_rules,
+                artifact_skills=state.artifact_skills,
+                user_language=state.user_language,
             ),
-            kickoff=prompts.build_fetch_data_kickoff(state),
+            kickoff=prompts.build_fetch_data_kickoff(state, required_text),
             artifact_path=state.artifact_path,
             require_files=False,
             node_label="fetch_data_sample",
@@ -103,18 +117,22 @@ async def _fetch_data_sample(state: GenState) -> str:
     finally:
         state.peek_done("fetch_data_sample")
     if isinstance(result, str):
-        # Loop failed — surface as a note so the next is_data_enough sees it.
-        return f"(data fetch step reported: {result})"
+        # Loop failed — surface as a note so the next define / can-fetch decision sees it.
+        return f"(data fetch step reported: {result})", False
     if result.get("over_budget"):
         # The guard is sticky, so the caller's next `winding_down()` check is
         # what stops the pipeline. Said plainly rather than folded into a
         # summary, which would read as a fetch that completed.
-        return "(data fetch stopped: the turn's budget ran out mid-fetch)"
+        return "(data fetch stopped: the turn's budget ran out mid-fetch)", False
     summary = result.get("summary") or "(fetch produced no summary)"
-    exec_notes = _render_exec_notes(result.get("scratchpad_execs") or [])
+    execs = result.get("scratchpad_execs") or []
+    exec_notes = _render_exec_notes(execs)
     if exec_notes:
         summary += "\n\n" + exec_notes
-    return summary
+    ok = any(e.get("ok", True) for e in execs)
+    if not ok:
+        summary += "\n\n(the fetch step ran no cell that succeeded)"
+    return summary, ok
 
 
 def _absorb_discovery_notes(state: GenState) -> None:
@@ -168,6 +186,52 @@ def _needs_data_loop(state: GenState) -> bool:
     return bool(state.unverified_sources)
 
 
+def _pending_required_text(state: GenState, pending: list[str]) -> str:
+    """The sources define called covered while nothing vouches for them,
+    each with the reason the next steps need code that reads it. Reached only
+    when `known_data_usable` is false: a fullstack type, or no known data."""
+    if settled_artifact_type(state) != "html-app":
+        why = "the backend reads it at run time"
+    else:
+        why = "no executed code read it and the known data does not hold its values"
+    lines = [f"- {s} — needs executed code that reads it: {why}" for s in pending]
+    lines.append(
+        "Run code that reads these sources even if their values appear under "
+        "the known data: the next steps need working access code."
+    )
+    return "\n".join(lines)
+
+
+def _mark_data_covered(state: GenState) -> None:
+    state.unverified_sources = []
+    # `finish_gathering` is the only other place that vouches for the data,
+    # and a gathering that ended without it never will — so without this the
+    # loop could not exit at all (I-41). The flag reaches the next
+    # checkpoint, so a resumed run does not pay for this phase again.
+    state.gathering_complete = True
+
+
+def _not_enough_data(state: GenState, reasoning: str, required: RequiredData | None) -> str:
+    """The "not enough data" error. After a forced fetch it names where the
+    fetch looked: the connections the required data mentions (or the first
+    few when it mentions none), then where each item was expected."""
+    message = f"{NOT_ENOUGH_DATA_PREFIX} {reasoning.strip()}"
+    if not state.forced_fetch_used:
+        return message
+    wheres = [it.where for it in (required.items if required else []) if it.where.strip()]
+    catalog = state.datasource_catalog
+    connections = list(catalog.connections) if catalog is not None else []
+    # The rule the backend prompt matches declared sources to connections by.
+    lowered = [w.lower() for w in wheres]
+    mentioned = [c.slug for c in connections if prompts.is_declared(c, lowered)]
+    looked = list(dict.fromkeys((mentioned or [c.slug for c in connections[:5]]) + wheres))
+    if not looked:
+        return message
+    # The agent quotes this to the user, so the reasoning ends as a sentence.
+    base = message if message.endswith((".", "!", "?")) else message + "."
+    return f"{base} Looked in: {', '.join(looked)}."
+
+
 async def _data_phase(state: GenState) -> str | None:
     """The emergency data loop: define -> can-fetch -> fetch, bounded.
 
@@ -181,7 +245,14 @@ async def _data_phase(state: GenState) -> str | None:
         state.record("data_check", "skipped", "gathering already covered the data")
         return None
 
+    # Loaded before the first decision, not on the first fetch: the decisions
+    # judge what can be fetched, and the public sources are part of that.
+    if state.public_sources is None:
+        state.public_sources = _public_data_sources_skill(state.session)
+
     last_reasoning = "the gathering phase did not verify the data it declared"
+    last_required: RequiredData | None = None
+    fetched_ok = False
     while state.data_iterations < DATA_LOOP_MAX:
         if state.winding_down():
             # Not an error: whatever was fetched stays in `data_notes` and
@@ -199,11 +270,28 @@ async def _data_phase(state: GenState) -> str | None:
             state, RequiredData, prompts.build_required_data_prompt(state),
             "define_required_data",
         )
-        required_text = "\n".join(
-            f"- {it.name} — from {it.where} ({it.why})" for it in required.items
-        ) or required.reasoning
-        state.record("define_required_data", "done", required_text)
+        last_required = required
         last_reasoning = required.reasoning
+        if required.items:
+            required_text = "\n".join(
+                f"- {it.name} — from {it.where} ({it.why})" for it in required.items
+            )
+            state.record("define_required_data", "done", required_text)
+        else:
+            # An empty list is the model's word alone. It is accepted only
+            # where nothing it could skip is at stake: no declared source is
+            # waiting, the rows really can sit in `known_data`, or a fetch in
+            # this call already read data.
+            pending = list(state.unverified_sources)
+            if not pending or known_data_usable(state) or fetched_ok:
+                state.record("define_required_data", "nothing_missing", required.reasoning)
+                _mark_data_covered(state)
+                return None
+            required_text = _pending_required_text(state, pending)
+            state.record("define_required_data", "nothing_missing_rejected", ", ".join(pending))
+            # Define's own reasoning says the data is there; an error built
+            # from it would tell the user the opposite of what happened.
+            last_reasoning = f"no executed code read {', '.join(pending)}"
 
         state.step_started("is_possible_to_fetch", attempt=state.data_iterations)
         can: FetchVerdict = await _decide(
@@ -211,36 +299,52 @@ async def _data_phase(state: GenState) -> str | None:
             prompts.build_can_fetch_prompt(state, required_text),
             "is_possible_to_fetch",
         )
+        forced = False
         if not can.possible:
-            state.record("is_possible_to_fetch", "no", can.reasoning)
-            state.error = f"not enough data: {can.reasoning}"
-            return state.error
-        state.record("is_possible_to_fetch", "yes", can.reasoning)
+            # One real attempt before giving up while a connection exists:
+            # the verdict is a model's reading of a catalog that lists no
+            # endpoints, and it has said "no" to data that was there. Only
+            # while an iteration remains for define to judge what it found.
+            if (
+                state.datasource_catalog is not None
+                and not state.forced_fetch_used
+                and state.data_iterations + 1 < DATA_LOOP_MAX
+            ):
+                state.forced_fetch_used = forced = True
+                state.record("is_possible_to_fetch", "no_but_trying", can.reasoning)
+            else:
+                state.record("is_possible_to_fetch", "no", can.reasoning)
+                state.error = _not_enough_data(state, can.reasoning, required)
+                return state.error
+        else:
+            state.record("is_possible_to_fetch", "yes", can.reasoning)
 
         state.step_started("fetch_data_sample", attempt=state.data_iterations)
-        notes = await _fetch_data_sample(state)
+        notes, ok = await _fetch_data_sample(state, required_text)
         state.data_iterations += 1
         state.data_notes = (state.data_notes + "\n\n" + notes).strip()
+        if not ok:
+            # The sources stay unverified; the next iteration reads the
+            # failure in the notes.
+            state.record("fetch_data_sample", "fail", notes[:200])
+            continue
+        state.record("fetch_data_sample", "done", notes[:200])
+        fetched_ok = True
+        if forced:
+            # The decisions said the data was not there; the next define
+            # and can-fetch judge what this fetch actually found.
+            continue
         # The loop fetched exactly what was declared unverified, so the list
         # clears. Not narrowed item by item: the fetch step works from
         # `define_required_data`'s consolidated list, not per source.
-        state.unverified_sources = []
-        # Condition 1 is satisfied by the same fetch. `finish_gathering` is
-        # the only other place that vouches for the data, and a gathering
-        # that ended without it (plain text, round budget, budget stop) never
-        # will — so without this line the loop could not exit at all, and
-        # three successful fetches ended in "not enough data" (I-41). The
-        # flag then reaches the next checkpoint, so a resumed run does not
-        # pay for this phase again.
-        state.gathering_complete = True
-        state.record("fetch_data_sample", "done", notes[:200])
+        _mark_data_covered(state)
+        return None
 
-        if not _needs_data_loop(state):
-            return None
-
-    state.error = (
-        f"not enough data: the data loop did not converge within {DATA_LOOP_MAX} "
-        f"iterations. Last assessment: {last_reasoning}"
+    state.error = _not_enough_data(
+        state,
+        f"the data loop did not converge within {DATA_LOOP_MAX} iterations. "
+        f"Last assessment: {last_reasoning}",
+        last_required,
     )
     return state.error
 
@@ -314,6 +418,11 @@ def _spec_context(state: GenState) -> str:
     spec_path = state.artifact_path / TECH_SPEC_FILENAME
     if spec_path.is_file():
         parts.append("## Technical specification\n" + spec_path.read_text(encoding="utf-8"))
+    # After spec.md: the agent's markdown may carry a `## Backend` of its own,
+    # and `engine._declared_api_paths` reads the first one in this context.
+    known = prompts.known_data_section(state)
+    if known:
+        parts.append(known)
     journal = state.journal()
     if journal:
         parts.append("## Progress journal (steps completed so far)\n" + journal)
@@ -332,6 +441,7 @@ async def _make_api_spec(state: GenState) -> str | None:
             messages=state.messages or None,
             tools=state.pipeline_tools if state.messages else None,
             system_override=state.pipeline_system if state.messages else None,
+            project_rules=state.project_rules,
             on_retry=lambda: state.step_started("make_api_spec", attempt=1),
             on_text=state.peek_for("make_api_spec"),
         )
@@ -374,7 +484,7 @@ def _fullstack_refusal(state: GenState) -> str | None:
 
 
 def _verify_datasource_env(state: GenState) -> dict[str, str]:
-    """The `DS_*` the sandboxed import check gets: the connections backend.py reads.
+    """The `DS_*` the import check gets: the connections backend.py reads.
 
     The connections are declared into metadata only after this check passes,
     so they are mapped from the source here, the way `_declare_datasources`
@@ -466,6 +576,57 @@ def _public_data_sources_skill(session) -> str:
         return body if isinstance(body, str) else ""
     except Exception:  # noqa: BLE001
         return ""
+
+
+def _project_rules(session) -> str:
+    """The workspace's anton.md as the `Project rules` section, or "".
+
+    Read with `read_anton_md`, not `build_anton_md_context`: that one frames
+    the file for the main agent ("Project Context") and records the read for
+    `anton_md_modified_since_last_read`. In tests the session is an
+    `AsyncMock`, whose call returns a coroutine, closed here as in
+    `_public_data_sources_skill`. A session without a workspace (the bench,
+    some tests) has no project rules.
+    """
+    read = getattr(getattr(session, "_workspace", None), "read_anton_md", None)
+    if read is None:
+        return ""
+    try:
+        text = read()
+    except OSError as exc:
+        # A workspace that refuses links raises when anton.md is one.
+        logger.warning(
+            "generate_artifact: anton.md unreadable, building without project rules: %s",
+            type(exc).__name__,
+        )
+        return ""
+    if inspect.iscoroutine(text):
+        text.close()
+        return ""
+    return prompts.project_rules_section(text) if isinstance(text, str) else ""
+
+
+def _artifact_skills(session) -> str:
+    """The `Artifact skills` section: every skill the host trusts for
+    artifact builds (`SkillStore.list_for_artifacts`), or "".
+
+    `public-data-sources` is left out: the fetch step already gets its body
+    whole (`_public_data_sources_skill`). A test-double store returns a
+    coroutine, closed as there.
+    """
+    store = getattr(session, "_skill_store", None)
+    list_for_artifacts = getattr(store, "list_for_artifacts", None)
+    if list_for_artifacts is None:
+        return ""
+    skills = list_for_artifacts()
+    if inspect.iscoroutine(skills):
+        skills.close()
+        return ""
+    if not isinstance(skills, list):
+        return ""
+    return prompts.artifact_skills_section(
+        [s for s in skills if s.label != _PUBLIC_SOURCES_SKILL]
+    )
 
 
 def _known_connection_hints(session) -> list[str]:
@@ -612,6 +773,8 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
         declared_sources=state.declared_sources,
         data_notes=state.data_notes,
         user_language=state.user_language,
+        project_rules=state.project_rules,
+        artifact_skills=state.artifact_skills,
     )
     verdict = None  # guards the terminal message when no attempt ever verified
     last_loop_error: str | None = None  # see the comment in _gen_verify_frontend
@@ -674,11 +837,9 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
             slug=state.slug, artifact_path=state.artifact_path,
             artifact_type=state.artifact_type,
             api_operations=verifiers.contract_operations(state.api_spec),
-            **(
-                {"ds_env": _verify_datasource_env(state)}
-                if _cell_sandbox(state) is not None
-                else {}
-            ),
+            # Sandbox or not, the import sees only the connections backend.py
+            # reads, as `_launch_datasource_env` gives the launch.
+            ds_env=_verify_datasource_env(state),
             # A live app's slot installs nothing, so nothing is installed here either.
             **({"live_app": True} if _runs_live_apps(state) else {}),
         )
@@ -764,10 +925,16 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
             state.artifact_path,
             live_app=_runs_live_apps(state),
             user_language=state.user_language,
+            project_rules=state.project_rules,
+            artifact_skills=state.artifact_skills,
         )
     else:
         system = prompts.build_subagent_system_prompt(
-            state.artifact_path, primary=state.primary, user_language=state.user_language
+            state.artifact_path,
+            primary=state.primary,
+            user_language=state.user_language,
+            project_rules=state.project_rules,
+            artifact_skills=state.artifact_skills,
         )
     verdict = None  # guards the terminal message when no attempt ever verified
     # The loop's failure reason (round budget, no tool calls) is kept separately:
@@ -1473,6 +1640,8 @@ def _save_checkpoint(state: GenState, stage: str) -> None:
             assumptions=list(state.assumptions),
             open_points=list(state.open_points),
             attachments=[a.to_dict() for a in state.attachments],
+            known_data=state.known_data,
+            known_data_verified=list(state.known_data_verified),
         ),
     )
 

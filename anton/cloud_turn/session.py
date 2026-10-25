@@ -764,6 +764,10 @@ def build_cloud_chat_session(
     # outlives the turn and cells could read anything left under it. Builtins
     # resolve via SkillStore's package root regardless.
     settings.skills_root = _stage_skills(request.skills)
+    # That tree holds every member's skills, and the pod can't tell the
+    # asker's own apart, so an artifact build here follows only anton's
+    # built-ins (SkillStore.list_for_artifacts) until the host names folders.
+    settings.skills_artifact_roots = []
     # Skills the agent builds stage here instead of the store, and the entrypoint
     # reports them for cowork to surface. ON the workspace, unlike everything
     # staged above — editing a skill spans turns, and the workspace PVC is the

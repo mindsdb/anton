@@ -73,6 +73,22 @@ async def test_fsm_failure_is_wrapped_with_report_instruction(tmp_path: Path, mo
     assert "Report this failure to the user" in out
 
 
+async def test_missing_data_tells_the_agent_what_to_ask_the_user_for(tmp_path: Path, monkeypatch):
+    slug = _make_artifact(tmp_path)
+
+    async def fake_generate(**kw):
+        return "not enough data: no connection holds the sites. Looked in: rest-gw."
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    _, out = await _collect(_session(tmp_path), {"slug": slug, "user_request": "build it", "agent_understanding": "an app"})
+    assert out.startswith("Error: the data this artifact needs is not available.")
+    assert "no connection holds the sites. Looked in: rest-gw." in out
+    assert "do NOT build the artifact yourself" in out
+    assert "pass the data in `known_data`" in out
+    assert "artifact generation failed" not in out
+    assert "ask how they want to proceed" not in out
+
+
 async def test_generator_crash_is_wrapped(tmp_path: Path, monkeypatch):
     slug = _make_artifact(tmp_path)
 
@@ -748,6 +764,20 @@ def test_known_data_asks_the_outer_agent_to_name_the_scratchpad():
     assert "NAME THE SCRATCHPAD" in GENERATE_ARTIFACT_TOOL.description
 
 
+def test_known_data_asks_for_the_rows_and_says_a_new_request_does_not_inherit_it():
+    """The gathering rule counts only the values themselves, and a new
+    iteration does not reuse the saved copy: the agent has to know both."""
+    from anton.core.tools.tool_defs import GENERATE_ARTIFACT_TOOL
+
+    schema_text = GENERATE_ARTIFACT_TOOL.input_schema["properties"]["known_data"]["description"]
+    for text in (schema_text, GENERATE_ARTIFACT_TOOL.description):
+        assert "rows or values" in text
+        assert "a few hundred rows at most" in text
+        assert "does not count" in text
+    assert "pass it again" in schema_text
+    assert "Pass it on every call that needs it" in GENERATE_ARTIFACT_TOOL.description
+
+
 # ── S-03: the agent relays skipped checks and warnings ──────────────────────
 
 async def test_success_instruction_tells_the_agent_to_relay_skipped_checks(tmp_path: Path, monkeypatch):
@@ -853,22 +883,29 @@ def test_the_attachments_field_tells_the_agent_what_qualifies():
 
 
 class _RecordingProvider(LLMProvider):
+    """Records the effort and output budget of each call. A call that names no effort sends the
+    provider's own, as the real providers do."""
+
     name = "fake"
+    accepts_large_output = True
 
     def __init__(self):
         self._reasoning_effort = "max"
-        self.efforts: list[str | None] = []
+        self.sent: list[tuple[str | None, int]] = []
+
+    def _record(self, kw):
+        self.sent.append((kw.get("reasoning_effort") or self.reasoning_effort, kw["max_tokens"]))
 
     async def complete(self, **kw):
-        self.efforts.append(kw.get("reasoning_effort"))
+        self._record(kw)
         return LLMResponse(content="ok", usage=Usage(output_tokens=1))
 
     async def stream(self, **kw):
-        self.efforts.append(kw.get("reasoning_effort"))
+        self._record(kw)
         yield StreamComplete(response=LLMResponse(content="ok", usage=Usage(output_tokens=1)))
 
 
-async def test_generation_runs_every_model_call_at_high_effort(tmp_path: Path, monkeypatch):
+async def test_generation_runs_every_model_call_at_the_configured_effort(tmp_path: Path, monkeypatch):
     slug = _make_artifact(tmp_path)
     provider = _RecordingProvider()
     llm = LLMClient(planning_provider=provider, planning_model="p", coding_provider=provider, coding_model="c")
@@ -876,6 +913,8 @@ async def test_generation_runs_every_model_call_at_high_effort(tmp_path: Path, m
 
     async def fake_generate(**kw):
         await llm.plan(system="s", messages=[])
+        async for _ in llm.plan_stream(system="s", messages=[]):
+            pass
         async for _ in llm.code_stream(system="s", messages=[]):
             pass
         return "Backend verification failed after retry: stop here"
@@ -883,9 +922,8 @@ async def test_generation_runs_every_model_call_at_high_effort(tmp_path: Path, m
     monkeypatch.setattr(gen_pkg, "generate", fake_generate)
     await _collect(session, {"slug": slug, "user_request": "build it", "agent_understanding": "an app"})
 
-    assert provider.efforts == ["high", "high"]
-    await llm.plan(system="s", messages=[])
-    assert provider.efforts[-1] is None, "the cap must not outlive the generation task"
+    # Max for every call. A streamed call's budget follows it; a non-streamed call keeps 8192.
+    assert provider.sent == [("max", 8192), ("max", 65536), ("max", 65536)]
 
 
 async def test_act_first_relays_the_brief_between_the_steps_and_reports_it(

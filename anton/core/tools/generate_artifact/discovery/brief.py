@@ -14,7 +14,8 @@ from pydantic import BaseModel
 from anton.core.llm.client import asked_model
 
 from . import sub_tools
-from .notes import string_list
+from ..state import known_data_usable
+from .notes import known_data_sources, source_key, string_list
 from .state import PrdState
 
 
@@ -277,6 +278,7 @@ async def redraw_brief(state: PrdState) -> None:
 
     declared = None
     new_type = ""
+    finish_inp: dict = {}
     # A reply cut off while the run winds down is kept for its text, but a
     # damaged call in it must not overwrite the declared sources.
     calls = response.tool_calls if usable_tool_call(response) else []
@@ -284,6 +286,7 @@ async def redraw_brief(state: PrdState) -> None:
         if tc.name != "finish_gathering":
             continue
         inp = tc.input or {}
+        finish_inp = inp
         new_type = str(inp.get("artifact_type") or "")
         declared = string_list(inp.get("data_sources"))
         # A correction can retract an assumption or settle an open point;
@@ -301,12 +304,29 @@ async def redraw_brief(state: PrdState) -> None:
         if new_type in GENERATOR_ARTIFACT_TYPES:
             state.final_artifact_type = new_type
         state.declared_sources = declared
-        # Anything the correction introduced has nothing executed against it.
+        # Anything the correction introduced has nothing executed against it,
+        # unless its rows are in `known_data` — read after the type change
+        # above, so a correction to a fullstack type does not honour the
+        # mark. A source still unverified from the previous call stays so.
         # This — not "data_notes is empty" — is what opens the emergency data
         # loop: after a correction the notes are full of the PREVIOUS
         # gathering's cells, and an emptiness check would read that as
         # "everything is covered".
-        state.unverified_sources = [s for s in declared if s not in previous]
+        covered = known_data_sources(finish_inp, usable=known_data_usable(state))
+        still_unverified = set(state.unverified_sources)
+        by_known_data = set(state.known_data_verified)
+        state.unverified_sources = [
+            s for s in declared
+            if (s not in previous or s in still_unverified) and source_key(s) not in covered
+        ]
+        # Marked now or vouched for by the rows on an earlier call. A source
+        # some executed code also read may land here too; reading it again
+        # costs a fetch, not a page built without its rows.
+        state.known_data_verified = [
+            s for s in declared
+            if s not in state.unverified_sources
+            and (source_key(s) in covered or s in by_known_data)
+        ]
     else:
         state.trace_log.node(
             "redraw_brief", "no_finish_gathering",
