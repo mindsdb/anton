@@ -143,13 +143,15 @@ async def test_a_page_hears_which_views_the_turn_left_with_fewer_than_half_their
     store, slug = _artifact(tmp_path)
     service.answer(_passed(
         compared=[{"pressed": "Ports", "viewports": ["desktop"]}],
-        shrunk_views=[{"pressed": "Ports", "view": "svg#ports", "viewports": ["desktop"], "before": 26, "after": 5}],
+        shrunk_views=[{
+            "pressed": "Ports", "view": "svg#ports", "viewports": ["desktop"], "mark": "circle", "before": 24, "after": 3,
+        }],
     ))
 
     lint = await _cell(_session(), store, slug, "filters the ports")
 
     assert lint.messages[1:] == [
-        f"{slug}/index.html — “Ports” (svg#ports: 5 of 26 marks) shows fewer than half the marks it showed before "
+        f"{slug}/index.html — “Ports” (svg#ports: 3 of 24 marks) shows fewer than half the marks it showed before "
         "this turn's edits. If the user did not ask to show less, the edits lost data: fix it; if they did, tell them "
         "what it shows now",
     ]

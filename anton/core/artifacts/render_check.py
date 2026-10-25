@@ -211,11 +211,14 @@ class BrokenView(BaseModel):
 
 
 class ShrunkView(BaseModel):
-    """A view, `view` as findings name it, that drew at least five marks
-    (svg shapes, map markers, table rows) in state `pressed` before the edit
-    and fewer than half as many now, at `viewports`; `before` and `after`
-    are its marks at the first of them. Not a failure: the service can't
-    tell a filter the user asked for from data the edit lost."""
+    """A view, `view` as findings name it, that drew at least five marks of
+    a kind in state `pressed` before the edit and fewer than half as many of
+    that kind now, at `viewports`; `before` and `after` are that kind's
+    marks at the first of them. The service counts an svg view's markers,
+    bars and other shapes kind by kind, and table rows and HTML map markers
+    only inside a chart or map container with no svg or canvas; a canvas's
+    marks not at all. Not a failure: the service can't tell a filter the
+    user asked for from data the edit lost."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -571,6 +574,12 @@ def _quoted(labels: Sequence[str]) -> str:
 _AS_IT_OPENS = "the page as it opens"
 
 
+def state_label(pressed: str | None) -> str:
+    """The state PRESSED as a sentence names it: the tab or toggle's label,
+    quoted and scrubbed, or `the page as it opens` for None."""
+    return _AS_IT_OPENS if pressed is None else f"“{scrub_output(pressed)}”"
+
+
 class ComparisonNotes(NamedTuple):
     """The views a comparison names, as labels ready for a sentence: those
     this turn's edits broke (`new_problem`), left without a graphic
@@ -596,19 +605,16 @@ def comparison_notes(comparison: Comparison | None) -> ComparisonNotes:
     if comparison is None or not comparison.informative:
         return ComparisonNotes(broke=[], blank=[], removed=[], shrank=[])
 
-    def label(pressed: str | None) -> str:
-        return _AS_IT_OPENS if pressed is None else f"“{scrub_output(pressed)}”"
-
     def states(reason: str) -> list[str]:
-        return list(dict.fromkeys(label(view.pressed) for view in comparison.broken_views if view.reason == reason))
+        return list(dict.fromkeys(state_label(view.pressed) for view in comparison.broken_views if view.reason == reason))
 
     removed = dict.fromkeys([*(view.pressed for view in comparison.removed_views), *comparison.removed_controls])
     shrank = dict.fromkeys(
-        f"{label(view.pressed)} ({scrub_output(view.view)}: {view.after} of {view.before} marks)"
+        f"{state_label(view.pressed)} ({scrub_output(view.view)}: {view.after} of {view.before} marks)"
         for view in comparison.shrunk_views
     )
     return ComparisonNotes(
-        broke=states("new_problem"), blank=states("no_view"), removed=[label(name) for name in removed],
+        broke=states("new_problem"), blank=states("no_view"), removed=[state_label(name) for name in removed],
         shrank=list(shrank),
     )
 

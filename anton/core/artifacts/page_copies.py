@@ -22,10 +22,17 @@ import stat
 import threading
 from collections.abc import Iterable, Mapping
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from anton.core.artifacts import render_check
-from anton.core.artifacts.render_check import Comparison, ComparisonNotes, agree, comparison_notes, joined
+from anton.core.artifacts.render_check import (
+    Comparison,
+    ComparisonNotes,
+    agree,
+    comparison_notes,
+    joined,
+    state_label,
+)
 from anton.utils.nofollow import read_bytes_nofollow, replace_bytes_nofollow
 
 if TYPE_CHECKING:
@@ -121,6 +128,16 @@ def _decoded(data: bytes | None) -> str | None:
         return None
 
 
+class _Shown(NamedTuple):
+    """What the agent was last shown about a page this turn, set by set: the
+    `blank` and `removed` labels, and each shrunk view by its state and name,
+    whatever its counts."""
+
+    blank: tuple[str, ...]
+    removed: tuple[str, ...]
+    shrunk: tuple[tuple[str | None, str], ...]
+
+
 def turn_pages_of(session) -> TurnPages | None:
     """SESSION's `TurnPages` for this turn, or None when it keeps none (a
     test double)."""
@@ -151,9 +168,8 @@ class TurnPages:
         # Each page's latest comparison whose previous page the service
         # checked, in the order the turn's last lines name the pages.
         self._comparisons: dict[PageKey, Comparison] = {}
-        # Per page, the `blank`, `removed` and shrunk views last shown to the
-        # agent; a shrunk view by its state and name, whatever its counts.
-        self._shown: dict[PageKey, tuple[tuple, tuple, tuple]] = {}
+        # Per page, what the agent was last shown, set by set.
+        self._shown: dict[PageKey, _Shown] = {}
         self._restored: dict[PageKey, None] = {}
 
     def capture(self, store, *, cell_sandbox: CellSandbox | None) -> None:
@@ -362,31 +378,40 @@ class TurnPages:
                 self._restored.pop(key, None)
 
     def notes_to_show(self, key: PageKey, comparison: Comparison | None) -> ComparisonNotes:
-        """What COMPARISON names for the agent (`comparison_notes`), less the
-        `blank`, `removed` and `shrank` it was already shown for KEY this
-        turn: a view drawn late reads as blank, or with few marks, on every
-        check, and the same line on every cell would send the agent back to
-        fix it each time. A shrunk view counts as shown by its state and
-        name, whatever its counts. A changed set is shown whole. `broke`
-        always stays: the page failed, and its repair cells bound the edits.
-        A comparison that says nothing changes nothing."""
+        """What COMPARISON names for the agent (`comparison_notes`), less each
+        of the `blank`, `removed` and `shrank` sets it was already shown for
+        KEY this turn: a view drawn late reads as blank, or with few marks,
+        on every check, and the same line on every cell would send the agent
+        back to fix it each time. A shrunk view counts as shown by its state
+        and name, whatever its counts. A changed set is shown whole, and a
+        set that didn't change stays quiet. `broke` always stays: the page
+        failed, and its repair cells bound the edits. A comparison that says
+        nothing changes nothing."""
         notes = comparison_notes(comparison)
         if comparison is None or not comparison.informative:
             return notes
-        shrunk = tuple(dict.fromkeys((view.pressed, view.view) for view in comparison.shrunk_views))
-        shown = (tuple(notes.blank), tuple(notes.removed), shrunk)
+        shown = _Shown(
+            blank=tuple(notes.blank), removed=tuple(notes.removed),
+            shrunk=tuple(dict.fromkeys((view.pressed, view.view) for view in comparison.shrunk_views)),
+        )
         with self._lock:
-            if self._shown.get(key) == shown:
-                return notes._replace(blank=[], removed=[], shrank=[])
+            last = self._shown.get(key)
             self._shown[key] = shown
-        return notes
+        if last is None:
+            return notes
+        return notes._replace(
+            blank=[] if shown.blank == last.blank else notes.blank,
+            removed=[] if shown.removed == last.removed else notes.removed,
+            shrank=[] if shown.shrunk == last.shrunk else notes.shrank,
+        )
 
     def end_lines(self, store, *, checks: Mapping[PageKey, RenderStatus]) -> list[str]:
         """The lines that close the turn's final message, written by anton
         whatever the reply claims: each page put back, and what the turn
-        broke, blanked, removed or shrank on each compared page. A page
-        whose last check in CHECKS passed gets no line for a view that
-        broke: that check may have seen it fixed without comparing."""
+        broke, blanked, removed or shrank on each compared page, each named
+        by its tab or toggle as the person sees it. A page whose last check
+        in CHECKS passed gets no line for a view that broke: that check may
+        have seen it fixed without comparing."""
         with self._lock:
             restored = list(self._restored)
             comparisons = dict(self._comparisons)
@@ -414,10 +439,13 @@ class TurnPages:
                     f"“{name}” no longer has {joined(notes.removed)}: this turn removed "
                     f"{agree(notes.removed, 'it', 'them')}."
                 )
-            if notes.shrank:
+            # By the state alone: the view's id and its counts are for the
+            # agent, and the line is for the person.
+            shrank = list(dict.fromkeys(state_label(view.pressed) for view in comparisons[key].shrunk_views))
+            if shrank:
                 lines.append(
-                    f"“{name}”: {joined(notes.shrank)} {agree(notes.shrank, 'shows', 'show')} fewer than half "
-                    f"the marks {agree(notes.shrank, 'it', 'they')} showed before this turn."
+                    f"“{name}”: {joined(shrank)} {agree(shrank, 'shows', 'show')} fewer than half of what "
+                    f"{agree(shrank, 'it', 'they')} showed before this turn."
                 )
         return lines
 

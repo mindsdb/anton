@@ -304,11 +304,14 @@ read the way the check reads a page. A check of a page with a copy sends it
 as `previous_html`, unless less than a whole check's time
 (`render_check.TIMEOUT_SECONDS`) is left of the cell's budget, and the
 service's `comparison` names the views the turn's edits broke, left without
-a graphic, removed, or left fewer than half the marks they drew (svg shapes,
-map markers, table rows; a canvas's aren't counted). A view that broke fails the page, so its repair cells
-apply. The others are not failures, and the agent hears about each set once
-a turn. When a page the turn's edits made worse fails with no repair cells
-left, anton puts the copy back. A `generate_artifact` run on an existing
+a graphic, removed, or left fewer than half the marks of a kind they drew:
+an svg view's markers, bars and other shapes, each kind counted apart.
+Table rows and a map library's HTML markers count only inside a chart or
+map container that holds no svg or canvas, and a canvas's marks aren't
+counted. A view that broke fails the page, so its repair cells apply. The
+others are not failures, and the agent hears about each set once a turn.
+When a page the turn's edits made worse fails with no repair cells left,
+anton puts the copy back. A `generate_artifact` run on an existing
 artifact that fails, stops over budget, crashes or is abandoned by the
 turn puts the main page back as it was when the run started: as the turn
 found it, when the run was the first to change it. A build that fails only
