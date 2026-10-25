@@ -193,11 +193,47 @@ async def test_gen_verify_backend_retries_once_then_succeeds(tmp_path: Path, mon
     monkeypatch.setattr(orchestrator.verifiers, "verify_backend", fake_verify)
     monkeypatch.setattr(orchestrator, "_map_datasources", fake_map)
     monkeypatch.setattr(orchestrator, "_declare_datasources", fake_declare)
+    # "REF" stands in for a connection reference, so the verify env, built on
+    # every host, can't be resolved from it.
+    monkeypatch.setattr(orchestrator, "_verify_datasource_env", lambda state: {})
 
     err = await orchestrator._gen_verify_backend(st)
     assert err is None
     assert calls["gen"] == 2  # one retry
     assert declared["refs"] == ["REF"]
+
+
+async def test_gen_verify_backend_hands_the_import_its_own_connections_without_a_sandbox(
+    tmp_path: Path, monkeypatch
+):
+    """The import check gets only the connections backend.py reads on every
+    host, as the launch does, not only under a sandbox."""
+    st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
+    st.api_spec = "{}"
+    seen = {}
+
+    async def fake_loop(**kw):
+        (tmp_path / "backend.py").write_text("x")
+        return {"files_written": ["backend.py"], "rounds_used": 1, "summary": "s"}
+
+    async def fake_verify(**kw):
+        seen.update(kw)
+        return VerifyResult(errors=[]), []
+
+    async def fake_declare(state, refs):
+        pass
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_backend", fake_verify)
+    monkeypatch.setattr(orchestrator, "_cell_sandbox", lambda state: None)
+    monkeypatch.setattr(orchestrator, "_map_datasources", lambda session, keys: ([], []))
+    monkeypatch.setattr(orchestrator, "_declare_datasources", fake_declare)
+    monkeypatch.setattr(
+        orchestrator, "_verify_datasource_env", lambda state: {"DS_PG_MAIN__PASSWORD": "pw"}
+    )
+
+    assert await orchestrator._gen_verify_backend(st) is None
+    assert seen["ds_env"] == {"DS_PG_MAIN__PASSWORD": "pw"}
 
 
 async def test_declare_datasources_writes_an_empty_list_to_clear_the_previous_one(
@@ -1759,14 +1795,40 @@ def test_a_repeat_call_without_known_data_builds_from_the_saved_copy(tmp_path: P
     assert stored.known_data == _SITES
 
     again = _state(art, user_request="map")
-    engine._restore(again, stored)
+    engine._restore(again, stored, entry=cp.ENTRY_SPEC)
     assert again.known_data == _SITES
     assert again.call_changed is False
 
     other = _state(art, user_request="map", known_data="site,lat\nOslo,59.9")
-    engine._restore(other, stored)
+    engine._restore(other, stored, entry=cp.ENTRY_SPEC)
     assert other.known_data == "site,lat\nOslo,59.9"
     assert other.call_changed is True
+
+
+def test_a_new_iteration_without_known_data_reads_the_sources_its_rows_verified(tmp_path: Path):
+    """A built page, then a new request that brings no rows: the old paste
+    may be what the user asked to drop, so it is not inherited, and the
+    sources only it verified go back to the data loop."""
+    art = tmp_path / "art"
+    art.mkdir()
+    first = _state(art, user_request="map", known_data=_SITES)
+    first.declared_sources = ["sites", "regions"]
+    first.known_data_verified = ["sites"]
+    orchestrator._save_checkpoint(first, cp.STAGE_GENERATED)
+    stored = cp.load(art)
+    assert stored.known_data_verified == ["sites"]
+
+    again = _state(art, user_request="map")
+    engine._restore(again, stored, entry=cp.ENTRY_NEW_ITERATION)
+    assert again.known_data == ""
+    assert again.unverified_sources == ["sites"]
+    assert again.known_data_verified == []
+    assert orchestrator._needs_data_loop(again)
+
+    brought = _state(art, user_request="map", known_data="site,lat\nOslo,59.9")
+    engine._restore(brought, stored, entry=cp.ENTRY_NEW_ITERATION)
+    assert brought.known_data == "site,lat\nOslo,59.9"
+    assert brought.unverified_sources == []
 
 
 # ── the fetch verdict and the forced fetch ──────────────────────────────────

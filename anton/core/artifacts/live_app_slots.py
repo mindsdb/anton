@@ -1236,8 +1236,21 @@ async def launch_live_app(
 
 def _log_launch_decision(decision: LaunchDecision) -> None:
     # WARNING: hosts log at WARNING by default, and this line is the record
-    # of an approved or refused launch.
-    _log.warning("live app launch: %s", decision.model_dump_json())
+    # of an approved or refused launch. A structured host formatter
+    # (anton.diagnostics) keeps only a message's template unless the record
+    # marks its values safe, and labels a WARNING without an event a failure.
+    # The decision holds slugs, connection names, changed parts and the
+    # card's outcome, never a value or a person's email.
+    _log.warning(
+        "live app launch: %s",
+        decision.model_dump_json(),
+        extra={
+            "event": "live_app_launch",
+            "outcome": decision.status,
+            "artifact_slug": decision.slug,
+            "_diagnostic_safe_template": True,
+        },
+    )
 
 
 async def _send_launch(

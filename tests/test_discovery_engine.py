@@ -556,6 +556,7 @@ async def test_a_source_whose_rows_are_in_known_data_is_verified():
     state = _state(_session_with_plan_sequence(_finish()), known_data=_SITES)
     await engine.run_gathering_loop(state)
     assert state.unverified_sources == []
+    assert state.known_data_verified == ["sites"]
 
 
 async def test_an_unmarked_source_stays_unverified_despite_known_data():

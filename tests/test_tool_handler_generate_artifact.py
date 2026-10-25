@@ -764,6 +764,20 @@ def test_known_data_asks_the_outer_agent_to_name_the_scratchpad():
     assert "NAME THE SCRATCHPAD" in GENERATE_ARTIFACT_TOOL.description
 
 
+def test_known_data_asks_for_the_rows_and_says_a_new_request_does_not_inherit_it():
+    """The gathering rule counts only the values themselves, and a new
+    iteration does not reuse the saved copy: the agent has to know both."""
+    from anton.core.tools.tool_defs import GENERATE_ARTIFACT_TOOL
+
+    schema_text = GENERATE_ARTIFACT_TOOL.input_schema["properties"]["known_data"]["description"]
+    for text in (schema_text, GENERATE_ARTIFACT_TOOL.description):
+        assert "rows or values" in text
+        assert "a few hundred rows at most" in text
+        assert "does not count" in text
+    assert "pass it again" in schema_text
+    assert "Pass it on every call that needs it" in GENERATE_ARTIFACT_TOOL.description
+
+
 # ── S-03: the agent relays skipped checks and warnings ──────────────────────
 
 async def test_success_instruction_tells_the_agent_to_relay_skipped_checks(tmp_path: Path, monkeypatch):
