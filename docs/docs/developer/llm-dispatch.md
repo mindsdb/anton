@@ -41,9 +41,9 @@ to handler-dispatched tools (see [Tool system](/developer/tool-system)).
 set in the process environment, and optionally `ANTON_ARTIFACT_REASONING_EFFORT`,
 every planning, coding and structured call the pipeline makes asks for that
 model and effort, on the role's own provider and so its endpoint
-(`model_route` and `ModelRoute` in `client.py`, entered beside the pipeline's
-effort ceiling inside its task). The ceiling still caps the effort, and an
-empty effort sends none, not the provider's own. The agent's and router's calls
+(`model_route` and `ModelRoute` in `client.py`, entered inside the pipeline's
+task). The effort goes out as set, and an empty effort sends none, not the
+provider's own. The agent's and router's calls
 in the same turn keep their own models. The builder's usage is reported under
 its model, its calls don't change the served model behind the agent's identity
 line, a screenshot refusal by the builder's model turns off screenshots for

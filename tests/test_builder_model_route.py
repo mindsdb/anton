@@ -117,11 +117,11 @@ async def test_inside_a_route_every_call_asks_for_its_model_and_effort():
     assert provider.calls == [(BUILDER, "medium")] * 6
 
 
-async def test_the_ceiling_caps_the_routes_effort():
+async def test_a_route_above_high_sends_its_effort_uncapped():
     llm, provider = _client()
-    with llm.effort_ceiling("high"), model_route(ModelRoute(BUILDER, "xhigh")):
+    with model_route(ModelRoute(BUILDER, "xhigh")):
         await _every_call(llm)
-    assert provider.calls == [(BUILDER, "high")] * 6
+    assert provider.calls == [(BUILDER, "xhigh")] * 6
 
 
 async def test_a_route_with_no_effort_clears_the_providers_own():
@@ -204,15 +204,11 @@ async def test_usage_names_the_routed_model_and_the_identity_line_keeps_the_agen
     assert llm.last_served_model == "agent-model"
 
 
-@pytest.mark.parametrize(("effort", "ceiling", "budget"), [("max", None, 65536), ("max", "high", 16384), (None, None, 8192)])
-async def test_the_stream_budget_follows_the_routes_effort(effort, ceiling, budget):
+@pytest.mark.parametrize(("effort", "budget"), [("max", 65536), ("high", 16384), (None, 8192)])
+async def test_the_stream_budget_follows_the_routes_effort(effort, budget):
     llm, _ = _client(effort="low")
     with model_route(ModelRoute(BUILDER, effort)):
-        if ceiling is None:
-            assert llm.stream_budget("planning") == budget
-        else:
-            with llm.effort_ceiling(ceiling):
-                assert llm.stream_budget("planning") == budget
+        assert llm.stream_budget("planning") == budget
 
 
 async def test_the_route_reaches_gathered_tasks_and_ends_with_its_block():
@@ -253,7 +249,7 @@ async def _generate(session, slug: str) -> None:
         assert isinstance(item, ToolProgress) or item is not None
 
 
-@pytest.mark.parametrize(("effort", "sent"), [("medium", "medium"), ("xhigh", "high"), (None, "")])
+@pytest.mark.parametrize(("effort", "sent"), [("medium", "medium"), ("xhigh", "xhigh"), (None, "")])
 async def test_generation_sends_every_call_to_the_builders_model_and_the_agent_keeps_its_own(
     tmp_path: Path, monkeypatch, effort, sent,
 ):
@@ -284,7 +280,7 @@ async def test_generation_sends_every_call_to_the_builders_model_and_the_agent_k
     assert provider.calls == [(BUILDER, sent)] * 4 + [("agent-model", "own")]
 
 
-async def test_without_a_builder_model_generation_keeps_todays_models_and_cap(tmp_path: Path, monkeypatch):
+async def test_without_a_builder_model_generation_keeps_the_agents_models_and_efforts(tmp_path: Path, monkeypatch):
     monkeypatch.delenv(ARTIFACT_MODEL_ENV_VAR, raising=False)
     monkeypatch.setenv(ARTIFACT_EFFORT_ENV_VAR, "medium")
     slug = _make_artifact(tmp_path)
@@ -299,7 +295,7 @@ async def test_without_a_builder_model_generation_keeps_todays_models_and_cap(tm
     monkeypatch.setattr(gen_pkg, "generate", fake_generate)
     await _generate(session, slug)
 
-    assert provider.calls == [("agent-model", "high"), ("coding-model", "high")]
+    assert provider.calls == [("agent-model", "own"), ("coding-model", "own")]
 
 
 # ── the step trace ────────────────────────────────────────────────────────────
@@ -318,8 +314,8 @@ async def test_the_data_loops_llm_call_events_name_the_model_each_call_asked_for
     state.gathering_complete = True
     state.unverified_sources = ["parts table"]
 
-    async def fetched(_state):
-        return "pulled a sample"
+    async def fetched(_state, _required_text=""):
+        return "pulled a sample", True
 
     monkeypatch.setattr(orchestrator, "_fetch_data_sample", fetched)
     with model_route(ModelRoute(BUILDER, "medium")):
