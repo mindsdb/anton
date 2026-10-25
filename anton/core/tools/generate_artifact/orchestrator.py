@@ -772,6 +772,7 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
         declared_sources=state.declared_sources,
         data_notes=state.data_notes,
         user_language=state.user_language,
+        live_app=_runs_live_apps(state),
         project_rules=state.project_rules,
         artifact_skills=state.artifact_skills,
     )
