@@ -159,9 +159,28 @@ def test_a_check_without_a_screenshot_asks_for_none(service):
 
 
 def test_the_request_model_is_the_contract_and_nothing_more():
-    assert RenderCheckRequest(html="x").model_dump() == {"html": "x", "screenshot": True}
+    assert RenderCheckRequest(html="x").model_dump() == {"html": "x", "screenshot": True, "materialize_main": None}
     with pytest.raises(ValueError):
         RenderCheckRequest(html="x", extra=1)
+
+
+@pytest.mark.parametrize('corruption',[None,'input','checked','bootstrap','unsolicited'])
+def test_materialized_source_must_preserve_bootstrap_and_identify_checked_bytes(service,corruption):
+    import hashlib
+    original=_PAGE.replace('<div id="a">hi</div>','<main id="cowork-page"></main>')
+    transformed=original.replace('<main id="cowork-page"></main>','<main id="cowork-page"><table><tr><td>Observed</td></tr></table></main>')
+    if corruption=='bootstrap':transformed=transformed.replace('</head>','<script>changed()</script></head>')
+    answer={**_answer(),'materialized_html':transformed,
+        'input_sha256':hashlib.sha256(original.encode()).hexdigest(),
+        'checked_html_sha256':hashlib.sha256(transformed.encode()).hexdigest()}
+    if corruption in {'input','checked'}:answer[corruption+'_sha256' if corruption=='input' else 'checked_html_sha256']='wrong'
+    service.answer((200,answer,0.0))
+    result=check_html(original,**({} if corruption=='unsolicited' else {'materialize_main':'cowork-page'}))
+    if corruption:
+        assert isinstance(result,RenderCheckUnavailable)
+    else:
+        assert result.status=='passed' and result.materialized_html==transformed
+        assert service.requests[0]['body']['materialize_main']=='cowork-page'
 
 
 def test_a_failed_verdict_keeps_every_finding(service):

@@ -20,6 +20,7 @@ import asyncio
 import functools
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -417,7 +418,7 @@ async def generate(
     ``attachments`` are absolute paths of files the user attached to the
     conversation (S-01); see `attachments.py` for what happens to each kind.
     """
-    from .attachments import resolve_attachments
+    from .attachments import KIND_DATA, resolve_attachments
     from .discovery import checkpoint as cp
     from .orchestrator import _artifact_skills, _datasource_catalog, _project_rules, run
     from .spend import SpendGuard
@@ -495,7 +496,16 @@ async def generate(
     # other; the channel is the only thing they share.
     session._artifact_progress = progress
     try:
-        result = await run(state, entry=entry)
+        fast_mode = os.environ.get("ANTON_STATIC_FAST_PATH", "")
+        if (fast_mode in {"direct", "facts"} and state.act_first
+                and all(attachment.kind == KIND_DATA for attachment in state.attachments)):
+            from .fast_static import prepare, run as run_fast_static
+            if await prepare(state):
+                result = await run_fast_static(state, mode=fast_mode)
+            else:
+                result = await run(state, entry=entry)
+        else:
+            result = await run(state, entry=entry)
     except BaseException as exc:
         # A crash is a run outcome too. Without this the trace file simply
         # stops mid-run with no terminal record, and nothing reading it can

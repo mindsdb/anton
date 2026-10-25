@@ -553,7 +553,8 @@ def verify_frontend(
     return VerifyResult(errors=errors, warnings=warnings)
 
 
-def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, screenshot: bool = True) -> BrowserCheck:
+def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, screenshot: bool = True,
+                         materialize_main: str | None = None) -> BrowserCheck:
     """Load the written page once in a browser.
 
     The class of defects the text checks above cannot see: a script that
@@ -591,7 +592,8 @@ def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, scree
     app directory, not the cwd.
     """
     if render_check.configured_url() is not None:
-        outcome = render_check.check_file(entry.resolve(), cell_sandbox=cell_sandbox, screenshot=screenshot)
+        options = {"materialize_main": materialize_main} if materialize_main else {}
+        outcome = render_check.check_file(entry.resolve(), cell_sandbox=cell_sandbox, screenshot=screenshot, **options)
         if outcome.status == "unverified":
             found = render_check.unverified_findings(outcome)
             return BrowserCheck(
@@ -602,6 +604,7 @@ def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, scree
         return BrowserCheck(
             status="passed" if verdict.ok else "failed", verdict=verdict, screenshot=outcome.screenshot,
             coverage=outcome.coverage,
+            materialized_html=outcome.materialized_html,
         )
     findings = lint_html(entry.resolve(), cell_sandbox=cell_sandbox)
     if findings is None:

@@ -32,6 +32,7 @@ from __future__ import annotations
 import base64
 import binascii
 import errno
+import hashlib
 import logging
 import os
 import time
@@ -78,6 +79,8 @@ MAX_ERROR_BODY_BYTES = 4096
 # and many findings; a page that logs without end cannot make this process
 # hold an answer of any size.
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+# Only a requested materialization may also return an 8 MB document, JSON escaped.
+MAX_MATERIALIZED_RESPONSE_BYTES = 2 * MAX_PAGE_BYTES + MAX_RESPONSE_BYTES
 # At most this many distinct findings of one check reach the agent; the rest
 # are counted. A page that logs one error per data row would otherwise put
 # thousands of lines into one tool result, resent on every model call.
@@ -124,6 +127,7 @@ class RenderCheckRequest(BaseModel):
 
     html: str
     screenshot: bool = True
+    materialize_main: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,80}$")
 
 
 class RenderFinding(BaseModel):
@@ -247,6 +251,9 @@ class RenderCheckResult(BaseModel):
     policy: str = ""
     views: list[CheckedView] = Field(default_factory=list)
     unopened: list[UnopenedToggle] = Field(default_factory=list)
+    materialized_html: str | None = None
+    input_sha256: str | None = None
+    checked_html_sha256: str | None = None
 
     @model_validator(mode="after")
     def _status_follows_the_rule(self) -> "RenderCheckResult":
@@ -470,7 +477,7 @@ class _Reply(NamedTuple):
     busy: bool = False
 
 
-def check_html(html: str, *, screenshot: bool = True, timeout: float = TIMEOUT_SECONDS) -> RenderCheckOutcome:
+def check_html(html: str, *, screenshot: bool = True, timeout: float = TIMEOUT_SECONDS, materialize_main: str | None = None) -> RenderCheckOutcome:
     """Ask the service to load `html`. Never raises.
 
     `timeout` is anton's limit for this call, a second ask included; a
@@ -488,20 +495,21 @@ def check_html(html: str, *, screenshot: bool = True, timeout: float = TIMEOUT_S
             reason=f"the page is {page_bytes // 1024} KB, over the render check's "
             f"{MAX_PAGE_BYTES // (1024 * 1024)} MB limit"
         )
-    body = RenderCheckRequest(html=html, screenshot=screenshot).model_dump_json().encode("utf-8")
+    body = RenderCheckRequest(html=html, screenshot=screenshot, materialize_main=materialize_main).model_dump_json(exclude_none=True).encode("utf-8")
     if len(body) > MAX_BODY_BYTES:
         return RenderCheckUnavailable(
             reason=f"the page's request is {len(body) // 1024} KB once JSON-escaped, over the render "
             f"check's {MAX_BODY_BYTES // (1024 * 1024)} MB request limit"
         )
     started = time.monotonic()
-    reply = _post(base, body=body, timeout=timeout)
+    response_options = {"response_limit": MAX_MATERIALIZED_RESPONSE_BYTES} if materialize_main else {}
+    reply = _post(base, body=body, timeout=timeout, **response_options)
     if reply.busy:
         left = timeout - (time.monotonic() - started) - BUSY_RETRY_SECONDS
         if left >= BUSY_RETRY_MIN_SECONDS:
             _log.info("render check at %s is busy; asking once more in %.0f s", base, BUSY_RETRY_SECONDS)
             time.sleep(BUSY_RETRY_SECONDS)
-            reply = _post(base, body=body, timeout=left)
+            reply = _post(base, body=body, timeout=left, **response_options)
     if reply.unavailable is not None:
         return reply.unavailable
     try:
@@ -514,12 +522,27 @@ def check_html(html: str, *, screenshot: bool = True, timeout: float = TIMEOUT_S
             )
         _log.warning("render check at %s answered a body that does not parse", base, exc_info=True)
         return RenderCheckUnavailable(reason="the render-check service answered something that does not parse")
+    if materialize_main and result.materialized_html is not None:
+        transformed = result.materialized_html
+        marker = '<main id="' + materialize_main + '"></main>'
+        if html.count(marker) != 1:
+            return RenderCheckUnavailable(reason="materialization input did not contain exactly one empty main")
+        before, after = html.split(marker)
+        prefix = before + marker.removesuffix('</main>')
+        suffix = '</main>' + after
+        if (len(transformed.encode('utf-8')) > MAX_PAGE_BYTES
+                or result.input_sha256 != hashlib.sha256(html.encode('utf-8')).hexdigest()
+                or result.checked_html_sha256 != hashlib.sha256(transformed.encode('utf-8')).hexdigest()
+                or not transformed.startswith(prefix) or not transformed.endswith(suffix)):
+            return RenderCheckUnavailable(reason="materialization did not preserve the input or identify the checked final document")
+    elif result.materialized_html is not None:
+        return RenderCheckUnavailable(reason="the service transformed a document without being asked")
     if result.screenshot is not None and len(result.screenshot.data) > MAX_SCREENSHOT_BASE64_CHARS:
         result = result.model_copy(update={"screenshot": None})
     return result
 
 
-def _post(base: str, *, body: bytes, timeout: float) -> _Reply:
+def _post(base: str, *, body: bytes, timeout: float, response_limit: int = MAX_RESPONSE_BYTES) -> _Reply:
     """POST `body` to the service once. Never raises."""
     try:
         # trust_env=False: the service is a sibling container on an internal
@@ -536,10 +559,10 @@ def _post(base: str, *, body: bytes, timeout: float) -> _Reply:
                 content = bytearray()
                 for chunk in response.iter_bytes():
                     content += chunk
-                    if len(content) > MAX_RESPONSE_BYTES:
+                    if len(content) > response_limit:
                         return _Reply(unavailable=RenderCheckUnavailable(
                             reason="the render check's answer is over "
-                            f"{MAX_RESPONSE_BYTES // (1024 * 1024)} MB, more than anton reads"
+                            f"{response_limit // (1024 * 1024)} MB, more than anton reads"
                         ))
     except httpx.TimeoutException:
         return _Reply(unavailable=RenderCheckUnavailable(
@@ -575,7 +598,8 @@ def _says_busy(response: httpx.Response) -> bool:
 
 
 def check_file(
-    path: Path, *, cell_sandbox: CellSandbox | None, screenshot: bool = True, timeout: float = TIMEOUT_SECONDS
+    path: Path, *, cell_sandbox: CellSandbox | None, screenshot: bool = True, timeout: float = TIMEOUT_SECONDS,
+    materialize_main: str | None = None,
 ) -> RenderCheckOutcome:
     """Read the page at `path` and ask the service to load it. Never raises.
 
@@ -603,7 +627,8 @@ def check_file(
             )
         return RenderCheckUnavailable(reason=f"the page could not be read ({exc.strerror or type(exc).__name__})")
     remaining = timeout - (time.monotonic() - started)
-    return check_html(data.decode("utf-8", errors="replace"), screenshot=screenshot, timeout=max(remaining, 1.0))
+    options = {"materialize_main": materialize_main} if materialize_main else {}
+    return check_html(data.decode("utf-8", errors="replace"), screenshot=screenshot, timeout=max(remaining, 1.0), **options)
 
 
 # Opens the caption beside every render screenshot in a tool result, so
