@@ -221,7 +221,11 @@ async def _plan_whole_document(
     tools: list[dict] | None = None,
     on_text=None,
 ) -> tuple[str, str | None]:
-    """One planning call for a whole specification, retried once with more room.
+    """One planning call for a whole specification, retried once asking for a compact version.
+
+    At high and below the retry also gets more room (16384, then 20480).
+    Above high, on an endpoint that takes large outputs, both tries get the
+    role's effort budget instead.
 
     Returns ``(body, error)``; exactly one of the two is set.
 
