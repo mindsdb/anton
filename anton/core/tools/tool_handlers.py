@@ -1080,6 +1080,7 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolO
 # The tool reason for each live-app launch failure; `root_cause` tiers each one.
 _LIVE_APP_FAILURE_REASONS: "dict[LaunchFailure, str]" = {
     "no_host": "live_app_unavailable",
+    "launches_disabled": "live_app_unavailable",
     "config": "live_app_unavailable",
     "no_slot": "live_app_unavailable",
     "slot_reset": "live_app_unavailable",

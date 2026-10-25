@@ -26,6 +26,7 @@ from anton.core.utils.write_check import (
 
 if TYPE_CHECKING:
     from anton.core.backends.manager import ScratchpadManager
+    from anton.core.interaction.elicit import AskOption
     from anton.core.session import ChatSession
 
 logger = logging.getLogger(__name__)
@@ -372,39 +373,56 @@ async def ask_approval_card(
     the turn is refused without asking, so an unattended turn doesn't wait
     out the timeout once per card. Sessions without a `WriteGate` keep no
     such memory."""
-    from anton.core.interaction.elicit import AskOption, AskRequest, elicit
+    from anton.core.interaction.elicit import AskOption
+
+    _, cause = await ask_approval_choice(
+        session, prompt,
+        options=(AskOption(value="approve", label="Approve", detail=approve_detail),),
+        cancel_detail=cancel_detail, log_label=log_label,
+    )
+    return cause
+
+
+async def ask_approval_choice(
+    session: ChatSession,
+    prompt: str,
+    *,
+    options: tuple[AskOption, ...],
+    cancel_detail: str = "Leave things as they are",
+    log_label: str = "write approval",
+) -> tuple[str | None, RefusalCause | None]:
+    """Choose one host-built action, or return why none was approved.
+
+    The gate remembers unanswered cards exactly as ask_approval_card does.
+    Cancel is always explicit, and no default or typed answer authorizes work.
+    """
+    from anton.core.interaction.elicit import ApprovalRequest, AskOption, elicit
 
     gate = getattr(session, "_write_gate", None)
     if isinstance(gate, WriteGate) and gate.unanswered:
-        return "unanswered_earlier"
-    request = AskRequest(
+        return None, "unanswered_earlier"
+    request = ApprovalRequest(
         prompt=prompt,
-        options=(
-            AskOption(value="approve", label="Approve", detail=approve_detail),
-            AskOption(value="cancel", label="Cancel", detail=cancel_detail),
-        ),
-        # No typed answer and no default: only a picked Approve clears the card.
-        allow_custom=False,
+        options=(*options, AskOption(value="cancel", label="Cancel", detail=cancel_detail)),
         timeout_s=getattr(session.elicitor, "timeout_s", None),
     )
     try:
-        # Not counted against the turn's questions: the card is the gate's,
-        # not the model's, so it spends none of the model's own.
         answer = await elicit(session, f"write:{uuid.uuid4().hex}", request, counted=False)
     except Exception as exc:
-        # The type only: a traceback's frames would print the card and the
-        # statement under a host that logs local variables.
         logger.warning("%s: the question failed (%s)", log_label, type(exc).__name__)
-        return "error"
-    if answer.status == "answered" and answer.values == ("approve",):
-        return None
+        return None, "error"
+    offered = {option.value for option in options}
+    if answer.status == "answered" and len(answer.values) == 1 and not answer.text:
+        value = answer.values[0]
+        if value in offered and value != "cancel":
+            return value, None
     if answer.status in ("answered", "cancelled"):
-        return "cancelled"
+        return None, "cancelled"
     if answer.status == "timeout" and isinstance(gate, WriteGate):
         gate.unanswered = True
     if answer.status in ("timeout", "unavailable"):
-        return answer.status
-    return "error"
+        return None, answer.status
+    return None, "error"
 
 
 def _log_decision(*, writes: CellWrites, status: DecisionStatus) -> None:

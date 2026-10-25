@@ -71,6 +71,17 @@ class FakeHost:
         self.launcher = launcher
         self.launch_token = _TOKEN
         self.events: list[tuple] = []
+        self.refused = 0
+        self.available = 0
+
+    def launch_lock(self):
+        return las._slot_locks().setdefault("test-admission", asyncio.Lock())
+
+    async def slots_full(self):
+        self.refused += 1
+
+    async def slots_available(self):
+        self.available += 1
 
     async def claim(self, slot: int) -> None:
         self.events.append(("claim", slot))
@@ -207,6 +218,8 @@ class Cards(list):
     None approves, a refusal cause refuses."""
 
     answer: str | None = None
+    pick: int = 0
+    options: tuple = ()
 
 
 @pytest.fixture
@@ -219,7 +232,13 @@ def cards(monkeypatch) -> Cards:
 
     import anton.core.utils.scratchpad as scratchpad
 
+    async def choose(session, prompt, *, options, **kwargs):
+        asked.append(prompt)
+        asked.options = options
+        return (options[asked.pick].value, None) if asked.answer is None else (None, asked.answer)
+
     monkeypatch.setattr(scratchpad, "ask_approval_card", ask)
+    monkeypatch.setattr(scratchpad, "ask_approval_choice", choose)
     return asked
 
 
@@ -762,12 +781,15 @@ def test_an_exited_app_frees_its_slot():
     assert las.plan_slot(statuses, "id-sales", _ME) == las.SlotPlan(0)
 
 
-def test_with_no_free_slot_a_launch_replaces_the_launchers_own_oldest_app():
+def test_with_no_free_slot_a_launch_requires_the_person_to_pick_their_app():
     mine_new = _app("newer", _ME, "2026-10-21T04:30:00Z")
     mine_old = _app("older", _ME, "2026-10-21T04:20:00Z")
     statuses = [_status(1, state="running", app=_app("x", _OTHER, "2026-10-21T04:00:00Z")),
                 _status(2, state="running", app=mine_new), _status(3, state="running", app=mine_old)]
-    assert las.plan_slot(statuses, "id-sales", _ME) == las.SlotPlan(2, replaces=mine_old)
+    with pytest.raises(las.SlotSelectionRequired) as asked:
+        las.plan_slot(statuses, "id-sales", _ME)
+    assert [p.index for p in asked.value.choices] == [1, 2]
+    assert [p.replaces.artifact for p in asked.value.choices] == ["newer", "older"]
 
 
 def test_a_launch_never_replaces_another_persons_app():
@@ -937,15 +959,17 @@ async def test_a_new_connection_relaunches_through_the_card(tmp_path, slots, app
     assert "these changed: its connections." in cards[1]
 
 
-async def test_a_full_house_of_my_apps_replaces_my_oldest_after_the_card(tmp_path, slots, approved, cards):
+async def test_a_full_house_of_my_apps_replaces_my_selected_newer_app(tmp_path, slots, approved, cards):
     folder = _artifact(tmp_path)
     slots[0].run("mine-new", _ME, started_at="2026-10-21T04:30:00Z")
     slots[1].run("mine-old", _ME, started_at="2026-10-21T04:20:00Z")
     slots[2].run("theirs", _OTHER, started_at="2026-10-21T04:00:00Z")
     result = await las.launch_live_app(_session(), slug="sales-demo", folder=folder, datasources=())
-    assert "this stops your app `mine-old`, running since 04:20 UTC" in cards[0]
-    assert result.slot == 2
-    assert slots[1].resets == 1 and slots[2].resets == 0 and slots[0].resets == 0
+    assert "Choose which of your running apps" in cards[0]
+    assert [o.label for o in cards.options] == ["Stop mine-new", "Stop mine-old"]
+    assert "04:30 UTC" in cards.options[0].detail and "last request none yet" in cards.options[0].detail
+    assert result.slot == 1
+    assert slots[0].resets == 1 and slots[2].resets == 0 and slots[1].resets == 0
     assert slots[2].app.artifact == "theirs"
 
 
@@ -958,6 +982,7 @@ async def test_every_slot_held_by_others_refuses_before_any_card(tmp_path, slots
         await las.launch_live_app(session, slug="sales-demo", folder=folder, datasources=())
     assert raised.value.cause == "slots_full"
     assert cards == [] and session._live_app_host.events == []
+    assert session._live_app_host.refused == 1
     assert all(slot.resets == 0 for slot in slots)
 
 
@@ -1271,24 +1296,23 @@ async def test_a_stop_during_the_launch_resets_the_app_it_started(tmp_path, slot
     task = asyncio.create_task(las.launch_live_app(session, slug="sales-demo", folder=folder, datasources=()))
     await asyncio.to_thread(entered.wait, 5)
     task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    assert not task.done()
+    gate.set()
     with pytest.raises(asyncio.CancelledError):
         await task
-    gate.set()
-    for _ in range(100):
-        if slots[0].resets:
-            break
-        await asyncio.sleep(0.02)
     assert slots[0].resets == 1 and session._live_app_host.events == []
 
 
 async def test_a_stop_while_recording_the_launch_resets_it(tmp_path, slots, approved, cards):
     folder = _artifact(tmp_path)
-    started = asyncio.Event()
+    started, release = asyncio.Event(), asyncio.Event()
 
     class HangingHost(FakeHost):
         async def launched(self, launch) -> None:
             started.set()
-            await asyncio.sleep(30)
+            await release.wait()
 
     task = asyncio.create_task(las.launch_live_app(_session(HangingHost()), slug="sales-demo", folder=folder,
                                                    datasources=()))
@@ -1527,7 +1551,9 @@ def _recording_elicit(monkeypatch, status: str):
 
     async def elicit(session, question_id, request, *, counted):
         asked.append(request)
-        return SimpleNamespace(status=status, values=("approve",) if status == "answered" else ())
+        from anton.core.interaction.elicit import AskAnswer
+
+        return AskAnswer(status=status, values=("approve",) if status == "answered" else ())
 
     monkeypatch.setattr(elicit_module, "elicit", elicit)
     return asked
@@ -1724,3 +1750,312 @@ async def test_a_folder_inside_the_persons_files_launches(tmp_path, slots, appro
     )
     result = await las.launch_live_app(session, slug="sales-demo", folder=folder, datasources=())
     assert result.slot == 1 and slots[0].requests
+
+
+@pytest.mark.parametrize("value", ["-1", "4", "1.5", "x", "１"])
+def test_per_person_cap_refuses_invalid_values(monkeypatch, value):
+    monkeypatch.setenv(las.PER_PERSON_ENV_VAR, value)
+    with pytest.raises(LiveAppConfigError, match=las.PER_PERSON_ENV_VAR):
+        las.live_apps_per_person(3)
+
+
+def test_per_person_cap_defaults_to_slot_count_and_accepts_zero(monkeypatch):
+    monkeypatch.delenv(las.PER_PERSON_ENV_VAR, raising=False)
+    assert las.live_apps_per_person(15) == 15
+    monkeypatch.setenv(las.PER_PERSON_ENV_VAR, "0")
+    assert las.live_apps_per_person(15) == 0
+
+
+async def test_disabled_launch_touches_no_app_even_on_relaunch(tmp_path, slots, approved, monkeypatch, cards):
+    folder = _artifact(tmp_path)
+    _runs_from(slots[0], folder)
+    monkeypatch.setenv(las.PER_PERSON_ENV_VAR, "0")
+    with pytest.raises(LiveAppLaunchError, match="operator turned") as raised:
+        await las.launch_live_app(_session(), slug="sales-demo", folder=folder, datasources=())
+    assert raised.value.cause == "launches_disabled"
+    assert not cards and all(s.resets == 0 and s.requests == [] for s in slots)
+
+
+async def test_cap_replaces_selected_newer_app_even_with_a_free_slot(tmp_path, slots, approved, cards, monkeypatch):
+    monkeypatch.setenv(las.PER_PERSON_ENV_VAR, "2")
+    slots[0].run("clock", _ME, started_at="2026-10-21T04:00:00Z")
+    slots[1].run("counter", _ME, started_at="2026-10-21T04:10:00Z")
+    cards.pick = 1
+    result = await las.launch_live_app(_session(), slug="notes", folder=_artifact(tmp_path, "notes"), datasources=())
+    assert result.slot == 2
+    assert slots[0].app.artifact == "clock" and slots[0].resets == 0
+    assert slots[1].app.artifact == "notes" and slots[1].resets == 1
+    assert slots[2].app is None and slots[2].requests == []
+
+
+@pytest.mark.parametrize("cause", ["cancelled", "timeout", "unavailable", "error", "unanswered_earlier"])
+async def test_unapproved_replacement_changes_nothing(tmp_path, slots, approved, cards, monkeypatch, cause):
+    monkeypatch.setenv(las.PER_PERSON_ENV_VAR, "1")
+    slots[0].run("clock", _ME, started_at="2026-10-21T04:00:00Z")
+    cards.answer = cause
+    with pytest.raises(LiveAppLaunchError) as raised:
+        await las.launch_live_app(_session(), slug="notes", folder=_artifact(tmp_path, "notes"), datasources=())
+    assert raised.value.cause == "launch_not_approved"
+    assert all(s.resets == 0 and s.requests == [] for s in slots)
+
+
+async def test_stale_selected_launch_is_not_replaced(tmp_path, slots, approved, monkeypatch):
+    from anton.core.utils import scratchpad
+    monkeypatch.setenv(las.PER_PERSON_ENV_VAR, "1")
+    slots[0].run("clock", _ME, started_at="2026-10-21T04:00:00Z")
+    async def choose(session, prompt, *, options, **kwargs):
+        slots[0].run("colleague", _OTHER, started_at="2026-10-21T04:01:00Z")
+        slots[0].boot += 1
+        return options[0].value, None
+    monkeypatch.setattr(scratchpad, "ask_approval_choice", choose)
+    with pytest.raises(LiveAppLaunchError) as raised:
+        await las.launch_live_app(_session(), slug="notes", folder=_artifact(tmp_path, "notes"), datasources=())
+    assert raised.value.cause == "slots_changed"
+    assert slots[0].app.artifact == "colleague"
+    assert all(s.resets == 0 and s.requests == [] for s in slots)
+
+
+async def test_simultaneous_same_person_launches_cannot_exceed_cap(tmp_path, slots, approved, monkeypatch):
+    from anton.core.utils import scratchpad
+    monkeypatch.setenv(las.PER_PERSON_ENV_VAR, "1")
+    both = asyncio.Event()
+    waiting = 0
+    async def ask(session, prompt, **kwargs):
+        nonlocal waiting
+        waiting += 1
+        if waiting == 2:
+            both.set()
+        await both.wait()
+    monkeypatch.setattr(scratchpad, "ask_approval_card", ask)
+    results = await asyncio.gather(*(
+        las.launch_live_app(_session(), slug=name, folder=_artifact(tmp_path, name), datasources=())
+        for name in ("clock", "counter")
+    ), return_exceptions=True)
+    assert sum(isinstance(r, las.LiveAppLaunchResult) for r in results) == 1
+    assert sum(isinstance(r, LiveAppLaunchError) and r.cause == "slots_changed" for r in results) == 1
+    assert sum(s.app is not None for s in slots) == 1
+    assert all(s.resets == 0 for s in slots)
+
+
+def test_refusal_uses_conditional_idle_deadline_before_hard_max():
+    app = _app("clock", _OTHER, "2026-10-21T04:00:00Z").model_copy(update={
+        "idle_expires_at": "2026-10-21T04:03:00Z",
+    })
+    with pytest.raises(LiveAppLaunchError) as raised:
+        las.plan_slot([_status(1, state="running", app=app)], "new", _ME)
+    assert "04:03 UTC if no further requests arrive" in str(raised.value)
+    assert "maximum lifetime ends by 12:00 UTC" in str(raised.value)
+
+
+def test_trusted_approval_supports_fifteen_apps_without_widening_model_questions():
+    from anton.core.interaction.elicit import ApprovalRequest, AskOption, AskRequest, validate_request
+    options = tuple(AskOption(value=str(i), label=str(i)) for i in range(16))
+    assert validate_request(ApprovalRequest(prompt="Pick", options=options))
+    assert not validate_request(AskRequest(prompt="Pick", options=options))
+    assert not validate_request(ApprovalRequest(prompt="Pick", options=options, default_value="0"))
+    assert not validate_request(ApprovalRequest(prompt="Pick", options=options, allow_custom=True))
+    assert not validate_request(ApprovalRequest(prompt="Pick", options=options + (AskOption(value="17", label="x"),)))
+
+
+@pytest.mark.parametrize("answer", ["last", "cancel", "forged", "timeout", "skip", "typed"])
+async def test_fifteen_owned_apps_use_the_real_approval_helper(monkeypatch, answer):
+    import importlib
+    from anton.core.interaction.elicit import AskAnswer, validate_request
+
+    module = importlib.import_module("anton.core.interaction.elicit")
+    choices = tuple(las.SlotPlan(
+        i, replaces=_app(f"app-{i}", _ME, "2026-10-21T04:00:00Z"), boot_id=str(i),
+    ) for i in range(15))
+
+    async def elicit(session, question_id, request, *, counted):
+        assert validate_request(request) and not counted
+        assert len(request.options) == 16
+        assert [option.label for option in request.options[:-1]] == [f"Stop app-{i}" for i in range(15)]
+        assert request.options[-1].value == "cancel"
+        assert all("last request none yet" in option.detail for option in request.options[:-1])
+        assert not request.default_value and not request.allow_custom
+        if answer == "timeout":
+            return AskAnswer(status="timeout")
+        if answer == "skip":
+            return AskAnswer(status="cancelled")
+        value = request.options[-2].value if answer in ("last", "typed") else answer
+        return AskAnswer(status="answered", values=(value,), text="yes" if answer == "typed" else "")
+
+    monkeypatch.setattr(module, "elicit", elicit)
+    session = SimpleNamespace(elicitor=None, _write_gate=None)
+    if answer == "last":
+        assert await las._choose_replacement(session, choices, prompt="Launch?") == choices[-1]
+    else:
+        with pytest.raises(LiveAppLaunchError) as raised:
+            await las._choose_replacement(session, choices, prompt="Launch?")
+        assert raised.value.cause == "launch_not_approved"
+
+
+def test_unknown_slot_cannot_hide_another_app_when_cap_is_lower():
+    with pytest.raises(LiveAppLaunchError, match="running-app count") as raised:
+        las.plan_slot([_status(1), None], "new", _ME, per_person=1)
+    assert raised.value.cause == "no_slot"
+
+
+async def test_exited_capacity_notifies_waiters_before_another_launch_consumes_it(tmp_path, slots, approved, cards):
+    for slot in slots:
+        slot.run("colleague", _OTHER, started_at="2026-10-21T04:00:00Z")
+    slots[0].state = "exited"
+
+    class Host(FakeHost):
+        async def launched(self, launch):
+            assert self.available >= 1
+            await super().launched(launch)
+
+    host = Host()
+    result = await las.launch_live_app(_session(host), slug="notes", folder=_artifact(tmp_path), datasources=())
+    assert result.slot == 1 and host.available == 1
+    assert all(slot.resets == 0 for slot in slots[1:])
+
+
+@pytest.mark.parametrize("cause", ["cancelled", "timeout", "unavailable", "error", "unanswered_earlier", "stopped"])
+async def test_replacement_logs_every_refusal_and_stop(tmp_path, slots, approved, monkeypatch, caplog, cause):
+    from anton.core.utils import scratchpad
+
+    monkeypatch.setenv(las.PER_PERSON_ENV_VAR, "1")
+    slots[0].run("clock", _ME, started_at="2026-10-21T04:00:00Z")
+
+    async def choose(*args, **kwargs):
+        if cause == "stopped":
+            raise asyncio.CancelledError
+        return None, cause
+
+    monkeypatch.setattr(scratchpad, "ask_approval_choice", choose)
+    error = asyncio.CancelledError if cause == "stopped" else LiveAppLaunchError
+    with caplog.at_level(logging.WARNING, logger=las.__name__), pytest.raises(error):
+        await las.launch_live_app(_session(), slug="notes", folder=_artifact(tmp_path), datasources=())
+    (line,) = _logged_decisions(caplog)
+    decision = json.loads(line["message"].removeprefix("live app launch: "))
+    assert decision["status"] == cause
+    assert decision["slug"] == "notes" and decision["replaces"] is None
+    assert all(slot.resets == 0 and not slot.requests for slot in slots)
+
+
+async def test_stop_holds_cross_worker_admission_until_reset_finishes(tmp_path, slots, approved, cards, monkeypatch):
+    from contextvars import ContextVar
+
+    admission = asyncio.Lock()
+    worker_locks = ContextVar("worker_locks", default={})
+    monkeypatch.setattr(las, "_slot_locks", worker_locks.get)
+    entered, release = asyncio.Event(), asyncio.Event()
+    folder = _artifact(tmp_path, "clock")
+    _runs_from(slots[0], folder)
+    for slot in slots[1:]:
+        slot.run("other-held", _ME, started_at="2026-10-21T04:00:00Z")
+
+    class StopHost(FakeHost):
+        def launch_lock(self):
+            return admission
+
+        async def claim(self, slot):
+            entered.set()
+            await release.wait()
+            await super().claim(slot)
+
+    class OtherHost(FakeHost):
+        def launch_lock(self):
+            return admission
+
+    worker_locks.set({})
+    stopping = asyncio.create_task(las.stop_live_app(_session(StopHost()), folder=folder))
+    await entered.wait()
+    # The supervisor can expire an app while the old stop records its claim.
+    slots[0].state = "exited"
+    worker_locks.set({})
+    launching = asyncio.create_task(las.launch_live_app(
+        _session(OtherHost(_OTHER)), slug="new", folder=_artifact(tmp_path, "new"), datasources=(),
+    ))
+    try:
+        assert admission.locked()
+        await asyncio.sleep(0)
+        assert not launching.done()
+    finally:
+        release.set()
+    await stopping
+    result = await launching
+    assert result.slot == 1 and slots[0].app.launcher == _OTHER
+    assert slots[0].app.artifact == "new"
+
+
+@pytest.mark.parametrize("step", ["post", "replace_reset", "stop_reset"])
+async def test_repeated_stop_keeps_admission_until_mutating_thread_settles(
+        tmp_path, slots, approved, cards, step):
+    admission = asyncio.Lock()
+    entered, release = threading.Event(), threading.Event()
+    folder = _artifact(tmp_path)
+
+    class Host(FakeHost):
+        def launch_lock(self):
+            return admission
+
+    if step != "post":
+        _runs_from(slots[0], folder)
+    method = "launch" if step == "post" else "reset"
+    original = getattr(slots[0], method)
+
+    def slow(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return original(*args, **kwargs)
+
+    setattr(slots[0], method, slow)
+    session = _session(Host())
+    call = las.stop_live_app(session, folder=folder) if step == "stop_reset" else las.launch_live_app(
+        session, slug="sales-demo", folder=folder, datasources=(),
+    )
+    task = asyncio.create_task(call)
+    assert await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    try:
+        assert not task.done() and admission.locked()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not admission.locked()
+    assert slots[0].resets >= 1
+
+
+async def test_record_receives_one_stop_and_finishes_cleanup_before_unlock(tmp_path, slots, approved, cards):
+    admission = asyncio.Lock()
+    entered, cancelled, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    class Host(FakeHost):
+        def launch_lock(self):
+            return admission
+
+        async def launched(self, launch):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                await release.wait()
+                self.events.append(("record_cancelled", launch.slot))
+                raise
+
+    host = Host()
+    task = asyncio.create_task(las.launch_live_app(
+        _session(host), slug="notes", folder=_artifact(tmp_path), datasources=(),
+    ))
+    await entered.wait()
+    task.cancel()
+    await cancelled.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    try:
+        assert not task.done() and admission.locked()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert host.events == [("record_cancelled", 1)]
+    assert slots[0].resets == 1 and not admission.locked()

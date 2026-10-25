@@ -243,6 +243,12 @@ The same host supplies `learned_memory_scope` as `personal`, `shared`, `off` or 
 
 These are in-process session inputs. The cloud-turn wire does not transport deployment identity or learned-memory scope.
 
+## Shared live-app slots
+
+Hosts that enable live apps can set `ANTON_LIVE_APPS_PER_PERSON` from zero through their configured slot count. Empty uses the slot count; zero refuses launches and leaves running apps alone. At the cap, or when every slot is full, the person chooses one of their own apps to replace. Cancel, Skip and unanswered cards leave the apps running.
+
+`LiveAppHost` must implement a deployment-wide `launch_lock`, plus `slots_full` and `slots_available` hooks for durable notices. The lock must coordinate every server worker. Approval cards wait outside it; final ownership checks, slot changes and launch recording happen inside it. A notice invites refused people to try again and reserves no capacity.
+
 ## Model-call deadline
 A model call that sends nothing for 10 minutes is stopped, and the turn ends with "The model sent no output for 10 minutes, so the call was stopped." Every piece of text, thinking or tool-call arguments anton reads from the model restarts the 10 minutes, so a slow model that keeps writing is never cut. A non-streamed call gets the 10 minutes for the whole call, including the SDK's own retries. After one call in a turn runs out, every later model call in that turn fails at once. The one exception is the completion check after an answer: when it runs out, the turn ends on the answer that already streamed, marked unverified.
 
