@@ -215,10 +215,10 @@ class ShrunkView(BaseModel):
     a kind in state `pressed` before the edit and fewer than half as many of
     that kind now, at `viewports`; `before` and `after` are that kind's
     marks at the first of them. The service counts an svg view's markers,
-    bars and other shapes kind by kind, and table rows and HTML map markers
-    only inside a chart or map container with no svg or canvas; a canvas's
-    marks not at all. Not a failure: the service can't tell a filter the
-    user asked for from data the edit lost."""
+    bars and other shapes kind by kind, and a canvas's marks not at all;
+    the render check's own docs say which table rows and HTML map markers
+    count. Not a failure: the service can't tell a filter the user asked
+    for from data the edit lost."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -234,9 +234,9 @@ class Comparison(BaseModel):
 
     `previous` says how fully the previous page was checked: `not_checked`
     means not at all, so every list is empty and says nothing.
-    `broken_views` and `shrunk_views` speak for the states in `compared`
-    only, and `removal_checked` says which removals the service could see.
-    A service that predates `shrunk_views` sends none.
+    `broken_views` speaks for the states in `compared` only, and
+    `removal_checked` says which removals the service could see. A service
+    that predates `shrunk_views` sends none.
     """
 
     model_config = ConfigDict(extra="ignore")

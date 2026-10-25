@@ -305,11 +305,11 @@ as `previous_html`, unless less than a whole check's time
 (`render_check.TIMEOUT_SECONDS`) is left of the cell's budget, and the
 service's `comparison` names the views the turn's edits broke, left without
 a graphic, removed, or left fewer than half the marks of a kind they drew:
-an svg view's markers, bars and other shapes, each kind counted apart.
-Table rows and a map library's HTML markers count only inside a chart or
-map container that holds no svg or canvas, and a canvas's marks aren't
-counted. A view that broke fails the page, so its repair cells apply. The
-others are not failures, and the agent hears about each set once a turn.
+an svg view's markers, bars and other shapes, each kind counted apart, and
+a canvas's marks not at all; the render check's own docs say which table
+rows and HTML map markers count. A view that broke fails the page, so its
+repair cells apply. The others are not failures, and the agent hears about
+each set once a turn.
 When a page the turn's edits made worse fails with no repair cells left,
 anton puts the copy back. A `generate_artifact` run on an existing
 artifact that fails, stops over budget, crashes or is abandoned by the
