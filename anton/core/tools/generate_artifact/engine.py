@@ -627,7 +627,8 @@ async def _generate_api_spec(
     ``messages`` and ``system_override`` are the hot path: the node continues
     the shared history under the region's single system prompt, and the step
     message is the instruction alone — the PRD and `spec.md` are already in
-    that history as the model's own replies. They travel together: a history
+    that history as the model's own replies (`write_prd` and
+    `orchestrator._write_tech_spec` add them). They travel together: a history
     sent under a different system prompt would discard the prefix cache the
     shared region exists to keep. Without ``messages`` the cold-start prompt
     carries the assembled context in front of the same instruction, and
@@ -762,16 +763,17 @@ def _api_spec_problem(spec, declared: dict[str, str] | None = None) -> str | Non
         present = {
             _normalise_api_path(p): p for p in paths if _normalise_api_path(p) != _HEALTH_PATH
         }
-        for key in sorted(set(declared) - set(present)):
-            return (
-                f"`spec.md` lists `{declared[key]}` but the document has no such path "
-                "(keep every path exactly as `spec.md` writes it)"
-            )
-        for key in sorted(set(present) - set(declared)):
-            return (
-                f"the document adds `{present[key]}`, which `spec.md` does not list "
-                "(keep every path exactly as `spec.md` writes it)"
-            )
+        # Every mismatch at once: naming one per retry leaves the rest for a
+        # retry the node doesn't have.
+        missing = [f"`{declared[key]}`" for key in sorted(set(declared) - set(present))]
+        extra = [f"`{present[key]}`" for key in sorted(set(present) - set(declared))]
+        mismatches = []
+        if missing:
+            mismatches.append(f"`spec.md` lists {', '.join(missing)} but the document has no such path")
+        if extra:
+            mismatches.append(f"the document adds {', '.join(extra)}, which `spec.md` does not list")
+        if mismatches:
+            return "; ".join(mismatches) + " (keep every path exactly as `spec.md` writes it)"
     return None
 
 

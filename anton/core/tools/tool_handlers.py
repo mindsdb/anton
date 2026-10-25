@@ -838,6 +838,15 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> Tool
             f"Error: `type` must be one of {ARTIFACT_TYPES}. Got: {artifact_type!r}.",
             reason="invalid_type",
         )
+    # The tool's schema leaves the fullstack types out where nothing starts an
+    # app backend (`live_app_slots.fullstack_offered`), but not every model
+    # keeps to a schema's enum.
+    if artifact_type.startswith("fullstack-") and not getattr(session, "_fullstack_offered", True):
+        return SideEffectResult.failed(
+            "Error: this deployment starts no app backends, so there is no fullstack type: "
+            "register an html-app instead.",
+            reason="invalid_type",
+        )
 
     artifact = store.create(  # type: ignore[arg-type]
         name=name,

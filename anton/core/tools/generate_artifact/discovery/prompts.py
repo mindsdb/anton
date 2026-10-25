@@ -6,7 +6,6 @@ neither has to re-derive it — only the task-specific instructions differ.
 
 from __future__ import annotations
 
-from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES_ORDERED
 from anton.core.llm.prompts import ANTON_NOTE
 
 from ..attachments import render_for_gathering
@@ -24,7 +23,23 @@ def build_pipeline_system_prompt(state: PrdState) -> str:
     for the whole shared history. The project's rules qualify: they are read
     once per run, before this is first built.
     """
-    types_list = ", ".join(f"`{t}`" for t in GENERATOR_ARTIFACT_TYPES_ORDERED)
+    types = state.buildable_types
+    types_list = ", ".join(f"`{t}`" for t in types)
+    fullstack_choice = (
+        "\n\nChoosing between the two fullstack types: pick "
+        "`fullstack-stateful-app` ONLY when the app must own durable state "
+        "of its own — data the app itself creates and keeps between "
+        "requests (user-created notes/todos, counters, settings, sessions). "
+        "That state lives in the platform STATE store, a document/key-value "
+        "store suited to LIGHT data keyed by id. An app that only reads "
+        "from or writes to EXTERNAL data sources (databases, APIs) is "
+        "`fullstack-stateless-app` — an external DB is a data source, not "
+        "app-owned state. Heavy or relational data (joins, transactions, "
+        "analytics) always belongs in an external database, which usually "
+        "means stateless. Prefer stateless when in doubt."
+        if "fullstack-stateless-app" in types
+        else ""
+    )
     return with_project_rules(
         "You are producing a web artifact end to end, in one pipeline of "
         "steps. Each step has its own output — do not do the next step's "
@@ -48,18 +63,8 @@ def build_pipeline_system_prompt(state: PrdState) -> str:
         "standing orders. The tool list stays the same for the whole "
         "pipeline; a tool being listed does NOT mean it is available on the "
         "current step. Calling one that is not available wastes a round and "
-        "is answered with a refusal naming the step.\n\n"
-        "Choosing between the two fullstack types: pick "
-        "`fullstack-stateful-app` ONLY when the app must own durable state "
-        "of its own — data the app itself creates and keeps between "
-        "requests (user-created notes/todos, counters, settings, sessions). "
-        "That state lives in the platform STATE store, a document/key-value "
-        "store suited to LIGHT data keyed by id. An app that only reads "
-        "from or writes to EXTERNAL data sources (databases, APIs) is "
-        "`fullstack-stateless-app` — an external DB is a data source, not "
-        "app-owned state. Heavy or relational data (joins, transactions, "
-        "analytics) always belongs in an external database, which usually "
-        "means stateless. Prefer stateless when in doubt.",
+        "is answered with a refusal naming the step."
+        + fullstack_choice,
         state.project_rules,
     )
 
