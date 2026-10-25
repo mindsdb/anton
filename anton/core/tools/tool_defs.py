@@ -596,9 +596,9 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
 )
 
 
-# `create_artifact` and `generate_artifact` where nothing starts an app
-# backend (`live_app_slots.fullstack_offered` is False): html-app is the one
-# web type, and neither text offers a fullstack app or `launch_backend`.
+# `create_artifact`, `generate_artifact` and `update_artifact` where nothing
+# starts an app backend (`live_app_slots.fullstack_offered` is False): html-app
+# is the one web type, and no text offers a fullstack app or `launch_backend`.
 STATIC_CREATE_ARTIFACT_TOOL = replace(
     CREATE_ARTIFACT_TOOL,
     description=cut_spans(
@@ -645,6 +645,21 @@ STATIC_GENERATE_ARTIFACT_TOOL = replace(
         (" and pick the type (one of html-app,", ".\n  2. Call", " with type `html-app`"),
         ("\nDo NOT call `launch_backend` for a fullstack", None, ""),
     ),
+)
+
+STATIC_UPDATE_ARTIFACT_METADATA_TOOL = replace(
+    UPDATE_ARTIFACT_METADATA_TOOL,
+    description=cut_spans(
+        UPDATE_ARTIFACT_METADATA_TOOL.description,
+        ("- `port`: port the backend process", "- `datasources`", ""),
+    ),
+    input_schema={
+        **UPDATE_ARTIFACT_METADATA_TOOL.input_schema,
+        "properties": {
+            name: spec for name, spec in UPDATE_ARTIFACT_METADATA_TOOL.input_schema["properties"].items()
+            if name != "port"
+        },
+    },
 )
 
 

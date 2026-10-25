@@ -115,6 +115,7 @@ from anton.core.tools.tool_defs import (
     SELECT_PATH_TOOL_PICK_ONLY,
     STATIC_CREATE_ARTIFACT_TOOL,
     STATIC_GENERATE_ARTIFACT_TOOL,
+    STATIC_UPDATE_ARTIFACT_METADATA_TOOL,
     UPDATE_ARTIFACT_METADATA_TOOL,
     ToolDef,
 )
@@ -3193,7 +3194,9 @@ class ChatSession:
             fullstack = self._fullstack_offered
             self.tool_registry.register_tool(CREATE_ARTIFACT_TOOL if fullstack else STATIC_CREATE_ARTIFACT_TOOL)
             self.tool_registry.register_tool(LIST_ARTIFACTS_TOOL)
-            self.tool_registry.register_tool(UPDATE_ARTIFACT_METADATA_TOOL)
+            self.tool_registry.register_tool(
+                UPDATE_ARTIFACT_METADATA_TOOL if fullstack else STATIC_UPDATE_ARTIFACT_METADATA_TOOL
+            )
             if fullstack:
                 self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
             self.tool_registry.register_tool(GENERATE_ARTIFACT_TOOL if fullstack else STATIC_GENERATE_ARTIFACT_TOOL)

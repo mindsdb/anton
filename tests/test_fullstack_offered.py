@@ -3,10 +3,11 @@
 Agent code that runs under a sandbox policy, with live apps off, can't start
 an app backend. Its agent is offered none: no `launch_backend`, no fullstack
 type in `create_artifact` or in the generator's gathering step, no backend
-section and no backend URL in the prompt. Without a policy (desktop, cloud),
-or with live apps on, the offer is what it was."""
+section, no backend skill and no backend URL in the prompt. Without a policy
+(desktop, cloud), or with live apps on, the offer is what it was."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,8 +16,10 @@ import pytest
 from anton.core.artifacts import live_app_slots as las
 from anton.core.backends.sandbox import CellSandbox
 from anton.core.llm.prompts import ARTIFACTS_PROMPT, BACKEND_GENERATION_PROMPT, STATIC_ARTIFACTS_PROMPT
+from anton.core.memory import skills as skills_mod
 from anton.core.session import ChatSession, ChatSessionConfig
 from anton.core.tools.generate_artifact.state import GenState
+from anton.core.tools.tool_handlers import handle_create_artifact
 from anton.workspace import Workspace
 from tests.conftest import make_mock_llm, run_turn
 
@@ -41,6 +44,14 @@ def live_apps_on(monkeypatch):
     monkeypatch.setenv(las.SLOTS_ENV_VAR, "http://live-app-1:8001")
 
 
+@pytest.fixture
+def builtin_skills(monkeypatch):
+    """The real built-in skills, which the suite hides (conftest's
+    `_no_builtin_skills`): a real turn's prompt lists each one's description,
+    and `build-fullstack-backend`'s offers the fullstack types."""
+    monkeypatch.setattr(skills_mod, "_BUILTIN_SKILLS_ROOT", Path(skills_mod.__file__).parent / "builtin_skills")
+
+
 def test_fullstack_is_offered_without_a_policy_or_with_live_apps(policy, monkeypatch):
     monkeypatch.delenv(las.SLOTS_ENV_VAR, raising=False)
     assert las.fullstack_offered(None) is True
@@ -63,25 +74,31 @@ async def _first_request(tmp_path: Path, cell_sandbox: CellSandbox | None) -> tu
     return kwargs["system"], {tool["name"]: tool for tool in kwargs["tools"]}
 
 
-async def test_a_sandboxed_turn_without_live_apps_offers_no_fullstack_app(tmp_path, policy, live_apps_off):
+async def test_a_sandboxed_turn_without_live_apps_offers_no_fullstack_app(
+    tmp_path, policy, live_apps_off, builtin_skills,
+):
     system, tools = await _first_request(tmp_path, policy)
 
     assert "launch_backend" not in tools
     assert tools["create_artifact"]["input_schema"]["properties"]["type"]["enum"] == [
         "html-app", "document", "dataset", "image", "mixed",
     ]
-    for name in ("create_artifact", "generate_artifact"):
-        assert not any(t in tools[name]["description"] for t in _FULLSTACK_TYPES)
-        assert "launch_backend" not in tools[name]["description"]
+    assert "port" not in tools["update_artifact"]["input_schema"]["properties"]
+    every_tool = json.dumps(list(tools.values()))
+    assert not any(t in every_tool for t in _FULLSTACK_TYPES)
+    assert "launch_backend" not in every_tool
     assert BACKEND_GENERATION_PROMPT not in system
     assert STATIC_ARTIFACTS_PROMPT in system
     assert "the entry point is the `url`" not in system
     assert "launch_backend" not in system
+    assert "build-fullstack-backend" not in system
     assert not any(t in system for t in _FULLSTACK_TYPES)
 
 
 @pytest.mark.parametrize("sandboxed", [False, True], ids=["no-policy", "policy-and-live-apps"])
-async def test_without_a_policy_or_with_live_apps_the_offer_is_unchanged(tmp_path, policy, monkeypatch, sandboxed):
+async def test_without_a_policy_or_with_live_apps_the_offer_is_unchanged(
+    tmp_path, policy, monkeypatch, builtin_skills, sandboxed,
+):
     if sandboxed:
         monkeypatch.setenv(las.SLOTS_ENV_VAR, "http://live-app-1:8001")
     else:
@@ -90,8 +107,38 @@ async def test_without_a_policy_or_with_live_apps_the_offer_is_unchanged(tmp_pat
 
     assert "launch_backend" in tools
     assert set(_FULLSTACK_TYPES) <= set(tools["create_artifact"]["input_schema"]["properties"]["type"]["enum"])
+    assert "port" in tools["update_artifact"]["input_schema"]["properties"]
     assert ARTIFACTS_PROMPT in system
     assert BACKEND_GENERATION_PROMPT in system
+    assert "- `build-fullstack-backend` — " in system
+
+
+def _registering_session(tmp_path: Path, *, fullstack_offered: bool) -> SimpleNamespace:
+    return SimpleNamespace(
+        _workspace=SimpleNamespace(artifacts_dir=tmp_path), _data_vault=None, _fullstack_offered=fullstack_offered,
+    )
+
+
+async def test_create_artifact_refuses_a_fullstack_type_where_none_is_offered(tmp_path):
+    """The schema leaves the fullstack types out, but not every model keeps
+    to an enum: the handler refuses one too, before any folder exists."""
+    session = _registering_session(tmp_path, fullstack_offered=False)
+    outcome = await handle_create_artifact(
+        session, {"name": "Demo", "description": "d", "type": "fullstack-stateless-app"},
+    )
+
+    assert outcome.ok is False
+    assert "register an html-app instead" in outcome.content
+    assert not any(tmp_path.iterdir())
+
+
+async def test_create_artifact_registers_a_fullstack_type_where_one_is_offered(tmp_path):
+    session = _registering_session(tmp_path, fullstack_offered=True)
+    outcome = await handle_create_artifact(
+        session, {"name": "Demo", "description": "d", "type": "fullstack-stateless-app"},
+    )
+
+    assert outcome.ok is True
 
 
 def _gen_state(tmp_path: Path, *, fullstack_offered: bool) -> GenState:

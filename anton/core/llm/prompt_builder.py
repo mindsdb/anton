@@ -75,7 +75,7 @@ class ChatSystemPromptBuilder:
         return "\n\n".join(chunks)
 
     def _build_procedural_memory_section(
-        self, skill_store: "SkillStore | None"
+        self, skill_store: "SkillStore | None", *, fullstack_offered: bool = True
     ) -> str:
         """Build the '## Procedural memory' section listing available skills.
 
@@ -83,6 +83,8 @@ class ChatSystemPromptBuilder:
         instruction telling the LLM to call `recall_skill(label)` to load
         the full procedure. Returns an empty string if no store is wired
         or no skills are saved — the caller skips the section entirely.
+        ``fullstack_offered`` False leaves out `build-fullstack-backend`,
+        whose line offers the fullstack types the tools leave out.
         """
         if skill_store is None:
             return ""
@@ -111,7 +113,7 @@ class ChatSystemPromptBuilder:
         for s in summaries:
             label = s.get("label", "")
             when = s.get("description", "").strip()
-            if not label:
+            if not label or (not fullstack_offered and label == "build-fullstack-backend"):
                 continue
             if when:
                 lines.append(f"- `{label}` — {when}")
@@ -156,8 +158,9 @@ class ChatSystemPromptBuilder:
         fullstack_offered: bool = True,
     ) -> str:
         """``fullstack_offered`` False (`live_app_slots.fullstack_offered`)
-        leaves out the fullstack types and the backend section: nothing on
-        this deployment would start the app's backend."""
+        leaves out the fullstack types, the backend section and the backend
+        skill's line: nothing on this deployment would start the app's
+        backend."""
         visualizations_section = self._build_visualizations_section(
             proactive_dashboards=proactive_dashboards,
             output_dir=output_dir,
@@ -214,7 +217,9 @@ class ChatSystemPromptBuilder:
 
         # Saved skills change rarely (the built-ins plus the user's own), so
         # they stay in the shared part ahead of anything project-specific.
-        procedural_memory = self._build_procedural_memory_section(skill_store)
+        procedural_memory = self._build_procedural_memory_section(
+            skill_store, fullstack_offered=fullstack_offered
+        )
         if procedural_memory:
             prompt += procedural_memory
 
