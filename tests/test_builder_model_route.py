@@ -3,8 +3,7 @@
 
 Every planning, coding and structured call the pipeline makes asks for the
 builder's model, on the agent's own provider and so its endpoint, with the
-builder's effort under the pipeline's ceiling. The agent's calls in the same
-turn keep their own. The tests drive a real `LLMClient` over a provider that
+builder's effort. The agent's calls in the same turn keep their own. The tests drive a real `LLMClient` over a provider that
 records each call, because the route is in what each call asks for.
 """
 
