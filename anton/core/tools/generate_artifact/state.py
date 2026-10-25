@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .debug_trace import NullTrace, GenTrace  # noqa: F401  (GenTrace re-exported for typing)
 from .progress import PEEK_GROUPS, LivePeek, StepCounter, label_for, plan_steps
@@ -32,6 +32,10 @@ DATA_LOOP_MAX: int = 3
 GEN_LOOP_MAX_RETRIES: int = 1
 GEN_VERIFY_MAX_RETRIES: int = 1
 RUNAPP_MAX_RETRIES: int = 1
+
+# Every "not enough data" error starts with this; the tool handler keys the
+# text it gives the agent on it.
+NOT_ENOUGH_DATA_PREFIX = "not enough data:"
 
 # Per-line detail cap for GenState.journal() — keeps the journal compact when
 # a step's detail is long (full text still lives in data_notes / trace_log).
@@ -127,7 +131,10 @@ class RequiredDataItem(BaseModel):
 class RequiredData(BaseModel):
     """`define_required_data`: what data is needed and where to get it."""
 
-    items: list[RequiredDataItem]
+    items: list[RequiredDataItem] = Field(
+        description="Data still missing for the task, one entry per item. "
+        "Empty when nothing is missing."
+    )
     reasoning: str
 
 
@@ -194,6 +201,21 @@ def language_name(user_language: str | None) -> str:
     return " ".join((user_language or "").split()) or DEFAULT_USER_LANGUAGE
 
 
+def settled_artifact_type(state) -> str:
+    """The type gathering settled on, or the registered one before it ran."""
+    return state.final_artifact_type or state.artifact_type
+
+
+def known_data_usable(state) -> bool:
+    """Whether `known_data` can stand in for executed code.
+
+    Only for an html-app, whose page embeds a snapshot. A fullstack backend
+    reads its source at run time and needs working access code in
+    `data_notes`.
+    """
+    return settled_artifact_type(state) == "html-app" and bool((state.known_data or "").strip())
+
+
 @dataclass
 class GenState:
     session: "ChatSession | Any"
@@ -220,6 +242,9 @@ class GenState:
     prd: str = ""
     data_notes: str = ""
     data_iterations: int = 0
+    # The data loop's one fetch against a "not possible" verdict was spent.
+    # Per call, never persisted: a repeat call gets its own attempt.
+    forced_fetch_used: bool = False
     api_spec: str | None = None
     files_written: list[str] = field(default_factory=list)
     # Generation inputs (spec.md, openapi.json) rather than user-facing output:
@@ -350,6 +375,10 @@ class GenState:
     # correction the notes are full of the PREVIOUS gathering's cells, and an
     # emptiness check would read that as "everything is covered".
     unverified_sources: list[str] = field(default_factory=list)
+    # Declared sources that only the `known_data` mark verified. A new
+    # iteration that brings no `known_data` puts them back in
+    # `unverified_sources`: nothing else vouches for them.
+    known_data_verified: list[str] = field(default_factory=list)
     # Raw material for the deterministic renderers in discovery/notes.py.
     scratchpad_execs: list[dict] = field(default_factory=list)
     web_calls: list[dict] = field(default_factory=list)

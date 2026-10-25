@@ -56,6 +56,19 @@ def _system_prompts(state: GenState, project_rules: str) -> dict[str, str]:
     }
 
 
+def test_the_data_steps_put_the_language_line_before_the_rules(tmp_path):
+    """A project rule about language comes after the run's language line,
+    so the rule has the last word, as it does in the generators."""
+    state = _state(tmp_path, user_language="Spanish")
+    line = "Write `reasoning` and any summary in Spanish."
+    for system in (
+        prompts.build_required_data_prompt(state)[0],
+        prompts.build_can_fetch_prompt(state, "- sales")[0],
+        prompts.build_fetch_data_system_prompt(tmp_path, project_rules=RULES, user_language="Spanish"),
+    ):
+        assert system.index(line) < system.index(RULES)
+
+
 def test_every_step_carries_the_rules_under_the_heading(tmp_path):
     for step, system in _system_prompts(_state(tmp_path), RULES).items():
         assert prompts.PROJECT_RULES_HEADER in system, step

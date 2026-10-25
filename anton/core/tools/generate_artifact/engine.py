@@ -421,7 +421,9 @@ async def generate(
         primary=primary,
         user_request=user_request,
         agent_understanding=agent_understanding,
-        known_data=known_data,
+        # Scrubbed once here: it reaches every step's prompt and is saved in
+        # discovery.json, and the agent may have pasted a credential with it.
+        known_data=scrub_credentials(known_data),
         user_preferences=user_preferences,
         user_language=user_language,
         datasource_catalog=_datasource_catalog(session),
@@ -455,7 +457,7 @@ async def generate(
     )
     state.record("entry", entry, "" if stored is None else stored.pipeline_stage)
     if entry != cp.ENTRY_FULL and stored is not None:
-        _restore(state, stored)
+        _restore(state, stored, entry=entry)
         _load_prd(state)
         # Only where the spec phase is skipped: every other entry rewrites
         # the contract in `_make_api_spec`, and `_invalidate_specs` has
@@ -519,7 +521,7 @@ def _record_page_check(session, *, state, result: dict | str) -> None:
     )
 
 
-def _restore(state, stored) -> None:
+def _restore(state, stored, *, entry: str = "") -> None:
     """Rebuild in memory what the discovery phases produced last time.
 
     Everything phase E reads has to come back, not just the PRD: the
@@ -529,6 +531,9 @@ def _restore(state, stored) -> None:
     `call_changed` is the only derived value — it says whether this call
     brought a correction, and it decides whether the brief is redrawn or
     reused verbatim. An optimization, never a confirmation signal.
+
+    `entry` decides whether a call without `known_data` inherits the saved
+    copy: only a call that continues the same run does.
     """
     from .discovery import checkpoint as cp
 
@@ -550,6 +555,23 @@ def _restore(state, stored) -> None:
         state.attachments = [
             a for a in (Attachment.from_dict(d) for d in stored.attachments) if a is not None
         ]
+    state.known_data_verified = list(stored.known_data_verified)
+    # Before the fingerprint: the saved fingerprint was taken over this same
+    # text, so a call that omits it is not a change.
+    if not (state.known_data or "").strip():
+        if entry == cp.ENTRY_NEW_ITERATION:
+            # The previous run finished, and new work brings its own data:
+            # rows from an earlier call may be what the user asked to drop.
+            # Without them nothing vouches for the sources they verified, so
+            # the data loop reads those again.
+            state.unverified_sources += [
+                s for s in state.known_data_verified if s not in state.unverified_sources
+            ]
+            state.known_data_verified = []
+        else:
+            # The same run continuing (a confirmation, a resume after a
+            # stop): its brief and PRD were drawn from these rows.
+            state.known_data = stored.known_data
     state.call_changed = stored.call_fingerprint != cp.call_fingerprint(
         state.agent_understanding, state.known_data, state.user_preferences,
         state.user_language,
@@ -812,9 +834,12 @@ async def _run_loop(
     Returns a result dict ``{files_written, rounds_used, summary,
     scratchpad_execs}`` on success, or a plain error string on failure.
     ``scratchpad_execs`` records every scratchpad ``exec`` the loop ran —
-    ``{name, code, output}`` per call, leaving out a cell that never ran
+    ``{name, code, output, ok}`` per call (``ok`` False for a cell the
+    runtime reported as failed), leaving out a cell that never ran
     (``CELL_NOT_RUN_REASONS``) — so callers can hand the exact data-access
-    code that ran to later FSM steps.
+    code that ran to later FSM steps. With ``require_files=False`` a loop
+    that ends without ``finish`` still returns the dict, ``finished`` False,
+    so the cells it ran survive.
 
     ``spend``, when given, is the run's `SpendGuard`. Once the turn's ceiling
     is reached the loop tells the model to close its file and stop, and gives
@@ -994,6 +1019,16 @@ async def _run_loop(
 
         if not response.tool_calls:
             tail = (response.content or "").strip()
+            if not require_files:
+                # A fetch that ended in prose still ran its cells; they are
+                # what the caller judges, not the missing `finish`.
+                return {
+                    "files_written": files_written,
+                    "rounds_used": round_idx + 1,
+                    "summary": tail[:300],
+                    "scratchpad_execs": scratchpad_execs,
+                    "finished": False,
+                }
             return (
                 f"generator stopped without writing files "
                 f"(round {round_idx + 1}/{MAX_ROUNDS}). "
@@ -1065,6 +1100,10 @@ async def _run_loop(
                             "name": str(inp.get("name") or ""),
                             "code": str(inp.get("code") or ""),
                             "output": sub_tools.result_text(content),
+                            # A cell the runtime reported as failed is no
+                            # working access code: the fetch verdict and the
+                            # notes renderer read this.
+                            "ok": getattr(outcome, "ok", None) is not False,
                         }
                     )
                 trace.scratchpad(node=node_label, input=inp, output=content)
@@ -1103,7 +1142,7 @@ async def _run_loop(
         # complete 48 KB page was deleted and regenerated because the model
         # burned its last rounds self-checking). The
         # `finished` flag tells the caller how the loop ended.
-        if not files_written:
+        if not files_written and require_files:
             return (
                 f"generator exceeded round budget ({MAX_ROUNDS}) without "
                 "writing any files."

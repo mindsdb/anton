@@ -188,3 +188,15 @@ def test_a_confirming_call_repeats_the_language():
         GENERATE_ARTIFACT_TOOL.prompt,
     ):
         assert "SAME `user_request` and `user_language`" in text
+
+
+def test_the_data_steps_write_their_reasoning_in_the_run_language(tmp_path):
+    line = "Write `reasoning` and any summary in Spanish."
+    st = _state(tmp_path, user_language="Spanish")
+    for system, _ in (
+        prompts.build_required_data_prompt(st),
+        prompts.build_can_fetch_prompt(st, "- sites"),
+    ):
+        assert line in system
+    assert line in prompts.build_fetch_data_system_prompt(tmp_path, user_language="Spanish")
+    assert "Write `reasoning` and any summary in English." in prompts.build_fetch_data_system_prompt(tmp_path)

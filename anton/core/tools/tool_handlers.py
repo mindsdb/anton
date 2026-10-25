@@ -1189,6 +1189,24 @@ def _generation_failed(reason: str) -> str:
     )
 
 
+def _data_unavailable(reason: str) -> str:
+    """Report a run that stopped for missing data, with the step that fixes it.
+
+    Apart from `_generation_failed` on purpose: nothing was built and nothing
+    is broken, so the agent is told what to ask the user for instead of how
+    to proceed — an open question is what sent it to build the page by hand.
+    """
+    return (
+        "Error: the data this artifact needs is not available.\n\n"
+        f"{reason}\n\n"
+        "IMPORTANT: do NOT build the artifact yourself — no write_file / "
+        "scratchpad fallback. Tell the user which data is missing and where "
+        "it was looked for, and ask them to connect the source or provide "
+        "the data. Once they do, call generate_artifact again and pass the "
+        "data in `known_data`, naming the scratchpad and cell it lives in."
+    )
+
+
 async def _drain_progress(queue):
     """Yield ToolProgress markers, staying silent while a question is open.
 
@@ -1492,10 +1510,16 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         task.cancel()
 
     if isinstance(result, str):
+        from anton.core.tools.generate_artifact.state import NOT_ENOUGH_DATA_PREFIX
+
         # A failed run still worked inside the artifact folder on its way to
         # failing, so the turn touched the artifact.
         _track_artifact(session, store, slug, summary="Generated artifact files")
-        yield ToolOutcome(content=_generation_failed(result), ok=False, reason="pipeline")
+        content = (
+            _data_unavailable(result) if result.startswith(NOT_ENOUGH_DATA_PREFIX)
+            else _generation_failed(result)
+        )
+        yield ToolOutcome(content=content, ok=False, reason="pipeline")
         return
 
     status = result.get("status", "generated")

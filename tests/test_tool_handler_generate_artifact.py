@@ -73,6 +73,22 @@ async def test_fsm_failure_is_wrapped_with_report_instruction(tmp_path: Path, mo
     assert "Report this failure to the user" in out
 
 
+async def test_missing_data_tells_the_agent_what_to_ask_the_user_for(tmp_path: Path, monkeypatch):
+    slug = _make_artifact(tmp_path)
+
+    async def fake_generate(**kw):
+        return "not enough data: no connection holds the sites. Looked in: rest-gw."
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    _, out = await _collect(_session(tmp_path), {"slug": slug, "user_request": "build it", "agent_understanding": "an app"})
+    assert out.startswith("Error: the data this artifact needs is not available.")
+    assert "no connection holds the sites. Looked in: rest-gw." in out
+    assert "do NOT build the artifact yourself" in out
+    assert "pass the data in `known_data`" in out
+    assert "artifact generation failed" not in out
+    assert "ask how they want to proceed" not in out
+
+
 async def test_generator_crash_is_wrapped(tmp_path: Path, monkeypatch):
     slug = _make_artifact(tmp_path)
 
@@ -746,6 +762,20 @@ def test_known_data_asks_the_outer_agent_to_name_the_scratchpad():
     schema_text = GENERATE_ARTIFACT_TOOL.input_schema["properties"]["known_data"]["description"]
     assert "name the scratchpad" in schema_text
     assert "NAME THE SCRATCHPAD" in GENERATE_ARTIFACT_TOOL.description
+
+
+def test_known_data_asks_for_the_rows_and_says_a_new_request_does_not_inherit_it():
+    """The gathering rule counts only the values themselves, and a new
+    iteration does not reuse the saved copy: the agent has to know both."""
+    from anton.core.tools.tool_defs import GENERATE_ARTIFACT_TOOL
+
+    schema_text = GENERATE_ARTIFACT_TOOL.input_schema["properties"]["known_data"]["description"]
+    for text in (schema_text, GENERATE_ARTIFACT_TOOL.description):
+        assert "rows or values" in text
+        assert "a few hundred rows at most" in text
+        assert "does not count" in text
+    assert "pass it again" in schema_text
+    assert "Pass it on every call that needs it" in GENERATE_ARTIFACT_TOOL.description
 
 
 # ── S-03: the agent relays skipped checks and warnings ──────────────────────
