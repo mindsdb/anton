@@ -119,6 +119,7 @@ def test_load_defaults_known_data_for_a_file_written_before_it(tmp_path: Path):
     loaded = cp.load(tmp_path)
     assert loaded is not None
     assert loaded.known_data == ""
+    assert loaded.known_data_verified == []
 
 
 # ── entry decision ──────────────────────────────────────────────────────────

@@ -451,6 +451,19 @@ async def test_redraw_lets_a_new_source_whose_rows_are_in_known_data_count_as_ve
     ))
     await brief.redraw_brief(state)
     assert state.unverified_sources == []
+    assert state.known_data_verified == ["sites"]
+
+
+async def test_redraw_keeps_what_the_rows_verified_on_an_earlier_call(tmp_path):
+    state = _state(tmp_path, known_data=_SITES)
+    state.declared_sources = ["sites", "orders"]
+    state.known_data_verified = ["sites"]
+    state.session._llm.plan = AsyncMock(return_value=_redraw_response(
+        "## Goal\nRedrawn.", data_sources=["sites", "orders"],
+    ))
+    await brief.redraw_brief(state)
+    assert state.unverified_sources == []
+    assert state.known_data_verified == ["sites"]
 
 
 async def test_redraw_keeps_a_source_that_was_still_unverified(tmp_path):

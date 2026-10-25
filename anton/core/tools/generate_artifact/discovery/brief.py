@@ -311,9 +311,18 @@ async def redraw_brief(state: PrdState) -> None:
         # "everything is covered".
         covered = known_data_sources(finish_inp, usable=known_data_usable(state))
         still_unverified = set(state.unverified_sources)
+        by_known_data = set(state.known_data_verified)
         state.unverified_sources = [
             s for s in declared
             if (s not in previous or s in still_unverified) and source_key(s) not in covered
+        ]
+        # Marked now or vouched for by the rows on an earlier call. A source
+        # some executed code also read may land here too; reading it again
+        # costs a fetch, not a page built without its rows.
+        state.known_data_verified = [
+            s for s in declared
+            if s not in state.unverified_sources
+            and (source_key(s) in covered or s in by_known_data)
         ]
     else:
         state.trace_log.node(

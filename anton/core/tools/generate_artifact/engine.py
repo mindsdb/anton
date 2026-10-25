@@ -394,7 +394,7 @@ async def generate(
     """
     from .attachments import resolve_attachments
     from .discovery import checkpoint as cp
-    from .orchestrator import _datasource_catalog, run
+    from .orchestrator import _artifact_skills, _datasource_catalog, _project_rules, run
     from .spend import SpendGuard
     from .state import GenState
     from .debug_trace import make_trace
@@ -427,6 +427,8 @@ async def generate(
         user_preferences=user_preferences,
         user_language=user_language,
         datasource_catalog=_datasource_catalog(session),
+        project_rules=_project_rules(session),
+        artifact_skills=_artifact_skills(session),
         scratchpads_context=_scratchpads_context(session),
         trace_log=trace,
         progress=progress,
@@ -455,7 +457,7 @@ async def generate(
     )
     state.record("entry", entry, "" if stored is None else stored.pipeline_stage)
     if entry != cp.ENTRY_FULL and stored is not None:
-        _restore(state, stored)
+        _restore(state, stored, entry=entry)
         _load_prd(state)
         # Only where the spec phase is skipped: every other entry rewrites
         # the contract in `_make_api_spec`, and `_invalidate_specs` has
@@ -519,7 +521,7 @@ def _record_page_check(session, *, state, result: dict | str) -> None:
     )
 
 
-def _restore(state, stored) -> None:
+def _restore(state, stored, *, entry: str = "") -> None:
     """Rebuild in memory what the discovery phases produced last time.
 
     Everything phase E reads has to come back, not just the PRD: the
@@ -529,6 +531,9 @@ def _restore(state, stored) -> None:
     `call_changed` is the only derived value — it says whether this call
     brought a correction, and it decides whether the brief is redrawn or
     reused verbatim. An optimization, never a confirmation signal.
+
+    `entry` decides whether a call without `known_data` inherits the saved
+    copy: only a call that continues the same run does.
     """
     from .discovery import checkpoint as cp
 
@@ -550,10 +555,23 @@ def _restore(state, stored) -> None:
         state.attachments = [
             a for a in (Attachment.from_dict(d) for d in stored.attachments) if a is not None
         ]
+    state.known_data_verified = list(stored.known_data_verified)
     # Before the fingerprint: the saved fingerprint was taken over this same
     # text, so a call that omits it is not a change.
     if not (state.known_data or "").strip():
-        state.known_data = stored.known_data
+        if entry == cp.ENTRY_NEW_ITERATION:
+            # The previous run finished, and new work brings its own data:
+            # rows from an earlier call may be what the user asked to drop.
+            # Without them nothing vouches for the sources they verified, so
+            # the data loop reads those again.
+            state.unverified_sources += [
+                s for s in state.known_data_verified if s not in state.unverified_sources
+            ]
+            state.known_data_verified = []
+        else:
+            # The same run continuing (a confirmation, a resume after a
+            # stop): its brief and PRD were drawn from these rows.
+            state.known_data = stored.known_data
     state.call_changed = stored.call_fingerprint != cp.call_fingerprint(
         state.agent_understanding, state.known_data, state.user_preferences,
         state.user_language,
@@ -576,6 +594,7 @@ async def _generate_api_spec(
     messages: list[dict] | None = None,
     tools: list[dict] | None = None,
     system_override: str | None = None,
+    project_rules: str = "",
     on_text=None,
 ) -> str:
     """One-shot planning call → OpenAPI specification (JSON).
@@ -586,7 +605,9 @@ async def _generate_api_spec(
     that history as the model's own replies. They travel together: a history
     sent under a different system prompt would discard the prefix cache the
     shared region exists to keep. Without ``messages`` the cold-start prompt
-    carries the assembled context in front of the same instruction.
+    carries the assembled context in front of the same instruction, and
+    ``project_rules`` in its system prompt (the hot path's carries them
+    already).
 
     The reply is parsed and checked for shape (`_api_spec_problem`), and its
     paths against the ones `spec.md` lists under `## Backend` when ``context``
@@ -597,7 +618,9 @@ async def _generate_api_spec(
         system = system_override
         user = build_api_spec_instruction(stateless=stateless)
     else:
-        system, user = build_api_spec_prompt(context, stateless=stateless)
+        system, user = build_api_spec_prompt(
+            context, stateless=stateless, project_rules=project_rules
+        )
     declared = _declared_api_paths(context)
     if declared:
         # Naming the paths up front: told only to copy them from spec.md, the

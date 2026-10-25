@@ -331,6 +331,16 @@ class GenState:
     # as `datasource_context`, and for only the declared sources by the
     # backend prompt.
     datasource_catalog: "DatasourceCatalog | None" = None
+    # The project's anton.md as the `## Project rules` section
+    # (`prompts.project_rules_section`), or "" when it has none. Read once per
+    # call by the entry point and placed in every step's system prompt. Not
+    # persisted, so an edit to anton.md applies from the next call.
+    project_rules: str = ""
+    # The skills the host trusts for artifact builds
+    # (`SkillStore.list_for_artifacts`) as the `## Artifact skills` section
+    # (`prompts.artifact_skills_section`), or "". Read with `project_rules`;
+    # the page writers, the backend writer and the fetch step get it.
+    artifact_skills: str = ""
     # The `## Scratchpads already in this session` section of the gathering
     # kickoff (`discovery.prompts.render_scratchpads_context`): the pads the
     # calling agent already ran, so the step reuses them instead of guessing
@@ -365,6 +375,10 @@ class GenState:
     # correction the notes are full of the PREVIOUS gathering's cells, and an
     # emptiness check would read that as "everything is covered".
     unverified_sources: list[str] = field(default_factory=list)
+    # Declared sources that only the `known_data` mark verified. A new
+    # iteration that brings no `known_data` puts them back in
+    # `unverified_sources`: nothing else vouches for them.
+    known_data_verified: list[str] = field(default_factory=list)
     # Raw material for the deterministic renderers in discovery/notes.py.
     scratchpad_execs: list[dict] = field(default_factory=list)
     web_calls: list[dict] = field(default_factory=list)

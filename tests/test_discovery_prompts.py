@@ -14,7 +14,6 @@ from types import SimpleNamespace
 from anton.core.artifacts.models import ARTIFACT_TYPES, GENERATOR_ARTIFACT_TYPES
 from anton.core.tools.generate_artifact.discovery import sub_tools
 from anton.core.tools.generate_artifact.discovery.prompts import (
-    DATASOURCES_HEADER,
     GATHERING_CONTINUE,
     build_call_kickoff,
     build_pipeline_system_prompt,
@@ -27,7 +26,7 @@ from anton.core.tools.generate_artifact.discovery.prompts import (
     render_scratchpads_context,
 )
 from anton.core.tools.generate_artifact.state import GenState
-from anton.utils.datasources import CatalogConnection, DatasourceCatalog
+from anton.utils.datasources import DATASOURCES_HEADER, CatalogConnection, DatasourceCatalog
 
 
 def _state(**over) -> GenState:

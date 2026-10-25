@@ -192,10 +192,16 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 # unverified list is what that loop reads, and after a
                 # correction it is filled by `redraw_brief`, not here.
                 covered = known_data_sources(inp, usable=known_data_usable(state))
+                executed = bool(state.scratchpad_execs or state.web_calls)
                 state.unverified_sources = (
                     []
-                    if (state.scratchpad_execs or state.web_calls)
+                    if executed
                     else [s for s in state.declared_sources if source_key(s) not in covered]
+                )
+                state.known_data_verified = (
+                    []
+                    if executed
+                    else [s for s in state.declared_sources if source_key(s) in covered]
                 )
                 state.gathering_complete = True
                 result_blocks.append(protocol.tool_result(tc.id, "ok"))
