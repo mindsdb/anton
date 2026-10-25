@@ -1267,11 +1267,12 @@ async def verify_backend(
 ) -> tuple[VerifyResult, list[str]]:
     """Install the backend's requirements, compile it, then import it in its venv.
 
-    Under the pool's sandbox policy both checks run through the launcher, and
-    the import sees `ds_env` (the artifact's own `DS_*`) instead of the
-    server's. For a live app nothing is installed, since its app slot
-    installs nothing: a requirement the slot lacks fails the check
-    instead, before any launch card.
+    Under the pool's sandbox policy both checks run through the launcher.
+    With or without one, a given `ds_env` (the artifact's own `DS_*`)
+    replaces the server's `DS_*` for the import, as it does for the launch;
+    with none, the import inherits them. For a live app nothing is
+    installed, since its app slot installs nothing: a requirement the
+    slot lacks fails the check instead, before any launch card.
     """
     backend_py = artifact_path / "backend.py"
     if not backend_py.is_file():
@@ -1333,7 +1334,7 @@ async def verify_backend(
         policy=policy,
         argv=[venv_python, "-B", "-c", _INTROSPECT_SCRIPT],
         cwd=artifact_path,
-        env=build_backend_env(None) if policy is None else _sandboxed_check_env(ds_env),
+        env=build_backend_env(None, ds_env) if policy is None else _sandboxed_check_env(ds_env),
     )
     finished = await _finish_check(check, timeout=import_timeout)
     if finished is None:

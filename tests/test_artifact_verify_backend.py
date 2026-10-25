@@ -612,3 +612,36 @@ async def test_verify_backend_leaves_no_bytecode_for_local_modules(tmp_path: Pat
     assert result.ok, result.errors
     assert list(tmp_path.rglob("__pycache__")) == []
     assert list(tmp_path.rglob("*.pyc")) == []
+
+
+# ── the import's DS_* on a host with the sandbox off ────────────────────────
+
+_DUMP_DS_KEYS = '''
+import os, json
+with open("ds_keys.json", "w") as f:
+    json.dump(sorted(k for k in os.environ if k.startswith("DS_")), f)
+'''
+
+
+async def test_without_a_sandbox_a_given_ds_env_replaces_the_inherited_ds(tmp_path: Path, monkeypatch):
+    """The import sees the artifact's own connections, as the launch does,
+    and none of the others the server holds."""
+    monkeypatch.setenv("DS_OTHER_DB__PASSWORD", "not-this-artifacts")
+    (tmp_path / "backend.py").write_text(_DUMP_DS_KEYS)
+
+    await verify_backend(
+        scratchpad_pool=_FakePool(), slug="x", artifact_path=tmp_path,
+        ds_env={"DS_POSTGRES_PROD_DB__PASSWORD": "pw"},
+    )
+
+    seen = json.loads((tmp_path / "ds_keys.json").read_text())
+    assert seen == ["DS_POSTGRES_PROD_DB__PASSWORD"]
+
+
+async def test_without_a_sandbox_and_no_ds_env_the_import_inherits_the_ds(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("DS_OTHER_DB__PASSWORD", "inherited")
+    (tmp_path / "backend.py").write_text(_DUMP_DS_KEYS)
+
+    await verify_backend(scratchpad_pool=_FakePool(), slug="x", artifact_path=tmp_path)
+
+    assert "DS_OTHER_DB__PASSWORD" in json.loads((tmp_path / "ds_keys.json").read_text())
