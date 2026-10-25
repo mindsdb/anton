@@ -18,7 +18,7 @@ class StreamingLLM(SimpleNamespace):
     def __init__(self, budget: int = 8192, **kw):
         super().__init__(budget=budget, stream_calls=[], **kw)
 
-    def stream_budget(self, role: str = "planning") -> int:
+    def stream_budget(self, role: str = "planning", *, by_effort=None) -> int:
         return self.budget
 
     def plan_stream(self, **kw):

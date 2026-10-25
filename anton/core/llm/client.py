@@ -3,10 +3,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, TypeVar
 
-from .effort import stream_budget_for
+from .effort import (
+    SILENCE_COVERED_BUDGET,
+    SILENT_TOKENS_PER_SECOND,
+    STREAM_BUDGET_BY_EFFORT,
+    stream_budget_for,
+)
 from .liveness import ModelCallTracker, current_turn_tracker
 from .provider import (
     LLMProvider,
@@ -179,16 +184,19 @@ class LLMClient:
         """
         return current_turn_tracker()
 
-    def stream_budget(self, role: str = "planning") -> int:
+    def stream_budget(
+        self, role: str = "planning", *, by_effort: Mapping[str, int] = STREAM_BUDGET_BY_EFFORT
+    ) -> int:
         """Output budget a streamed call of ``role`` gets when it passes none.
 
         Only endpoints known to take large outputs get the effort table; any
-        other keeps the client default.
+        other keeps the client default. ``by_effort`` is the table, for a call
+        that needs more room at an effort than the default table gives.
         """
         provider = self._coding_provider if role == "coding" else self._planning_provider
         if getattr(provider, "accepts_large_output", False) is not True:
             return self._max_tokens
-        return stream_budget_for(getattr(provider, "reasoning_effort", None), self._max_tokens)
+        return stream_budget_for(getattr(provider, "reasoning_effort", None), self._max_tokens, by_effort)
 
     async def aclose(self) -> None:
         """Close provider transports. The three roles may share objects."""
@@ -227,18 +235,20 @@ class LLMClient:
     def _idle_timeout_for(self, *, max_tokens: int) -> float | None:
         """The idle deadline for one call with this output budget, or None for none.
 
-        Every call gets the same deadline. The budget is a parameter so a call
-        that may think longer can be given a longer deadline here, in one
-        place, without touching the call sites. A deadline above the OpenAI
-        and Anthropic SDKs' default 600 s read timeout needs that timeout
-        raised too: on an endpoint that sends no keepalives, a streamed call
-        that goes quiet after its response starts ends at 600 s with a
-        read-timeout error instead of this deadline.
+        The configured deadline, raised for a budget above
+        `SILENCE_COVERED_BUDGET`, whose hidden thinking can outlast it: one
+        second per `SILENT_TOKENS_PER_SECOND` tokens of the budget, so 655 s at
+        65536 and 1280 s at 128000, never below the configured deadline. The
+        providers raise their SDK read timeout to `LONGEST_SILENCE_S`, since on
+        an endpoint that sends no keepalives a streamed call that goes quiet
+        ends at the SDK's read timeout instead of this deadline.
         """
         idle_s = self.model_call_idle_timeout_s
         # `not idle_s > 0` rather than `idle_s <= 0`, so NaN reads as off.
         if idle_s is None or not idle_s > 0:
             return None
+        if max_tokens > SILENCE_COVERED_BUDGET:
+            return float(max(idle_s, max_tokens / SILENT_TOKENS_PER_SECOND))
         return float(idle_s)
 
     def _timed_out(

@@ -28,7 +28,7 @@ from anton.core.artifacts.internal_files import API_SPEC_FILENAME, PRD_FILENAME
 from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
 from anton.core.backends.sandbox import cell_sandbox_of
 from anton.utils.datasources import scrub_credentials
-from anton.core.llm.effort import client_stream_budget
+from anton.core.llm.effort import WRITE_BUDGET_BY_EFFORT, client_stream_budget
 from anton.core.llm.structured import looks_truncated
 from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS, scratchpad_action
 
@@ -52,6 +52,8 @@ from .prompts import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from anton.chat_session import ChatSession
 
 logger = logging.getLogger(__name__)
@@ -192,16 +194,19 @@ _SPEC_COMPACT_NUDGE = (
 )
 
 
-def _budget_for_effort(session: "ChatSession", floor: int, role: str) -> int:
+def _budget_for_effort(
+    session: "ChatSession", floor: int, role: str, *, by_effort: Mapping[str, int] | None = None
+) -> int:
     """``floor``, or the streamed budget the client gives ``role`` at its effort when that is larger.
 
     Hidden thinking spends from the same budget as the answer, and at the top
     efforts it outgrows the fixed ones: measured 2026-10-24 on `sonnet-5-5` at
     max, a spec call spent all of 16384 and every write round all of 20480
     thinking, and wrote nothing. The effort table only raises a budget, so high
-    and below keep the fixed ones.
+    and below keep the fixed ones. ``by_effort`` is the table, when the call
+    needs another one (`WRITE_BUDGET_BY_EFFORT` for a write round).
     """
-    return max(floor, client_stream_budget(getattr(session, "_llm", None), role))
+    return max(floor, client_stream_budget(getattr(session, "_llm", None), role, by_effort=by_effort))
 
 
 async def _plan_whole_document(
@@ -892,7 +897,10 @@ async def _run_loop(
         # model is also less token-efficient on this content (1.57 characters
         # per token against the coding model's 2.62), so 8192 bought it barely
         # 12 800 characters — less than an average artifact.
-        budget = _budget_for_effort(session, GEN_WRITE_MAX_TOKENS, "planning" if first_round else "coding")
+        budget = _budget_for_effort(
+            session, GEN_WRITE_MAX_TOKENS, "planning" if first_round else "coding",
+            by_effort=WRITE_BUDGET_BY_EFFORT,
+        )
         # Truncation must be judged against the budget THIS round ran on.
         # Against the client default instead, every reply over 8192 tokens
         # would be called truncated and its last tool call rejected — exactly
