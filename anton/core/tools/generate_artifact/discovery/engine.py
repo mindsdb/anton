@@ -9,6 +9,7 @@ idea — but with a different, smaller tool set and a control tool
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
@@ -55,6 +56,53 @@ def _exec_ran(outcome) -> bool:
     if getattr(outcome, "reason", "") in CELL_NOT_RUN_REASONS:
         return False
     return getattr(outcome, "ok", None) is not False
+
+
+def _complete_gathering(state, inp):
+    claimed_type = str(inp.get("artifact_type") or "")
+    # The schema's `enum` (see sub_tools.FINISH_GATHERING_SCHEMA)
+    # is a hint, not an enforced constraint — a model can still
+    # emit a type outside the enum. Left unchecked, that string
+    # reaches `write_prd`'s `ArtifactStore.update(type=...)`
+    # unvalidated until much later, where it raises ValueError
+    # and crashes the whole run instead of just falling back to
+    # the type that was already known-good. The check is against
+    # what this pipeline BUILDS, not every registered type: a
+    # `document` or `dataset` is valid metadata but has no
+    # generator, and settling on one would build a fullstack
+    # app for it and lock the slug out of any repeat call.
+    state.final_artifact_type = (
+        claimed_type if claimed_type in GENERATOR_ARTIFACT_TYPES
+        else state.artifact_type
+    )
+    state.gathering_notes = render_gathering_notes(inp)
+    state.assumptions = string_list(inp.get("assumptions"))
+    state.open_points = string_list(inp.get("open_points"))
+    state.declared_sources = string_list(inp.get("data_sources"))
+    # On the hot path the gathering loop had the data tools and
+    # used them, so a source it declares is one it worked with.
+    # `web_calls` counts as much as `scratchpad_execs`: a source
+    # that IS a web page is verified by having been fetched, and
+    # demanding a scratchpad cell for it would send every
+    # web-sourced request through the emergency data loop to
+    # re-download an article that was already read. An html-app
+    # source whose rows the calling agent passed in is verified
+    # by the `known_data` mark (`known_data_usable`). The
+    # unverified list is what that loop reads, and after a
+    # correction it is filled by `redraw_brief`, not here.
+    covered = known_data_sources(inp, usable=known_data_usable(state))
+    executed = bool(state.scratchpad_execs or state.web_calls)
+    state.unverified_sources = (
+        []
+        if executed
+        else [s for s in state.declared_sources if source_key(s) not in covered]
+    )
+    state.known_data_verified = (
+        []
+        if executed
+        else [s for s in state.declared_sources if source_key(s) in covered]
+    )
+    state.gathering_complete = True
 
 
 async def run_gathering_loop(state: "PrdState") -> None:
@@ -140,8 +188,10 @@ async def run_gathering_loop(state: "PrdState") -> None:
 
         result_blocks: list[dict] = []
         finished = False
-        for tc in response.tool_calls:
+        batch_failed = False
+        for call_index, tc in enumerate(response.tool_calls):
             if tc.parse_error:
+                batch_failed = True
                 result_blocks.append(protocol.malformed_input_result(tc))
                 continue
 
@@ -160,50 +210,16 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 continue
 
             if name == "finish_gathering":
-                claimed_type = str(inp.get("artifact_type") or "")
-                # The schema's `enum` (see sub_tools.FINISH_GATHERING_SCHEMA)
-                # is a hint, not an enforced constraint — a model can still
-                # emit a type outside the enum. Left unchecked, that string
-                # reaches `write_prd`'s `ArtifactStore.update(type=...)`
-                # unvalidated until much later, where it raises ValueError
-                # and crashes the whole run instead of just falling back to
-                # the type that was already known-good. The check is against
-                # what this pipeline BUILDS, not every registered type: a
-                # `document` or `dataset` is valid metadata but has no
-                # generator, and settling on one would build a fullstack
-                # app for it and lock the slug out of any repeat call.
-                state.final_artifact_type = (
-                    claimed_type if claimed_type in GENERATOR_ARTIFACT_TYPES
-                    else state.artifact_type
-                )
-                state.gathering_notes = render_gathering_notes(inp)
-                state.assumptions = string_list(inp.get("assumptions"))
-                state.open_points = string_list(inp.get("open_points"))
-                state.declared_sources = string_list(inp.get("data_sources"))
-                # On the hot path the gathering loop had the data tools and
-                # used them, so a source it declares is one it worked with.
-                # `web_calls` counts as much as `scratchpad_execs`: a source
-                # that IS a web page is verified by having been fetched, and
-                # demanding a scratchpad cell for it would send every
-                # web-sourced request through the emergency data loop to
-                # re-download an article that was already read. An html-app
-                # source whose rows the calling agent passed in is verified
-                # by the `known_data` mark (`known_data_usable`). The
-                # unverified list is what that loop reads, and after a
-                # correction it is filled by `redraw_brief`, not here.
-                covered = known_data_sources(inp, usable=known_data_usable(state))
-                executed = bool(state.scratchpad_execs or state.web_calls)
-                state.unverified_sources = (
-                    []
-                    if executed
-                    else [s for s in state.declared_sources if source_key(s) not in covered]
-                )
-                state.known_data_verified = (
-                    []
-                    if executed
-                    else [s for s in state.declared_sources if source_key(s) in covered]
-                )
-                state.gathering_complete = True
+                if (os.environ.get("ANTON_STATIC_BATCH_FINISH") == "on" or
+                        os.environ.get("ANTON_STATIC_COHERENT_GATHER") == "on") and (
+                    batch_failed or call_index != len(response.tool_calls) - 1
+                ):
+                    reason = ("A source execution in this batch failed; inspect and fix it before finishing."
+                              if batch_failed else "finish_gathering must follow all source tool calls in the batch.")
+                    state.trace_log.tool_rejected(node=step, tool=name, reason=reason)
+                    result_blocks.append(protocol.tool_result(tc.id, reason))
+                    continue
+                _complete_gathering(state, inp)
                 result_blocks.append(protocol.tool_result(tc.id, "ok"))
                 finished = True
             elif name == "ask_user":
@@ -221,8 +237,15 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 result_blocks.append(protocol.tool_result(tc.id, outcome["tool_result"]))
             elif name == "scratchpad":
                 from anton.core.tools.tool_handlers import handle_scratchpad
+                from .. import static_gathering
 
-                outcome = await handle_scratchpad(state.session, inp)
+                completion = inp.get("complete_static_artifact")
+                atomic = static_gathering.enabled(state) and completion is not None
+                before = static_gathering.fingerprint(state.artifact_path) if atomic else None
+                execution_input = {k: v for k, v in inp.items() if k != "complete_static_artifact"}
+                outcome = await handle_scratchpad(state.session, execution_input)
+                if scratchpad_action(inp) == "exec" and not _exec_ran(outcome):
+                    batch_failed = True
                 content = protocol.unwrap_outcome(outcome)
                 state.trace_log.scratchpad(node="scratchpad", input=inp, output=content)
                 # Raw material for `notes.render_exec_notes`: the working
@@ -237,13 +260,33 @@ async def run_gathering_loop(state: "PrdState") -> None:
                         "code": inp.get("code"),
                         "output": protocol.result_text(content),
                     })
+                if atomic:
+                    try:
+                        if (not isinstance(completion, dict) or not isinstance(completion.get("summary"), str)
+                                or not isinstance(completion.get("data_sources"), list)
+                                or not all(isinstance(s, str) for s in completion["data_sources"])):
+                            raise ValueError("Completion metadata needs a summary and source names.")
+                        if (scratchpad_action(inp) != "exec" or not inp.get("code") or not _exec_ran(outcome)
+                                or batch_failed or call_index != len(response.tool_calls) - 1):
+                            raise ValueError("Completion requires a successful exec after all source work in this response.")
+                        static_gathering.validate_handoff(state.artifact_path, before)
+                        _complete_gathering(state, {**completion, "artifact_type": "html-app"})
+                        state.record("atomic_gather", "done", "successful exec and fresh validated canonical data")
+                        content = protocol.result_text(content) + "\nStatic evidence collection completed from the validated data handoff."
+                        finished = True
+                    except (OSError, ValueError, RecursionError) as error:
+                        content = protocol.result_text(content) + "\nCollection remains open: " + str(error)
+                        state.trace_log.tool_rejected(node=step, tool="complete_static_artifact", reason=str(error))
                 result_blocks.append(protocol.tool_result(tc.id, content))
             elif name in ("web_search", "web_fetch"):
                 handler, field = _web_tools()[name]
                 # Both fallbacks answer with a `ToolOutcome`;
                 # the model, the trace and `web_notes` all want its text, not
                 # the dataclass repr — same unwrap as the scratchpad branch.
-                content = protocol.unwrap_outcome(await handler(state.session, inp))
+                outcome = await handler(state.session, inp)
+                if getattr(outcome, "ok", None) is False:
+                    batch_failed = True
+                content = protocol.unwrap_outcome(outcome)
                 state.trace_log.scratchpad(node=name, input=inp, output=content)
                 # Raw material for `notes.render_web_notes`; the field the
                 # call was made with (`query` or `url`) is what the notes cite.

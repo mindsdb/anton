@@ -6,6 +6,8 @@ neither has to re-derive it — only the task-specific instructions differ.
 
 from __future__ import annotations
 
+import os
+
 from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES_ORDERED
 from anton.core.llm.prompts import ANTON_NOTE
 
@@ -25,7 +27,19 @@ def build_pipeline_system_prompt(state: PrdState) -> str:
     once per run, before this is first built.
     """
     types_list = ", ".join(f"`{t}`" for t in GENERATOR_ARTIFACT_TYPES_ORDERED)
-    return with_project_rules(
+    snapshot_policy = (
+        "For a report, dashboard, analysis, map or presentation of data available now, "
+        "prefer a self-contained html-app snapshot: fetch the needed records once during "
+        "gathering and embed them. Client-side filters, tabs, charts and calculations do "
+        "not need a backend. Choose fullstack when the original user request requires "
+        "live refresh, ongoing service access, writes, secrets at runtime or durable app "
+        "state. Do not invent a live-data requirement from the mere presence of a connection. "
+        "Gather the complete requested data, calculate aggregates with Python, and print "
+        "the actual values and records needed for the page as compact JSON, keeping "
+        "scenarios and units distinct. A schema sample alone cannot support a data report.\n\n"
+        if os.environ.get("ANTON_STATIC_FAST_PATH") in {"direct", "facts"} else ""
+    )
+    return with_project_rules(snapshot_policy + (
         "You are producing a web artifact end to end, in one pipeline of "
         "steps. Each step has its own output — do not do the next step's "
         "work early:\n"
@@ -59,9 +73,11 @@ def build_pipeline_system_prompt(state: PrdState) -> str:
         "`fullstack-stateless-app` — an external DB is a data source, not "
         "app-owned state. Heavy or relational data (joins, transactions, "
         "analytics) always belongs in an external database, which usually "
-        "means stateless. Prefer stateless when in doubt.",
-        state.project_rules,
-    )
+        "means stateless. Prefer stateless when in doubt."
+        + ("\n\nThe snapshot policy above takes precedence for data reports: "
+           "reading an external source at build time does not require a runtime backend."
+           if snapshot_policy else "")
+    ), state.project_rules)
 
 
 SCRATCHPADS_HEADER = "## Scratchpads already in this session"
@@ -240,6 +256,28 @@ _WHEN_TO_ASK_ACT_FIRST = (
 
 
 def _gathering_instruction(act_first: bool) -> str:
+    if act_first and os.environ.get("ANTON_STATIC_FAST_PATH") in {"direct", "facts"}:
+        handoff = (
+            "Save the complete relevant rows and exact calculated figures as canonical observed-data.json "
+            "in the artifact folder, with units, scenario and time scope; print only a short manifest. "
+            if os.environ.get("ANTON_STATIC_COHERENT_GATHER") == "on" else
+            "Print the complete relevant rows and calculated figures as compact JSON, with units, "
+            "scenario and time scope. "
+        )
+        return (
+            "Gather the evidence needed to build the ORIGINAL user request. Choose html-app for "
+            "a self-contained snapshot unless the user requires ongoing live access or writes. "
+            "Use the connected source's documented API and credentials from the catalog. Reuse "
+            "an existing scratchpad when present. Fetch ALL records/fields needed for the views, "
+            "not just a schema sample or head(). Compute exact requested aggregates with Python. "
+            + handoff + "Do not print credentials. Batch independent queries in one "
+            "cell when practical. A row count or summary does not substitute for records the page "
+            "must display. Check for truncation; retrieve the remaining records or report the gap. "
+            "Once the required data is observed, immediately call finish_gathering and declare the "
+            "type and sources. Do not draft a brief, PRD, design or implementation plan. Do not add "
+            "requirements or ask for preferences the request does not need. For a backend that "
+            "must query data at runtime, verify its access with a real sample and finish."
+        )
     return _GATHERING_TEMPLATE.format(
         when_to_ask=_WHEN_TO_ASK_ACT_FIRST if act_first else _WHEN_TO_ASK,
     )

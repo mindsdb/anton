@@ -57,6 +57,65 @@ def _session_with_plan_sequence(*responses) -> SimpleNamespace:
     return SimpleNamespace(_llm=llm, question_count=0, elicitor=None, emit=AsyncMock())
 
 
+def _batch(label="ready"):
+    return _response(tool_calls=[
+        _tc("scratchpad", {"action": "exec", "name": "facts", "code": "print('validated')"}, id="exec"),
+        _tc("finish_gathering", {"artifact_type": "html-app", "summary": label,
+                                 "data_sources": ["inventory"]}, id="finish"),
+    ])
+
+
+async def test_batch_finish_uses_completed_source_work_without_an_extra_model_call(monkeypatch):
+    from anton.core.tools.registry import ToolOutcome
+    import anton.core.tools.tool_handlers as handlers
+
+    monkeypatch.setenv("ANTON_STATIC_BATCH_FINISH", "on")
+    monkeypatch.setattr(handlers, "handle_scratchpad", AsyncMock(return_value=ToolOutcome("validated rows", ok=True)))
+    session = _session_with_plan_sequence(_batch())
+    state = _state(session)
+    await engine.run_gathering_loop(state)
+    assert state.gathering_complete
+    assert not state.unverified_sources
+    assert len(state.scratchpad_execs) == 1
+    assert session._llm.plan.call_count == 1
+    assert session._llm.code.call_count == 0
+
+
+@pytest.mark.parametrize("flag", ["ANTON_STATIC_BATCH_FINISH", "ANTON_STATIC_COHERENT_GATHER"])
+async def test_batch_finish_cannot_vouch_for_a_failed_source_execution(monkeypatch, flag):
+    from anton.core.tools.registry import ToolOutcome
+    import anton.core.tools.tool_handlers as handlers
+
+    monkeypatch.setenv(flag, "on")
+    scratchpad = AsyncMock(side_effect=[ToolOutcome("bad query", ok=False), ToolOutcome("validated rows", ok=True)])
+    monkeypatch.setattr(handlers, "handle_scratchpad", scratchpad)
+    session = _session_with_plan_sequence(_batch("premature"), _batch("after correction"))
+    state = _state(session)
+    await engine.run_gathering_loop(state)
+    assert state.gathering_notes.startswith("after correction")
+    assert len(state.scratchpad_execs) == 1
+    assert scratchpad.call_count == 2
+    assert session._llm.code.call_count == 1
+    assert "failed" in state.messages[2]["content"][1]["content"]
+
+
+@pytest.mark.parametrize("flag", ["ANTON_STATIC_BATCH_FINISH", "ANTON_STATIC_COHERENT_GATHER"])
+async def test_batch_finish_must_follow_the_work_it_vouches_for(monkeypatch, flag):
+    from anton.core.tools.registry import ToolOutcome
+    import anton.core.tools.tool_handlers as handlers
+
+    monkeypatch.setenv(flag, "on")
+    monkeypatch.setattr(handlers, "handle_scratchpad", AsyncMock(return_value=ToolOutcome("validated rows", ok=True)))
+    reversed_batch = _batch()
+    reversed_batch.tool_calls.reverse()
+    session = _session_with_plan_sequence(reversed_batch, _response(tool_calls=[
+        _tc("finish_gathering", {"artifact_type": "html-app", "summary": "after execution", "data_sources": ["inventory"]})]))
+    state = _state(session)
+    await engine.run_gathering_loop(state)
+    assert state.gathering_notes.startswith("after execution")
+    assert session._llm.code.call_count == 1
+
+
 async def test_finish_gathering_sets_artifact_type_and_notes():
     session = _session_with_plan_sequence(
         _response(tool_calls=[_tc("finish_gathering", {"summary": "ready", "artifact_type": "fullstack-stateless-app", "notes": "use CoinGecko"})]),
