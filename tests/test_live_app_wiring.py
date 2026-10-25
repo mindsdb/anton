@@ -652,8 +652,8 @@ def test_a_live_apps_page_is_warned_of_its_own_policy_not_the_previews():
     warnings = verifiers.verify_frontend(page, is_fullstack=True, live_app=True).warnings
     assert not any("app preview" in w for w in warnings)
     (warning,) = [w for w in warnings if w.startswith("External resource a live app does not load: ")]
-    assert "fonts.googleapis.com" in warning and "example.com/logo.png" in warning
-    assert "cdn.jsdelivr.net/npm/x@1/x.css" not in warning
+    listed = warning.removeprefix("External resource a live app does not load: ").split(". A live app")[0]
+    assert listed == "'https://fonts.googleapis.com/css2?family=Inter', 'https://example.com/logo.png'"
 
 
 def test_a_page_with_only_jsdelivr_scripts_passes_the_live_app_rule():
