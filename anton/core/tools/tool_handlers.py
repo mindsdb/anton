@@ -1409,6 +1409,27 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         return
 
     slug = (tc_input.get("slug") or "").strip()
+    if not slug and os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on":
+        # A new page can enter the same generator without a separate model
+        # round trip solely to register its folder. Existing-slug edits keep
+        # their normal path. Validate before creating any persistent resource.
+        name = (tc_input.get("name") or "").strip()
+        fields = ("user_request", "agent_understanding", "user_language")
+        missing = next((key for key in fields if not isinstance(tc_input.get(key), str)
+                        or not tc_input[key].strip()), None)
+        if name and missing:
+            yield f"Error: `{missing}` is required."
+            return
+        if name:
+            from anton.core.tools.generate_artifact.state import MAX_USER_LANGUAGE_CHARS
+
+            if len(" ".join(tc_input["user_language"].split())) > MAX_USER_LANGUAGE_CHARS:
+                yield "Error: `user_language` must be only the language's English name."
+                return
+            artifact = store.create(name=name, description=tc_input["agent_understanding"].strip(),
+                                    type="html-app", primary="index.html")
+            slug = artifact.slug
+            _track_artifact(session, store, slug, summary=f"Created artifact: {name}")
     if not slug:
         yield "Error: `slug` is required."
         return
@@ -1461,6 +1482,20 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     folder = store.folder_for(slug)
     from anton.core.tools.generate_artifact import generate
 
+    def failure_context(detail):
+        if os.environ.get("ANTON_STATIC_SINGLE_CALL") != "on":
+            return _generation_failed(detail) if not detail.startswith("Error:") else detail
+        # Creation may have happened inside this call. Losing its identity on
+        # failure makes a caller recreate the artifact or discard collected data.
+        recovery = {"status": "failed", "slug": slug, "path": str(folder),
+                    "primary": artifact.primary, "message": _generation_failed(detail),
+                    "retry_instruction": "If retrying, reuse this slug and its saved source data. Do not create another artifact or substitute demo/default values."}
+        for key, name in (("observed_data_file", "observed-data.json"),
+                          ("last_saved_component_program", "presentation-program.js")):
+            if (folder / name).is_file():
+                recovery[key] = str(folder / name)
+        return json.dumps(recovery, indent=2)
+
     queue: "asyncio.Queue[str | None]" = asyncio.Queue()
     task = asyncio.create_task(
         _generate_with_progress_close(
@@ -1487,7 +1522,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         result = await task
     except Exception as exc:  # last-resort: never escalate to the dispatcher
         yield ToolOutcome(
-            content=_generation_failed(f"generator crashed: {exc}"),
+            content=failure_context(f"generator crashed: {exc}"),
             ok=False,
             reason=type(exc).__name__,
         )
@@ -1509,7 +1544,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
             _data_unavailable(result) if result.startswith(NOT_ENOUGH_DATA_PREFIX)
             else _generation_failed(result)
         )
-        yield ToolOutcome(content=content, ok=False, reason="pipeline")
+        yield ToolOutcome(content=failure_context(content), ok=False, reason="pipeline")
         return
 
     status = result.get("status", "generated")

@@ -10,6 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 from anton.core.artifacts import render_check
 from anton.core.tools.generate_artifact import attachments as att_mod
 from anton.core.tools.generate_artifact import engine, orchestrator, prompts
@@ -429,6 +431,32 @@ def test_restore_drops_malformed_records(tmp_path: Path):
 
 
 # ── generate(): resolution is recorded in the trace ─────────────────────────
+
+@pytest.mark.parametrize("file_kind,expected_fast", [("csv", True), ("png", False)])
+async def test_fast_path_accepts_validated_data_uploads_but_keeps_asset_staging(tmp_path, monkeypatch, file_kind, expected_fast):
+    from anton.core.tools.generate_artifact import fast_static
+
+    csv, png = _files(tmp_path)
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    result = {"status": "generated", "files_written": [], "internal_files": [], "trace": []}
+    prepare = AsyncMock(return_value=True)
+    fast = AsyncMock(return_value=result)
+    normal = AsyncMock(return_value=result)
+    monkeypatch.setenv("ANTON_STATIC_FAST_PATH", "direct")
+    monkeypatch.setattr(fast_static, "prepare", prepare)
+    monkeypatch.setattr(fast_static, "run", fast)
+    monkeypatch.setattr(orchestrator, "run", normal)
+    monkeypatch.setattr(engine, "_scratchpads_context", lambda session: "")
+    monkeypatch.setattr(orchestrator, "_datasource_catalog", lambda session: None)
+    session = SimpleNamespace(act_first=True, _workspace=SimpleNamespace(base=tmp_path), _scratchpads=None)
+    source = csv if file_kind == "csv" else png
+    await engine.generate(session=session, slug="report", artifact_path=artifact, artifact_type="html-app",
+                          user_request="Show the attached data", agent_understanding="A report", attachments=[str(source)])
+    assert bool(fast.call_count) is expected_fast
+    assert bool(normal.call_count) is not expected_fast
+    if expected_fast:
+        assert prepare.call_args.args[0].attachments[0].path == str(csv)
 
 async def test_generate_records_kept_and_dropped_attachments(tmp_path: Path, monkeypatch):
     csv, _ = _files(tmp_path)

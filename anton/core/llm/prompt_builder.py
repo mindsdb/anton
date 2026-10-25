@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -74,7 +75,7 @@ class ChatSystemPromptBuilder:
         return "\n\n".join(chunks)
 
     def _build_procedural_memory_section(
-        self, skill_store: "SkillStore | None"
+        self, skill_store: "SkillStore | None", *, direct_generation: bool = False
     ) -> str:
         """Build the '## Procedural memory' section listing available skills.
 
@@ -92,21 +93,23 @@ class ChatSystemPromptBuilder:
         if not summaries:
             return ""
 
-        lines: list[str] = [
-            "",
-            "",
-            "## Procedural memory (skills available)",
-            "",
-            (
+        instructions = (
                 "These are reusable procedures you've previously refined for "
                 "recurring tasks. When the user's request matches one of "
                 "them, call `recall_skill(label)` to load the full step-by-"
                 "step procedure into your context. You may recall multiple "
                 "skills if the task spans several. If none apply, proceed "
                 "with normal reasoning."
-            ),
-            "",
-        ]
+        )
+        if direct_generation:
+            instructions = (
+                "These are reusable procedures. For work you carry out yourself, call "
+                "recall_skill(label) when a procedure matches. For an HTML artifact "
+                "delegated to generate_artifact, matching connected-source procedures "
+                "are read inside discovery; delegate immediately instead of recalling "
+                "them and querying the same source beforehand."
+            )
+        lines: list[str] = ["", "", "## Procedural memory (skills available)", "", instructions, ""]
         for s in summaries:
             label = s.get("label", "")
             when = s.get("description", "").strip()
@@ -123,7 +126,12 @@ class ChatSystemPromptBuilder:
         *,
         proactive_dashboards: bool,
         output_dir: str,
+        direct_generation: bool = False,
     ) -> str:
+        if direct_generation:
+            from .static_artifact_prompt import visualizations
+
+            return visualizations(proactive=proactive_dashboards)
         visualizations_output_format_prompt = (
             VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT
             if proactive_dashboards
@@ -153,10 +161,21 @@ class ChatSystemPromptBuilder:
         product_lines: list[str] | None = None,
         deployment_identity: DeploymentIdentity | None = None,
     ) -> str:
+        direct_generation = (os.environ.get("ANTON_STATIC_COHERENT_ENTRY") == "on"
+                             and os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on"
+                             and any(getattr(tool, "name", "") == "generate_artifact"
+                                     and "name" in tool.input_schema.get("properties", {})
+                                     for tool in tool_defs or []))
         visualizations_section = self._build_visualizations_section(
             proactive_dashboards=proactive_dashboards,
             output_dir=output_dir,
+            direct_generation=direct_generation,
         )
+        artifacts_section = ARTIFACTS_PROMPT
+        if direct_generation:
+            from .static_artifact_prompt import ARTIFACTS
+
+            artifacts_section = ARTIFACTS
 
         prompt = ""
 
@@ -183,7 +202,7 @@ class ChatSystemPromptBuilder:
             # not also introduce itself as Anton in the prompt's opening line.
             identity_lead="You are an AI coworker" if deployment_identity is not None else "You are Anton",
             runtime_identity_section=runtime_identity_section,
-            artifacts_section=ARTIFACTS_PROMPT,
+            artifacts_section=artifacts_section,
             visualizations_section=visualizations_section,
             conversation_discipline=conversation_discipline,
             conversation_started=conversation_started,
@@ -208,7 +227,7 @@ class ChatSystemPromptBuilder:
 
         # Saved skills change rarely (the built-ins plus the user's own), so
         # they stay in the shared part ahead of anything project-specific.
-        procedural_memory = self._build_procedural_memory_section(skill_store)
+        procedural_memory = self._build_procedural_memory_section(skill_store, direct_generation=direct_generation)
         if procedural_memory:
             prompt += procedural_memory
 
