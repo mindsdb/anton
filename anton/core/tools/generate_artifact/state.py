@@ -173,6 +173,8 @@ class BrowserCheck:
     findings_listed: bool = False
     screenshot: "RenderScreenshot | None" = None
     coverage: "ViewCoverage | None" = None
+    # Optional final source returned by a renderer that checked these exact bytes.
+    materialized_html: str | None = None
 
 
 # ── FSM state ────────────────────────────────────────────────────────────────
