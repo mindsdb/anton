@@ -11,6 +11,7 @@ from .prompts import (
     CHAT_SYSTEM_PROMPT,
     CONVERSATION_DISCIPLINE_ACT_FIRST,
     CONVERSATION_DISCIPLINE_ASK_FIRST,
+    STATIC_ARTIFACTS_PROMPT,
     VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
     VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
 )
@@ -152,7 +153,11 @@ class ChatSystemPromptBuilder:
         runtime_identity_lines: list[str] | None = None,
         product_lines: list[str] | None = None,
         deployment_identity: DeploymentIdentity | None = None,
+        fullstack_offered: bool = True,
     ) -> str:
+        """``fullstack_offered`` False (`live_app_slots.fullstack_offered`)
+        leaves out the fullstack types and the backend section: nothing on
+        this deployment would start the app's backend."""
         visualizations_section = self._build_visualizations_section(
             proactive_dashboards=proactive_dashboards,
             output_dir=output_dir,
@@ -183,7 +188,7 @@ class ChatSystemPromptBuilder:
             # not also introduce itself as Anton in the prompt's opening line.
             identity_lead="You are an AI coworker" if deployment_identity is not None else "You are Anton",
             runtime_identity_section=runtime_identity_section,
-            artifacts_section=ARTIFACTS_PROMPT,
+            artifacts_section=ARTIFACTS_PROMPT if fullstack_offered else STATIC_ARTIFACTS_PROMPT,
             visualizations_section=visualizations_section,
             conversation_discipline=conversation_discipline,
             conversation_started=conversation_started,
@@ -191,7 +196,8 @@ class ChatSystemPromptBuilder:
 
         # Short pointer only — the full backend/fullstack contract lives in the
         # built-in `build-fullstack-backend` skill (recalled on demand).
-        prompt += "\n\n" + BACKEND_GENERATION_PROMPT
+        if fullstack_offered:
+            prompt += "\n\n" + BACKEND_GENERATION_PROMPT
 
         tool_prompts = self._build_tool_prompts_section(tool_defs)
         if tool_prompts:

@@ -113,6 +113,8 @@ from anton.core.tools.tool_defs import (
     SCRATCHPAD_TOOL,
     SELECT_PATH_TOOL,
     SELECT_PATH_TOOL_PICK_ONLY,
+    STATIC_CREATE_ARTIFACT_TOOL,
+    STATIC_GENERATE_ARTIFACT_TOOL,
     UPDATE_ARTIFACT_METADATA_TOOL,
     ToolDef,
 )
@@ -2082,6 +2084,11 @@ class ChatSession:
             workspace_env_overlay=config.workspace_env_overlay,
             cell_sandbox=config.cell_sandbox,
         )
+        # Sandboxed without live apps, nothing starts an app backend, so the
+        # artifact tools and the prompt offer html-apps only.
+        from anton.core.artifacts.live_app_slots import fullstack_offered
+
+        self._fullstack_offered = fullstack_offered(config.cell_sandbox)
 
         self.tool_registry = ToolRegistry()
         # Procedural memory: brain-inspired skills (Stage 1 = declarative).
@@ -2924,6 +2931,7 @@ class ChatSession:
                 getattr(self, "_surface", None), getattr(self, "_deployment_identity", None)
             ),
             deployment_identity=getattr(self, "_deployment_identity", None),
+            fullstack_offered=getattr(self, "_fullstack_offered", True),
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
             output_dir=self._output_dir,
@@ -3182,11 +3190,13 @@ class ChatSession:
         # would just return error strings — better to hide the tools
         # entirely so the LLM doesn't try to use them.
         if self._workspace is not None:
-            self.tool_registry.register_tool(CREATE_ARTIFACT_TOOL)
+            fullstack = self._fullstack_offered
+            self.tool_registry.register_tool(CREATE_ARTIFACT_TOOL if fullstack else STATIC_CREATE_ARTIFACT_TOOL)
             self.tool_registry.register_tool(LIST_ARTIFACTS_TOOL)
             self.tool_registry.register_tool(UPDATE_ARTIFACT_METADATA_TOOL)
-            self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
-            self.tool_registry.register_tool(GENERATE_ARTIFACT_TOOL)
+            if fullstack:
+                self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
+            self.tool_registry.register_tool(GENERATE_ARTIFACT_TOOL if fullstack else STATIC_GENERATE_ARTIFACT_TOOL)
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""

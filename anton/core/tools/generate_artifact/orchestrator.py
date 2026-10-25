@@ -385,6 +385,10 @@ async def _write_tech_spec(state: GenState) -> str | None:
         state.error = "make_tech_spec: model returned an empty specification."
         return state.error
     (state.artifact_path / TECH_SPEC_FILENAME).write_text(body, encoding="utf-8")
+    if messages is not None:
+        # Into the shared history, as the PRD step's reply is: the API-spec
+        # step continues this history and copies its paths from the spec.
+        state.messages.extend([{"role": "user", "content": user}, {"role": "assistant", "content": body}])
     if TECH_SPEC_FILENAME not in state.internal_files:
         state.internal_files.append(TECH_SPEC_FILENAME)
     state.record("make_tech_spec", "done", "wrote spec.md")
@@ -469,15 +473,22 @@ def _runs_live_apps(state: GenState) -> bool:
     return live_app_slots.live_apps_enabled() and _cell_sandbox(state) is not None
 
 
+# What the agent does instead where nothing starts an app backend.
+_BUILD_AN_HTML_APP = (
+    "Build it as an html-app instead: register one with `create_artifact` and "
+    "call `generate_artifact` on its slug."
+)
+
+
 def _fullstack_refusal(state: GenState) -> str | None:
     """Why no fullstack app can run here, or None. Sandboxed without live
-    apps, the sandbox starts no backend. With them, a launch that can never
-    succeed (no host records it, a setting is broken) refuses here too,
-    before the pipeline spends anything."""
+    apps, the sandbox starts no backend, and the refusal says to build an
+    html-app. With them, a launch that can never succeed (no host records it,
+    a setting is broken) refuses here too, before the pipeline spends anything."""
     if _cell_sandbox(state) is None:
         return None
     if not live_app_slots.live_apps_enabled():
-        return BACKENDS_OFF_MESSAGE
+        return f"{BACKENDS_OFF_MESSAGE} {_BUILD_AN_HTML_APP}"
     blocker = live_app_slots.live_app_launch_blocker(state.session)
     return str(blocker) if blocker is not None else None
 

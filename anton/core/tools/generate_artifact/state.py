@@ -429,8 +429,20 @@ class GenState:
         if self._pipeline_tools is None:
             from .discovery.sub_tools import pipeline_tool_schemas
 
-            self._pipeline_tools = pipeline_tool_schemas()
+            self._pipeline_tools = pipeline_tool_schemas(self.buildable_types)
         return self._pipeline_tools
+
+    @property
+    def buildable_types(self) -> tuple[str, ...]:
+        """The types this run may settle on, in schema order: html-app alone
+        where the session offers no fullstack app, because nothing there
+        starts an app backend (`live_app_slots.fullstack_offered`, read once
+        by the session into `_fullstack_offered` for its tools and prompt)."""
+        from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES_ORDERED
+
+        if getattr(self.session, "_fullstack_offered", True):
+            return GENERATOR_ARTIFACT_TYPES_ORDERED
+        return ("html-app",)
 
     def __post_init__(self) -> None:
         if self.is_fullstack is None:

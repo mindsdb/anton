@@ -521,19 +521,34 @@ _STEP_TASK = {
 }
 
 
-def pipeline_tool_schemas() -> list[dict]:
+def pipeline_tool_schemas(types: tuple[str, ...] = GENERATOR_ARTIFACT_TYPES_ORDERED) -> list[dict]:
     """The ONE tool array used by every call in phases A-D.
 
     Fixed contents, fixed order, built the same way every time: it is part of
     the cached prefix, and a reordered array is a changed prefix. Availability
     per step is decided by `rejection_for`, never by dropping entries here.
+    ``types`` are the ones `finish_gathering` may settle on
+    (`GenState.buildable_types`).
     """
+    finish = FINISH_GATHERING_SCHEMA
+    if types != GENERATOR_ARTIFACT_TYPES_ORDERED:
+        schema = finish["input_schema"]
+        finish = {
+            **finish,
+            "input_schema": {
+                **schema,
+                "properties": {
+                    **schema["properties"],
+                    "artifact_type": {**schema["properties"]["artifact_type"], "enum": list(types)},
+                },
+            },
+        }
     return [
         _scratchpad_schema(),
         _web_search_schema(),
         _web_fetch_schema(),
         _ask_user_schema(),
-        FINISH_GATHERING_SCHEMA,
+        finish,
     ]
 
 
