@@ -50,7 +50,8 @@ JOURNAL_DETAIL_MAX: int = 300
 # The gateway used to answer HTTP 500 above 20480 output tokens for a
 # non-streamed call; it now assembles such calls from an internal stream, so
 # that limit is gone. These calls are streamed anyway. Re-measure before
-# raising them.
+# raising them. A top effort's larger streamed budget replaces both
+# (engine._budget_for_effort).
 SPEC_MAX_TOKENS: int = 16384
 SPEC_MAX_TOKENS_RETRY: int = 20480
 
@@ -76,6 +77,8 @@ SPEC_MAX_TOKENS_RETRY: int = 20480
 # The planning model is also less token-efficient on this content (1.57
 # characters per token against the coding model's 2.62), so 8192 bought it
 # ~12 800 characters — under the size of an average artifact.
+#
+# A top effort's larger streamed budget replaces it (engine._budget_for_effort).
 GEN_WRITE_MAX_TOKENS: int = 20480
 
 # The same budget restated in CHARACTERS, because that is the unit the model
@@ -92,12 +95,6 @@ GEN_WRITE_MAX_TOKENS: int = 20480
 # Deliberately conservative: overshooting costs the whole part (a body with no
 # end marker writes nothing), undershooting costs one extra round.
 REPLY_BODY_CHARS: int = 30_000
-
-# Effort ceiling for every model call the pipeline makes. At the top efforts the
-# model spends up to 23k tokens thinking before a two-thousand-character brief,
-# which costs minutes per step and runs non-streamed calls past the gateway's
-# time budget; the pipeline's steps are bounded and do not need that depth.
-ARTIFACT_EFFORT_CEILING = "high"
 
 # Reserved out of MAX_QUESTIONS_PER_TURN for the brief phase: one
 # `show_and_confirm` call plus up to two "revise brief, show again" cycles.

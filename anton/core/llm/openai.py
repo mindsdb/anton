@@ -12,6 +12,7 @@ from contextlib import aclosing
 
 from openai import AsyncAzureOpenAI
 
+from .effort import LONGEST_SILENCE_S
 from .provider import register_provider, safe_parse_tool_input, unregister_provider
 from .provider import (
     ContextOverflowError,
@@ -979,6 +980,11 @@ async def _aclose_stream(stream: object) -> None:
             pass
 
 
+# The SDK's own 600 s read timeout would end a call that thinks in silence for
+# longer, before anton's own deadline (`LLMClient._idle_timeout_for`) does.
+_SDK_TIMEOUT = openai.Timeout(LONGEST_SILENCE_S, connect=5.0)
+
+
 class OpenAIProvider(LLMProvider):
     name: str = "openai"
 
@@ -1081,7 +1087,7 @@ class OpenAIProvider(LLMProvider):
                 azure_kwargs["azure_endpoint"] = base_url
             if not ssl_verify:
                 azure_kwargs["http_client"] = httpx.AsyncClient(verify=False)
-            self._client = AsyncAzureOpenAI(**azure_kwargs)
+            self._client = AsyncAzureOpenAI(**azure_kwargs, timeout=_SDK_TIMEOUT)
         else:
             kwargs: dict = {}
             if client_api_key:
@@ -1090,7 +1096,7 @@ class OpenAIProvider(LLMProvider):
                 kwargs["base_url"] = base_url
             if not ssl_verify:
                 kwargs["http_client"] = httpx.AsyncClient(verify=False)
-            self._client = openai.AsyncOpenAI(**kwargs)
+            self._client = openai.AsyncOpenAI(**kwargs, timeout=_SDK_TIMEOUT)
 
         # After the if/else, not per branch: a future client flavor must not be
         # able to skip registration and leave its pool unclosed.

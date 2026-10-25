@@ -12,6 +12,7 @@ from anton.core.llm.provider import (
     TransientProviderError,
     Usage,
 )
+from anton.core.llm.client import LLMClient
 from anton.core.tools.generate_artifact.engine import _run_loop
 from anton.core.tools.generate_artifact.state import GEN_WRITE_MAX_TOKENS
 from anton.core.tools.generate_artifact.sub_tools import (
@@ -627,6 +628,46 @@ async def test_every_round_gets_the_raised_budget_including_round_zero(
     )
     assert session._llm.plan_stream.call_args.kwargs["max_tokens"] == GEN_WRITE_MAX_TOKENS
     assert session._llm.code_stream.call_args.kwargs["max_tokens"] == GEN_WRITE_MAX_TOKENS
+
+
+class _EffortProvider:
+    """Only what `LLMClient.stream_budget` reads from a provider."""
+
+    accepts_large_output = True
+    trace_role = None
+
+    def __init__(self, effort: str) -> None:
+        self.reasoning_effort = effort
+
+
+async def test_a_top_effort_raises_each_rounds_budget_to_its_roles_write_budget(
+    tmp_path: Path,
+):
+    """Hidden thinking spends from the round's budget: measured on
+    `sonnet-5-5`, every round at max spent all of 20480, and all of 65536,
+    thinking and wrote nothing; at 128000 it wrote the page. Round 0 runs on
+    the planning model and later rounds on the coding model, so each takes
+    its own role's write budget: max on planning here, xhigh on coding."""
+    client = LLMClient(
+        planning_provider=_EffortProvider("max"), planning_model="p",
+        coding_provider=_EffortProvider("xhigh"), coding_model="c",
+    )
+    session = AsyncMock()
+    session._scratchpads.cell_sandbox = None
+    session._llm.stream_budget = client.stream_budget
+    session._llm.plan_stream = _stream_mock(
+        _resp([ToolCall(id="1", name="write_file", input={"path": "index.html"})],
+              body=_body("<html></html>"))
+    )
+    session._llm.code_stream = _stream_mock(
+        _resp([ToolCall(id="2", name="finish", input={"summary": "ok"})])
+    )
+    await _run_loop(
+        session=session, system="s", kickoff="k", artifact_path=tmp_path,
+        node_label="generate_frontend",
+    )
+    assert session._llm.plan_stream.call_args.kwargs["max_tokens"] == 128000
+    assert session._llm.code_stream.call_args.kwargs["max_tokens"] == 32768
 
 
 async def test_truncation_on_a_write_round_is_judged_against_its_own_budget(

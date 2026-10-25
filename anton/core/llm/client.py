@@ -3,11 +3,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextvars import ContextVar
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, TypeVar
 
-from .effort import EFFORT_ORDER, capped, stream_budget_for
+from .effort import (
+    SILENCE_COVERED_BUDGET,
+    SILENT_TOKENS_PER_SECOND,
+    STREAM_BUDGET_BY_EFFORT,
+    stream_budget_for,
+)
 from .liveness import ModelCallTracker, current_turn_tracker
 from .provider import (
     LLMProvider,
@@ -23,11 +27,6 @@ if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
 
 _T = TypeVar("_T")
-
-# Set by `LLMClient.effort_ceiling`. A ContextVar so a pipeline can cap every
-# call it makes, including those in tasks it gathers, without threading the
-# cap through each call site.
-_EFFORT_CEILING: ContextVar[str | None] = ContextVar("anton_effort_ceiling", default=None)
 
 
 class _ProviderAuthConfirmation:
@@ -185,55 +184,19 @@ class LLMClient:
         """
         return current_turn_tracker()
 
-    @contextlib.contextmanager
-    def effort_ceiling(self, level: str):
-        """Cap the reasoning effort of every planning and coding call inside.
-
-        The cap lives in a module-level ContextVar, so it applies to every
-        ``LLMClient`` used inside the block, not only the instance whose method
-        was entered.
-
-        A nested block can only lower the cap. Enter it in a plain coroutine or
-        around a single ``await``, never across a ``yield``: an async generator
-        has no context of its own, so the cap would leak to whatever consumes
-        it, and the reset fails when the generator is closed from another
-        context.
-        """
-        outer = _EFFORT_CEILING.get()
-        if outer is None:
-            effective = level
-        elif level in EFFORT_ORDER:
-            effective = capped(level, outer)
-        else:
-            # An unknown level cannot be compared, so it must not lift the cap.
-            effective = outer
-        token = _EFFORT_CEILING.set(effective)
-        try:
-            yield
-        finally:
-            _EFFORT_CEILING.reset(token)
-
-    @staticmethod
-    def _effective_effort(provider: LLMProvider) -> str | None:
-        return capped(getattr(provider, "reasoning_effort", None), _EFFORT_CEILING.get())
-
-    @classmethod
-    def _effort_kwargs(cls, provider: LLMProvider) -> dict:
-        """``reasoning_effort=`` for the provider call, only when the cap changed it."""
-        effective = cls._effective_effort(provider)
-        own = getattr(provider, "reasoning_effort", None)
-        return {} if effective == own else {"reasoning_effort": effective}
-
-    def stream_budget(self, role: str = "planning") -> int:
+    def stream_budget(
+        self, role: str = "planning", *, by_effort: Mapping[str, int] = STREAM_BUDGET_BY_EFFORT
+    ) -> int:
         """Output budget a streamed call of ``role`` gets when it passes none.
 
         Only endpoints known to take large outputs get the effort table; any
-        other keeps the client default.
+        other keeps the client default. ``by_effort`` is the table, for a call
+        that needs more room at an effort than the default table gives.
         """
         provider = self._coding_provider if role == "coding" else self._planning_provider
         if getattr(provider, "accepts_large_output", False) is not True:
             return self._max_tokens
-        return stream_budget_for(self._effective_effort(provider), self._max_tokens)
+        return stream_budget_for(getattr(provider, "reasoning_effort", None), self._max_tokens, by_effort)
 
     async def aclose(self) -> None:
         """Close provider transports. The three roles may share objects."""
@@ -272,18 +235,20 @@ class LLMClient:
     def _idle_timeout_for(self, *, max_tokens: int) -> float | None:
         """The idle deadline for one call with this output budget, or None for none.
 
-        Every call gets the same deadline. The budget is a parameter so a call
-        that may think longer can be given a longer deadline here, in one
-        place, without touching the call sites. A deadline above the OpenAI
-        and Anthropic SDKs' default 600 s read timeout needs that timeout
-        raised too: on an endpoint that sends no keepalives, a streamed call
-        that goes quiet after its response starts ends at 600 s with a
-        read-timeout error instead of this deadline.
+        The configured deadline, raised for a budget above
+        `SILENCE_COVERED_BUDGET`, whose hidden thinking can outlast it: one
+        second per `SILENT_TOKENS_PER_SECOND` tokens of the budget, so 655 s at
+        65536 and 1280 s at 128000, never below the configured deadline. The
+        providers raise their SDK read timeout to `LONGEST_SILENCE_S`, since on
+        an endpoint that sends no keepalives a streamed call that goes quiet
+        ends at the SDK's read timeout instead of this deadline.
         """
         idle_s = self.model_call_idle_timeout_s
         # `not idle_s > 0` rather than `idle_s <= 0`, so NaN reads as off.
         if idle_s is None or not idle_s > 0:
             return None
+        if max_tokens > SILENCE_COVERED_BUDGET:
+            return float(max(idle_s, max_tokens / SILENT_TOKENS_PER_SECOND))
         return float(idle_s)
 
     def _timed_out(
@@ -427,7 +392,6 @@ class LLMClient:
     ) -> LLMResponse:
         listener = self.usage_listener
         budget = max_tokens or self._max_tokens
-        effort_kw = self._effort_kwargs(self._planning_provider)
         response = await self._guarded_call(
             operation=lambda: _call_with_auth_confirmation(
                 lambda: self._planning_provider.complete(
@@ -437,7 +401,6 @@ class LLMClient:
                     tools=tools,
                     max_tokens=budget,
                     native_web_tools=native_web_tools,
-                    **effort_kw,
                 ),
                 role="planning",
             ),
@@ -462,7 +425,6 @@ class LLMClient:
         """``wait_note`` leads the host's still-working line while this call waits."""
         listener = self.usage_listener
         budget = max_tokens or self.stream_budget("planning")
-        effort_kw = self._effort_kwargs(self._planning_provider)
         # aclosing: a caller that stops early closes the call now, not when
         # the abandoned generator is finalized.
         events = self._guarded_stream(
@@ -474,7 +436,6 @@ class LLMClient:
                     tools=tools,
                     max_tokens=budget,
                     native_web_tools=native_web_tools,
-                    **effort_kw,
                 ),
                 role="planning",
             ),
@@ -560,7 +521,6 @@ class LLMClient:
     ) -> LLMResponse:
         listener = self.usage_listener
         budget = max_tokens or self._max_tokens
-        effort_kw = self._effort_kwargs(self._coding_provider)
         response = await self._guarded_call(
             operation=lambda: _call_with_auth_confirmation(
                 lambda: self._coding_provider.complete(
@@ -570,7 +530,6 @@ class LLMClient:
                     tools=tools,
                     max_tokens=budget,
                     native_web_tools=native_web_tools,
-                    **effort_kw,
                 ),
                 role="coding",
             ),
@@ -594,7 +553,6 @@ class LLMClient:
         """``wait_note`` leads the host's still-working line while this call waits."""
         listener = self.usage_listener
         budget = max_tokens or self.stream_budget("coding")
-        effort_kw = self._effort_kwargs(self._coding_provider)
         events = self._guarded_stream(
             make_stream=lambda: _stream_with_auth_confirmation(
                 lambda: self._coding_provider.stream(
@@ -604,7 +562,6 @@ class LLMClient:
                     tools=tools,
                     max_tokens=budget,
                     native_web_tools=native_web_tools,
-                    **effort_kw,
                 ),
                 role="coding",
             ),
@@ -683,7 +640,6 @@ class LLMClient:
         tool, validator_class, is_list = build_structured_tool(schema_class)
 
         budget = max_tokens or self._max_tokens
-        effort_kw = self._effort_kwargs(provider)
 
         listener = self.usage_listener
 
@@ -697,7 +653,6 @@ class LLMClient:
                         tools=[tool],
                         tool_choice=tool_choice,
                         max_tokens=budget,
-                        **effort_kw,
                     ),
                     role=role,
                 ),

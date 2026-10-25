@@ -883,22 +883,29 @@ def test_the_attachments_field_tells_the_agent_what_qualifies():
 
 
 class _RecordingProvider(LLMProvider):
+    """Records the effort and output budget of each call. A call that names no effort sends the
+    provider's own, as the real providers do."""
+
     name = "fake"
+    accepts_large_output = True
 
     def __init__(self):
         self._reasoning_effort = "max"
-        self.efforts: list[str | None] = []
+        self.sent: list[tuple[str | None, int]] = []
+
+    def _record(self, kw):
+        self.sent.append((kw.get("reasoning_effort") or self.reasoning_effort, kw["max_tokens"]))
 
     async def complete(self, **kw):
-        self.efforts.append(kw.get("reasoning_effort"))
+        self._record(kw)
         return LLMResponse(content="ok", usage=Usage(output_tokens=1))
 
     async def stream(self, **kw):
-        self.efforts.append(kw.get("reasoning_effort"))
+        self._record(kw)
         yield StreamComplete(response=LLMResponse(content="ok", usage=Usage(output_tokens=1)))
 
 
-async def test_generation_runs_every_model_call_at_high_effort(tmp_path: Path, monkeypatch):
+async def test_generation_runs_every_model_call_at_the_configured_effort(tmp_path: Path, monkeypatch):
     slug = _make_artifact(tmp_path)
     provider = _RecordingProvider()
     llm = LLMClient(planning_provider=provider, planning_model="p", coding_provider=provider, coding_model="c")
@@ -906,6 +913,8 @@ async def test_generation_runs_every_model_call_at_high_effort(tmp_path: Path, m
 
     async def fake_generate(**kw):
         await llm.plan(system="s", messages=[])
+        async for _ in llm.plan_stream(system="s", messages=[]):
+            pass
         async for _ in llm.code_stream(system="s", messages=[]):
             pass
         return "Backend verification failed after retry: stop here"
@@ -913,9 +922,8 @@ async def test_generation_runs_every_model_call_at_high_effort(tmp_path: Path, m
     monkeypatch.setattr(gen_pkg, "generate", fake_generate)
     await _collect(session, {"slug": slug, "user_request": "build it", "agent_understanding": "an app"})
 
-    assert provider.efforts == ["high", "high"]
-    await llm.plan(system="s", messages=[])
-    assert provider.efforts[-1] is None, "the cap must not outlive the generation task"
+    # Max for every call. A streamed call's budget follows it; a non-streamed call keeps 8192.
+    assert provider.sent == [("max", 8192), ("max", 65536), ("max", 65536)]
 
 
 async def test_act_first_relays_the_brief_between_the_steps_and_reports_it(

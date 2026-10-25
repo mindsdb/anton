@@ -6,6 +6,7 @@ from typing import NoReturn
 
 import anthropic
 
+from .effort import LONGEST_SILENCE_S
 from .provider import register_provider, safe_parse_tool_input, unregister_provider
 from .provider import (
     ContextOverflowError,
@@ -220,6 +221,11 @@ def _build_native_web_tools(
     return entries, beta
 
 
+# The SDK's own 600 s read timeout would end a call that thinks in silence for
+# longer, before anton's own deadline (`LLMClient._idle_timeout_for`) does.
+_SDK_TIMEOUT = anthropic.Timeout(LONGEST_SILENCE_S, connect=5.0)
+
+
 class AnthropicProvider(LLMProvider):
     name: str = "anthropic"
 
@@ -252,7 +258,7 @@ class AnthropicProvider(LLMProvider):
         kwargs = {}
         if api_key:
             kwargs["api_key"] = api_key
-        self._client = anthropic.AsyncAnthropic(**kwargs)
+        self._client = anthropic.AsyncAnthropic(**kwargs, timeout=_SDK_TIMEOUT)
         register_provider(self)
 
     def export_connection_info(self) -> ProviderConnectionInfo:

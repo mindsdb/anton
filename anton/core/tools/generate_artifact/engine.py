@@ -28,6 +28,7 @@ from anton.core.artifacts.internal_files import API_SPEC_FILENAME, PRD_FILENAME
 from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
 from anton.core.backends.sandbox import cell_sandbox_of
 from anton.utils.datasources import scrub_credentials
+from anton.core.llm.effort import WRITE_BUDGET_BY_EFFORT, client_stream_budget
 from anton.core.llm.structured import looks_truncated
 from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS, scratchpad_action
 
@@ -51,6 +52,8 @@ from .prompts import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from anton.chat_session import ChatSession
 
 logger = logging.getLogger(__name__)
@@ -191,6 +194,21 @@ _SPEC_COMPACT_NUDGE = (
 )
 
 
+def _budget_for_effort(
+    session: "ChatSession", floor: int, role: str, *, by_effort: Mapping[str, int] | None = None
+) -> int:
+    """``floor``, or the streamed budget the client gives ``role`` at its effort when that is larger.
+
+    Hidden thinking spends from the same budget as the answer, and at the top
+    efforts it outgrows the fixed ones: measured 2026-10-24 on `sonnet-5-5` at
+    max, a spec call spent all of 16384 and every write round all of 20480
+    thinking, and wrote nothing. The effort table only raises a budget, so high
+    and below keep the fixed ones. ``by_effort`` is the table, when the call
+    needs another one (`WRITE_BUDGET_BY_EFFORT` for a write round).
+    """
+    return max(floor, client_stream_budget(getattr(session, "_llm", None), role, by_effort=by_effort))
+
+
 async def _plan_whole_document(
     session: "ChatSession",
     *,
@@ -203,7 +221,11 @@ async def _plan_whole_document(
     tools: list[dict] | None = None,
     on_text=None,
 ) -> tuple[str, str | None]:
-    """One planning call for a whole specification, retried once with more room.
+    """One planning call for a whole specification, retried once asking for a compact version.
+
+    At high and below the retry also gets more room (16384, then 20480).
+    Above high, on an endpoint that takes large outputs, both tries get the
+    role's effort budget instead.
 
     Returns ``(body, error)``; exactly one of the two is set.
 
@@ -244,7 +266,10 @@ async def _plan_whole_document(
     cannot see a cut that stopped just under the cap.
     """
     trace = trace or NullTrace()
-    budgets = (SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY)
+    budgets = (
+        _budget_for_effort(session, SPEC_MAX_TOKENS, "planning"),
+        _budget_for_effort(session, SPEC_MAX_TOKENS_RETRY, "planning"),
+    )
     response = None
     extra = ""
     attempt = 0
@@ -288,7 +313,7 @@ async def _plan_whole_document(
     used = getattr(getattr(response, "usage", None), "output_tokens", None)
     return "", (
         f"{node_label}: the specification hit the output limit "
-        f"({used} tokens against a {SPEC_MAX_TOKENS_RETRY} budget) and was "
+        f"({used} tokens against a {budgets[-1]} budget) and was "
         "still incomplete after a retry asking for a compact version."
     )
 
@@ -908,7 +933,10 @@ async def _run_loop(
         # model is also less token-efficient on this content (1.57 characters
         # per token against the coding model's 2.62), so 8192 bought it barely
         # 12 800 characters — less than an average artifact.
-        budget = GEN_WRITE_MAX_TOKENS
+        budget = _budget_for_effort(
+            session, GEN_WRITE_MAX_TOKENS, "planning" if first_round else "coding",
+            by_effort=WRITE_BUDGET_BY_EFFORT,
+        )
         # Truncation must be judged against the budget THIS round ran on.
         # Against the client default instead, every reply over 8192 tokens
         # would be called truncated and its last tool call rejected — exactly

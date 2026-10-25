@@ -1,13 +1,13 @@
-"""LLMClient: the effort ceiling and the effort-derived stream budget."""
+"""LLMClient: every call leaves the provider's own effort alone, and the stream budget follows it."""
 from __future__ import annotations
-
-import asyncio
 
 import pytest
 from pydantic import BaseModel
 
-from anton.core.llm import client as client_module
+from anton.core.llm.anthropic import AnthropicProvider
 from anton.core.llm.client import LLMClient
+from anton.core.llm.effort import LONGEST_SILENCE_S, WRITE_BUDGET_BY_EFFORT
+from anton.core.llm.openai import OpenAIProvider
 from anton.core.llm.provider import LLMProvider, LLMResponse, StreamComplete, ToolCall, Usage
 
 
@@ -69,33 +69,19 @@ async def _every_call(llm):
     await llm.generate_object_code(_Answer, system="s", messages=[])
 
 
-async def test_without_a_ceiling_no_override_is_sent():
-    llm, planning, coding = _client()
+@pytest.mark.parametrize("effort", ["max", "xhigh", "high", "low", None])
+async def test_no_call_overrides_the_providers_effort(effort):
+    llm, planning, coding = _client(planning=effort, coding=effort)
     await _every_call(llm)
+    assert len(planning.calls + coding.calls) == 6
     assert all("reasoning_effort" not in c for c in planning.calls + coding.calls)
-
-
-async def test_ceiling_lowers_every_planning_and_coding_call():
-    llm, planning, coding = _client()
-    with llm.effort_ceiling("high"):
-        await _every_call(llm)
-    assert [c["reasoning_effort"] for c in planning.calls + coding.calls] == ["high"] * 6
-
-
-@pytest.mark.parametrize("effort", ["low", None, "turbo", "high"])
-async def test_ceiling_leaves_lower_and_unknown_efforts_alone(effort):
-    llm, planning, _ = _client(planning=effort)
-    with llm.effort_ceiling("high"):
-        await llm.plan(system="s", messages=[])
-    assert "reasoning_effort" not in planning.calls[0]
 
 
 async def test_legacy_provider_without_the_property_still_works():
     legacy = _LegacyProvider()
     llm = LLMClient(planning_provider=legacy, planning_model="p", coding_provider=legacy, coding_model="c")
-    with llm.effort_ceiling("high"):
-        assert (await llm.plan(system="s", messages=[])).content == "ok"
-        assert await _drain(llm.plan_stream(system="s", messages=[]))
+    assert (await llm.plan(system="s", messages=[])).content == "ok"
+    assert await _drain(llm.plan_stream(system="s", messages=[]))
 
 
 @pytest.mark.parametrize(
@@ -121,10 +107,7 @@ async def test_unknown_endpoint_keeps_the_client_default():
     assert generic.calls[0]["max_tokens"] == 8192
 
 
-async def test_stream_budget_respects_the_ceiling_and_a_large_default():
-    llm, _, _ = _client(planning="max")
-    with llm.effort_ceiling("high"):
-        assert llm.stream_budget("planning") == 16384
+async def test_stream_budget_never_goes_below_a_large_default():
     big, _, _ = _client(planning="high", max_tokens=100000)
     assert big.stream_budget("planning") == 100000
 
@@ -140,38 +123,61 @@ async def test_explicit_max_tokens_wins_and_non_streamed_calls_keep_the_default(
     assert llm.max_tokens == 8192
 
 
-async def test_ceiling_is_reset_on_exit_in_the_same_task():
+@pytest.mark.parametrize("effort, expected", [("max", 128000), ("xhigh", 32768), ("high", 16384), (None, 8192)])
+async def test_a_write_call_asks_for_the_write_tables_budget(effort, expected):
+    llm, planning, _ = _client(planning=effort)
+    assert llm.stream_budget("planning", by_effort=WRITE_BUDGET_BY_EFFORT) == expected
+    await _drain(llm.plan_stream(system="s", messages=[], max_tokens=llm.stream_budget(
+        "planning", by_effort=WRITE_BUDGET_BY_EFFORT)))
+    assert planning.calls[0]["max_tokens"] == expected
+
+
+async def test_an_unknown_endpoint_keeps_the_client_default_for_a_write_call_too():
+    class _Generic(_RecordingProvider):
+        accepts_large_output = False
+
+    generic = _Generic("max")
+    llm = LLMClient(planning_provider=generic, planning_model="p", coding_provider=generic, coding_model="c")
+    assert llm.stream_budget("planning", by_effort=WRITE_BUDGET_BY_EFFORT) == 8192
+
+
+@pytest.mark.parametrize("budget, expected", [(2048, 600.0), (8192, 600.0), (65536, 655.36), (128000, 1280.0)])
+def test_the_silence_deadline_grows_with_a_budget_that_can_outlast_it(budget, expected):
     llm, _, _ = _client()
-    with llm.effort_ceiling("high"):
-        assert client_module._EFFORT_CEILING.get() == "high"
-    assert client_module._EFFORT_CEILING.get() is None
+    assert llm._idle_timeout_for(max_tokens=budget) == expected
 
 
-async def test_nested_ceiling_can_only_lower():
-    llm, planning, _ = _client(planning="max")
-    with llm.effort_ceiling("low"):
-        with llm.effort_ceiling("high"):
-            await llm.plan(system="s", messages=[])
-        with llm.effort_ceiling("minimal"):
-            await llm.plan(system="s", messages=[])
-    assert [c["reasoning_effort"] for c in planning.calls] == ["low", "minimal"]
-
-
-async def test_nested_unknown_level_keeps_the_outer_cap():
-    llm, planning, _ = _client(planning="max")
-    with llm.effort_ceiling("low"):
-        with llm.effort_ceiling("turbo"):
-            await llm.plan(system="s", messages=[])
-    assert planning.calls[0]["reasoning_effort"] == "low"
-
-
-async def test_ceiling_reaches_gathered_tasks():
+@pytest.mark.parametrize("configured", [0, -1, float("nan")])
+def test_a_deadline_turned_off_stays_off_at_any_budget(configured):
     llm, _, _ = _client()
-    seen: list[str | None] = []
+    llm.model_call_idle_timeout_s = configured
+    assert llm._idle_timeout_for(max_tokens=128000) is None
 
-    async def probe():
-        seen.append(client_module._EFFORT_CEILING.get())
 
-    with llm.effort_ceiling("high"):
-        await asyncio.gather(probe(), probe())
-    assert seen == ["high", "high"]
+@pytest.mark.parametrize("budget, expected", [(8192, 0.05), (60000, 0.05), (65536, 655.36)])
+def test_a_short_configured_deadline_stays_until_the_budget_outgrows_what_600_s_covers(budget, expected):
+    llm, _, _ = _client()
+    llm.model_call_idle_timeout_s = 0.05
+    assert llm._idle_timeout_for(max_tokens=budget) == expected
+
+
+def test_a_configured_deadline_above_the_budgets_silence_still_wins():
+    llm, _, _ = _client()
+    llm.model_call_idle_timeout_s = 3000.0
+    assert llm._idle_timeout_for(max_tokens=128000) == 3000.0
+
+
+@pytest.mark.parametrize("make", [
+    lambda: OpenAIProvider(api_key="k", base_url="https://gateway.invalid/v1",
+                           flavor=OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH),
+    lambda: OpenAIProvider(api_key="k", base_url="https://gateway.invalid/v1"),
+    lambda: OpenAIProvider(api_key="k", base_url="https://azure.invalid", api_version="2025-04-01-preview"),
+    lambda: AnthropicProvider(api_key="k"),
+])
+async def test_the_sdk_read_timeout_never_cuts_a_silence_the_deadline_allows(make):
+    provider = make()
+    try:
+        assert provider._client.timeout.read == LONGEST_SILENCE_S
+        assert provider._client.timeout.connect == 5.0
+    finally:
+        await provider.aclose()
