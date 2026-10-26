@@ -806,6 +806,11 @@ def _ds_keys(source: str) -> list[str]:
     return sorted(set(_DS_KEY.findall(source)))
 
 
+def _canonical_name(name: str) -> str:
+    """A package name as PEP 503 normalizes it."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
 def _requirement_names(requirements: str) -> set[str]:
     """PEP 503-normalized package names from requirements.txt lines.
 
@@ -821,7 +826,7 @@ def _requirement_names(requirements: str) -> set[str]:
             continue
         m = _REQ_NAME.match(line)
         if m:
-            names.add(re.sub(r"[-_.]+", "-", m.group(0)).lower())
+            names.add(_canonical_name(m.group(0)))
     return names
 
 
@@ -910,6 +915,7 @@ def evaluate_backend(
     artifact_type: str = "",
     state_manifest: str | None = None,
     api_operations: set[str] | None = None,
+    live_app: bool = False,
 ) -> tuple[VerifyResult, list[str]]:
     """Pure contract evaluation of a generated backend.
 
@@ -918,7 +924,10 @@ def evaluate_backend(
     `state_manifest` is the raw text of `state_manifest.json` (None = the file
     does not exist) — read by the async glue, validated here to stay pure.
     `api_operations` (from `contract_operations`) is what `openapi.json`
-    promises; None skips the comparison.
+    promises; None skips the comparison. `live_app` is set for a backend that
+    runs in an app slot, which installs nothing, so its `requirements.txt`
+    needs no core package line; `verify_backend` has already refused any
+    package it names that isn't installed.
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -984,14 +993,18 @@ def evaluate_backend(
         )
 
     req_names = _requirement_names(requirements)
-    for core in _CORE_REQS:
-        if core not in req_names:
-            # Self-evidencing message: show what WAS parsed, so a mismatch
-            # between the file and this parser is visible to the retry loop.
-            errors.append(
-                f"requirements.txt must list `{core}`. Parsed package names: "
-                + (", ".join(sorted(req_names)) or "(none)")
-            )
+    # Every other launch installs `requirements.txt`, so it must name the core
+    # packages. An app slot installs nothing and runs the ones in its image,
+    # whatever the file lists.
+    if not live_app:
+        for core in _CORE_REQS:
+            if core not in req_names:
+                # Self-evidencing message: show what WAS parsed, so a mismatch
+                # between the file and this parser is visible to the retry loop.
+                errors.append(
+                    f"requirements.txt must list `{core}`. Parsed package names: "
+                    + (", ".join(sorted(req_names)) or "(none)")
+                )
     if "anton-state" in req_names:
         # Applies to every type: the package is not on any registry, so pip
         # fails on the line. The install step filters it defensively, but the
@@ -1229,19 +1242,21 @@ _REQUIREMENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 def _missing_here(packages: Sequence[str]) -> list[str]:
-    """The requirements this process's environment lacks, by name. A live
-    app's slot runs this same image with nothing installed, so it lacks them
-    too; the scratchpad venv reaches the same packages through its `.pth`."""
-    from importlib.metadata import PackageNotFoundError, distribution
+    """The requirements a live app's slot lacks, by name. The slot runs this
+    same image with nothing installed, and imports from the base interpreter's
+    packages and this process's, as the scratchpad venv does (system site
+    packages, and its `.pth`). This process's own environment alone misses
+    what only the base interpreter holds, such as `mangum`."""
+    import site
+    import sys
+    from importlib.metadata import distributions
 
+    paths = [*sys.path, *site.getsitepackages([sys.base_prefix])]
+    installed = {_canonical_name(d.metadata["Name"]) for d in distributions(path=paths) if d.metadata["Name"]}
     missing: list[str] = []
     for line in packages:
         match = _REQUIREMENT_NAME.match(line.strip())
-        if match is None:
-            continue
-        try:
-            distribution(match.group())
-        except PackageNotFoundError:
+        if match is not None and _canonical_name(match.group()) not in installed:
             missing.append(match.group())
     return missing
 
@@ -1259,11 +1274,12 @@ async def verify_backend(
 ) -> tuple[VerifyResult, list[str]]:
     """Install the backend's requirements, compile it, then import it in its venv.
 
-    Under the pool's sandbox policy both checks run through the launcher, and
-    the import sees `ds_env` (the artifact's own `DS_*`) instead of the
-    server's. For a live app nothing is installed, since its app slot
-    installs nothing: a requirement this environment lacks fails the check
-    instead, before any launch card.
+    Under the pool's sandbox policy both checks run through the launcher.
+    With or without one, a given `ds_env` (the artifact's own `DS_*`)
+    replaces the server's `DS_*` for the import, as it does for the launch;
+    with none, the import inherits them. For a live app nothing is
+    installed, since its app slot installs nothing: a requirement the
+    slot lacks fails the check instead, before any launch card.
     """
     backend_py = artifact_path / "backend.py"
     if not backend_py.is_file():
@@ -1325,7 +1341,7 @@ async def verify_backend(
         policy=policy,
         argv=[venv_python, "-B", "-c", _INTROSPECT_SCRIPT],
         cwd=artifact_path,
-        env=build_backend_env(None) if policy is None else _sandboxed_check_env(ds_env),
+        env=build_backend_env(None, ds_env) if policy is None else _sandboxed_check_env(ds_env),
     )
     finished = await _finish_check(check, timeout=import_timeout)
     if finished is None:
@@ -1344,5 +1360,5 @@ async def verify_backend(
     return evaluate_backend(
         introspection, source, req_text,
         artifact_type=artifact_type, state_manifest=state_manifest,
-        api_operations=api_operations,
+        api_operations=api_operations, live_app=live_app,
     )

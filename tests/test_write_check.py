@@ -1237,31 +1237,35 @@ def test_a_listing_still_names_files_that_exist_and_a_delete_any_it_could_name(c
 
 # ── SQLite and DuckDB files ───────────────────────────────────────────────
 
-@pytest.mark.parametrize("code, path", [
+@pytest.mark.parametrize("code, path, statements", [
     ("import sqlite3\nc = sqlite3.connect('warehouse.db')\nc.execute('DELETE FROM orders WHERE qty = 0')\nc.commit()",
-     "warehouse.db"),
+     "warehouse.db", [("DELETE FROM orders WHERE qty = 0", "")]),
     ("import sqlite3\nwith sqlite3.connect('warehouse.db') as c:\n    c.cursor().execute('UPDATE t SET a = 1')",
-     "warehouse.db"),
+     "warehouse.db", [("UPDATE t SET a = 1", "")]),
     ("import sqlite3\ncon = sqlite3.connect(database='warehouse.db')\ncur = con.cursor()\n"
-     "cur.executemany('INSERT INTO t VALUES (?)', rows)", "warehouse.db"),
+     "cur.executemany('INSERT INTO t VALUES (?)', rows)", "warehouse.db", [("INSERT INTO t VALUES (?)", "{rows}")]),
     ("import sqlite3\nc = sqlite3.connect('warehouse.db')\nc.executescript('DROP TABLE t; CREATE TABLE t (a int);')",
-     "warehouse.db"),
+     "warehouse.db", [("DROP TABLE t", ""), ("CREATE TABLE t (a int)", "")]),
     ("import duckdb\ncon = duckdb.connect('analytics.duckdb')\ncon.execute(\"CREATE TABLE s AS SELECT * FROM 'stock.csv'\")",
-     "analytics.duckdb"),
+     "analytics.duckdb", [("CREATE TABLE s AS SELECT * FROM 'stock.csv'", "")]),
     ("import duckdb\ncon = duckdb.connect('analytics.duckdb')\ncon.sql('DELETE FROM s WHERE qty < 0')",
-     "analytics.duckdb"),
-    ("import duckdb\nq = 'UPDATE s SET qty = 0'\nduckdb.connect('analytics.duckdb').execute(q)", "analytics.duckdb"),
+     "analytics.duckdb", [("DELETE FROM s WHERE qty < 0", "")]),
+    ("import duckdb\nq = 'UPDATE s SET qty = 0'\nduckdb.connect('analytics.duckdb').execute(q)", "analytics.duckdb",
+     [("UPDATE s SET qty = 0", "")]),
     ("import duckdb\ncon = duckdb.connect('analytics.duckdb')\ndef run(s):\n    con.execute(s)\nrun('DELETE FROM s')",
-     "analytics.duckdb"),
+     "analytics.duckdb", [("DELETE FROM s", "")]),
     ("import pandas as pd, sqlite3\nc = sqlite3.connect('warehouse.db')\ndf.to_sql('stock', c, if_exists='replace')",
-     "warehouse.db"),
+     "warehouse.db", [("to_sql into stock", "")]),
     ("from sqlalchemy import create_engine, text\ne = create_engine('sqlite:///warehouse.db')\n"
-     "with e.begin() as c:\n    c.execute(text('DELETE FROM orders'))", "warehouse.db"),
+     "with e.begin() as c:\n    c.execute(text('DELETE FROM orders'))", "warehouse.db", [("DELETE FROM orders", "")]),
 ], ids=["sqlite-delete", "with-cursor", "keyword-executemany", "executescript", "duckdb-create", "duckdb-sql",
         "statement-in-a-name", "local-helper", "to_sql", "sqlalchemy-sqlite-url"])
-def test_a_write_to_a_database_file_the_turn_began_with_is_held_as_its_overwrite(code, path, office):
+def test_a_write_to_a_database_file_the_turn_began_with_is_held_as_its_overwrite(code, path, statements, office):
+    """The overwrite carries each statement it runs, with its values, so the
+    card can quote them beside the file."""
     writes = find_cell_writes(code=code, earlier_code=(), snapshots=(office,))
     assert [(c.action, c.paths) for c in writes.held_files] == [("overwrite", (path,))]
+    assert [(w.statement, w.values) for w in writes.held_files[0].statements] == statements
     assert writes.sql == (), "the SQL check still lets an in-process handle through"
 
 
@@ -1320,6 +1324,80 @@ def test_a_database_file_no_earlier_cell_wrote_is_still_held(earlier, engine, pa
     waits."""
     cells = (f"import {engine}\n" + earlier.format(engine=engine, path=path),) if earlier else ()
     assert _changes(code, databases, earlier=cells) == [("overwrite", (path,), True)]
+
+
+SHIP = "import sqlite3\ncon = sqlite3.connect('warehouse.db')\n"
+
+
+@pytest.mark.parametrize("code, fenced", [
+    (SHIP + "con.execute(\"UPDATE orders SET status = 'shipped' WHERE id = 42\")",
+     ["warehouse.db", "UPDATE orders SET status = 'shipped' WHERE id = 42"]),
+    (SHIP + "con.executemany('INSERT INTO orders VALUES (?, ?)', [(1, 'a'), (2, 'b')])",
+     ["warehouse.db", "INSERT INTO orders VALUES (?, ?)\nwith values [(1, 'a'), (2, 'b')]"]),
+    ("import duckdb\nduckdb.connect('analytics.duckdb').execute('DELETE FROM sales WHERE qty = 0')",
+     ["analytics.duckdb", "DELETE FROM sales WHERE qty = 0"]),
+    ("import pandas as pd\n" + SHIP + "pd.DataFrame({'a': [1, 2]}).to_sql('orders_copy', con)",
+     ["warehouse.db", "to_sql into orders_copy"]),
+], ids=["update", "executemany", "duckdb-delete", "to_sql"])
+def test_the_card_names_the_database_file_and_quotes_each_statement_with_its_values(code, fenced, office):
+    """The user can tell a one-row fix from an emptied table before pressing
+    Approve: the card shows what runs on the file, not only its name."""
+    card = _card(code, office)
+    assert "This step would change this database file:" in card
+    assert "It would run:" in card
+    assert _fenced(card) == fenced
+
+
+def test_every_write_to_one_database_file_is_on_its_one_change(office):
+    """One Approve runs both statements, so the card quotes both, under the
+    file named once."""
+    code = SHIP + "con.execute('DELETE FROM orders WHERE id = 1')\ncon.execute(\"UPDATE orders SET status = 'x' WHERE id = 2\")"
+    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(office,))
+    assert [(c.paths, len(c.statements)) for c in writes.held_files] == [(("warehouse.db",), 2)]
+    assert _fenced(_card_prompt(writes)) == [
+        "warehouse.db", "DELETE FROM orders WHERE id = 1", "UPDATE orders SET status = 'x' WHERE id = 2",
+    ]
+
+
+@pytest.mark.parametrize("code", [
+    SHIP + "con.execute('DELETE FROM orders')\nimport shutil\nshutil.copy('backup.db', 'warehouse.db')",
+    "import shutil\nshutil.copy('backup.db', 'warehouse.db')\n" + SHIP + "con.execute('DELETE FROM orders')",
+], ids=["copy-after", "copy-before"])
+def test_a_copy_onto_a_database_file_stays_on_the_card_beside_its_statements(code, office):
+    """The copy replaces the whole file, which a DELETE quoted under "would
+    change this database file" doesn't say, so each keeps its own line."""
+    card = _card(code, office)
+    assert "This step would overwrite:\n\n```\nwarehouse.db\n```" in card
+    assert "It would run:\n\n```\nDELETE FROM orders\n```" in card
+
+
+def test_a_database_file_the_agent_made_shows_its_statement_when_another_change_raises_the_card(databases):
+    """A write to a database an earlier turn made raises no card, but the
+    Approve another change asks for runs it too, so the card quotes it."""
+    earlier = "import sqlite3\ncon = sqlite3.connect('scratch.db'); con.execute('CREATE TABLE t (a int)')"
+    card = _card(SQLITE_AGAIN + "\nimport os\nos.remove('stock.csv')", databases, earlier=(earlier,))
+    assert "This step would delete:\n\n```\nstock.csv\n```" in card
+    assert "This step would also change this database file:\n\n```\nscratch.db\n```" in card
+    assert "It would run:\n\n```\nINSERT INTO t VALUES (1)\n```" in card
+
+
+@pytest.mark.parametrize("code, fenced", [
+    (SHIP + "with con:\n    con.execute('INSERT INTO archive SELECT * FROM orders')\ncon.execute('DELETE FROM orders')",
+     ["warehouse.db", "INSERT INTO archive SELECT * FROM orders", "DELETE FROM orders"]),
+    (SHIP + "for r in rows:\n    con.execute('INSERT INTO t VALUES (?)', r)\ncon.execute('UPDATE t SET a = 0')",
+     ["warehouse.db", "INSERT INTO t VALUES (?)\nwith values {r}", "UPDATE t SET a = 0"]),
+], ids=["with-block", "loop"])
+def test_a_database_file_s_statements_are_quoted_in_the_order_they_run(code, fenced, office):
+    """A write in a block runs before a later one outside it, so the card
+    quotes it first: a DELETE shown before the INSERT that archives the rows
+    would misstate the step."""
+    assert _fenced(_card(code, office)) == fenced
+
+
+def test_a_secret_in_a_database_file_s_statement_is_scrubbed_on_the_card(office):
+    token = "ya29." + "a" * 30
+    card = _card(SHIP + f"con.execute(\"UPDATE creds SET note = '{token}' WHERE id = 1\")", office)
+    assert token not in card and "[REDACTED_TOKEN]" in card
 
 
 # ── HTTP ──────────────────────────────────────────────────────────────────

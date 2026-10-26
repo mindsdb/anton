@@ -870,12 +870,28 @@ def record_page_checks(
             record.pop(key, None)
 
 
+def _builder_model(session: "ChatSession") -> str | None:
+    """The model generate_artifact's calls go to here when it is not the
+    agent's own, else None. Its screenshot refusals are kept apart, since they
+    say nothing about the agent's model."""
+    from anton.core.llm.client import routed_model
+
+    model = routed_model()
+    agent = getattr(getattr(session, "_llm", None), "planning_model", None)
+    return model if model is not None and model != agent else None
+
+
 def render_screenshots_refused(session: "ChatSession") -> bool:
-    """Whether the model refused a request carrying a render-check screenshot
-    in this session and took it without one
+    """Whether the model the check's screenshot goes to refused a request
+    carrying a render-check screenshot in this session and took it without one
     (`ChatSession._confirm_render_screenshots_refused`), so checks ask the
-    service for none and the findings go to the agent without one. A test
-    double without the flag gets screenshots."""
+    service for none and the findings go to the model without one. Inside
+    generate_artifact on a model of its own, that is the builder's model
+    (`_builder_model`); everywhere else the agent's. A test double without the
+    flag gets screenshots."""
+    builder = _builder_model(session)
+    if builder is not None:
+        return builder in getattr(session, "_builder_screenshots_refused", ())
     return getattr(session, "_render_screenshots_refused", False) is True
 
 
@@ -893,9 +909,13 @@ def images_refused(session: "ChatSession") -> bool:
 def record_render_screenshots_refused(session: "ChatSession") -> None:
     """Remember that the model refused a request carrying a render-check
     screenshot and took it without one, for a caller outside the session's
-    own turn loop (generate_artifact's retry). Later checks then ask for no
-    screenshot (`render_screenshots_refused`)."""
-    session._render_screenshots_refused = True
+    own turn loop (generate_artifact's retry). Later checks for that model then
+    ask for no screenshot (`render_screenshots_refused`)."""
+    builder = _builder_model(session)
+    if builder is None:
+        session._render_screenshots_refused = True
+        return
+    session._builder_screenshots_refused = {*getattr(session, "_builder_screenshots_refused", ()), builder}
 
 
 def page_check_lines(store, *, checks: "dict[PageKey, RenderStatus]") -> list[str]:
@@ -1121,6 +1141,15 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> Tool
     if artifact_type not in ARTIFACT_TYPES:
         return SideEffectResult.failed(
             f"Error: `type` must be one of {ARTIFACT_TYPES}. Got: {artifact_type!r}.",
+            reason="invalid_type",
+        )
+    # The tool's schema leaves the fullstack types out where nothing starts an
+    # app backend (`live_app_slots.fullstack_offered`), but not every model
+    # keeps to a schema's enum.
+    if artifact_type.startswith("fullstack-") and not getattr(session, "_fullstack_offered", True):
+        return SideEffectResult.failed(
+            "Error: this deployment starts no app backends, so there is no fullstack type: "
+            "register an html-app instead.",
             reason="invalid_type",
         )
 
@@ -1547,6 +1576,24 @@ def _rolls_back(result) -> bool:
     return True
 
 
+def _data_unavailable(reason: str) -> str:
+    """Report a run that stopped for missing data, with the step that fixes it.
+
+    Apart from `_generation_failed` on purpose: nothing was built and nothing
+    is broken, so the agent is told what to ask the user for instead of how
+    to proceed — an open question is what sent it to build the page by hand.
+    """
+    return (
+        "Error: the data this artifact needs is not available.\n\n"
+        f"{reason}\n\n"
+        "IMPORTANT: do NOT build the artifact yourself — no write_file / "
+        "scratchpad fallback. Tell the user which data is missing and where "
+        "it was looked for, and ask them to connect the source or provide "
+        "the data. Once they do, call generate_artifact again and pass the "
+        "data in `known_data`, naming the scratchpad and cell it lives in."
+    )
+
+
 async def _drain_progress(queue):
     """Yield ToolProgress markers, staying silent while a question is open.
 
@@ -1832,9 +1879,9 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         if isinstance(raw_attachments, list) else []
 
     folder = store.folder_for(slug)
-    from anton.core.llm.effort import effort_ceiling_of
+    from anton.core.llm.client import model_route
     from anton.core.tools.generate_artifact import generate
-    from anton.core.tools.generate_artifact.state import ARTIFACT_EFFORT_CEILING
+    from anton.core.tools.generate_artifact.state import artifact_model_route
 
     from anton.core.artifacts.page_copies import turn_pages_of
 
@@ -1900,15 +1947,17 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
             # blocking it briefly is the lesser cost.
             _put_back()
 
-    async def _at_artifact_effort(coro):
-        # Entered inside the task, so the cap lives in the task's own context
-        # and never reaches the agent loop draining this handler.
-        with effort_ceiling_of(getattr(session, "_llm", None), ARTIFACT_EFFORT_CEILING):
+    route = artifact_model_route()
+
+    async def _at_artifact_model(coro):
+        # Entered inside the task, so the builder's model lives in the task's
+        # own context and never reaches the agent loop draining this handler.
+        with model_route(route):
             return await coro
 
     queue: "asyncio.Queue[str | None]" = asyncio.Queue()
     task = asyncio.create_task(
-        _at_artifact_effort(
+        _at_artifact_model(
             _generate_with_progress_close(
                 generate(
                     session=session,
@@ -1977,12 +2026,17 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         yield _browser_check_failed_outcome(session, slug=slug, folder=folder, result=result)
         return
     if isinstance(result, str):
+        from anton.core.tools.generate_artifact.state import NOT_ENOUGH_DATA_PREFIX
+
         # A failed run still worked inside the artifact folder on its way to
         # failing, so the turn touched the artifact.
         _track_artifact(session, store, slug, summary="Generated artifact files")
-        text = _generation_failed(result)
+        content = (
+            _data_unavailable(result) if result.startswith(NOT_ENOUGH_DATA_PREFIX)
+            else _generation_failed(result)
+        )
         yield ToolOutcome(
-            content=_with_put_back(text, restored), ok=False, reason="pipeline"
+            content=_with_put_back(content, restored), ok=False, reason="pipeline"
         )
         return
     if restored is not None:
@@ -3284,6 +3338,33 @@ _ASK_USER_UNANSWERED = {
     ),
 }
 
+# The `ToolOutcome.reason` of a question that timed out, and of one the user
+# skipped. The text above only asks the model to stop, so
+# `ChatSession._stream_and_handle_tools` stops the turn itself on either: no
+# later call in the turn runs, and the turn ends on `unanswered_question_line`.
+QUESTION_TIMED_OUT = "question_timed_out"
+QUESTION_SKIPPED = "question_skipped"
+UNANSWERED_QUESTION_REASONS = frozenset({QUESTION_TIMED_OUT, QUESTION_SKIPPED})
+_UNANSWERED_QUESTION_REASON = {"timeout": QUESTION_TIMED_OUT, "cancelled": QUESTION_SKIPPED}
+
+
+def unanswered_question_line(tc_input: dict, reason: str) -> str:
+    """The line a turn ends on when its `ask_user` question went unanswered.
+
+    anton writes it, not the model, so it names the open question every time.
+    """
+    question = (tc_input.get("question") or "").strip()
+    if reason == QUESTION_SKIPPED:
+        return (
+            f'You skipped my question: "{question}", so I\'ve stopped here without '
+            "acting on it. Tell me how you'd like to go on."
+        )
+    return (
+        f'I asked: "{question}" and haven\'t had an answer, so I\'ve stopped here '
+        "without acting on it. Answer it above when you're ready, and I'll pick up "
+        "from there."
+    )
+
 
 def _ask_user_telemetry_settings(session: "ChatSession"):
     """Best-effort settings object for `send_event`, mirroring the pattern
@@ -3312,7 +3393,7 @@ def _send_ask_user_event(session: "ChatSession", action: str, props: dict) -> No
         pass
 
 
-async def handle_ask_user(session: "ChatSession", tc_input: dict) -> str:
+async def handle_ask_user(session: "ChatSession", tc_input: dict) -> str | ToolOutcome:
     """Ask the user to choose, and return the answer as the tool result."""
     from anton.core.interaction.elicit import elicit
 
@@ -3339,7 +3420,13 @@ async def handle_ask_user(session: "ChatSession", tc_input: dict) -> str:
     if answer.status == "unavailable":
         return _status("error", _ASK_USER_UNAVAILABLE)
     if answer.status in _ASK_USER_UNANSWERED:
-        return _status(answer.status, _ASK_USER_UNANSWERED[answer.status])
+        # Tier 1: the question was asked and no answer came back, which is the
+        # tool working. The reason is what ends the turn.
+        return ToolOutcome(
+            content=_status(answer.status, _ASK_USER_UNANSWERED[answer.status]),
+            ok=True,
+            reason=_UNANSWERED_QUESTION_REASON[answer.status],
+        )
 
     if answer.status == "answered":
         extra: dict = {}

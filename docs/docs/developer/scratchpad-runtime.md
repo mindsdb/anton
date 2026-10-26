@@ -444,8 +444,11 @@ inside the subprocess:
 - `generate_object(Model, system=..., messages=[...])` — forced-tool-call
   structured output. It shares `build_structured_tool` /
   `unwrap_structured_response` from `anton/core/llm/structured.py` with the
-  main process's `LLMClient.generate_object`; only the provider invocation
-  differs (sync subprocess vs async planning). See [LLM dispatch](/developer/llm-dispatch).
+  main process's `LLMClient.generate_object`, and `send_structured`, which
+  resends a call whose forced tool choice the model refused. The refusal is
+  remembered in that module, so it outlasts the provider each call builds; only
+  the provider invocation differs (sync subprocess vs async planning). See
+  [LLM dispatch](/developer/llm-dispatch).
 
 The boot script also provides `agentic_loop(...)` (a sync tool-call loop),
 `web_search(query)` (routes through the configured LLM's native web search),

@@ -172,8 +172,11 @@ this down by category if that helps"). Always leave a door open — never dead-e
 But always let the user know the detail is available if they want it.
 - When you discover important information, use the memorize tool to encode it. \
 Use "always"/"never"/"when" for behavioral rules. Use "lesson" for facts. \
-Use "profile" for things about the user. Choose "global" for universal knowledge, \
-"project" for workspace-specific knowledge. \
+Use "profile" only for who the user is (name, role, time zone, expertise), never for \
+an instruction on how to answer or work. Scope is "project" unless the user says a \
+rule applies to all their projects; the memorize tool's Scope note says when to \
+choose "global". Never memorize what the project's own instructions in anton.md \
+already say: they load on every turn in this project. \
 Only encode genuinely reusable knowledge — not transient conversation details.
 """
 
@@ -347,6 +350,45 @@ result. For fullstack apps the entry point is the `url` from the \
 the page and its `/api/*`; `static/index.html` opened from disk cannot reach \
 the API, so never present its path as the way to open the app.
 """
+
+
+def cut_spans(text: str, *cuts: tuple[str, str | None, str]) -> str:
+    """`text` with each `(start, end, replacement)` applied in order: the span
+    from `start` up to the first `end` after it becomes `replacement`. `end`
+    itself is kept, and None runs the span to the end of `text`.
+
+    Each `start` must occur exactly once and its `end` must follow it, so a
+    variant derived from a prompt fails at import, instead of drifting, when
+    the prompt is reworded.
+    """
+    for start, end, replacement in cuts:
+        count = text.count(start)
+        if count != 1:
+            raise ValueError(f"{start[:60]!r} occurs {count} times, not once")
+        begin = text.index(start)
+        stop = len(text) if end is None else text.find(end, begin + len(start))
+        if stop < 0:
+            raise ValueError(f"{end!r} doesn't follow {start[:60]!r}")
+        text = text[:begin] + replacement + text[stop:]
+    return text
+
+
+# Where nothing starts an app backend (`live_app_slots.fullstack_offered` is
+# False): no fullstack type to register, no launch, and no backend URL as the
+# way to open an app.
+STATIC_ARTIFACTS_PROMPT = cut_spans(
+    ARTIFACTS_PROMPT,
+    (
+        "- Fullstack web app (backend + frontend) — the DEFAULT",
+        "\nWHEN NOT TO REGISTER:",
+        "- Interactive apps and demos → `type=\"html-app\"` too. This deployment "
+        "starts no app backends, so there is no fullstack type; an html-app shows "
+        "the data it was built with.\n",
+    ),
+    (", and every `fullstack-stateless-app`", " goes to `generate_artifact(", ""),
+    (", and for fullstack apps launches the backend", " Do NOT write a PRD yourself", "."),
+    (" For fullstack apps the entry point is the `url`", "\n", ""),
+)
 
 
 # ---------------------------------------------------------------------------
