@@ -898,7 +898,7 @@ def test_public_data_sources_skill_is_loaded_from_the_store():
         def __init__(self):
             self.asked = []
 
-        def load(self, label):
+        def load_for_artifacts(self, label):
             self.asked.append(label)
             return _Skill()
 
@@ -914,7 +914,7 @@ def test_public_data_sources_skill_is_loaded_from_the_store():
 
 
 def test_public_data_sources_skill_is_defensive():
-    """AsyncMock session: store.load() returns a coroutine that must be closed.
+    """AsyncMock session: store.load_for_artifacts() returns a coroutine that must be closed.
 
     We also assert the absence of a RuntimeWarning: without an explicit close() the
     abandoned coroutine surfaces at GC time in the output of an arbitrary test. The
@@ -928,7 +928,7 @@ def test_public_data_sources_skill_is_defensive():
         assert orchestrator._public_data_sources_skill(AsyncMock()) == ""
 
     class _MissingStore:
-        def load(self, label):
+        def load_for_artifacts(self, label):
             return None
 
     session = AsyncMock()
