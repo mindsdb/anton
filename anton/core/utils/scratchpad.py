@@ -186,7 +186,7 @@ def _wholes(change: FileChange) -> str:
 
 # How each call-write reads on the card and in the refusal.
 _CALL_VIA = {
-    "procedure": "run a stored procedure",
+    "procedure": "run a stored procedure or function",
     "sqlalchemy": "change data through SQLAlchemy",
     "mongodb": "change data in MongoDB",
     "dynamodb": "change data in DynamoDB",
@@ -331,6 +331,8 @@ def _card_prompt(writes: CellWrites) -> str:
             lines += ["A part in braces, `{...}`, is the code that fills in that value when the step runs.", ""]
     for call in writes.calls:
         lines += [f"This step would {_CALL_VIA[call.via]}:", "", _fence(call.call), ""]
+        if call.runs and call.runs != call.call:
+            lines += ["That call runs:", "", _fence(call.runs), ""]
     for change in writes.held_files:
         lines += _file_lines(change)
     # An append, or an overwrite of a file the agent owns, raises no card on
@@ -454,11 +456,12 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
     if not isinstance(gate, WriteGate):
         return None
     # The cells compaction folded away come first: the pad's process still
-    # holds what they imported and bound. Compaction keeps no cell's error.
-    compacted = tuple(getattr(pad, "compacted_code", ()))
+    # holds what they imported and bound. Their outcomes still decide whether
+    # the check can count a write as one that ran.
+    compacted = tuple(getattr(pad, "compacted_cells", ()))
     cells = tuple(getattr(pad, "cells", ()) or ())
-    earlier = (*compacted, *(cell.code for cell in cells))
-    errored = (*(False for _ in compacted), *(bool(getattr(cell, "error", None)) for cell in cells))
+    earlier = (*(cell.code for cell in compacted), *(cell.code for cell in cells))
+    errored = (*(cell.errored for cell in compacted), *(bool(getattr(cell, "error", None)) for cell in cells))
     try:
         writes = await asyncio.to_thread(
             find_cell_writes,
