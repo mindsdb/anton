@@ -66,7 +66,7 @@ _WRITE_PRD_INSTRUCTION = (
     "pages). Describe STRUCTURE where the content is long: for a "
     "presentation, a slide outline with one line per slide, not the slide "
     "texts. Short samples (a few rows, a title list) are fine.\n"
-    "- Write in the language of the user request.\n"
+    "- Section headings are in the user language too.\n"
     "- Keep the PRD as short as the requirements allow. A small request gets "
     "a small PRD: no section is padded to look complete, and nothing is "
     "repeated across sections."

@@ -76,6 +76,10 @@ async def _confirm_loop(state: PrdState) -> str:
             state.record("brief", "stopped_over_budget", "revise loop stopped")
             await write_prd(state)
             return cp.STAGE_AWAITING_CONFIRMATION
+        if state.question_unanswered:
+            state.record("brief", "unconfirmed", "a question went unanswered")
+            await write_prd(state)
+            return cp.STAGE_AWAITING_CONFIRMATION
         outcome = await show_and_confirm(state)
 
         if outcome == "accepted":
@@ -113,6 +117,12 @@ async def _announce_and_write(state: PrdState) -> str:
     """
     if state.winding_down():
         state.record("brief", "stopped_over_budget", "brief not shown")
+        await write_prd(state)
+        return cp.STAGE_AWAITING_CONFIRMATION
+    # Acting first only skips confirming assumptions; an unanswered question
+    # still blocks the build.
+    if state.question_unanswered:
+        state.record("brief", "unconfirmed", "a question went unanswered")
         await write_prd(state)
         return cp.STAGE_AWAITING_CONFIRMATION
     announce_brief(state)

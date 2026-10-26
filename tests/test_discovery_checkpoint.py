@@ -22,6 +22,7 @@ def _cp(**over) -> cp.DiscoveryCheckpoint:
         web_notes="- https://example.com/x — Title",
         assumptions=["dark theme"],
         open_points=["count cancelled orders?"],
+        known_data="site,lat\nToronto,43.7",
     )
     base.update(over)
     return cp.DiscoveryCheckpoint(**base)
@@ -45,6 +46,28 @@ def test_call_fingerprint_covers_all_three_soft_fields():
     assert base != cp.call_fingerprint("other", "data", "prefs")
     assert base != cp.call_fingerprint("understanding", "other", "prefs")
     assert base != cp.call_fingerprint("understanding", "data", "other")
+
+
+def test_call_fingerprint_covers_the_user_language():
+    base = cp.call_fingerprint("understanding", "data", "prefs", "English")
+    assert base != cp.call_fingerprint("understanding", "data", "prefs", "Russian")
+    assert base == cp.call_fingerprint("understanding", "data", "prefs", "english")
+
+
+def test_call_fingerprint_keys_on_the_language_the_steps_write_in():
+    """No language means the English default, so the two calls write the
+    same brief and must not redraw it."""
+    assert cp.call_fingerprint("u", "d", "p", "") == cp.call_fingerprint("u", "d", "p", "English")
+    assert cp.call_fingerprint("u", "d", "p") == cp.call_fingerprint("u", "d", "p", "English")
+
+
+def test_an_english_call_matches_a_checkpoint_saved_before_the_language_existed():
+    """A checkpoint saved before `user_language` hashed only three fields.
+    An English call must still match it, or every existing artifact redraws
+    its brief once after the upgrade and asks to confirm it again."""
+    before = cp.fingerprint("u", "d", "p")
+    assert cp.call_fingerprint("u", "d", "p", "English") == before
+    assert cp.call_fingerprint("u", "d", "p", "Russian") != before
 
 
 def test_fields_are_not_concatenation_ambiguous():
@@ -88,6 +111,15 @@ def test_load_defaults_the_lists_a_pre_feature_file_lacks(tmp_path: Path):
     loaded = cp.load(tmp_path)
     assert loaded is not None
     assert loaded.assumptions == [] and loaded.open_points == []
+
+
+def test_load_defaults_known_data_for_a_file_written_before_it(tmp_path: Path):
+    payload = {"pipeline_stage": cp.STAGE_PRD_WRITTEN, "brief_markdown": "## Goal"}
+    (tmp_path / DISCOVERY_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
+    loaded = cp.load(tmp_path)
+    assert loaded is not None
+    assert loaded.known_data == ""
+    assert loaded.known_data_verified == []
 
 
 # ── entry decision ──────────────────────────────────────────────────────────

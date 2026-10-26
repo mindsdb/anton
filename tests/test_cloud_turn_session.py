@@ -88,6 +88,8 @@ def test_all_cross_tenant_hazards_off(tmp_path, monkeypatch):
     assert cfg.tools == []               # no host connector/publish tools
     assert cfg.web_search_enabled is False
     assert cfg.web_fetch_enabled is False
+    # The pod is its own gVisor sandbox; the Landlock policy stays off there.
+    assert cfg.cell_sandbox is None
 
 
 def test_datasource_turn_carries_only_its_references_to_the_child(tmp_path, monkeypatch):
@@ -941,6 +943,23 @@ def test_skills_reach_the_skill_store(tmp_path, monkeypatch, skills_tmp):
     root = session._skill_store.root
     assert (root / "csv-summary" / "references" / "recipe.md").is_file()
     assert root.is_relative_to(skills_tmp)
+
+
+def test_a_marked_org_skill_is_recalled_but_no_artifact_build_follows_it(
+    tmp_path, monkeypatch, skills_tmp
+):
+    """The org's tree holds every member's skills, and the pod names no
+    folder an artifact build may trust, so builds follow only built-ins."""
+    marked = {"chart-rules": {"files": {"SKILL.md": (
+        "---\nname: chart-rules\ndescription: d\napplies_to: artifacts\n---\n"
+        "Use only Chart.js.\n"
+    )}}}
+    session = _real_cloud_session(tmp_path, monkeypatch, skills=marked)
+    store = session._skill_store
+
+    assert store.artifact_roots == []
+    assert store.load("chart-rules") is not None
+    assert "chart-rules" not in [s.label for s in store.list_for_artifacts()]
 
 
 def test_skills_root_is_a_fresh_dir_outside_the_workspace(tmp_path, monkeypatch, skills_tmp):

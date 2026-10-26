@@ -45,6 +45,7 @@ from anton.core.artifacts.internal_files import (
     METADATA_FILENAME,
     NON_CONTENT_NAMES,
     README_FILENAME,
+    is_bytecode_name,
 )
 
 
@@ -60,8 +61,9 @@ _EXCLUDED_FROM_FILES = HOUSEKEEPING_FILES | GENERATION_INPUT_FILES
 def iter_content_files(folder: Path) -> Iterator[tuple[Path, os.stat_result]]:
     """Yield (path, lstat) for each regular file that is artifact content.
 
-    Top-level `NON_CONTENT_NAMES` are pruned without descending and symlinks
-    are never followed. An entry or directory that errors is skipped on its
+    Top-level `NON_CONTENT_NAMES` and Python bytecode at any depth
+    (`is_bytecode_name`) are pruned without descending, and symlinks are
+    never followed. An entry or directory that errors is skipped on its
     own; a missing `folder` yields nothing. Order is unspecified.
 
     Directories are told apart by the scan's own entry type, so only files
@@ -77,6 +79,8 @@ def iter_content_files(folder: Path) -> Iterator[tuple[Path, os.stat_result]]:
             continue
         for entry in entries:
             if is_root and entry.name in NON_CONTENT_NAMES:
+                continue
+            if is_bytecode_name(entry.name):
                 continue
             try:
                 if entry.is_dir(follow_symlinks=False):
@@ -317,7 +321,7 @@ class ArtifactStore:
 
         Returns the updated artifact, or None when the slug is missing.
         """
-        artifact = self._load_silent(slug)
+        artifact = self.read_metadata(slug)
         if artifact is None:
             return None
         if type is not _UNSET and type not in ARTIFACT_TYPES:
@@ -351,7 +355,7 @@ class ArtifactStore:
         for child in self._root.iterdir():
             if not child.is_dir():
                 continue
-            artifact = self._load_silent(child.name)
+            artifact = self.read_metadata(child.name)
             if artifact is not None:
                 # Reconcile against disk so file counts are accurate even
                 # though scratchpad writes bypass the store (see _reconcile_files).
@@ -367,7 +371,7 @@ class ArtifactStore:
         makes scratchpad-written files show up in `files[]` — the agent
         writes them directly to the folder, bypassing the store.
         """
-        artifact = self._load_silent(slug)
+        artifact = self.read_metadata(slug)
         if artifact is None:
             return None
         return self._reconcile_files(artifact)
@@ -383,7 +387,7 @@ class ArtifactStore:
         found: dict[str, Artifact] = {}
         unmatched: list[str] = []
         for key in wanted:
-            artifact = self._load_silent(key) if key else None
+            artifact = self.read_metadata(key) if key else None
             if artifact is None:
                 unmatched.append(key)
             else:
@@ -409,7 +413,7 @@ class ArtifactStore:
             for child in children:
                 if not pending:
                     break
-                artifact = found.get(child.name) or self._load_silent(child.name)
+                artifact = found.get(child.name) or self.read_metadata(child.name)
                 if artifact is not None and artifact.id in pending:
                     pending.discard(artifact.id)
                     found.setdefault(artifact.slug, artifact)
@@ -442,7 +446,7 @@ class ArtifactStore:
         Returns the updated artifact, or None when the slug is
         missing on disk.
         """
-        artifact = self._load_silent(slug)
+        artifact = self.read_metadata(slug)
         if artifact is None:
             return None
         prov_entry = next(
@@ -478,7 +482,7 @@ class ArtifactStore:
         Returns the (possibly refreshed) artifact, or None when the slug
         is missing. See `_reconcile_files` for the why.
         """
-        artifact = self._load_silent(slug)
+        artifact = self.read_metadata(slug)
         if artifact is None:
             return None
         return self._reconcile_files(artifact)
@@ -501,18 +505,23 @@ class ArtifactStore:
         inputs (`prd.md` / `spec.md` / `openapi.json`) — the last group sits
         in the folder but is not what the user asked to be built, and listing
         it invites the agent to present a spec as a deliverable.
+        Python bytecode (`is_bytecode_name`) is skipped at any depth.
         """
         folder = self.folder_for(artifact.slug)
         entries: list[FileEntry] = []
         for p in sorted(folder.rglob("*")):
+            parts = p.relative_to(folder).parts
+            # Before any stat: bytecode is dropped without touching the disk.
+            if any(is_bytecode_name(part) for part in parts):
+                continue
             if not p.is_file() or p.is_symlink():
                 continue
             # POSIX separators regardless of platform: FileEntry.path is
             # persisted to metadata.json and compared against the stored
             # fingerprint, so a Windows-written artifact must not disagree
             # with the same artifact written anywhere else.
-            rel = p.relative_to(folder).as_posix()
-            if rel in _EXCLUDED_FROM_FILES or rel.split("/", 1)[0] in HOUSEKEEPING_DIRS:
+            rel = "/".join(parts)
+            if rel in _EXCLUDED_FROM_FILES or parts[0] in HOUSEKEEPING_DIRS:
                 continue
             try:
                 st = p.stat()
@@ -537,7 +546,7 @@ class ArtifactStore:
     def render_readme(self, slug: str) -> str | None:
         """Re-render README.md from the current metadata. Returns the
         rendered text, or None when the slug is missing."""
-        artifact = self._load_silent(slug)
+        artifact = self.read_metadata(slug)
         if artifact is None:
             return None
         text = self._render_readme_text(artifact)
@@ -560,7 +569,10 @@ class ArtifactStore:
         readme = self._render_readme_text(artifact)
         self.readme_path(artifact.slug).write_text(readme, encoding="utf-8")
 
-    def _load_silent(self, slug: str) -> Artifact | None:
+    def read_metadata(self, slug: str) -> Artifact | None:
+        """The artifact's metadata as stored, without reconciling its file
+        list, so nothing is rewritten; None when the slug escapes the store or
+        the metadata is missing or does not parse."""
         try:
             path = self.metadata_path(slug)
         except ValueError:

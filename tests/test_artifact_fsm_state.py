@@ -13,6 +13,7 @@ from anton.core.tools.generate_artifact.state import (
     RequiredData,
     StepResult,
     VerifyResult,
+    known_data_usable,
 )
 
 
@@ -177,3 +178,29 @@ def test_is_fullstack_is_derived_from_the_artifact_type():
     assert _st("fullstack-stateful-app").is_fullstack is True
     # An explicit value still wins — existing call sites pass one.
     assert _st("html-app", is_fullstack=True).is_fullstack is True
+
+
+def _gs(**kw) -> GenState:
+    base = dict(session=object(), artifact_type="html-app", artifact_path=Path("/tmp/a"), slug="a")
+    base.update(kw)
+    return GenState(**base)
+
+
+def test_known_data_stands_in_for_code_only_for_an_html_app_snapshot():
+    assert known_data_usable(_gs(known_data="site,lat\nToronto,43.7")) is True
+    assert known_data_usable(_gs(known_data="   ")) is False
+    assert known_data_usable(_gs(known_data="x" * 50_000)) is True
+    assert known_data_usable(
+        _gs(artifact_type="fullstack-stateless-app", known_data="site,lat\nToronto,43.7")
+    ) is False
+
+
+def test_known_data_usable_reads_the_type_gathering_settled_on():
+    st = _gs(known_data="site,lat\nToronto,43.7")
+    st.final_artifact_type = "fullstack-stateful-app"
+    assert known_data_usable(st) is False
+
+
+def test_the_required_data_schema_says_an_empty_list_means_nothing_is_missing():
+    schema = RequiredData.model_json_schema()
+    assert "Empty when nothing is missing" in schema["properties"]["items"]["description"]

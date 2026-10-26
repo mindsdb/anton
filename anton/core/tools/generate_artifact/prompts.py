@@ -28,9 +28,10 @@ from .sub_tools import FILE_BEGIN_MARKER as BEGIN, FILE_END_MARKER as END
 # How much file content fits in one reply, in characters — the unit the model
 # can compare against what it is about to write. Derived from the output budget
 # in state.py; quoted from the constant so the two cannot drift.
-from .state import REPLY_BODY_CHARS
+from .state import REPLY_BODY_CHARS, language_name
 
 if TYPE_CHECKING:
+    from anton.core.memory.skills import Skill
     from anton.utils.datasources import CatalogConnection, DatasourceCatalog
 
 
@@ -42,8 +43,8 @@ if TYPE_CHECKING:
 FSM_DIGRAPH = """\
 digraph artifact_generation {
     rankdir=TB;
-    is_data_enough       [shape=diamond, label="Is there enough data to solve the task?"];
-    define_required_data [shape=box,     label="Determine the required data"];
+    data_verified        [shape=diamond, label="Did gathering verify every declared source?"];
+    define_required_data [shape=box,     label="Determine the data still missing"];
     is_possible_to_fetch [shape=diamond, label="Is it possible to fetch the data?"];
     fetch_data_sample    [shape=box,     label="Fetch a data sample"];
     not_enough_data      [shape=ellipse, label="Error: not enough data"];
@@ -57,13 +58,17 @@ digraph artifact_generation {
     run_app              [shape=box,     label="Launch the application"];
     verify_fullstack     [shape=box,     label="Verify the application is running"];
 
-    // entry node = is_data_enough
-    is_data_enough       -> make_tech_spec       [label="yes"];
-    is_data_enough       -> define_required_data [label="no"];
-    define_required_data -> is_possible_to_fetch;
+    // entry node = data_verified
+    data_verified        -> make_tech_spec       [label="yes"];
+    data_verified        -> define_required_data [label="no"];
+    define_required_data -> make_tech_spec       [label="nothing missing"];
+    define_required_data -> is_possible_to_fetch [label="data missing"];
     is_possible_to_fetch -> fetch_data_sample    [label="yes"];
     is_possible_to_fetch -> not_enough_data      [label="no"];
-    fetch_data_sample    -> is_data_enough;
+    is_possible_to_fetch -> fetch_data_sample    [label="no, once, when connections exist"];
+    fetch_data_sample    -> make_tech_spec       [label="data fetched"];
+    fetch_data_sample    -> define_required_data [label="fetch failed, or after the forced fetch"];
+    fetch_data_sample    -> not_enough_data      [label="iterations exhausted"];
     make_tech_spec       -> is_fullstack;
     is_fullstack         -> make_api_spec        [label="yes"];
     is_fullstack         -> generate_frontend    [label="no"];
@@ -134,24 +139,58 @@ USING DATA:
 # (html-app and the fullstack `static/index.html`).
 _DESIGN_RULES = """\
 VISUAL DESIGN (for every HTML file you produce):
+- SCOPE: render ONLY what the request, the PRD, `spec.md` and the API
+  specification ask for. No invented brand or company names, logos,
+  taglines, marketing copy or intro paragraphs, status pills or badges,
+  footers or disclaimers unless asked. Requested content includes the
+  functional states (loading, empty, error and API error messages) and what
+  the rules below require: chart subtitles, units, estimated or converted
+  notes. The layout rules arrange that content; they never add other content.
 - Dark theme: background #0d1117, text #e6edf3.
   System sans-serif font stack, generous padding, responsive layout.
 - STYLING: Tailwind CSS is the recommended way to style the page. Load it
   once in `<head>` via CDN:
-  `<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>`
+  `<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.3"></script>`
   and use utility classes for layout, spacing, typography and colour
   (`bg-[#0d1117] text-[#e6edf3]` for the theme). Hand-written CSS in a
   `<style>` block stays allowed wherever utilities fall short — keyframes,
   chart containers, complex selectors — or when the page is too small to
   need a framework. No other CSS or JS library: the two CDN scripts named in
-  these rules (Tailwind, ECharts) are the ONLY external resources a page
-  may load. Both are fetched every time the page opens, so a page that must
-  work OFFLINE or without external resources (brief or PRD says so) skips
-  Tailwind and styles itself with hand-written CSS.
+  these rules (Tailwind, ECharts) and, for a map or globe, the recipe
+  packages under MAPS AND GLOBES, each at exactly the version shown, are the
+  ONLY external resources a page may load. They are fetched every time the
+  page opens, so a page that must work OFFLINE or without external resources
+  (brief or PRD says so) skips Tailwind and styles itself with hand-written
+  CSS.
 - ALWAYS use Apache ECharts for interactive charts via CDN:
-  `<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>`
+  `<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>`
   Initialise with `echarts.init(dom, 'dark')` and customise background to #0d1117.
   NEVER use Plotly, matplotlib, or other chart libraries unless explicitly asked.
+- MAPS AND GLOBES: ECharts ships no world outline, so a map or globe uses
+  one of these tested recipes, at exactly these versions. Load the world
+  atlas with d3@7.9.0 and topojson-client@3.1.0:
+  `<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>`
+  `<script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js"></script>`
+  `const WORLD_ATLAS = 'https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json';`
+  `d3.json(WORLD_ATLAS).then((world) => { const countries = topojson.feature(world, world.objects.countries); /* draw */ });`
+  Load it with `d3.json`, never `fetch()`: the verifier fails an absolute
+  URL in `fetch()`. Then draw `countries` in one of three ways:
+  - d3 into an `<svg>` (`d3.geoNaturalEarth1().fitSize([w, h], countries)`,
+    `d3.geoPath`);
+  - ECharts: `echarts.registerMap('world', countries)`, then a `map` series
+    with `map: 'world'`;
+  - a globe: globe.gl@2.34.2
+    (`<script src="https://cdn.jsdelivr.net/npm/globe.gl@2.34.2/dist/globe.gl.min.js"></script>`)
+    with `.polygonsData(countries.features)`. It is heavy, so the browser
+    check may run out of time on it and leave the page unverified.
+  Never write GeoJSON into the page by hand: a world outline runs to hundreds
+  of KB. Leaflet, raster map tiles, MapLibre (it needs a web worker) and
+  echarts-gl (it needs `eval`) break the preview policy below.
+- PREVIEW POLICY: the web app preview runs the page in a sandboxed frame
+  under a content security policy that blocks what it does not allow. Build
+  to that policy so the page renders on every deployment: no external
+  stylesheet or web font, no external image or map tile (embed an image as a
+  `data:` URI), no `eval` or `new Function`, and no web workers.
 - Chart type by purpose: line for change over time, bar for comparing
   categories (horizontal when labels are long), stacked bar for composition
   across categories, scatter for the relation between two measures. Pie or
@@ -178,17 +217,30 @@ VISUAL DESIGN (for every HTML file you produce):
 - Multi-tab dashboards: NEVER call `echarts.init()` on a hidden container.
   Use lazy init — initialise charts only on first tab visibility.
   Pattern: `const _rendered = new Set(['overview']); function showPage(name) { if (!_rendered.has(name)) { _rendered.add(name); initChartsFor(name); } }`
+  `initChartsFor(name)` starts each view on that tab through `runView`, the
+  helper in the verifier contract, so a view that fails on a tab fails alone.
 - Layout composition:
   - Hero KPI cards at the top (large numbers, colour-coded ±, delta arrows).
   - Main narrative chart immediately below KPIs.
   - Supporting charts below, each with a subtitle explaining what it reveals.
   - Use ECharts `markLine` for thresholds, `markPoint` for outliers,
     `markArea` for highlighted regions.
-- Responsive:
-  - Multi-card grid: `grid-template-columns: repeat(auto-fit, minmax(360px, 1fr))`
+- Responsive (the page must read well on a 390 px phone, not only fit it):
+  - Multi-card grid: `grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr))`
   - Chart containers: `width: 100%; height: min(420px, 60vh)`
   - Register `window.addEventListener('resize', () => chart.resize())` on every ECharts instance.
-  - Tables wrapped in `<div style="overflow-x: auto;">` — never fixed widths.
+  - A table of more than 4 columns shows each row as a card below 640 px:
+    every `td` carries `data-label="<column name>"`, and a media query hides
+    the `thead` and sets `display: block` on `table`, `tbody`, `tr` and `td`
+    (keep `tr[hidden]` hidden), with `td::before { content: attr(data-label) }`.
+    A narrower table sits in `<div style="overflow-x: auto;">`. Never fixed table widths.
+  - Numbers, ids and dates never break inside a value: `white-space: nowrap` on
+    those cells. Never `overflow-wrap: anywhere` or `word-break: break-all` on
+    table cells: they squeeze every column to a letter or two.
+  - A map fits its projection to the plotted points (with a margin), not the
+    whole world, when they sit in one region. At phone width its labels and
+    legend stay inside the view and no smaller than 11 px: shorten or drop
+    labels that would overlap.
 - SECURITY: NEVER embed API keys, tokens, passwords, or connection strings in HTML/JS.
   Credentials were already used server-side; serialise only the resulting data.\
 """
@@ -210,11 +262,16 @@ step and costs a regeneration, unless the item says it is only a warning:
 - The global name `window.__antonCommentsLayer` is never used; the host app
   reserves it.
 - Every opened `<script>` block must be closed with `</script>`.
+- No HTML tag shown as text: escaped markup such as `&lt;div&gt;` outside
+  `<pre>`, `<code>` or `<textarea>`.
 - No universal `* { ... !important }` rule.
 - Every `z-index` is 1000 or below.
 - Significant block containers (`div`, `section`, `table`, `main`,
   `article`) carry stable `id` attributes — the host app attaches comments
-  to them. A missing `id` is only a warning.\
+  to them. A missing `id` is only a warning.
+- A script from any host but `https://cdn.jsdelivr.net/npm/`, an external
+  stylesheet or an external image is only a warning, but the app preview
+  does not load it: keep styles in `<style>` and embed images as `data:` URIs.\
 """
 
 # The browser gate, one bullet per page kind: the html-app page is loaded
@@ -224,10 +281,21 @@ step and costs a regeneration, unless the item says it is only a warning:
 # speak of a fullstack app, and the failure it can see differs (a local file
 # under file://, a URL of the page's own origin over http).
 _BROWSER_GATE_HTML = """\
-- Where a headless browser is available, the page is also loaded once from
-  disk right after these checks: a console error, a crashed renderer or a
-  request for a local file that does not exist fails the step; a page with
-  no visible text or elements is a warning.\
+- Where a headless browser is available, the page is also loaded once right
+  after these checks, on a deployment that supports it the way the app
+  preview loads it: in a sandboxed frame under the preview's content security
+  policy, at a desktop and a phone width. A console error, an uncaught
+  exception, a
+  crashed renderer, a request for a local file that does not exist, a load
+  the preview's content security policy blocks, a separate file the page asks
+  for (the preview serves only the page itself), a chart, map or canvas that
+  stays blank, a loading message that still shows over a view that has
+  drawn (hide or remove it once the view draws), or a page wider than the
+  screen fails the step; a page with no
+  visible text or elements is a warning. A library the check cannot load
+  leaves the page unverified, which does not fail the step. A page with
+  many findings gets the first ones listed and a count of more distinct
+  problems: fix the listed ones first.\
 """
 
 _BROWSER_GATE_SERVED = """\
@@ -236,6 +304,52 @@ _BROWSER_GATE_SERVED = """\
   or a request for a URL that failed (a missing asset in `static/`, a
   `fetch()` to a route the backend does not serve) fails the step; a page
   with no visible text or elements is a warning.\
+"""
+
+
+# The one helper every view's setup goes through, here and, word for word, in
+# the build-html-dashboard skill. A throw or a rejected promise stays in its
+# view: the view shows a plain-text message and carries `data-view-failed`,
+# which the render check reports as a blank view whatever the message says.
+# The message names the view first in both channels: `console.error`, which
+# the render check counts, and `reportError`, which fires the window `error`
+# event the app preview's error list is built from. `el` may be missing, and
+# `fail` must not throw from inside the `catch`, or the error escapes the view.
+VIEW_HELPER_JS = (
+    "function runView(name, el, setup) { const fail = (err) => { "
+    "const why = err && err.message ? err.message : String(err); "
+    "if (el) { el.setAttribute('data-view-failed', name); el.textContent = name + ' could not load.'; } "
+    "console.error(name + ' failed: ' + why); "
+    "if (typeof reportError === 'function') reportError(new Error(name + ': ' + why)); }; "
+    "try { const done = setup(el); if (done && typeof done.then === 'function') done.catch(fail); } "
+    "catch (err) { fail(err); } }"
+)
+
+
+# Follows either browser-gate bullet. The browser check counts console errors,
+# so an error a view catches and only writes into the page never reaches it,
+# and an expected failure that logs one fails a page that works.
+_CAUGHT_ERRORS = """\
+- Start every view through this one helper: each chart, map, globe or other
+  view that runs setup code, on load or on its tab's first visit. A view
+  whose setup throws or whose promise rejects then fails alone, with a
+  plain-text message in its place, and every other view still draws:
+  `""" + VIEW_HELPER_JS + """`
+  Call it with the view's title as the page shows it, its element and its
+  setup function, which may be `async`:
+  `runView('Shipment map', document.getElementById('world-map'), drawMap);`.
+  Await or return every promise the setup starts, such as the atlas's
+  `d3.json(...)`. Don't end it with a `.catch` of your own: the helper must
+  see the failure to name and mark the view.
+  Keep the helper as written: its `console.error` and `reportError` name the
+  failed view to the browser check and to the preview's error list, and
+  `data-view-failed` lets the check find the failed view whatever its
+  message says. A view's own `try`/`catch` that only writes a message hides
+  the error from the check. Log with `console.error` only a view that failed
+  to draw. An expected failure stays silent or uses `console.warn`: the
+  guarded storage helper the browser storage note below asks for catches a
+  throw on every load in the preview frame, and a `console.error` there
+  fails the check.\
 """
 
 
@@ -259,7 +373,7 @@ Not checked by the verifier, but the page breaks inside the frame without them:
 def _verifier_contract(*, served: bool) -> str:
     return "## Verifier contract\n" + _VERIFIER_CONTRACT + "\n" + (
         _BROWSER_GATE_SERVED if served else _BROWSER_GATE_HTML
-    ) + "\n\n" + _FRAME_NOTES
+    ) + "\n" + _CAUGHT_ERRORS + "\n\n" + _FRAME_NOTES
 
 
 # ---------------------------------------------------------------------------
@@ -441,8 +555,35 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
   ```python
   todos = Collection(get_store(), "todos")   # built inside the route
   await todos.put("id1", {"text": "buy milk"})
+  item = await todos.get("id1")    # None if missing; an item written by put also carries pk, sk, _key, _v
   items = await todos.list()
   n = await Collection(get_store(), "counters").increment("visits", field="n")
+  ```
+  `Collection` stores its items under ITS OWN keys: `pk="_"` (unless you
+  pass `pk=`) and `sk="<name>#<key>"`. Data written through a `Collection`
+  is read back ONLY through the same `Collection` (`get`/`list`) — never
+  with raw `store.get(...)`/`store.query(...)` on your own pk/sk, which
+  finds nothing. Pick one style per piece of data and stick to it.
+- CHANGE A STORED DOCUMENT by reading it, modifying it and putting it back
+  with the `_v` it was read with. If another request wrote in between, the
+  put raises `ConditionalCheckFailed` and writes nothing, instead of
+  silently overwriting that write; answer 409. Handle a missing document
+  first, and make sure some endpoint creates it, e.g. a "new game" route
+  calling `await games.put("current", new_game(), if_not_exists=True)`;
+  until then this route answers 404:
+  ```python
+  from fastapi import HTTPException
+  from anton_state import ConditionalCheckFailed
+
+  games = Collection(get_store(), "games")
+  game = await games.get("current")
+  if game is None:
+      raise HTTPException(status_code=404, detail="no game")
+  game["moves"].append(cell)
+  try:
+      await games.put("current", game, if_version=game["_v"])
+  except ConditionalCheckFailed:
+      raise HTTPException(status_code=409, detail="state changed, reload")
   ```
   Low-level `store` methods (all async; there is NO `scan()` and NO secondary
   indexes — `query` has no `index=` argument):
@@ -452,9 +593,16 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
   * `await store.delete(pk, sk=None)`
   * `await store.query(pk, *, sk_prefix=None, filters=None, limit=None)`
   * `await store.increment(pk, sk=None, *, field, by=1)` — atomic counter;
-    do NOT hand-roll read-modify-write
+    never read-modify-write a counter by hand
   * `await store.update(pk, sk=None, *, set_fields=None, add_fields=None,
     if_version=None)` — atomic partial update
+- An item that `increment`/`update` CREATES carries NO `pk`/`sk` attributes
+  (and no `_key` via `Collection`): `query`/`list` return it without them,
+  so a listing must never read the key from such items. When a listing needs
+  the key, keep it as a plain field in the same atomic call —
+  `await store.update("counts", option, set_fields={"option": option},
+  add_fields={"count": 1})`. Never `put` a counter item before each
+  increment: `put` replaces the whole item and resets the count.
 - DESIGN KEYS AROUND ACCESS PATTERNS: every "list" endpoint must map to ONE
   `query(pk=...)` call (or `Collection.list()`). Never call the store in a
   loop to assemble a listing.
@@ -480,7 +628,8 @@ root-relative path instead of `api()`, or one whose `fetch()` names a path
 
 - Single self-contained HTML file: your own CSS in `<style>`, all JS in
   `<script>`. The only external resources are the CDN scripts named in the
-  design rules (Tailwind, ECharts).
+  design rules (Tailwind, ECharts) and, for a map or globe, the recipe
+  packages and world atlas named there.
 - Include the api-base meta tag in `<head>`:
   ```html
   <meta name="api-base" content="">
@@ -574,7 +723,8 @@ def _gen_html_task(target: str, *, fullstack: bool = False) -> str:
 Produce ONE self-contained HTML file named exactly `{target}`: the
 complete frontend of a fullstack app. Inline your own CSS and all JS; the
 only external resources allowed are the Tailwind and ECharts `<script>` tags
-from the CDNs named in the design rules. The backend is generated in parallel
+from the CDNs named in the design rules and, for a map or globe, the recipe
+packages and world atlas named there. The backend is generated in parallel
 and serves the endpoints listed under `## API Specification`: take exact
 paths and response shapes from there and call every one of them through the
 `api()` helper (see Fullstack rules). Embed no data — the page fetches it
@@ -586,9 +736,13 @@ the relative name given there."""
 Produce ONE self-contained HTML file named exactly `{target}`, at the root
 of the artifact folder. Inline your own CSS and all JS and embed all data in
 the file. Do not reference any other file of the artifact, except the assets
-listed under `## Attached files` (already in the folder, referenced by the
-relative name given there); the only external resources allowed are the
-Tailwind and ECharts `<script>` tags from the CDNs named in the design rules."""
+listed under `## Attached files`, by the relative name given there in quotes
+(`<img src="logo.png">`): once you have written the page, the pipeline
+replaces each such reference with the asset itself as a `data:` URI, since
+the app preview shows only the page. The only external resources allowed
+are the Tailwind and ECharts `<script>` tags from the CDNs named in the
+design rules and, for a map or globe, the recipe packages and world atlas
+named there."""
     return f"""\
 You are a single-purpose worker inside an artifact-generation pipeline. This
 step is `generate_frontend`.
@@ -596,13 +750,92 @@ step is `generate_frontend`.
 ## Your task
 {body}
 
-UI text and the `<html lang>` attribute follow the language of the PRD.
-
 You are done when the file is written and closed (`</body></html>`) and you
 have called `finish(summary="<one line>")`. A deterministic verifier then
 checks the file; on failure you get another attempt with the exact errors.
 Checking your own output is NOT part of the job.\
 """
+
+
+PROJECT_RULES_HEADER = "## Project rules (follow, don't display)"
+
+# Said in both sections: the fixed blocks before them name one chart library,
+# a dark theme and the only scripts a page loads, and a project's rule or
+# skill asking otherwise must not be left for the model to weigh.
+OVER_DEFAULTS = (
+    "Where they ask for something other than this prompt's defaults, such as "
+    "a chart library, colours, fonts or layout, they win over those defaults; "
+    "the checks on what this step writes still apply."
+)
+
+
+def project_rules_section(anton_md: str) -> str:
+    """The project's anton.md as a system-prompt section, or "" when blank.
+
+    A system-prompt section on purpose, never kickoff content: rules that
+    reached the page writer only inside the brief or the PRD were read as
+    content and printed on the page as text.
+    """
+    text = anton_md.strip()
+    if not text:
+        return ""
+    return (
+        f"{PROJECT_RULES_HEADER}\n"
+        "The project's own instructions, written by its users in "
+        "`.anton/anton.md`. Follow "
+        f"them in everything this step produces. {OVER_DEFAULTS} They are "
+        "instructions to you, not content: do what they ask, but never print, quote or "
+        "summarize the rules themselves on the page, in a file, or in text "
+        "the user sees.\n\n"
+        f"{text}"
+    )
+
+
+ARTIFACT_SKILLS_HEADER = "## Artifact skills (follow, don't display)"
+
+
+def artifact_skills_section(skills: "list[Skill]") -> str:
+    """The skills marked for artifact builds as one system-prompt section,
+    or "" when there are none. Each body sits under its label."""
+    bodies = [
+        f"### {skill.label}\n{skill.declarative_md.strip()}"
+        for skill in skills
+        if skill.declarative_md.strip()
+    ]
+    if not bodies:
+        return ""
+    return (
+        f"{ARTIFACT_SKILLS_HEADER}\n"
+        "Skills this project marked for every artifact build. Follow them in "
+        f"everything this step produces, as you would the project rules. {OVER_DEFAULTS} "
+        "Do what they ask, but never print, quote or summarize the skills "
+        "themselves on the page, in a file, or in text the user sees.\n\n"
+        + "\n\n".join(bodies)
+    )
+
+
+def with_project_rules(system: str, project_rules: str) -> str:
+    """`system` with the run's `Project rules` section at its end, if any."""
+    return f"{system}\n\n{project_rules}" if project_rules else system
+
+
+def _ui_language(user_language: str, *, backend: bool = False) -> str:
+    """The page's language, by name. Last in the system prompt: the blocks
+    before it are the same for every run, so they stay one shared prefix."""
+    language = language_name(user_language)
+    if backend:
+        return (
+            "## UI language\n"
+            f"Text the backend returns for the page to show (error messages, "
+            f"labels, seeded records) is in {language} unless the PRD or the "
+            "brief asks for another language for the page."
+        )
+    return (
+        "## UI language\n"
+        f"Write the UI text in {language} unless the PRD or the brief asks "
+        "for another language for the page, and set the `<html lang>` "
+        "attribute to the language of the UI text."
+    )
 
 
 def _gen_html_workflow(target: str, *, fullstack: bool = False) -> str:
@@ -724,6 +957,9 @@ def build_subagent_system_prompt(
     artifact_path: Path,
     *,
     primary: str | None = None,
+    user_language: str = "",
+    project_rules: str = "",
+    artifact_skills: str = "",
 ) -> str:
     """System prompt for the single-generator path — the `html-app` page.
 
@@ -742,8 +978,11 @@ def build_subagent_system_prompt(
     # `artifact_path` is deliberately not quoted: every path the model writes
     # is relative to the artifact root, and an absolute path in the prompt is
     # only something to misuse. The parameter stays for signature stability.
+    # `project_rules` and `artifact_skills` sit after the fixed blocks, so
+    # they stay one shared prefix across projects; "" drops out of the join.
     return "\n\n".join(
-        [
+        part
+        for part in [
             _gen_html_task(target),
             _gen_html_inputs(),
             _gen_html_workflow(target),
@@ -752,7 +991,11 @@ def build_subagent_system_prompt(
             _verifier_contract(served=False),
             "## Design rules\n" + _DESIGN_RULES,
             _GEN_TOOLS,
+            project_rules,
+            artifact_skills,
+            _ui_language(user_language),
         ]
+        if part
     )
 
 
@@ -866,15 +1109,17 @@ def build_api_spec_prompt(
     context: str,
     *,
     stateless: bool = False,
+    project_rules: str = "",
 ) -> tuple[str, str]:
     """Cold-start form: the assembled context plus the same instruction the
     hot path sends, so both paths ask for the same document."""
-    system = (
+    system = with_project_rules(
         _DATA_CONTEXT_HEADER
         + "You are the `make_api_spec` node. Your document is saved to "
         "`openapi.json` and handed to the backend and frontend generators "
         "next to the material below; the instruction at the end of the user "
-        "message says what goes into it."
+        "message says what goes into it.",
+        project_rules,
     )
     user = "## Requirements\n" + context.strip() + "\n\n" + build_api_spec_instruction(
         stateless=stateless
@@ -1013,11 +1258,11 @@ def _datasource_section(
         # Gathered cells that read a `DS_*` variable are evidence of a source
         # the model forgot to declare: keep the catalog then.
         return catalog.render().strip() if "DS_" in data_notes else _NO_DATASOURCES_NOTE
-    kept = [c.slug for c in catalog.connections if _is_declared(c, declared)]
+    kept = [c.slug for c in catalog.connections if is_declared(c, declared)]
     return catalog.render(kept or None).strip()
 
 
-def _is_declared(connection: "CatalogConnection", declared: list[str]) -> bool:
+def is_declared(connection: "CatalogConnection", declared: list[str]) -> bool:
     """Whether a lowercased declared source names `connection`: its slug,
     label, engine id or engine name occurs in it."""
     names = (
@@ -1031,6 +1276,17 @@ def _is_declared(connection: "CatalogConnection", declared: list[str]) -> bool:
     return any(tok in d for d in declared for tok in tokens)
 
 
+# A live app's backend runs in an app slot that installs nothing, so the
+# verifier checks only that each package the file names is installed here.
+_LIVE_APP_PACKAGES = (
+    "## Live app packages\n"
+    "This app runs as a live app, in an app slot that installs nothing: it runs only the "
+    "packages already installed here, `fastapi`, `mangum` and `uvicorn` among them. So "
+    "`requirements.txt` is not installed. A package it names that isn't installed here "
+    "fails the step, and `fastapi`, `mangum` and `uvicorn` need no line."
+)
+
+
 def build_backend_system_prompt(
     artifact_path: Path,
     *,
@@ -1038,6 +1294,10 @@ def build_backend_system_prompt(
     datasources: "DatasourceCatalog | None" = None,
     declared_sources: list[str] | tuple[str, ...] = (),
     data_notes: str = "",
+    user_language: str = "",
+    live_app: bool = False,
+    project_rules: str = "",
+    artifact_skills: str = "",
 ) -> str:
     """System prompt for `generate_backend`.
 
@@ -1047,20 +1307,27 @@ def build_backend_system_prompt(
     model writes is relative to the artifact root.
     """
     target = "backend.py"
+    contract = _gen_backend_verifier_contract(stateless=stateless)
     parts = [
         _gen_backend_task(stateless=stateless),
         _gen_html_inputs(fullstack=True, backend=True),
         _gen_backend_workflow(stateless=stateless),
         _gen_html_output_protocol(target, example=_PYTHON_BODY_EXAMPLE),
         _GEN_SIZE_RULES_PYTHON,
-        _gen_backend_verifier_contract(stateless=stateless),
+        contract,
         "## Backend rules\n" + _BACKEND_RULES,
         "## State rules\n" + (_STATELESS_RULES if stateless else _STATEFUL_RULES),
     ]
+    if live_app:
+        # Right after the contract, whose requirements line it replaces.
+        # Without live apps the prompt is as it was, byte for byte.
+        parts.insert(parts.index(contract) + 1, _LIVE_APP_PACKAGES)
     section = _datasource_section(datasources, declared_sources, data_notes)
     if section:
         parts.append(section)
     parts.append(_GEN_TOOLS)
+    parts.extend(p for p in (project_rules, artifact_skills) if p)
+    parts.append(_ui_language(user_language, backend=True))
     return "\n\n".join(parts)
 
 
@@ -1109,23 +1376,50 @@ def build_backend_kickoff(
 FULLSTACK_FRONTEND_TARGET = "static/index.html"
 
 
-def build_frontend_system_prompt(artifact_path: Path) -> str:
+# A live app's page opens at its own address, whose content security policy
+# loads scripts from one host only, so the verifier fails any other script.
+_LIVE_APP_SCRIPTS = (
+    "## Live app scripts\n"
+    "This app runs as a live app, whose content security policy loads scripts and "
+    "stylesheets only from `https://cdn.jsdelivr.net`, and images and fonts only from the "
+    "page itself. A script from any other host, or one written as `//cdn.jsdelivr.net/...`, "
+    "fails the step instead of warning, in a `<script src>`, an import or an import map "
+    "alike: load every library as `https://cdn.jsdelivr.net/npm/<package>@<version>/...`."
+)
+
+
+def build_frontend_system_prompt(
+    artifact_path: Path,
+    *,
+    live_app: bool = False,
+    user_language: str = "",
+    project_rules: str = "",
+    artifact_skills: str = "",
+) -> str:
     # `artifact_path` is not quoted, for the same reason as in the html-app
     # builder: every path the model writes is relative to the artifact root.
     target = FULLSTACK_FRONTEND_TARGET
-    return "\n\n".join(
-        [
-            _gen_html_task(target, fullstack=True),
-            _gen_html_inputs(fullstack=True),
-            _gen_html_workflow(target, fullstack=True),
-            _gen_html_output_protocol(target),
-            _GEN_SIZE_RULES,
-            _verifier_contract(served=True),
-            "## Fullstack rules\n" + _FRONTEND_RULES,
-            "## Design rules\n" + _DESIGN_RULES,
-            _GEN_TOOLS,
-        ]
-    )
+    contract = _verifier_contract(served=True)
+    sections = [
+        _gen_html_task(target, fullstack=True),
+        _gen_html_inputs(fullstack=True),
+        _gen_html_workflow(target, fullstack=True),
+        _gen_html_output_protocol(target),
+        _GEN_SIZE_RULES,
+        contract,
+        "## Fullstack rules\n" + _FRONTEND_RULES,
+        "## Design rules\n" + _DESIGN_RULES,
+        _GEN_TOOLS,
+        project_rules,
+        artifact_skills,
+        _ui_language(user_language),
+    ]
+    if live_app:
+        # Right after the contract it tightens. Without live apps the prompt
+        # is as it was, byte for byte.
+        sections.insert(sections.index(contract) + 1, _LIVE_APP_SCRIPTS)
+    # "" (no anton.md, no artifact skill) drops out of the join.
+    return "\n\n".join(part for part in sections if part)
 
 
 def build_frontend_kickoff(
@@ -1180,6 +1474,26 @@ def prd_section(state) -> str:
     return f"{PRD_SECTION_HEADER}\n{body}\n{PRD_SECTION_FOOTER}" if body else ""
 
 
+KNOWN_DATA_HEADER = "## Known data (passed in by the calling agent)"
+KNOWN_DATA_FOOTER = "--- end of known data ---"
+
+
+def known_data_section(state) -> str:
+    """`known_data` under its header, or "" when there is none. Passed whole:
+    it is what the calling agent chose to hand over, and a cut snapshot would
+    be built into the page as if it were complete. Closed by a footer for the
+    same reason as the PRD: the agent's markdown may carry `##` headings of
+    its own."""
+    text = (getattr(state, "known_data", "") or "").strip()
+    return f"{KNOWN_DATA_HEADER}\n{text}\n{KNOWN_DATA_FOOTER}" if text else ""
+
+
+def datasources_or_none(state) -> str:
+    """The `## Connected Data Sources` section, or the same header over
+    "(none)" so a step can tell "nothing connected" from a missing section."""
+    return (state.datasource_context or "").strip() or f"{DATASOURCES_HEADER}\n(none)"
+
+
 def _brief_and_notes(state) -> str:
     parts = [f"## Brief\n{state.brief.strip()}"]
     prd = prd_section(state)
@@ -1189,6 +1503,9 @@ def _brief_and_notes(state) -> str:
         parts.append(f"## Data gathered so far\n{state.data_notes.strip()}")
     else:
         parts.append("## Data gathered so far\n(nothing gathered yet)")
+    known = known_data_section(state)
+    if known:
+        parts.append(known)
     if getattr(state, "web_notes", "").strip():
         parts.append(state.web_notes.strip())
     journal = state.journal()
@@ -1197,34 +1514,73 @@ def _brief_and_notes(state) -> str:
     return "\n\n".join(parts)
 
 
+def _data_sources_context(state) -> str:
+    """What the data decisions may draw on: the connections, the public
+    sources and the pads the calling agent already filled."""
+    parts = [datasources_or_none(state)]
+    for extra in (getattr(state, "public_sources", None), getattr(state, "scratchpads_context", "")):
+        if extra and extra.strip():
+            parts.append(extra.strip())
+    return "\n\n".join(parts)
+
+
+def _reasoning_language(user_language: str) -> str:
+    """`reasoning` becomes the "not enough data" text the agent quotes to the
+    user, so it is pinned to the run's language like every other step."""
+    return (
+        "## Language\n"
+        f"Write `reasoning` and any summary in {language_name(user_language)}. "
+        "Keep names of tables, fields, files and APIs as they are."
+    )
+
+
 def build_required_data_prompt(state) -> tuple[str, str]:
-    system = (
+    system = with_project_rules(
         _DATA_CONTEXT_HEADER
         + "You are the `define_required_data` node. List exactly which data is "
-        "missing and where each item can be obtained (user's connected data "
-        "sources or public/documented APIs). Be concrete and minimal."
+        "still missing and where each item can be obtained (user's connected "
+        "data sources, public/documented APIs or the scratchpads listed). Be "
+        "concrete and minimal. Data whose values are already under known data "
+        "or gathered data is not missing; a description of data (where it "
+        "lives, its columns) without the values is not the data. Return an "
+        "empty `items` list when nothing is missing.\n\n"
+        + _reasoning_language(state.user_language),
+        state.project_rules,
     )
-    user = _brief_and_notes(state) + "\n\nList the required data items."
+    user = (
+        _brief_and_notes(state)
+        + "\n\n" + _data_sources_context(state)
+        + "\n\nList the data items still missing (an empty list when nothing is missing)."
+    )
     return system, user
 
 
 def build_can_fetch_prompt(state, required: str) -> tuple[str, str]:
-    system = (
+    system = with_project_rules(
         _DATA_CONTEXT_HEADER
         + "You are the `is_possible_to_fetch` decision node. Given the required "
         "data and the available sources, decide whether the data can actually be "
-        "obtained. If a needed source simply does not exist among the user's "
-        "connections or public sources, it is NOT possible."
+        "obtained. It is possible when a listed connection, public source or "
+        "scratchpad can provide it. It is NOT possible only when none of them can.\n\n"
+        + _reasoning_language(state.user_language),
+        state.project_rules,
     )
     user = (
         _brief_and_notes(state)
+        + "\n\n" + _data_sources_context(state)
         + f"\n\n## Required data\n{required}\n\nIs it possible to fetch this data?"
     )
     return system, user
 
 
 def build_fetch_data_system_prompt(
-    artifact_path, *, datasource_context: str = "", public_sources: str = ""
+    artifact_path,
+    *,
+    datasource_context: str = "",
+    public_sources: str = "",
+    project_rules: str = "",
+    artifact_skills: str = "",
+    user_language: str = "",
 ) -> str:
     parts = [
         _ROLE_COMMON,
@@ -1248,6 +1604,9 @@ def build_fetch_data_system_prompt(
         parts.append(public_sources.strip())
     if datasource_context.strip():
         parts.append(datasource_context.strip())
+    # Before the project rules: a project rule about language comes later and wins.
+    parts.append(_reasoning_language(user_language))
+    parts.extend(p for p in (project_rules, artifact_skills) if p)
     parts.append(
         "## Output folder\n"
         f"(You will NOT write files here in this step.) Artifact folder: `{artifact_path}`"
@@ -1255,13 +1614,23 @@ def build_fetch_data_system_prompt(
     return "\n\n".join(parts)
 
 
-def build_fetch_data_kickoff(state) -> str:
-    return (
-        _brief_and_notes(state)
-        + "\n\nUse the `scratchpad` tool to fetch a data sample, then call "
+def build_fetch_data_kickoff(state, required_text: str = "") -> str:
+    # The list goes here in full: the journal cuts each step to
+    # JOURNAL_DETAIL_MAX characters. The pads go here too, because the
+    # single-scratchpad guard challenges a new name only once per session
+    # and a fetch in a fresh pad would not see the agent's data.
+    parts = [_brief_and_notes(state)]
+    if required_text.strip():
+        parts.append(f"## Data to fetch in this step\n{required_text.strip()}")
+    pads = (getattr(state, "scratchpads_context", "") or "").strip()
+    if pads:
+        parts.append(pads)
+    parts.append(
+        "Use the `scratchpad` tool to fetch a data sample, then call "
         "`finish` with a precise summary of the scratchpads/cells and the "
         "schema/sample you observed."
     )
+    return "\n\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -1283,9 +1652,12 @@ any other stack. Describe behaviour, screens, data flow, and endpoints on top of
   an absolute URL anywhere in the spec.
 - Frontend: one self-contained HTML file (`static/index.html` for fullstack
   types) — vanilla JavaScript, Tailwind CSS via CDN for styling (hand-written
-  CSS where needed), Apache ECharts for charts. Both libraries need network
-  access when the page opens; when the PRD requires offline use, the spec
-  says so and the frontend is styled with hand-written CSS only.
+  CSS where needed), Apache ECharts for charts. A map or globe uses the
+  tested recipe: d3@7.9.0 and topojson-client@3.1.0 load world-atlas@2.0.2,
+  drawn with d3, with ECharts, or on a globe with globe.gl@2.34.2. These
+  libraries need network access when the page opens; when the PRD requires
+  offline use, the spec says so and the frontend is styled with hand-written
+  CSS only.
 - Durable state (`fullstack-stateful-app` ONLY): the platform STATE store — a
   document/key-value store keyed by (partition key, sort key) with named
   collections, no scan, no secondary indexes, atomic counters. The spec must
@@ -1385,6 +1757,9 @@ def build_tech_spec_instruction(state) -> str:
     if fullstack:
         content.append(_TECH_SPEC_BACKEND)
     content.append(_TECH_SPEC_EXCLUSIONS)
+    language = language_name(getattr(state, "user_language", ""))
+    kept = ["`## Insights`", "`## Implementation notes`"] + (["`## Backend`"] if fullstack else [])
+    headings = ", ".join(kept[:-1]) + " and " + kept[-1]
     return (
         "## Your task\n"
         "Write the technical specification (`spec.md`) for the build. Do not "
@@ -1396,19 +1771,26 @@ def build_tech_spec_instruction(state) -> str:
         + "\n\n## Fixed stack\n"
         + _TECH_SPEC_STACK
         + "\n\nKeep the whole document short: it complements the PRD, and "
-        "every line is context the build step carries on every round."
+        "every line is context the build step carries on every round.\n\n"
+        "## Language\n"
+        f"Write the prose in {language}, even where earlier notes use another "
+        f"language. Keep the document's headings {headings} exactly as "
+        "written, in English (the build step finds sections by heading), and "
+        "keep code, identifiers, endpoints and file names as they are. Exact "
+        "UI strings follow the PRD."
     )
 
 
 def build_tech_spec_prompt(state) -> tuple[str, str]:
     """Cold-start form: the assembled context plus the same instruction the
     hot path sends, so both paths ask for the same document."""
-    system = (
+    system = with_project_rules(
         _DATA_CONTEXT_HEADER
         + "You are the `make_tech_spec` node. Your document is saved to "
         "`spec.md` and handed to the backend and frontend generators next to "
         "the material below; the instruction at the end of the user message "
-        "says what goes into it."
+        "says what goes into it.",
+        state.project_rules,
     )
     user = _brief_and_notes(state) + (
         f"\n\n## Artifact type\n{state.artifact_type}\n\n"

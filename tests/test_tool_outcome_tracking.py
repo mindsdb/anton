@@ -201,6 +201,8 @@ class TestScratchpadOutcomes:
         )
         assert isinstance(outcome, ToolOutcome)
         assert outcome.ok is True
+        # The cell never ran, and a host reads that from the opening.
+        assert outcome.content.startswith("Not run: ")
 
 
 def _install_session(pad) -> SimpleNamespace:

@@ -72,6 +72,7 @@ class OpenModelCall:
     last_output_at: float
     produced_output: bool = False
     awaiting: bool = False
+    note: str | None = None
 
 
 def _format_wait(*, seconds: float) -> str:
@@ -96,7 +97,9 @@ class ModelCallTracker:
     def closed(self) -> bool:
         return self._closed
 
-    def open(self, *, role: str, idle_timeout_s: float | None) -> OpenModelCall | None:
+    def open(
+        self, *, role: str, idle_timeout_s: float | None, note: str | None = None
+    ) -> OpenModelCall | None:
         """Register a call as it is issued. Returns None once the tracker is closed."""
         if self._closed:
             return None
@@ -106,6 +109,7 @@ class ModelCallTracker:
             issued_at=now,
             idle_timeout_s=idle_timeout_s,
             last_output_at=now,
+            note=note,
         )
         self._calls.append(call)
         return call
@@ -147,6 +151,8 @@ class ModelCallTracker:
             message = f"The model is still writing ({_format_wait(seconds=open_for)})"
         else:
             message = f"Waiting for the model ({_format_wait(seconds=open_for)})"
+        if oldest.note:
+            message = f"{oldest.note} — {message[0].lower()}{message[1:]}"
         return ModelCallSnapshot(
             role=oldest.role,
             open_for_s=open_for,

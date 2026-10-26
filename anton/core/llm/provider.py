@@ -1,16 +1,93 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 import weakref
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+import httpx2
+
+from .tracing import TraceContext, get_call_role, get_trace_context
+
 if TYPE_CHECKING:
     from anton.core.interaction.elicit import AskAnswer, AskRequest
+
+
+# Turns on one `llm_usage` log line per model call, for an eval that reads the
+# host's log instead of Langfuse. Off by default: production logs nothing new.
+USAGE_LOG_ENV = "ANTON_USAGE_LOG"
+_usage_logger = logging.getLogger("anton.usage")
+
+
+def usage_log_enabled() -> bool:
+    return os.environ.get(USAGE_LOG_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def log_usage_record(record: dict) -> None:
+    # default=str: an odd value from a host or an SDK must not fail the call.
+    _usage_logger.info("llm_usage %s", json.dumps(record, separators=(",", ":"), default=str))
+
+
+def log_background_done(trace: TraceContext) -> None:
+    """Mark that a turn's end-of-turn work has finished, so an eval stops waiting for its usage.
+
+    One line per turn that wrote a `turn_cost` line. The trace is passed in, not
+    read: a late finalizer of an abandoned turn runs in another context.
+    """
+    record = {"conversation": trace.session_id, "turn": (trace.metadata or {}).get("turn")}
+    _usage_logger.info("usage_background_done %s", json.dumps(record, separators=(",", ":"), default=str))
+
+
+def _usage_record(*, role: str | None, model: str | None, served_model: str | None,
+                  input_tokens: int, output_tokens: int, cache_read: int,
+                  cache_creation: int) -> dict:
+    """One call's usage, named by the conversation, turn and tags of the current trace."""
+    ctx = get_trace_context()
+    metadata = (ctx.metadata or {}) if ctx else {}
+    return {
+        # End-of-turn work runs detached from the session, its conversation in the metadata.
+        "conversation": (ctx.session_id or metadata.get("conversation_id")) if ctx else None,
+        "turn": metadata.get("turn"),
+        "tags": list(ctx.tags) if ctx else [],
+        "role": role,
+        "model": model,
+        "served_model": served_model,
+        "input": input_tokens,
+        "output": output_tokens,
+        "cache_read": cache_read,
+        "cache_creation": cache_creation,
+    }
+
+
+def scratchpad_usage_record(sent: object) -> dict | None:
+    """The record for a usage line a scratchpad sent, or None when it is not a JSON object.
+
+    The pad runs cell code, so the host names the conversation, turn and tags from
+    its own trace and keeps only counts, models and role from what the pad sent.
+    """
+    if not isinstance(sent, dict):
+        return None
+
+    def count(key: str) -> int:
+        value = sent.get(key)
+        valid = isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        return value if valid else 0
+
+    def text(key: str) -> str | None:
+        value = sent.get(key)
+        return value if isinstance(value, str) else None
+
+    return _usage_record(
+        role=text("role"), model=text("model"), served_model=text("served_model"),
+        input_tokens=count("input"), output_tokens=count("output"),
+        cache_read=count("cache_read"), cache_creation=count("cache_creation"),
+    )
 
 
 # Providers hold an HTTP pool. Unclosed, httpx2 prints a traceback when the
@@ -281,6 +358,17 @@ class StreamReasoningDelta:
     text: str
 
 
+@dataclass
+class StreamTurnEnded:
+    """Last event of a turn that handed back before finishing.
+
+    `ended_by` is the turn's `TurnCost.ended_by` (e.g. `spend_ceiling`,
+    `round_cap`). Not sent for a completed, cancelled or failed turn.
+    """
+
+    ended_by: str
+
+
 StreamEvent = (
     StreamTextDelta
     | StreamToolUseStart
@@ -293,6 +381,7 @@ StreamEvent = (
     | StreamAskUser
     | StreamAskUserAnswered
     | StreamReasoningDelta
+    | StreamTurnEnded
 )
 
 
@@ -599,6 +688,8 @@ def damaged_tool_call_result(tc: ToolCall) -> dict | None:
             "body; if an argument was large, make it smaller or split the work "
             "across several calls."
         ),
+        # cowork-server's figure sources skip any history result marked
+        # is_error, since its text is anton's, not the tool's output.
         "is_error": True,
     }
 
@@ -819,7 +910,7 @@ class TransientProviderError(ConnectionError):
 
     Covers provider/infra-side hiccups — an ``overloaded_error``/``api_error``
     event (including the mid-stream case that arrives inside an HTTP-200 stream,
-    see ENG-673), a 5xx, a plain 429 (no quota detail), a dropped connection, or
+    see ENG-673), a 5xx, a 429 without a billing code, a dropped connection, or
     a truncated stream. The session loop backs off and retries these within a
     bounded budget; distinct from auth/quota/model-gate failures, which are
     permanent for the identical request and must fail fast.
@@ -893,6 +984,27 @@ def _log_status(*, status: object) -> int | str:
     return status if type(status) is int and 100 <= status <= 599 else "unknown"
 
 
+# Transport errors a stream raises while its body is read. The SDKs wrap
+# transport failures only while they open the request; once the 200 is in,
+# a dying connection surfaces as the raw httpx2 error and the SDK never
+# retried it. Providers catch it next to the SDK's own connection error.
+STREAM_DROP_ERROR = httpx2.TransportError
+
+
+def is_stream_drop(exc: BaseException) -> bool:
+    """True for a connection that died after the response started.
+
+    Providers raise ``connection_error`` for every lost connection and set
+    ``session_backoff`` only once the stream has started, so a failure to
+    connect never matches.
+    """
+    return (
+        isinstance(exc, TransientProviderError)
+        and exc.code == "connection_error"
+        and exc.session_backoff
+    )
+
+
 class ProviderOverloadedError(ConnectionError):
     """Terminal form of a transient failure: the retry budget was exhausted.
 
@@ -933,8 +1045,7 @@ class _BillingStopKind(NamedTuple):
 
 # The MindsHub authorization gate's billing deny codes:
 # ``wallet_empty`` rides a 402; ``included_allowance_exhausted`` and
-# ``free_air_daily_spend_fuse_exceeded`` ride a 429 (with NO FastAPI ``detail``,
-# so the legacy 429-quota branch never sees them). All three stop only an org
+# ``free_air_daily_spend_fuse_exceeded`` ride a 429. All three stop only an org
 # whose wallet cannot pay, and all three are permanent for the identical request
 # inside a turn: they belong on a billing card, never in the retry loop. The
 # fuse resets at the end of the UTC day, which no retry budget waits out. The
@@ -1293,7 +1404,8 @@ def retry_after_seconds(exc: BaseException) -> float | None:
     """Seconds from a response's ``Retry-After`` header, or ``None`` (ENG-1537).
 
     The MindsHub gateway sends this on the velocity 429 (``rate_limited``,
-    `minds/inference/errors.py`) as integer seconds — the only form we act on.
+    `minds/inference/errors.py`) as integer seconds. Azure's ``retry-after-ms``
+    is read first when present, since it is the precise interval.
     The HTTP-date form is legal but nothing in use emits it, and mis-reading a
     date as a number would produce an absurd delay, so an unparseable value is
     treated as absent: the caller then falls back to its own backoff curve.
@@ -1309,18 +1421,21 @@ def retry_after_seconds(exc: BaseException) -> float | None:
     if headers is None:
         return None
     try:
+        raw_ms = headers.get("retry-after-ms") or headers.get("Retry-After-Ms")
         raw = headers.get("retry-after") or headers.get("Retry-After")
     except Exception:
         return None
-    if raw is None:
-        return None
-    try:
-        secs = float(str(raw).strip())
-    except (TypeError, ValueError):
-        return None  # HTTP-date form, or junk
-    if secs != secs or secs in (float("inf"), float("-inf")) or secs < 0:
-        return None
-    return secs
+    # Azure sends the precise interval in milliseconds next to a rounded-up Retry-After.
+    for value, scale in ((raw_ms, 1000), (raw, 1)):
+        if value is None:
+            continue
+        try:
+            secs = float(str(value).strip()) / scale
+        except (TypeError, ValueError):
+            continue  # HTTP-date form, or junk
+        if secs == secs and secs not in (float("inf"), float("-inf")) and secs >= 0:
+            return secs
+    return None
 
 
 def _rate_limited(
@@ -1363,7 +1478,8 @@ def classify_transient(
     the session waits the interval the server actually named (ENG-1537).
 
     ``velocity_confirmed`` says the caller POSITIVELY identified a velocity
-    limit — our gateway's ``rate_limited`` reason header or body code. Only then
+    limit — our gateway's ``rate_limited`` reason header or body code, or
+    Azure's ``retry-after-ms`` header. Only then
     does the 429 earn a session wait. The absence of billing carriers is not
     evidence of transience: both fail-fast guards below are string-exact, so a
     provider whose quota denial uses a different dialect (Gemini sends an
@@ -1401,13 +1517,15 @@ def classify_transient(
             provider=provider, code=f"http_{status_code}", session_backoff=False, model=model,
             status_code=status_code,
         )
-    if status_code == 429 and not parsed.top.detail:
+    if status_code == 429:
         # Plain rate-limit ("slow down"), NOT an out-of-quota 429. Quota 429s are
-        # mapped upstream (gateway dialect carries a `detail`, OpenAI's carries
-        # ``insufficient_quota``, the M3 gate's allowance and free-serving fuse
-        # 429s carry a billing code); the guards here are defense for direct
-        # callers, and for a mapper whose origin gate refused the code — a billing
-        # failure is permanent and must never enter the retry loop (ENG-1169).
+        # mapped upstream (OpenAI's carries ``insufficient_quota``, the M3 gate's
+        # allowance and free-serving fuse 429s carry a billing code). A body with
+        # only a FastAPI `detail` is a rate limit too: the MindsHub edge answers a
+        # request flood with one, and no MindsHub service sends a quota 429 in
+        # that shape. The guards here are defense for direct callers, and for a
+        # mapper whose origin gate refused the code — a billing failure is
+        # permanent and must never enter the retry loop (ENG-1169).
         if etype == "insufficient_quota":
             return None
         if wallet_denial_code(body):
@@ -1732,12 +1850,17 @@ def _image_too_large(message: object) -> ContentTooLargeError:
     )
 
 
-def _content_rejected() -> ContentValidationError:
-    """The shape refusal, shared by the 400 classifier and the Responses one."""
+def _content_rejected(*, code: str = "content_validation") -> ContentValidationError:
+    """The shape refusal, shared by the 400 classifier and the Responses one.
+
+    The Responses one passes the provider's image code, which names the one
+    image it could not use (`is_image_refusal` reads it).
+    """
     return ContentValidationError(
         "The model provider rejected part of this conversation's content "
         "(an attachment or image in an unsupported format). That content "
-        "will be removed automatically so the conversation can continue."
+        "will be removed automatically so the conversation can continue.",
+        code=code,
     )
 
 
@@ -1824,6 +1947,48 @@ def classify_content_rejection(
     return None
 
 
+# Words a provider's refusal of an image part uses: OpenAI names the part
+# ("image_url is only supported by certain models"), and servers for
+# text-only models name what the model lacks ("not a multimodal model").
+_IMAGE_REFUSAL_WORDS = ("image", "vision", "multimodal", "multi-modal")
+
+
+def is_image_refusal(exc: BaseException) -> bool:
+    """Whether the provider may have refused a request for carrying image
+    parts at all, as it does when the model takes no image input.
+
+    True for the shape rejection ``classify_content_rejection`` raises (a
+    ``ContentValidationError`` with its default code), and for a 400 or 422
+    whose error names an image. The second is how an OpenAI-compatible API
+    refuses an image sent to a model that takes no image input: OpenAI
+    answers chat.completions with "Invalid content type. image_url is only
+    supported by certain models." ``classify_content_rejection`` leaves that
+    400 unnamed on purpose, because its remedy removes every image in the
+    conversation.
+
+    False for a refusal of one image, which says nothing about images in
+    general: ``ContentTooLargeError`` (an image over the provider's size
+    limit), and a Responses API image code (``classify_responses_failure``
+    keeps it on the error), on the error or in a 400's body. False for a
+    ``TransientProviderError`` too, which is a provider fault whatever its
+    text mentions.
+
+    Only "may have": a 400 that merely mentions an image passes. So the
+    caller removes only images it added itself, and treats the refusal as
+    theirs only once the request goes through without them.
+    """
+    if isinstance(exc, (ContentTooLargeError, TransientProviderError)):
+        return False
+    if isinstance(exc, ContentValidationError):
+        return exc.code not in _RESPONSES_IMAGE_CODES
+    if getattr(exc, "status_code", None) not in (400, 422):
+        return False
+    if ProviderErrorBody.parse(getattr(exc, "body", None)).code in _RESPONSES_IMAGE_CODES:
+        return False
+    text = f"{exc} {getattr(exc, 'body', '')}".lower()
+    return any(word in text for word in _IMAGE_REFUSAL_WORDS)
+
+
 # The sentence OpenAI and Azure send when chat.completions refuses function
 # tools for a model that reasons by default, whether or not the request set an
 # effort. Azure documents only this sentence, not the body's `param`.
@@ -1886,6 +2051,8 @@ _RESPONSES_IMAGE_REJECTED_CODES = (
     "unsupported_image_media_type", "empty_image_file",
     "failed_to_download_image", "image_file_not_found",
 )
+# Each names one image the provider could not use (`is_image_refusal`).
+_RESPONSES_IMAGE_CODES = _RESPONSES_IMAGE_TOO_LARGE_CODES + _RESPONSES_IMAGE_REJECTED_CODES
 
 
 def classify_responses_failure(
@@ -1897,14 +2064,14 @@ def classify_responses_failure(
     In-band means a ``response.failed`` event, a stream ``error`` event, or a
     non-streamed response with status ``failed``: all arrive inside a 200. Each
     named code gets the typed error for its cause, so the session runs that
-    cause's handling: compaction for an overflow, the count-based retry for a
+    cause's handling: compaction for an overflow, the session wait for a
     rate limit, the history repair for an image, and a visible error for a
     refused prompt. ``None`` leaves any other code to the caller's transient
     handling.
 
-    A rate limit gets what an unconfirmed 429 gets, not the session wait. The
-    code does not say whether a per-minute or a per-day limit was hit, and only
-    a confirmed velocity limit earns the wait (see :func:`classify_transient`).
+    A rate limit gets the session wait. Its code names a rate limit, quotas and
+    spend caps have their own codes, and with no hint the wait runs the backoff
+    curve inside the rate-limit budget.
     """
     parsed = ProviderErrorBody.parse(body)
     code = parsed.code
@@ -1915,7 +2082,7 @@ def classify_responses_failure(
         return ContextOverflowError(message if isinstance(message, str) else code)
     if code == "rate_limit_exceeded":
         return _rate_limited(
-            provider=provider, model=model, velocity_confirmed=False,
+            provider=provider, model=model, velocity_confirmed=True,
             retry_after=None, status_code=None,
         )
     if code in _PROMPT_REFUSAL_CODES:
@@ -1923,7 +2090,7 @@ def classify_responses_failure(
     if code in _RESPONSES_IMAGE_TOO_LARGE_CODES:
         return _image_too_large(message)
     if code in _RESPONSES_IMAGE_REJECTED_CODES:
-        return _content_rejected()
+        return _content_rejected(code=code)
     return None
 
 
@@ -2148,6 +2315,10 @@ class ProviderErrorFilter(logging.Filter):
             provider_error = _provider_error(exc=exc)
             if provider_error is None:
                 continue
+            record._diagnostic_safe_template = True
+            record.error_type = type(exc).__name__
+            record.provider_error = type(provider_error).__name__
+            record.status_code = _log_status(status=getattr(provider_error, "status_code", None))
             record.msg = "Provider operation failed: error_type=%s provider_error=%s status=%s"
             record.args = (
                 type(exc).__name__, type(provider_error).__name__,
@@ -2229,6 +2400,18 @@ class ProviderConnectionInfo:
     api_version: str | None = None  # Azure api-version query param
 
 
+def call_effort(passed: str | None, own: str | None) -> str | None:
+    """The reasoning effort a call sends: the one it passed, else the provider's own.
+
+    An empty one sends none at all, the provider's own included. That is how a
+    model route with no effort of its own clears the role's (`model_route`
+    in client.py).
+    """
+    if passed is None:
+        return own
+    return passed or None
+
+
 class LLMProvider(ABC):
 
     async def aclose(self) -> None:
@@ -2239,6 +2422,44 @@ class LLMProvider(ABC):
     # Role reported for a call made on this provider outside LLMClient, such
     # as cowork-server's route gate. LLMClient sets it.
     trace_role: str | None = None
+    # Receives each call's usage record instead of the log. A scratchpad sets
+    # it to send the record to its host.
+    usage_sink: Callable[[dict], None] | None = None
+
+    def log_usage(self, *, model: str, usage: Usage, served_model: str | None) -> None:
+        """Report one call's usage to `usage_sink`, or log it when `ANTON_USAGE_LOG` is on.
+
+        Called where the usage is first known, before any check on the reply
+        can raise, so a billed call that then fails is still counted.
+        """
+        if self.usage_sink is None and not usage_log_enabled():
+            return
+        record = _usage_record(
+            role=get_call_role() or self.trace_role, model=model, served_model=served_model,
+            input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
+            cache_read=usage.cache_read_tokens, cache_creation=usage.cache_creation_tokens,
+        )
+        if self.usage_sink is not None:
+            self.usage_sink(record)
+        else:
+            log_usage_record(record)
+
+    @property
+    def reasoning_effort(self) -> str | None:
+        """The effort this provider sends when a call does not override it."""
+        return getattr(self, "_reasoning_effort", None)
+
+    @property
+    def accepts_large_output(self) -> bool:
+        """Whether the endpoint is known to take output budgets up to 64k tokens.
+
+        Known means Anthropic, the Responses API or the MindsHub gateway. The
+        Responses API flavor is also what a host picks for a custom endpoint it
+        configured to speak that API, which in practice is OpenAI or Azure.
+        False for unknown servers: an OpenAI-compatible server with a small
+        context window rejects ``prompt + max_tokens`` above its limit.
+        """
+        return False
 
     def native_web_tools(self) -> set[str]:
         """Subset of {"web_search", "web_fetch"} this provider executes server-side.
@@ -2267,6 +2488,7 @@ class LLMProvider(ABC):
         tool_choice: dict | None = None,
         max_tokens: int = 4096,
         native_web_tools: set[str] | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse: ...
 
     def export_connection_info(self) -> ProviderConnectionInfo:
@@ -2286,8 +2508,12 @@ class LLMProvider(ABC):
         tools: list[dict] | None = None,
         max_tokens: int = 4096,
         native_web_tools: set[str] | None = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Stream LLM responses. Default falls back to complete()."""
+        # Passed only when set: a subclass written before the parameter existed
+        # still works for every call that does not override the effort.
+        extra = {"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}
         response = await self.complete(
             model=model,
             system=system,
@@ -2295,6 +2521,7 @@ class LLMProvider(ABC):
             tools=tools,
             max_tokens=max_tokens,
             native_web_tools=native_web_tools,
+            **extra,
         )
         if response.content:
             yield StreamTextDelta(text=response.content)

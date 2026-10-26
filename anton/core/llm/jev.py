@@ -72,8 +72,12 @@ async def classify(
     questions: dict,
     timeout_s: float,
     client=None,
+    headers: dict[str, str] | None = None,
 ) -> JevVerdict:
-    """POST one decision request. Never raises; failures come back in ``error``."""
+    """POST one decision request. Never raises; failures come back in ``error``.
+
+    ``headers`` are sent alongside the key, which they cannot override.
+    """
     import httpx2 as httpx
 
     started = time.monotonic()
@@ -89,7 +93,7 @@ async def classify(
         async with asyncio.timeout(timeout_s):
             response = await client.post(
                 f"{base_url.rstrip('/')}/decisions",
-                headers={"Authorization": f"Bearer {api_key}"},
+                headers={**(headers or {}), "Authorization": f"Bearer {api_key}"},
                 json={"model": model, "state": state, "questions": questions},
             )
     except TimeoutError:
