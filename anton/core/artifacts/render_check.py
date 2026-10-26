@@ -18,12 +18,13 @@ neither field, which reads as the page as it opens only.
 
 A request may also carry the page as it was when the turn began
 (`previous_html`). The service then compares the two, and its answer names
-the views the edit removed, the views that drew before and broke, and the
-tabs and toggles that are gone (`comparison`). The comparison never changes
+the views the edit removed, the views that drew before and broke, the views
+that draw fewer than half the marks they drew, and the tabs and toggles
+that are gone (`comparison`). The comparison never changes
 `status` or `findings`; what anton does with it is `page_copies`' and
 `tool_handlers._check_pages`'. A service that predates the comparison
-refuses such a request with 400, which reads as unverified: a release ships
-the service and anton together.
+refuses such a request with 400; anton then asks once more with the page
+alone, so the page keeps its own verdict without a comparison.
 
 The service's URL comes from `ANTON_RENDER_CHECK_URL` in this process's
 environment, read at call time the way `html_lint` reads
@@ -209,13 +210,33 @@ class BrokenView(BaseModel):
     findings: list[RenderFinding] = Field(default_factory=list)
 
 
+class ShrunkView(BaseModel):
+    """A view, `view` as findings name it, that drew at least five marks of
+    a kind in state `pressed` before the edit and fewer than half as many of
+    that kind now, at `viewports`; `before` and `after` are that kind's
+    marks at the first of them. The service counts an svg view's markers,
+    bars and other shapes kind by kind, and a canvas's marks not at all;
+    the render check's own docs say which table rows and HTML map markers
+    count. Not a failure: the service can't tell a filter the user asked
+    for from data the edit lost."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    pressed: str | None
+    view: str
+    viewports: list[Viewport]
+    before: int
+    after: int
+
+
 class Comparison(BaseModel):
     """The service's comparison of the page with `previous_html`.
 
     `previous` says how fully the previous page was checked: `not_checked`
     means not at all, so every list is empty and says nothing.
     `broken_views` speaks for the states in `compared` only, and
-    `removal_checked` says which removals the service could see.
+    `removal_checked` says which removals the service could see. A service
+    that predates `shrunk_views` sends none.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -227,6 +248,7 @@ class Comparison(BaseModel):
     removed_views: list[ViewRef] = Field(default_factory=list)
     broken_views: list[BrokenView] = Field(default_factory=list)
     removed_controls: list[str] = Field(default_factory=list)
+    shrunk_views: list[ShrunkView] = Field(default_factory=list)
 
     @property
     def informative(self) -> bool:
@@ -552,18 +574,26 @@ def _quoted(labels: Sequence[str]) -> str:
 _AS_IT_OPENS = "the page as it opens"
 
 
+def state_label(pressed: str | None) -> str:
+    """The state PRESSED as a sentence names it: the tab or toggle's label,
+    quoted and scrubbed, or `the page as it opens` for None."""
+    return _AS_IT_OPENS if pressed is None else f"“{scrub_output(pressed)}”"
+
+
 class ComparisonNotes(NamedTuple):
     """The views a comparison names, as labels ready for a sentence: those
     this turn's edits broke (`new_problem`), left without a graphic
-    (`no_view`) and removed, each once."""
+    (`no_view`), removed, and left fewer than half their marks (`shrank`,
+    each with the view and both counts), each once."""
 
     broke: list[str]
     blank: list[str]
     removed: list[str]
+    shrank: list[str]
 
     @property
     def found(self) -> bool:
-        return bool(self.broke or self.blank or self.removed)
+        return bool(self.broke or self.blank or self.removed or self.shrank)
 
 
 def comparison_notes(comparison: Comparison | None) -> ComparisonNotes:
@@ -571,19 +601,21 @@ def comparison_notes(comparison: Comparison | None) -> ComparisonNotes:
     labels, the page before any press as `the page as it opens`. Empty when
     nothing was compared: no comparison, or a previous page the service did
     not check. Removed views come first, then removed tabs and toggles that
-    showed none."""
+    showed none. A shrunk view reads `“Map” (svg#lanes: 3 of 40 marks)`."""
     if comparison is None or not comparison.informative:
-        return ComparisonNotes(broke=[], blank=[], removed=[])
-
-    def label(pressed: str | None) -> str:
-        return _AS_IT_OPENS if pressed is None else f"“{scrub_output(pressed)}”"
+        return ComparisonNotes(broke=[], blank=[], removed=[], shrank=[])
 
     def states(reason: str) -> list[str]:
-        return list(dict.fromkeys(label(view.pressed) for view in comparison.broken_views if view.reason == reason))
+        return list(dict.fromkeys(state_label(view.pressed) for view in comparison.broken_views if view.reason == reason))
 
     removed = dict.fromkeys([*(view.pressed for view in comparison.removed_views), *comparison.removed_controls])
+    shrank = dict.fromkeys(
+        f"{state_label(view.pressed)} ({scrub_output(view.view)}: {view.after} of {view.before} marks)"
+        for view in comparison.shrunk_views
+    )
     return ComparisonNotes(
-        broke=states("new_problem"), blank=states("no_view"), removed=[label(name) for name in removed]
+        broke=states("new_problem"), blank=states("no_view"), removed=[state_label(name) for name in removed],
+        shrank=list(shrank),
     )
 
 
@@ -611,6 +643,18 @@ class _Reply(NamedTuple):
     status: int = 0
 
 
+# The least time left in which a page whose request with the previous page
+# got 400 is asked once more alone.
+_RENDER_ALONE_MIN_SECONDS = 1.0
+
+
+def _request_body(html: str, *, screenshot: bool, previous_html: str | None) -> bytes:
+    """The request's JSON, without `previous_html` when it is None."""
+    return RenderCheckRequest(
+        html=html, screenshot=screenshot, previous_html=previous_html
+    ).model_dump_json(exclude_none=True).encode("utf-8")
+
+
 def check_html(
     html: str, *, previous_html: str | None = None, screenshot: bool = True, timeout: float = TIMEOUT_SECONDS
 ) -> RenderCheckOutcome:
@@ -618,8 +662,11 @@ def check_html(
 
     `previous_html`, the page as it was when the turn began, asks the
     service to compare the two (`RenderCheckResult.comparison`). Without it
-    the request is the one an older service accepts; an older service
-    answers a request with it 400, which is unverified like any 400.
+    the request is the one an older service accepts. The comparison never
+    costs the page its own verdict: a previous page over `MAX_PAGE_BYTES`,
+    or a request with it over `MAX_COMPARED_BODY_BYTES`, goes without it,
+    and a 400 to a request with it, as an older service answers, is asked
+    once more without it.
 
     `timeout` is anton's limit for this call, a second ask included; a
     caller with a smaller budget left passes what remains. A service busy
@@ -639,18 +686,23 @@ def check_html(
     if previous_html is not None:
         previous_bytes = len(previous_html.encode("utf-8"))
         if previous_bytes > MAX_PAGE_BYTES:
-            return RenderCheckUnavailable(
-                reason=f"the page as it was before this turn is {previous_bytes // 1024} KB, over the render "
-                f"check's {MAX_PAGE_BYTES // (1024 * 1024)} MB limit"
+            _log.info(
+                "comparison skipped: the page as it was before this turn is %d KB, over the %d MB limit",
+                previous_bytes // 1024, MAX_PAGE_BYTES // (1024 * 1024),
             )
-    body = RenderCheckRequest(
-        html=html, screenshot=screenshot, previous_html=previous_html
-    ).model_dump_json(exclude_none=True).encode("utf-8")
-    body_cap = MAX_BODY_BYTES if previous_html is None else MAX_COMPARED_BODY_BYTES
-    if len(body) > body_cap:
+            previous_html = None
+    body = _request_body(html, screenshot=screenshot, previous_html=previous_html)
+    if previous_html is not None and len(body) > MAX_COMPARED_BODY_BYTES:
+        _log.info(
+            "comparison skipped: the request with the page as it was before this turn is %d KB once "
+            "JSON-escaped, over the %d MB limit", len(body) // 1024, MAX_COMPARED_BODY_BYTES // (1024 * 1024),
+        )
+        previous_html = None
+        body = _request_body(html, screenshot=screenshot, previous_html=None)
+    if previous_html is None and len(body) > MAX_BODY_BYTES:
         return RenderCheckUnavailable(
             reason=f"the page's request is {len(body) // 1024} KB once JSON-escaped, over the render "
-            f"check's {body_cap // (1024 * 1024)} MB request limit"
+            f"check's {MAX_BODY_BYTES // (1024 * 1024)} MB request limit"
         )
     started = time.monotonic()
     reply = _post(base, body=body, timeout=timeout)
@@ -660,12 +712,17 @@ def check_html(
             _log.info("render check at %s is busy; asking once more in %.0f s", base, BUSY_RETRY_SECONDS)
             time.sleep(BUSY_RETRY_SECONDS)
             reply = _post(base, body=body, timeout=left)
+    if reply.unavailable is not None and previous_html is not None and reply.status == 400:
+        # A service that predates page comparison refuses the field before it
+        # checks anything, so asking again with the page alone costs little.
+        _log.warning(
+            "the render-check service at %s rejected a request with previous_html; it may predate page "
+            "comparison, so the page is checked alone", base,
+        )
+        left = timeout - (time.monotonic() - started)
+        if left >= _RENDER_ALONE_MIN_SECONDS:
+            reply = _post(base, body=_request_body(html, screenshot=screenshot, previous_html=None), timeout=left)
     if reply.unavailable is not None:
-        if previous_html is not None and reply.status == 400:
-            _log.warning(
-                "the render-check service at %s rejected a request with previous_html; "
-                "it may predate page comparison", base,
-            )
         return reply.unavailable
     try:
         result = RenderCheckResult.model_validate_json(reply.content)

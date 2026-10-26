@@ -963,6 +963,36 @@ def _browser_check_failed():
     )
 
 
+async def test_a_rebuild_that_failed_its_browser_check_names_what_it_broke_and_removed(tmp_path: Path, monkeypatch):
+    """A rebuild of an existing page comes back to repair knowing which views drew before and fail
+    now, and which it dropped: the same comparison a built page's result carries."""
+    from dataclasses import replace
+
+    from anton.core.artifacts.render_check import Comparison
+    from anton.core.tools import tool_handlers
+
+    comparison = Comparison.model_validate({
+        "previous": "complete", "previous_status": "passed", "removal_checked": "all",
+        "compared": [{"pressed": "Routes", "viewports": ["desktop"]}],
+        "broken_views": [{"pressed": "Routes", "reason": "new_problem", "viewports": ["desktop"], "findings": []}],
+        "removed_views": [{"pressed": "Globe"}], "removed_controls": ["Globe"],
+    })
+    slug = _make_artifact(tmp_path, type="html-app")
+
+    async def fake_generate(**kw):
+        return replace(_browser_check_failed(), comparison=comparison)
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    session = _session(tmp_path)
+    session._render_screenshots_refused = True
+    _, result = await _collect_raw(session, {"slug": slug, "user_request": "rebuild it", "agent_understanding": "a page"})
+
+    body = json.loads(result.content)
+    assert body["changes_from_previous"] == {"broke": ["“Routes”"], "blank": [], "removed": ["“Globe”"], "shrank": []}
+    assert body["instruction"].endswith(tool_handlers._CHANGES_INSTRUCTION)
+    assert list(body)[-1] == "instruction"
+
+
 @pytest.mark.parametrize("refused", [False, True])
 async def test_a_page_that_failed_its_browser_check_comes_back_to_repair(tmp_path: Path, monkeypatch, refused):
     """The result names the page the last build wrote, its findings, the
@@ -992,6 +1022,8 @@ async def test_a_page_that_failed_its_browser_check_comes_back_to_repair(tmp_pat
     assert body["findings"] == list(_browser_check_failed().findings)
     assert body["views_measured"] == "at desktop size, as it opens and behind “Routes”"
     assert body["repair_cells"] == 2
+    # A first build has nothing to compare with.
+    assert "changes_from_previous" not in body
     instruction = body["instruction"]
     assert "do NOT build or repair" not in text and "ask how they want to proceed" not in text
     for step in ("repair it yourself now", "`read_text_file`", "scratchpad cell", "`runView`",

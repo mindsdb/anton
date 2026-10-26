@@ -139,6 +139,24 @@ async def test_a_passing_page_hears_which_views_the_turn_blanked_and_removed(ser
     ]
 
 
+async def test_a_page_hears_which_views_the_turn_left_with_fewer_than_half_their_marks(service, tmp_path):
+    store, slug = _artifact(tmp_path)
+    service.answer(_passed(
+        compared=[{"pressed": "Ports", "viewports": ["desktop"]}],
+        shrunk_views=[{
+            "pressed": "Ports", "view": "svg#ports", "viewports": ["desktop"], "mark": "circle", "before": 24, "after": 3,
+        }],
+    ))
+
+    lint = await _cell(_session(), store, slug, "filters the ports")
+
+    assert lint.messages[1:] == [
+        f"{slug}/index.html — “Ports” (svg#ports: 3 of 24 marks) shows fewer than half the marks it showed before "
+        "this turn's edits. If the user did not ask to show less, the edits lost data: fix it; if they did, tell them "
+        "what it shows now",
+    ]
+
+
 async def test_a_view_the_turn_broke_is_named_before_the_repair_cells_left(service, tmp_path):
     store, slug = _artifact(tmp_path)
     service.answer((200, {
@@ -360,7 +378,7 @@ async def test_each_build_is_compared_with_the_page_as_the_turn_found_it(service
 
     assert service.requests[0]["body"]["previous_html"] == _BEFORE
     assert orchestrator._result_shell(st)["changes_from_previous"] == {
-        "broke": [], "blank": [], "removed": ["“Globe”"],
+        "broke": [], "blank": [], "removed": ["“Globe”"], "shrank": [],
     }
 
 
