@@ -2149,6 +2149,9 @@ class ChatSession:
         # generate_artifact sets it too when the model refused its retry's
         # screenshot (`engine._run_loop`).
         self._render_screenshots_refused = False
+        # The same, for builder models generate_artifact runs on that the agent
+        # doesn't (`tool_handlers._builder_model`), one entry per model.
+        self._builder_screenshots_refused: set[str] = set()
         # Set once the model refused a request carrying an image a tool
         # returned (what `read_image` loaded) and took it without that image
         # (`_confirm_tool_images_refused`). From then on `read_image` answers

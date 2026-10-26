@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
+from anton.core.llm.client import asked_model
+
 from . import sub_tools
 from ..state import known_data_usable
 from .notes import known_data_sources, source_key, string_list
@@ -246,6 +248,7 @@ async def classify_feedback(state: PrdState) -> str:
     state.trace_log.llm_call(
         node="classify_feedback", method="generate_object", system=system,
         messages=messages, value=result.model_dump(),
+        model=asked_model(state.session._llm, "planning"),
     )
     state.trace_log.verdict(node="classify_feedback", schema="FeedbackVerdict", value=result.model_dump())
     return result.route if result.route in ("revise_brief", "back_to_gathering") else "revise_brief"

@@ -28,6 +28,7 @@ from anton.core.artifacts.internal_files import API_SPEC_FILENAME, PRD_FILENAME
 from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
 from anton.core.backends.sandbox import cell_sandbox_of
 from anton.utils.datasources import scrub_credentials
+from anton.core.llm.client import asked_model, routed_model
 from anton.core.llm.effort import WRITE_BUDGET_BY_EFFORT, client_stream_budget
 from anton.core.llm.structured import looks_truncated
 from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS, scratchpad_action
@@ -288,6 +289,7 @@ async def _plan_whole_document(
         trace.llm_call(
             node=node_label, method="plan", system=system,
             messages=call_messages, response=response, attempt=attempt,
+            model=asked_model(session._llm, "planning"),
         )
 
         if getattr(response, "tool_calls", None):
@@ -968,11 +970,13 @@ async def _run_loop(
             )
             # `messages` is the list `call` holds, now without the image.
             response, used_budget = await call()
-            if first_round:
+            if first_round or routed_model() is not None:
                 # Round 0 runs on the planning model, the main agent's own,
                 # so its checks send no screenshot either from now on. A
                 # later round runs on the coding model, whose refusal says
-                # nothing about the main agent's.
+                # nothing about the main agent's. On a builder model of its
+                # own every round runs on that model, whose checks this
+                # records for.
                 from anton.core.tools.tool_handlers import record_render_screenshots_refused
 
                 record_render_screenshots_refused(session)
@@ -986,6 +990,7 @@ async def _run_loop(
             response=response,
             attempt=attempt,
             round=round_idx,
+            model=asked_model(session._llm, "planning" if first_round else "coding"),
         )
 
         # The file body rides in the reply's TEXT now, so it is parsed once per

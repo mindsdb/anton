@@ -35,6 +35,21 @@ base URL matches the configured Minds URL) from a generic third-party endpoint â
 that decides whether `web_search`/`web_fetch` execute server-side or fall back
 to handler-dispatched tools (see [Tool system](/developer/tool-system)).
 
+### The artifact builder's own model
+
+`generate_artifact` can build on a model of its own. With `ANTON_ARTIFACT_MODEL`
+set in the process environment, and optionally `ANTON_ARTIFACT_REASONING_EFFORT`,
+every planning, coding and structured call the pipeline makes asks for that
+model and effort, on the role's own provider and so its endpoint
+(`model_route` and `ModelRoute` in `client.py`, entered inside the pipeline's
+task). The effort goes out as set, and an empty effort sends none, not the
+provider's own. The agent's and router's calls
+in the same turn keep their own models. The builder's usage is reported under
+its model, its calls don't change the served model behind the agent's identity
+line, a screenshot refusal by the builder's model turns off screenshots for
+that model alone, and the step trace's `llm_call` events name the model each
+call asked for.
+
 ## `LLMClient` surface
 
 | Method | Provider | Returns |

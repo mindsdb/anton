@@ -23,6 +23,7 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, NamedTuple
 
 from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES_ORDERED
+from anton.core.llm.client import asked_model
 
 from ..sub_tools import tool_schema
 
@@ -242,6 +243,7 @@ async def call_with_room(
         state.trace_log.llm_call(
             node=step, method=method, system=system, messages=msgs,
             response=response, attempt=number, round=round_idx,
+            model=asked_model(llm, role),
         )
         return response, used or budget
 

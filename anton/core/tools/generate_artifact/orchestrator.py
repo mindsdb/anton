@@ -23,6 +23,7 @@ from anton.core.artifacts.internal_files import (
     TECH_SPEC_FILENAME,
 )
 from anton.core.artifacts import live_app_slots
+from anton.core.llm.client import asked_model
 from anton.core.artifacts.store import BACKEND_LOG_FILENAME
 from anton.core.backends.sandbox import BACKENDS_OFF_MESSAGE, CellSandbox, cell_sandbox_of
 from anton.utils.datasources import scrub_output
@@ -79,7 +80,7 @@ async def _decide(state: GenState, schema, prompt_pair, node: str) -> object:
     state.trace_log.llm_call(
         node=node, method="generate_object",
         system=system, messages=[{"role": "user", "content": user}],
-        value=value,
+        value=value, model=asked_model(state.session._llm, "planning"),
     )
     state.trace_log.verdict(node=node, schema=getattr(schema, "__name__", str(schema)), value=value)
     return result
