@@ -217,6 +217,8 @@ VISUAL DESIGN (for every HTML file you produce):
 - Multi-tab dashboards: NEVER call `echarts.init()` on a hidden container.
   Use lazy init — initialise charts only on first tab visibility.
   Pattern: `const _rendered = new Set(['overview']); function showPage(name) { if (!_rendered.has(name)) { _rendered.add(name); initChartsFor(name); } }`
+  `initChartsFor(name)` starts each view on that tab through `runView`, the
+  helper in the verifier contract, so a view that fails on a tab fails alone.
 - Layout composition:
   - Hero KPI cards at the top (large numbers, colour-coded ±, delta arrows).
   - Main narrative chart immediately below KPIs.
@@ -292,19 +294,49 @@ _BROWSER_GATE_SERVED = """\
 """
 
 
+# The one helper every view's setup goes through, here and, word for word, in
+# the build-html-dashboard skill. A throw or a rejected promise stays in its
+# view: the view shows a plain-text message and carries `data-view-failed`,
+# which the render check reports as a blank view whatever the message says.
+# The message names the view first in both channels: `console.error`, which
+# the render check counts, and `reportError`, which fires the window `error`
+# event the app preview's error list is built from. `el` may be missing, and
+# `fail` must not throw from inside the `catch`, or the error escapes the view.
+VIEW_HELPER_JS = (
+    "function runView(name, el, setup) { const fail = (err) => { "
+    "const why = err && err.message ? err.message : String(err); "
+    "if (el) { el.setAttribute('data-view-failed', name); el.textContent = name + ' could not load.'; } "
+    "console.error(name + ' failed: ' + why); "
+    "if (typeof reportError === 'function') reportError(new Error(name + ': ' + why)); }; "
+    "try { const done = setup(el); if (done && typeof done.then === 'function') done.catch(fail); } "
+    "catch (err) { fail(err); } }"
+)
+
+
 # Follows either browser-gate bullet. The browser check counts console errors,
 # so an error a view catches and only writes into the page never reaches it,
 # and an expected failure that logs one fails a page that works.
 _CAUGHT_ERRORS = """\
-- A view you guard with `try`/`catch` logs what it caught as well as writing
-  a short message into the view:
-  `try { drawMap(el); } catch (e) { console.error(e); el.textContent = 'The map could not load.'; }`.
-  A catch that only writes the message hides the error from the browser
-  check: at most the check reports the view as empty, and it cannot say what
-  broke it. Log with `console.error` only a view that failed to draw. An
-  expected failure stays silent or uses `console.warn`: the guarded storage
-  helper the browser storage note below asks for catches a throw on every
-  load in the preview frame, and a `console.error` there fails the check.\
+- Start every view through this one helper: each chart, map, globe or other
+  view that runs setup code, on load or on its tab's first visit. A view
+  whose setup throws or whose promise rejects then fails alone, with a
+  plain-text message in its place, and every other view still draws:
+  `""" + VIEW_HELPER_JS + """`
+  Call it with the view's title as the page shows it, its element and its
+  setup function, which may be `async`:
+  `runView('Shipment map', document.getElementById('world-map'), drawMap);`.
+  Await or return every promise the setup starts, such as the atlas's
+  `d3.json(...)`. Don't end it with a `.catch` of your own: the helper must
+  see the failure to name and mark the view.
+  Keep the helper as written: its `console.error` and `reportError` name the
+  failed view to the browser check and to the preview's error list, and
+  `data-view-failed` lets the check find the failed view whatever its
+  message says. A view's own `try`/`catch` that only writes a message hides
+  the error from the check. Log with `console.error` only a view that failed
+  to draw. An expected failure stays silent or uses `console.warn`: the
+  guarded storage helper the browser storage note below asks for catches a
+  throw on every load in the preview frame, and a `console.error` there
+  fails the check.\
 """
 
 
