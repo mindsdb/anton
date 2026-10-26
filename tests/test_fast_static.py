@@ -183,3 +183,25 @@ async def test_coherent_gather_changes_only_its_copied_control_tool(tmp_path, mo
     monkeypatch.setattr(engine, "run_gathering_loop", gather)
     assert await fast_static.prepare(state)
     assert original_finish["description"] == before
+
+
+@pytest.mark.parametrize("installed", [True, False])
+async def test_geocoding_is_offered_only_when_the_optional_gazetteer_is_installed(tmp_path, monkeypatch, installed):
+    import importlib.util
+    from anton.core.tools.generate_artifact.discovery import engine
+    monkeypatch.setenv("ANTON_STATIC_GATHER_GEOCODING", "on")
+    monkeypatch.setenv("ANTON_STATIC_GEO_CAPABILITY", "on")
+    find_spec = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec",
+                        lambda name, *a: (object() if installed else None) if name == "geonamescache" else find_spec(name, *a))
+    state = GenState(session=SimpleNamespace(history=[]), artifact_type="html-app", artifact_path=tmp_path,
+                     slug="map", act_first=True)
+
+    async def gather(received):
+        assert ("resolve_place" in received.pipeline_system) is installed
+        assert ("geonamescache" in received.pipeline_system) is installed
+        received.gathering_complete = True
+        received.final_artifact_type = "html-app"
+
+    monkeypatch.setattr(engine, "run_gathering_loop", gather)
+    assert await fast_static.prepare(state)

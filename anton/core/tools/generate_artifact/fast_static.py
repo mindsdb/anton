@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import importlib.util
 import inspect
 import json
 import os
@@ -238,7 +239,9 @@ async def prepare(state):
             "This client needs no third-party package. For other source protocols, use their "
             "documented client instead. Never print credentials or embed a client object."
         )
-    if os.environ.get("ANTON_STATIC_GATHER_GEOCODING") == "on":
+    # geonamescache is an optional extra; never promise a lookup that cannot import.
+    geocoding = importlib.util.find_spec("geonamescache") is not None
+    if geocoding and os.environ.get("ANTON_STATIC_GATHER_GEOCODING") == "on":
         state._pipeline_system += (
             "\nFor geographic views, resolve ONLY the actual places needed for the requested entities "
             "and position roles during this collection. Use the installed local helper: "
@@ -252,7 +255,7 @@ async def prepare(state):
             "country columns or descriptive labels. Retain source-supplied coordinates when they "
             "describe the requested position. Credit GeoNames in a page using this lookup."
         )
-    if os.environ.get("ANTON_STATIC_GEO_CONTRACT") == "on":
+    if geocoding and os.environ.get("ANTON_STATIC_GEO_CONTRACT") == "on":
         state._pipeline_system += (
             "\nGeocoding return contract: resolve_place returns a JSON mapping containing lat, "
             "lon, country, location, geonameid and source. Retain that returned mapping directly "
@@ -263,7 +266,7 @@ async def prepare(state):
             "place and preserve str(error); TypeError and AttributeError are programming errors "
             "to repair, not evidence that coordinates are unavailable."
         )
-    elif os.environ.get("ANTON_STATIC_GEO_CAPABILITY") == "on":
+    elif geocoding and os.environ.get("ANTON_STATIC_GEO_CAPABILITY") == "on":
         state._pipeline_system += (
             "\nGeographic capability: geonamescache is installed in Python. Prefer coordinates "
             "already supplied by the source. For named places lacking coordinates, use "

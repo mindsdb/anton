@@ -55,7 +55,6 @@ dependencies = [
     { name = "anyio" },
     { name = "click" },
     { name = "dill" },
-    { name = "geonamescache" },
     { name = "httpx2" },
     { name = "mcp" },
     { name = "openai" },
@@ -76,6 +75,9 @@ dependencies = [
 clipboard = [
     { name = "pillow" },
 ]
+geo = [
+    { name = "geonamescache" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -92,7 +94,7 @@ requires-dist = [
     { name = "anyio", specifier = ">=4.14.2" },
     { name = "click", specifier = ">=8.3.3" },
     { name = "dill", specifier = "==0.3.8" },
-    { name = "geonamescache", specifier = "==3.0.1" },
+    { name = "geonamescache", marker = "extra == 'geo'", specifier = "==3.0.1" },
     { name = "httpx2", specifier = ">=2.7,<3" },
     { name = "mcp", specifier = ">=2,<3" },
     { name = "openai", specifier = ">=3.0" },
@@ -109,7 +111,7 @@ requires-dist = [
     { name = "truststore", specifier = ">=0.10.4" },
     { name = "typer", specifier = ">=0.12.4" },
 ]
-provides-extras = ["clipboard"]
+provides-extras = ["clipboard", "geo"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -393,8 +395,8 @@ name = "httpcore2"
 version = "2.12.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "h11" },
-    { name = "truststore" },
+    { name = "h11", marker = "python_full_version < '3.12' or sys_platform != 'emscripten'" },
+    { name = "truststore", marker = "python_full_version < '3.12' or sys_platform != 'emscripten'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/be/ad/f4f0e57345f1870f3e8cb624e058d7eca6e5a27d33bcc3311d9b618734cd/httpcore2-2.12.0.tar.gz", hash = "sha256:9293522bba0aa7c4c8e9e3f040c16575bd8868e155a77fa30c7a9085a5eae648", size = 67548, upload-time = "2026-08-18T13:22:08.211Z" }
 wheels = [
@@ -1359,8 +1361,8 @@ name = "uvicorn"
 version = "0.53.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "click" },
-    { name = "h11" },
+    { name = "click", marker = "python_full_version < '3.12' or sys_platform != 'emscripten'" },
+    { name = "h11", marker = "python_full_version < '3.12' or sys_platform != 'emscripten'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/5d/ad/04bbb797c84fc1f26cb171f7394716f4865ffb8d8c5e1eef42565c2dfa6b/uvicorn-0.53.0.tar.gz", hash = "sha256:a9356f0cb89b3b8621529c5d5eebd69bfe154f4c3f68b4cf2de47e45fa855c2e", size = 110881, upload-time = "2026-09-14T07:44:23.815Z" }
 wheels = [
