@@ -731,6 +731,19 @@ async def test_a_write_to_a_database_file_shows_its_statement_and_runs_only_on_a
     assert harness.pad.ran == ([SQLITE_UPDATE_CELL] if answer is APPROVE else []), "only Approve runs it"
 
 
+async def test_a_cancelled_write_to_a_database_file_is_refused_as_a_change(project, caplog):
+    """The refusal says what the card said, a change to the file, so the
+    model doesn't tell the user the file would be overwritten. The log keeps
+    the kind."""
+    (project / "shop.db").write_text("x")
+    session = await _gated_session(project, elicitor=_AnswersAtOnce(answer=CANCEL))
+    with caplog.at_level(logging.WARNING, logger=GATE_LOG):
+        outcome = await _hold()(session, pad=_Pad(), code=SQLITE_UPDATE_CELL)
+    assert outcome is not None and outcome.reason == "write_not_approved"
+    assert "Not run: this step would change `shop.db`." in outcome.content
+    assert _decisions(caplog) == ['{"kinds":["overwrite"],"count":1,"status":"cancelled"}']
+
+
 @pytest.mark.parametrize("code, kinds", [
     ("open('stock.csv', 'a').write('B,2\\n')", '["append"]'),
     ("import os\nos.makedirs('.anton/artifacts/dash', exist_ok=True)\n"
