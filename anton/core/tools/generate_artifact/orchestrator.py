@@ -924,8 +924,10 @@ async def _gen_verify_frontend(
                 live = await asyncio.to_thread(
                     verifiers.verify_frontend_live, entry_file, cell_sandbox=policy,
                     screenshot=not render_screenshots_refused(state.session),
+                    previous_html=state.previous_page[1] if state.previous_page is not None else None,
                 )
                 state.browser_status = live.status
+                state.comparison = live.comparison
                 state.browser_findings_listed = live.findings_listed
                 state.browser_screenshot = live.screenshot
                 state.browser_coverage = live.coverage
@@ -977,6 +979,7 @@ async def _gen_verify_frontend(
             views=live.views,
             screenshot=live.screenshot,
             error=state.error,
+            comparison=live.comparison,
         )
     return state.error
 
@@ -1428,7 +1431,12 @@ def _embed_attachments(state: GenState, entry_file: Path) -> None:
             html, state.attachments, state.artifact_path, cell_sandbox=_cell_sandbox(state)
         )
         if embedded != html:
-            write_text_nofollow(state.artifact_path, entry_file, embedded)
+            # The thread this runs in outlives a cancelled run: once the
+            # handler gave the run up and put the page back, write nothing.
+            with state.page_lock:
+                if state.abandoned.is_set():
+                    return
+                write_text_nofollow(state.artifact_path, entry_file, embedded)
     except (OSError, ValueError):
         state.trace_log.node("verify_frontend", "embed_skipped", "the page could not be rewritten")
 
@@ -1466,6 +1474,13 @@ def _result_shell(state: GenState) -> dict:
     if state.browser_status == "passed" and state.browser_coverage is not None:
         shell["browser_checked"] = state.browser_coverage.checked
         shell["browser_unchecked"] = state.browser_coverage.unchecked
+    # What the build broke, blanked or removed against the page as the turn
+    # found it. The handler's instruction has the agent name each one.
+    from anton.core.artifacts.render_check import comparison_notes
+
+    changes = comparison_notes(state.comparison)
+    if changes.found:
+        shell["changes_from_previous"] = changes._asdict()
     # Seen live: the agent presented `<path>/static/index.html` as the
     # entry point of a fullstack app: the
     # port was in the trace, the URL nowhere, and the system prompt's "prefer
