@@ -1928,6 +1928,9 @@ class ChatSession:
         # writes when the content filter stops every hand-back. Reset per turn in
         # turn_stream.
         self._turn_steps: list[_TurnStep] = []
+        # Survives automatic recovery; only a new user turn clears this stop.
+        self._unanswered_question: str | None = None
+        self._unanswered_question_reported = False
         # Whether this turn's own message told the agent to keep going (None
         # until a limit first asks), and the limits that message has already
         # carried past once.
@@ -5407,11 +5410,31 @@ class ChatSession:
         )
         try:
             async for item in inner:
+                kind, payload = item
+                if kind == "result" and payload.reason in UNANSWERED_QUESTION_REASONS:
+                    # Latch before cleanup or result bookkeeping can raise and
+                    # send the outer turn into automatic recovery.
+                    self._unanswered_question = unanswered_question_line(tc.input, payload.reason)
                 yield item
         finally:
             # Same-task close, so the inner `finally` cancels the dispatch on
             # a Stop rather than waiting for GC (hazard 4 below).
             await inner.aclose()
+
+    def _unanswered_question_events(self, *, cancels_continuation: bool) -> list[StreamEvent]:
+        """Close an unanswered turn once, including after bookkeeping fails."""
+        if self._unanswered_question is None or self._unanswered_question_reported:
+            return []
+        if self._turn_cost is not None:
+            self._turn_cost.ended_by = "question_unanswered"
+        self._append_history({"role": "assistant", "content": self._unanswered_question})
+        self._unanswered_question_reported = True
+        events: list[StreamEvent] = []
+        # This notice keeps the earlier answer instead of replacing it.
+        if cancels_continuation:
+            events.append(StreamTaskProgress(phase="handback", message=""))
+        events.append(StreamTextDelta(text=self._unanswered_question))
+        return events
 
     async def _run_draining(self, coro):
         """Run *coro* while forwarding whatever it emits out of band.
@@ -5510,6 +5533,8 @@ class ChatSession:
             self.emitter = TurnEmitter()
         self.question_count = 0
         self.answer_wait_s = 0.0
+        self._unanswered_question = None
+        self._unanswered_question_reported = False
         # Per-turn, so a long-lived session (the CLI reuses one across turns)
         # reports only what the CURRENT turn touched. Hosts that build a fresh
         # session per turn get the same result either way.
@@ -5713,6 +5738,19 @@ class ChatSession:
                         yield event
                     break  # completed successfully
                 except Exception as _agent_exc:
+                    if self._unanswered_question is not None:
+                        # An unanswered question is terminal even if subsequent
+                        # bookkeeping failed. Never ask the model to recover it.
+                        self._seal_dangling_tool_uses("the turn stopped after an unanswered question")
+                        for event in self._unanswered_question_events(
+                            cancels_continuation=_replacement_pending,
+                        ):
+                            if isinstance(event, StreamTextDelta):
+                                assistant_text_parts.append(event.text)
+                            yield event
+                        _replacement_pending = False
+                        break
+
                     # Token/billing limits, model-gate 403s, and endpoint/model
                     # 404s (ENG-1139) are deterministic — the auto-retry below
                     # would just re-send the same doomed request (and burn its
@@ -6517,12 +6555,6 @@ class ChatSession:
         # would both cost more of the budget we just declared spent and risk
         # forcing a continuation past it.
         _spend_ceiling_hit = False
-        # The line the turn ends on, once an `ask_user` question has gone
-        # unanswered (timed out or skipped). Set, it refuses every later call in
-        # the turn, that response's included, ends the tool loop after the
-        # round, and, like `_max_rounds_hit`, suppresses verification: an
-        # INCOMPLETE verdict would start a new round with tools offered.
-        _unanswered_question: str | None = None
         # Set per verification-loop iteration (see below): tells the post-loop
         # fallback the current reply is already in history, so it must not append
         # it a second time (ENG-1155 double-append).
@@ -6719,6 +6751,16 @@ class ChatSession:
 
                 tool_results: list[dict] = []
                 for tc in llm_response.tool_calls:
+                    # Nothing runs after a question nobody answered, whatever the
+                    # model sent with it. Refuse before inspecting its arguments.
+                    if self._unanswered_question is not None:
+                        tool_results.append(_not_run_after_unanswered_question(tc))
+                        for event in _discarded_tool_call_events(
+                            tc, _NOT_RUN_AFTER_UNANSWERED_QUESTION
+                        ):
+                            yield event
+                        continue
+
                     # ACC: tool_call emit. Args_summary is intentionally
                     # truncated — the ACC vocabulary documents it as a
                     # summary string, not a full payload. Detectors
@@ -6738,16 +6780,6 @@ class ChatSession:
                             tool=tc.name,
                             datasources=_extract_datasources(tc)
                         )
-
-                    # Nothing runs after a question nobody answered, whatever the
-                    # model sent with it.
-                    if _unanswered_question is not None:
-                        tool_results.append(_not_run_after_unanswered_question(tc))
-                        for event in _discarded_tool_call_events(
-                            tc, _NOT_RUN_AFTER_UNANSWERED_QUESTION
-                        ):
-                            yield event
-                        continue
 
                     # An unfinished tool call is never dispatched. The
                     # truncation gates above catch the common case earlier and
@@ -7172,8 +7204,6 @@ class ChatSession:
                         errored=tool_ok is False,
                         not_run=tool_reason in CELL_NOT_RUN_REASONS,
                     ))
-                    if tool_reason in UNANSWERED_QUESTION_REASONS:
-                        _unanswered_question = unanswered_question_line(tc.input, tool_reason)
 
                     if isinstance(result_text, list):
                         # Multimodal tool result — scrub credentials from text
@@ -7280,16 +7310,9 @@ class ChatSession:
                 # The turn ends here, on anton's own line, with no model call:
                 # one would get to answer the question itself. The answer, when
                 # it comes, starts the next turn.
-                if _unanswered_question is not None:
-                    if self._turn_cost is not None:
-                        self._turn_cost.ended_by = "question_unanswered"
-                    # A continuation promised that its reply replaces the answer
-                    # the user read; this line doesn't (see
-                    # `_stream_handback_diagnosis`'s `cancels_continuation`).
-                    if continuation > 0:
-                        yield StreamTaskProgress(phase="handback", message="")
-                    yield StreamTextDelta(text=_unanswered_question)
-                    self._append_history({"role": "assistant", "content": _unanswered_question})
+                if self._unanswered_question is not None:
+                    for event in self._unanswered_question_events(cancels_continuation=continuation > 0):
+                        yield event
                     _reply_persisted = True
                     break
 
@@ -7371,7 +7394,7 @@ class ChatSession:
                 tool_round < self._verify_min_tool_rounds
                 or _max_rounds_hit
                 or _spend_ceiling_hit
-                or _unanswered_question is not None
+                or self._unanswered_question is not None
             ):
                 break
 

@@ -30,6 +30,7 @@ from anton.core.llm.provider import (
     ToolCall,
     Usage,
 )
+from anton.core.memory.episodes import EpisodicMemory
 from anton.core.session import ChatSession, ChatSessionConfig, _VerifierVerdict
 from anton.core.settings import CoreSettings
 from tests.conftest import make_mock_llm
@@ -143,6 +144,7 @@ def project(tmp_path: Path) -> Path:
 
 def _session(
     project: Path, model: _Model, answer: AskAnswer, *, verdict: str = "COMPLETE",
+    episodic: EpisodicMemory | None = None,
 ) -> tuple[ChatSession, _Pad]:
     """A session with the write gate on. A new file gets no card, so the gate
     doesn't stand between the question and the write: only the stop does.
@@ -162,6 +164,7 @@ def _session(
         workspace=workspace,
         settings=CoreSettings(write_approval=True),
         elicitor=_AnswersAtOnce(answer),
+        episodic=episodic,
         session_id="conv-t",
     ))
     pad = _Pad()
@@ -318,3 +321,117 @@ async def test_a_question_unanswered_after_a_continuation_leaves_the_earlier_ans
         if isinstance(e, StreamTaskProgress) and e.phase == "handback"
     )
     assert QUESTION in _text(events[handback:])
+
+
+@unanswered
+@pytest.mark.parametrize("memory_enabled", [False, True], ids=["memory-off", "memory-on"])
+async def test_a_malformed_sibling_cannot_restart_an_unanswered_turn(project, answer, memory_enabled):
+    episodic = EpisodicMemory(project / "episodes", enabled=memory_enabled)
+    if memory_enabled:
+        episodic.start_session()
+    malformed = ToolCall(id="tc_bad", name="scratchpad", input={
+        "action": "exec", "name": "main", "code": 1,
+    })
+    model = _Model([_ask(), malformed], [_write(project)])
+    session, pad = _session(project, model, answer, episodic=episodic)
+    seen = await _run(session)
+    assert pad.ran == []
+    assert not (project / "approved.txt").exists()
+    assert model.calls == 1
+    results = _tool_results(session)
+    assert set(_tool_uses(session)) == set(results)
+    assert results["tc_bad"].startswith("Not run")
+    assert answer.status in results["tc_ask"]
+    assert QUESTION in _text(seen.events)
+    assert seen.ended_by == "question_unanswered"
+    assert seen.events[-1] == StreamTurnEnded(ended_by="question_unanswered")
+
+
+def _fail_question_bookkeeping_once(session, monkeypatch):
+    original = session._emit_tool_completed
+    failed = False
+
+    def emit(**kwargs):
+        nonlocal failed
+        if kwargs["name"] == "ask_user" and not failed:
+            failed = True
+            raise RuntimeError("scripted bookkeeping failure")
+        return original(**kwargs)
+
+    monkeypatch.setattr(session, "_emit_tool_completed", emit)
+
+
+@unanswered
+async def test_recovery_after_an_unanswered_result_cannot_call_the_model(project, answer, monkeypatch):
+    model = _Model([_ask(), _write(project, "tc_same")], [_write(project, "tc_retry")])
+    session, pad = _session(project, model, answer)
+    _fail_question_bookkeeping_once(session, monkeypatch)
+    seen = await _run(session)
+    assert pad.ran == []
+    assert not (project / "approved.txt").exists()
+    assert model.calls == 1
+    assert set(_tool_uses(session)) == set(_tool_results(session))
+    assert QUESTION in _text(seen.events)
+    assert seen.ended_by == "question_unanswered"
+    assert seen.events[-1] == StreamTurnEnded(ended_by="question_unanswered")
+
+
+async def test_an_answered_question_still_recovers_after_bookkeeping_fails(project, monkeypatch):
+    write = _write(project)
+    model = _Model([_ask()], [write])
+    session, pad = _session(project, model, APPROVE)
+    _fail_question_bookkeeping_once(session, monkeypatch)
+    seen = await _run(session)
+    assert pad.ran == [write.input["code"]]
+    assert (project / "approved.txt").read_text() == "yes"
+    assert seen.ended_by == "completed"
+
+
+async def test_an_unanswered_continuation_survives_recovery_and_the_next_turn_can_run(project, monkeypatch):
+    first = _cell("a = 1\n", "tc_a")
+    second = _cell("b = 2\n", "tc_b")
+    write = _write(project)
+    model = _Model([first], [second], [], [_ask()], [write])
+    session, pad = _session(project, model, TIMEOUT, verdict="INCOMPLETE")
+    _fail_question_bookkeeping_once(session, monkeypatch)
+    try:
+        stopped = await _turn(session)
+        phases = [e.phase for e in stopped.events if isinstance(e, StreamTaskProgress)]
+        assert phases.count("continuation") == 1
+        assert phases.count("handback") == 1
+        handback = next(
+            i for i, e in enumerate(stopped.events)
+            if isinstance(e, StreamTaskProgress) and e.phase == "handback"
+        )
+        assert _text(stopped.events[handback:]).count(QUESTION) == 1
+        assert model.calls == 4
+        assert pad.ran == [first.input["code"], second.input["code"]]
+        assert not (project / "approved.txt").exists()
+        assert set(_tool_uses(session)) == set(_tool_results(session))
+        assert stopped.events[-1] == StreamTurnEnded(ended_by="question_unanswered")
+
+        resumed = await _turn(session, "Approve")
+        assert pad.ran == [first.input["code"], second.input["code"], write.input["code"]]
+        assert (project / "approved.txt").read_text() == "yes"
+        assert resumed.ended_by == "completed"
+    finally:
+        await session.close()
+
+
+async def test_a_failure_after_the_unanswered_notice_does_not_repeat_it(project, monkeypatch):
+    model = _Model([_ask()], [_write(project)])
+    session, pad = _session(project, model, TIMEOUT)
+    consolidate = MagicMock(side_effect=RuntimeError("scripted consolidation failure"))
+    monkeypatch.setattr(ChatSession, "_background_memory_active", property(lambda self: True))
+    monkeypatch.setattr(session, "_maybe_consolidate_scratchpads", consolidate)
+    monkeypatch.setattr(session, "_start_background_work", MagicMock())
+    seen = await _run(session)
+    consolidate.assert_called_once()
+    assert model.calls == 1
+    assert pad.ran == []
+    assert not (project / "approved.txt").exists()
+    assert _text(seen.events).count(QUESTION) == 1
+    assert session._history[-1]["content"].count(QUESTION) == 1
+    assert set(_tool_uses(session)) == set(_tool_results(session))
+    assert seen.ended_by == "question_unanswered"
+    assert seen.events[-1] == StreamTurnEnded(ended_by="question_unanswered")
