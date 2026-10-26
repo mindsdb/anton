@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import importlib.util
-import inspect
 import json
 import os
 import re
@@ -25,31 +24,6 @@ from .orchestrator import _finish, _stopped_over_budget
 MAX_SOURCE_CHARS = 96000
 MAX_PAGE_CHARS = 18000
 SOURCE_TOOLS = {"scratchpad", "read_text_file", "web_fetch", "web_search", "recall_skill"}
-
-
-def _connection_procedures(session):
-    """Hand matching saved procedures to discovery even when the caller didn't recall them."""
-    from .orchestrator import _list_connections, _vault
-
-    store = getattr(session, "_skill_store", None)
-    if store is None:
-        return ""
-    procedures = []
-    for connection in _list_connections(_vault(session))[:16]:
-        label = connection.get("name")
-        if not isinstance(label, str):
-            continue
-        try:
-            skill = store.load(label)
-            if inspect.iscoroutine(skill):
-                skill.close()
-                continue
-            body = getattr(skill, "declarative_md", None)
-            if isinstance(body, str) and body:
-                procedures.append(f"Connected source procedure {label}:\n{body[:24000]}")
-        except Exception:
-            continue  # Ordinary source discovery still works without a matching skill.
-    return "\n\n".join(procedures)[:MAX_SOURCE_CHARS]
 
 
 def _integer_setting(name, default, minimum, maximum):
@@ -122,8 +96,6 @@ async def prepare(state):
     # Recalled source documentation lives in the calling conversation. Without
     # this handoff the delegate gets credential names but loses the API contract.
     state._pipeline_system = state.pipeline_system + "\n\nPreviously observed source documentation and results:\n" + source_evidence(state.session)
-    if os.environ.get("ANTON_STATIC_CONNECTED_PROCEDURES") == "on":
-        state._pipeline_system += "\n\n" + _connection_procedures(state.session)
     if (os.environ.get("ANTON_STATIC_BATCH_GATHER") == "on"
             and os.environ.get("ANTON_STATIC_PROFILE_FIRST") != "on"):
         state._pipeline_system += (
@@ -133,24 +105,7 @@ async def prepare(state):
             "Then finish gathering; don't spend extra rounds printing the same data. Verify "
             "field names against the source schema. Never replace a missing measure or a "
             "failed join with zero. Check joined row coverage and reconcile grouped totals "
-            "against the complete source. For risk or what-if analysis, quantify the relevant "
-            "available alternatives against the current plan, with their scope explicit."
-        )
-    if os.environ.get("ANTON_STATIC_REQUEST_METRICS") == "on":
-        state._pipeline_system += (
-            "\nTranslate every requested business question into computed display metrics during "
-            "this evidence collection. Save a compact request_metrics section in observed-data.json: "
-            "each requested measure needs its scope/group, unit, actual value and derivation, or a "
-            "specific unavailable reason. A dataset-wide total does not answer a question about a "
-            "named segment, route, period or alternative: also calculate those requested groups. "
-            "For what-if or before/after questions, query the applicable reference and intervention "
-            "scenarios and calculate both on the same measures. Lack of an individual causal join "
-            "does not prevent a clearly labelled scenario-level comparison. Keep reductions in "
-            "exposure, gross revenue, cost and net profit distinct; never call revenue or avoided "
-            "risk profit. Before declaring a requested outcome unavailable, inspect the documented "
-            "tables/fields and relevant comparison scenarios that can actually answer it. Fetch only "
-            "the source tables needed for the requested questions and views, not an entire catalog. "
-            "Perform calculations in code against real rows; use no guessed figures or schema fields."
+            "against the complete source."
         )
     if os.environ.get("ANTON_STATIC_BATCH_FINISH") == "on":
         state._pipeline_system += (
@@ -164,81 +119,6 @@ async def prepare(state):
             "When schema exploration, a decision or a user answer is still needed, inspect "
             "it first and use the ordinary gathering loop."
         )
-    if os.environ.get("ANTON_STATIC_REQUEST_FIDELITY") == "on":
-        state._pipeline_system += (
-            "\nBefore finishing, reconcile the requested quantities with the computed handoff. "
-            "Counts, sums, rates, peaks and incremental amounts are different measures: a count "
-            "of periods satisfying a condition must count those periods, and an incremental "
-            "amount must use the stated reference and scope. Retain every requested quantity "
-            "with its exact unit, source scope and derivation. Validate them against the real "
-            "source rows without substituting an adjacent measure."
-        )
-    if os.environ.get("ANTON_STATIC_METRIC_SCOPE") == "on":
-        state._pipeline_system += (
-            "\nResolve each requested measure's grain separately. A global total and a per-entity "
-            "maximum can require different grains; do not force all measures into one grouping. "
-            "Inspect the documented role of join keys, not just their names. Reconcile grouped "
-            "counts and sums to the intended complete source population and account explicitly "
-            "for unmatched rows. An unrelated or missing association does not make the actual "
-            "population's total zero. Preserve requested global totals independently of optional "
-            "grouped details, and retain unavailable group allocations as unavailable."
-        )
-    if os.environ.get("ANTON_STATIC_SOURCE_SEMANTICS") == "on":
-        state._pipeline_system += (
-            "\nResolve source semantics before filtering or asserting a population. Inspect the "
-            "observed types and distinct categorical values of fields used in filters or joins; "
-            "do not invent enum values or boolean spellings. If a meaning is undocumented, "
-            "inspect representative related rows and preserve unresolved values explicitly. "
-            "Use the requested or documented reporting horizon, as-of date and calendar. Raw "
-            "fact tables can include history, future rows and non-boundary dates. Apply the "
-            "actual date bounds before aggregating; distinct event dates are not a count of "
-            "reporting periods. Build period buckets from the stated calendar when requested. "
-            "Keep raw dates and the chosen bounds in the handoff. Validate assumptions against "
-            "observed rows, and include observed values, counts or bounds in assertion failures "
-            "so a repair can address the cause without repeatedly guessing."
-        )
-    if os.environ.get("ANTON_STATIC_STATE_SETS") == "on":
-        state._pipeline_system += (
-            "\nTranslate the user's business population into a predicate over all observed states. "
-            "A lifecycle phrase such as not yet complete can cover several nonterminal source "
-            "categories; it need not mean equality to one similarly named enum. Inspect documented "
-            "state meanings and account for every observed category. Record the included, excluded "
-            "and unresolved states and why, then reconcile the requested count or total against "
-            "the rows in that population. Preserve uncertainty when source meanings do not justify "
-            "a classification. Use an exact status equality only when the request or source rule "
-            "actually specifies that exact status."
-        )
-    if os.environ.get("ANTON_STATIC_REFERENCE_METRICS") == "on":
-        state._pipeline_system += (
-            "\nRelative measures such as extra, additional, incremental, avoided or changed need "
-            "a reference. Identify the reference from the request and source documentation. "
-            "Calculate comparable absolute totals and reference-adjusted differences at the "
-            "same scope, grain, period and units, retaining the component derivation. Costs "
-            "already incurred in the reference are not additional costs of an alternative. "
-            "Do not subtract twice from a source measure already defined as incremental. "
-            "Preserve both totals and differences and label the requested measure correctly; "
-            "state an unresolved reference explicitly rather than silently choosing one."
-        )
-    if os.environ.get("ANTON_STATIC_QUERY_CLIENT") == "on":
-        state._pipeline_system += (
-            "\nFor a connected source whose documented protocol uses form-body OAuth client credentials "
-            "and Scenarios/QueryString requests with Columns/Rows responses, the host provides "
-            "a standard-library client: `from anton.core.tools.generate_artifact.source_query "
-            "import ScenarioRowsClient`; `client = ScenarioRowsClient.from_environment()`; "
-            "`rows = client.query_rows(documented_query_path, scenario=scenario_object, "
-            "query=query_string)`. rows is list[dict] with the original column names and "
-            "values. The first argument is the query URL/path from the procedure, not the "
-            "connection's name: for a documented example that posts to base_url + "
-            "'/integration/V1/query', use '/integration/V1/query'. Relative paths without "
-            "a leading slash and full URLs on that same source origin are accepted. Recreate "
-            "the client in each execution rather than relying on notebook persistence. "
-            "Supply one scenario mapping per query, with the documented fields; loop "
-            "over scenarios when necessary. Use the exact injected DS_ prefix argument if "
-            "several complete connections exist. The client handles auth, expiry, row-shape "
-            "validation and truncation errors; an unexpected response never becomes zero rows. "
-            "This client needs no third-party package. For other source protocols, use their "
-            "documented client instead. Never print credentials or embed a client object."
-        )
     # geonamescache is an optional extra; never promise a lookup that cannot import.
     geocoding = importlib.util.find_spec("geonamescache") is not None
     if geocoding and os.environ.get("ANTON_STATIC_GATHER_GEOCODING") == "on":
@@ -250,8 +130,7 @@ async def prepare(state):
             "location, geonameid and GeoNames provenance. Country can be omitted only for a unique "
             "place. Catch ValueError to keep ambiguous/unmatched places explicitly unresolved; do "
             "not guess a candidate. Save each resolved position alongside its actual source entity "
-            "id and location role in observed-data.json. A destination or headquarters coordinate "
-            "must never stand in for a current position. Do not geocode arbitrary identifiers, "
+            "id and location role in observed-data.json. Do not geocode arbitrary identifiers, "
             "country columns or descriptive labels. Retain source-supplied coordinates when they "
             "describe the requested position. Credit GeoNames in a page using this lookup."
         )
@@ -341,14 +220,7 @@ async def prepare(state):
             "A purely presentational edit may instead use the validated same-artifact snapshot "
             "reuse procedure above when its scope and required data are still applicable."
         )
-    gather_effort = os.environ.get("ANTON_STATIC_GATHER_EFFORT")
-    if gather_effort:
-        from anton.core.llm.reasoning import scoped_effort
-        state.record("gathering", "effort_override", gather_effort)
-        with scoped_effort(gather_effort):
-            await run_gathering_loop(state)
-    else:
-        await run_gathering_loop(state)
+    await run_gathering_loop(state)
     final_type = state.final_artifact_type or state.artifact_type
     if final_type != "html-app" or not state.gathering_complete or state.unverified_sources:
         state._pipeline_system, state._pipeline_tools = "", None
@@ -481,35 +353,6 @@ async def run(state, *, mode):
             "the presentation and interaction code around the host-provided values. "
             "Use compact CSS and DOM rendering rather than repeated row markup."
         )
-    if catalog := os.environ.get("ANTON_STATIC_LIBRARY_CATALOG"):
-        system += (
-            "\nThe preview verifier carries these npm libraries and verified entry points: " + catalog +
-            ". Use https://cdn.jsdelivr.net/npm/<package>@<version>/<file> for their assets. "
-            "For geographic maps, an established geographic projection with actual boundaries "
-            "and source coordinates is appropriate. D3 geo, topojson-client and world-atlas can "
-            "provide a geographic base; ECharts maps need registered geometry. A schematic of "
-            "nodes is appropriate for a network, but does not communicate geographic locations "
-            "on a world map. Keep unknown places explicit instead of inventing positions."
-            " Prefer the bundled classic-script entry when one is listed. For ES modules, "
-            "all imports must be fully qualified pinned CDN URLs; bare package names need "
-            "explicit resolution. Do not use a CommonJS .cjs file as a browser script."
-        )
-    if os.environ.get("ANTON_STATIC_DECISION_LAYOUT") == "on":
-        system += (
-            "\nOrganize the page around the user's decision. Lead with a precise, scoped finding "
-            "and the most important observed measure; give supporting context lower emphasis. "
-            "A broad risk overview must show the relevant risk-bearing scenarios alongside the "
-            "baseline, with explicit scenario labels, rather than leading with quiet baseline zeros. "
-            "For a comparison, show each requested option on the same measures and state a cost "
-            "conclusion only within the source's available cost coverage. Check the actual categorical "
-            "values before filtering flags: strings such as 'No' or '0' are not boolean true. "
-            "Use a continuous page unless tabs are requested or materially simplify the content. "
-            "Do not dump every source table into an executive page. Keep requested figures available "
-            "in a compact readable detail section. At phone widths, stack detail rows or reduce "
-            "columns while keeping essential labels, measures and units visible; hiding overflow "
-            "does not make a table responsive. Use containLabel and adequate chart margins. "
-            "Preserve the full request and source accuracy when simplifying the implementation."
-        )
     messages = [{"role": "user", "content": context}]
     component_system = component_page.SYSTEM if components else None
     if components and os.environ.get("ANTON_STATIC_CHART_TABLES") == "on":
@@ -528,19 +371,6 @@ async def run(state, *, mode):
             "compare the whole selection object to a string or use it as a source dictionary key. "
             "Unknown control keys and printing objects trigger a precise repair error."
         )
-    if components and os.environ.get("ANTON_STATIC_REQUEST_FIDELITY") == "on":
-        component_system += (
-            "\nFollow the requested content and degree of elaboration precisely. Include every "
-            "requested measure and interaction; use a finding, supporting metrics or extra charts "
-            "only when they help answer the request. A narrow request does not need an executive "
-            "overview. Keep counts, sums, rates, peaks and incremental amounts distinct and show "
-            "their requested scopes/units. Keep all explanatory UI in the user's language, "
-            "including units and human-readable source comments; preserve proper names and IDs. "
-            "Use reader-facing labels rather than schema/debug field names."
-            " Establish the requested visual and its labels before adding contextual views. "
-            "Locations, relationships, comparisons and temporal sequences answer different "
-            "questions; do not substitute one for another merely because those fields exist."
-        )
     if components and os.environ.get("ANTON_STATIC_GEO_CONTROLS") == "on":
         component_system += (
             "\nMap/globe sections also support legend:[{label,color}] for a visible color key. "
@@ -551,61 +381,6 @@ async def run(state, *, mode):
             "Use D3 for animated routes; ECharts maps keep standard ECharts options."
             " Omit center unless a particular viewpoint is requested: a globe initially faces its "
             "observed points and uses readable anchored labels for visible points."
-        )
-    if components and os.environ.get("ANTON_STATIC_METRIC_SCOPE") == "on":
-        component_system += (
-            "\nCheck each requested measure's exact scope against the underlying bound records. "
-            "Derived summaries can have a different grain: do not sum a partial set of groups "
-            "as a global total or reuse one metric's entity grouping for every other metric. "
-            "Compute requested totals from the full intended population and reconcile grouped "
-            "counts/sums, including unmatched records. A summary containing zero does not justify "
-            "a zero headline when its association excludes valid source rows. Do not invent "
-            "a missing join; keep global totals valid and missing group allocations explicit."
-        )
-    if components and os.environ.get("ANTON_STATIC_SOURCE_SEMANTICS") == "on":
-        component_system += (
-            "\nRespect the documented source categories and explicit reporting bounds in the "
-            "handoff. Raw event dates need not align with reporting periods. Do not relabel "
-            "unbounded facts as a requested period or reinterpret an unresolved category."
-        )
-    if components and os.environ.get("ANTON_STATIC_STATE_SETS") == "on":
-        component_system += (
-            "\nPreserve the handoff's requested business population, including its included, "
-            "excluded and unresolved source states. Do not narrow a multi-state lifecycle "
-            "predicate to equality with one similarly named status label."
-        )
-    if components and os.environ.get("ANTON_STATIC_REFERENCE_METRICS") == "on":
-        component_system += (
-            "\nDistinguish absolute totals from reference-adjusted changes in the handoff. "
-            "For requested extra/additional costs or avoided amounts, display the applicable "
-            "difference and its reference; do not substitute an absolute total under that label. "
-            "Keep already-incremental source measures from being subtracted a second time."
-        )
-    if components and os.environ.get("ANTON_STATIC_PERSISTENT_SUMMARY") == "on":
-        component_system += (
-            "\nThe runtime supports config.overview = {lead?, metrics?}, using the same lead and "
-            "metrics API. It stays visibly present across view tabs. For a request with several "
-            "subjects or views, place requested headline measures whose scope is independent of "
-            "the selected view in this compact overview, and put detailed tables/charts in render. "
-            "Do not make a requested cross-view total disappear when the reader changes tabs, "
-            "or duplicate a fixed summary in every render branch. Metrics affected by scenario, "
-            "date or entity filters belong in render and must change with those selections; "
-            "do not pin filtered values in the fixed overview."
-        )
-    if components and os.environ.get("ANTON_STATIC_LAYOUT_OPTIONS") == "on":
-        component_system += (
-            "\nconfig.phoneColumns may be 1 or 2 and controls the metric layout at phone widths. "
-            "Choose 1 for a phone-first summary and when a single-column layout is requested. Keep headings, column "
-            "labels, explanations and helper copy in the user's language; these display labels "
-            "are different from source identifiers, which stay verbatim when identifying records. "
-            "A request focused on one primary visual should lead with that visual, without "
-            "unrequested summary figures or large detail ledgers pushing it below the first screen. "
-            "The bound source retains the complete records; on-screen completeness does not require "
-            "a raw-row dump. Show the requested aggregates, exceptions and details, and omit "
-            "unrequested record ledgers and collection-validation counts. "
-            "Use the overview only for requested cross-view measures. If a requested interaction "
-            "cannot be expressed by the runtime, use USE_HTML_WRITER rather than promising an "
-            "interaction that the program does not implement."
         )
     attempt = 0
     while attempt < 2:

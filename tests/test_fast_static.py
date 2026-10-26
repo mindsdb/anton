@@ -114,22 +114,6 @@ async def test_direct_writer_respects_the_existing_spend_guard(tmp_path):
     assert not (tmp_path / "index.html").exists()
 
 
-def test_connected_procedures_follow_saved_connection_names_without_loading_other_skills():
-    loaded = []
-
-    def load(label):
-        loaded.append(label)
-        return SimpleNamespace(declarative_md="Query /documented-route with the observed schema.")
-
-    session = SimpleNamespace(
-        _skill_store=SimpleNamespace(load=load),
-        _data_vault=SimpleNamespace(list_connections=lambda: [{"name": "inventory-prod"}]),
-    )
-    result = fast_static._connection_procedures(session)
-    assert loaded == ["inventory-prod"]
-    assert "/documented-route" in result
-
-
 async def test_canonical_channel_avoids_conflicting_console_datasets_and_keeps_product_rules(tmp_path, monkeypatch):
     import json
     from anton.core.tools.generate_artifact import observed_data

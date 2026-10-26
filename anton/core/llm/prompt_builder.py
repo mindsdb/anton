@@ -108,9 +108,9 @@ class ChatSystemPromptBuilder:
             instructions = (
                 "These are reusable procedures. For work you carry out yourself, call "
                 "recall_skill(label) when a procedure matches. For an HTML artifact "
-                "delegated to generate_artifact, matching connected-source procedures "
-                "are read inside discovery; delegate immediately instead of recalling "
-                "them and querying the same source beforehand."
+                "delegated to generate_artifact, recall a matching source procedure "
+                "first; discovery receives it, so do not also query the same source "
+                "beforehand."
             )
         lines: list[str] = ["", "", "## Procedural memory (skills available)", "", instructions, ""]
         for s in summaries:

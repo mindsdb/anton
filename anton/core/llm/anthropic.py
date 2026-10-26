@@ -5,7 +5,6 @@ from collections.abc import AsyncIterator
 from typing import NoReturn
 
 import anthropic
-from .reasoning import current_effort
 
 from .effort import LONGEST_SILENCE_S
 from .provider import register_provider, safe_parse_tool_input, unregister_provider
@@ -291,7 +290,7 @@ class AnthropicProvider(LLMProvider):
             kwargs["tools"] = merged_tools
         if tool_choice:
             kwargs["tool_choice"] = tool_choice
-        effort = current_effort(call_effort(reasoning_effort, self._reasoning_effort))
+        effort = call_effort(reasoning_effort, self._reasoning_effort)
         if effort:
             kwargs["extra_body"] = {"output_config": {"effort": effort}}
         if beta_headers:
@@ -386,7 +385,7 @@ class AnthropicProvider(LLMProvider):
         }
         if merged_tools:
             kwargs["tools"] = merged_tools
-        effort = current_effort(call_effort(reasoning_effort, self._reasoning_effort))
+        effort = call_effort(reasoning_effort, self._reasoning_effort)
         if effort:
             kwargs["extra_body"] = {"output_config": {"effort": effort}}
         if beta_headers:

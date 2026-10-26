@@ -14,9 +14,9 @@ operation registers the folder, gathers and validates the data, builds the
 page, and applies the existing static and browser checks. Use this path for
 fully specified reports as well as requests whose requirements need settling.
 Pass the user's request verbatim and keep agent_understanding short. Pass
-data or procedures already observed as known_data; do not query a source or
-recall a source skill solely to repeat work the generator will perform.
-Matching saved connection procedures are available inside discovery.
+data or procedures already observed as known_data; do not query a source
+solely to repeat work the generator will perform. Recall a matching source
+skill first; discovery receives the recalled procedure.
 Client-side filters and calculations work in a snapshot without a backend.
 
 EXISTING ARTIFACTS:

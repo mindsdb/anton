@@ -8,18 +8,7 @@
     globe: 'https://cdn.jsdelivr.net/npm/globe.gl@2.34.2/dist/globe.gl.min.js',
   };
   const atlas = 'https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json';
-  let usedGeocoding = false;
-  const drawnTypes=new Set(), drawnPoints=[];
-  Object.defineProperty(window,'__coworkRenderAudit',{get:()=>({types:[...drawnTypes],points:drawnPoints.map(p=>({...p}))})});
-  document.addEventListener('transitionrun',event=>{if(event.target.closest?.('.view'))drawnTypes.add('motion');},true);
-  document.addEventListener('animationstart',event=>{if(event.target.closest?.('.view'))drawnTypes.add('motion');},true);
   const normalized = value => String(value).normalize('NFKD').toLowerCase().replace(/[^\p{L}\p{N}]/gu,'');
-  window.CoworkPosition = (location, country) => {
-    let matches=window.ARTIFACT_GEOCODING?.[location]||[];
-    if(country)matches=matches.filter(p=>[p.country,p.countryName,p.countryISO3].some(v=>normalized(v)===normalized(country)));
-    if(matches.length!==1)throw new Error('Place '+location+' needs an unambiguous source country or observed coordinates.');
-    usedGeocoding=true;return [matches[0].lon,matches[0].lat];
-  };
   function load(name) {
     if (!library.has(name)) library.set(name, new Promise((resolve, reject) => {
       const script = document.createElement('script');
@@ -58,11 +47,7 @@
   }
   async function drawGeography(node, section, cleanup) {
     const land = await geography();
-    const points = (section.points || []).map(p=>{
-      if(typeof p.lat==='number'&&typeof p.lon==='number')return p;
-      if(p.location){const [lon,lat]=CoworkPosition(p.location,p.country);return {...p,lat,lon};}
-      return p;
-    }), routes = section.routes || [];
+    const points = section.points || [], routes = section.routes || [];
     for (const p of points) coordinate([p.lon, p.lat]);
     for (const r of routes) { coordinate(r.from); coordinate(r.to); }
     if (!node.isConnected) return;
@@ -86,7 +71,7 @@
       const observer = new ResizeObserver(() => globe.width(node.clientWidth).height(node.clientHeight));
       observer.observe(node); cleanup.push(() => {observer.disconnect(); globe._destructor();});
       if(window.CoworkGlobeLabels)CoworkGlobeLabels(node,globe,points,cleanup);
-      if(window.CoworkGeoMotion)CoworkGeoMotion(node,section,cleanup,()=>drawnTypes.add('motion'),globe);
+      if(window.CoworkGeoMotion)CoworkGeoMotion(node,section,cleanup,()=>{},globe);
     } else if (section.library === 'echarts') {
       await load('echarts'); if (!node.isConnected) return;
       echarts.registerMap('cowork-world', land);
@@ -116,11 +101,8 @@
         text.attr('x',x).attr('y',y);placed.push({x,y,w:width});
       }
       svg.call(d3.zoom().filter(event=>event.type!=='wheel'||event.ctrlKey).scaleExtent([1,8]).on('zoom',event=>group.attr('transform',event.transform)));
-      if(window.CoworkGeoMotion)CoworkGeoMotion(node,section,cleanup,()=>drawnTypes.add('motion'));
+      if(window.CoworkGeoMotion)CoworkGeoMotion(node,section,cleanup,()=>{});
     }
-    if(!node.isConnected||!node.querySelector('svg,canvas'))return;
-    for(const point of points)drawnPoints.push({name:point.name||'',location:point.location||'',lat:point.lat,lon:point.lon});
-    for(const route of routes)for(const [role,pair] of [['from',route.from],['to',route.to]])drawnPoints.push({name:route.label||'',role,lat:pair[1],lon:pair[0]});
   }
   async function drawChart(node, section, cleanup) {
     await load('echarts'); if (!node.isConnected) return;
@@ -152,17 +134,11 @@
     if(compact){option.grid={...base.grid,left:8,right:18};option.legend={...base.legend,...given.legend,top:null,bottom:0,orient:'horizontal',type:'scroll'};}
     if (given.xAxis) option.xAxis = Array.isArray(given.xAxis) ? given.xAxis.map(axis) : axis(given.xAxis);
     if (given.yAxis) option.yAxis = Array.isArray(given.yAxis) ? given.yAxis.map(a=>axis(a,true)) : axis(given.yAxis,true);
-    let frames=0;
-    chart.getZr().on('rendered',()=>{if(++frames>1&&option.animation!==false&&(option.animationDuration||0)>0)drawnTypes.add('motion');});
     chart.setOption(option);
-    chart.getModel().eachSeries(series=>{
-      if(['sankey','graph'].includes(series.subType)&&series.getGraph?.().edges.length){node.classList.add('network-view');drawnTypes.add('network');}
-    });
     if(geographicMaps.length){
-      drawnTypes.add('map');
       for(const series of seriesList)if(series.coordinateSystem==='geo')for(const item of series.data||[]){
         const pairs=series.type==='lines'?item.coords:[Array.isArray(item)?item:item.value];
-        for(const pair of pairs||[])if(Array.isArray(pair)){coordinate(pair.slice(0,2));drawnPoints.push({name:item.name||'',lat:pair[1],lon:pair[0]});}
+        for(const pair of pairs||[])if(Array.isArray(pair))coordinate(pair.slice(0,2));
       }
     }
     return chart;
@@ -228,13 +204,13 @@
           wrap.style.setProperty('--table-width',s.columns.length*104+'px');wrap.tabIndex=0;wrap.setAttribute('role','region');wrap.setAttribute('aria-label',s.title||'');
           for(const c of s.columns)tr.append(el('th',c.label));thead.append(tr);table.append(thead,tbody);
           for(const row of s.rows||[]){const tr=el('tr');for(const c of s.columns){const td=el('td');td.dataset.label=c.label;const raw=row[c.key],value=c.format?c.format(raw,row):CoworkNumber(raw,c.unit);td.append(el('span',value));tr.append(td);}tbody.append(tr);}
-          if(!(s.rows||[]).length)section.append(el('p',config.emptyText||'—','empty'));else{wrap.append(table);section.append(wrap);drawnTypes.add('table');}continue;
+          if(!(s.rows||[]).length)section.append(el('p',config.emptyText||'—','empty'));else{wrap.append(table);section.append(wrap);}continue;
         }
         if(s.type==='timeline'){
-          if(window.CoworkTimeline&&CoworkTimeline(section,s,cleanup)){drawnTypes.add('timeline');continue;}
-          const list=el('ol',null,'timeline');for(const item of s.items||[]){const li=el('li');li.append(el('time',item.time),el('h3',item.label));if(item.detail)li.append(el('p',item.detail));list.append(li);}section.append(list);if(s.items?.length)drawnTypes.add('timeline');continue;
+          if(window.CoworkTimeline&&CoworkTimeline(section,s,cleanup))continue;
+          const list=el('ol',null,'timeline');for(const item of s.items||[]){const li=el('li');li.append(el('time',item.time),el('h3',item.label));if(item.detail)li.append(el('p',item.detail));list.append(li);}section.append(list);continue;
         }
-        const view=el('div',null,s.type==='chart'?'view':'view geo-view');view.id=s.type+'-'+index;section.append(view);
+        const view=el('div',null,s.type==='chart'?'view':'view geo-view');section.append(view);
         view.setAttribute('aria-busy','true');view.append(el('p',config.loadingText||'…','loading'));
         let chart;
         if(s.type==='chart')chart=await drawChart(view,s,cleanup);
@@ -245,10 +221,8 @@
         view.setAttribute('aria-busy','false');
         if(chart&&window.CoworkChartData)CoworkChartData(chart,head,section,config,section.id,openData,cleanup);
         if(['map','globe'].includes(s.type)&&window.CoworkGeoLegend)CoworkGeoLegend(section,s);
-        drawnTypes.add(s.type);
         if(current!==version)return;
       }
-      if(usedGeocoding){const credit=el('p','GeoNames','caption');credit.id='geographic-source';body.append(credit);}
     }
     try{await update();}catch(error){dispose();throw error;}
   };
