@@ -6,6 +6,7 @@ from typing import NoReturn
 
 import anthropic
 
+from .effort import LONGEST_SILENCE_S
 from .provider import register_provider, safe_parse_tool_input, unregister_provider
 from .provider import (
     ContextOverflowError,
@@ -25,6 +26,7 @@ from .provider import (
     ToolCall,
     TransientProviderError,
     Usage,
+    call_effort,
     classify_404,
     classify_content_rejection,
     classify_markup_bad_request,
@@ -220,6 +222,11 @@ def _build_native_web_tools(
     return entries, beta
 
 
+# The SDK's own 600 s read timeout would end a call that thinks in silence for
+# longer, before anton's own deadline (`LLMClient._idle_timeout_for`) does.
+_SDK_TIMEOUT = anthropic.Timeout(LONGEST_SILENCE_S, connect=5.0)
+
+
 class AnthropicProvider(LLMProvider):
     name: str = "anthropic"
 
@@ -252,7 +259,7 @@ class AnthropicProvider(LLMProvider):
         kwargs = {}
         if api_key:
             kwargs["api_key"] = api_key
-        self._client = anthropic.AsyncAnthropic(**kwargs)
+        self._client = anthropic.AsyncAnthropic(**kwargs, timeout=_SDK_TIMEOUT)
         register_provider(self)
 
     def export_connection_info(self) -> ProviderConnectionInfo:
@@ -283,7 +290,7 @@ class AnthropicProvider(LLMProvider):
             kwargs["tools"] = merged_tools
         if tool_choice:
             kwargs["tool_choice"] = tool_choice
-        effort = reasoning_effort or self._reasoning_effort
+        effort = call_effort(reasoning_effort, self._reasoning_effort)
         if effort:
             kwargs["extra_body"] = {"output_config": {"effort": effort}}
         if beta_headers:
@@ -378,7 +385,7 @@ class AnthropicProvider(LLMProvider):
         }
         if merged_tools:
             kwargs["tools"] = merged_tools
-        effort = reasoning_effort or self._reasoning_effort
+        effort = call_effort(reasoning_effort, self._reasoning_effort)
         if effort:
             kwargs["extra_body"] = {"output_config": {"effort": effort}}
         if beta_headers:

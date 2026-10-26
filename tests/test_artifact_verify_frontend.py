@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import pytest
 
 from anton.core.artifacts.html_lint import HtmlFinding
+from anton.core.artifacts.render_check import ViewCoverage
 from anton.core.tools.generate_artifact import verifiers
 from anton.core.tools.generate_artifact.verifiers import (
     browser_check_skip_reason,
@@ -40,6 +41,13 @@ fetch(api('/api/items'));
 def test_good_fullstack_frontend_passes():
     r = verify_frontend(GOOD, is_fullstack=True)
     assert r.ok, r.errors
+
+
+def test_markup_shown_as_text_is_error():
+    html = GOOD.replace('<div id="kpi-revenue"></div>', '<div id="kpi-revenue">&lt;svg viewBox="0 0 9 9"&gt;</div>')
+    r = verify_frontend(html, is_fullstack=True)
+    assert not r.ok
+    assert any("HTML tags as text" in e and "<svg viewBox" in e for e in r.errors)
 
 
 def test_missing_viewport_is_error():
@@ -224,6 +232,18 @@ def test_live_check_clean_page_is_an_empty_verdict(monkeypatch):
     monkeypatch.setattr(verifiers, "lint_html", lambda path, *, cell_sandbox: [])
     check = verify_frontend_live(Path("/tmp/x/index.html"), cell_sandbox=None)
     assert check.status == "passed" and check.verdict.ok and check.verdict.warnings == []
+
+
+def test_the_local_browser_vouches_for_the_page_as_it_opens_only(monkeypatch):
+    """It presses no tab or toggle, so its pass covers the page as it opens
+    and names nothing it left unopened. A page it could not load names no
+    view at all."""
+    monkeypatch.setattr(verifiers, "lint_html", lambda path, *, cell_sandbox: [])
+    check = verify_frontend_live(Path("/tmp/x/index.html"), cell_sandbox=None)
+    assert check.coverage == ViewCoverage(checked="as it opens", unchecked=[])
+
+    monkeypatch.setattr(verifiers, "lint_html", lambda path, *, cell_sandbox: None)
+    assert verify_frontend_live(Path("/tmp/x/index.html"), cell_sandbox=None).coverage is None
 
 
 def test_live_check_maps_findings_to_errors_and_a_warning(monkeypatch):

@@ -2315,6 +2315,10 @@ class ProviderErrorFilter(logging.Filter):
             provider_error = _provider_error(exc=exc)
             if provider_error is None:
                 continue
+            record._diagnostic_safe_template = True
+            record.error_type = type(exc).__name__
+            record.provider_error = type(provider_error).__name__
+            record.status_code = _log_status(status=getattr(provider_error, "status_code", None))
             record.msg = "Provider operation failed: error_type=%s provider_error=%s status=%s"
             record.args = (
                 type(exc).__name__, type(provider_error).__name__,
@@ -2394,6 +2398,18 @@ class ProviderConnectionInfo:
     base_url: str | None = None
     ssl_verify: bool | None = None
     api_version: str | None = None  # Azure api-version query param
+
+
+def call_effort(passed: str | None, own: str | None) -> str | None:
+    """The reasoning effort a call sends: the one it passed, else the provider's own.
+
+    An empty one sends none at all, the provider's own included. That is how a
+    model route with no effort of its own clears the role's (`model_route`
+    in client.py).
+    """
+    if passed is None:
+        return own
+    return passed or None
 
 
 class LLMProvider(ABC):

@@ -15,8 +15,12 @@ on:
   workflow_call:
 
 jobs:
-  run-tests:
+  unit-tests:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     # A test that hangs fails the job here instead of at GitHub's 6-hour limit.
     timeout-minutes: 30
     steps:
@@ -24,6 +28,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.30"
 
       - name: Set up Python
         run: uv python install 3.12
@@ -34,7 +40,52 @@ jobs:
         run: uv lock --check
 
       - name: Run unit tests
-        run: uv run --group dev pytest tests/ -v --ignore=tests/e2e
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
+        run: uv run --locked --group dev pytest tests/ -v --ignore=tests/e2e --shard-index "$SHARD_INDEX" --shard-count 4 --durations=20
 
+      - name: Check exported release dependencies
+        run: python scripts/release_contract.py --check
+
+  stub-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.30"
+      - name: Set up Python
+        run: uv python install 3.12
       - name: Run E2E tests (stub)
-        run: uv run --group dev pytest tests/e2e/ -v
+        run: uv run --locked --group dev pytest tests/e2e/ -v --durations=20
+
+  windows-installer:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.30"
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Check PowerShell release installation
+        run: uv run --locked --group dev pytest tests/test_release_installers.py -k powershell -v
+
+  # Preserve the required check name, and fail even if a dependency was skipped.
+  run-tests:
+    if: always()
+    needs: [unit-tests, stub-e2e, windows-installer]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every test job
+        env:
+          UNIT_RESULT: ${{ needs.unit-tests.result }}
+          E2E_RESULT: ${{ needs.stub-e2e.result }}
+          WINDOWS_RESULT: ${{ needs.windows-installer.result }}
+        run: |
+          test "$UNIT_RESULT" = success &&
+          test "$E2E_RESULT" = success &&
+          test "$WINDOWS_RESULT" = success

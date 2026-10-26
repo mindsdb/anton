@@ -14,6 +14,7 @@ from anton.core.tools.tool_handlers import (
     handle_update_artifact_metadata,
 )
 from anton.core.artifacts.listing import FIELDS as ARTIFACT_LIST_FIELDS
+from anton.core.llm.prompts import cut_spans
 from anton.core.utils.scratchpad import SCRATCHPAD_ACTIONS
 from anton.core.tools.text_file import DEFAULT_LINE_COUNT, MAX_OUTPUT_CHARS
 
@@ -144,7 +145,14 @@ MEMORIZE_TOOL = ToolDef(
         "- never: Something to never do ('Never use time.sleep() in scratchpad')\n"
         "- when: Conditional rule ('If paginated API → use async + progress()')\n"
         "- lesson: Factual knowledge ('CoinGecko rate-limits at 50/min')\n"
-        "- profile: Fact about the user ('Name: Jorge', 'Prefers dark mode')"
+        "- profile: Fact about who the user is ('Name: Jorge', 'Timezone: PST'). "
+        "An instruction on how to answer or work is a rule, not a profile entry.\n\n"
+        "Scope: 'project' by default. A rule or preference the user gives in this "
+        "conversation is 'project', even when it says 'always': 'Always show "
+        "amounts in EUR' is 'project'. Choose 'global' only when the user says it "
+        "applies to all their projects or everywhere ('In every project, answer in "
+        "English'), or for general knowledge that holds in any project, such as a "
+        "library quirk. A profile entry always goes to global."
     ),
     input_schema={
         "type": "object",
@@ -165,6 +173,11 @@ MEMORIZE_TOOL = ToolDef(
                         "scope": {
                             "type": "string",
                             "enum": ["global", "project"],
+                            "description": (
+                                "'project' unless the user says the entry applies to "
+                                "all their projects, or it is general knowledge that "
+                                "holds in any project; the tool's Scope note says when."
+                            ),
                         },
                         "topic": {
                             "type": "string",
@@ -192,7 +205,8 @@ CREATE_ARTIFACT_TOOL = ToolDef(
         "AFTER REGISTERING a web artifact (html-app, fullstack-stateless-app, "
         "or fullstack-stateful-app): a report the user has fully specified you "
         "build yourself (DIRECT REPORTS in the ARTIFACTS section); anything else "
-        "goes to `generate_artifact(slug, user_request, agent_understanding, ...)`, "
+        "goes to `generate_artifact(slug, user_request, user_language, "
+        "agent_understanding, ...)`, "
         "which works out the requirements with the user, writes every file, and "
         "verifies its own output. For `document`, "
         "`dataset`, `image` and `mixed` there is no generator: write the "
@@ -434,16 +448,29 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "- `slug`: the artifact slug from a prior `create_artifact` call.\n"
         "- `user_request`: the user's request, as close to their original "
         "wording as possible.\n"
+        "- `user_language`: the language the user writes to you in, by its "
+        "English name (\"English\", \"Russian\", \"Spanish\"). Judge it by "
+        "the user's own messages, not by the data, the attachments or this "
+        "conversation's system text. The pipeline asks its questions and "
+        "writes the brief, `prd.md`, `spec.md` and the page's text in this "
+        "language. If the user wants the page in another language, say so in "
+        "`agent_understanding`.\n"
         "- `agent_understanding`: what the user asked for, in your words — "
         "only what they said or what plainly follows from it. Do NOT add "
         "features, screens, mechanics or styling of your own: the pipeline "
         "proposes those to the user itself, and anything you put here is "
         "shown to them in the brief as something decided for them. One or "
         "two sentences is the normal size.\n"
-        "- `known_data` (optional): anything already known about the data "
-        "needed. If you already fetched something, NAME THE SCRATCHPAD it "
-        "lives in (and the cell): the tool runs its own checks in that pad "
-        "and cannot find it otherwise.\n"
+        "- `known_data` (optional): the data you already have for it. When "
+        "you already read the rows or values the artifact shows and they "
+        "are small (a few hundred rows at most), paste them here: an "
+        "html-app is then built from them without fetching them again. A "
+        "description of the data without its values does not count. If you "
+        "already fetched something, also NAME THE SCRATCHPAD it lives in "
+        "(and the cell): the tool runs its own checks in that pad and "
+        "cannot find it otherwise. Pass it on every call that needs it: a "
+        "new request on an artifact that was already built does not reuse "
+        "the earlier call's `known_data`.\n"
         "- `user_preferences` (optional): preferences the user stated "
         "themselves, in this or an earlier conversation (language, style, "
         "preferred APIs). Never infer a preference from an artifact you "
@@ -463,15 +490,19 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "relay both to the user when non-empty.\n"
         "- `needs_confirmation` — a brief was drafted but the user could not "
         "be asked. Show `brief_summary`; if they agree, call again with the "
-        "SAME `user_request`.\n"
+        "SAME `user_request` and `user_language`.\n"
         "- `cancelled` — the user declined. Do not build the artifact by "
         "hand.\n"
+        "- `browser_check_failed` — the page passed the static checks but "
+        "failed its browser check; it is on disk. Repair it yourself in a "
+        "scratchpad cell, as its `instruction` says.\n"
         "- `stopped_over_budget` — the turn ran out of tokens and the "
         "pipeline stopped cleanly; what it finished is on disk.\n\n"
         "Every status but `generated` carries an `instruction` saying what to "
         "do next — follow it. On a technical failure, report it to the user "
         "and ask how to proceed; NEVER fall back to building the artifact "
-        "yourself."
+        "yourself. The one exception is `browser_check_failed`: repair that "
+        "page in place, never rebuild it."
     ),
     input_schema={
         "type": "object",
@@ -489,6 +520,14 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
                     "one stopped, a different one starts over."
                 ),
             },
+            "user_language": {
+                "type": "string",
+                "maxLength": 40,
+                "description": (
+                    "English name of the language the user writes to you "
+                    "in, e.g. \"Russian\"."
+                ),
+            },
             "agent_understanding": {
                 "type": "string",
                 "description": (
@@ -503,10 +542,16 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
             "known_data": {
                 "type": "string",
                 "description": (
-                    "What is already known about the data needed. If you "
-                    "already fetched something, name the scratchpad it lives "
-                    "in (and the cell) — the tool reuses that pad for its own "
-                    "checks and cannot find it otherwise."
+                    "The data already known for this artifact. Paste the "
+                    "rows or values themselves when you already read them "
+                    "and they are small (a few hundred rows at most): an "
+                    "html-app is built from them without fetching them "
+                    "again, and a description without the values does not "
+                    "count. If you already fetched something, also name the "
+                    "scratchpad it lives in (and the cell) — the tool reuses "
+                    "that pad for its own checks and cannot find it "
+                    "otherwise. A new request on a built artifact does not "
+                    "reuse the earlier call's value: pass it again."
                 ),
             },
             "user_preferences": {
@@ -534,7 +579,7 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
                 ),
             },
         },
-        "required": ["slug", "user_request", "agent_understanding"],
+        "required": ["slug", "user_request", "user_language", "agent_understanding"],
     },
     handler=handle_generate_artifact,
     prompt=(
@@ -549,17 +594,88 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "  1. Call `create_artifact` to register the slug and pick the type "
         "(one of html-app, fullstack-stateless-app, fullstack-stateful-app).\n"
         "  2. Call `generate_artifact(slug=<slug>, user_request=..., "
-        "agent_understanding=..., known_data?, user_preferences?, attachments?)`. It asks "
+        "user_language=..., agent_understanding=..., known_data?, "
+        "user_preferences?, attachments?)`. It asks "
         "the user anything it still needs, so do not pre-interview them for "
-        "it.\n"
+        "it. `user_language` is the language the user writes to you in; "
+        "talk to the user in that language while the artifact is built and "
+        "when you report the result.\n"
         "  3. Follow the `instruction` in the result. `needs_confirmation` "
         "means show `brief_summary` and, if the user agrees, call again with "
-        "the SAME `user_request` — that repeat call IS the confirmation. A "
+        "the SAME `user_request` and `user_language` — that repeat call IS "
+        "the confirmation. A "
         "correction goes in `agent_understanding`, with `user_request` left "
         "as it was.\n"
         "Do NOT call `launch_backend` for a fullstack artifact built this "
         "way — the tool launches and health-checks it itself."
     ),
+)
+
+
+# `create_artifact`, `generate_artifact` and `update_artifact` where nothing
+# starts an app backend (`live_app_slots.fullstack_offered` is False): html-app
+# is the one web type, and no text offers a fullstack app or `launch_backend`.
+STATIC_CREATE_ARTIFACT_TOOL = replace(
+    CREATE_ARTIFACT_TOOL,
+    description=cut_spans(
+        CREATE_ARTIFACT_TOOL.description,
+        (" image, fullstack app,", " etc.)", " image,"),
+        (" (html-app, fullstack-stateless-app,", ": a report the user", " (html-app)"),
+        (" for an html-app or `recall_skill(\"build-fullstack-backend\")`", " before writing", ""),
+        (
+            "- fullstack-stateless-app: fullstack web app",
+            "\n\nPass `primary`",
+            "There is no fullstack type: this deployment starts no app backends, so "
+            "an interactive app or demo is an html-app.",
+        ),
+        (" `\"static/index.html\"` for a fullstack app,", " `\"report.pdf\"`", ""),
+    ),
+    input_schema={
+        **CREATE_ARTIFACT_TOOL.input_schema,
+        "properties": {
+            **CREATE_ARTIFACT_TOOL.input_schema["properties"],
+            "type": {
+                "type": "string",
+                "enum": [
+                    t for t in CREATE_ARTIFACT_TOOL.input_schema["properties"]["type"]["enum"]
+                    if not t.startswith("fullstack-")
+                ],
+            },
+        },
+    },
+)
+
+STATIC_GENERATE_ARTIFACT_TOOL = replace(
+    GENERATE_ARTIFACT_TOOL,
+    description=cut_spans(
+        GENERATE_ARTIFACT_TOOL.description,
+        (" fullstack apps, and dashboards", " or reports whose", " dashboards"),
+        (", `fullstack-stateless-app`, or", ").", ""),
+        (", and for fullstack apps a launch", ". There is no separate PRD", ""),
+        (", and you do NOT call `launch_backend` afterwards", ".", ""),
+    ),
+    prompt=cut_spans(
+        GENERATE_ARTIFACT_TOOL.prompt,
+        (" and (for fullstack) a launch and health check", ". Use it for", ""),
+        (" fullstack apps and for web artifacts", " whose requirements", " web artifacts"),
+        (" and pick the type (one of html-app,", ".\n  2. Call", " with type `html-app`"),
+        ("\nDo NOT call `launch_backend` for a fullstack", None, ""),
+    ),
+)
+
+STATIC_UPDATE_ARTIFACT_METADATA_TOOL = replace(
+    UPDATE_ARTIFACT_METADATA_TOOL,
+    description=cut_spans(
+        UPDATE_ARTIFACT_METADATA_TOOL.description,
+        ("- `port`: port the backend process", "- `datasources`", ""),
+    ),
+    input_schema={
+        **UPDATE_ARTIFACT_METADATA_TOOL.input_schema,
+        "properties": {
+            name: spec for name, spec in UPDATE_ARTIFACT_METADATA_TOOL.input_schema["properties"].items()
+            if name != "port"
+        },
+    },
 )
 
 

@@ -1,11 +1,16 @@
 """Deterministic channels from the discovery phases into generation."""
 from __future__ import annotations
 
+import pytest
+
 from anton.core.tools.generate_artifact.discovery.notes import (
     WEB_EXCERPT_MAX,
     WEB_NOTES_MAX,
+    known_data_sources,
+    render_exec_notes,
     render_gathering_notes,
     render_web_notes,
+    source_key,
 )
 
 
@@ -88,3 +93,41 @@ def test_summary_alone_still_yields_to_legacy_notes():
 def test_summary_with_sections_renders_both():
     out = render_gathering_notes({"summary": "Sum.", "open_points": ["colour?"]})
     assert out == "Sum.\n\n### Open points\n- colour?"
+
+
+@pytest.mark.parametrize("mark", [
+    "known_data", "`known_data`", "known data", "Known-Data", "known_data (13 rows)", '"known_data"',
+])
+def test_a_known_data_mark_is_read_however_the_model_spells_it(mark):
+    inp = {"data_findings": [{"source": "Sites  Table", "verified_by": mark}]}
+    assert known_data_sources(inp, usable=True) == {"sites table"}
+
+
+def test_no_source_counts_when_known_data_cannot_stand_in_for_code():
+    inp = {"data_findings": [{"source": "sites", "verified_by": "known_data"}]}
+    assert known_data_sources(inp, usable=False) == set()
+
+
+def test_other_marks_and_malformed_findings_do_not_count():
+    inp = {"data_findings": [
+        {"source": "orders", "verified_by": "pad main, cell 2"},
+        {"source": "", "verified_by": "known_data"},
+        "not a dict",
+    ]}
+    assert known_data_sources(inp, usable=True) == set()
+    assert known_data_sources({"data_findings": "known_data"}, usable=True) == set()
+
+
+def test_source_key_ignores_spacing_and_case():
+    assert source_key("  Orders\n Table ") == source_key("orders table") == "orders table"
+
+
+def test_a_failed_cell_is_marked_so_no_generator_takes_it_for_working_code():
+    out = render_exec_notes([
+        {"name": "pad", "code": "get('/sites')", "output": "HTTPError: 401", "ok": False},
+        {"name": "pad", "code": "rows = q()", "output": "13 rows", "ok": True},
+        {"name": "old", "code": "x = 1", "output": ""},
+    ])
+    assert "Scratchpad `pad` (failed):\n```python\nget('/sites')" in out
+    assert "Scratchpad `pad`:\n```python\nrows = q()" in out
+    assert "Scratchpad `old`:\n```python\nx = 1" in out

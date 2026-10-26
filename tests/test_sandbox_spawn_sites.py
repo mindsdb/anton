@@ -825,7 +825,7 @@ async def test_a_fullstack_artifact_is_refused_before_the_spec_or_generation(
         slug="app", brief="b", is_fullstack=True,
     )
     entry_point = {"spec": cp.ENTRY_SPEC, "generate": cp.ENTRY_GENERATE}[entry]
-    assert await orchestrator.run(state, entry=entry_point) == BACKENDS_OFF_MESSAGE
+    assert (await orchestrator.run(state, entry=entry_point)).startswith(BACKENDS_OFF_MESSAGE)
     assert spent == []
 
 
@@ -847,7 +847,9 @@ async def test_a_fullstack_artifact_is_refused_before_any_question(tmp_path, pol
         session=session, artifact_type="fullstack-stateless-app", artifact_path=tmp_path,
         slug="app", brief="b",
     )
-    assert await orchestrator.run(state, entry=cp.ENTRY_FULL) == BACKENDS_OFF_MESSAGE
+    refusal = await orchestrator.run(state, entry=cp.ENTRY_FULL)
+    assert refusal.startswith(BACKENDS_OFF_MESSAGE)
+    assert "Build it as an html-app instead" in refusal
     assert asked == []
 
 

@@ -143,21 +143,29 @@ def _emit_rule_retrieval(**shape) -> None:
 class _IdentityFacts(BaseModel):
     """Result of the identity-extraction LLM call.
 
-    Each fact is a concise statement about the user (name, timezone,
-    expertise, preferences, tools). Empty list when nothing relevant
-    is found in the message.
+    Each fact is a concise statement about who the user is (name, role,
+    location, timezone, expertise, tools). Empty list when the messages
+    say nothing about that.
+
+    The facts land in the global profile, which every project reads, while
+    the call sees only the user's messages and not the project they came
+    from. So it saves no instruction on how to answer or work: the agent
+    saves those as rules through `memorize`, where it can see the project
+    and choose the scope.
     """
 
     facts: list[str] = Field(
         default_factory=list,
         description=(
-            "Identity facts extracted from the user message. Each fact "
-            "is a concise statement about the user. Examples: "
-            "'Name: Jorge', 'Timezone: PST', 'Prefers dark mode', "
-            "'Uses uv over pip'. Only extract facts that are clearly "
-            "about the user's identity, preferences, or working style. "
-            "Ignore transient conversation details. Return an empty list "
-            "if nothing identity-relevant is found."
+            "Facts about who the user is, extracted from their messages. "
+            "Each fact is a concise statement about the user. Examples: "
+            "'Name: Jorge', 'Timezone: PST', 'Role: data engineer', "
+            "'Works mostly in Python'. Never include an instruction or "
+            "preference about how to answer or do the work, such as a "
+            "currency, unit, format, tone or length, even when the user "
+            "says 'always', and never include anything said about one "
+            "project. Ignore transient conversation details. Return an "
+            "empty list when the messages say nothing about who the user is."
         ),
     )
 
@@ -189,7 +197,7 @@ class _CompactionResult(BaseModel):
 
 
 _IDENTITY_EXTRACT_PROMPT = """\
-Extract identity facts from this user message — concise statements about the user (name, timezone, expertise, preferences, tools). Only extract facts that are clearly about the user's identity, preferences, or working style. Ignore transient conversation details. Return an empty list if nothing identity-relevant is found.
+Extract facts about who the user is from these messages: their name, role, team, location, time zone, language, expertise and the tools they use. The profile you write applies in every project the user has, and the messages come from one of them. So leave out every instruction or preference about how to answer or do the work, such as a currency, unit, format, tone or length, even when the user says "always": the agent saves those as rules, with their own scope. Leave out anything the user says about one project. Ignore transient conversation details. Return an empty list when the messages say nothing about who the user is.
 """
 
 _COMPACTION_PROMPT = """\

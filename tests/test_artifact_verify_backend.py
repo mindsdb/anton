@@ -91,6 +91,17 @@ def test_core_requirements_accept_extras_and_specifiers():
     assert r.ok, r.errors
 
 
+@pytest.mark.parametrize("reqs", ["fastapi\nuvicorn\n", ""])
+def test_a_live_apps_requirements_need_no_core_package(reqs):
+    """An app slot installs nothing, so a file without `mangum` (what the model
+    wrote on the live-apps VM) or with no line at all launches. Off the live
+    path the same file still fails, since every other launch installs it."""
+    live, _ = evaluate_backend(GOOD_INTROSPECTION, GOOD_SOURCE, reqs, live_app=True)
+    assert live.ok, live.errors
+    other, _ = evaluate_backend(GOOD_INTROSPECTION, GOOD_SOURCE, reqs)
+    assert any("requirements.txt must list `mangum`" in e for e in other.errors)
+
+
 # ── STATE contract (fullstack-stateful-app / fullstack-stateless-app) ────────
 
 from anton.core.artifacts.backend_launcher import parse_requirements
@@ -369,6 +380,23 @@ async def test_verify_backend_happy_path(tmp_path: Path):
 
 
 @_needs_asgi
+async def test_a_live_apps_backend_that_imports_mangum_unlisted_passes(tmp_path: Path):
+    """The live-apps VM's failing build: `backend.py` imports `mangum` and
+    `requirements.txt` lists only `fastapi` and `uvicorn`. The live check
+    imports it from what is installed and passes; off the live path it fails."""
+    (tmp_path / "backend.py").write_text(BACKEND_OK)
+    (tmp_path / "requirements.txt").write_text("fastapi\nuvicorn\n")
+    live, _ = await verify_backend(
+        scratchpad_pool=_FakePool(), slug="x", artifact_path=tmp_path, live_app=True,
+    )
+    assert live.ok, live.errors
+    other, _ = await verify_backend(
+        scratchpad_pool=_FakePool(), slug="x", artifact_path=tmp_path,
+    )
+    assert other.errors == ["requirements.txt must list `mangum`. Parsed package names: fastapi, uvicorn"]
+
+
+@_needs_asgi
 async def test_verify_backend_reports_import_error(tmp_path: Path):
     (tmp_path / "backend.py").write_text("import definitely_not_a_real_module\n")
     (tmp_path / "requirements.txt").write_text("fastapi\nmangum\nuvicorn\n")
@@ -584,3 +612,36 @@ async def test_verify_backend_leaves_no_bytecode_for_local_modules(tmp_path: Pat
     assert result.ok, result.errors
     assert list(tmp_path.rglob("__pycache__")) == []
     assert list(tmp_path.rglob("*.pyc")) == []
+
+
+# ── the import's DS_* on a host with the sandbox off ────────────────────────
+
+_DUMP_DS_KEYS = '''
+import os, json
+with open("ds_keys.json", "w") as f:
+    json.dump(sorted(k for k in os.environ if k.startswith("DS_")), f)
+'''
+
+
+async def test_without_a_sandbox_a_given_ds_env_replaces_the_inherited_ds(tmp_path: Path, monkeypatch):
+    """The import sees the artifact's own connections, as the launch does,
+    and none of the others the server holds."""
+    monkeypatch.setenv("DS_OTHER_DB__PASSWORD", "not-this-artifacts")
+    (tmp_path / "backend.py").write_text(_DUMP_DS_KEYS)
+
+    await verify_backend(
+        scratchpad_pool=_FakePool(), slug="x", artifact_path=tmp_path,
+        ds_env={"DS_POSTGRES_PROD_DB__PASSWORD": "pw"},
+    )
+
+    seen = json.loads((tmp_path / "ds_keys.json").read_text())
+    assert seen == ["DS_POSTGRES_PROD_DB__PASSWORD"]
+
+
+async def test_without_a_sandbox_and_no_ds_env_the_import_inherits_the_ds(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("DS_OTHER_DB__PASSWORD", "inherited")
+    (tmp_path / "backend.py").write_text(_DUMP_DS_KEYS)
+
+    await verify_backend(scratchpad_pool=_FakePool(), slug="x", artifact_path=tmp_path)
+
+    assert "DS_OTHER_DB__PASSWORD" in json.loads((tmp_path / "ds_keys.json").read_text())

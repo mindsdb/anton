@@ -11,12 +11,13 @@ from __future__ import annotations
 import base64
 import json
 import os
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
-from typing import NamedTuple
+from typing import NamedTuple, get_args
 
 import pytest
 
@@ -40,14 +41,23 @@ _PAGE = (
 _SHOT = base64.b64encode(b"\xff\xd8\xff\xe0 not really a jpeg").decode()
 
 
-def _answer(status: str = "passed", *, findings=(), unreachable=(), screenshot: bool = True) -> dict:
-    return {
+def _answer(
+    status: str = "passed", *, findings=(), unreachable=(), screenshot: bool = True, views=None, unopened=None
+) -> dict:
+    """A 200 answer. Without `views` and `unopened` it is an older service's,
+    which sends neither field."""
+    answer = {
         "status": status,
         "findings": list(findings),
         "unreachable": list(unreachable),
         "screenshot": {"media_type": "image/jpeg", "data": _SHOT} if screenshot else None,
         "policy": "default-src 'self'",
     }
+    if views is not None:
+        answer["views"] = list(views)
+    if unopened is not None:
+        answer["unopened"] = list(unopened)
+    return answer
 
 
 class _Service:
@@ -150,7 +160,9 @@ def test_a_check_without_a_screenshot_asks_for_none(service):
 
 
 def test_the_request_model_is_the_contract_and_nothing_more():
-    assert RenderCheckRequest(html="x").model_dump() == {"html": "x", "screenshot": True}
+    assert RenderCheckRequest(html="x").model_dump() == {"html": "x", "screenshot": True, "previous_html": None}
+    # What `check_html` sends without a previous page: the body an older service accepts.
+    assert RenderCheckRequest(html="x").model_dump(exclude_none=True) == {"html": "x", "screenshot": True}
     with pytest.raises(ValueError):
         RenderCheckRequest(html="x", extra=1)
 
@@ -431,6 +443,23 @@ _THROWN = {"kind": "uncaught_exception", "viewport": "desktop", "detail": "Refer
 _BLANK = {"kind": "blank_view", "viewport": "desktop", "detail": "#world-map has no drawn content"}
 _CSP = {"kind": "csp_violation", "viewport": "desktop", "detail": "script-src blocked https://unpkg.com/x.js"}
 _MISSING = {"url": "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js", "reason": "not in the check's mirror"}
+# Shaped like what the render-check service sends: a finding of the kind it
+# adds for loading text left over a drawn view, the views it measured and a
+# toggle it found but did not press. The service is another program, so
+# these are literals.
+_LOADING = {
+    "kind": "loading_label", "viewport": "desktop",
+    "detail": 'div#map-fallback still says "Loading world map…" over svg in div#map, which drew: '
+    "hide or remove it once the view has drawn",
+}
+_TIME_RAN_OUT = "the check's time for pressing tabs and toggles ran out"
+_VIEWS = [
+    {"pressed": None, "viewports": ["desktop", "phone"]},
+    {"pressed": "Map", "viewports": ["desktop", "phone"]},
+    {"pressed": "3D Globe", "viewports": ["desktop", "phone"]},
+]
+_UNOPENED = [{"label": "Routes", "reason": _TIME_RAN_OUT}]
+_CHECKED = "at desktop and phone sizes, as it opens and behind “Map” and “3D Globe”"
 
 
 @pytest.mark.parametrize("status,findings,unreachable", [
@@ -439,11 +468,81 @@ _MISSING = {"url": "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js",
     pytest.param("failed", [_THROWN, _TIMEOUT], [], id="an-exception-fails-despite-the-deadline"),
     pytest.param("unverified", [_BLANK, _TIMEOUT], [], id="a-blank-view-on-a-slow-host"),
     pytest.param("failed", [_BLANK], [], id="a-blank-view"),
+    pytest.param("unverified", [_LOADING, _TIMEOUT], [], id="a-loading-label-on-a-slow-host"),
+    pytest.param("failed", [_LOADING], [], id="a-loading-label-over-a-drawn-view"),
     pytest.param("passed", [], [], id="nothing-found"),
 ])
 def test_each_status_the_rule_gives_parses(status, findings, unreachable):
     result = RenderCheckResult.model_validate(_answer(status, findings=findings, unreachable=unreachable))
     assert result.status == status
+
+
+def test_every_finding_kind_has_one_place_in_the_status_rule():
+    """A kind in no set reads as an "other finding" (rule 5), and after a
+    timeout loses the note that the page may still have been drawing."""
+    places = [
+        render_check._DEFINITE_KINDS, render_check._FAILED_DESPITE_TIMEOUT_KINDS,
+        render_check._MAY_STILL_DRAW_KINDS, frozenset({"timeout"}),
+    ]
+    assert sorted(kind for place in places for kind in place) == sorted(get_args(render_check.FindingKind))
+
+
+def test_the_views_the_check_measured_and_the_toggles_it_did_not_press_parse(service):
+    service.answer((200, _answer(views=_VIEWS, unopened=_UNOPENED), 0.0))
+
+    result = check_html(_PAGE)
+
+    assert isinstance(result, RenderCheckResult)
+    assert [(view.pressed, view.viewports) for view in result.views] == [
+        (None, ["desktop", "phone"]), ("Map", ["desktop", "phone"]), ("3D Globe", ["desktop", "phone"]),
+    ]
+    assert [(toggle.label, toggle.reason) for toggle in result.unopened] == [("Routes", _TIME_RAN_OUT)]
+
+
+def test_an_answer_that_names_no_views_still_parses_as_the_page_as_it_opens(service):
+    """An older service sends neither `views` nor `unopened`."""
+    service.answer((200, _answer(), 0.0))
+
+    result = check_html(_PAGE)
+
+    assert result.status == "passed"
+    assert result.views == [] and result.unopened == []
+    assert result.coverage == render_check.ViewCoverage(checked="as it opens", unchecked=[])
+
+
+@pytest.mark.parametrize("views,checked", [
+    pytest.param(_VIEWS, _CHECKED, id="every-view-at-both-sizes"),
+    pytest.param(
+        [{"pressed": None, "viewports": ["phone", "desktop"]}, {"pressed": "Map", "viewports": ["phone"]}],
+        "as it opens at desktop and phone sizes, behind “Map” at phone size",
+        id="a-view-only-the-phone-showed",
+    ),
+    pytest.param(
+        [{"pressed": "Map", "viewports": ["desktop"]}, {"pressed": "Map", "viewports": ["desktop"]}],
+        "at desktop size, behind “Map”",
+        id="one-label-pressed-twice-and-no-opening-view",
+    ),
+])
+def test_the_coverage_names_each_view_the_check_measured(views, checked):
+    assert RenderCheckResult.model_validate(_answer(views=views)).coverage.checked == checked
+
+
+def test_the_coverage_names_unopened_toggles_by_reason_and_counts_past_the_cap(monkeypatch):
+    monkeypatch.setattr(render_check, "MAX_UNOPENED_SHOWN", 3)
+    unopened = [
+        {"label": "Routes", "reason": _TIME_RAN_OUT},
+        {"label": "Admin", "reason": "the page navigated away"},
+        *({"label": f"Row {i}", "reason": _TIME_RAN_OUT} for i in range(6)),
+    ]
+
+    coverage = RenderCheckResult.model_validate(_answer(views=_VIEWS, unopened=unopened)).coverage
+
+    assert coverage.checked == _CHECKED
+    assert coverage.unchecked == [
+        f"“Routes” and “Row 0” ({_TIME_RAN_OUT})",
+        "“Admin” (the page navigated away)",
+        "and 5 more tabs or toggles",
+    ]
 
 
 @pytest.mark.parametrize("answer", [
@@ -454,6 +553,7 @@ def test_each_status_the_rule_gives_parses(status, findings, unreachable):
         {"kind": "console_error", "viewport": "desktop", "detail": "boom"},
     ]), id="passed-with-a-console-error"),
     pytest.param(_answer("unverified", findings=[_THROWN, _TIMEOUT]), id="unverified-beside-an-exception"),
+    pytest.param(_answer("passed", findings=[_LOADING]), id="passed-with-a-loading-label"),
 ])
 def test_a_status_its_findings_contradict_is_unverified_never_a_pass(service, tmp_path, answer):
     """The generator's check rebuilt the status from the findings, so a
@@ -510,6 +610,30 @@ def test_check_file_never_follows_a_link_out_of_the_persons_files(service, tmp_p
     result = check_file(link, cell_sandbox=policy)
     assert result.status == "unverified"
     assert "outside the files this conversation may read" in result.unverified_reason
+    assert service.requests == []
+
+
+def test_a_refused_read_and_an_unreadable_page_read_differently(service, tmp_path, project, policy):
+    outside = tmp_path / "outside.html"
+    outside.write_text(_PAGE)
+    refused = check_file(outside, cell_sandbox=policy)
+    assert refused.status == "unverified"
+    assert refused.unverified_reason == "the page is outside the files this conversation may read"
+    with pytest.raises(PermissionError):
+        render_check.read_page_bytes(outside, cell_sandbox=policy)
+    assert service.requests == []
+
+    if sys.platform == "win32" or os.geteuid() == 0:
+        pytest.skip("a file mode does not stop this process from reading")
+    locked = project / "locked.html"
+    locked.write_text(_PAGE)
+    locked.chmod(0o000)
+    try:
+        unreadable = check_file(locked, cell_sandbox=policy)
+    finally:
+        locked.chmod(0o644)
+    assert unreadable.status == "unverified"
+    assert unreadable.unverified_reason.startswith("the page could not be read")
     assert service.requests == []
 
 
@@ -638,9 +762,10 @@ def test_a_page_with_thousands_of_findings_reaches_the_agent_bounded(service, tm
     lint = tool_handlers.lint_changed_artifact_files(store, {slug: tool_handlers.ArtifactFiles()})
 
     shown = render_check.MAX_FINDINGS_SHOWN
-    assert len(lint.messages) == shown + 1
+    assert len(lint.messages) == shown + 2
     assert lint.messages[0] == f"{slug}/index.html — console_error (desktop): missing value for row 0"
-    assert lint.messages[-1] == f"{slug}/index.html — and {10_000 - shown} more distinct findings, not listed"
+    assert lint.messages[-2] == f"{slug}/index.html — and {10_000 - shown} more distinct findings, not listed"
+    assert lint.messages[-1] == f"{slug}/index.html — {tool_handlers._repairs_left_line(tool_handlers.REPAIR_CELLS)}"
 
     check = verifiers.verify_frontend_live(store.root / slug / "index.html", cell_sandbox=None)
     assert check.status == "failed"
@@ -731,6 +856,14 @@ def test_an_unverified_answer_is_a_skip_with_its_reason_not_an_error(service, tm
         "- uncaught_exception (desktop): ReferenceError: renderChart is not defined",
         id="an-exception-beside-a-library-the-check-could-not-load",
     ),
+    pytest.param(
+        _answer("unverified", findings=[_LOADING, _TIMEOUT]),
+        "unverified: the check ran out of time (the check's 25 s ran out while measuring the page)\n"
+        "Before it ran out of time, the check found:\n"
+        '- loading_label (desktop): div#map-fallback still says "Loading world map…" over svg in div#map, '
+        "which drew: hide or remove it once the view has drawn (it may still have been drawing)",
+        id="a-loading-label-before-the-deadline",
+    ),
 ])
 def test_an_unverified_check_still_lists_what_it_found(service, tmp_path, answer, reason):
     """The reason named only the timeout or the unreachable URL, so the agent
@@ -776,6 +909,23 @@ def test_an_exception_before_the_deadline_fails_the_generators_check(service, tm
     assert check.verdict.errors == [
         "Loaded in a headless browser, the page threw an uncaught exception: "
         "ReferenceError: renderChart is not defined (desktop)",
+    ]
+
+
+def test_a_loading_label_fails_the_generators_check(service, tmp_path):
+    """Without a verdict line of its own, a `loading_label` finding added no
+    verifier error, and a page the service failed passed the step."""
+    page = tmp_path / "index.html"
+    page.write_text(_PAGE)
+    service.answer((200, _answer("failed", findings=[_LOADING, {**_LOADING, "viewport": "phone"}]), 0.0))
+
+    check = verifiers.verify_frontend_live(page, cell_sandbox=None)
+
+    assert check.status == "failed"
+    assert check.verdict.errors == [
+        "Loaded in a headless browser, a loading message still showed over a view that had drawn: "
+        'div#map-fallback still says "Loading world map…" over svg in div#map, which drew: '
+        "hide or remove it once the view has drawn (desktop and phone)",
     ]
 
 
@@ -1095,6 +1245,30 @@ async def test_generate_traces_its_result_without_the_screenshot(tmp_path, monke
     assert _SHOT not in trace_file.read_text()
 
 
+@pytest.mark.parametrize("views,unopened,checked,unchecked", [
+    pytest.param(
+        _VIEWS, _UNOPENED, _CHECKED, [f"“Routes” ({_TIME_RAN_OUT})"], id="views-and-a-toggle-it-did-not-press",
+    ),
+    pytest.param(None, None, "as it opens", [], id="a-service-that-names-no-views"),
+])
+async def test_a_passing_check_tells_the_agent_which_views_it_covered(
+    service, project, policy, monkeypatch, views, unopened, checked, unchecked
+):
+    """A pass read as "browser-verified" for a globe behind a toggle the
+    check never opened. The result names the views the check measured and
+    the tabs and toggles it did not press."""
+    st = _gen_state(project, policy)
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", _writes_page(project, []))
+    service.answer((200, _answer(views=views, unopened=unopened, screenshot=False), 0.0))
+
+    assert await orchestrator._gen_verify_frontend(st) is None
+
+    shell = orchestrator._result_shell(st)
+    assert shell["verified_in_browser"] is True
+    assert shell["browser_checked"] == checked
+    assert shell["browser_unchecked"] == unchecked
+
+
 async def test_an_unverified_page_passes_the_step_and_says_why(service, project, policy, monkeypatch):
     st = _gen_state(project, policy)
     monkeypatch.setattr(orchestrator.engine, "_run_loop", _writes_page(project, []))
@@ -1110,7 +1284,10 @@ async def test_an_unverified_page_passes_the_step_and_says_why(service, project,
     ]
     assert st.browser_status == "unverified"
     assert st.browser_findings_listed is False
-    assert orchestrator._result_shell(st)["verified_in_browser"] is False
+    shell = orchestrator._result_shell(st)
+    assert shell["verified_in_browser"] is False
+    # No view is named as checked beside a page no check vouched for.
+    assert "browser_checked" not in shell and "browser_unchecked" not in shell
 
 
 async def test_an_unverified_page_tells_the_agent_what_the_check_still_found(service, project, policy, monkeypatch):
@@ -1312,7 +1489,8 @@ async def _handler_result(
     )
     out = None
     async for item in tool_handlers.handle_generate_artifact(
-        session, {"slug": slug, "user_request": "a map", "agent_understanding": "a map"}
+        session, {"slug": slug, "user_request": "a map", "agent_understanding": "a map",
+                  "user_language": "English"}
     ):
         out = item
     return slug, out
@@ -1418,6 +1596,40 @@ async def test_a_verified_page_keeps_the_do_not_reverify_instruction(tmp_path, m
     assert "unverified in a browser" not in instruction
 
 
+async def test_a_verified_page_lets_the_agent_claim_only_the_views_the_check_saw(tmp_path, monkeypatch):
+    """The agent told the user a page was browser-verified and its globe
+    toggle worked, though the check never opened the globe. The result
+    carries the views the check saw and the ones it did not open, and the
+    instruction lets the agent call only the first verified or working."""
+    _, out = await _handler_result(tmp_path, monkeypatch, {
+        "status": "generated", "files_written": ["index.html"], "warnings": [], "checks_skipped": [],
+        "verified_in_browser": True,
+        "browser_checked": "at desktop and phone sizes, as it opens and behind “Map”",
+        "browser_unchecked": [f"“3D Globe” ({_TIME_RAN_OUT})"],
+    })
+
+    payload = json.loads(out.content)
+    assert payload["browser_checked"] == "at desktop and phone sizes, as it opens and behind “Map”"
+    assert payload["browser_unchecked"] == [f"“3D Globe” ({_TIME_RAN_OUT})"]
+    instruction = payload["instruction"]
+    assert (
+        "a browser loaded the page without finding a problem in the views `browser_checked` names: "
+        "the page as it opens, and the view behind each tab or toggle it names."
+    ) in instruction
+    assert (
+        'Say "browser-verified", "tested" or "works" only of the views `browser_checked` names; '
+        "a view it does not name was not checked."
+    ) in instruction
+    assert (
+        "`browser_unchecked` lists the tabs and toggles the check found but did not press: when it is "
+        "non-empty, tell the user in one sentence that the views behind them were not checked, and "
+        "never call those views verified, tested or working."
+    ) in instruction
+    # The rules the instruction already had stay.
+    assert "Do NOT re-read, re-parse or re-verify" in instruction
+    assert "never present a skipped check as passed" in instruction
+
+
 # ── The check after a cell ───────────────────────────────────────────────────
 
 
@@ -1447,8 +1659,39 @@ def test_only_edited_pages_are_sent_primary_first_with_one_screenshot(service, t
     assert lint.screenshot is not None and lint.screenshot_page == f"{slug}/z.html"
     assert lint.page_checks == {(slug, "z.html"): "passed", (slug, "a.html"): "passed"}
     assert lint.messages == [
-        f"{slug}/z.html — loaded in a browser the way the app preview loads it: no problems found",
-        f"{slug}/a.html — loaded in a browser the way the app preview loads it: no problems found",
+        f"{slug}/z.html — loaded in a browser the way the app preview loads it, as it opens: no problems found",
+        f"{slug}/a.html — loaded in a browser the way the app preview loads it, as it opens: no problems found",
+    ]
+
+
+def test_a_passed_page_names_the_views_the_check_saw_and_the_toggles_it_did_not_press(service, tmp_path):
+    """A pass said only "no problems found", and the agent called a globe
+    behind a toggle working though the check never opened it."""
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    service.answer((200, _answer(views=_VIEWS, unopened=_UNOPENED, screenshot=False), 0.0))
+
+    lint = tool_handlers.lint_changed_artifact_files(store, {slug: tool_handlers.ArtifactFiles()})
+
+    assert lint.page_checks == {(slug, "index.html"): "passed"}
+    assert lint.messages == [
+        f"{slug}/index.html — loaded in a browser the way the app preview loads it, at desktop and phone "
+        "sizes, as it opens and behind “Map” and “3D Globe”: no problems found",
+        f"{slug}/index.html — tabs and toggles the check did not press: “Routes” ({_TIME_RAN_OUT}). "
+        "The views behind them were not checked: say so, and never call them verified, tested or working",
+    ]
+
+
+def test_a_page_that_failed_gets_no_line_for_the_toggles_the_check_did_not_press(service, tmp_path):
+    """The agent fixes a failed page and checks it again, so only a pass
+    names what the check left unopened."""
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    service.answer((200, _answer("failed", findings=[_LOADING], views=_VIEWS, unopened=_UNOPENED), 0.0))
+
+    lint = tool_handlers.lint_changed_artifact_files(store, {slug: tool_handlers.ArtifactFiles()})
+
+    assert [line.removeprefix(f"{slug}/index.html — ") for line in lint.messages] == [
+        f"loading_label (desktop): {_LOADING['detail']}",
+        tool_handlers._repairs_left_line(tool_handlers.REPAIR_CELLS),
     ]
 
 
@@ -1526,7 +1769,10 @@ def test_a_cell_that_changes_only_a_file_the_page_loads_checks_the_page(service,
 
     assert [r["body"]["html"] for r in service.requests] == [(store.root / slug / "index.html").read_text()]
     assert lint.page_checks == {(slug, "index.html"): "failed"}
-    assert lint.messages == [f"{slug}/index.html — separate_file (desktop): dashboard_data.js"]
+    assert lint.messages == [
+        f"{slug}/index.html — separate_file (desktop): dashboard_data.js",
+        f"{slug}/index.html — {tool_handlers._repairs_left_line(tool_handlers.REPAIR_CELLS)}",
+    ]
     assert tool_handlers.page_check_lines(store, checks=session._page_checks) == [
         "“Map” failed the browser check, so it may not display correctly in the preview."
     ]
@@ -2044,7 +2290,7 @@ async def test_the_cell_result_carries_the_screenshot_on_the_streaming_path(serv
     assert [r["body"]["html"] for r in service.requests] == [_PAGE.replace("hi", "cell 1")]
     text, caption, image = _tool_results(session)[0]["content"]
     assert text["text"].endswith(
-        f"[artifact lint]\n{slug}/index.html — loaded in a browser the way the app preview loads it: no problems found"
+        f"[artifact lint]\n{slug}/index.html — loaded in a browser the way the app preview loads it, as it opens: no problems found"
     )
     assert caption["text"].startswith(render_check.SCREENSHOT_CAPTION)
     assert image["source"]["data"] == _SHOT
@@ -3205,3 +3451,408 @@ def test_the_skill_says_what_checks_a_hand_built_page_now():
     assert "a hand-built page gets no automatic check" not in skill
     assert "A hand-built page gets the browser check too" in skill
     assert "not checked in a browser" in skill
+
+
+# ── Repairing a page that failed its browser check ───────────────────────────
+
+_ROUTES_ERROR = {
+    "kind": "console_error", "viewport": "desktop",
+    "detail": "console.error: Route network failed: ROUTES is not defined",
+}
+
+
+def _repair_session() -> SimpleNamespace:
+    return SimpleNamespace(
+        _page_checks={}, _unverified_findings_listed=set(), _repair_cells={}, _failed_views={}, _scratchpads=None,
+    )
+
+
+def _failed_build(session, slug: str, page: str, views=_VIEWS) -> None:
+    """generate_artifact's last build of PAGE failed its browser check, which
+    measured VIEWS. The state's primary is the one the artifact held before
+    the run, which a failed run never moved."""
+    from anton.core.artifacts.render_check import CheckedView
+    from anton.core.tools.generate_artifact import engine
+    from anton.core.tools.generate_artifact.state import BrowserCheckFailed
+
+    engine._record_page_check(
+        session,
+        state=SimpleNamespace(slug=slug, browser_status="failed", files_written=[page], is_fullstack=False, primary="index.html"),
+        result=BrowserCheckFailed(
+            page=page, findings=("x",), views=tuple(CheckedView.model_validate(v) for v in views),
+            screenshot=None, error="Frontend verification failed after 2 attempt(s): x",
+        ),
+    )
+
+
+async def _repair_cell(session, store, slug: str, page: str, text: str):
+    before = tool_handlers.snapshot_existing_artifacts(store)
+    (store.root / slug / page).write_text(_PAGE.replace("hi", text))
+    return await tool_handlers.check_cell_artifacts(session, store=store, before=before)
+
+
+async def test_a_page_showing_markup_as_text_fails_a_passing_check_and_spends_its_repairs(service, tmp_path):
+    """Escaped markup loads without an error, so the service passes the page."""
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    session = _repair_session()
+    key = tool_handlers.PageKey(slug, "index.html")
+    service.answer((200, _answer("passed", views=_VIEWS, unopened=[]), 0.0))
+    escaped = "&lt;style&gt;.x{color:red}&lt;/style&gt;"
+
+    lint = await _repair_cell(session, store, slug, "index.html", escaped)
+
+    assert lint.messages[0].startswith(f"{slug}/index.html — the page shows HTML tags as text")
+    assert "['<style>', '</style>']" in lint.messages[0]
+    assert lint.messages[-1] == f"{slug}/index.html — {tool_handlers._repairs_left_line(tool_handlers.REPAIR_CELLS)}"
+    assert session._page_checks == {key: "failed"}
+
+    # Each repair that keeps the markup escaped spends a repair cell, until none is left.
+    for repair in range(tool_handlers.REPAIR_CELLS):
+        lint = await _repair_cell(session, store, slug, "index.html", escaped + "x" * (repair + 1))
+    assert lint.messages == [f"{slug}/index.html — {tool_handlers._NO_REPAIRS_LEFT}"]
+    assert session._page_checks == {key: "failed"}
+
+
+@pytest.mark.parametrize("page", ["index.html", "dashboard.html"])
+async def test_a_passing_repair_of_the_page_the_build_wrote_ends_the_turn_without_the_failed_line(
+    service, tmp_path, page
+):
+    """The failed build's record keys on the file its check loaded, so a
+    repair of that file replaces it, whatever the build named the page."""
+    store, slug = _artifact_with_pages(tmp_path, page)
+    session = _repair_session()
+    _failed_build(session, slug, page)
+    key = tool_handlers.PageKey(slug, page)
+    assert session._page_checks == {key: "failed"}
+    service.answer((200, _answer("passed", views=_VIEWS, unopened=[]), 0.0))
+
+    lint = await _repair_cell(session, store, slug, page, "repaired")
+
+    assert lint.messages == [f"{slug}/{page} — loaded in a browser the way the app preview loads it, {_CHECKED}: no problems found"]
+    assert session._page_checks == {key: "passed"}
+    assert session._repair_cells == {key: 1}
+    assert session._failed_views == {}
+    assert tool_handlers.page_check_lines(store, checks=session._page_checks) == []
+
+
+async def test_the_second_failed_repair_lists_no_findings_and_says_none_are_left(service, tmp_path):
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    session = _repair_session()
+    _failed_build(session, slug, "index.html")
+    key = tool_handlers.PageKey(slug, "index.html")
+    service.answer((200, _answer("failed", findings=[_ROUTES_ERROR], views=_VIEWS, unopened=[]), 0.0))
+    label = f"{slug}/index.html"
+
+    first = await _repair_cell(session, store, slug, "index.html", "first repair")
+    second = await _repair_cell(session, store, slug, "index.html", "second repair")
+
+    assert first.messages == [
+        f"{label} — console_error (desktop): {_ROUTES_ERROR['detail']}",
+        f"{label} — {tool_handlers._repairs_left_line(1)}",
+    ]
+    assert first.screenshot is not None
+    assert second.messages == [f"{label} — {tool_handlers._NO_REPAIRS_LEFT}"]
+    assert second.screenshot is None
+    assert session._repair_cells == {key: 2}
+    assert tool_handlers.page_check_lines(store, checks=session._page_checks) == [
+        "“Map” failed the browser check, so it may not display correctly in the preview."
+    ]
+
+
+async def test_a_repair_that_drops_a_view_the_failed_check_measured_fails(service, tmp_path):
+    """The failed build's check measured the page as it opens and behind
+    "Map" and "3D Globe". The repair's check passes, but finds no "3D
+    Globe": the repair removed the view instead of fixing it."""
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    session = _repair_session()
+    _failed_build(session, slug, "index.html")
+    key = tool_handlers.PageKey(slug, "index.html")
+    service.answer((200, _answer("passed", views=_VIEWS[:2], unopened=[]), 0.0))
+
+    lint = await _repair_cell(session, store, slug, "index.html", "no globe")
+
+    label = f"{slug}/index.html"
+    assert lint.messages == [
+        f"{label} — failed: this repair removed views the check that failed the page measured, at desktop and "
+        "phone sizes, behind “3D Globe”. A repair fixes the code a finding names and keeps every view: put them back",
+        f"{label} — {tool_handlers._repairs_left_line(1)}",
+    ]
+    assert session._page_checks == {key: "failed"}
+    # The bar stays where the build's check set it, for the next repair too.
+    assert [view.pressed for view in session._failed_views[key]] == [None, "Map", "3D Globe"]
+
+
+async def test_a_view_the_repairs_check_found_but_had_no_time_to_press_is_not_removed(service, tmp_path):
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    session = _repair_session()
+    _failed_build(session, slug, "index.html")
+    service.answer((200, _answer(
+        "passed", views=_VIEWS[:2], unopened=[{"label": "3D Globe", "reason": _TIME_RAN_OUT}],
+    ), 0.0))
+
+    await _repair_cell(session, store, slug, "index.html", "globe left unpressed")
+
+    assert session._page_checks == {tool_handlers.PageKey(slug, "index.html"): "passed"}
+
+
+async def test_an_unverified_check_in_between_still_holds_the_page_to_the_failed_views(service, tmp_path):
+    """The first repair's check gives no verdict, so the page's last check
+    is unverified, not failed. The next cell drops "3D Globe" and its check
+    passes: it still fails, since no check has passed the page."""
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    session = _repair_session()
+    _failed_build(session, slug, "index.html")
+    key = tool_handlers.PageKey(slug, "index.html")
+    service.answer((503, b"not ready", 0.0), (200, _answer("passed", views=_VIEWS[:2], unopened=[]), 0.0))
+
+    await _repair_cell(session, store, slug, "index.html", "service down")
+    lint = await _repair_cell(session, store, slug, "index.html", "no globe")
+
+    label = f"{slug}/index.html"
+    assert lint.messages == [
+        f"{label} — failed: this repair removed views the check that failed the page measured, at desktop and "
+        "phone sizes, behind “3D Globe”. A repair fixes the code a finding names and keeps every view: put them back",
+        f"{label} — {tool_handlers._repairs_left_line(1)}",
+    ]
+    assert session._page_checks == {key: "failed"}
+
+
+async def test_a_page_that_passed_and_fails_again_counts_the_repairs_it_already_used(service, tmp_path):
+    """A repair passes, then a later edit that turn breaks the page. The page
+    spent one repair cell, so the failed check says one is left, and the
+    next failed repair says none are."""
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    session = _repair_session()
+    _failed_build(session, slug, "index.html")
+    failed = (200, _answer("failed", findings=[_ROUTES_ERROR], views=_VIEWS, unopened=[]), 0.0)
+    service.answer((200, _answer("passed", views=_VIEWS, unopened=[]), 0.0), failed, failed)
+
+    await _repair_cell(session, store, slug, "index.html", "repair passes")
+    broken = await _repair_cell(session, store, slug, "index.html", "a later edit breaks it")
+    last = await _repair_cell(session, store, slug, "index.html", "second repair")
+
+    label = f"{slug}/index.html"
+    assert broken.messages[-1] == f"{label} — {tool_handlers._repairs_left_line(1)}"
+    assert last.messages == [f"{label} — {tool_handlers._NO_REPAIRS_LEFT}"]
+    assert session._repair_cells == {tool_handlers.PageKey(slug, "index.html"): 2}
+
+
+async def test_a_page_built_by_hand_gets_the_same_repair_budget(service, tmp_path):
+    """A page's first failed check isn't a repair, whoever built the page:
+    the cells after it are."""
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    session = _repair_session()
+    key = tool_handlers.PageKey(slug, "index.html")
+    service.answer((200, _answer("failed", findings=[_ROUTES_ERROR], views=_VIEWS, unopened=[]), 0.0))
+
+    built = await _repair_cell(session, store, slug, "index.html", "built by hand")
+    await _repair_cell(session, store, slug, "index.html", "first repair")
+    last = await _repair_cell(session, store, slug, "index.html", "second repair")
+
+    assert built.messages[-1] == f"{slug}/index.html — {tool_handlers._repairs_left_line(2)}"
+    assert session._repair_cells == {key: 2}
+    assert last.messages == [f"{slug}/index.html — {tool_handlers._NO_REPAIRS_LEFT}"]
+
+
+# ── Comparing with the page as it was before the turn ────────────────────────
+
+_OLD_PAGE = _PAGE.replace("hi", "before")
+
+
+def _comparison(**fields) -> dict:
+    """A `comparison` the service sends beside its answer: the previous page
+    checked completely, and nothing found, unless FIELDS say otherwise."""
+    return {
+        "previous": "complete", "previous_status": "passed", "compared": [],
+        "removal_checked": "all", "removed_views": [], "broken_views": [], "removed_controls": [],
+        **fields,
+    }
+
+
+def test_a_request_without_the_previous_page_leaves_the_key_out(service):
+    check_html(_PAGE, previous_html=None)
+    assert service.requests[0]["body"] == {"html": _PAGE, "screenshot": True}
+
+
+def test_a_request_with_the_previous_page_sends_it(service):
+    check_html(_PAGE, previous_html=_OLD_PAGE)
+    assert service.requests[0]["body"] == {"html": _PAGE, "screenshot": True, "previous_html": _OLD_PAGE}
+
+
+def test_check_file_sends_the_previous_page(service, tmp_path):
+    page = tmp_path / "index.html"
+    page.write_text(_PAGE)
+    check_file(page, cell_sandbox=None, previous_html=_OLD_PAGE)
+    assert service.requests[0]["body"]["previous_html"] == _OLD_PAGE
+
+
+def test_the_request_cap_is_the_services_for_two_pages():
+    assert render_check.MAX_BODY_BYTES == 2 * render_check.MAX_PAGE_BYTES + 1024 == 16778240
+    assert render_check.MAX_COMPARED_BODY_BYTES == 4 * render_check.MAX_PAGE_BYTES + 2048 == 33556480
+
+
+def test_a_request_with_the_previous_page_is_held_to_the_larger_cap(service, monkeypatch):
+    """The page as it was before the turn doubles what a request may carry,
+    so only such a request gets the larger cap; a request with one page is
+    still refused here past the single-page cap, with a reason."""
+    monkeypatch.setattr(render_check, "MAX_BODY_BYTES", 3 * 1024)
+    monkeypatch.setattr(render_check, "MAX_COMPARED_BODY_BYTES", 16 * 1024)
+    page = "x" * 4096
+
+    alone = check_html(page)
+    compared = check_html(page, previous_html=page)
+
+    assert alone.status == "unverified"
+    assert alone.unverified_reason == (
+        "the page's request is 4 KB once JSON-escaped, over the render check's 0 MB request limit"
+    )
+    assert compared.status == "passed"
+    assert len(service.requests) == 1 and service.requests[0]["body"]["previous_html"] == page
+
+
+def test_a_compared_request_over_the_larger_cap_checks_the_page_alone(service, monkeypatch):
+    """The page alone fits its own cap: the comparison never costs it its
+    verdict. JSON escapes each \\x01 as six bytes."""
+    monkeypatch.setattr(render_check, "MAX_BODY_BYTES", 1024 * 1024)
+    monkeypatch.setattr(render_check, "MAX_COMPARED_BODY_BYTES", 2 * 1024 * 1024)
+    page, previous = "\x01" * (160 * 1024), "\x01" * (190 * 1024)
+
+    result = check_html(page, previous_html=previous)
+
+    assert result.status == "passed"
+    assert [sorted(request["body"]) for request in service.requests] == [["html", "screenshot"]]
+
+
+def test_a_page_over_its_own_cap_is_unverified_with_or_without_the_previous_page(service, monkeypatch):
+    monkeypatch.setattr(render_check, "MAX_BODY_BYTES", 1024 * 1024)
+    monkeypatch.setattr(render_check, "MAX_COMPARED_BODY_BYTES", 2 * 1024 * 1024)
+    page = "\x01" * (200 * 1024)
+
+    result = check_html(page, previous_html=page)
+
+    assert result.status == "unverified"
+    assert result.unverified_reason == (
+        "the page's request is 1200 KB once JSON-escaped, over the render check's 1 MB request limit"
+    )
+    assert service.requests == []
+
+
+def test_a_previous_page_over_the_size_limit_is_not_sent_and_the_page_is_checked_alone(service, monkeypatch):
+    monkeypatch.setattr(render_check, "MAX_PAGE_BYTES", 1024)
+
+    result = check_html(_PAGE, previous_html="x" * 2048)
+
+    assert result.status == "passed"
+    assert [request["body"] for request in service.requests] == [{"html": _PAGE, "screenshot": True}]
+
+
+def test_the_comparison_parses(service):
+    broken = {"pressed": "Map", "reason": "new_problem", "viewports": ["desktop", "phone"], "findings": [_BLANK]}
+    service.answer((200, {**_answer("failed", findings=[_BLANK]), "comparison": _comparison(
+        compared=[{"pressed": "Map", "viewports": ["desktop", "phone"]}],
+        removed_views=[{"pressed": "Globe"}], removed_controls=["Globe"], broken_views=[broken],
+    )}, 0.0))
+
+    result = check_html(_PAGE, previous_html=_OLD_PAGE)
+
+    assert result.status == "failed"
+    comparison = result.comparison
+    assert comparison.previous == "complete" and comparison.previous_status == "passed"
+    assert [view.pressed for view in comparison.removed_views] == ["Globe"]
+    assert comparison.removed_controls == ["Globe"]
+    assert comparison.broken_views[0].reason == "new_problem"
+    assert comparison.broken_views[0].findings[0].detail == _BLANK["detail"]
+    assert comparison.informative and comparison.has_new_problem
+
+
+def test_an_answer_without_a_comparison_has_none(service):
+    assert check_html(_PAGE).comparison is None
+
+
+def test_no_answer_has_no_comparison():
+    assert RenderCheckUnavailable(reason="x").comparison is None
+
+
+def test_a_comparison_that_does_not_parse_is_dropped_and_the_verdict_kept(service, caplog):
+    service.answer((200, {**_answer("failed", findings=[_BLANK]), "comparison": {"previous": "sometimes"}}, 0.0))
+
+    result = check_html(_PAGE, previous_html=_OLD_PAGE)
+
+    assert result.status == "failed"
+    assert [finding.detail for finding in result.findings] == [_BLANK["detail"]]
+    assert result.comparison is None
+    assert "comparison that does not parse" in caplog.text
+
+
+def test_a_service_that_rejects_the_previous_page_is_asked_again_with_the_page_alone(service, caplog):
+    """An anton newer than its service keeps every page's own verdict, with
+    no comparison, instead of reading every edited page as unverified."""
+    service.answer((400, {"detail": "extra fields not permitted"}, 0.0), (200, _answer("passed"), 0.0))
+
+    result = check_html(_PAGE, previous_html=_OLD_PAGE)
+
+    assert (result.status, result.comparison) == ("passed", None)
+    assert [sorted(request["body"]) for request in service.requests] == [
+        ["html", "previous_html", "screenshot"], ["html", "screenshot"],
+    ]
+    assert "it may predate page comparison" in caplog.text
+
+
+def test_a_400_to_the_page_alone_is_unverified_with_no_third_ask(service):
+    service.answer((400, {"detail": "the request isn't a render check request"}, 0.0))
+
+    result = check_html(_PAGE, previous_html=_OLD_PAGE)
+
+    assert result.status == "unverified"
+    assert result.unverified_reason == "the render-check service rejected the request (HTTP 400)"
+    assert len(service.requests) == 2
+    assert check_html(_PAGE).status == "unverified" and len(service.requests) == 3
+
+
+_NO_VIEW = {"reason": "no_view", "viewports": ["phone"], "findings": []}
+_NEW_PROBLEM = {"reason": "new_problem", "viewports": ["desktop"], "findings": []}
+
+
+@pytest.mark.parametrize(("comparison", "notes"), [
+    (None, ([], [], [], [])),
+    (_comparison(previous="not_checked", previous_status=None, removed_controls=["Globe"]), ([], [], [], [])),
+    # The new page's check was cut short: nothing compared, no removal seen.
+    (_comparison(removal_checked="none", removed_controls=["Globe"]), ([], [], [], [])),
+    (_comparison(), ([], [], [], [])),
+    (
+        _comparison(broken_views=[
+            {"pressed": None, **_NEW_PROBLEM}, {"pressed": "Map", **_NEW_PROBLEM},
+            {"pressed": "Map", **_NO_VIEW}, {"pressed": "Details", **_NO_VIEW},
+        ]),
+        (["the page as it opens", "“Map”"], ["“Map”", "“Details”"], [], []),
+    ),
+    (
+        _comparison(removed_views=[{"pressed": "Globe"}], removed_controls=["Globe", "Dark mode"]),
+        ([], [], ["“Globe”", "“Dark mode”"], []),
+    ),
+    (
+        _comparison(compared=[{"pressed": "Ports", "viewports": ["desktop", "phone"]}], shrunk_views=[
+            {"pressed": "Ports", "view": "svg#ports", "viewports": ["desktop", "phone"], "before": 26, "after": 5},
+            {"pressed": None, "view": "table#lanes", "viewports": ["desktop"], "before": 40, "after": 12},
+        ]),
+        ([], [], [], ["“Ports” (svg#ports: 5 of 26 marks)", "the page as it opens (table#lanes: 12 of 40 marks)"]),
+    ),
+])
+def test_the_notes_name_each_view_once(comparison, notes):
+    from anton.core.artifacts.render_check import Comparison, comparison_notes
+
+    parsed = None if comparison is None else Comparison.model_validate(comparison)
+    assert tuple(comparison_notes(parsed)) == notes
+
+
+def test_labels_join_as_a_sentence_says_them():
+    from anton.core.artifacts.render_check import agree, joined
+
+    assert [joined(["a"]), joined(["a", "b"]), joined(["a", "b", "c"])] == ["a", "a and b", "a, b and c"]
+    assert [agree(["a"], "it", "them"), agree(["a", "b"], "it", "them")] == ["it", "them"]
+
+
+def test_a_comparison_from_a_service_without_shrunk_views_parses_with_none():
+    from anton.core.artifacts.render_check import Comparison
+
+    assert Comparison.model_validate(_comparison()).shrunk_views == []

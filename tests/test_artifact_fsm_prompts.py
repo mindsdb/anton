@@ -4,11 +4,12 @@ import re
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from anton.core.datasources.data_vault import LocalDataVault
 from anton.core.tools.generate_artifact import prompts
 from anton.core.tools.generate_artifact.state import GenState
-from anton.utils.datasources import collect_datasource_catalog
+from anton.utils.datasources import DATASOURCES_HEADER, collect_datasource_catalog
 
 
 def _state(**kw):
@@ -23,7 +24,7 @@ def _state(**kw):
 def test_fsm_digraph_is_english_and_covers_nodes():
     g = prompts.FSM_DIGRAPH
     for node in [
-        "is_data_enough", "define_required_data", "is_possible_to_fetch",
+        "data_verified", "define_required_data", "is_possible_to_fetch",
         "fetch_data_sample", "not_enough_data", "make_tech_spec",
         "is_fullstack", "make_api_spec", "generate_backend", "verify_backend",
         "generate_frontend", "verify_frontend", "run_app", "verify_fullstack",
@@ -800,6 +801,28 @@ def test_tech_spec_instruction_drops_the_no_restate_rule_without_a_prd():
     assert "Implementation notes" in instruction
 
 
+def test_tech_spec_instruction_names_the_user_language_and_keeps_headings():
+    """spec.md is written in the user's language, but `## Backend` is read
+    back by name (`engine._declared_api_paths`), so headings stay as listed."""
+    instruction = prompts.build_tech_spec_instruction(
+        _state(artifact_type="fullstack-stateless-app", user_language="Russian")
+    )
+    assert "Write the prose in Russian" in instruction
+    assert (
+        "`## Insights`, `## Implementation notes` and `## Backend` exactly as "
+        "written, in English"
+    ) in instruction
+    html = prompts.build_tech_spec_instruction(
+        _state(artifact_type="html-app", is_fullstack=False, user_language="Russian")
+    )
+    assert "`## Insights` and `## Implementation notes` exactly as written" in html
+
+
+def test_tech_spec_instruction_falls_back_without_a_language():
+    instruction = prompts.build_tech_spec_instruction(SimpleNamespace())
+    assert "Write the prose in English" in instruction
+
+
 def test_tech_spec_instruction_adds_a_backend_section_for_fullstack():
     """Fullstack specs feed the API design: they get a `## Backend` section
     on top of the shared rules, not a licence to retell the PRD."""
@@ -1040,8 +1063,12 @@ def test_html_prompt_states_each_rule_once():
     assert "NOT part of the job" in s
 
 
-def test_html_prompt_pins_ui_language_to_the_prd():
-    assert "language of the PRD" in _html_prompt()
+def test_html_prompt_names_the_ui_language():
+    """Named, not "the language of the PRD": a step left to infer the
+    language is where an English run turned Russian."""
+    s = _html_prompt()
+    assert "Write the UI text in English unless the PRD or the brief asks" in s
+    assert "language of the PRD" not in s
 
 
 def test_html_prompt_quotes_the_markers_and_the_size_from_the_constants():
@@ -1116,7 +1143,7 @@ def test_fullstack_prompt_names_its_input_sections_and_the_api_spec():
         prompts.PRD_SECTION_FOOTER,
     ):
         assert heading in s, heading
-    assert "language of the PRD" in s
+    assert "Write the UI text in English unless the PRD or the brief asks" in s
     # The two fullstack-only verifier failures are announced as such.
     assert 'name="api-base"' in s
     assert "fails the step" in s
@@ -1132,3 +1159,77 @@ def test_fullstack_prompt_and_kickoff_do_not_invite_a_data_step():
     assert "inspect a data sample" not in kickoff
     assert "follow the workflow from your instructions" in kickoff
     assert kickoff.index("## API Specification") < kickoff.index("follow the workflow")
+
+
+def _slug_catalog(*slugs: str) -> SimpleNamespace:
+    """A `DatasourceCatalog` stand-in: the slugs and the rendered section."""
+    rendered = DATASOURCES_HEADER + "\n" + "\n".join(f"- {s} (REST API)" for s in slugs)
+    return SimpleNamespace(
+        connections=tuple(SimpleNamespace(slug=s) for s in slugs),
+        render=lambda slugs=None: rendered,
+    )
+
+
+def _data_state(**kw):
+    base = dict(
+        artifact_type="html-app", is_fullstack=False,
+        datasource_catalog=_slug_catalog("rest-gw"),
+        public_sources="## Public data sources\n- open-meteo",
+        scratchpads_context="## Scratchpads already in this session\n- main (3 cells)",
+        known_data="site,lat\nToronto,43.7",
+    )
+    base.update(kw)
+    return _state(**base)
+
+
+def test_the_data_decisions_see_connections_public_sources_pads_and_known_data():
+    st = _data_state()
+    for _, user in (
+        prompts.build_required_data_prompt(st),
+        prompts.build_can_fetch_prompt(st, "- sites"),
+    ):
+        assert "- rest-gw (REST API)" in user
+        assert "open-meteo" in user
+        assert "main (3 cells)" in user
+        assert "Toronto,43.7" in user
+
+
+def test_the_data_decisions_say_so_when_nothing_is_connected():
+    _, user = prompts.build_can_fetch_prompt(_data_state(datasource_catalog=None), "- sites")
+    assert f"{DATASOURCES_HEADER}\n(none)" in user
+
+
+def test_define_may_answer_that_nothing_is_missing_but_not_for_a_description():
+    system, _ = prompts.build_required_data_prompt(_data_state())
+    assert "Return an empty `items` list when nothing is missing" in system
+    assert "without the values is not the data" in system
+
+
+def test_can_fetch_counts_a_scratchpad_as_a_source():
+    system, _ = prompts.build_can_fetch_prompt(_data_state(), "- sites")
+    assert "connection, public source or scratchpad" in system
+    assert "NOT possible only when none of them can" in system
+
+
+def test_the_fetch_kickoff_carries_the_full_list_and_the_pads():
+    required = "- sites — from rest-gw /sites (" + "needed for the map " * 30 + ")"
+    kickoff = prompts.build_fetch_data_kickoff(_data_state(), required)
+    assert f"## Data to fetch in this step\n{required}" in kickoff
+    assert "## Scratchpads already in this session\n- main (3 cells)" in kickoff
+    bare = prompts.build_fetch_data_kickoff(_data_state(scratchpads_context=""))
+    assert "## Data to fetch in this step" not in bare
+    assert "## Scratchpads already in this session" not in bare
+
+
+def test_the_fetch_kickoff_carries_long_known_data_whole():
+    rows = "\n".join(f"site-{i},{i}.0" for i in range(2000))
+    kickoff = prompts.build_fetch_data_kickoff(_data_state(known_data=rows))
+    assert rows in kickoff
+    assert "(truncated" not in kickoff
+
+
+def test_the_graph_shows_the_forced_fetch_and_the_loop_back():
+    g = prompts.FSM_DIGRAPH
+    assert 'is_possible_to_fetch -> fetch_data_sample    [label="no, once, when connections exist"]' in g
+    assert "fetch_data_sample    -> define_required_data" in g
+    assert 'fetch_data_sample    -> not_enough_data      [label="iterations exhausted"]' in g

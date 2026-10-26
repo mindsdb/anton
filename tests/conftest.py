@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 import os
 import sys
@@ -129,6 +130,12 @@ os.environ["ANTON_ANALYTICS_ENABLED"] = "false"
 # emitted nothing. Costs no coverage — the full suite passes unchanged.
 os.environ["ANTON_ANALYTICS_URL"] = ""
 os.environ["ANTON_POSTHOG_KEY"] = ""
+#
+# The live-app slot settings belong to a host deployment. A shell that exports
+# them would turn live apps on for tests that expect them off; the tests that
+# need them set them with monkeypatch.
+for _name in ("ANTON_LIVE_APP_SLOTS", "ANTON_LIVE_APP_CONNECTIONS_FILE", "ANTON_LIVE_APP_ADDRESS"):
+    os.environ.pop(_name, None)
 
 @functools.cache
 def _landlock_abi() -> int:
@@ -149,12 +156,36 @@ def _landlock_required() -> bool:
     return sys.platform.startswith("linux") and os.environ.get("GITHUB_ACTIONS") == "true"
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    group = parser.getgroup("CI shards")
+    group.addoption("--shard-index", type=int, default=None, help="Zero-based CI shard index")
+    group.addoption("--shard-count", type=int, default=None, help="Number of isolated CI shards")
+
+
 def pytest_configure(config) -> None:
+    index, count = config.getoption("shard_index"), config.getoption("shard_count")
+    if (index is None) != (count is None):
+        raise pytest.UsageError("--shard-index and --shard-count must be supplied together")
+    if count is not None and (count < 1 or not 0 <= index < count):
+        raise pytest.UsageError("Shards require --shard-count > 0 and 0 <= --shard-index < --shard-count")
     config.addinivalue_line(
         "markers",
         "landlock: locks a process with real Landlock; skipped without Landlock, failed instead on Linux "
         "under GitHub Actions or with LANDLOCK_REQUIRED=1",
     )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    index, count = config.getoption("shard_index"), config.getoption("shard_count")
+    if count is None:
+        return
+    selected, deselected = [], []
+    for item in items:
+        module = item.path.relative_to(config.rootpath).as_posix()
+        shard = int(hashlib.sha256(module.encode()).hexdigest(), 16) % count
+        (selected if shard == index else deselected).append(item)
+    items[:] = selected
+    config.hook.pytest_deselected(items=deselected)
 
 
 def pytest_report_header(config) -> str:
