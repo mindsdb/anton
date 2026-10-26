@@ -36,6 +36,7 @@ from .provider import (
     ToolCall,
     TransientProviderError,
     Usage,
+    call_effort,
     classify_404,
     classify_content_rejection,
     classify_markup_bad_request,
@@ -1260,7 +1261,7 @@ class OpenAIProvider(LLMProvider):
             messages=oai_messages,
             max_tokens=max_tokens,
         )
-        effort = current_effort(reasoning_effort or self._reasoning_effort)
+        effort = current_effort(call_effort(reasoning_effort, self._reasoning_effort))
         if effort:
             kwargs["reasoning_effort"] = effort
         merged_tools: list[dict] = []
@@ -1384,7 +1385,7 @@ class OpenAIProvider(LLMProvider):
             max_tokens=max_tokens,
             stream=True,
         )
-        effort = current_effort(reasoning_effort or self._reasoning_effort)
+        effort = current_effort(call_effort(reasoning_effort, self._reasoning_effort))
         if effort:
             kwargs["reasoning_effort"] = effort
         merged_tools: list[dict] = []
@@ -1682,7 +1683,7 @@ class OpenAIProvider(LLMProvider):
             kwargs["input"] = _shared_prompt_input(static, SESSION_CONTEXT_MARKER + session) + responses_input
         elif system:
             kwargs["instructions"] = system
-        effort = current_effort(reasoning_effort or self._reasoning_effort)
+        effort = current_effort(call_effort(reasoning_effort, self._reasoning_effort))
         if effort:
             # "summary": "auto" asks the Responses API to also stream a
             # natural-language summary of the reasoning itself (as

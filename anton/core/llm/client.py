@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar
 
 from .effort import (
@@ -27,6 +29,56 @@ if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
 
 _T = TypeVar("_T")
+
+
+@dataclass(frozen=True)
+class ModelRoute:
+    """The model and effort that replace a role's own for every call inside `model_route`.
+
+    The calls keep their role's provider, so they reach the same endpoint.
+    ``effort`` None sends no effort at all, not the role provider's own.
+    """
+
+    model: str
+    effort: str | None = None
+
+
+# Set by `model_route`. A ContextVar, so every call a pipeline makes, in the
+# tasks it gathers too, asks for the route's model.
+_MODEL_ROUTE: ContextVar[ModelRoute | None] = ContextVar("anton_model_route", default=None)
+
+
+@contextlib.contextmanager
+def model_route(route: ModelRoute | None) -> Iterator[None]:
+    """Send every planning, coding and structured call inside to ``route``'s
+    model and effort, whichever `LLMClient` makes it. None changes nothing.
+
+    Enter it in a plain coroutine or around a single ``await``, never across a
+    ``yield``: an async generator has no context of its own, so the route would
+    leak to whatever consumes it.
+    """
+    if route is None:
+        yield
+        return
+    token = _MODEL_ROUTE.set(route)
+    try:
+        yield
+    finally:
+        _MODEL_ROUTE.reset(token)
+
+
+def routed_model() -> str | None:
+    """The model `model_route` sends calls to here, or None outside one."""
+    route = _MODEL_ROUTE.get()
+    return route.model if route is not None else None
+
+
+def asked_model(llm: object, role: str) -> str | None:
+    """The model a call of ``role`` through ``llm`` asks for here: the route's
+    inside `model_route`, else the role's own. None for a host client or a test
+    double that names no model."""
+    model = routed_model() or getattr(llm, "coding_model" if role == "coding" else "planning_model", None)
+    return model if isinstance(model, str) else None
 
 
 class _ProviderAuthConfirmation:
@@ -184,6 +236,29 @@ class LLMClient:
         """
         return current_turn_tracker()
 
+    @staticmethod
+    def _effective_effort(provider: LLMProvider) -> str | None:
+        """The effort a call sends: a `model_route`'s inside one, else the provider's own."""
+        route = _MODEL_ROUTE.get()
+        return route.effort if route is not None else getattr(provider, "reasoning_effort", None)
+
+    @staticmethod
+    def _effort_kwargs(provider: LLMProvider) -> dict:
+        """``reasoning_effort=`` for the provider call, only when a `model_route`
+        changed it. A route with no effort over a provider that has one sends
+        ``""``, so the provider sends none (`call_effort`)."""
+        route = _MODEL_ROUTE.get()
+        own = getattr(provider, "reasoning_effort", None)
+        if route is None or route.effort == own:
+            return {}
+        return {"reasoning_effort": route.effort if route.effort is not None else ""}
+
+    def _record_served_unless_routed(self, response) -> None:
+        """`_record_served`, except for a call `model_route` sent to another
+        model: the identity line names the agent's model, not the builder's."""
+        if _MODEL_ROUTE.get() is None:
+            self._record_served(response)
+
     def stream_budget(
         self, role: str = "planning", *, by_effort: Mapping[str, int] = STREAM_BUDGET_BY_EFFORT
     ) -> int:
@@ -196,7 +271,7 @@ class LLMClient:
         provider = self._coding_provider if role == "coding" else self._planning_provider
         if getattr(provider, "accepts_large_output", False) is not True:
             return self._max_tokens
-        return stream_budget_for(getattr(provider, "reasoning_effort", None), self._max_tokens, by_effort)
+        return stream_budget_for(self._effective_effort(provider), self._max_tokens, by_effort)
 
     async def aclose(self) -> None:
         """Close provider transports. The three roles may share objects."""
@@ -392,24 +467,27 @@ class LLMClient:
     ) -> LLMResponse:
         listener = self.usage_listener
         budget = max_tokens or self._max_tokens
+        effort_kw = self._effort_kwargs(self._planning_provider)
+        model = asked_model(self, "planning")
         response = await self._guarded_call(
             operation=lambda: _call_with_auth_confirmation(
                 lambda: self._planning_provider.complete(
-                    model=self._planning_model,
+                    model=model,
                     system=system,
                     messages=messages,
                     tools=tools,
                     max_tokens=budget,
                     native_web_tools=native_web_tools,
+                    **effort_kw,
                 ),
                 role="planning",
             ),
             role="planning",
-            model=self._planning_model,
+            model=model,
             max_tokens=budget,
         )
-        self._notify_usage("planning", self._planning_model, response.usage, listener)
-        self._record_served(response)
+        self._notify_usage("planning", model, response.usage, listener)
+        self._record_served_unless_routed(response)
         return response
 
     async def plan_stream(
@@ -425,32 +503,36 @@ class LLMClient:
         """``wait_note`` leads the host's still-working line while this call waits."""
         listener = self.usage_listener
         budget = max_tokens or self.stream_budget("planning")
+        effort_kw = self._effort_kwargs(self._planning_provider)
+        # Read once, as the effort is: the whole stream asks for one model.
+        model = asked_model(self, "planning")
+        routed = _MODEL_ROUTE.get() is not None
         # aclosing: a caller that stops early closes the call now, not when
         # the abandoned generator is finalized.
         events = self._guarded_stream(
             make_stream=lambda: _stream_with_auth_confirmation(
                 lambda: self._planning_provider.stream(
-                    model=self._planning_model,
+                    model=model,
                     system=system,
                     messages=messages,
                     tools=tools,
                     max_tokens=budget,
                     native_web_tools=native_web_tools,
+                    **effort_kw,
                 ),
                 role="planning",
             ),
             role="planning",
-            model=self._planning_model,
+            model=model,
             max_tokens=budget,
             note=wait_note,
         )
         async with contextlib.aclosing(events):
             async for event in events:
                 if isinstance(event, StreamComplete):
-                    self._notify_usage(
-                        "planning", self._planning_model, event.response.usage, listener
-                    )
-                    self._record_served(event.response)
+                    self._notify_usage("planning", model, event.response.usage, listener)
+                    if not routed:
+                        self._record_served(event.response)
                 yield event
 
     def _record_served(self, response) -> None:
@@ -521,23 +603,26 @@ class LLMClient:
     ) -> LLMResponse:
         listener = self.usage_listener
         budget = max_tokens or self._max_tokens
+        effort_kw = self._effort_kwargs(self._coding_provider)
+        model = asked_model(self, "coding")
         response = await self._guarded_call(
             operation=lambda: _call_with_auth_confirmation(
                 lambda: self._coding_provider.complete(
-                    model=self._coding_model,
+                    model=model,
                     system=system,
                     messages=messages,
                     tools=tools,
                     max_tokens=budget,
                     native_web_tools=native_web_tools,
+                    **effort_kw,
                 ),
                 role="coding",
             ),
             role="coding",
-            model=self._coding_model,
+            model=model,
             max_tokens=budget,
         )
-        self._notify_usage("coding", self._coding_model, response.usage, listener)
+        self._notify_usage("coding", model, response.usage, listener)
         return response
 
     async def code_stream(
@@ -553,29 +638,30 @@ class LLMClient:
         """``wait_note`` leads the host's still-working line while this call waits."""
         listener = self.usage_listener
         budget = max_tokens or self.stream_budget("coding")
+        effort_kw = self._effort_kwargs(self._coding_provider)
+        model = asked_model(self, "coding")
         events = self._guarded_stream(
             make_stream=lambda: _stream_with_auth_confirmation(
                 lambda: self._coding_provider.stream(
-                    model=self._coding_model,
+                    model=model,
                     system=system,
                     messages=messages,
                     tools=tools,
                     max_tokens=budget,
                     native_web_tools=native_web_tools,
+                    **effort_kw,
                 ),
                 role="coding",
             ),
             role="coding",
-            model=self._coding_model,
+            model=model,
             max_tokens=budget,
             note=wait_note,
         )
         async with contextlib.aclosing(events):
             async for event in events:
                 if isinstance(event, StreamComplete):
-                    self._notify_usage(
-                        "coding", self._coding_model, event.response.usage, listener
-                    )
+                    self._notify_usage("coding", model, event.response.usage, listener)
                 yield event
 
     async def summarize(
@@ -640,6 +726,7 @@ class LLMClient:
         tool, validator_class, is_list = build_structured_tool(schema_class)
 
         budget = max_tokens or self._max_tokens
+        effort_kw = self._effort_kwargs(provider)
 
         listener = self.usage_listener
 
@@ -653,6 +740,7 @@ class LLMClient:
                         tools=[tool],
                         tool_choice=tool_choice,
                         max_tokens=budget,
+                        **effort_kw,
                     ),
                     role=role,
                 ),
@@ -759,7 +847,7 @@ class LLMClient:
         return await self._generate_object_with(
             schema_class,
             provider=self._planning_provider,
-            model=self._planning_model,
+            model=asked_model(self, "planning"),
             role="planning",
             system=system,
             messages=messages,
@@ -786,7 +874,7 @@ class LLMClient:
         return await self._generate_object_with(
             schema_class,
             provider=self._coding_provider,
-            model=self._coding_model,
+            model=asked_model(self, "coding"),
             role="coding",
             system=system,
             messages=messages,

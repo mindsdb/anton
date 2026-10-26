@@ -44,7 +44,7 @@ import httpx2 as httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from anton.core.artifacts.store import BACKEND_LOG_FILENAME
-from anton.core.backends.sandbox import cell_sandbox_of
+from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
 from anton.core.utils.scratchpad import RefusalCause, refusal_why
 from anton.utils.datasources import scrub_output
 from anton.utils.nofollow import read_bytes_nofollow, write_text_nofollow
@@ -136,6 +136,14 @@ class SlotUnavailable(Exception):
 def live_apps_enabled() -> bool:
     """Whether this deployment runs live apps in app slots: `ANTON_LIVE_APP_SLOTS` is set and not blank."""
     return bool(os.environ.get(SLOTS_ENV_VAR, "").strip())
+
+
+def fullstack_offered(cell_sandbox: CellSandbox | None) -> bool:
+    """Whether the agent is offered full-stack apps: its code runs without a
+    sandbox policy, or with one and live apps on. Sandboxed without live apps,
+    nothing starts an app backend, so the tools, the prompt and
+    `generate_artifact` offer html-apps only."""
+    return cell_sandbox is None or live_apps_enabled()
 
 
 def live_app_slot_addresses() -> tuple[str, ...]:

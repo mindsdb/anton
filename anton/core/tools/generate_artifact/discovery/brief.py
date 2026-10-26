@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
+from anton.core.llm.client import asked_model
+
 from . import sub_tools
 from ..state import known_data_usable
 from .notes import known_data_sources, source_key, string_list
@@ -246,6 +248,7 @@ async def classify_feedback(state: PrdState) -> str:
     state.trace_log.llm_call(
         node="classify_feedback", method="generate_object", system=system,
         messages=messages, value=result.model_dump(),
+        model=asked_model(state.session._llm, "planning"),
     )
     state.trace_log.verdict(node="classify_feedback", schema="FeedbackVerdict", value=result.model_dump())
     return result.route if result.route in ("revise_brief", "back_to_gathering") else "revise_brief"
@@ -266,7 +269,6 @@ async def redraw_brief(state: PrdState) -> None:
     bounded: the artifact is rebuilt from the sources already known, which is
     the same result the correction would have had without the new source.
     """
-    from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
     from anton.core.llm.structured import usable_tool_call
 
     brief, response = await sub_tools.plan_step(
@@ -298,7 +300,7 @@ async def redraw_brief(state: PrdState) -> None:
     if declared is not None:
         previous = set(state.declared_sources)
         # Buildable types only, same rule as the gathering step.
-        if new_type in GENERATOR_ARTIFACT_TYPES:
+        if new_type in state.buildable_types:
             state.final_artifact_type = new_type
         state.declared_sources = declared
         # Anything the correction introduced has nothing executed against it,

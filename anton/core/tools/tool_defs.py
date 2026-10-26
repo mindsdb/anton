@@ -14,6 +14,7 @@ from anton.core.tools.tool_handlers import (
     handle_update_artifact_metadata,
 )
 from anton.core.artifacts.listing import FIELDS as ARTIFACT_LIST_FIELDS
+from anton.core.llm.prompts import cut_spans
 from anton.core.utils.scratchpad import SCRATCHPAD_ACTIONS
 from anton.core.tools.text_file import DEFAULT_LINE_COUNT, MAX_OUTPUT_CHARS
 
@@ -145,7 +146,14 @@ MEMORIZE_TOOL = ToolDef(
         "- never: Something to never do ('Never use time.sleep() in scratchpad')\n"
         "- when: Conditional rule ('If paginated API → use async + progress()')\n"
         "- lesson: Factual knowledge ('CoinGecko rate-limits at 50/min')\n"
-        "- profile: Fact about the user ('Name: Jorge', 'Prefers dark mode')"
+        "- profile: Fact about who the user is ('Name: Jorge', 'Timezone: PST'). "
+        "An instruction on how to answer or work is a rule, not a profile entry.\n\n"
+        "Scope: 'project' by default. A rule or preference the user gives in this "
+        "conversation is 'project', even when it says 'always': 'Always show "
+        "amounts in EUR' is 'project'. Choose 'global' only when the user says it "
+        "applies to all their projects or everywhere ('In every project, answer in "
+        "English'), or for general knowledge that holds in any project, such as a "
+        "library quirk. A profile entry always goes to global."
     ),
     input_schema={
         "type": "object",
@@ -166,6 +174,11 @@ MEMORIZE_TOOL = ToolDef(
                         "scope": {
                             "type": "string",
                             "enum": ["global", "project"],
+                            "description": (
+                                "'project' unless the user says the entry applies to "
+                                "all their projects, or it is general knowledge that "
+                                "holds in any project; the tool's Scope note says when."
+                            ),
                         },
                         "topic": {
                             "type": "string",
@@ -490,12 +503,16 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "SAME `user_request` and `user_language`.\n"
         "- `cancelled` — the user declined. Do not build the artifact by "
         "hand.\n"
+        "- `browser_check_failed` — the page passed the static checks but "
+        "failed its browser check; it is on disk. Repair it yourself in a "
+        "scratchpad cell, as its `instruction` says.\n"
         "- `stopped_over_budget` — the turn ran out of tokens and the "
         "pipeline stopped cleanly; what it finished is on disk.\n\n"
         "Every status but `generated` carries an `instruction` saying what to "
         "do next — follow it. On a technical failure, report it to the user "
         "and ask how to proceed; NEVER fall back to building the artifact "
-        "yourself."
+        "yourself. The one exception is `browser_check_failed`: repair that "
+        "page in place, never rebuild it."
     ),
     input_schema={
         "type": "object",
@@ -602,6 +619,73 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "Do NOT call `launch_backend` for a fullstack artifact built this "
         "way — the tool launches and health-checks it itself."
     ),
+)
+
+
+# `create_artifact`, `generate_artifact` and `update_artifact` where nothing
+# starts an app backend (`live_app_slots.fullstack_offered` is False): html-app
+# is the one web type, and no text offers a fullstack app or `launch_backend`.
+STATIC_CREATE_ARTIFACT_TOOL = replace(
+    CREATE_ARTIFACT_TOOL,
+    description=cut_spans(
+        CREATE_ARTIFACT_TOOL.description,
+        (" image, fullstack app,", " etc.)", " image,"),
+        (" (html-app, fullstack-stateless-app,", ": a report the user", " (html-app)"),
+        (" for an html-app or `recall_skill(\"build-fullstack-backend\")`", " before writing", ""),
+        (
+            "- fullstack-stateless-app: fullstack web app",
+            "\n\nPass `primary`",
+            "There is no fullstack type: this deployment starts no app backends, so "
+            "an interactive app or demo is an html-app.",
+        ),
+        (" `\"static/index.html\"` for a fullstack app,", " `\"report.pdf\"`", ""),
+    ),
+    input_schema={
+        **CREATE_ARTIFACT_TOOL.input_schema,
+        "properties": {
+            **CREATE_ARTIFACT_TOOL.input_schema["properties"],
+            "type": {
+                "type": "string",
+                "enum": [
+                    t for t in CREATE_ARTIFACT_TOOL.input_schema["properties"]["type"]["enum"]
+                    if not t.startswith("fullstack-")
+                ],
+            },
+        },
+    },
+)
+
+STATIC_GENERATE_ARTIFACT_TOOL = replace(
+    GENERATE_ARTIFACT_TOOL,
+    description=cut_spans(
+        GENERATE_ARTIFACT_TOOL.description,
+        (" fullstack apps, and dashboards", " or reports whose", " dashboards"),
+        (", `fullstack-stateless-app`, or", ").", ""),
+        (", and for fullstack apps a launch", ". There is no separate PRD", ""),
+        (", and you do NOT call `launch_backend` afterwards", ".", ""),
+    ),
+    prompt=cut_spans(
+        GENERATE_ARTIFACT_TOOL.prompt,
+        (" and (for fullstack) a launch and health check", ". Use it for", ""),
+        (" fullstack apps and for web artifacts", " whose requirements", " web artifacts"),
+        (" and pick the type (one of html-app,", ".\n  2. Call", " with type `html-app`"),
+        ("\nDo NOT call `launch_backend` for a fullstack", None, ""),
+    ),
+)
+
+STATIC_UPDATE_ARTIFACT_METADATA_TOOL = replace(
+    UPDATE_ARTIFACT_METADATA_TOOL,
+    description=cut_spans(
+        UPDATE_ARTIFACT_METADATA_TOOL.description,
+        ("- `port`: port the backend process", "- `datasources`", ""),
+    ),
+    input_schema={
+        **UPDATE_ARTIFACT_METADATA_TOOL.input_schema,
+        "properties": {
+            name: spec for name, spec in UPDATE_ARTIFACT_METADATA_TOOL.input_schema["properties"].items()
+            if name != "port"
+        },
+    },
 )
 
 

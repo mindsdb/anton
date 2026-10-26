@@ -91,6 +91,17 @@ def test_core_requirements_accept_extras_and_specifiers():
     assert r.ok, r.errors
 
 
+@pytest.mark.parametrize("reqs", ["fastapi\nuvicorn\n", ""])
+def test_a_live_apps_requirements_need_no_core_package(reqs):
+    """An app slot installs nothing, so a file without `mangum` (what the model
+    wrote on the live-apps VM) or with no line at all launches. Off the live
+    path the same file still fails, since every other launch installs it."""
+    live, _ = evaluate_backend(GOOD_INTROSPECTION, GOOD_SOURCE, reqs, live_app=True)
+    assert live.ok, live.errors
+    other, _ = evaluate_backend(GOOD_INTROSPECTION, GOOD_SOURCE, reqs)
+    assert any("requirements.txt must list `mangum`" in e for e in other.errors)
+
+
 # ── STATE contract (fullstack-stateful-app / fullstack-stateless-app) ────────
 
 from anton.core.artifacts.backend_launcher import parse_requirements
@@ -366,6 +377,23 @@ async def test_verify_backend_happy_path(tmp_path: Path):
     )
     assert result.ok, result.errors
     assert ds == []
+
+
+@_needs_asgi
+async def test_a_live_apps_backend_that_imports_mangum_unlisted_passes(tmp_path: Path):
+    """The live-apps VM's failing build: `backend.py` imports `mangum` and
+    `requirements.txt` lists only `fastapi` and `uvicorn`. The live check
+    imports it from what is installed and passes; off the live path it fails."""
+    (tmp_path / "backend.py").write_text(BACKEND_OK)
+    (tmp_path / "requirements.txt").write_text("fastapi\nuvicorn\n")
+    live, _ = await verify_backend(
+        scratchpad_pool=_FakePool(), slug="x", artifact_path=tmp_path, live_app=True,
+    )
+    assert live.ok, live.errors
+    other, _ = await verify_backend(
+        scratchpad_pool=_FakePool(), slug="x", artifact_path=tmp_path,
+    )
+    assert other.errors == ["requirements.txt must list `mangum`. Parsed package names: fastapi, uvicorn"]
 
 
 @_needs_asgi

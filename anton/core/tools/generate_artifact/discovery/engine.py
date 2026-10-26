@@ -12,7 +12,6 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
-from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
 from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS, scratchpad_action
 
 from .. import sub_tools as protocol
@@ -71,8 +70,10 @@ def _complete_gathering(state, inp):
     # `document` or `dataset` is valid metadata but has no
     # generator, and settling on one would build a fullstack
     # app for it and lock the slug out of any repeat call.
+    # Where nothing starts an app backend, html-app is the only
+    # buildable type (`GenState.buildable_types`).
     state.final_artifact_type = (
-        claimed_type if claimed_type in GENERATOR_ARTIFACT_TYPES
+        claimed_type if claimed_type in state.buildable_types
         else state.artifact_type
     )
     state.gathering_notes = render_gathering_notes(inp)

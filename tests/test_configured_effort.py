@@ -19,7 +19,7 @@ import pytest
 from anton.core.artifacts import ArtifactStore
 from anton.core.llm.client import LLMClient
 from anton.core.llm.provider import LLMProvider, LLMResponse, StreamComplete, StreamTextDelta, ToolCall, Usage
-from anton.core.session import _VERIFIER_TOKEN_BUDGETS, ChatSession, ChatSessionConfig
+from anton.core.session import ChatSession, ChatSessionConfig
 from anton.core.tools.generate_artifact import engine
 from anton.core.tools.tool_defs import ToolDef
 
@@ -101,8 +101,8 @@ async def _drain(session: ChatSession, message: str) -> list:
     return [event async for event in session.turn_stream(message)]
 
 
-@pytest.mark.parametrize("effort", ["max", "xhigh", "medium", None])
-async def test_the_completion_check_sends_the_configured_effort(effort, monkeypatch):
+async def _checked_turn(effort: str | None, completes: list, monkeypatch) -> _EffortProvider:
+    """One turn with one tool round, so the completion check runs, over a provider set to ``effort``."""
     # One tool round is enough to reach the completion check, and the LLM check decides alone.
     monkeypatch.setenv("ANTON_VERIFY_MIN_TOOL_ROUNDS", "1")
     monkeypatch.setenv("ANTON_VERIFIER_JEV", "off")
@@ -112,7 +112,7 @@ async def test_the_completion_check_sends_the_configured_effort(effort, monkeypa
             _stream_of(_tool_response(ToolCall(id="call_1", name=PROBE_TOOL, input={}))),
             _stream_of(_text_response("done")),
         ],
-        completes=[_answer(_verdict_response())],
+        completes=completes,
     )
     client = LLMClient(
         planning_provider=provider, planning_model="planner",
@@ -133,10 +133,31 @@ async def test_the_completion_check_sends_the_configured_effort(effort, monkeypa
         await _drain(session, "do it")
     finally:
         await session.close()
+    return provider
+
+
+@pytest.mark.parametrize(("effort", "budget"), [("max", 4096), ("xhigh", 2048), ("medium", 2048), (None, 2048)])
+async def test_the_completion_check_sends_the_configured_effort(effort, budget, monkeypatch):
+    provider = await _checked_turn(effort, [_answer(_verdict_response())], monkeypatch)
 
     checks = [call for call in provider.sent if call.kind == "complete"]
-    assert [call.max_tokens for call in checks] == [_VERIFIER_TOKEN_BUDGETS[0]]
+    assert [call.max_tokens for call in checks] == [budget]
     assert {call.effort for call in provider.sent} == {effort}
+
+
+@pytest.mark.parametrize(("effort", "budgets"), [("max", [4096, 8192]), ("xhigh", [2048, 4096]), (None, [2048, 4096])])
+async def test_a_cut_verdict_retries_once_with_more_room_at_any_effort(effort, budgets, monkeypatch):
+    """At max the model thinks before it calls the verdict tool: replayed through MindsHub on
+    2026-10-24, 2048 was cut every time on `sonnet-5-5` and `opus-5-5`, and 4096 two times in three
+    on `opus-5-5`. So max starts at 4096 and retries at 8192, which a non-streamed call still
+    finishes inside the gateway's 110 s."""
+    cut = LLMResponse(content="", tool_calls=[], usage=Usage(input_tokens=10, output_tokens=budgets[0]),
+                      stop_reason="length")
+    provider = await _checked_turn(effort, [_answer(cut), _answer(_verdict_response())], monkeypatch)
+
+    checks = [call for call in provider.sent if call.kind == "complete"]
+    assert [call.max_tokens for call in checks] == budgets
+    assert {call.effort for call in checks} == {effort}
 
 
 @pytest.mark.parametrize(
