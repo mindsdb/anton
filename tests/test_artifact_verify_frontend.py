@@ -43,6 +43,13 @@ def test_good_fullstack_frontend_passes():
     assert r.ok, r.errors
 
 
+def test_markup_shown_as_text_is_error():
+    html = GOOD.replace('<div id="kpi-revenue"></div>', '<div id="kpi-revenue">&lt;svg viewBox="0 0 9 9"&gt;</div>')
+    r = verify_frontend(html, is_fullstack=True)
+    assert not r.ok
+    assert any("HTML tags as text" in e and "<svg viewBox" in e for e in r.errors)
+
+
 def test_missing_viewport_is_error():
     html = GOOD.replace('<meta name="viewport" content="width=device-width, initial-scale=1.0">', "")
     r = verify_frontend(html, is_fullstack=True)

@@ -225,11 +225,22 @@ VISUAL DESIGN (for every HTML file you produce):
   - Supporting charts below, each with a subtitle explaining what it reveals.
   - Use ECharts `markLine` for thresholds, `markPoint` for outliers,
     `markArea` for highlighted regions.
-- Responsive:
-  - Multi-card grid: `grid-template-columns: repeat(auto-fit, minmax(360px, 1fr))`
+- Responsive (the page must read well on a 390 px phone, not only fit it):
+  - Multi-card grid: `grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr))`
   - Chart containers: `width: 100%; height: min(420px, 60vh)`
   - Register `window.addEventListener('resize', () => chart.resize())` on every ECharts instance.
-  - Tables wrapped in `<div style="overflow-x: auto;">` — never fixed widths.
+  - A table of more than 4 columns shows each row as a card below 640 px:
+    every `td` carries `data-label="<column name>"`, and a media query hides
+    the `thead` and sets `display: block` on `table`, `tbody`, `tr` and `td`
+    (keep `tr[hidden]` hidden), with `td::before { content: attr(data-label) }`.
+    A narrower table sits in `<div style="overflow-x: auto;">`. Never fixed table widths.
+  - Numbers, ids and dates never break inside a value: `white-space: nowrap` on
+    those cells. Never `overflow-wrap: anywhere` or `word-break: break-all` on
+    table cells: they squeeze every column to a letter or two.
+  - A map fits its projection to the plotted points (with a margin), not the
+    whole world, when they sit in one region. At phone width its labels and
+    legend stay inside the view and no smaller than 11 px: shorten or drop
+    labels that would overlap.
 - SECURITY: NEVER embed API keys, tokens, passwords, or connection strings in HTML/JS.
   Credentials were already used server-side; serialise only the resulting data.\
 """
@@ -251,6 +262,8 @@ step and costs a regeneration, unless the item says it is only a warning:
 - The global name `window.__antonCommentsLayer` is never used; the host app
   reserves it.
 - Every opened `<script>` block must be closed with `</script>`.
+- No HTML tag shown as text: escaped markup such as `&lt;div&gt;` outside
+  `<pre>`, `<code>` or `<textarea>`.
 - No universal `* { ... !important }` rule.
 - Every `z-index` is 1000 or below.
 - Significant block containers (`div`, `section`, `table`, `main`,

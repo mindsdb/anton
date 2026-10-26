@@ -553,6 +553,7 @@ def _check_pages(
     comparisons: "dict[PageKey, Comparison]" = {}
     put_back: set[PageKey] = set()
     edited = frozenset(page.key(store) for page in pages if page.edited)
+    shown_as_text = _markup_shown_as_text(store, pages)
 
     def _repairs_left_after(page: _ChangedPage) -> int:
         """The repair cells PAGE has left this turn once this check is done.
@@ -601,6 +602,15 @@ def _check_pages(
     if render_check.configured_url() is None:
         for page in to_check:
             label = f"{page.slug}/{page.path.name}"
+            if page.key(store) in shown_as_text:
+                left = _repairs_left_after(page)
+                page_checks[page.key(store)] = "failed"
+                if left <= 0:
+                    messages.append(f"{label} — {_NO_REPAIRS_LEFT}")
+                    continue
+                messages.append(f"{label} — {shown_as_text[page.key(store)]}")
+                messages.append(f"{label} — {_repairs_left_line(left)}")
+                continue
             if cell_sandbox is not None:
                 messages.append(f"{label} — {_SANDBOX_BROWSER_SKIP}")
                 page_checks[page.key(store)] = "unverified"
@@ -664,7 +674,7 @@ def _check_pages(
             )
         left = _repairs_left_after(page)
         removed = _removed_views(failed_views.get(key, ()), outcome)
-        status: "RenderStatus" = "failed" if removed else outcome.status
+        status: "RenderStatus" = "failed" if removed or key in shown_as_text else outcome.status
         page_checks[key] = status
         failed = status == "failed"
         if failed:
@@ -712,7 +722,7 @@ def _check_pages(
                 )
             messages += _comparison_lines(label, _notes(key, comparison))
             continue
-        if outcome.status == "unverified":
+        if outcome.status == "unverified" and key not in shown_as_text:
             messages.append(f"{label} — not checked in a browser: {outcome.unverified_reason}")
             if page.key(store) in findings_listed_earlier:
                 # An earlier unverified check this turn already listed what
@@ -735,6 +745,8 @@ def _check_pages(
                     f"{render_check.view_coverage(views=removed).checked}. A repair fixes the code a "
                     "finding names and keeps every view: put them back"
                 ))
+            if key in shown_as_text:
+                lines.insert(0, shown_as_text[key])
         messages += [f"{label} — {line}" for line in lines]
         if more:
             messages.append(f"{label} — and {more} more distinct findings, not listed")
@@ -813,6 +825,27 @@ def lint_changed_artifact_files(
         failing=failing, repairs_used=repairs_used, failed_views=failed_views, turn_pages=turn_pages,
     )
     return replace(checked, messages=messages + checked.messages)
+
+
+def _markup_shown_as_text(store, pages: list[_ChangedPage]) -> dict[PageKey, str]:
+    """A finding for each page this cell wrote that shows HTML tags as text.
+    Escaped markup loads without an error, so no browser check fails such a page."""
+    from anton.core.artifacts import report_tools
+
+    found: dict[PageKey, str] = {}
+    for page in pages:
+        if not page.edited or page.size > _ARTIFACT_LINT_SIZE_CEILING:
+            continue
+        try:
+            shown = report_tools.shown_markup(page.path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        if shown:
+            found[page.key(store)] = (
+                f"the page shows HTML tags as text, so that markup does not render or run: {shown}. "
+                f"With report_tools, {report_tools.SHOWN_MARKUP_FIX}"
+            )
+    return found
 
 
 def record_page_checks(

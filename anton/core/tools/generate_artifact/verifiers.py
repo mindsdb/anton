@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 from anton.core.artifacts import html_lint, render_check
 from anton.core.artifacts.html_lint import lint_html, lint_url
 from anton.core.artifacts.render_check import RenderFinding
+from anton.core.artifacts.report_tools import shown_markup
 from anton.core.backends.sandbox import CellSandbox, SandboxedSpawn, cell_sandbox_of
 from anton.core.utils.scratchpad import install_call_failed
 from anton.utils.datasources import scrub_output
@@ -485,6 +486,15 @@ def verify_frontend(
     # `<script` with no closing `</script` anywhere.
     if "<script" in low and "</script" not in low:
         errors.append("Frontend opens a <script> block but never closes it with </script>.")
+
+    # 5c. Markup shown as text. Escaped tags load without an error, so the
+    #     browser check passes such a page.
+    shown = shown_markup(html)
+    if shown:
+        errors.append(
+            f"The page shows HTML tags as text, so that markup does not render or run: {shown}. "
+            "Escape only text values, never the page's own markup."
+        )
 
     # 6. Forbidden globals / CSS.
     if "__antonCommentsLayer" in html:

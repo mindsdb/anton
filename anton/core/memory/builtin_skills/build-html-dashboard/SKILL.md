@@ -137,7 +137,10 @@ Layout and composition:
 
 Responsive layout (critical — dashboards must work on phones too):
 - ALWAYS include `<meta name="viewport" content="width=device-width, initial-scale=1.0">` in `<head>`. Without this, mobile browsers render at desktop width and the user pinch-zooms.
-- Multi-card sections use `grid-template-columns: repeat(auto-fit, minmax(360px, 1fr))` (or 300px on dense layouts). This lets the browser reflow to single-column on narrow viewports without a media query — cards stack vertically instead of getting squashed into unreadable columns.
+- Multi-card sections use `grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr))` (or 300px on dense layouts; the `min()` keeps one card inside a 390 px phone). This lets the browser reflow to single-column on narrow viewports without a media query — cards stack vertically instead of getting squashed into unreadable columns.
 - Chart containers use `width: 100%` and `height: min(420px, 60vh)` (NOT fixed pixel widths). For each ECharts instance, register a window resize hook so it refits: `window.addEventListener('resize', () => myChart.resize());` — without this, rotating a phone or resizing the window leaves charts the wrong size.
-- Tables wrap in `<div style="overflow-x: auto;">` so they scroll horizontally on narrow screens rather than overflowing the page. Do NOT set fixed table widths.
+- A table of more than 4 columns shows each row as a card below 640 px: every `td` carries `data-label="<column name>"`, and a media query hides the `thead` and sets `display: block` on `table`, `tbody`, `tr` and `td` (keep `tr[hidden]` hidden), with `td::before { content: attr(data-label) }`. Squeezed into a phone, a wide table's columns end up a letter or two wide, and a sideways-scrolling one hides most of its columns.
+- A narrower table wraps in `<div style="overflow-x: auto;">`. Do NOT set fixed table widths.
+- Numbers, ids and dates never break inside a value: `white-space: nowrap` on those cells. Never `overflow-wrap: anywhere` or `word-break: break-all` on table cells.
+- A map fits its projection to the plotted points (with a margin), not the whole world, when they sit in one region. At phone width its labels and legend stay inside the view and no smaller than 11 px: shorten or drop labels that would overlap.
 - Default to one column on narrow viewports unless the user explicitly asks for a fixed multi-column layout (e.g. for a printable PDF).
