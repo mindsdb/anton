@@ -64,23 +64,23 @@ def deck(tmp_path: Path) -> Path:
 def test_no_office_configured_yields_none(monkeypatch, deck: Path):
     monkeypatch.delenv("ANTON_XLSX_LINT_OFFICE", raising=False)
     monkeypatch.setattr("shutil.which", lambda _name: None)
-    assert check_opens_via_office(deck) is None
+    assert check_opens_via_office(deck, cell_sandbox=None) is None
 
 
 def test_office_path_that_does_not_exist_yields_none(monkeypatch, deck: Path):
     monkeypatch.setenv("ANTON_XLSX_LINT_OFFICE", "/no/such/binary-xyz")
-    assert check_opens_via_office(deck) is None
+    assert check_opens_via_office(deck, cell_sandbox=None) is None
 
 
 def test_file_office_opens_has_no_findings(tmp_path: Path, monkeypatch, deck: Path):
     _fake_office(tmp_path, monkeypatch, _FAKE_OK)
-    assert check_opens_via_office(deck) == []
+    assert check_opens_via_office(deck, cell_sandbox=None) == []
 
 
 def test_file_office_refuses_is_a_finding(tmp_path: Path, monkeypatch, deck: Path):
     _fake_office(tmp_path, monkeypatch, _FAKE_REJECT)
 
-    findings = check_opens_via_office(deck)
+    findings = check_opens_via_office(deck, cell_sandbox=None)
 
     assert findings is not None and len(findings) == 1
     assert isinstance(findings[0], FileLoadFinding)
@@ -93,9 +93,9 @@ def test_timeout_yields_none(tmp_path: Path, monkeypatch, deck: Path):
     _fake_office(tmp_path, monkeypatch, _FAKE_HANG)
     monkeypatch.setattr(office_open_check, "_TIMEOUT_SECONDS", 1)
 
-    assert check_opens_via_office(deck) is None
+    assert check_opens_via_office(deck, cell_sandbox=None) is None
 
 
 @requires_office
 def test_real_office_opens_the_minimal_deck(deck: Path):
-    assert check_opens_via_office(deck) == []
+    assert check_opens_via_office(deck, cell_sandbox=None) == []

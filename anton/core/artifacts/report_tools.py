@@ -14,6 +14,11 @@ the caller computed; they do not calculate or check business values.
 
 They are imported from the installed package rather than copied into artifact
 folders, so a report made with one release opens and edits with the next.
+
+Block-level markup (sections, paragraphs, list items, table rows, chart bars)
+ends with a line break, so line-based tools can read and diff a page part by
+part. Line breaks go only between elements where the browser does not show
+whitespace, never inside text.
 """
 
 from __future__ import annotations
@@ -66,8 +71,12 @@ main{max-width:1100px;margin:0 auto;padding:24px 16px}h1{font-size:1.7rem;margin
 h2{font-size:1.15rem;margin:0 0 .6em}section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:0 0 16px}
 p{margin:.4em 0}.subtitle{color:var(--muted);margin-top:-.4em}a{color:var(--accent)}
 .table-wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:.95rem}
-caption{text-align:left;color:var(--muted);padding:0 0 6px}th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
-th{font-weight:600;background:color-mix(in srgb,var(--line) 35%,transparent)}td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+caption{text-align:left;color:var(--muted);padding:0 0 6px}th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);overflow-wrap:break-word}
+th{font-weight:600;background:color-mix(in srgb,var(--line) 35%,transparent)}td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+@media (max-width:640px){table.cards thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+table.cards,table.cards tbody,table.cards tr,table.cards td{display:block;width:100%}table.cards tr[hidden]{display:none}
+table.cards tr{border-bottom:1px solid var(--line);padding:6px 0}table.cards td{border:0;padding:3px 0;display:flex;gap:12px;justify-content:space-between;text-align:right}
+table.cards td::before{content:attr(data-label);font-weight:600;color:var(--muted);text-align:left}}
 svg.bars{width:100%;height:auto}svg.bars text{fill:var(--fg);font-size:13px}svg.bars .bar{fill:var(--accent)}svg.bars .threshold{stroke:var(--mark);stroke-dasharray:4 3}
 .filter label{font-weight:600;margin-right:8px}.filter select{font:inherit;padding:4px 8px;margin-bottom:10px}.total{font-weight:600}
 @media print{body{background:#fff;color:#000}section{border:0;padding:0;break-inside:avoid}.filter select{display:none}}
@@ -86,36 +95,39 @@ if(total){total.textContent=total.getAttribute('data-rt-total')+': '+String(Math
 if(empty){empty.hidden=shown>0;}}
 sel.addEventListener('change',apply);apply();});})();
 """
-_FILTER_SCRIPT = f"<script>{_FILTER_JS}</script>"
+_FILTER_SCRIPT = f"<script>{_FILTER_JS}</script>\n"
 
 
 def page(title: str, *parts, lang: str = "en", theme: str = "light", subtitle: str | None = None) -> Html:
     """A complete document: lang, charset, viewport, inline CSS, light or dark theme."""
     if theme not in ("light", "dark"):
         raise ValueError('theme must be "light" or "dark"')
+    # Parts are joined without separators: a line break between two inline
+    # parts (text and a link) would show as a space. Block parts end with one.
     body = "".join(_esc(p) for p in parts)
     script = _FILTER_SCRIPT if "data-rt-filter" in body else ""
-    sub = f'<p class="subtitle">{_esc(subtitle)}</p>' if subtitle else ""
+    sub = f'<p class="subtitle">{_esc(subtitle)}</p>\n' if subtitle else ""
     return Html(
-        f'<!doctype html><html lang="{_esc(lang)}" data-theme="{theme}"><head><meta charset="utf-8">'
-        f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>{_esc(title)}</title>'
-        f"<style>{_CSS}</style></head><body><main><h1>{_esc(title)}</h1>{sub}{body}{script}</main></body></html>\n"
+        f'<!doctype html>\n<html lang="{_esc(lang)}" data-theme="{theme}">\n<head>\n<meta charset="utf-8">\n'
+        f'<meta name="viewport" content="width=device-width,initial-scale=1">\n<title>{_esc(title)}</title>\n'
+        f"<style>{_CSS}</style>\n</head>\n<body>\n<main>\n<h1>{_esc(title)}</h1>\n{sub}{body}{script}"
+        "</main>\n</body>\n</html>\n"
     )
 
 
 def section(heading: str, *parts, id: str | None = None) -> Html:
     """A titled block. ``id`` defaults to the heading's slug plus "-section"."""
-    return Html(f'<section id="{_esc(id or _slug(heading) + "-section")}"><h2>{_esc(heading)}</h2>'
-                + "".join(_esc(p) for p in parts) + "</section>")
+    return Html(f'<section id="{_esc(id or _slug(heading) + "-section")}"><h2>{_esc(heading)}</h2>\n'
+                + "".join(_esc(p) for p in parts) + "</section>\n")
 
 
 def para(*texts) -> Html:
     """One paragraph per text."""
-    return Html("".join(f"<p>{_esc(t)}</p>" for t in texts))
+    return Html("".join(f"<p>{_esc(t)}</p>\n" for t in texts))
 
 
 def bullets(items) -> Html:
-    return Html("<ul>" + "".join(f"<li>{_esc(i)}</li>" for i in items) + "</ul>")
+    return Html("<ul>\n" + "".join(f"<li>{_esc(i)}</li>\n" for i in items) + "</ul>\n")
 
 
 def _is_number(value) -> bool:
@@ -140,9 +152,32 @@ def _numeric_columns(body, count) -> list[bool]:
             for i in range(count)]
 
 
-def _thead(columns, numeric) -> str:
-    return "<thead><tr>" + "".join(
+# A table with more columns than this shows each row as a card on a phone:
+# squeezed into 390 px, its columns would be a letter or two wide.
+_CARD_COLUMNS = 4
+
+
+def _tds(cells, numeric, columns) -> str:
+    cards = len(columns) > _CARD_COLUMNS
+    return "".join(f'<td{_card_label(c) if cards else ""}{" class=num" if n else ""}>{_esc(v)}</td>'
+                   for v, n, c in zip(cells, numeric, columns))
+
+
+def _card_label(column) -> str:
+    return f' data-label="{_esc(column)}"'
+
+
+_TABLE_WRAP = '<div class="table-wrap">'
+
+
+def _table_html(columns, numeric, trs, *, table_attrs: str = "", caption: str = "") -> str:
+    """A scrollable table, one row per line. ``trs`` are whole ``<tr>`` elements."""
+    head = "<thead><tr>" + "".join(
         f'<th scope="col"{" class=num" if n else ""}>{_esc(c)}</th>' for c, n in zip(columns, numeric)) + "</tr></thead>"
+    if len(columns) > _CARD_COLUMNS:
+        table_attrs += ' class="cards"'
+    return (f"{_TABLE_WRAP}<table{table_attrs}>{caption}\n{head}\n<tbody>\n"
+            + "".join(tr + "\n" for tr in trs) + "</tbody></table></div>\n")
 
 
 def table(columns, rows, *, caption: str | None = None, id: str | None = None) -> Html:
@@ -151,9 +186,8 @@ def table(columns, rows, *, caption: str | None = None, id: str | None = None) -
     body = [_row_cells(columns, r) for r in rows]
     numeric = _numeric_columns(body, len(columns))
     cap = f"<caption>{_esc(caption)}</caption>" if caption else ""
-    trs = "".join("<tr>" + "".join(f'<td{" class=num" if n else ""}>{_esc(v)}</td>' for v, n in zip(r, numeric))
-                  + "</tr>" for r in body)
-    return Html(f'<div class="table-wrap"><table{_attr_id(id)}>{cap}{_thead(columns, numeric)}<tbody>{trs}</tbody></table></div>')
+    trs = [f"<tr>{_tds(r, numeric, columns)}</tr>" for r in body]
+    return Html(_table_html(columns, numeric, trs, table_attrs=_attr_id(id), caption=cap))
 
 
 def bar_chart(labels, values, *, name: str, value_label: str = "Value", threshold: float | None = None,
@@ -177,13 +211,14 @@ def bar_chart(labels, values, *, name: str, value_label: str = "Value", threshol
         bars.append(f'<text x="{left - 8}" y="{y + 18}" text-anchor="end">{_esc(label)}</text>'
                     f'<rect class="bar" x="{left}" y="{y + 4}" width="{w:.1f}" height="{row_h - 10}">'
                     f"<title>{_esc(label)}: {_esc(value)} {_esc(value_label)}</title></rect>"
-                    f'<text x="{left + w + 6:.1f}" y="{y + 18}">{_esc(value)}</text>')
+                    f'<text x="{left + w + 6:.1f}" y="{y + 18}">{_esc(value)}</text>\n')
     mark = ""
     if threshold is not None:
         x = left + width * threshold / top
-        mark = f'<line class="threshold" x1="{x:.1f}" x2="{x:.1f}" y1="4" y2="{height - 4}"><title>Threshold {_esc(threshold)}</title></line>'
+        mark = (f'<line class="threshold" x1="{x:.1f}" x2="{x:.1f}" y1="4" y2="{height - 4}">'
+                f"<title>Threshold {_esc(threshold)}</title></line>\n")
     return Html(f'<svg class="bars"{_attr_id(id)} role="img" aria-label="{_esc(name)}" '
-                f'viewBox="0 0 {left + width + 60} {height}"><title>{_esc(name)}</title>{"".join(bars)}{mark}</svg>')
+                f'viewBox="0 0 {left + width + 60} {height}"><title>{_esc(name)}</title>\n{"".join(bars)}{mark}</svg>\n')
 
 
 def filter_table(columns, rows, *, key: str, label: str, region_name: str, value: str | None = None,
@@ -213,19 +248,20 @@ def filter_table(columns, rows, *, key: str, label: str, region_name: str, value
         total += r[v] if visible and v is not None and _is_number(r[v]) else 0
         val_attr = f' data-rt-value="{_esc(r[v])}"' if v is not None and _is_number(r[v]) else ""
         trs.append(f'<tr data-rt-key="{_esc(row_key)}"{val_attr}{"" if visible else " hidden"}>'
-                   + "".join(f'<td{" class=num" if n else ""}>{_esc(c)}</td>' for c, n in zip(r, numeric)) + "</tr>")
+                   f"{_tds(r, numeric, columns)}</tr>")
     total_html = ""
     if v is not None:
         tl = total_label or f"Total {value}"
-        total_html = f'<p class="total" data-rt-total="{_esc(tl)}" aria-live="polite">{_esc(tl)}: {_esc(round(total, 6))}</p>'
+        total_html = f'<p class="total" data-rt-total="{_esc(tl)}" aria-live="polite">{_esc(tl)}: {_esc(round(total, 6))}</p>\n'
+    # The label and the select are inline: a line break between them would show as a space.
     return Html(
         f'<div class="filter" id="{_esc(fid)}" data-rt-filter{" data-rt-hide-zero" if hide_zero else ""}>'
         f'<label for="{_esc(fid)}-select">{_esc(label)}</label>'
-        f'<select id="{_esc(fid)}-select"><option value="">All</option>'
-        + "".join(f'<option value="{_esc(o)}">{_esc(o) or "(blank)"}</option>' for o in options) + "</select>"
-        f'<div role="region" aria-label="{_esc(region_name)}"><h3>{_esc(region_name)}</h3>{total_html}'
-        f'<p data-rt-empty{" hidden" if shown else ""}>{_esc(empty_text)}</p>'
-        f'<div class="table-wrap"><table>{_thead(columns, numeric)}<tbody>{"".join(trs)}</tbody></table></div></div></div>'
+        f'<select id="{_esc(fid)}-select">\n<option value="">All</option>\n'
+        + "".join(f'<option value="{_esc(o)}">{_esc(o) or "(blank)"}</option>\n' for o in options) + "</select>\n"
+        f'<div role="region" aria-label="{_esc(region_name)}"><h3>{_esc(region_name)}</h3>\n{total_html}'
+        f'<p data-rt-empty{" hidden" if shown else ""}>{_esc(empty_text)}</p>\n'
+        + _table_html(columns, numeric, trs) + "</div>\n</div>\n"
     )
 
 
@@ -253,7 +289,7 @@ def _json_text(value) -> str:
 
 def data(id: str, value) -> Html:
     """An inert JSON block, for data the author chooses to embed (nothing is embedded otherwise)."""
-    return Html(f'<script type="application/json" id="{_esc(id)}">{_json_text(value)}</script>')
+    return Html(f'<script type="application/json" id="{_esc(id)}">{_json_text(value)}</script>\n')
 
 
 def save(path, html: str) -> Path:
@@ -278,15 +314,18 @@ def _read(path: Path) -> str:
 _VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
 
 # Markup that reaches the reader as text, e.g. "<h2>Summary</h2>" passed as a plain
-# string and escaped. Text inside <code> or <pre> is left alone.
-_SHOWN_TAG = re.compile(r"</?(?:h[1-6]|p|a|div|section|span|table|tr|td|th|ul|ol|li|strong|em|b|i|br)\b[^<>]{0,200}>",
-                        re.I)
+# string and escaped. Text inside <code>, <pre> or <textarea> is left alone.
+_SHOWN_TAG = re.compile(
+    r"</?(?:h[1-6]|p|a|div|section|span|table|thead|tbody|tr|td|th|caption|ul|ol|li|dl|dt|dd|strong|em|b|i|br"
+    r"|style|script|svg|path|rect|circle|polyline|polygon|g|img|canvas|iframe|select|option|label|button|input"
+    r"|form|dialog|details|summary|header|footer|nav|main|article|aside|html|head|body|link|meta)\b[^<>]{0,200}>",
+    re.I)
 
 
 class _Reader(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.ids, self.links, self.scripts, self.text = [], [], [], []
+        self.ids, self.links, self.resources, self.text = [], [], [], []
         self.lang = self.viewport = self.title = None
         self.tables, self._table, self._row, self._cell, self._skip, self._in_title = [], None, None, None, 0, False
         self.shown_tags, self._code = [], 0
@@ -302,10 +341,10 @@ class _Reader(HTMLParser):
         elif tag == "a" and a.get("href") is not None:
             self.links.append(a["href"])
         elif tag in ("script", "link", "img", "iframe") and (a.get("src") or (tag == "link" and a.get("href"))):
-            self.scripts.append(a.get("src") or a.get("href"))
+            self.resources.append((tag, a.get("src") or a.get("href")))
         elif tag in ("script", "style"):
             self._skip += 1
-        elif tag in ("code", "pre"):
+        elif tag in ("code", "pre", "textarea"):
             self._code += 1
         elif tag == "title" and self.title is None:
             self._in_title = True  # the document title; svg <title>s come later
@@ -320,7 +359,7 @@ class _Reader(HTMLParser):
     def handle_endtag(self, tag):
         if tag in ("script", "style") and self._skip:
             self._skip -= 1
-        elif tag in ("code", "pre") and self._code:
+        elif tag in ("code", "pre", "textarea") and self._code:
             self._code -= 1
         elif tag == "title" and self._in_title:
             self._in_title = False
@@ -350,10 +389,37 @@ class _Reader(HTMLParser):
         self.text.append(text)
 
 
+# The one host the app preview loads a script from (cowork's web shell,
+# `script-src`), where the html-app generator loads Tailwind, ECharts and its
+# map libraries. Matched by host, as the generator's verifier matches it
+# (`generate_artifact.verifiers._PREVIEW_SCRIPT_HOST`); the preview loads no
+# external stylesheet or image from any host.
+_PREVIEW_SCRIPT_HOST = "cdn.jsdelivr.net"
+_EXTERNAL_URL = re.compile(r"\s*(?:https?:)?//([^/?#\s:]+)", re.I)
+
+
+def _external_host(url: str | None) -> str | None:
+    """The host of an `http(s)://` or `//` URL, lower case, or None for any
+    other value (a relative path, `data:`)."""
+    m = _EXTERNAL_URL.match(url or "")
+    return m.group(1).lower() if m else None
+
+
+SHOWN_MARKUP_FIX = "a plain string is escaped; pass HTML you wrote yourself as rt.Html(markup)"
+
+
+def shown_markup(html: str) -> list[str]:
+    """HTML tags the page shows its reader as text, at most three."""
+    reader = _Reader()
+    reader.feed(html)
+    return reader.shown_tags[:3]
+
+
 def check(path) -> dict:
     """Read a saved page back. Raises ValueError on structural problems.
 
-    Checks: lang and viewport present, no external scripts, styles or images,
+    Checks: lang and viewport present, no external scripts (but scripts from
+    the app preview's script host, `cdn.jsdelivr.net`), styles or images,
     unique element ids, every local link resolving to an existing file, and no
     HTML tags shown to the reader as text (markup passed as a plain string is
     escaped; wrap trusted markup from these helpers, or pass it to ``section``).
@@ -369,7 +435,10 @@ def check(path) -> dict:
         problems.append("html element has no lang")
     if not reader.viewport:
         problems.append("no viewport meta tag")
-    external = [s for s in reader.scripts if re.match(r"\s*(https?:)?//", s or "")]
+    external = [
+        url for tag, url in reader.resources
+        if (host := _external_host(url)) is not None and not (tag == "script" and host == _PREVIEW_SCRIPT_HOST)
+    ]
     if external:
         problems.append(f"external resources: {external}")
     dupes = sorted({i for i in reader.ids if reader.ids.count(i) > 1})
@@ -385,7 +454,7 @@ def check(path) -> dict:
     if broken:
         problems.append(f"local links that do not resolve: {broken}")
     if reader.shown_tags:
-        problems.append(f"HTML tags shown as text: {reader.shown_tags[:3]}")
+        problems.append(f"HTML tags shown as text: {reader.shown_tags[:3]} ({SHOWN_MARKUP_FIX})")
     if problems:
         raise ValueError("; ".join(problems))
     return {
@@ -435,7 +504,30 @@ class _Locator(HTMLParser):
                 return
 
 
-_LEADING_HEADING = re.compile(r"\s*<h([1-6])\b[^>]*>.*?</h\1\s*>", re.I | re.S)
+# The line break after a kept heading stays with it, so new content starts on its own line.
+_LEADING_HEADING = re.compile(r"\s*<h([1-6])\b[^>]*>.*?</h\1\s*>(?:\r?\n)?", re.I | re.S)
+
+
+_EOL = re.compile(r"\r?\n")
+
+
+def _block_end(text: str, end: int) -> int:
+    """``end`` moved past the line break that ends a block there, if any."""
+    found = _EOL.match(text, end)
+    return found.end() if found else end
+
+
+def _page_eol(text: str) -> str:
+    """The page's line break, taken from its first one.
+
+    Not "any \\r\\n in the page": a value shown as text may carry one.
+    """
+    first = _EOL.search(text)
+    return first.group() if first else "\n"
+
+
+def _with_eol(markup: str, eol: str) -> str:
+    return _EOL.sub(eol, markup) if eol != "\n" else markup
 
 
 def _locate(text: str) -> _Locator:
@@ -463,7 +555,7 @@ def _with_filter_script(text: str) -> str:
         return text
     body_ends = list(re.finditer(r"</body\s*>", text, re.I))
     at = body_ends[-1].start() if body_ends else len(text)
-    return text[:at] + _FILTER_SCRIPT + text[at:]
+    return text[:at] + _with_eol(_FILTER_SCRIPT, _page_eol(text)) + text[at:]
 
 
 def _carries_id(markup: str, id_: str) -> bool:
@@ -483,19 +575,26 @@ def update(path, changes: dict) -> dict:
     is kept unless the new content starts with a heading of its own. Markup
     that itself carries an element with the same id, such as a whole
     ``rt.section(..., id=)`` or ``rt.table(..., id=)``, replaces the element
-    rather than its content, so the id is never duplicated. Each id must match
-    exactly one element. A filter added to a page without the filter script
-    also adds the script. Returns a receipt of the ids changed and the old and
-    new file sizes.
+    rather than its content, so the id is never duplicated; a table's scroll
+    wrapper is replaced along with it. Each id must match exactly one element.
+    A filter added to a page without the filter script also adds the script.
+    Line breaks in new markup follow the page's ("\\n" or "\\r\\n"). Returns a
+    receipt of the ids changed and the old and new file sizes.
     """
     path = Path(path)
     text = _read(path)
+    eol = _page_eol(text)
     locator = _locate(text)
     edits = []
     for id_, content in changes.items():
         if isinstance(content, Html) and _carries_id(content, id_):
             start, end = _one(locator.outer, id_)
             new = str(content)
+            # rt.table brings its own wrapper; replacing only the <table> would nest it in the old one.
+            if new.startswith(_TABLE_WRAP) and text.endswith(_TABLE_WRAP, 0, start) and text.startswith("</div>", end):
+                start, end = start - len(_TABLE_WRAP), end + len("</div>")
+            if new.endswith("\n"):
+                end = _block_end(text, end)  # the new block brings its own line break
         elif isinstance(content, str):
             start, end = _one(locator.spans, id_)
             new = _esc(content)
@@ -505,7 +604,7 @@ def update(path, changes: dict) -> dict:
         else:
             start, end = _one(locator.spans, id_)
             new = _json_text(content)
-        edits.append((start, end, new))
+        edits.append((start, end, _with_eol(new, eol)))
     edits.sort()
     for (s1, e1, _), (s2, _e2, _) in zip(edits, edits[1:]):
         if s2 < e1:
@@ -524,17 +623,22 @@ def insert(path, content, *, before: str | None = None, after: str | None = None
 
     For new parts of an existing page, e.g. a decision summary above the
     detail: ``rt.insert(path, rt.section("Decision summary", rt.para(...)),
-    before="detail-section")``. Every other byte is unchanged, except that a
-    filter added to a page without the filter script also adds the script.
-    Plain text is escaped, as elsewhere. Returns a receipt like ``update``.
+    before="detail-section")``. A block from these helpers inserted after an
+    element goes after the line break that ends it, so it gets a line of its
+    own; other content goes right next to the element. Every other byte is
+    unchanged, except that a filter added to a page without the filter script
+    also adds the script. Plain text is escaped, as elsewhere. Line breaks in
+    new markup follow the page's. Returns a receipt like ``update``.
     """
     if (before is None) == (after is None):
         raise ValueError("give exactly one of before= or after=")
     path = Path(path)
     text = _read(path)
     start, end = _one(_locate(text).outer, before or after)
-    at = start if before is not None else end
-    new = _esc(content)
+    new = _with_eol(_esc(content), _page_eol(text))
+    at = start
+    if after is not None:
+        at = _block_end(text, end) if isinstance(content, Html) and new.endswith("\n") else end
     out = text[:at] + new + text[at:]
     if "data-rt-filter" in new:
         out = _with_filter_script(out)

@@ -42,9 +42,16 @@ def _stream_mock(response):
     return Mock(side_effect=lambda **kw: _one_event_stream(response))
 
 
+def _session() -> AsyncMock:
+    """A mock chat session whose scratchpad pool carries no sandbox policy."""
+    session = AsyncMock()
+    session._scratchpads.cell_sandbox = None
+    return session
+
+
 def _state(tmp_path, **kw):
     base = dict(
-        session=AsyncMock(), artifact_type="html-app", artifact_path=tmp_path,
+        session=_session(), artifact_type="html-app", artifact_path=tmp_path,
         slug="a", brief="Show current time", is_fullstack=False,
         progress=asyncio.Queue(),
     )
@@ -320,10 +327,10 @@ def test_step_started_counts_a_full_html_app_run(tmp_path: Path):
     assert _drain(st) == [
         "Gathering what the artifact needs",
         "Preparing a short brief for you",
-        "Writing down the agreed requirements (step 1 of 4)",
+        "Writing down the requirements (step 1 of 4)",
         "Writing the technical specification (step 2 of 4)",
         "Writing the page (step 3 of 4)",
-        "Verifying the page (step 4 of 4)",
+        "Checking the page (step 4 of 4)",
     ]
 
 
@@ -490,7 +497,7 @@ def test_settling_a_new_type_rebuilds_the_plan_but_keeps_the_numbers(tmp_path):
     st.settle_artifact_type("fullstack-stateless-app")
     assert st.is_fullstack is True
     st.step_started("write_prd")
-    assert q.get_nowait() == "Writing down the agreed requirements (step 1 of 9)"
+    assert q.get_nowait() == "Writing down the requirements (step 1 of 9)"
 
     # Settling the same type again is a no-op; a blank is ignored.
     st.settle_artifact_type("fullstack-stateless-app")

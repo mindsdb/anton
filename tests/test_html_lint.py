@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from anton.core.artifacts.html_lint import lint_html, lint_url
+from anton.core.artifacts.html_lint import _findings_from_result, lint_html, lint_url
 
 requires_browser = pytest.mark.skipif(
     not os.environ.get("ANTON_HTML_LINT_BROWSER"),
@@ -61,17 +61,17 @@ def empty_body_page(tmp_path: Path) -> Path:
 
 def test_no_browser_configured_yields_none(monkeypatch, broken_page: Path):
     monkeypatch.delenv("ANTON_HTML_LINT_BROWSER", raising=False)
-    assert lint_html(broken_page) is None
+    assert lint_html(broken_page, cell_sandbox=None) is None
 
 
 def test_browser_path_that_does_not_exist_yields_none(monkeypatch, broken_page: Path):
     monkeypatch.setenv("ANTON_HTML_LINT_BROWSER", "/no/such/binary-xyz")
-    assert lint_html(broken_page) is None
+    assert lint_html(broken_page, cell_sandbox=None) is None
 
 
 @requires_browser
 def test_flags_console_error_and_missing_local_asset(broken_page: Path):
-    findings = lint_html(broken_page)
+    findings = lint_html(broken_page, cell_sandbox=None)
     kinds = {f.kind for f in findings}
     assert "console_error" in kinds
     assert "failed_request" in kinds
@@ -82,7 +82,7 @@ def test_flags_console_error_and_missing_local_asset(broken_page: Path):
 
 @requires_browser
 def test_clean_page_has_no_findings(clean_page: Path):
-    assert lint_html(clean_page) == []
+    assert lint_html(clean_page, cell_sandbox=None) == []
 
 
 @requires_browser
@@ -90,14 +90,14 @@ def test_flags_empty_body_with_no_other_signal(empty_body_page: Path):
     """Division by zero is not a JS error, and there's no missing asset —
     console_error/failed_request stay silent. empty_page is the only thing
     that can catch this shape of bug."""
-    findings = lint_html(empty_body_page)
+    findings = lint_html(empty_body_page, cell_sandbox=None)
     kinds = {f.kind for f in findings}
     assert kinds == {"empty_page"}
 
 
 @requires_browser
 def test_message_format(broken_page: Path):
-    findings = lint_html(broken_page)
+    findings = lint_html(broken_page, cell_sandbox=None)
     failed = next(f for f in findings if f.kind == "failed_request")
     assert failed.message().startswith("failed_request:")
 
@@ -108,15 +108,15 @@ def test_lint_url_refuses_anything_that_is_not_an_http_url(tmp_path: Path, monke
     """A file path belongs to lint_html; `None` means "not checked", never
     "clean", so a wrong argument cannot pass a page."""
     monkeypatch.setenv("ANTON_HTML_LINT_BROWSER", "/bin/true")
-    assert lint_url(str(tmp_path / "index.html")) is None
-    assert lint_url("file:///tmp/index.html") is None
-    assert lint_url("") is None
-    assert lint_url(None) is None  # type: ignore[arg-type]
+    assert lint_url(str(tmp_path / "index.html"), cell_sandbox=None) is None
+    assert lint_url("file:///tmp/index.html", cell_sandbox=None) is None
+    assert lint_url("", cell_sandbox=None) is None
+    assert lint_url(None, cell_sandbox=None) is None  # type: ignore[arg-type]
 
 
 def test_lint_url_without_a_browser_yields_none(monkeypatch):
     monkeypatch.delenv("ANTON_HTML_LINT_BROWSER", raising=False)
-    assert lint_url("http://127.0.0.1:1/") is None
+    assert lint_url("http://127.0.0.1:1/", cell_sandbox=None) is None
 
 
 def test_lint_url_hands_the_runner_the_url_as_target(monkeypatch):
@@ -131,7 +131,7 @@ def test_lint_url_hands_the_runner_the_url_as_target(monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, stdout="RESULT_JSON_START\n{}\nRESULT_JSON_END\n", stderr="")
     monkeypatch.setattr(html_lint, "discover_browser", lambda: "/usr/bin/electron")
     monkeypatch.setattr(html_lint.subprocess, "run", fake_run)
-    assert lint_url("http://127.0.0.1:5000") == []
+    assert lint_url("http://127.0.0.1:5000", cell_sandbox=None) == []
     assert seen["target"] == "http://127.0.0.1:5000"
 
 
@@ -162,7 +162,7 @@ def served_broken_page(tmp_path: Path):
 
 @requires_browser
 def test_lint_url_flags_console_error_and_http_404(served_broken_page: str):
-    findings = lint_url(served_broken_page)
+    findings = lint_url(served_broken_page, cell_sandbox=None)
     assert findings is not None
     kinds = {f.kind for f in findings}
     assert "console_error" in kinds
@@ -170,3 +170,20 @@ def test_lint_url_flags_console_error_and_http_404(served_broken_page: str):
     messages = " ".join(f.message() for f in findings)
     assert "intentional error for test" in messages
     assert "missing.js" in messages and "HTTP 404" in messages
+
+
+def test_browser_findings_redact_tokens_in_messages_and_urls():
+    """Console messages and failed request URLs reach the regeneration prompt,
+    so a token in either is redacted and the rest stays readable."""
+    token = "FAKE0tok3nZr1xK2mN4pL7vT9wY3sB6dF"
+    findings = _findings_from_result({
+        "consoleErrors": [{"message": f"auth failed: Bearer {token}", "line": 3}],
+        "failedRequests": [
+            {"url": f"https://api.example.com/v1/items?access_token={token}", "error": "net::ERR_FAILED"},
+        ],
+    })
+
+    details = [f.detail for f in findings]
+    assert details[0].startswith("auth failed: Bearer ") and details[0].endswith("(line 3)")
+    assert "https://api.example.com/v1/items?access_token=" in details[1]
+    assert not any(token in d for d in details)

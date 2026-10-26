@@ -11,11 +11,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
+from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS, scratchpad_action
 
 from .. import sub_tools as protocol
+from ..state import known_data_usable
 from . import prompts, sub_tools
-from .notes import render_gathering_notes, string_list
+from .notes import known_data_sources, render_gathering_notes, source_key, string_list
 from .state import PrdState, gathering_question_budget
 
 if TYPE_CHECKING:
@@ -45,11 +46,12 @@ def _web_tools() -> dict[str, tuple]:
 def _exec_ran(outcome) -> bool:
     """Whether a scratchpad exec result describes a cell that executed.
 
-    False for the single-scratchpad guard's challenge (`ok=True`, guidance
-    rather than a failure, hence the `reason`) and for a cell the runtime
-    reported as failed: neither is working data-access code.
+    False for an `ok=True` result whose cell never ran (the single-scratchpad
+    guard's challenge, a change the user didn't approve), hence the `reason`,
+    and for a cell the runtime reported as failed: none is working
+    data-access code.
     """
-    if getattr(outcome, "reason", "") == "new_scratchpad_challenged":
+    if getattr(outcome, "reason", "") in CELL_NOT_RUN_REASONS:
         return False
     return getattr(outcome, "ok", None) is not False
 
@@ -69,7 +71,7 @@ async def run_gathering_loop(state: "PrdState") -> None:
         `finish_gathering` — both are the best-effort case the caller
         (orchestrator.run) falls back on.
     """
-    budget = gathering_question_budget(state.session)
+    budget = gathering_question_budget(state.session, act_first=state.act_first)
     # One array for the whole shared-prefix region; availability per step is
     # decided in code by `sub_tools.rejection_for`, not by dropping entries.
     tools = state.pipeline_tools
@@ -103,14 +105,21 @@ async def run_gathering_loop(state: "PrdState") -> None:
             state.record("gathering", "stopped_over_budget", f"after round {round_idx}")
             state.gathering_complete = False
             return
-        method = "plan" if round_idx == 0 else "code"
-        llm_call = state.session._llm.plan if round_idx == 0 else state.session._llm.code
+        role = "planning" if round_idx == 0 else "coding"
         await sub_tools.signal_thinking(state.session)
-        response = await llm_call(system=system, messages=state.messages, tools=tools)
-        state.trace_log.llm_call(
-            node="gathering", method=method, system=system,
-            messages=state.messages, response=response, round=round_idx,
+        room = await sub_tools.call_with_room(
+            state, step, role=role, system=system, messages=state.messages,
+            tools=tools, round_idx=round_idx,
         )
+        response = room.response
+        if room.truncated:
+            # Cut off without a retry or after one: half a summary must not
+            # become the notes, and a damaged call must not run.
+            # `gathering_complete` stays False, so the emergency data loop
+            # re-checks the data.
+            state.record("gathering", "truncated", f"round {round_idx}")
+            state.gathering_complete = False
+            return
 
         if not response.tool_calls:
             state.gathering_notes = (response.content or "").strip()
@@ -162,8 +171,10 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 # `document` or `dataset` is valid metadata but has no
                 # generator, and settling on one would build a fullstack
                 # app for it and lock the slug out of any repeat call.
+                # Where nothing starts an app backend, html-app is the only
+                # buildable type (`GenState.buildable_types`).
                 state.final_artifact_type = (
-                    claimed_type if claimed_type in GENERATOR_ARTIFACT_TYPES
+                    claimed_type if claimed_type in state.buildable_types
                     else state.artifact_type
                 )
                 state.gathering_notes = render_gathering_notes(inp)
@@ -176,13 +187,22 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 # that IS a web page is verified by having been fetched, and
                 # demanding a scratchpad cell for it would send every
                 # web-sourced request through the emergency data loop to
-                # re-download an article that was already read. The unverified
-                # list is what that loop reads, and after a correction it is
-                # filled by `redraw_brief`, not here.
+                # re-download an article that was already read. An html-app
+                # source whose rows the calling agent passed in is verified
+                # by the `known_data` mark (`known_data_usable`). The
+                # unverified list is what that loop reads, and after a
+                # correction it is filled by `redraw_brief`, not here.
+                covered = known_data_sources(inp, usable=known_data_usable(state))
+                executed = bool(state.scratchpad_execs or state.web_calls)
                 state.unverified_sources = (
                     []
-                    if (state.scratchpad_execs or state.web_calls)
-                    else list(state.declared_sources)
+                    if executed
+                    else [s for s in state.declared_sources if source_key(s) not in covered]
+                )
+                state.known_data_verified = (
+                    []
+                    if executed
+                    else [s for s in state.declared_sources if source_key(s) in covered]
                 )
                 state.gathering_complete = True
                 result_blocks.append(protocol.tool_result(tc.id, "ok"))
@@ -192,6 +212,8 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 # reaching here means there is a question left to spend.
                 outcome = await sub_tools.dispatch_ask_user(state.session, inp)
                 questions_asked += 1
+                if outcome["status"] == "timeout":
+                    state.question_unanswered = True
                 state.record_qa(outcome["question"], outcome["answer_summary"])
                 state.trace_log.node(
                     "ask_user", outcome["status"],
@@ -210,11 +232,11 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 # that RAN counts: a live run once recorded an exec
                 # the single-scratchpad guard had refused, and both generators
                 # received its code with the refusal text as its "Output".
-                if inp.get("action") == "exec" and inp.get("code") and _exec_ran(outcome):
+                if scratchpad_action(inp) == "exec" and inp.get("code") and _exec_ran(outcome):
                     state.scratchpad_execs.append({
                         "name": inp.get("name"),
                         "code": inp.get("code"),
-                        "output": content if isinstance(content, str) else str(content),
+                        "output": protocol.result_text(content),
                     })
                 result_blocks.append(protocol.tool_result(tc.id, content))
             elif name in ("web_search", "web_fetch"):

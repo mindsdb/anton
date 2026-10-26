@@ -178,6 +178,7 @@ PHASE_LABELS = {
     "complete": "Complete",
     "failed": "Failed",
     "scratchpad": "Scratchpad",
+    "model_wait": "",
 }
 
 
@@ -219,6 +220,18 @@ class QuestionRenderTracker:
             pass
         finally:
             self._rendered.pop(question_id, None)
+
+
+def is_displayed_tool_result(event) -> bool:
+    """Whether the CLI prints this `StreamToolResult` permanently.
+
+    A scratchpad dump is the user's own request to see the cells; a tool's
+    `message` is written for the user. Every other result is the agent's
+    input and stays off the screen.
+    """
+    if event.action == "message":
+        return True
+    return event.name == "scratchpad" and event.action == "dump"
 
 
 class StreamDisplay:
@@ -557,7 +570,7 @@ class StreamDisplay:
 
         label = PHASE_LABELS.get(phase, phase)
         eta_str = f"  ~{int(eta)}s" if eta else ""
-        self._line2_status = f"{label}  {message}{eta_str}"
+        self._line2_status = f"{label}  {message}{eta_str}" if label else f"{message}{eta_str}"
         self._set_status(self._line2_status)
         self._update_spinner()
 

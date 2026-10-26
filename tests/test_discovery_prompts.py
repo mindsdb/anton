@@ -14,7 +14,6 @@ from types import SimpleNamespace
 from anton.core.artifacts.models import ARTIFACT_TYPES, GENERATOR_ARTIFACT_TYPES
 from anton.core.tools.generate_artifact.discovery import sub_tools
 from anton.core.tools.generate_artifact.discovery.prompts import (
-    DATASOURCES_HEADER,
     GATHERING_CONTINUE,
     build_call_kickoff,
     build_pipeline_system_prompt,
@@ -27,7 +26,7 @@ from anton.core.tools.generate_artifact.discovery.prompts import (
     render_scratchpads_context,
 )
 from anton.core.tools.generate_artifact.state import GenState
-from anton.utils.datasources import CatalogConnection, DatasourceCatalog
+from anton.utils.datasources import DATASOURCES_HEADER, CatalogConnection, DatasourceCatalog
 
 
 def _state(**over) -> GenState:
@@ -206,15 +205,38 @@ def test_finish_gathering_schema_describes_the_fields_the_brief_reads():
         assert properties[field_name]["description"].strip()
 
 
-def test_gathering_step_carries_no_language_rule():
+def test_gathering_step_names_the_language_instead_of_pointing_at_the_request():
     """Seen live: with an all-English request and English attachments,
     "write in the language of the user request" made the gathering notes
     come back in Spanish (and Russian on replays), and the brief and the PRD
-    followed them. Without the rule the notes stay in the request's language."""
-    message = step_message(sub_tools.STEP_GATHERING, _state())
+    followed them. The step names the language the calling agent stated."""
+    message = step_message(sub_tools.STEP_GATHERING, _state(user_language="English"))
+    assert "User language: English. Write everything meant for the user" in message
+    assert "in English, even where earlier messages use another language" in message
     lowered = message.lower()
     assert "in the language of" not in lowered
     assert "same language as" not in lowered
+
+
+def test_every_document_step_header_names_the_user_language():
+    state = _state(user_language="Russian")
+    for step in (
+        sub_tools.STEP_GATHERING,
+        sub_tools.STEP_DRAFT_BRIEF,
+        sub_tools.STEP_REDRAW_BRIEF,
+        sub_tools.STEP_WRITE_PRD,
+    ):
+        assert "User language: Russian." in step_message(step, state), step
+
+
+def test_step_header_falls_back_to_a_named_language_when_none_was_stated():
+    """A direct caller (bench, tests) may name no language. The fallback is a
+    concrete name: "the language of the user request" is the wording that
+    made the model pick an unrelated language."""
+    for step in (sub_tools.STEP_GATHERING, sub_tools.STEP_WRITE_PRD):
+        message = step_message(step, _state())
+        assert "User language: English." in message, step
+        assert "language of the user request" not in message.lower(), step
 
 
 def test_restored_context_carries_assumptions_and_open_points():
@@ -227,6 +249,12 @@ def test_restored_context_carries_assumptions_and_open_points():
     assert "dark theme (agent's addition)" in text
     assert "## Open points recorded earlier" in text
     assert "count cancelled orders?" in text
+
+
+def test_restored_context_labels_the_brief_as_shown_not_agreed():
+    text = restored_context(_state(brief="## Goal\nA clock."))
+    assert "## Brief shown earlier" in text
+    assert "agreed" not in text
 
 
 def test_restored_context_omits_empty_assumption_sections():
@@ -281,3 +309,85 @@ def test_the_pads_context_comes_from_where_the_guard_looks():
     assert "launcher-slug" not in text
     assert engine._scratchpads_context(N()) == ""
     assert engine._scratchpads_context(N(_agent_scratchpad_names=set(), _scratchpads=None)) == ""
+
+
+def test_gathering_in_act_first_asks_only_what_blocks_the_build():
+    message = step_message(sub_tools.STEP_GATHERING, _state(act_first=True))
+    assert "no reasonable assumption" in message
+    assert "Leave `open_points` empty" in message
+    assert "Ask only when the answer changes the artifact type" not in message
+
+
+def test_gathering_keeps_the_confirm_rule_by_default():
+    message = step_message(sub_tools.STEP_GATHERING, _state())
+    assert "Ask only when the answer changes the artifact type" in message
+    assert "no reasonable assumption" not in message
+
+
+def test_act_first_gives_gathering_the_questions_reserved_for_the_brief():
+    from anton.core.tools.generate_artifact.state import gathering_question_budget
+
+    session = SimpleNamespace(question_count=0)
+    assert gathering_question_budget(session) == 5
+    assert gathering_question_budget(session, act_first=True) == 8
+    message = step_message(sub_tools.STEP_GATHERING, _state(act_first=True))
+    assert "Questions you may still ask the user: 8" in message
+
+
+def test_brief_steps_use_the_act_first_variants():
+    state = _state(act_first=True)
+    draft = step_message(sub_tools.STEP_DRAFT_BRIEF, state)
+    redraw = step_message(sub_tools.STEP_REDRAW_BRIEF, state)
+    assert "- Assumptions — one line per" in draft
+    assert "seen the brief or the finished artifact" in redraw
+    assert "leaves Assumptions" in redraw
+    assert "finish_gathering" in redraw
+
+
+def test_brief_steps_keep_the_confirm_variants_by_default():
+    state = _state()
+    assert "- Proposals — one line per" in step_message(sub_tools.STEP_DRAFT_BRIEF, state)
+    assert "has already seen a brief" in step_message(sub_tools.STEP_REDRAW_BRIEF, state)
+
+
+def test_the_pipeline_prompt_does_not_promise_a_confirmation():
+    """The system prompt is shared by both modes; in act-first nothing is
+    confirmed, so it must not say the brief is."""
+    text = build_pipeline_system_prompt(_state())
+    assert "for confirmation" not in text
+    assert "the user agreed to" not in text
+    assert "`draft_brief` — a short brief shown to the user" in text
+
+
+def test_call_kickoff_names_the_known_data_section_as_the_rules_quote_it():
+    from anton.core.tools.generate_artifact.prompts import KNOWN_DATA_HEADER
+
+    assert f"{KNOWN_DATA_HEADER}\n" in build_call_kickoff(_state())
+
+
+def test_the_rules_let_known_data_verify_a_source_and_drop_the_old_rule():
+    from anton.core.tools.generate_artifact.discovery import prompts as discovery_prompts
+    from anton.core.tools.generate_artifact.prompts import KNOWN_DATA_HEADER
+
+    template = discovery_prompts._GATHERING_TEMPLATE
+    assert "verified only if you ran code" not in template
+    assert 'verified_by: "known_data"' in template
+    assert KNOWN_DATA_HEADER.removeprefix("## ") in template
+    assert "without the values does not count" in template
+
+
+def test_the_finish_gathering_schema_mentions_the_known_data_mark():
+    from anton.core.tools.generate_artifact.discovery.sub_tools import FINISH_GATHERING_SCHEMA
+
+    props = FINISH_GATHERING_SCHEMA["input_schema"]["properties"]
+    assert "has had no code run against it" not in props["data_sources"]["description"]
+    assert "is not verified" in props["data_sources"]["description"]
+    verified_by = props["data_findings"]["items"]["properties"]["verified_by"]["description"]
+    assert "`known_data`" in verified_by
+
+
+def test_the_redraw_asks_for_the_known_data_mark():
+    from anton.core.tools.generate_artifact.discovery import prompts as discovery_prompts
+
+    assert "data_findings" in discovery_prompts._REDRAW_RESTATE
+    assert 'verified_by: "known_data"' in discovery_prompts._REDRAW_RESTATE

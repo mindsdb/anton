@@ -263,10 +263,11 @@ class TestSessionRuntimeIdentity:
         assert "Serving model: grok (the model requested for this conversation)" in prompt
 
     async def test_empty_context_and_unknown_client_yields_cannot_verify_no_mandate(self):
-        # The web-pod shape before the fix: nothing injected. make_mock_llm's
-        # planning_model / last_served_model are Mocks, i.e. not strings.
+        # The web-pod shape before the fix: nothing injected, and a client
+        # whose planning_model / last_served_model are Mocks, not strings.
         mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(return_value=_text_response("Hello!"))
+        mock_llm.planning_model = AsyncMock()
 
         prompt = await _system_prompt_after_turn(mock_llm)
         assert "RUNTIME IDENTITY:" in prompt
@@ -504,6 +505,7 @@ class TestProductLines:
         joined = "\n".join(product_lines("desktop"))
         assert 'recall_skill("cowork-product")' in joined
         assert "install" in joined
+        assert "local models" in joined
 
 
 class TestProductBlockRendering:

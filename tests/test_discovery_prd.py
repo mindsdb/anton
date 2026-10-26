@@ -16,6 +16,7 @@ from anton.core.interaction.elicit import AskAnswer
 from anton.core.llm.provider import LLMResponse, Usage
 from anton.core.tools.generate_artifact.discovery import prd
 from anton.core.tools.generate_artifact.discovery.state import PrdState
+from tests.streaming_llm import StreamingLLM
 
 
 def _response(content: str) -> LLMResponse:
@@ -30,7 +31,7 @@ def _state(artifact_path: Path, **over) -> PrdState:
     # reach that branch.
     base = dict(
         session=SimpleNamespace(
-            _llm=SimpleNamespace(plan=AsyncMock()),
+            _llm=StreamingLLM(plan=AsyncMock()),
             question_count=0,
             elicitor=None,
             emit=AsyncMock(),
@@ -265,6 +266,17 @@ def test_write_prd_instruction_asks_for_brevity_without_a_line_count():
     text = prd._WRITE_PRD_INSTRUCTION
     assert text.startswith("## Your task")
     assert "## Sections" in text and "## Rules" in text
-    assert "Write in the language of the user request" in text
+    assert "Section headings are in the user language too" in text
+    assert "language of the user request" not in text
     assert "as short as the requirements allow" in text
     assert "lines" not in text.lower()
+
+
+def test_write_prd_turns_assumptions_into_requirements():
+    """The act-first brief has an Assumptions section instead of Proposals
+    and Questions; without this rule `write_prd` could drop what the user saw."""
+    assert "Its Assumptions are decisions" in prd._WRITE_PRD_INSTRUCTION
+
+
+def test_write_prd_does_not_claim_an_agreement():
+    assert "the user agreed to" not in prd._WRITE_PRD_INSTRUCTION

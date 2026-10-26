@@ -6,13 +6,17 @@ from anton.core.tools.tool_handlers import (
     handle_launch_backend,
     handle_list_artifacts,
     handle_memorize,
-    handle_open_artifact,
     handle_read_image,
+    handle_read_text_file,
     handle_recall,
     handle_scratchpad,
     handle_select_path,
     handle_update_artifact_metadata,
 )
+from anton.core.artifacts.listing import FIELDS as ARTIFACT_LIST_FIELDS
+from anton.core.llm.prompts import cut_spans
+from anton.core.utils.scratchpad import SCRATCHPAD_ACTIONS
+from anton.core.tools.text_file import DEFAULT_LINE_COUNT, MAX_OUTPUT_CHARS
 
 from dataclasses import dataclass, replace
 from typing import Callable, Optional
@@ -83,14 +87,21 @@ SCRATCHPAD_TOOL = ToolDef(
         "Defaults to 'preview' mode (compact); use sample(var, mode='full') for complete dump.\n"
         "get_llm, agentic_loop, web_search, sample, and progress are already available "
         "as globals in the scratchpad — do not import them.\n"
-        "All .anton/.env secrets are available as environment variables (os.environ)."
+        "All .anton/.env secrets are available as environment variables (os.environ).\n"
+        "Never print a credential or a token endpoint's response: keep the token in a "
+        "variable and print only its status and expiry."
     ),
     input_schema={
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["exec", "view", "reset", "remove", "dump", "install"],
+                "enum": list(SCRATCHPAD_ACTIONS),
+                "description": (
+                    "What to do: `exec` runs `code` in the scratchpad, `view` shows its "
+                    "cells, `dump` renders them as a notebook, `install` installs "
+                    "`packages`, `reset` clears its state and `remove` deletes it."
+                ),
             },
             "name": {"type": "string", "description": "Scratchpad name"},
             "code": {
@@ -134,7 +145,14 @@ MEMORIZE_TOOL = ToolDef(
         "- never: Something to never do ('Never use time.sleep() in scratchpad')\n"
         "- when: Conditional rule ('If paginated API → use async + progress()')\n"
         "- lesson: Factual knowledge ('CoinGecko rate-limits at 50/min')\n"
-        "- profile: Fact about the user ('Name: Jorge', 'Prefers dark mode')"
+        "- profile: Fact about who the user is ('Name: Jorge', 'Timezone: PST'). "
+        "An instruction on how to answer or work is a rule, not a profile entry.\n\n"
+        "Scope: 'project' by default. A rule or preference the user gives in this "
+        "conversation is 'project', even when it says 'always': 'Always show "
+        "amounts in EUR' is 'project'. Choose 'global' only when the user says it "
+        "applies to all their projects or everywhere ('In every project, answer in "
+        "English'), or for general knowledge that holds in any project, such as a "
+        "library quirk. A profile entry always goes to global."
     ),
     input_schema={
         "type": "object",
@@ -155,6 +173,11 @@ MEMORIZE_TOOL = ToolDef(
                         "scope": {
                             "type": "string",
                             "enum": ["global", "project"],
+                            "description": (
+                                "'project' unless the user says the entry applies to "
+                                "all their projects, or it is general knowledge that "
+                                "holds in any project; the tool's Scope note says when."
+                            ),
                         },
                         "topic": {
                             "type": "string",
@@ -177,13 +200,14 @@ CREATE_ARTIFACT_TOOL = ToolDef(
         "Claim a folder for a user-facing output (HTML dashboard, document, "
         "dataset, image, fullstack app, etc.). Call this BEFORE writing the "
         "files — the tool returns the absolute folder path you should write "
-        "into. Each artifact gets its own subfolder under `<workspace>/artifacts/`, "
+        "into. Each artifact gets its own folder, "
         "with a `metadata.json` + `README.md` written automatically.\n\n"
         "AFTER REGISTERING a web artifact (html-app, fullstack-stateless-app, "
         "or fullstack-stateful-app): a report the user has fully specified you "
         "build yourself (DIRECT REPORTS in the ARTIFACTS section); anything else "
-        "goes to `generate_artifact(slug, user_request, agent_understanding, ...)`, "
-        "which agrees the requirements with the user, writes every file, and "
+        "goes to `generate_artifact(slug, user_request, user_language, "
+        "agent_understanding, ...)`, "
+        "which works out the requirements with the user, writes every file, and "
         "verifies its own output. For `document`, "
         "`dataset`, `image` and `mixed` there is no generator: write the "
         "files yourself into the returned path.\n\n"
@@ -219,8 +243,7 @@ CREATE_ARTIFACT_TOOL = ToolDef(
         "Skip when you don't know yet — the renderer falls back to a "
         "heuristic, and you can set it later via `update_artifact`.\n\n"
         "To MODIFY an existing artifact instead of creating a new one, call "
-        "`list_artifacts` first to find it, then `open_artifact(slug)` to get "
-        "the path."
+        "`list_artifacts` to find it; its folder is `<root>/<slug>`."
     ),
     input_schema={
         "type": "object",
@@ -312,42 +335,31 @@ UPDATE_ARTIFACT_METADATA_TOOL = ToolDef(
 LIST_ARTIFACTS_TOOL = ToolDef(
     name="list_artifacts",
     description=(
-        "List every artifact in the current workspace (newest first). "
-        "Use this to find an existing artifact you want to modify — paired "
-        "with `open_artifact(slug)` for the actual edit. Each entry includes "
-        "the slug, human name, type, description, file count, and last-update "
-        "timestamp. Returns an empty list when no artifacts exist yet."
-    ),
-    input_schema={
-        "type": "object",
-        "properties": {},
-    },
-    handler=handle_list_artifacts,
-)
-
-
-OPEN_ARTIFACT_TOOL = ToolDef(
-    name="open_artifact",
-    description=(
-        "Load an existing artifact by slug. Returns the folder path plus the "
-        "list of files so you can decide what to edit, and the primary file's "
-        "current text as `primary_content` when it is a small text file. Combine "
-        "with the scratchpad to read other files (`open(path).read()`) or write "
-        "updates back into the folder. Provenance is updated automatically — "
-        "every turn that modifies a file in the folder is appended to the "
-        "artifact's metadata.json."
+        "List the artifacts in this workspace, newest first. An artifact's folder "
+        "is `<root>/<slug>`, and paths in the result are relative to it. Without "
+        "`match` you get a summary (name, type, updatedAt, description, primary); "
+        "with `match` the full record, including id, files and service_files "
+        "(housekeeping and generation files, not what was built)."
     ),
     input_schema={
         "type": "object",
         "properties": {
-            "slug": {
-                "type": "string",
-                "description": "Folder slug (returned by `list_artifacts` or the previous `create_artifact`).",
+            "fields": {
+                "type": "array",
+                "items": {"type": "string", "enum": list(ARTIFACT_LIST_FIELDS)},
+                "description": (
+                    "Fields to return instead of the default set. Every artifact is "
+                    "headed by its slug whatever you ask for, so the slug needs no field."
+                ),
+            },
+            "match": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Slugs or ids of the artifacts to return. Default: all.",
             },
         },
-        "required": ["slug"],
     },
-    handler=handle_open_artifact,
+    handler=handle_list_artifacts,
 )
 
 
@@ -426,7 +438,8 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "or `fullstack-stateful-app`).\n\n"
         "It runs the whole thing itself: gathers the data it needs (it can "
         "use the scratchpad, web search and web fetch), asks the user "
-        "whatever is still unclear, agrees a short brief with them, writes "
+        "whatever is still unclear, shows them a short brief (and asks them to "
+        "confirm it when the agent is set to ask first), writes "
         "the requirements down as `prd.md`, then a technical spec, then the "
         "code — with static verification, and for fullstack apps a launch "
         "and a health check on `/api/health`. There is no separate PRD step "
@@ -435,16 +448,29 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "- `slug`: the artifact slug from a prior `create_artifact` call.\n"
         "- `user_request`: the user's request, as close to their original "
         "wording as possible.\n"
+        "- `user_language`: the language the user writes to you in, by its "
+        "English name (\"English\", \"Russian\", \"Spanish\"). Judge it by "
+        "the user's own messages, not by the data, the attachments or this "
+        "conversation's system text. The pipeline asks its questions and "
+        "writes the brief, `prd.md`, `spec.md` and the page's text in this "
+        "language. If the user wants the page in another language, say so in "
+        "`agent_understanding`.\n"
         "- `agent_understanding`: what the user asked for, in your words — "
         "only what they said or what plainly follows from it. Do NOT add "
         "features, screens, mechanics or styling of your own: the pipeline "
         "proposes those to the user itself, and anything you put here is "
-        "shown to them as a proposal they have to read and accept. One or "
+        "shown to them in the brief as something decided for them. One or "
         "two sentences is the normal size.\n"
-        "- `known_data` (optional): anything already known about the data "
-        "needed. If you already fetched something, NAME THE SCRATCHPAD it "
-        "lives in (and the cell): the tool runs its own checks in that pad "
-        "and cannot find it otherwise.\n"
+        "- `known_data` (optional): the data you already have for it. When "
+        "you already read the rows or values the artifact shows and they "
+        "are small (a few hundred rows at most), paste them here: an "
+        "html-app is then built from them without fetching them again. A "
+        "description of the data without its values does not count. If you "
+        "already fetched something, also NAME THE SCRATCHPAD it lives in "
+        "(and the cell): the tool runs its own checks in that pad and "
+        "cannot find it otherwise. Pass it on every call that needs it: a "
+        "new request on an artifact that was already built does not reuse "
+        "the earlier call's `known_data`.\n"
         "- `user_preferences` (optional): preferences the user stated "
         "themselves, in this or an earlier conversation (language, style, "
         "preferred APIs). Never infer a preference from an artifact you "
@@ -464,15 +490,19 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "relay both to the user when non-empty.\n"
         "- `needs_confirmation` — a brief was drafted but the user could not "
         "be asked. Show `brief_summary`; if they agree, call again with the "
-        "SAME `user_request`.\n"
+        "SAME `user_request` and `user_language`.\n"
         "- `cancelled` — the user declined. Do not build the artifact by "
         "hand.\n"
+        "- `browser_check_failed` — the page passed the static checks but "
+        "failed its browser check; it is on disk. Repair it yourself in a "
+        "scratchpad cell, as its `instruction` says.\n"
         "- `stopped_over_budget` — the turn ran out of tokens and the "
         "pipeline stopped cleanly; what it finished is on disk.\n\n"
         "Every status but `generated` carries an `instruction` saying what to "
         "do next — follow it. On a technical failure, report it to the user "
         "and ask how to proceed; NEVER fall back to building the artifact "
-        "yourself."
+        "yourself. The one exception is `browser_check_failed`: repair that "
+        "page in place, never rebuild it."
     ),
     input_schema={
         "type": "object",
@@ -490,6 +520,14 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
                     "one stopped, a different one starts over."
                 ),
             },
+            "user_language": {
+                "type": "string",
+                "maxLength": 40,
+                "description": (
+                    "English name of the language the user writes to you "
+                    "in, e.g. \"Russian\"."
+                ),
+            },
             "agent_understanding": {
                 "type": "string",
                 "description": (
@@ -504,10 +542,16 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
             "known_data": {
                 "type": "string",
                 "description": (
-                    "What is already known about the data needed. If you "
-                    "already fetched something, name the scratchpad it lives "
-                    "in (and the cell) — the tool reuses that pad for its own "
-                    "checks and cannot find it otherwise."
+                    "The data already known for this artifact. Paste the "
+                    "rows or values themselves when you already read them "
+                    "and they are small (a few hundred rows at most): an "
+                    "html-app is built from them without fetching them "
+                    "again, and a description without the values does not "
+                    "count. If you already fetched something, also name the "
+                    "scratchpad it lives in (and the cell) — the tool reuses "
+                    "that pad for its own checks and cannot find it "
+                    "otherwise. A new request on a built artifact does not "
+                    "reuse the earlier call's value: pass it again."
                 ),
             },
             "user_preferences": {
@@ -535,13 +579,13 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
                 ),
             },
         },
-        "required": ["slug", "user_request", "agent_understanding"],
+        "required": ["slug", "user_request", "user_language", "agent_understanding"],
     },
     handler=handle_generate_artifact,
     prompt=(
         "ARTIFACT GENERATION:\n"
         "`generate_artifact` builds an already-registered artifact end to "
-        "end — gathering data, agreeing a brief with the user, writing the "
+        "end — gathering data, showing the user a brief, writing the "
         "requirements, the technical spec and the code, with verification "
         "and (for fullstack) a launch and health check. Use it for fullstack "
         "apps and for web artifacts whose requirements still need agreeing, "
@@ -550,17 +594,88 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "  1. Call `create_artifact` to register the slug and pick the type "
         "(one of html-app, fullstack-stateless-app, fullstack-stateful-app).\n"
         "  2. Call `generate_artifact(slug=<slug>, user_request=..., "
-        "agent_understanding=..., known_data?, user_preferences?, attachments?)`. It asks "
+        "user_language=..., agent_understanding=..., known_data?, "
+        "user_preferences?, attachments?)`. It asks "
         "the user anything it still needs, so do not pre-interview them for "
-        "it.\n"
+        "it. `user_language` is the language the user writes to you in; "
+        "talk to the user in that language while the artifact is built and "
+        "when you report the result.\n"
         "  3. Follow the `instruction` in the result. `needs_confirmation` "
         "means show `brief_summary` and, if the user agrees, call again with "
-        "the SAME `user_request` — that repeat call IS the confirmation. A "
+        "the SAME `user_request` and `user_language` — that repeat call IS "
+        "the confirmation. A "
         "correction goes in `agent_understanding`, with `user_request` left "
         "as it was.\n"
         "Do NOT call `launch_backend` for a fullstack artifact built this "
         "way — the tool launches and health-checks it itself."
     ),
+)
+
+
+# `create_artifact`, `generate_artifact` and `update_artifact` where nothing
+# starts an app backend (`live_app_slots.fullstack_offered` is False): html-app
+# is the one web type, and no text offers a fullstack app or `launch_backend`.
+STATIC_CREATE_ARTIFACT_TOOL = replace(
+    CREATE_ARTIFACT_TOOL,
+    description=cut_spans(
+        CREATE_ARTIFACT_TOOL.description,
+        (" image, fullstack app,", " etc.)", " image,"),
+        (" (html-app, fullstack-stateless-app,", ": a report the user", " (html-app)"),
+        (" for an html-app or `recall_skill(\"build-fullstack-backend\")`", " before writing", ""),
+        (
+            "- fullstack-stateless-app: fullstack web app",
+            "\n\nPass `primary`",
+            "There is no fullstack type: this deployment starts no app backends, so "
+            "an interactive app or demo is an html-app.",
+        ),
+        (" `\"static/index.html\"` for a fullstack app,", " `\"report.pdf\"`", ""),
+    ),
+    input_schema={
+        **CREATE_ARTIFACT_TOOL.input_schema,
+        "properties": {
+            **CREATE_ARTIFACT_TOOL.input_schema["properties"],
+            "type": {
+                "type": "string",
+                "enum": [
+                    t for t in CREATE_ARTIFACT_TOOL.input_schema["properties"]["type"]["enum"]
+                    if not t.startswith("fullstack-")
+                ],
+            },
+        },
+    },
+)
+
+STATIC_GENERATE_ARTIFACT_TOOL = replace(
+    GENERATE_ARTIFACT_TOOL,
+    description=cut_spans(
+        GENERATE_ARTIFACT_TOOL.description,
+        (" fullstack apps, and dashboards", " or reports whose", " dashboards"),
+        (", `fullstack-stateless-app`, or", ").", ""),
+        (", and for fullstack apps a launch", ". There is no separate PRD", ""),
+        (", and you do NOT call `launch_backend` afterwards", ".", ""),
+    ),
+    prompt=cut_spans(
+        GENERATE_ARTIFACT_TOOL.prompt,
+        (" and (for fullstack) a launch and health check", ". Use it for", ""),
+        (" fullstack apps and for web artifacts", " whose requirements", " web artifacts"),
+        (" and pick the type (one of html-app,", ".\n  2. Call", " with type `html-app`"),
+        ("\nDo NOT call `launch_backend` for a fullstack", None, ""),
+    ),
+)
+
+STATIC_UPDATE_ARTIFACT_METADATA_TOOL = replace(
+    UPDATE_ARTIFACT_METADATA_TOOL,
+    description=cut_spans(
+        UPDATE_ARTIFACT_METADATA_TOOL.description,
+        ("- `port`: port the backend process", "- `datasources`", ""),
+    ),
+    input_schema={
+        **UPDATE_ARTIFACT_METADATA_TOOL.input_schema,
+        "properties": {
+            name: spec for name, spec in UPDATE_ARTIFACT_METADATA_TOOL.input_schema["properties"].items()
+            if name != "port"
+        },
+    },
 )
 
 
@@ -572,7 +687,8 @@ RECALL_TOOL = ToolDef(
         "ONLY use this when the user explicitly asks about a previous conversation "
         "or session (e.g. 'what did we talk about last time?', 'remember when we...', "
         "'have we discussed X before?'). Do NOT use this for questions about code, "
-        "files, or data in the workspace — use the scratchpad to explore those directly.\n\n"
+        "files, or data in the workspace — use `read_text_file` or the "
+        "scratchpad to explore those directly.\n\n"
         "Returns timestamped episodes matching the query (newest first). "
         "A single call is enough — do not call multiple times with different queries."
     ),
@@ -620,6 +736,43 @@ READ_IMAGE_TOOL = ToolDef(
         "required": ["file_path"],
     },
     handler=handle_read_image,
+)
+
+
+READ_TEXT_FILE_TOOL = ToolDef(
+    name="read_text_file",
+    description=(
+        "Read a text file: an artifact's source, a project file or a conversation "
+        "attachment. Files elsewhere, dot-files, and binary or non-UTF-8 files are "
+        "refused.\n\n"
+        f"Returns the first {DEFAULT_LINE_COUNT} lines unless you pass a range; "
+        f"`end_line=-1` reads to the end. One call returns at most {MAX_OUTPUT_CHARS:,} "
+        "characters. The first line of the result is a header naming the lines "
+        "returned and where to continue; the file's text starts on the next line."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Absolute, or relative to the project root.",
+            },
+            "start_line": {
+                "type": "integer",
+                "description": "First line, from 1; negative counts from the end (-20: the last 20 lines). Default: 1.",
+            },
+            "end_line": {
+                "type": "integer",
+                "description": f"Last line, inclusive; -1 is the last line. Default: start_line + {DEFAULT_LINE_COUNT - 1}.",
+            },
+            "line_numbers": {
+                "type": "boolean",
+                "description": "Prefix each line with its number and a tab, which are not part of the file. Default: false.",
+            },
+        },
+        "required": ["path"],
+    },
+    handler=handle_read_text_file,
 )
 
 
@@ -790,9 +943,10 @@ ASK_USER_TOOL = ToolDef(
         'Returns {"status":"answered","values":["<value>"]} — or "text" when the '
         'user typed their own answer instead of picking, possibly alongside '
         '"values". Other statuses: "cancelled" (the user declined to answer), '
-        '"timeout", "error". On cancelled/timeout/error do NOT call this tool '
-        "again for the same question: either proceed on an assumption you state "
-        "out loud, or ask in plain text and end your turn.\n\n"
+        '"timeout", "error". On cancelled/timeout do NOT call this tool again '
+        "and do NOT act on an assumed answer: end your turn and say the "
+        "question is still waiting for them. Their answer arrives as their "
+        "next message. On error, ask in plain text and end your turn.\n\n"
         "Ask one question at a time."
     ),
     # This is where the carve-out from CONVERSATION DISCIPLINE's "never ask and
@@ -813,8 +967,9 @@ ASK_USER_TOOL = ToolDef(
         "answer arrives inside the current turn, so continue with it immediately. "
         "Open-ended questions still go in plain text with the turn ended. Ask one "
         "question at a time either way. If `ask_user` comes back cancelled, "
-        "timeout or error, do not re-ask: proceed on an assumption you state out "
-        "loud, or ask in plain text and end your turn."
+        "timeout or error, do not re-ask and do not act on an assumed answer — "
+        "for an approval, that assumption is the approval. End your turn and "
+        "say the question is still open."
     ),
     input_schema={
         "type": "object",

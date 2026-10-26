@@ -1,0 +1,341 @@
+"""A turn that reaches its spend ceiling or round cap asks before it stops.
+
+"Keep going" raises the limit inside the same turn; any other outcome hands
+back exactly as before. Ending the turn instead made the user's reply a new
+turn with a fresh limit, so work bigger than one limit stopped again and again
+while the user kept typing "keep going".
+
+Drives the real ``turn_stream`` with the spend-ceiling suite's scripted LLM,
+plus an elicitor that answers from a script.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from anton.core.interaction.elicit import AskAnswer
+from anton.core.llm.provider import StreamAskUser, StreamTaskProgress
+from anton.core.session import (
+    _HANDBACK_NOT_USER_CLAUSE,
+    _LIMIT_CONTINUE_MULTIPLIER,
+    _FinishAuthorization,
+    _VerifierVerdict,
+)
+
+from tests.test_spend_ceiling import (
+    CEILING,
+    PER_CALL,
+    _history_text,
+    _session,
+    _text,
+    _tool_call,
+    workspace,  # noqa: F401 — fixture
+)
+
+KEEP_GOING = AskAnswer(status="answered", values=("continue",))
+STOP_HERE = AskAnswer(status="answered", values=("stop",))
+
+
+class _ScriptedElicitor:
+    supported_kinds = ("choice",)
+    answer_hint = "hint"
+    timeout_s = 300
+
+    def __init__(self, *answers: AskAnswer) -> None:
+        self.answers = list(answers)
+        self.requests = []
+
+    async def begin(self, question_id, request):
+        pass
+
+    async def ask(self, question_id, request):
+        self.requests.append(request)
+        return self.answers.pop(0) if self.answers else STOP_HERE
+
+    async def end(self, question_id):
+        pass
+
+
+async def _run(session, prompt="do the thing"):
+    with patch("anton.analytics.send_event") as send:
+        events = [ev async for ev in session.turn_stream(prompt)]
+    return events, send.call_args.kwargs
+
+
+async def test_keep_going_at_the_ceiling_finishes_in_the_same_turn(workspace):
+    """The run that stops at the plain ceiling finishes after one answer."""
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 14)] + [_text("all done")])
+    session.elicitor = _ScriptedElicitor(KEEP_GOING)
+    events, kwargs = await _run(session)
+    assert kwargs["ended_by"] == "completed"
+    assert kwargs["limit_continues"] == "1"
+    assert int(kwargs["tokens_total"]) > CEILING
+    assert any(isinstance(ev, StreamAskUser) for ev in events), "the host sees the question"
+    assert "Do NOT retry automatically" not in _history_text(session)
+
+
+async def test_stop_here_hands_back_as_before(workspace):
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 14)])
+    session.elicitor = _ScriptedElicitor(STOP_HERE)
+    _, kwargs = await _run(session)
+    assert kwargs["ended_by"] == "spend_ceiling"
+    assert kwargs["limit_continues"] == "0"
+    assert _HANDBACK_NOT_USER_CLAUSE in _history_text(session)
+
+
+async def test_unanswered_question_hands_back(workspace):
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 14)])
+    session.elicitor = _ScriptedElicitor(AskAnswer(status="timeout"))
+    _, kwargs = await _run(session)
+    assert kwargs["ended_by"] == "spend_ceiling"
+
+
+async def test_one_answer_buys_a_bounded_window(workspace):
+    """A run that never finishes asks again at the raised ceiling, and stops
+    there when the user says so."""
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 80)])
+    session._max_tool_rounds = 100  # so the ceiling, not the round cap, decides
+    elicitor = _ScriptedElicitor(KEEP_GOING, STOP_HERE)
+    session.elicitor = elicitor
+    _, kwargs = await _run(session)
+    assert kwargs["ended_by"] == "spend_ceiling"
+    assert kwargs["limit_continues"] == "1"
+    assert len(elicitor.requests) == 2
+    total = int(kwargs["tokens_total"])
+    assert CEILING < total <= (1 + _LIMIT_CONTINUE_MULTIPLIER) * CEILING + 2 * PER_CALL
+
+
+async def test_the_question_states_what_continuing_costs(workspace):
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 14)])
+    elicitor = _ScriptedElicitor(STOP_HERE)
+    session.elicitor = elicitor
+    await _run(session)
+    request = elicitor.requests[0]
+    assert request.prompt == (
+        f"This task reached its limit of {CEILING:,} tokens per request. "
+        "Continuing uses more tokens. Keep going?"
+    )
+    assert [o.value for o in request.options] == ["continue", "stop"]
+    assert f"{_LIMIT_CONTINUE_MULTIPLIER * CEILING:,}" in request.options[0].detail
+    assert not request.allow_custom
+
+
+async def test_keep_going_at_the_round_cap_raises_it(workspace):
+    work = [_tool_call(i) for i in range(1, 9)] + [_text("all done")]
+    session = _session(workspace, responses=work, per_call=1_000)
+    session._max_tool_rounds = 3
+    session.elicitor = _ScriptedElicitor(KEEP_GOING)
+    _, kwargs = await _run(session)
+    assert kwargs["ended_by"] == "completed"
+    assert kwargs["limit_continues"] == "1"
+
+
+async def test_stop_at_the_round_cap_hands_back(workspace):
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 9)], per_call=1_000)
+    session._max_tool_rounds = 3
+    session.elicitor = _ScriptedElicitor(STOP_HERE)
+    _, kwargs = await _run(session)
+    assert kwargs["ended_by"] == "round_cap"
+    assert _HANDBACK_NOT_USER_CLAUSE in _history_text(session)
+
+
+def _structured_calls(session, *, authorized: bool) -> AsyncMock:
+    """Answer the finish-authorization check, and let any verifier verdict
+    through as COMPLETE."""
+
+    async def _answer(schema, **_kwargs):
+        if schema is _FinishAuthorization:
+            return _FinishAuthorization(
+                quote="Keep going, don't stop" if authorized else "", authorized=authorized
+            )
+        return _VerifierVerdict(status="COMPLETE", reason="done")
+
+    calls = AsyncMock(side_effect=_answer)
+    session._llm.generate_object_code = calls
+    return calls
+
+
+def _authorization_checks(calls: AsyncMock) -> int:
+    return sum(1 for c in calls.call_args_list if c.args and c.args[0] is _FinishAuthorization)
+
+
+async def test_the_user_s_own_keep_going_passes_the_limit_without_asking(workspace):
+    """The incident: the user wrote "keep going, don't stop until you are
+    finished", and the turn stopped at the limit again."""
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 14)] + [_text("all done")])
+    elicitor = _ScriptedElicitor(STOP_HERE)
+    session.elicitor = elicitor
+    _structured_calls(session, authorized=True)
+    events, kwargs = await _run(session, "Keep going, don't stop until you are finished")
+    assert kwargs["ended_by"] == "completed"
+    assert kwargs["limit_message_continues"] == "1"
+    assert kwargs["limit_continues"] == "0"
+    assert not elicitor.requests, "the user already answered"
+    notes = [ev.message for ev in events if isinstance(ev, StreamTaskProgress)]
+    assert any(
+        f"reached its limit of {CEILING:,} tokens per request" in n and "as you asked" in n
+        for n in notes
+    ), "the user is told which limit their message carried it past"
+
+
+async def test_the_user_s_message_carries_each_limit_once(workspace):
+    """A run that never finishes is asked at the raised limit, so one message
+    cannot authorize unbounded spend."""
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 80)])
+    session._max_tool_rounds = 100
+    elicitor = _ScriptedElicitor(STOP_HERE)
+    session.elicitor = elicitor
+    calls = _structured_calls(session, authorized=True)
+    _, kwargs = await _run(session, "Keep going, don't stop")
+    assert kwargs["ended_by"] == "spend_ceiling"
+    assert kwargs["limit_message_continues"] == "1"
+    assert len(elicitor.requests) == 1
+    raised = (1 + _LIMIT_CONTINUE_MULTIPLIER) * CEILING
+    assert f"reached its limit of {raised:,} tokens per request" in elicitor.requests[0].prompt
+    assert _authorization_checks(calls) == 1, "checked once per turn, not per limit"
+
+
+async def test_an_ordinary_request_still_asks(workspace):
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 14)])
+    elicitor = _ScriptedElicitor(STOP_HERE)
+    session.elicitor = elicitor
+    _structured_calls(session, authorized=False)
+    _, kwargs = await _run(session, "Convert the RFP to match the strategy")
+    assert kwargs["ended_by"] == "spend_ceiling"
+    assert kwargs["limit_message_continues"] == "0"
+    assert len(elicitor.requests) == 1
+
+
+async def test_a_failed_check_falls_back_to_asking(workspace):
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 14)])
+    elicitor = _ScriptedElicitor(STOP_HERE)
+    session.elicitor = elicitor
+    session._llm.generate_object_code = AsyncMock(side_effect=RuntimeError("model down"))
+    _, kwargs = await _run(session, "keep going")
+    assert kwargs["ended_by"] == "spend_ceiling"
+    assert len(elicitor.requests) == 1
+
+
+async def test_the_hand_back_names_the_limit_and_how_to_continue(workspace):
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 14)])
+    session.elicitor = _ScriptedElicitor(STOP_HERE)
+    await _run(session)
+    text = _history_text(session)
+    assert f"reached its limit of {CEILING:,} tokens per request" in text
+    assert 'replying \\"keep going\\" continues' in text or 'replying "keep going" continues' in text
+
+
+def _stopped_at_the_ceiling(workspace):
+    return _session(workspace, responses=[_tool_call(i) for i in range(1, 14)])
+
+
+def _stopped_at_the_round_cap(workspace):
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 9)], per_call=1_000)
+    session._max_tool_rounds = 3
+    return session
+
+
+@pytest.mark.parametrize(
+    "stopped,sentence",
+    [
+        (_stopped_at_the_ceiling, f"This task reached its limit of {CEILING:,} tokens per request."),
+        (_stopped_at_the_round_cap, "This task reached its limit of 3 steps per request."),
+    ],
+)
+async def test_the_limit_sentence_names_no_setting(workspace, stopped, sentence):
+    """Where the operator sets the limits, the user can't change them, so the
+    hand-back the model writes and the question both name the limit alone."""
+    session = stopped(workspace)
+    elicitor = _ScriptedElicitor(STOP_HERE)
+    session.elicitor = elicitor
+    await _run(session)
+    handbacks = [
+        m["content"]
+        for m in session._history
+        if isinstance(m.get("content"), str) and f'word for word: "{sentence}"' in m["content"]
+    ]
+    assert len(handbacks) == 1
+    assert "settings" not in handbacks[0]
+    assert elicitor.requests[0].prompt.startswith(f"{sentence} ")
+    assert "settings" not in elicitor.requests[0].prompt
+
+
+def test_a_yes_needs_a_quote_from_the_message():
+    from anton.core.session import _finish_authorized
+
+    message = "Go and don't stop until you hae something for me to review!!!!"
+    yes = lambda quote: _FinishAuthorization(quote=quote, authorized=True)  # noqa: E731
+    # Copied with the typo fixed and the punctuation trimmed: still the user's words.
+    assert _finish_authorized(yes("Go and don't stop until you have something for me to review"), message)
+    # A yes with nothing to point at is not a yes.
+    assert not _finish_authorized(yes(""), message)
+    # A quote the message does not contain is invented.
+    assert not _finish_authorized(yes("keep working until everything is finished"), message)
+    assert not _finish_authorized(
+        _FinishAuthorization(quote="don't stop", authorized=False), message
+    )
+
+
+async def test_turn_without_an_emitter_hands_back_at_the_limit(workspace):
+    """`turn()` runs with no emitter, so nothing can ask. The limit must hand
+    back as before, not crash reading an emitter that is not there (the
+    reviewed failure: an empty reply ending `retry_exhausted`)."""
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 14)])
+    session.elicitor = _ScriptedElicitor(KEEP_GOING)
+    with patch("anton.analytics.send_event") as send:
+        reply = await session.turn("do the thing")
+    assert send.call_args.kwargs["ended_by"] == "spend_ceiling"
+    assert send.call_args.kwargs["limit_continues"] == "0"
+    assert isinstance(reply, str)
+
+
+async def test_a_message_too_long_to_check_whole_is_asked_about(workspace):
+    """Truncating it could cut off a trailing restriction while the opening
+    "keep going" still verifies, so a long message never skips the question."""
+    from anton.core.session import _FINISH_AUTHORIZATION_MAX_CHARS
+
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 14)])
+    elicitor = _ScriptedElicitor(STOP_HERE)
+    session.elicitor = elicitor
+    calls = _structured_calls(session, authorized=True)
+    message = (
+        "Keep going, don't stop until you are finished. "
+        + "Context. " * (_FINISH_AUTHORIZATION_MAX_CHARS // 9)
+        + "But ask me before you go past my token limit."
+    )
+    _, kwargs = await _run(session, message)
+    assert kwargs["limit_message_continues"] == "0"
+    assert len(elicitor.requests) == 1
+    assert _authorization_checks(calls) == 0
+
+
+def test_an_exact_non_latin_quote_counts():
+    from anton.core.session import _finish_authorized
+
+    for message, quote in (
+        ("请继续，不要停下来，直到全部完成。", "不要停下来，直到全部完成"),
+        ("Продолжай и не останавливайся, пока не закончишь.", "не останавливайся, пока не закончишь"),
+        # No spaces or punctuation around the quote: only an exact match finds it.
+        ("请继续不要停下来直到全部完成", "不要停下来"),
+    ):
+        assert _finish_authorized(_FinishAuthorization(quote=quote, authorized=True), message)
+    assert not _finish_authorized(
+        _FinishAuthorization(quote="不要问我", authorized=True), "请继续，不要停下来。"
+    ), "a quote the message does not contain is still invented"
+
+
+async def test_typing_keep_going_in_the_cli_continues(workspace, monkeypatch):
+    """The CLI shows the options as labels, so typing "Keep going" must mean
+    Keep going, not free text the turn reads as a stop (review finding)."""
+    from rich.console import Console
+
+    from anton.core.interaction.cli import CLIElicitor
+
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 14)] + [_text("all done")])
+    session.elicitor = CLIElicitor(Console(quiet=True))
+    monkeypatch.setattr("anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value="Keep going"))
+    _, kwargs = await _run(session)
+    assert kwargs["ended_by"] == "completed"
+    assert kwargs["limit_continues"] == "1"

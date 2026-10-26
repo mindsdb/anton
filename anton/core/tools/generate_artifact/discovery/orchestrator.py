@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from . import checkpoint as cp
 from . import engine
-from .brief import classify_feedback, draft_brief, redraw_brief, show_and_confirm
+from .brief import announce_brief, classify_feedback, draft_brief, redraw_brief, show_and_confirm
 from .prd import write_prd
 from .state import PrdState
 
@@ -76,6 +76,10 @@ async def _confirm_loop(state: PrdState) -> str:
             state.record("brief", "stopped_over_budget", "revise loop stopped")
             await write_prd(state)
             return cp.STAGE_AWAITING_CONFIRMATION
+        if state.question_unanswered:
+            state.record("brief", "unconfirmed", "a question went unanswered")
+            await write_prd(state)
+            return cp.STAGE_AWAITING_CONFIRMATION
         outcome = await show_and_confirm(state)
 
         if outcome == "accepted":
@@ -105,6 +109,59 @@ async def _confirm_loop(state: PrdState) -> str:
     return cp.STAGE_AWAITING_CONFIRMATION
 
 
+async def _announce_and_write(state: PrdState) -> str:
+    """Act-first end of phase B: show the brief without waiting, write the PRD.
+
+    Over the budget the brief is not shown, as in `_confirm_loop`: the outer
+    agent shows it together with the "continue?" question.
+    """
+    if state.winding_down():
+        state.record("brief", "stopped_over_budget", "brief not shown")
+        await write_prd(state)
+        return cp.STAGE_AWAITING_CONFIRMATION
+    # Acting first only skips confirming assumptions; an unanswered question
+    # still blocks the build.
+    if state.question_unanswered:
+        state.record("brief", "unconfirmed", "a question went unanswered")
+        await write_prd(state)
+        return cp.STAGE_AWAITING_CONFIRMATION
+    announce_brief(state)
+    await write_prd(state)
+    return cp.STAGE_PRD_WRITTEN
+
+
+async def _run_act_first(state: PrdState, *, entry: str) -> str:
+    """Phases A-C when the agent acts first: nobody confirms the brief.
+
+    A changed repeat call — the usual case, since the calling agent re-types
+    `agent_understanding` every time — goes through `redraw_brief`: in this
+    mode it is the only path for a correction, and only the redraw step can
+    re-declare the data sources a correction may add.
+
+    `ENTRY_CONFIRM` follows a budget stop where the outer agent already showed
+    the brief and the user said to continue, so the brief is not shown again
+    here; a correction is still redrawn into the PRD.
+    """
+    if entry == cp.ENTRY_FULL:
+        await _run_gathering(state)
+        await draft_brief(state)
+        return await _announce_and_write(state)
+    if entry == cp.ENTRY_NEW_ITERATION:
+        if state.call_changed:
+            await redraw_brief(state)
+        else:
+            await draft_brief(state)
+        return await _announce_and_write(state)
+    if entry == cp.ENTRY_CONFIRM:
+        if state.call_changed:
+            await redraw_brief(state)
+        await write_prd(state)
+        return cp.STAGE_PRD_WRITTEN
+    raise ValueError(
+        f"run_discovery called with an entry it does not own: {entry!r}"
+    )
+
+
 async def run_discovery(state: PrdState, *, entry: str) -> str:
     """Phases A-C. Returns the pipeline stage reached, or `CANCELLED`.
 
@@ -126,7 +183,13 @@ async def run_discovery(state: PrdState, *, entry: str) -> str:
     is not an option: `prd_section` declares it the authoritative requirements
     source, so a correction agreed in the brief would be overwritten by the
     un-corrected document at the spec step.
+
+    When `state.act_first` is set, `_run_act_first` runs instead: the brief is
+    shown without waiting and never cancelled.
     """
+    if state.act_first:
+        return await _run_act_first(state, entry=entry)
+
     if entry == cp.ENTRY_FULL:
         await _run_gathering(state)
         await draft_brief(state)

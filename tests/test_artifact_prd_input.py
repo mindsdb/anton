@@ -16,11 +16,19 @@ from anton.core.artifacts.internal_files import PRD_FILENAME
 from anton.core.tools.generate_artifact import engine, orchestrator, prompts
 from anton.core.tools.generate_artifact.discovery import checkpoint as cp
 from anton.core.tools.generate_artifact.state import GenState
+from tests.streaming_llm import StreamingLLM
 
+
+
+def _unsandboxed_session() -> AsyncMock:
+    """A mock session whose scratchpads carry no sandbox policy, as on the desktop."""
+    session = AsyncMock()
+    session._scratchpads.cell_sandbox = None
+    return session
 
 def _state(tmp_path, **kw):
     base = dict(
-        session=AsyncMock(), artifact_type="html-app", artifact_path=tmp_path,
+        session=_unsandboxed_session(), artifact_type="html-app", artifact_path=tmp_path,
         slug="a", brief="## User request\nShow orders", is_fullstack=False,
     )
     base.update(kw)
@@ -105,7 +113,7 @@ async def test_generate_loads_the_prd_before_running_the_fsm(tmp_path: Path, mon
     ))
     monkeypatch.setattr(orchestrator, "run", fake_run)
     await engine.generate(
-        session=AsyncMock(), artifact_type="html-app", artifact_path=tmp_path,
+        session=_unsandboxed_session(), artifact_type="html-app", artifact_path=tmp_path,
         slug="a", user_request="show orders", agent_understanding="orders table",
     )
     assert seen["entry"] == cp.ENTRY_SPEC
@@ -136,7 +144,7 @@ async def test_a_resumed_generation_reads_the_api_contract_back(tmp_path: Path, 
     ))
     monkeypatch.setattr(orchestrator, "run", fake_run)
     await engine.generate(
-        session=AsyncMock(), artifact_type="fullstack-stateless-app", artifact_path=tmp_path,
+        session=_unsandboxed_session(), artifact_type="fullstack-stateless-app", artifact_path=tmp_path,
         slug="a", user_request="a clock", agent_understanding="clock",
     )
     assert seen["entry"] == cp.ENTRY_GENERATE
@@ -165,7 +173,7 @@ async def test_a_resumed_spec_phase_does_not_read_a_contract_it_will_rewrite(tmp
     ))
     monkeypatch.setattr(orchestrator, "run", fake_run)
     await engine.generate(
-        session=AsyncMock(), artifact_type="fullstack-stateless-app", artifact_path=tmp_path,
+        session=_unsandboxed_session(), artifact_type="fullstack-stateless-app", artifact_path=tmp_path,
         slug="a", user_request="a clock", agent_understanding="clock",
     )
     assert seen["entry"] == cp.ENTRY_SPEC
@@ -327,7 +335,7 @@ async def test_what_generate_prd_writes_is_what_generate_artifact_reads(tmp_path
     body = "## Goal\nShow the orders table.\n\n## Data model\nthe `orders` scratchpad, cell 1"
     prd_state = PrdState(
         session=SimpleNamespace(
-            _llm=SimpleNamespace(plan=AsyncMock(return_value=LLMResponse(
+            _llm=StreamingLLM(plan=AsyncMock(return_value=LLMResponse(
                 content=body, tool_calls=[], usage=Usage(input_tokens=1, output_tokens=1),
             ))),
             question_count=0, elicitor=None, emit=AsyncMock(),
@@ -362,7 +370,7 @@ async def test_write_prd_settles_the_type_the_gathering_chose(tmp_path: Path, mo
     monkeypatch.setattr(tool_handlers, "resolve_artifact_store", lambda session: store)
     prd_state = PrdState(
         session=SimpleNamespace(
-            _llm=SimpleNamespace(plan=AsyncMock(return_value=LLMResponse(
+            _llm=StreamingLLM(plan=AsyncMock(return_value=LLMResponse(
                 content="## Goal\nA room-based game.", tool_calls=[],
                 usage=Usage(input_tokens=1, output_tokens=1),
             ))),
