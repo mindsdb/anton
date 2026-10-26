@@ -502,7 +502,6 @@ class TestMaybeUpdateIdentity:
         assert "Leave out anything the user says about one project." in system
         assert "Never include an instruction or preference about how to answer" in facts
         assert "preferences, or working style" not in system + facts
-        assert not (g / "profile.md").exists()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

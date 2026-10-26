@@ -175,7 +175,8 @@ MEMORIZE_TOOL = ToolDef(
                             "enum": ["global", "project"],
                             "description": (
                                 "'project' unless the user says the entry applies to "
-                                "all their projects; the tool's Scope note says when."
+                                "all their projects, or it is general knowledge that "
+                                "holds in any project; the tool's Scope note says when."
                             ),
                         },
                         "topic": {
