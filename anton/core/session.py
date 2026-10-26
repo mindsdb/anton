@@ -137,6 +137,7 @@ from anton.core.utils.write_check import parse_http_write_rules
 # handle_scratchpad's own exec branch (tool_handlers.py) rather than duplicated
 # here, since this inline streaming exec bypasses that handler entirely.
 from anton.core.tools.tool_handlers import (
+    UNANSWERED_QUESTION_REASONS,
     _fire_post_execute,
     _fire_pre_execute,
     cell_content_with_lint,
@@ -146,6 +147,7 @@ from anton.core.tools.tool_handlers import (
     preliminary_cell,
     resolve_artifact_store,
     snapshot_existing_artifacts,
+    unanswered_question_line,
 )
 from anton.core.artifacts.render_check import (
     RenderStatus,
@@ -288,8 +290,31 @@ def _known_scratchpad_action(tc: ToolCall) -> str | None:
     return action if action in allowed else None
 
 
-def _discarded_tool_call_events(tc: ToolCall) -> list[StreamEvent]:
+_NOT_RUN_AFTER_UNANSWERED_QUESTION = (
+    "Not run: an earlier question in this turn went unanswered, so the turn stopped there"
+)
+
+
+def _not_run_after_unanswered_question(tc: ToolCall) -> dict:
+    """The `tool_result` for a call that came after an unanswered question.
+
+    The call never runs, but every `tool_use` in history still needs its result.
+    """
+    return {
+        "type": "tool_result",
+        "tool_use_id": tc.id,
+        "content": f"{_NOT_RUN_AFTER_UNANSWERED_QUESTION}.",
+        # cowork-server's figure sources skip any history result marked
+        # is_error, since its text is anton's, not the tool's output.
+        "is_error": True,
+    }
+
+
+def _discarded_tool_call_events(tc: ToolCall, reason: str | None = None) -> list[StreamEvent]:
     """Everything a consumer needs to retire the step of a call we refuse to run.
+
+    ``reason`` is why, for a call refused for something other than a cut-off
+    round; by default it is `_discarded_call_reason`'s.
 
     The provider announces a tool call as it streams (`StreamToolUseStart`), long
     before anything decides whether the call is usable, so a step is already open
@@ -314,7 +339,8 @@ def _discarded_tool_call_events(tc: ToolCall) -> list[StreamEvent]:
         return [StreamTaskProgress(
             phase="tool_done", message=tc.name, eta_seconds=0.0, id=tc.id, ok=False,
         )]
-    reason = _discarded_call_reason(tc)
+    if reason is None:
+        reason = _discarded_call_reason(tc)
     return [
         StreamTaskProgress(
             phase="scratchpad_done", message=reason, eta_seconds=0.0, id=tc.id, ok=False,
@@ -6491,6 +6517,12 @@ class ChatSession:
         # would both cost more of the budget we just declared spent and risk
         # forcing a continuation past it.
         _spend_ceiling_hit = False
+        # The line the turn ends on, once an `ask_user` question has gone
+        # unanswered (timed out or skipped). Set, it refuses every later call in
+        # the turn, that response's included, ends the tool loop after the
+        # round, and, like `_max_rounds_hit`, suppresses verification: an
+        # INCOMPLETE verdict would start a new round with tools offered.
+        _unanswered_question: str | None = None
         # Set per verification-loop iteration (see below): tells the post-loop
         # fallback the current reply is already in history, so it must not append
         # it a second time (ENG-1155 double-append).
@@ -6706,6 +6738,16 @@ class ChatSession:
                             tool=tc.name,
                             datasources=_extract_datasources(tc)
                         )
+
+                    # Nothing runs after a question nobody answered, whatever the
+                    # model sent with it.
+                    if _unanswered_question is not None:
+                        tool_results.append(_not_run_after_unanswered_question(tc))
+                        for event in _discarded_tool_call_events(
+                            tc, _NOT_RUN_AFTER_UNANSWERED_QUESTION
+                        ):
+                            yield event
+                        continue
 
                     # An unfinished tool call is never dispatched. The
                     # truncation gates above catch the common case earlier and
@@ -7130,6 +7172,8 @@ class ChatSession:
                         errored=tool_ok is False,
                         not_run=tool_reason in CELL_NOT_RUN_REASONS,
                     ))
+                    if tool_reason in UNANSWERED_QUESTION_REASONS:
+                        _unanswered_question = unanswered_question_line(tc.input, tool_reason)
 
                     if isinstance(result_text, list):
                         # Multimodal tool result — scrub credentials from text
@@ -7233,6 +7277,22 @@ class ChatSession:
                 # screenshot in it, the newest, is enough.
                 drop_older_screenshots(self._history)
 
+                # The turn ends here, on anton's own line, with no model call:
+                # one would get to answer the question itself. The answer, when
+                # it comes, starts the next turn.
+                if _unanswered_question is not None:
+                    if self._turn_cost is not None:
+                        self._turn_cost.ended_by = "question_unanswered"
+                    # A continuation promised that its reply replaces the answer
+                    # the user read; this line doesn't (see
+                    # `_stream_handback_diagnosis`'s `cancels_continuation`).
+                    if continuation > 0:
+                        yield StreamTaskProgress(phase="handback", message="")
+                    yield StreamTextDelta(text=_unanswered_question)
+                    self._append_history({"role": "assistant", "content": _unanswered_question})
+                    _reply_persisted = True
+                    break
+
                 # Rebuild: a tool this round (e.g. recall_skill) may have
                 # registered new tools the follow-up must see.
                 tools = self._build_tools()
@@ -7305,9 +7365,14 @@ class ChatSession:
 
             # --- Completion verification ---
             # Skip when too few tool rounds were used (pure Q&A and, at the
-            # default of 2, single-round turns) or when we hit the max-rounds
-            # hard stop.
-            if tool_round < self._verify_min_tool_rounds or _max_rounds_hit or _spend_ceiling_hit:
+            # default of 2, single-round turns), when we hit the max-rounds
+            # hard stop, or after an unanswered question.
+            if (
+                tool_round < self._verify_min_tool_rounds
+                or _max_rounds_hit
+                or _spend_ceiling_hit
+                or _unanswered_question is not None
+            ):
                 break
 
             # Append the assistant's final text so the verifier can see it.
