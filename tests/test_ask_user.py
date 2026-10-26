@@ -23,7 +23,11 @@ from anton.core.llm.provider import (
     StreamTaskProgress,
 )
 from anton.core.tools.tool_defs import ASK_USER_TOOL
-from anton.core.tools.tool_handlers import build_ask_request, handle_ask_user
+from anton.core.tools.tool_handlers import (
+    UNANSWERED_QUESTION_REASONS,
+    build_ask_request,
+    handle_ask_user,
+)
 
 
 def _choice(**over) -> AskRequest:
@@ -467,10 +471,14 @@ async def test_an_unanswered_question_tells_the_model_to_end_its_turn(make_sessi
     """An approval question that timed out once ended in the change it asked
     about: "proceed on a stated assumption" made the assumption the approval."""
     session = _wired(make_session, _RecordingElicitor(answer=AskAnswer(status=status)))
-    result = json.loads(await handle_ask_user(session, _TC_INPUT))
+    outcome = await handle_ask_user(session, _TC_INPUT)
+    result = json.loads(outcome.content)
     assert result["status"] == status
     assert "Do not act on an assumed answer" in result["message"]
     assert "End your turn" in result["message"]
+    # The text only asks; the reason is what makes the turn loop stop.
+    assert outcome.ok is True
+    assert outcome.reason in UNANSWERED_QUESTION_REASONS
 
 
 def test_the_tool_text_no_longer_says_to_proceed_on_an_assumption():

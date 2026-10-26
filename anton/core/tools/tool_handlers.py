@@ -2805,6 +2805,33 @@ _ASK_USER_UNANSWERED = {
     ),
 }
 
+# The `ToolOutcome.reason` of a question that timed out, and of one the user
+# skipped. The text above only asks the model to stop, so
+# `ChatSession._stream_and_handle_tools` stops the turn itself on either: no
+# later call in the turn runs, and the turn ends on `unanswered_question_line`.
+QUESTION_TIMED_OUT = "question_timed_out"
+QUESTION_SKIPPED = "question_skipped"
+UNANSWERED_QUESTION_REASONS = frozenset({QUESTION_TIMED_OUT, QUESTION_SKIPPED})
+_UNANSWERED_QUESTION_REASON = {"timeout": QUESTION_TIMED_OUT, "cancelled": QUESTION_SKIPPED}
+
+
+def unanswered_question_line(tc_input: dict, reason: str) -> str:
+    """The line a turn ends on when its `ask_user` question went unanswered.
+
+    anton writes it, not the model, so it names the open question every time.
+    """
+    question = (tc_input.get("question") or "").strip()
+    if reason == QUESTION_SKIPPED:
+        return (
+            f'You skipped my question: "{question}", so I\'ve stopped here without '
+            "acting on it. Tell me how you'd like to go on."
+        )
+    return (
+        f'I asked: "{question}" and haven\'t had an answer, so I\'ve stopped here '
+        "without acting on it. Answer it above when you're ready, and I'll pick up "
+        "from there."
+    )
+
 
 def _ask_user_telemetry_settings(session: "ChatSession"):
     """Best-effort settings object for `send_event`, mirroring the pattern
@@ -2833,7 +2860,7 @@ def _send_ask_user_event(session: "ChatSession", action: str, props: dict) -> No
         pass
 
 
-async def handle_ask_user(session: "ChatSession", tc_input: dict) -> str:
+async def handle_ask_user(session: "ChatSession", tc_input: dict) -> str | ToolOutcome:
     """Ask the user to choose, and return the answer as the tool result."""
     from anton.core.interaction.elicit import elicit
 
@@ -2860,7 +2887,13 @@ async def handle_ask_user(session: "ChatSession", tc_input: dict) -> str:
     if answer.status == "unavailable":
         return _status("error", _ASK_USER_UNAVAILABLE)
     if answer.status in _ASK_USER_UNANSWERED:
-        return _status(answer.status, _ASK_USER_UNANSWERED[answer.status])
+        # Tier 1: the question was asked and no answer came back, which is the
+        # tool working. The reason is what ends the turn.
+        return ToolOutcome(
+            content=_status(answer.status, _ASK_USER_UNANSWERED[answer.status]),
+            ok=True,
+            reason=_UNANSWERED_QUESTION_REASON[answer.status],
+        )
 
     if answer.status == "answered":
         extra: dict = {}
