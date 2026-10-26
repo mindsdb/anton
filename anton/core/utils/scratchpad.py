@@ -20,6 +20,7 @@ from anton.core.utils.write_check import (
     HttpWrite,
     HttpWriteRule,
     ProjectSnapshot,
+    SqlWrite,
     find_cell_writes,
     snapshot_project_files,
 )
@@ -260,9 +261,26 @@ def _summary(writes: CellWrites) -> str:
     return "; ".join(parts)
 
 
-def _file_lines(change: FileChange, *, lead: str) -> list[str]:
+def _statement_text(write: SqlWrite) -> str:
+    """One statement as the card fences it, with the values it passes."""
+    return write.statement + (f"\nwith values {write.values}" if write.values else "")
+
+
+def _file_lines(change: FileChange, *, also: bool = False) -> list[str]:
     """One file change on the card: the root folders it takes whole, every
-    path it names, or the code that picks the path when it runs."""
+    path it names, or the code that picks the path when it runs. With
+    `also`, the change raises no card on its own, but the Approve runs it
+    too. A change to a SQLite or DuckDB file names the file and quotes each
+    statement it runs, as a SQL write's statements are quoted."""
+    would = "This step would also" if also else "This step would"
+    if change.statements:
+        files = "this database file" if len(change.paths) == 1 else "these database files"
+        lines = [f"{would} change {files}:", "", _fence("\n".join(_shown_path(p) for p in change.paths)), "",
+                 "It would run:", ""]
+        for write in change.statements:
+            lines += [_fence(_statement_text(write)), ""]
+        return lines
+    lead = f"{would} {'append to' if change.action == 'append' else change.action}"
     lines: list[str] = []
     wholes = _wholes(change)
     if wholes:
@@ -305,22 +323,21 @@ def _card_prompt(writes: CellWrites) -> str:
     if writes.sql:
         lines += ["This step would change data in a connected source:", ""]
         for write in writes.sql:
-            text = write.statement + (f"\nwith values {write.values}" if write.values else "")
-            lines += [_fence(text), ""]
+            lines += [_fence(_statement_text(write)), ""]
         if any(write.run_time_parts for write in writes.sql):
             lines += ["A part in braces, `{...}`, is the code that fills in that value when the step runs.", ""]
     for call in writes.calls:
         lines += [f"This step would {_CALL_VIA[call.via]}:", "", _fence(call.call), ""]
     for change in writes.held_files:
-        lines += _file_lines(change, lead=f"This step would {change.action}")
+        lines += _file_lines(change)
     # An append, or an overwrite of a file the agent owns, raises no card on
     # its own, but the Approve runs it too.
     for change in writes.not_held_files:
-        also = "append to" if change.action == "append" else change.action
-        lines += _file_lines(change, lead=f"This step would also {also}")
+        lines += _file_lines(change, also=True)
     for request in writes.http:
         lines += _request_lines(request)
-    if any(r.run_time_parts for r in writes.http) and not any(w.run_time_parts for w in writes.sql):
+    later = [*writes.http, *(w for change in writes.files for w in change.statements)]
+    if any(w.run_time_parts for w in later) and not any(w.run_time_parts for w in writes.sql):
         lines += ["A part in braces, `{...}`, is the code that fills in that value when the step runs.", ""]
     shown = [*(p for change in writes.files for p in change.paths), *(r.url for r in writes.http)]
     if any(_shown_path(p) != p for p in shown):
