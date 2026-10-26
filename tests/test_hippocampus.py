@@ -132,6 +132,19 @@ class TestRecallScratchpadWisdom:
         entry_count = result.count("- Scratchpad when-rule")
         assert 0 < entry_count < 30
 
+    def test_get_returns_the_entries_recall_renders(self, hc, mem_dir):
+        entries = "\n".join(
+            f"- Scratchpad when-rule number {i} with some extra padding words here"
+            for i in range(30)
+        )
+        (mem_dir / "rules.md").write_text(f"# Rules\n\n## When\n{entries}\n")
+        (mem_dir / "lessons.md").write_text("# Lessons\n- Scratchpad cells timeout at 30s\n- Unrelated fact\n")
+
+        kept = hc.get_scratchpad_wisdom(token_budget=150)
+
+        assert 0 < len(kept) < 31
+        assert hc.recall_scratchpad_wisdom(token_budget=150) == "\n".join(f"- {e.text}" for e in kept)
+
 
 class TestEncodeRule:
     def test_creates_rules_file(self, hc, mem_dir):

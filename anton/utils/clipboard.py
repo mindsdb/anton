@@ -215,6 +215,23 @@ async def ensure_clipboard(console: Console) -> bool:
 #      of multimodal content blocks for the LLM.
 
 
+def sniff_image_format(head: bytes) -> str | None:
+    """The real image format from magic bytes, or None if not a known image.
+    Content, never the extension: a BMP named ``.png`` must not ship as PNG,
+    and a text file named ``.png`` must not ship at all."""
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "PNG"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "JPEG"
+    if head.startswith((b"GIF87a", b"GIF89a")):
+        return "GIF"
+    if head.startswith(b"BM"):
+        return "BMP"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "WEBP"
+    return None
+
+
 def _media_type_for(fmt: str) -> str:
     f = (fmt or "PNG").lower()
     if f in ("jpg", "jpeg"):

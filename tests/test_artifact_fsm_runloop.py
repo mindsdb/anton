@@ -3,14 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
-# Must be the SAME module the engine catches against. A plain `httpx` here
-# builds its error from a different class tree, the engine's except clause
-# never matches, and this file would assert a retry while actually proving
-# that a dropped stream is fatal.
-import httpx2 as httpx
 import pytest
 
-from anton.core.llm.provider import LLMResponse, StreamComplete, ToolCall, Usage
+from anton.core.llm.provider import (
+    LLMResponse,
+    StreamComplete,
+    ToolCall,
+    TransientProviderError,
+    Usage,
+)
+from anton.core.llm.client import LLMClient
 from anton.core.tools.generate_artifact.engine import _run_loop
 from anton.core.tools.generate_artifact.state import GEN_WRITE_MAX_TOKENS
 from anton.core.tools.generate_artifact.sub_tools import (
@@ -110,7 +112,7 @@ async def test_run_loop_records_scratchpad_execs(tmp_path: Path, monkeypatch):
     )
     assert isinstance(result, dict)
     assert result["scratchpad_execs"] == [
-        {"name": "pad", "code": "print(df.head())", "output": "cell 1 ok: 100 rows"}
+        {"name": "pad", "code": "print(df.head())", "output": "cell 1 ok: 100 rows", "ok": True}
     ]
 
 
@@ -144,7 +146,33 @@ async def test_run_loop_records_no_cell_that_never_ran(tmp_path: Path, monkeypat
     )
     assert isinstance(result, dict)
     assert result["scratchpad_execs"] == [
-        {"name": "pad", "code": "print(df.head())", "output": "cell 2 ok: 100 rows"}
+        {"name": "pad", "code": "print(df.head())", "output": "cell 2 ok: 100 rows", "ok": True}
+    ]
+
+
+async def test_run_loop_records_a_cell_that_left_out_action(tmp_path: Path, monkeypatch):
+    """A call with `code` and no `action` runs as `exec`, so it is data-access code that ran."""
+    import anton.core.tools.tool_handlers as tool_handlers
+
+    monkeypatch.setattr(
+        tool_handlers, "handle_scratchpad", AsyncMock(return_value="cell 1 ok: 100 rows")
+    )
+    session = AsyncMock()
+    session._scratchpads.cell_sandbox = None
+    session._llm.plan_stream = _stream_mock(
+        _resp([
+            ToolCall(id="1", name="scratchpad", input={"name": "pad", "code": "print(df.head())"}),
+            ToolCall(id="2", name="finish", input={"summary": "done"}),
+        ])
+    )
+    result = await _run_loop(
+        session=session, system="s", kickoff="k",
+        artifact_path=tmp_path, require_files=False,
+        node_label="fetch_data_sample",
+    )
+    assert isinstance(result, dict)
+    assert result["scratchpad_execs"] == [
+        {"name": "pad", "code": "print(df.head())", "output": "cell 1 ok: 100 rows", "ok": True}
     ]
 
 
@@ -483,6 +511,36 @@ async def test_round_budget_without_files_is_still_an_error(tmp_path: Path):
     assert "round budget" in result
 
 
+async def test_round_budget_of_a_fetch_without_files_hands_the_cells_to_the_caller(
+    tmp_path: Path, monkeypatch
+):
+    """A fetch writes no files: running out of rounds is not an error, the
+    caller still gets the recorded cells and `finished: False`."""
+    import anton.core.tools.tool_handlers as tool_handlers
+
+    monkeypatch.setattr(
+        tool_handlers, "handle_scratchpad", AsyncMock(return_value="cell ok: 10 rows")
+    )
+    session = AsyncMock()
+    session._scratchpads.cell_sandbox = None
+    exec_resp = _resp([ToolCall(
+        id="1", name="scratchpad",
+        input={"action": "exec", "name": "pad", "code": "print(1)"},
+    )])
+    session._llm.plan_stream = _stream_mock(exec_resp)
+    session._llm.code_stream = _stream_mock(exec_resp)
+
+    result = await _run_loop(
+        session=session, system="s", kickoff="k", artifact_path=tmp_path,
+        require_files=False, node_label="fetch_data_sample",
+    )
+    assert isinstance(result, dict)
+    assert result["finished"] is False
+    assert result["files_written"] == []
+    assert len(result["scratchpad_execs"]) > 0
+    assert all(e["code"] == "print(1)" for e in result["scratchpad_execs"])
+
+
 async def test_finished_flag_is_true_on_a_clean_finish(tmp_path: Path):
     session = AsyncMock()
     session._scratchpads.cell_sandbox = None
@@ -572,6 +630,46 @@ async def test_every_round_gets_the_raised_budget_including_round_zero(
     assert session._llm.code_stream.call_args.kwargs["max_tokens"] == GEN_WRITE_MAX_TOKENS
 
 
+class _EffortProvider:
+    """Only what `LLMClient.stream_budget` reads from a provider."""
+
+    accepts_large_output = True
+    trace_role = None
+
+    def __init__(self, effort: str) -> None:
+        self.reasoning_effort = effort
+
+
+async def test_a_top_effort_raises_each_rounds_budget_to_its_roles_write_budget(
+    tmp_path: Path,
+):
+    """Hidden thinking spends from the round's budget: measured on
+    `sonnet-5-5`, every round at max spent all of 20480, and all of 65536,
+    thinking and wrote nothing; at 128000 it wrote the page. Round 0 runs on
+    the planning model and later rounds on the coding model, so each takes
+    its own role's write budget: max on planning here, xhigh on coding."""
+    client = LLMClient(
+        planning_provider=_EffortProvider("max"), planning_model="p",
+        coding_provider=_EffortProvider("xhigh"), coding_model="c",
+    )
+    session = AsyncMock()
+    session._scratchpads.cell_sandbox = None
+    session._llm.stream_budget = client.stream_budget
+    session._llm.plan_stream = _stream_mock(
+        _resp([ToolCall(id="1", name="write_file", input={"path": "index.html"})],
+              body=_body("<html></html>"))
+    )
+    session._llm.code_stream = _stream_mock(
+        _resp([ToolCall(id="2", name="finish", input={"summary": "ok"})])
+    )
+    await _run_loop(
+        session=session, system="s", kickoff="k", artifact_path=tmp_path,
+        node_label="generate_frontend",
+    )
+    assert session._llm.plan_stream.call_args.kwargs["max_tokens"] == 128000
+    assert session._llm.code_stream.call_args.kwargs["max_tokens"] == 32768
+
+
 async def test_truncation_on_a_write_round_is_judged_against_its_own_budget(
     tmp_path: Path,
 ):
@@ -608,12 +706,15 @@ async def test_truncation_on_a_write_round_is_judged_against_its_own_budget(
 
 
 def _dropping_stream():
-    """A stream that dies mid-iteration, as a real dropped connection does."""
+    """A stream that dies mid-iteration, raised as the providers type the drop."""
 
     async def _gen(**kw):
         if False:  # pragma: no cover - makes this an async generator
             yield None
-        raise httpx.RemoteProtocolError("peer closed connection")
+        raise TransientProviderError(
+            "Lost the connection to the model provider mid-response.",
+            code="connection_error", session_backoff=True,
+        )
 
     return _gen
 
@@ -671,11 +772,12 @@ async def test_a_second_drop_in_the_same_round_propagates(tmp_path: Path):
     session._llm.code_stream = Mock(
         side_effect=[_dropping_stream()(), _dropping_stream()()]
     )
-    with pytest.raises(httpx.RemoteProtocolError):
+    with pytest.raises(TransientProviderError):
         await _run_loop(
             session=session, system="s", kickoff="k", artifact_path=tmp_path,
             node_label="generate_frontend",
         )
+    assert session._llm.code_stream.call_count == 2
 
 
 async def test_read_text_file_paths_are_relative_to_the_artifact_folder(tmp_path: Path, monkeypatch):
@@ -813,3 +915,54 @@ async def test_a_slash_path_is_read_in_the_folder_even_before_it_exists(tmp_path
     not as a file outside the project."""
     content = await _read_result_through_the_loop(tmp_path, "/static/app.js")
     assert content.startswith("Error: file not found: static/app.js"), content
+
+
+async def test_run_loop_marks_a_cell_the_runtime_reported_as_failed(tmp_path: Path, monkeypatch):
+    import anton.core.tools.tool_handlers as tool_handlers
+    from anton.core.tools.registry import ToolOutcome
+
+    failed = ToolOutcome(content="HTTPError: 401 Unauthorized", ok=False)
+    monkeypatch.setattr(tool_handlers, "handle_scratchpad", AsyncMock(return_value=failed))
+    session = AsyncMock()
+    session._scratchpads.cell_sandbox = None
+    session._llm.plan_stream = _stream_mock(_resp([
+        ToolCall(id="1", name="scratchpad", input={"action": "exec", "name": "pad", "code": "get('/sites')"}),
+        ToolCall(id="2", name="finish", input={"summary": "tried"}),
+    ]))
+    result = await _run_loop(
+        session=session, system="s", kickoff="k",
+        artifact_path=tmp_path, require_files=False, node_label="fetch_data_sample",
+    )
+    assert result["scratchpad_execs"][0]["ok"] is False
+
+
+async def test_a_fetch_that_ends_in_prose_keeps_the_cells_it_ran(tmp_path: Path, monkeypatch):
+    import anton.core.tools.tool_handlers as tool_handlers
+
+    monkeypatch.setattr(tool_handlers, "handle_scratchpad", AsyncMock(return_value="cell 1 ok: 13 rows"))
+    session = AsyncMock()
+    session._scratchpads.cell_sandbox = None
+    session._llm.plan_stream = _stream_mock(_resp([
+        ToolCall(id="1", name="scratchpad", input={"action": "exec", "name": "pad", "code": "rows = get('/sites')"}),
+    ]))
+    session._llm.code_stream = _stream_mock(_resp([], body="Fetched 13 site rows into `rows`."))
+    result = await _run_loop(
+        session=session, system="s", kickoff="k",
+        artifact_path=tmp_path, require_files=False, node_label="fetch_data_sample",
+    )
+    assert isinstance(result, dict)
+    assert result["finished"] is False
+    assert result["summary"] == "Fetched 13 site rows into `rows`."
+    assert result["scratchpad_execs"][0]["code"] == "rows = get('/sites')"
+
+
+async def test_a_writer_that_ends_in_prose_still_fails(tmp_path: Path):
+    session = AsyncMock()
+    session._scratchpads.cell_sandbox = None
+    session._llm.plan_stream = _stream_mock(_resp([], body="I would write the page now."))
+    result = await _run_loop(
+        session=session, system="s", kickoff="k",
+        artifact_path=tmp_path, node_label="generate_frontend",
+    )
+    assert isinstance(result, str)
+    assert "generator stopped without writing files" in result

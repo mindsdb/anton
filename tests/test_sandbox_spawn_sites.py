@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -159,6 +160,327 @@ def _pad(project: Path, policy: CellSandbox | None, **kwargs) -> LocalScratchpad
 
 
 # ── The sites ────────────────────────────────────────────────────────────────
+
+
+async def test_cell_launch_preparation_leaves_the_event_loop(project, policy, monkeypatch, server_env):
+    pad = _pad(project, policy)
+    monkeypatch.setattr(pad, "_verify_venv_python", lambda: True)
+    loop_thread = threading.get_ident()
+    original = CellSandbox.launch
+    preparations = []
+    launches = []
+
+    def prepare(self, *args, **kwargs):
+        preparations.append(threading.get_ident())
+        assert threading.get_ident() != loop_thread, "launch preparation blocks the event loop"
+        launch = original(self, *args, **kwargs)
+        launches.append(launch)
+        return launch
+
+    async def capture(*args, **kwargs):
+        assert threading.get_ident() == loop_thread, "subprocess creation moved off its event loop"
+        return _Proc()
+
+    monkeypatch.setattr(CellSandbox, "launch", prepare)
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", capture)
+    try:
+        await pad.start()
+        assert len(preparations) == 1
+    finally:
+        await pad.close()
+    for fd in (*launches[0].pass_fds, launches[0].refusal_fd):
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+@pytest.mark.parametrize("failure", [OSError, asyncio.CancelledError])
+async def test_cell_spawn_failure_closes_prepared_descriptors(project, policy, monkeypatch, failure):
+    pad = _pad(project, policy)
+    monkeypatch.setattr(pad, "_verify_venv_python", lambda: True)
+    original = CellSandbox.launch
+    launches = []
+    saved = _snapshot(project)
+
+    def prepare(self, *args, **kwargs):
+        launch = original(self, *args, **kwargs)
+        launches.append(launch)
+        return launch
+
+    async def fail(*args, **kwargs):
+        assert _payload(kwargs)["rules"]
+        raise failure("spawn stopped")
+
+    monkeypatch.setattr(CellSandbox, "launch", prepare)
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", fail)
+    with pytest.raises(SandboxUnavailable if failure is OSError else failure, match="spawn stopped"):
+        await pad.start()
+    assert saved.read_bytes() == b"saved namespace"
+    assert Path(pad._venv_python).exists()
+    assert pad._proc is None
+    assert len(launches) == 1
+    for fd in (*launches[0].pass_fds, launches[0].refusal_fd):
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+async def test_cell_launch_preparation_refusal_preserves_venv_and_snapshot(project, policy, monkeypatch):
+    pad = _pad(project, policy)
+    monkeypatch.setattr(pad, "_verify_venv_python", lambda: True)
+    saved = _snapshot(project)
+
+    def refuse(self, *args, **kwargs):
+        raise SandboxUnavailable("launch preparation refused")
+
+    async def spawn(*args, **kwargs):
+        pytest.fail("a refused preparation started a process")
+
+    monkeypatch.setattr(CellSandbox, "launch", refuse)
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", spawn)
+    with pytest.raises(SandboxUnavailable, match="launch preparation refused"):
+        await pad.start()
+    assert saved.read_bytes() == b"saved namespace"
+    assert Path(pad._venv_python).exists()
+    assert pad._proc is None
+
+
+async def test_close_waits_for_the_process_prepared_by_a_running_start(project, policy, monkeypatch):
+    pad = _pad(project, policy)
+    monkeypatch.setattr(pad, "_verify_venv_python", lambda: True)
+    ready, release = threading.Event(), threading.Event()
+    spawning, spawned = asyncio.Event(), asyncio.Event()
+    original = CellSandbox.launch
+    launches = []
+
+    def prepare(self, *args, **kwargs):
+        launch = original(self, *args, **kwargs)
+        launches.append(launch)
+        ready.set()
+        assert release.wait(5)
+        return launch
+
+    async def capture(*args, **kwargs):
+        spawning.set()
+        await spawned.wait()
+        return _Proc()
+
+    monkeypatch.setattr(CellSandbox, "launch", prepare)
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", capture)
+    starting = asyncio.create_task(pad.start())
+    closing = None
+    try:
+        assert await asyncio.to_thread(ready.wait, 1)
+        closing = asyncio.create_task(pad.close())
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.wait_for(spawning.wait(), 5)
+        await asyncio.sleep(0.02)
+        assert not closing.done(), "close returned before the starting process became owned"
+        spawned.set()
+        await asyncio.wait_for(asyncio.gather(starting, closing), 5)
+        assert pad._proc is None
+        assert pad._cell_launch is None
+        for fd in (*launches[0].pass_fds, launches[0].refusal_fd):
+            with pytest.raises(OSError):
+                os.fstat(fd)
+    finally:
+        release.set()
+        spawned.set()
+        await asyncio.gather(*(task for task in (starting, closing) if task is not None), return_exceptions=True)
+        await pad.close()
+
+
+@pytest.mark.parametrize("teardown", ["close", "cleanup"])
+async def test_teardown_during_venv_verification_waits_for_the_following_launch(
+    project, policy, monkeypatch, teardown,
+):
+    pad = _pad(project, policy)
+    verifying, verified = threading.Event(), threading.Event()
+    preparing, prepared = threading.Event(), threading.Event()
+    original = CellSandbox.launch
+    launches = []
+
+    def verify():
+        verifying.set()
+        assert verified.wait(5)
+        return True
+
+    def prepare(self, *args, **kwargs):
+        launch = original(self, *args, **kwargs)
+        launches.append(launch)
+        preparing.set()
+        assert prepared.wait(5)
+        return launch
+
+    async def capture(*args, **kwargs):
+        return _Proc()
+
+    monkeypatch.setattr(pad, "_verify_venv_python", verify)
+    monkeypatch.setattr(CellSandbox, "launch", prepare)
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", capture)
+    starting = asyncio.create_task(pad.start())
+    closing = None
+    try:
+        assert await asyncio.to_thread(verifying.wait, 1)
+        closing = asyncio.create_task(getattr(pad, teardown)())
+        await asyncio.sleep(0)
+        verified.set()
+        assert await asyncio.to_thread(preparing.wait, 1)
+        await asyncio.sleep(0.02)
+        assert not closing.done(), "teardown returned while launch preparation was pending"
+        prepared.set()
+        await asyncio.wait_for(asyncio.gather(starting, closing), 5)
+        assert pad._proc is None
+        assert pad._cell_launch is None
+        for fd in (*launches[0].pass_fds, launches[0].refusal_fd):
+            with pytest.raises(OSError):
+                os.fstat(fd)
+    finally:
+        verified.set()
+        prepared.set()
+        await asyncio.gather(*(task for task in (starting, closing) if task is not None), return_exceptions=True)
+        await pad.close()
+
+
+@pytest.mark.parametrize("teardown", ["close", "cleanup"])
+@pytest.mark.parametrize("cancel_teardown", [False, True])
+async def test_cancelled_launch_preparation_drains_before_teardown(
+    project, policy, monkeypatch, server_env, teardown, cancel_teardown,
+):
+    pad = _pad(project, policy)
+    monkeypatch.setattr(pad, "_verify_venv_python", lambda: True)
+    loop_thread = threading.get_ident()
+    ready, release = threading.Event(), threading.Event()
+    original = CellSandbox.launch
+    launches = []
+    spawned = []
+
+    def prepare(self, *args, **kwargs):
+        assert threading.get_ident() != loop_thread, "launch preparation blocks the event loop"
+        launch = original(self, *args, **kwargs)
+        launches.append(launch)
+        ready.set()
+        assert release.wait(5), "the test did not release launch preparation"
+        # Concurrent teardown must not clear runtime paths while work uses them.
+        assert pad._venv_python is not None
+        return launch
+
+    async def capture(*args, **kwargs):
+        spawned.append(args)
+        return _Proc()
+
+    monkeypatch.setattr(CellSandbox, "launch", prepare)
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", capture)
+    starting = asyncio.create_task(pad.start())
+    closing = None
+    try:
+        assert await asyncio.to_thread(ready.wait, 1), "launch preparation never started"
+        starting.cancel()
+        await asyncio.sleep(0)
+        starting.cancel()
+        closing = asyncio.create_task(getattr(pad, teardown)())
+        await asyncio.sleep(0.02)
+        if cancel_teardown:
+            closing.cancel()
+            await asyncio.sleep(0)
+            closing.cancel()
+        assert not starting.done(), "Stop abandoned launch preparation"
+        assert not closing.done(), "teardown abandoned launch preparation"
+        release.set()
+        await asyncio.wait_for(asyncio.gather(starting, closing, return_exceptions=True), 5)
+        assert starting.cancelled()
+        assert closing.cancelled() is cancel_teardown
+        assert not spawned, "a canceled launch started a process"
+        assert pad._proc is None
+        assert len(launches) == 1
+        launch = launches[0]
+        for fd in (*launch.pass_fds, launch.refusal_fd):
+            with pytest.raises(OSError):
+                os.fstat(fd)
+    finally:
+        release.set()
+        await asyncio.gather(*(task for task in (starting, closing) if task is not None), return_exceptions=True)
+        await pad.close()
+
+
+@pytest.mark.parametrize("prepared_before_cancel", [False, True])
+async def test_cancelled_preparation_task_closes_launch_descriptors(
+    project, policy, monkeypatch, prepared_before_cancel,
+):
+    """A cancelled asyncio task does not mean its preparation thread has finished."""
+    pad = _pad(project, policy)
+    monkeypatch.setattr(pad, "_verify_venv_python", lambda: True)
+    loop = asyncio.get_running_loop()
+    ready, finished = asyncio.Event(), asyncio.Event()
+    release = threading.Event()
+    original_launch = CellSandbox.launch
+    original_work = pad._run_venv_work
+    original_close = os.close
+    launches = []
+    closes = {}
+
+    def prepare(self, *args, **kwargs):
+        if not prepared_before_cancel:
+            loop.call_soon_threadsafe(ready.set)
+            assert release.wait(5), "the test did not release launch preparation"
+        launch = original_launch(self, *args, **kwargs)
+        launches.append(launch)
+        closes.update({fd: 0 for fd in (*launch.pass_fds, launch.refusal_fd)})
+        return launch
+
+    async def tracked_work(work):
+        if work.__name__ != "prepare_launch":
+            return await original_work(work)
+
+        def finish_work():
+            try:
+                result = work()
+                if prepared_before_cancel:
+                    loop.call_soon_threadsafe(ready.set)
+                    assert release.wait(5), "the test did not release the prepared launch"
+                return result
+            finally:
+                loop.call_soon_threadsafe(finished.set)
+
+        return await original_work(finish_work)
+
+    def close(fd):
+        if fd in closes:
+            closes[fd] += 1
+        original_close(fd)
+
+    async def spawn(*args, **kwargs):
+        pytest.fail("a cancelled preparation started a process")
+
+    monkeypatch.setattr(CellSandbox, "launch", prepare)
+    monkeypatch.setattr(pad, "_run_venv_work", tracked_work)
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(os, "close", close)
+    starting = asyncio.create_task(pad.start())
+    try:
+        await asyncio.wait_for(ready.wait(), 5)
+        assert len(pad._venv_workers) == 1
+        worker = next(iter(pad._venv_workers))
+        starting.cancel("start cancelled")
+        worker.cancel("preparation task cancelled")
+        with pytest.raises(asyncio.CancelledError, match="start cancelled"):
+            await asyncio.wait_for(starting, 5)
+        assert pad._proc is None
+        assert not pad._pending_starts
+        release.set()
+        await asyncio.wait_for(finished.wait(), 5)
+        assert len(launches) == 1
+        assert list(closes.values()) == [1, 1, 1]
+        for fd in closes:
+            with pytest.raises(OSError):
+                os.fstat(fd)
+    finally:
+        release.set()
+        await asyncio.gather(starting, return_exceptions=True)
+        await asyncio.wait_for(finished.wait(), 5)
+        for launch in launches:
+            launch.close()
+            launch.refusal()
+        await pad.close()
 
 
 async def test_the_cell_runs_the_installed_boot_script_through_the_launcher(
@@ -503,7 +825,7 @@ async def test_a_fullstack_artifact_is_refused_before_the_spec_or_generation(
         slug="app", brief="b", is_fullstack=True,
     )
     entry_point = {"spec": cp.ENTRY_SPEC, "generate": cp.ENTRY_GENERATE}[entry]
-    assert await orchestrator.run(state, entry=entry_point) == BACKENDS_OFF_MESSAGE
+    assert (await orchestrator.run(state, entry=entry_point)).startswith(BACKENDS_OFF_MESSAGE)
     assert spent == []
 
 
@@ -525,7 +847,9 @@ async def test_a_fullstack_artifact_is_refused_before_any_question(tmp_path, pol
         session=session, artifact_type="fullstack-stateless-app", artifact_path=tmp_path,
         slug="app", brief="b",
     )
-    assert await orchestrator.run(state, entry=cp.ENTRY_FULL) == BACKENDS_OFF_MESSAGE
+    refusal = await orchestrator.run(state, entry=cp.ENTRY_FULL)
+    assert refusal.startswith(BACKENDS_OFF_MESSAGE)
+    assert "Build it as an html-app instead" in refusal
     assert asked == []
 
 
@@ -557,7 +881,7 @@ def test_each_browser_and_office_check_refuses_under_a_policy_before_it_spawns(t
     assert html_lint.lint_url("http://127.0.0.1:1/", cell_sandbox=policy) is None
     assert xlsx_office_check.check_xlsx_via_office(book, cell_sandbox=policy) is None
     assert office_open_check.check_opens_via_office(book, cell_sandbox=policy) is None
-    assert verifiers.verify_frontend_live(page, cell_sandbox=policy) is None
+    assert verifiers.verify_frontend_live(page, cell_sandbox=policy).status == "unverified"
     assert verifiers.verify_app_live("http://127.0.0.1:1/", cell_sandbox=policy) is None
     assert spawned == []
 
@@ -566,13 +890,16 @@ class _Store:
     def __init__(self, root: Path) -> None:
         self.root = root
 
+    def read_metadata(self, slug: str) -> None:
+        return None
 
-def _artifact(root: Path, slug: str, filename: str, content: bytes) -> dict[str, float]:
+
+def _artifact(root: Path, slug: str, filename: str, content: bytes) -> dict[str, tool_handlers.ArtifactFiles]:
     folder = root / slug
     folder.mkdir(parents=True)
     (folder / "metadata.json").write_text("{}")
     (folder / filename).write_bytes(content)
-    return {slug: 0.0}
+    return {slug: tool_handlers.ArtifactFiles()}
 
 
 def test_browser_and_office_lints_are_skipped_and_say_so(tmp_path, policy, monkeypatch):
@@ -592,17 +919,24 @@ def test_browser_and_office_lints_are_skipped_and_say_so(tmp_path, policy, monke
     before = _artifact(store.root, "page", "page.html", b"<html><body>hi</body></html>")
     before |= _artifact(store.root, "deck", "deck.pptx", b"not a zip")
 
-    messages = tool_handlers.lint_changed_artifact_files(store, before, cell_sandbox=policy)
+    messages = tool_handlers.lint_changed_artifact_files(store, before, cell_sandbox=policy).messages
     assert f"page/page.html — {tool_handlers._SANDBOX_BROWSER_SKIP}" in messages
     # The in-process structural lint still runs and reports the broken deck.
     assert any(m.startswith("deck/deck.pptx — ") and "LibreOffice" not in m for m in messages)
 
 
-def test_skipped_lints_stay_silent_where_the_tool_is_not_installed(tmp_path, policy, monkeypatch):
+def test_a_page_the_sandbox_cannot_load_says_so_even_with_no_browser_installed(tmp_path, policy, monkeypatch):
+    """Under a sandbox with no render-check service the agent is told the page
+    was not checked in a browser. It used to be told nothing at all, which
+    read as a clean check."""
     monkeypatch.delenv("ANTON_HTML_LINT_BROWSER", raising=False)
+    monkeypatch.delenv("ANTON_RENDER_CHECK_URL", raising=False)
     store = _Store(tmp_path / "artifacts")
     before = _artifact(store.root, "page", "page.html", b"<html></html>")
-    assert tool_handlers.lint_changed_artifact_files(store, before, cell_sandbox=policy) == []
+    lint = tool_handlers.lint_changed_artifact_files(store, before, cell_sandbox=policy)
+    assert lint.messages == [f"page/page.html — {tool_handlers._SANDBOX_BROWSER_SKIP}"]
+    assert tool_handlers._SANDBOX_BROWSER_SKIP.startswith("not checked in a browser: ")
+    assert lint.page_checks == {("page", "page.html"): "unverified"}
 
 
 def test_the_generator_skips_its_browser_check_and_says_why():

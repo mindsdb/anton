@@ -401,13 +401,13 @@ def _session() -> ChatSession:
     return s
 
 
-def _stream_that_fails_then_succeeds(fail_n: int, calls: dict):
-    """Async-generator factory: raise a transient error `fail_n` times, then
-    yield a successful text delta."""
+def _stream_that_fails_then_succeeds(fail_n: int, calls: dict, exc: Exception | None = None):
+    """Async-generator factory: raise a transient error (`exc`, an overload by
+    default) `fail_n` times, then yield a successful text delta."""
     async def _gen(user_msg):
         calls["n"] += 1
         if calls["n"] <= fail_n:
-            raise TransientProviderError(
+            raise exc or TransientProviderError(
                 "Anthropic is momentarily overloaded.",
                 provider="Anthropic", code="overloaded_error",
             )

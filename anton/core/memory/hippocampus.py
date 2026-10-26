@@ -398,11 +398,16 @@ class Hippocampus:
     def recall_scratchpad_wisdom(self, token_budget: int = 2000) -> str:
         """Retrieve procedural knowledge relevant to scratchpad execution.
 
-        Gathers "when" rules + lessons whose text or topic mentions
-        "scratchpad", ordered by confidence tier (high, then medium/unset,
-        then low) and by recency within a tier, then trimmed to token_budget
-        (~4 chars/token — same convention as get_lessons). Injected into tool
-        descriptions so the LLM sees them when composing code.
+        The entries get_scratchpad_wisdom picks, one "- " line each. Injected
+        into tool descriptions so the LLM sees them when composing code.
+        """
+        return "\n".join(f"- {engram.text}" for engram in self.get_scratchpad_wisdom(token_budget))
+
+    def get_scratchpad_wisdom(self, token_budget: int = 2000) -> list[Engram]:
+        """The scratchpad wisdom as Engrams: "when" rules + lessons whose text
+        or topic mentions "scratchpad", ordered by confidence tier (high, then
+        medium/unset, then low) and by recency within a tier, then trimmed to
+        token_budget (~4 chars/token — same convention as get_lessons).
         """
         candidates: list[Engram] = []
 
@@ -432,9 +437,7 @@ class Hippocampus:
             seen_texts.add(engram.text)
             deduped.append(engram)
 
-        kept = _filter_by_token_budget(deduped, token_budget)
-
-        return "\n".join(f"- {engram.text}" for engram in kept)
+        return _filter_by_token_budget(deduped, token_budget)
 
     # ---------- rules -------------------
 

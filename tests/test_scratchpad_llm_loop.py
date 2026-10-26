@@ -562,6 +562,103 @@ async def test_a_cells_model_calls_carry_its_turns_trace_and_role(
     ]
 
 
+_ASK_CELL = 'print(get_llm().complete(system="s", messages=[{"role": "user", "content": "hi"}]).content)'
+
+
+async def _run_on_pad(tmp_path, base_url, code):
+    pad = LocalScratchpadRuntime(
+        name="usage",
+        coding_provider="openai-compatible",
+        coding_model="stub-model",
+        coding_api_key="test-key",
+        coding_base_url=base_url,
+        _venvs_base=tmp_path / "venvs",
+    )
+    await pad.start()
+    token = set_trace_context(TraceContext(session_id="conv-1", metadata={"turn": "1"}))
+    try:
+        return await pad.execute(code)
+    finally:
+        reset_trace_context(token)
+        await pad.cleanup()
+
+
+@pytest.mark.slow
+async def test_a_cells_model_call_is_logged_by_the_host_not_in_its_output(tmp_path, monkeypatch, usage_lines):
+    """The pad's log is the cell output the model reads, so a cell's call sends
+    its usage to the host, which logs it with the cell's turn."""
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    with _serving() as server:
+        cell = await _run_on_pad(tmp_path, f"http://127.0.0.1:{server.server_port}/v1", _ASK_CELL)
+
+    assert cell.error is None, cell.error
+    assert "llm_usage" not in cell.stdout + cell.stderr + cell.logs
+    (line,) = usage_lines()
+    assert (line["conversation"], line["turn"], line["role"]) == ("conv-1", "1", "coding")
+    assert (line["model"], line["input"], line["output"]) == ("stub-model", 1, 1)
+
+
+@pytest.mark.slow
+async def test_a_killed_cell_keeps_the_usage_of_the_calls_it_made(tmp_path, monkeypatch, usage_lines):
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "3")
+    with _serving() as server:
+        cell = await _run_on_pad(tmp_path, f"http://127.0.0.1:{server.server_port}/v1",
+                                 _ASK_CELL + "\nimport time\ntime.sleep(60)")
+
+    assert cell.error and "timed out" in cell.error
+    assert len(usage_lines()) == 1
+
+
+@pytest.mark.slow
+async def test_a_cell_sends_no_usage_when_the_host_log_is_off(tmp_path, monkeypatch, usage_lines):
+    monkeypatch.delenv("ANTON_USAGE_LOG", raising=False)
+    with _serving() as server:
+        cell = await _run_on_pad(tmp_path, f"http://127.0.0.1:{server.server_port}/v1", _ASK_CELL)
+
+    assert cell.error is None, cell.error
+    assert usage_lines() == []
+
+
+@pytest.mark.slow
+async def test_a_cell_cannot_write_a_usage_line_when_the_host_log_is_off(tmp_path, monkeypatch, usage_lines):
+    monkeypatch.delenv("ANTON_USAGE_LOG", raising=False)
+    forged = 'import sys\nsys.__stdout__.write(\'__ANTON_USAGE__ {"input": 1}\\n\')\nsys.__stdout__.flush()'
+    cell = await _run_on_pad(tmp_path, "http://127.0.0.1:9/v1", forged)
+
+    assert cell.error is None, cell.error
+    assert usage_lines() == []
+
+
+@pytest.mark.slow
+async def test_a_cell_cannot_put_its_usage_on_another_conversation(tmp_path, monkeypatch, usage_lines):
+    """The host names the conversation and turn; the pad only reports counts and models."""
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    sent = {"conversation": "conv-2", "turn": "9", "input": 1000000, "output": True,
+            "cache_read": -5, "model": "m", "note": "anything"}
+    forged = (f"import sys\nsys.__stdout__.write('__ANTON_USAGE__ {json.dumps(sent)}\\n')\n"
+              "sys.__stdout__.flush()")
+    cell = await _run_on_pad(tmp_path, "http://127.0.0.1:9/v1", forged)
+
+    assert cell.error is None, cell.error
+    (line,) = usage_lines()
+    assert (line["conversation"], line["turn"]) == ("conv-1", "1")
+    assert (line["input"], line["output"], line["cache_read"], line["model"]) == (1000000, 0, 0, "m")
+    assert "note" not in line
+
+
+@pytest.mark.slow
+async def test_an_unreadable_usage_line_is_logged_without_its_content(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    caplog.set_level("INFO")
+    broken = "import sys\nsys.__stdout__.write('__ANTON_USAGE__ token=secret-value\\n')\nsys.__stdout__.flush()"
+    cell = await _run_on_pad(tmp_path, "http://127.0.0.1:9/v1", broken)
+
+    assert cell.error is None, cell.error
+    assert "unreadable scratchpad usage line" in caplog.text
+    assert "secret-value" not in caplog.text
+
+
 def test_a_cell_line_that_starts_like_the_trace_marker_stays_code(tmp_path):
     """Only the marker followed by a JSON object is a trace line."""
     (cell,) = _run_cells(

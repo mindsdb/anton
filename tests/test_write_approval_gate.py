@@ -65,8 +65,8 @@ PUT_CELL = (
     "r = requests.put('https://erp.example.com/api/suppliers/S005', json={'lead_time_days': 21})\n"
     "print(r.status_code)\n"
 )
-MAESTRO_RULE = "POST https://maestro.example.com/api/*/orders/*"
-MAESTRO_POST = "import requests\nrequests.post('https://maestro.example.com/api/v2/orders/9', json={'qty': 5})\n"
+PLANNER_RULE = "POST https://planner.example.com/api/*/orders/*"
+PLANNER_POST = "import requests\nrequests.post('https://planner.example.com/api/v2/orders/9', json={'qty': 5})\n"
 
 APPROVE = AskAnswer(status="answered", values=("approve",))
 CANCEL = AskAnswer(status="answered", values=("cancel",))
@@ -312,13 +312,35 @@ async def test_an_update_waits_for_approve_and_then_runs_once(project):
     assert len(seen.cards) == 1, "the card reaches the host while the cell waits"
     assert seen.ran_before == [0], "nothing ran before the user answered"
     assert harness.pad.ran == [UPDATE_CELL], "it runs exactly once after Approve"
-    assert drained == ["prepare_scratchpad_exec"], "the gated exec is drained so its card reaches the host"
+    assert drained == ["prepare_scratchpad_exec", "check_cell_artifacts"], (
+        "the gated exec and the check after it are drained so their cards reach the host"
+    )
     prompt = seen.cards[0].request.prompt
     quoted = "UPDATE suppliers\nSET lead_time_days = %s\nWHERE supplier_id = %s\nwith values (21, 'S005')"
     assert f"```\n{quoted}\n```" in prompt, "the card quotes the statement line by line, with its values"
     assert seen.cards[0].id.startswith("write:")
     assert seen.cards[0].request.allow_custom is False
     assert {option.style for option in seen.cards[0].request.options} == {"default"}, "no host renders a style"
+
+
+async def test_a_card_from_the_check_after_a_cell_reaches_the_host(project, monkeypatch):
+    """A running live app's relaunch asks its card from the check after the
+    cell. Undrained, that card sits on the emitter until its timeout, and
+    the turn hangs here and fails on the deadline."""
+    from anton.core.tools import tool_handlers
+    from anton.core.utils.scratchpad import ask_approval_card
+
+    async def relaunch(session, store, before):
+        cause = await ask_approval_card(
+            session, "**Launch this live app?**", approve_detail="Start", cancel_detail="Leave",
+        )
+        return [f"relaunch: {cause or 'approved'}"]
+
+    monkeypatch.setattr(tool_handlers, "_relaunch_live_apps", relaunch)
+    harness = _session(project, "print(1)\n")
+    seen = await _run(harness=harness, answers=[APPROVE])
+    assert [card.request.prompt for card in seen.cards] == ["**Launch this live app?**"]
+    assert "[live app]\nrelaunch: approved" in _history_text(harness.session)
 
 
 @pytest.mark.parametrize("answer", [CANCEL, SKIP, TIMEOUT], ids=["cancel", "skip", "timeout"])
@@ -348,18 +370,21 @@ async def test_a_function_call_waits_for_approval_and_quotes_the_call(project, a
         assert "must not be made another way" in _history_text(harness.session)
 
 
-@pytest.mark.parametrize("report", [
-    "from reportlab.platypus import Paragraph\nParagraph('delete orders where qty is zero')",
-    "from docx import Document\ndoc = Document()\ndoc.add_paragraph('delete orders where qty is zero')",
-], ids=["reportlab", "python-docx"])
-async def test_lowercase_report_text_runs_but_lowercase_sql_waits(project, report):
-    sql = "cur.execute('delete orders where qty = 0')"
-    harness = _session(project, report, sql)
-    seen = await _run(harness=harness, answers=[CANCEL])
-    assert len(seen.cards) == 1
-    assert seen.ran_before == [1]
-    assert harness.pad.ran == [report]
-    assert "delete orders where qty = 0" in seen.cards[0].request.prompt
+@pytest.mark.parametrize("answer", [APPROVE, CANCEL], ids=["approve", "cancel"])
+async def test_a_routine_bound_in_an_earlier_cell_waits_for_approval_where_it_runs(project, answer):
+    """A partial bound in one cell runs its routine in the cell that calls
+    it: that cell waits too, and its card shows which routine runs."""
+    bind = ("import oracledb\nimport functools\nconn = oracledb.connect(dsn='x')\ncur = conn.cursor()\n"
+            "purge = functools.partial(cur.callproc, 'purge_suppliers')")
+    call = "for sid in range(3):\n    purge([sid])"
+    harness = _session(project, bind, call)
+    seen = await _run(harness=harness, answers=[APPROVE, answer])
+    assert len(seen.cards) == 2
+    assert seen.ran_before == [0, 1]
+    prompt = seen.cards[1].request.prompt
+    assert "This step would run a stored procedure or function:\n\n```\npurge([sid])\n```" in prompt
+    assert "That call runs:\n\n```\npurge = functools.partial(cur.callproc, 'purge_suppliers')\n```" in prompt
+    assert harness.pad.ran == ([bind, call] if answer == APPROVE else [bind])
 
 
 async def test_a_refused_cell_closes_its_step_with_a_result_the_replay_skips(project):
@@ -469,25 +494,25 @@ async def test_a_put_without_approve_never_runs_and_the_refusal_names_it(project
 
 
 async def test_a_post_to_an_endpoint_the_setting_lists_waits_for_approve(project):
-    harness = _session(project, MAESTRO_POST, http=MAESTRO_RULE)
+    harness = _session(project, PLANNER_POST, http=PLANNER_RULE)
     seen = await _run(harness=harness, answers=[CANCEL])
     assert len(seen.cards) == 1
-    assert "This step would send POST to:\n\n```\nhttps://maestro.example.com/api/v2/orders/9\n```" in (
+    assert "This step would send POST to:\n\n```\nhttps://planner.example.com/api/v2/orders/9\n```" in (
         seen.cards[0].request.prompt
     )
     assert harness.pad.ran == []
 
 
 async def test_a_post_the_setting_does_not_list_runs_with_no_card(project):
-    elsewhere = MAESTRO_POST.replace("/orders/9", "/forecasts/9")
-    harness = _session(project, elsewhere, MAESTRO_POST, http=MAESTRO_RULE)
+    elsewhere = PLANNER_POST.replace("/orders/9", "/forecasts/9")
+    harness = _session(project, elsewhere, PLANNER_POST, http=PLANNER_RULE)
     seen = await _run(harness=harness, answers=[CANCEL])
     assert len(seen.cards) == 1, "only the listed endpoint asks"
     assert harness.pad.ran == [elsewhere]
 
 
 async def test_the_setting_reads_its_environment_variable(project, monkeypatch):
-    monkeypatch.setenv("ANTON_WRITE_APPROVAL_HTTP", f"{MAESTRO_RULE}\nDELETE https://hooks.example.com/**")
+    monkeypatch.setenv("ANTON_WRITE_APPROVAL_HTTP", f"{PLANNER_RULE}\nDELETE https://hooks.example.com/**")
     workspace = MagicMock(base=project)
     workspace.artifacts_dir = project / "artifacts"
     session = ChatSession(ChatSessionConfig(
@@ -495,7 +520,7 @@ async def test_the_setting_reads_its_environment_variable(project, monkeypatch):
     ))
     try:
         assert [(r.method, r.url_glob) for r in session._write_gate.http_rules] == [
-            ("POST", "https://maestro.example.com/api/*/orders/*"), ("DELETE", "https://hooks.example.com/**"),
+            ("POST", "https://planner.example.com/api/*/orders/*"), ("DELETE", "https://hooks.example.com/**"),
         ]
     finally:
         await session.close()
@@ -503,7 +528,7 @@ async def test_the_setting_reads_its_environment_variable(project, monkeypatch):
 
 async def test_a_bad_entry_in_the_setting_is_skipped_with_one_warning(project, caplog):
     with caplog.at_level(logging.WARNING, logger="anton.core.utils.write_check"):
-        harness = _session(project, MAESTRO_POST, http=f"{MAESTRO_RULE}, POST")
+        harness = _session(project, PLANNER_POST, http=f"{PLANNER_RULE}, POST")
     warned = [r.getMessage() for r in caplog.records
               if r.name == "anton.core.utils.write_check" and r.levelno == logging.WARNING]
     assert warned == ["write approval: skipped the HTTP write entry 'POST': an entry is a method and a URL"]
@@ -715,6 +740,41 @@ async def test_an_overwrite_of_an_existing_file_waits_and_names_it(project, capl
     assert outcome is not None and outcome.reason == "write_not_approved"
     assert "This step would overwrite:\n\n```\nreport.pdf\n```" in elicitor.prompts[0]
     assert "Not run: this step would overwrite `report.pdf`." in outcome.content
+    assert _decisions(caplog) == ['{"kinds":["overwrite"],"count":1,"status":"cancelled"}']
+
+
+SQLITE_UPDATE_CELL = (
+    "import sqlite3\n"
+    "con = sqlite3.connect('shop.db')\n"
+    "con.execute(\"UPDATE orders SET status = 'shipped' WHERE id = 42\")\n"
+    "con.commit()\n"
+)
+
+
+@pytest.mark.parametrize("answer", [APPROVE, CANCEL], ids=["approve", "cancel"])
+async def test_a_write_to_a_database_file_shows_its_statement_and_runs_only_on_approve(project, answer):
+    """The card names the file and quotes the UPDATE, and the cell waits on
+    it as it did when the card named only the file."""
+    (project / "shop.db").write_text("x")
+    harness = _session(project, SQLITE_UPDATE_CELL)
+    seen = await _run(harness=harness, answers=[answer])
+    assert len(seen.cards) == 1
+    prompt = seen.cards[0].request.prompt
+    assert "This step would change this database file:\n\n```\nshop.db\n```" in prompt
+    assert "It would run:\n\n```\nUPDATE orders SET status = 'shipped' WHERE id = 42\n```" in prompt
+    assert harness.pad.ran == ([SQLITE_UPDATE_CELL] if answer is APPROVE else []), "only Approve runs it"
+
+
+async def test_a_cancelled_write_to_a_database_file_is_refused_as_a_change(project, caplog):
+    """The refusal says what the card said, a change to the file, so the
+    model doesn't tell the user the file would be overwritten. The log keeps
+    the kind."""
+    (project / "shop.db").write_text("x")
+    session = await _gated_session(project, elicitor=_AnswersAtOnce(answer=CANCEL))
+    with caplog.at_level(logging.WARNING, logger=GATE_LOG):
+        outcome = await _hold()(session, pad=_Pad(), code=SQLITE_UPDATE_CELL)
+    assert outcome is not None and outcome.reason == "write_not_approved"
+    assert "Not run: this step would change `shop.db`." in outcome.content
     assert _decisions(caplog) == ['{"kinds":["overwrite"],"count":1,"status":"cancelled"}']
 
 

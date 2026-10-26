@@ -127,6 +127,39 @@ def test_check_reports_structural_problems(tmp_path):
         assert fragment in message
 
 
+_GENERATED_HEAD = (
+    '<meta name="viewport" content="width=device-width">'
+    '<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.3"></script>'
+    '<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>'
+)
+
+
+def test_check_passes_the_generators_scripts_from_the_preview_script_host(tmp_path):
+    """An html-app the generator built loads Tailwind and ECharts from the
+    one host the preview loads scripts from; editing it with rt.update and
+    checking it must not report them."""
+    page = tmp_path / "index.html"
+    page.write_text(f'<!doctype html><html lang="en"><head>{_GENERATED_HEAD}</head><body><p id="a">x</p></body></html>')
+    rt.check(page)  # raises ValueError on any problem
+
+
+@pytest.mark.parametrize("resource", [
+    '<script src="https://unpkg.com/echarts@5.5.1/dist/echarts.min.js"></script>',
+    '<script src="https://cdn.jsdelivr.net.evil.example/x.js"></script>',
+    '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tailwindcss@3/dist/tailwind.min.css">',
+    '<img src="https://cdn.jsdelivr.net/npm/flag-icons/flags/4x3/ca.svg" alt="">',
+])
+def test_check_fails_any_other_external_resource(tmp_path, resource):
+    """Only a script from the preview's script host passes: a script from any
+    other host, and an external stylesheet or image from any host, is what the
+    preview blocks."""
+    page = tmp_path / "index.html"
+    page.write_text(f'<!doctype html><html lang="en"><head>{_GENERATED_HEAD}{resource}</head><body></body></html>')
+    with pytest.raises(ValueError, match="external resources") as info:
+        rt.check(page)
+    assert "jsdelivr.net/npm/echarts" not in str(info.value)
+
+
 def test_check_returns_what_the_page_shows(tmp_path):
     out = rt.save(tmp_path / "r.html", _page(rt.section("Detail", rt.table(COLS, ROWS, id="detail")),
                                              rt.section("Chart", rt.bar_chart(["a"], [1], name="Chart name"))))

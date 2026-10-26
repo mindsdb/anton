@@ -35,6 +35,21 @@ base URL matches the configured Minds URL) from a generic third-party endpoint â
 that decides whether `web_search`/`web_fetch` execute server-side or fall back
 to handler-dispatched tools (see [Tool system](/developer/tool-system)).
 
+### The artifact builder's own model
+
+`generate_artifact` can build on a model of its own. With `ANTON_ARTIFACT_MODEL`
+set in the process environment, and optionally `ANTON_ARTIFACT_REASONING_EFFORT`,
+every planning, coding and structured call the pipeline makes asks for that
+model and effort, on the role's own provider and so its endpoint
+(`model_route` and `ModelRoute` in `client.py`, entered inside the pipeline's
+task). The effort goes out as set, and an empty effort sends none, not the
+provider's own. The agent's and router's calls
+in the same turn keep their own models. The builder's usage is reported under
+its model, its calls don't change the served model behind the agent's identity
+line, a screenshot refusal by the builder's model turns off screenshots for
+that model alone, and the step trace's `llm_call` events name the model each
+call asked for.
+
 ## `LLMClient` surface
 
 | Method | Provider | Returns |
@@ -53,7 +68,14 @@ works:
 2. A synthetic tool is built whose `input_schema` is that schema.
 3. The provider is called with `tool_choice={"type": "tool", "name": tool_name}` â€”
    this *forces* the LLM to call the tool rather than returning text.
-4. The tool-call input is validated through `model_validate()` and returned as
+4. Some models refuse a forced choice with a 400 that names `tool_choice`:
+   Claude Opus 5.5, Sonnet 5.5 and Fable 5.1, and an older Claude with thinking
+   on. `send_structured` then sends the call once more with no `tool_choice`
+   and a line asking for the tool first, and remembers the refusal for that
+   endpoint and model while the process runs, so later calls there skip the
+   forced choice. An unforced reply with no tool call gets one more try, so a
+   call sends at most three requests.
+5. The tool-call input is validated through `model_validate()` and returned as
    a typed instance (or `list[Model]` for list annotations).
 
 ### Why it beats asking for JSON in text

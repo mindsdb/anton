@@ -312,7 +312,8 @@ def test_action_events_are_logged(caplog):
     assert {"kind": "delta", "text": "hi"} in events
     assert {"kind": "turn_completed"} in events
     assert "tool call: scratchpad" in caplog.text
-    assert "progress [scratchpad_start]: running cell" in caplog.text
+    assert "running cell" not in caplog.text
+    assert any(record.name == "anton.cloud_turn.__main__" and record.getMessage() == "Turn progress" for record in caplog.records)
     assert "tool result: scratchpad action=exec (20 chars)" in caplog.text
     assert "cloud turn completed" in caplog.text
     # the answer text is emitted, never narrated into the logs

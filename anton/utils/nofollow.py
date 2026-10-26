@@ -150,6 +150,27 @@ def read_text_nofollow(root: Path | str, path: Path | str) -> str:
         return handle.read()
 
 
+def read_bytes_nofollow(root: Path | str, path: Path | str, *, limit: int) -> bytes:
+    """Read ``path``, refusing a symlink at it or any folder above it below ``root``.
+
+    On Linux and macOS the file must also be a regular file with no other
+    hard link, so a FIFO or a device at the name is refused before anything
+    is read. Raises OSError(EFBIG) when the file holds more than ``limit``
+    bytes; nothing past ``limit + 1`` bytes is read.
+    """
+    fd = open_nofollow(root, path, os.O_RDONLY | _O_NONBLOCK)
+    with os.fdopen(fd, "rb") as handle:
+        if not _IS_WINDOWS:
+            _require_lone_regular_file(fd, shown=path)
+        too_large = OSError(errno.EFBIG, f"holds more than {limit} bytes", str(path))
+        if os.fstat(fd).st_size > limit:
+            raise too_large
+        data = handle.read(limit + 1)
+    if len(data) > limit:
+        raise too_large
+    return data
+
+
 def write_text_nofollow(
     root: Path | str, path: Path | str, text: str, *, create_parents: bool = False
 ) -> None:

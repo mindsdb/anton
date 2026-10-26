@@ -172,8 +172,11 @@ this down by category if that helps"). Always leave a door open — never dead-e
 But always let the user know the detail is available if they want it.
 - When you discover important information, use the memorize tool to encode it. \
 Use "always"/"never"/"when" for behavioral rules. Use "lesson" for facts. \
-Use "profile" for things about the user. Choose "global" for universal knowledge, \
-"project" for workspace-specific knowledge. \
+Use "profile" only for who the user is (name, role, time zone, expertise), never for \
+an instruction on how to answer or work. Scope is "project" unless the user says a \
+rule applies to all their projects; the memorize tool's Scope note says when to \
+choose "global". Never memorize what the project's own instructions in anton.md \
+already say: they load on every turn in this project. \
 Only encode genuinely reusable knowledge — not transient conversation details.
 """
 
@@ -312,8 +315,8 @@ primary?)`. It claims the folder and returns `<artifact_path>`.
 2. THEN route the request. A report the user has fully specified you build \
 yourself (DIRECT REPORTS above). Any other `html-app`, and every \
 `fullstack-stateless-app` and `fullstack-stateful-app`, goes to \
-`generate_artifact(slug, user_request, agent_understanding, known_data?, \
-user_preferences?, attachments?)`, which produces every file. It runs the whole thing: gathers what it needs, asks the user whatever \
+`generate_artifact(slug, user_request, user_language, agent_understanding, \
+known_data?, user_preferences?, attachments?)`, which produces every file. It runs the whole thing: gathers what it needs, asks the user whatever \
 is still unclear, shows them a short brief (and asks them to confirm it when the \
 agent is set to ask first), writes the requirements down as `prd.md`, then a \
 technical spec, then the code with static verification, \
@@ -345,6 +348,45 @@ result. For fullstack apps the entry point is the `url` from the \
 the page and its `/api/*`; `static/index.html` opened from disk cannot reach \
 the API, so never present its path as the way to open the app.
 """
+
+
+def cut_spans(text: str, *cuts: tuple[str, str | None, str]) -> str:
+    """`text` with each `(start, end, replacement)` applied in order: the span
+    from `start` up to the first `end` after it becomes `replacement`. `end`
+    itself is kept, and None runs the span to the end of `text`.
+
+    Each `start` must occur exactly once and its `end` must follow it, so a
+    variant derived from a prompt fails at import, instead of drifting, when
+    the prompt is reworded.
+    """
+    for start, end, replacement in cuts:
+        count = text.count(start)
+        if count != 1:
+            raise ValueError(f"{start[:60]!r} occurs {count} times, not once")
+        begin = text.index(start)
+        stop = len(text) if end is None else text.find(end, begin + len(start))
+        if stop < 0:
+            raise ValueError(f"{end!r} doesn't follow {start[:60]!r}")
+        text = text[:begin] + replacement + text[stop:]
+    return text
+
+
+# Where nothing starts an app backend (`live_app_slots.fullstack_offered` is
+# False): no fullstack type to register, no launch, and no backend URL as the
+# way to open an app.
+STATIC_ARTIFACTS_PROMPT = cut_spans(
+    ARTIFACTS_PROMPT,
+    (
+        "- Fullstack web app (backend + frontend) — the DEFAULT",
+        "\nWHEN NOT TO REGISTER:",
+        "- Interactive apps and demos → `type=\"html-app\"` too. This deployment "
+        "starts no app backends, so there is no fullstack type; an html-app shows "
+        "the data it was built with.\n",
+    ),
+    (", and every `fullstack-stateless-app`", " goes to `generate_artifact(", ""),
+    (", and for fullstack apps launches the backend", " Do NOT write a PRD yourself", "."),
+    (" For fullstack apps the entry point is the `url`", "\n", ""),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +427,7 @@ and produce the visualization as an artifact.
 
 A report the user has fully specified follows DIRECT REPORTS in the ARTIFACTS \
 section. Otherwise: `create_artifact(type="html-app", …)`, then \
-`generate_artifact(slug, user_request, agent_understanding, …)`. It works out the \
+`generate_artifact(slug, user_request, user_language, agent_understanding, …)`. It works out the \
 requirements with the user itself and writes the dashboard through a verified \
 pipeline and its own output contract — you do NOT recall a skill or write the \
 HTML yourself for this.
@@ -414,7 +456,7 @@ inline numbers. The terminal is the primary display — make it look great there
 visualization or report file, THEN produce it as an artifact. A report the user \
 has fully specified follows DIRECT REPORTS in the ARTIFACTS section; otherwise \
 `create_artifact(type="html-app", primary="index.html", ...)`, then \
-`generate_artifact(slug, user_request, agent_understanding, ...)`. If you end \
+`generate_artifact(slug, user_request, user_language, agent_understanding, ...)`. If you end \
 up building a generator-made dashboard BY HAND instead \
 (rewriting its code, or the generator failed and the user asked you \
 to continue; not for changing a report's content), call `recall_skill("build-html-dashboard")` first and follow the \
@@ -429,7 +471,7 @@ BACKEND & FULLSTACK APPLICATION GENERATION:
 
 Normal path: register the artifact (`fullstack-stateless-app` — prefer this — or \
 `fullstack-stateful-app`), then call `generate_artifact(slug, user_request, \
-agent_understanding, …)`. It works out the requirements with the user itself, then \
+user_language, agent_understanding, …)`. It works out the requirements with the user itself, then \
 writes `backend.py`, `requirements.txt` and `static/index.html` (plus \
 `state_manifest.json` for `fullstack-stateful-app`) \
 against a hard contract, verifies the backend by importing it and checking its \

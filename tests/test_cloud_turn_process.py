@@ -78,10 +78,17 @@ def test_provider_bodies_stay_off_stderr_for_every_logger(tmp_path, mode):
     assert events == [{"kind": "turn_failed", "error": "RuntimeError: could not finish the turn"}]
     assert PROVIDER_PRIVATE not in stdout
     assert PROVIDER_PRIVATE not in stderr
-    replaced = "Provider operation failed: error_type={} provider_error=RateLimitError status=429"
-    assert "WARNING:anton.core.session:" + replaced.format("RuntimeError") in stderr
-    assert "ERROR:anton.cloud_turn.__main__.child:" + replaced.format("RateLimitError") in stderr
-    assert "ERROR:anton.cloud_turn.__main__:" + replaced.format("RuntimeError") in stderr
+    records = [json.loads(line) for line in stderr.splitlines()]
+    expected = {"anton.core.session": ("WARNING", "RuntimeError"),
+                "anton.cloud_turn.__main__.child": ("ERROR", "RateLimitError"),
+                "anton.cloud_turn.__main__": ("ERROR", "RuntimeError")}
+    for name, (level, error_type) in expected.items():
+        record = next(record for record in records if record["logger"] == name)
+        assert record["log_level"] == level
+        assert record["error_type"] == error_type
+        assert record["provider_error"] == "RateLimitError"
+        assert record["status_code"] == 429
+
 
 
 def test_malformed_input_clean_protocol(tmp_path):

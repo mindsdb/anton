@@ -330,7 +330,7 @@ def test_step_started_counts_a_full_html_app_run(tmp_path: Path):
         "Writing down the requirements (step 1 of 4)",
         "Writing the technical specification (step 2 of 4)",
         "Writing the page (step 3 of 4)",
-        "Verifying the page (step 4 of 4)",
+        "Checking the page (step 4 of 4)",
     ]
 
 

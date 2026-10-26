@@ -12,6 +12,7 @@ from contextlib import aclosing
 
 from openai import AsyncAzureOpenAI
 
+from .effort import LONGEST_SILENCE_S
 from .provider import register_provider, safe_parse_tool_input, unregister_provider
 from .provider import (
     ContextOverflowError,
@@ -22,6 +23,7 @@ from .provider import (
     ProviderAuthError,
     ProviderConnectionInfo,
     ProviderErrorBody,
+    STREAM_DROP_ERROR,
     StreamComplete,
     StreamEvent,
     StreamReasoningDelta,
@@ -33,6 +35,7 @@ from .provider import (
     ToolCall,
     TransientProviderError,
     Usage,
+    call_effort,
     classify_404,
     classify_content_rejection,
     classify_markup_bad_request,
@@ -978,6 +981,11 @@ async def _aclose_stream(stream: object) -> None:
             pass
 
 
+# The SDK's own 600 s read timeout would end a call that thinks in silence for
+# longer, before anton's own deadline (`LLMClient._idle_timeout_for`) does.
+_SDK_TIMEOUT = openai.Timeout(LONGEST_SILENCE_S, connect=5.0)
+
+
 class OpenAIProvider(LLMProvider):
     name: str = "openai"
 
@@ -1080,7 +1088,7 @@ class OpenAIProvider(LLMProvider):
                 azure_kwargs["azure_endpoint"] = base_url
             if not ssl_verify:
                 azure_kwargs["http_client"] = httpx.AsyncClient(verify=False)
-            self._client = AsyncAzureOpenAI(**azure_kwargs)
+            self._client = AsyncAzureOpenAI(**azure_kwargs, timeout=_SDK_TIMEOUT)
         else:
             kwargs: dict = {}
             if client_api_key:
@@ -1089,11 +1097,15 @@ class OpenAIProvider(LLMProvider):
                 kwargs["base_url"] = base_url
             if not ssl_verify:
                 kwargs["http_client"] = httpx.AsyncClient(verify=False)
-            self._client = openai.AsyncOpenAI(**kwargs)
+            self._client = openai.AsyncOpenAI(**kwargs, timeout=_SDK_TIMEOUT)
 
         # After the if/else, not per branch: a future client flavor must not be
         # able to skip registration and leave its pool unclosed.
         register_provider(self)
+
+    @property
+    def accepts_large_output(self) -> bool:
+        return self._flavor in (self.FLAVOR_OPENAI, self.FLAVOR_MINDS_PASSTHROUGH)
 
     def export_connection_info(self) -> ProviderConnectionInfo:
         return ProviderConnectionInfo(
@@ -1227,6 +1239,7 @@ class OpenAIProvider(LLMProvider):
         tool_choice: dict | None = None,
         max_tokens: int = 4096,
         native_web_tools: set[str] | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         if self._flavor == self.FLAVOR_OPENAI:
             return await self._complete_via_responses(
@@ -1237,6 +1250,7 @@ class OpenAIProvider(LLMProvider):
                 tool_choice=tool_choice,
                 max_tokens=max_tokens,
                 native_web_tools=native_web_tools,
+                reasoning_effort=reasoning_effort,
             )
 
         oai_messages = _translate_messages(system, messages, supports_vision=self._supports_vision, vision_format=self._vision_format)
@@ -1246,8 +1260,9 @@ class OpenAIProvider(LLMProvider):
             messages=oai_messages,
             max_tokens=max_tokens,
         )
-        if self._reasoning_effort:
-            kwargs["reasoning_effort"] = self._reasoning_effort
+        effort = call_effort(reasoning_effort, self._reasoning_effort)
+        if effort:
+            kwargs["reasoning_effort"] = effort
         merged_tools: list[dict] = []
         if tools:
             merged_tools.extend(_translate_tools(tools))
@@ -1302,29 +1317,33 @@ class OpenAIProvider(LLMProvider):
                     )
                 ))
 
+        usage_obj = response.usage
+        input_tokens, cache_read_tokens, cache_creation_tokens = _split_cached_input(
+            usage_obj
+        )
+        usage = Usage(
+            input_tokens=input_tokens,
+            output_tokens=usage_obj.completion_tokens if usage_obj else 0,
+            # All prompt-side tokens, exactly as before this split existed
+            # (the OpenAI dialect's prompt_tokens is cache-inclusive).
+            context_pressure=compute_context_pressure(
+                model, input_tokens + cache_read_tokens + cache_creation_tokens
+            ),
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+        )
+        if usage_obj is not None:
+            self.log_usage(model=model, usage=usage, served_model=getattr(response, "model", None))
+
         raise_on_empty_response(
             content=content_text, tool_calls=tool_calls,
             stop_reason=choice.finish_reason, model=model,
         )
 
-        usage_obj = response.usage
-        input_tokens, cache_read_tokens, cache_creation_tokens = _split_cached_input(
-            usage_obj
-        )
         return LLMResponse(
             content=content_text,
             tool_calls=tool_calls,
-            usage=Usage(
-                input_tokens=input_tokens,
-                output_tokens=usage_obj.completion_tokens if usage_obj else 0,
-                # All prompt-side tokens, exactly as before this split existed
-                # (the OpenAI dialect's prompt_tokens is cache-inclusive).
-                context_pressure=compute_context_pressure(
-                    model, input_tokens + cache_read_tokens + cache_creation_tokens
-                ),
-                cache_read_tokens=cache_read_tokens,
-                cache_creation_tokens=cache_creation_tokens,
-            ),
+            usage=usage,
             stop_reason=choice.finish_reason,
             model=getattr(response, "model", None),
         )
@@ -1338,6 +1357,7 @@ class OpenAIProvider(LLMProvider):
         tools: list[dict] | None = None,
         max_tokens: int = 4096,
         native_web_tools: set[str] | None = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         if self._flavor == self.FLAVOR_OPENAI:
             # aclosing, not a bare `async for`: if the consumer abandons us the
@@ -1349,6 +1369,7 @@ class OpenAIProvider(LLMProvider):
                 tools=tools,
                 max_tokens=max_tokens,
                 native_web_tools=native_web_tools,
+                reasoning_effort=reasoning_effort,
             )
             async with aclosing(inner):
                 async for event in inner:
@@ -1363,8 +1384,9 @@ class OpenAIProvider(LLMProvider):
             max_tokens=max_tokens,
             stream=True,
         )
-        if self._reasoning_effort:
-            kwargs["reasoning_effort"] = self._reasoning_effort
+        effort = call_effort(reasoning_effort, self._reasoning_effort)
+        if effort:
+            kwargs["reasoning_effort"] = effort
         merged_tools: list[dict] = []
         if tools:
             merged_tools.extend(_translate_tools(tools))
@@ -1393,6 +1415,7 @@ class OpenAIProvider(LLMProvider):
         # returned, so it never retried — the session must (ENG-673). A failure
         # BEFORE this (request establishment) was already SDK-retried → fail fast.
         stream_started = False
+        usage_seen = False
 
         stream = None
         try:
@@ -1401,6 +1424,7 @@ class OpenAIProvider(LLMProvider):
             async for chunk in stream:
                 served_model = getattr(chunk, "model", None) or served_model
                 if chunk.usage:
+                    usage_seen = True
                     (
                         input_tokens,
                         cache_read_tokens,
@@ -1489,7 +1513,7 @@ class OpenAIProvider(LLMProvider):
             raise
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
-        except openai.APIConnectionError as exc:
+        except (openai.APIConnectionError, STREAM_DROP_ERROR) as exc:
             # A connection error here is retryable. If it dropped mid-stream
             # (after the 200), the SDK never retried it → the session must back
             # off and retry. If it failed during request establishment, the SDK
@@ -1547,6 +1571,17 @@ class OpenAIProvider(LLMProvider):
         finally:
             await _aclose_stream(stream)
 
+        usage = Usage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            context_pressure=compute_context_pressure(
+                model, input_tokens + cache_read_tokens + cache_creation_tokens
+            ),
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+        )
+        if usage_seen:
+            self.log_usage(model=model, usage=usage, served_model=served_model)
 
         # Finalize tool calls. Same safe-parse protection as the
         # non-streaming path — a model cut off mid-JSON-arguments
@@ -1603,15 +1638,7 @@ class OpenAIProvider(LLMProvider):
             response=LLMResponse(
                 content=content_text,
                 tool_calls=tool_calls,
-                usage=Usage(
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    context_pressure=compute_context_pressure(
-                        model, input_tokens + cache_read_tokens + cache_creation_tokens
-                    ),
-                    cache_read_tokens=cache_read_tokens,
-                    cache_creation_tokens=cache_creation_tokens,
-                ),
+                usage=usage,
                 stop_reason=stop_reason,
                 model=served_model,
             )
@@ -1631,6 +1658,7 @@ class OpenAIProvider(LLMProvider):
         tool_choice: dict | None,
         max_tokens: int,
         native_web_tools: set[str] | None,
+        reasoning_effort: str | None = None,
     ) -> dict:
         """Common Responses API kwargs for both ``complete`` and ``stream``."""
         responses_input = _translate_messages_to_responses_input(
@@ -1654,7 +1682,8 @@ class OpenAIProvider(LLMProvider):
             kwargs["input"] = _shared_prompt_input(static, SESSION_CONTEXT_MARKER + session) + responses_input
         elif system:
             kwargs["instructions"] = system
-        if self._reasoning_effort:
+        effort = call_effort(reasoning_effort, self._reasoning_effort)
+        if effort:
             # "summary": "auto" asks the Responses API to also stream a
             # natural-language summary of the reasoning itself (as
             # response.reasoning_summary_text.delta events) — without it,
@@ -1662,7 +1691,7 @@ class OpenAIProvider(LLMProvider):
             # all. Safe to always pair with effort: only sent when effort
             # is already set, which is itself gated to reasoning-capable
             # models by the caller (see AntonSettings.planning_reasoning_effort).
-            kwargs["reasoning"] = {"effort": self._reasoning_effort}
+            kwargs["reasoning"] = {"effort": effort}
             if self._reasoning_summary:
                 kwargs["reasoning"]["summary"] = "auto"
 
@@ -1720,6 +1749,7 @@ class OpenAIProvider(LLMProvider):
         tool_choice: dict | None,
         max_tokens: int,
         native_web_tools: set[str] | None,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         kwargs = self._build_responses_kwargs(
             model=model,
@@ -1729,6 +1759,7 @@ class OpenAIProvider(LLMProvider):
             tool_choice=tool_choice,
             max_tokens=max_tokens,
             native_web_tools=native_web_tools,
+            reasoning_effort=reasoning_effort,
         )
 
         try:
@@ -1748,6 +1779,11 @@ class OpenAIProvider(LLMProvider):
                 model=model,
             ) from exc
 
+        if getattr(response, "usage", None) is not None:
+            self.log_usage(
+                model=model, usage=_responses_usage(response, model),
+                served_model=getattr(response, "model", None),
+            )
         return _parse_response_object(response, model)
 
     async def _stream_via_responses(
@@ -1759,6 +1795,7 @@ class OpenAIProvider(LLMProvider):
         tools: list[dict] | None,
         max_tokens: int,
         native_web_tools: set[str] | None,
+        reasoning_effort: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         kwargs = self._build_responses_kwargs(
             model=model,
@@ -1768,6 +1805,7 @@ class OpenAIProvider(LLMProvider):
             tool_choice=None,  # streaming path does not force tool_choice today
             max_tokens=max_tokens,
             native_web_tools=native_web_tools,
+            reasoning_effort=reasoning_effort,
         )
         kwargs["stream"] = True
 
@@ -1779,6 +1817,7 @@ class OpenAIProvider(LLMProvider):
         cache_creation_tokens = 0
         stop_reason: str | None = None
         served_model: str | None = None  # from the final Response object (ENG-1638)
+        usage_seen = False
 
         # Map output_index → in-flight function-call state. Responses API uses
         # a per-output_index stable handle for streaming arguments.
@@ -1804,7 +1843,7 @@ class OpenAIProvider(LLMProvider):
 
                 # The model's own reasoning summary — not the final answer.
                 # Only arrives when `reasoning.summary` was requested (see
-                # _build_responses_kwargs, gated on self._reasoning_effort).
+                # _build_responses_kwargs, gated on the call's effort).
                 elif etype == "response.reasoning_summary_text.delta":
                     delta = getattr(event, "delta", "")
                     if delta:
@@ -1884,6 +1923,7 @@ class OpenAIProvider(LLMProvider):
                     if final_response is not None:
                         usage = getattr(final_response, "usage", None)
                         if usage is not None:
+                            usage_seen = True
                             (
                                 input_tokens,
                                 cache_read_tokens,
@@ -1901,6 +1941,11 @@ class OpenAIProvider(LLMProvider):
                 # classifies it the same way (billing stop, a code that names
                 # its cause, transient, or stream_error with backoff).
                 elif etype in ("response.failed", "error"):
+                    failed = getattr(event, "response", None) if etype == "response.failed" else None
+                    if getattr(failed, "usage", None) is not None:
+                        # Billed though it failed, and this raise skips the usage line below.
+                        self.log_usage(model=model, usage=_responses_usage(failed, model),
+                                       served_model=getattr(failed, "model", None))
                     error = (getattr(getattr(event, "response", None), "error", None)
                              if etype == "response.failed" else event)
                     body = _responses_error_body(error)
@@ -1910,7 +1955,7 @@ class OpenAIProvider(LLMProvider):
             raise
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
-        except openai.APIConnectionError as exc:
+        except (openai.APIConnectionError, STREAM_DROP_ERROR) as exc:
             # A connection error here is retryable. Mid-stream (after the 200) was
             # never SDK-retried → session backs off; request-establishment was
             # already SDK-retried → fail fast (ENG-673).
@@ -1972,6 +2017,18 @@ class OpenAIProvider(LLMProvider):
         finally:
             await _aclose_stream(stream)
 
+        usage = Usage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            context_pressure=compute_context_pressure(
+                model, input_tokens + cache_read_tokens + cache_creation_tokens
+            ),
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+        )
+        if usage_seen:
+            self.log_usage(model=model, usage=usage, served_model=served_model)
+
         # Same rule as the chat.completions reader (ENG-673): a stream that
         # ended with no terminal event and produced nothing was cut, and must
         # fail fast rather than hand back an empty answer.
@@ -1992,15 +2049,7 @@ class OpenAIProvider(LLMProvider):
             response=LLMResponse(
                 content=content_text,
                 tool_calls=tool_calls,
-                usage=Usage(
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    context_pressure=compute_context_pressure(
-                        model, input_tokens + cache_read_tokens + cache_creation_tokens
-                    ),
-                    cache_read_tokens=cache_read_tokens,
-                    cache_creation_tokens=cache_creation_tokens,
-                ),
+                usage=usage,
                 stop_reason=stop_reason,
                 model=served_model,
             )
@@ -2077,13 +2126,6 @@ def _parse_response_object(response, model: str) -> LLMResponse:
         # Other item types (web_search_call, reasoning, etc.) are skipped —
         # the model's output_text already incorporates their effects.
 
-    usage = getattr(response, "usage", None)
-    # `or 0` guards an explicit None (the attr is present but null) — the
-    # Responses API returns usage.input_tokens=None on web-search responses,
-    # which a bare getattr default does NOT catch. Mirrors the streaming path.
-    input_tokens, cache_read_tokens, cache_creation_tokens = _split_cached_input(usage)
-    output_tokens = (getattr(usage, "output_tokens", 0) or 0) if usage else 0
-
     if getattr(response, "status", None) == "failed":
         body = _responses_error_body(getattr(response, "error", None))
         named = classify_responses_failure(body, provider="The model provider", model=model)
@@ -2104,15 +2146,25 @@ def _parse_response_object(response, model: str) -> LLMResponse:
     return LLMResponse(
         content=content_text,
         tool_calls=tool_calls,
-        usage=Usage(
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            context_pressure=compute_context_pressure(
-                model, input_tokens + cache_read_tokens + cache_creation_tokens
-            ),
-            cache_read_tokens=cache_read_tokens,
-            cache_creation_tokens=cache_creation_tokens,
-        ),
+        usage=_responses_usage(response, model),
         stop_reason=status,
         model=getattr(response, "model", None),
+    )
+
+
+def _responses_usage(response, model: str) -> Usage:
+    usage = getattr(response, "usage", None)
+    # `or 0` guards an explicit None (the attr is present but null) — the
+    # Responses API returns usage.input_tokens=None on web-search responses,
+    # which a bare getattr default does NOT catch. Mirrors the streaming path.
+    input_tokens, cache_read_tokens, cache_creation_tokens = _split_cached_input(usage)
+    output_tokens = (getattr(usage, "output_tokens", 0) or 0) if usage else 0
+    return Usage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        context_pressure=compute_context_pressure(
+            model, input_tokens + cache_read_tokens + cache_creation_tokens
+        ),
+        cache_read_tokens=cache_read_tokens,
+        cache_creation_tokens=cache_creation_tokens,
     )
