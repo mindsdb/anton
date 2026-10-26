@@ -16,8 +16,9 @@ What it finds:
   literal. Each statement in a string that holds a write is its own
   finding, writes or not, since one Approve runs them all. A
   statement only printed, logged or written to a file doesn't count, and
-  neither does one run on an in-process DuckDB or SQLite handle. Any other
-  handle, known or not, counts. ``to_sql`` into a database that isn't
+  neither does one run on an in-process DuckDB or SQLite handle: one that
+  opens a file the turn began with counts as that file's overwrite, below.
+  Any other handle, known or not, counts. ``to_sql`` into a database that isn't
   in-process counts too. A statement hidden in a base64, base32, base16, hex
   or rot13 literal that the cell decodes, or read from a literal-path SQL
   file that exists (up to 1 MB), is decoded or read now and checked too.
@@ -54,8 +55,9 @@ What it finds:
   ``savefig``, any ``.save(path)`` (openpyxl, docx, pptx), a copy, rename,
   replace or move onto it, a delete that a write to the same path follows on
   every path through the code, and a write statement or ``to_sql`` on an
-  in-process SQLite or DuckDB handle that opens it. An append, and an
-  overwrite of a file the agent owns (one under ``.anton/artifacts``,
+  in-process SQLite or DuckDB handle that opens it, which the card quotes
+  with the file, each statement whole, as it quotes a SQL write. An append,
+  and an overwrite of a file the agent owns (one under ``.anton/artifacts``,
   ``.anton/skill_drafts`` or ``.anton/output``, or one an earlier cell in the
   conversation wrote, unless that cell stopped on an error or picked the
   name when it ran, as a dated export does), are reported but not held. ``open`` in an ``x`` mode
@@ -200,6 +202,10 @@ class FileChange(BaseModel):
     # False for a change that runs with no card and is logged as not held:
     # an append, or an overwrite of a file the agent owns.
     held: bool = True
+    # For an overwrite through an in-process SQLite or DuckDB handle: each
+    # statement it runs, as the card quotes a SQL write. A `to_sql` reads
+    # "to_sql into <table>".
+    statements: tuple[SqlWrite, ...] = ()
 
 
 class HttpWrite(BaseModel):
@@ -3933,6 +3939,14 @@ def _sql_write(text: str, *, reader: _Reader, values: str = "", line: int) -> Sq
     )
 
 
+def _to_sql_statement(call: ast.Call) -> str:
+    """A DataFrame `to_sql` call as the card names it: the table it writes,
+    or "a table" when the code picks the name when it runs."""
+    table = call.args[0] if call.args else _keyword(call, "name")
+    label = table.value if isinstance(table, ast.Constant) and isinstance(table.value, str) else "a table"
+    return f"to_sql into {label}"
+
+
 def _sql_findings(
     reader: _Reader, cell: _Cell, *, root: ast.AST | None = None, report: _Report | None = None,
 ) -> list[SqlWrite]:
@@ -3990,11 +4004,7 @@ def _sql_findings(
         )
         if con is not None and reader.is_local_handle(con):
             continue
-        table = node.args[0] if node.args else next(
-            (k.value for k in node.keywords if k.arg == "name"), None
-        )
-        label = table.value if isinstance(table, ast.Constant) and isinstance(table.value, str) else "a table"
-        out.append(_sql_write(f"to_sql into {label}", reader=reader,
+        out.append(_sql_write(_to_sql_statement(node), reader=reader,
                               line=report.line if report else cell.host_line or node.lineno))
     return out
 
@@ -4692,25 +4702,27 @@ def _database_files(node: ast.AST, reader: _Reader, *, depth: int = 0) -> list[s
     return []
 
 
-def _holds_a_write(node: ast.AST, reader: _Reader, *, depth: int = 0) -> bool:
-    """Whether the statement `node` holds writes: written out, held in a
-    name, or passed in as a parameter. It goes to an execute, so it reads as
-    SQL whatever its case."""
+def _written_statements(node: ast.AST, reader: _Reader, *, depth: int = 0) -> tuple[str, ...]:
+    """Every statement of each text `node` holds that has a write, as the
+    card quotes it: written out, held in a name, or passed in as a
+    parameter. It goes to an execute, so it reads as SQL whatever its case.
+    Empty when no text holds a write."""
     text = _sql_text(node, reader)
     if text is not None:
-        return bool(write_statements(text, prose=False))
+        return _quoted_statements(text) if write_statements(text, prose=False) else ()
     if not isinstance(node, ast.Name) or depth > 4:
-        return False
+        return ()
+    found: list[str] = []
     for b in reader.bindings_of(node.id, node=node):
         if b.how != "param":
-            if reader.statements_held(node.id, b, prose=False):
-                return True
+            found += reader.statements_held(node.id, b, prose=False)
             continue
         key = (id(b.value), node.id)
         args = [reader.param_args[key]] if key in reader.param_args else reader.call_sites(b.value, node.id)
-        if any(a is not None and _holds_a_write(a.node, reader, depth=depth + 1) for a in args):
-            return True
-    return False
+        for a in args:
+            if a is not None:
+                found += _written_statements(a.node, reader, depth=depth + 1)
+    return tuple(dict.fromkeys(found))
 
 
 class _OwnedFiles:
@@ -4797,7 +4809,8 @@ class _FileFinder:
         self.owned = owned
         self.out: list[FileChange] = []
         # Files already reported as overwritten, so a delete and the write
-        # that follows it name a file once.
+        # that follows it name a file once. A database write keeps its own
+        # changes (`overwrite`), so it never hides another overwrite.
         self.overwritten: set[str] = set()
 
     def paths(self, node: ast.AST) -> list[str] | _Unknown:
@@ -4810,19 +4823,20 @@ class _FileFinder:
         return _locate(got, self.snapshots, cwds=self.reader.cwds if cwds is None else cwds, files_only=files_only,
                        existing_files=existing_files, made=self.reader.made, disk=self.reader.disk)
 
+    def line(self, node: ast.AST) -> int:
+        """The line a change `node` makes is reported at."""
+        return self.report.line if self.report is not None else self.cell.host_line or getattr(node, "lineno", 0)
+
     def add(
         self, action: Literal["delete", "rename", "move", "overwrite", "append"], targets: _Targets, node: ast.AST,
-        *, held: bool = True,
+        *, held: bool = True, statements: tuple[SqlWrite, ...] = (),
     ) -> None:
         if not targets.found():
             return
-        if self.report is not None:
-            line, call = self.report.line, self.report.call
-        else:
-            line, call = self.cell.host_line or getattr(node, "lineno", 0), scrub_output(self.cell.source(node))
+        call = self.report.call if self.report is not None else scrub_output(self.cell.source(node))
         self.out.append(FileChange(
             action=action, paths=targets.paths, whole_project=targets.whole_project,
-            whole_shared=targets.whole_shared, call=call, line=line, held=held,
+            whole_shared=targets.whole_shared, call=call, line=self.line(node), held=held, statements=statements,
         ))
 
     def walk(self, root: ast.AST) -> None:
@@ -4944,7 +4958,9 @@ class _FileFinder:
         else:
             self.add("delete", self.locate(got, files_only=files_only), call)
 
-    def overwrite(self, got: list[str] | _Unknown, call: ast.Call, *, append: bool = False) -> None:
+    def overwrite(
+        self, got: list[str] | _Unknown, call: ast.Call, *, append: bool = False, statements: tuple[SqlWrite, ...] = (),
+    ) -> None:
         """A write into the files `got` names that the turn began with: held
         as an overwrite unless the agent owns the file. With `append`, the
         write adds to the file, and is reported but not held. A path from a
@@ -4953,23 +4969,45 @@ class _FileFinder:
         per site has. In an earlier cell, such a path makes no file the
         agent's own: the snapshot holds the files the turn began with, not
         those the conversation began with, so it can't tell an older day's
-        export from one an earlier cell wrote."""
+        export from one an earlier cell wrote.
+
+        With `statements`, the write runs them on a SQLite or DuckDB file,
+        and the card quotes them with it. Such a write is reported even when
+        another overwrite already named the file, and a file an earlier one
+        in the cell changes takes the new statements on that change
+        (`run_too`), so the card names it once with all of them."""
         if isinstance(got, _Unknown):
             return
         got = [p for p in got if _RUN_TIME_PART not in p]
-        found = [p for p in self.locate(got, existing_files=True).paths if append or p not in self.overwritten]
+        located = self.locate(got, existing_files=True).paths
+        if statements:
+            found = self.run_too(located, statements)
+        else:
+            found = [p for p in located if append or p not in self.overwritten]
         if append:
             self.add("append", _Targets(paths=tuple(found)), call, held=False)
             return
-        self.overwritten.update(found)
+        if not statements:
+            self.overwritten.update(found)
         owned = tuple(p for p in found if self.owned is not None and self.owned.owns(p))
-        self.add("overwrite", _Targets(paths=tuple(p for p in found if p not in owned)), call)
-        self.add("overwrite", _Targets(paths=owned), call, held=False)
+        self.add("overwrite", _Targets(paths=tuple(p for p in found if p not in owned)), call, statements=statements)
+        self.add("overwrite", _Targets(paths=owned), call, held=False, statements=statements)
+
+    def run_too(self, paths: Sequence[str], statements: tuple[SqlWrite, ...]) -> list[str]:
+        """`statements` added to each change an earlier database write in the
+        cell made to files among `paths`; the paths no such change names."""
+        rest = list(paths)
+        for i, change in enumerate(self.out):
+            if change.statements and change.paths and set(change.paths) <= set(rest):
+                self.out[i] = change.model_copy(update={"statements": (*change.statements, *statements)})
+                rest = [p for p in rest if p not in change.paths]
+        return rest
 
     def database_write(self, call: ast.Call) -> None:
         """A write statement, or `to_sql`, on an in-process SQLite or DuckDB
-        handle that opens a file: an overwrite of that file. The SQL check
-        lets every in-process handle through (`_executes_on_local`)."""
+        handle that opens a file: an overwrite of that file, with each
+        statement it runs for the card. The SQL check lets every in-process
+        handle through (`_executes_on_local`)."""
         method = call.func.attr
         if method == "to_sql":
             handle = call.args[1] if len(call.args) > 1 else _keyword(call, "con")
@@ -4985,8 +5023,15 @@ class _FileFinder:
         files = _database_files(handle, self.reader)
         if not files or not self.reader.is_local_handle(handle):
             return
-        if statement is None or _holds_a_write(statement, self.reader):
-            self.overwrite(list(files), call)
+        if statement is None:
+            texts, values = (_to_sql_statement(call),), ""
+        else:
+            texts, values = _written_statements(statement, self.reader), _values_text(call, reader=self.reader)
+        if texts:
+            line = self.line(call)
+            self.overwrite(list(files), call, statements=tuple(
+                _sql_write(text, reader=self.reader, values=values, line=line) for text in texts
+            ))
 
     def written_after(self, call: ast.Call) -> set[str]:
         """The paths written after `call` on every path through the code: by a
