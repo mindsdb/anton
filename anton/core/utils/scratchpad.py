@@ -234,18 +234,21 @@ def _request_summary(write: HttpWrite) -> str:
 
 def _describe_files(writes: CellWrites) -> list[str]:
     """Each held file change for the refusal: the first paths it names, or
-    the code that picks the path when it runs. The card names every path."""
+    the code that picks the path when it runs. The card names every path.
+    A change to a SQLite or DuckDB file reads as a change, as the card says,
+    not an overwrite."""
     out = []
     for change in writes.held_files:
+        action = "change" if change.statements else change.action
         wholes = _wholes(change)
         if wholes:
-            out.append(f"{change.action} {wholes}")
+            out.append(f"{action} {wholes}")
         if change.paths:
             named = ", ".join(_code_span(_shown_path(p)) for p in change.paths[:_REFUSAL_PATHS])
             more = len(change.paths) - _REFUSAL_PATHS
-            out.append(f"{change.action} {named}" + (f" and {more} more" if more > 0 else ""))
+            out.append(f"{action} {named}" + (f" and {more} more" if more > 0 else ""))
         if not (wholes or change.paths):
-            out.append(f"{change.action} a file or folder it picks when it runs, in {_code_span(change.call)}")
+            out.append(f"{action} a file or folder it picks when it runs, in {_code_span(change.call)}")
     return out
 
 
