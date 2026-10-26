@@ -145,7 +145,14 @@ MEMORIZE_TOOL = ToolDef(
         "- never: Something to never do ('Never use time.sleep() in scratchpad')\n"
         "- when: Conditional rule ('If paginated API → use async + progress()')\n"
         "- lesson: Factual knowledge ('CoinGecko rate-limits at 50/min')\n"
-        "- profile: Fact about the user ('Name: Jorge', 'Prefers dark mode')"
+        "- profile: Fact about who the user is ('Name: Jorge', 'Timezone: PST'). "
+        "An instruction on how to answer or work is a rule, not a profile entry.\n\n"
+        "Scope: 'project' by default. A rule or preference the user gives in this "
+        "conversation is 'project', even when it says 'always': 'Always show "
+        "amounts in EUR' is 'project'. Choose 'global' only when the user says it "
+        "applies to all their projects or everywhere ('In every project, answer in "
+        "English'), or for general knowledge that holds in any project, such as a "
+        "library quirk. A profile entry always goes to global."
     ),
     input_schema={
         "type": "object",
@@ -166,6 +173,10 @@ MEMORIZE_TOOL = ToolDef(
                         "scope": {
                             "type": "string",
                             "enum": ["global", "project"],
+                            "description": (
+                                "'project' unless the user says the entry applies to "
+                                "all their projects; the tool's Scope note says when."
+                            ),
                         },
                         "topic": {
                             "type": "string",
