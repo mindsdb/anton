@@ -16,7 +16,7 @@ When you run `anton` in a directory:
 | Path | What it holds |
 | --- | --- |
 | `.anton/` | Workspace folder: scratchpad state, episodic memory, local secrets |
-| `.anton/anton.md` | Optional project context — Anton reads this at conversation start |
+| `.anton/anton.md` | Optional project context — Anton reads this at conversation start, and every artifact build follows it as rules, without showing it on the page |
 | `.anton/.env` | Workspace configuration variables (local file) |
 | `.anton/episodes/` | Episodic memories, one file per session |
 | `.anton/memory/rules.md` | Behavioral rules: always/never/when rules (e.g. never hardcode credentials) |

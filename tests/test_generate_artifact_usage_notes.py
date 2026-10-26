@@ -51,6 +51,7 @@ async def test_generate_gives_the_run_the_session_catalog_and_notes(vault, tmp_p
     monkeypatch.setattr(orchestrator, "run", fake_run)
     monkeypatch.setattr(engine, "_scratchpads_context", lambda session: "")
     session = AsyncMock()
+    session._scratchpads.cell_sandbox = None
     session._data_vault = vault
     session._connector_usage_notes = {"langfuse": "LF-NOTE"}
     art = tmp_path / "art"

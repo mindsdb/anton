@@ -187,3 +187,38 @@ def test_fullstack_bundles_assets_but_not_owner_side_or_outside_files(tmp_path):
     assert set(included) == _names(zbytes)
     _assert_no_leak(zbytes)
 
+
+
+def _add_bytecode(content: Path) -> None:
+    for rel in (
+        "__pycache__/app.cpython-313.pyc",
+        "img/__pycache__/x.cpython-313.pyc",
+        "stray.pyc",
+    ):
+        path = content / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"owner-secret")
+
+
+def test_directory_bundle_skips_python_bytecode(tmp_path):
+    artifact = _make_artifact(tmp_path)
+    (artifact / "index.html").write_text("<h1>Report</h1>")
+    _add_bytecode(artifact)
+
+    zbytes = _zip_html(artifact)
+
+    assert _names(zbytes) == {"index.html", *ASSETS}
+    _assert_no_leak(zbytes)
+
+
+def test_fullstack_bundle_skips_python_bytecode(tmp_path):
+    artifact = _make_artifact(tmp_path, content_dir="static")
+    (artifact / "backend.py").write_text("app = None\n")
+    _add_bytecode(artifact / "static")
+
+    zbytes, included = _zip_fullstack(artifact)
+
+    own = {name for name in _names(zbytes) if not name.startswith("anton_state/")}
+    assert own == {"backend.py", *(f"static/{asset}" for asset in ASSETS)}
+    assert set(included) == _names(zbytes)
+    _assert_no_leak(zbytes)

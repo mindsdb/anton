@@ -66,6 +66,7 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
         with:
+          version: "0.11.30"
           python-version: "3.12"
 
       - name: Build package
@@ -74,7 +75,18 @@ jobs:
           # tags on one commit and `git describe` resolves the older one; build
           # exactly the version the release job minted.
           SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.release.outputs.version }}
-        run: uv build
+        run: |
+          python scripts/release_contract.py --check
+          uv build
+          python scripts/release_contract.py --check --dist-dir dist
+
+      - name: Verify the wheel with its reviewed dependencies
+        run: |
+          uv venv --python 3.12 /tmp/anton-release
+          uv pip install --python /tmp/anton-release/bin/python --require-hashes --no-deps --only-binary :all: -r anton/release-requirements.txt
+          uv pip install --python /tmp/anton-release/bin/python --no-deps dist/*.whl
+          uv pip check --python /tmp/anton-release/bin/python
+          cd /tmp && /tmp/anton-release/bin/anton --help > /dev/null
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

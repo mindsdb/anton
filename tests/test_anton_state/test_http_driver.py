@@ -1,7 +1,7 @@
 import pytest
 from anton_state import (
-    StateSchema, Attr, ConditionalCheckFailed, StateThrottled, StateUnavailable,
-    pop_last_state_error,
+    StateSchema, Attr, Collection, ConditionalCheckFailed, StateThrottled, StateUnavailable,
+    Store, pop_last_state_error,
 )
 from anton_state.http_driver import HTTPDriver, _WireError
 
@@ -115,3 +115,22 @@ def test_unauthorized_not_treated_as_unavailable(monkeypatch):
     assert not isinstance(ei.value, StateUnavailable)  # definitely-not-applied, clearer error
     # A config/clock problem, not a state-plane outage.
     assert pop_last_state_error() is None
+
+
+async def test_collection_put_accepts_item_read_back_from_broker(monkeypatch):
+    stored = {"pk": "_", "sk": "game#current", "_key": "current", "_v": 7, "moves": []}
+    sent = {}
+
+    def responder(op, payload):
+        if op == "get":
+            return {"item": dict(stored)}
+        sent[op] = payload
+        return {"ok": True}
+
+    games = Collection(Store(_drv(monkeypatch, responder), _S), "game")
+    game = await games.get("current")
+    game["moves"].append("A1")
+    await games.put("current", game, if_version=game["_v"])
+    assert sent["put"]["item"]["moves"] == ["A1"]
+    assert (sent["put"]["pk"], sent["put"]["sk"]) == ("_", "game#current")
+    assert sent["put"]["cond"] == {"if_version": 7}

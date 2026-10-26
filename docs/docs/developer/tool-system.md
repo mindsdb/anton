@@ -60,13 +60,14 @@ conditionally:
 | Tool | Registered when | Handler |
 |---|---|---|
 | `scratchpad` | Always | `handle_scratchpad` — exec/view/reset/remove/dump/install |
-| `read_image` | Always | `handle_read_image` — returns image content blocks |
+| `read_image` | Always | `handle_read_image` — returns image content blocks, with the media type the file's bytes show (PNG, JPEG, GIF or WebP), and a text error for a file that is none of those; under a sandbox policy, only paths the person's cells may read (`CellSandbox.allows_read`). Once the model refused a request carrying an image a tool returned, and took it without that image, it answers in text for the rest of the session |
+| `read_text_file` | Always | `handle_read_text_file` — a range of lines of a text file, under the read access policy (`file_access.py`), held under a sandbox policy to what the person's cells may read (`file_access.under_policy`) |
 | `memorize` | Cortex (or legacy self-awareness) present | `handle_memorize` → `cortex.encode()` |
 | `recall` | Episodic memory enabled | `handle_recall` → `episodic.recall_formatted()` |
 | `recall_skill` | Always (no-op without skills) | `handle_recall_skill` → `SkillStore.load()` + counter |
 | `web_search` | Only when the provider does NOT execute it natively | `handle_web_search_fallback` |
 | `web_fetch` | Only when the provider does NOT execute it natively | `handle_web_fetch_fallback` |
-| `create_artifact`, `list_artifacts`, `open_artifact`, `set_artifact_primary` | A workspace is bound to the session | Artifact store handlers |
+| `create_artifact`, `list_artifacts`, `update_artifact`, `launch_backend`, `generate_artifact` | A workspace is bound to the session | Artifact store handlers |
 
 Notes:
 
@@ -129,8 +130,11 @@ Details that matter:
 - **Round cap**: the loop runs until the LLM returns a text-only response or
   the tool-round cap is exhausted (which emits `cap_exhausted` and forces a
   wrap-up).
-- **Observer firing**: only `handle_scratchpad` fires the pre/post-execute
-  scratchpad observers; other tools have no observer surface.
+- **Observer firing**: a scratchpad exec fires the pre/post-execute scratchpad
+  observers on both exec paths: the inline streaming exec in
+  `ChatSession._stream_and_handle_tools`, which every host's main agent takes,
+  and `handle_scratchpad`, which serves the generate_artifact sub-loops. Other
+  tools have no observer surface.
 
 ## Adding your own
 

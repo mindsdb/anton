@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import base64
+import bisect
+import functools
+import html
 import json
 import logging
 import os
 import re
 import shutil
+import urllib.parse
 import uuid
 import yaml
 from collections.abc import Collection, Mapping
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -173,6 +178,7 @@ def begin_ds_turn_scope() -> None:
     _DS_SECRET_VARS.begin_scope()
     _DS_KNOWN_VARS.begin_scope()
     _ds_env_values.begin_scope()
+    _held_exact_secrets.set({})
 
 
 def set_ds_env_values(values: dict[str, str]) -> None:
@@ -182,6 +188,7 @@ def set_ds_env_values(values: dict[str, str]) -> None:
     untouched.
     """
     _ds_env_values.set(values)
+    _hold_exact_secrets()
 
 
 # Provider credential env vars injected into the scratchpad execution env for
@@ -202,12 +209,133 @@ _PROVIDER_SECRET_VARS: tuple[str, ...] = (
 # Well-known provider key formats — scrubbed by shape so a key is redacted even
 # when it didn't come from one of our env vars (e.g. the model already emitted
 # it, or it arrived via an unexpected path). Length floors keep this from
-# matching short incidental `sk-`/`mdb_` strings.
+# matching short incidental `sk-`/`mdb_` strings. A letter or digit right before
+# the prefix means a longer word, such as `task-completion-rate` or
+# `risk-assessment-panel`, not a key.
 _SECRET_KEY_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?:"
     r"mdb_[A-Za-z0-9._-]{10,}"   # MindsHub
     r"|sk-[A-Za-z0-9_-]{20,}"    # OpenAI / Anthropic (sk-, sk-proj-, sk-ant-)
     r"|AIza[A-Za-z0-9_-]{30,}"   # Google standard key
     r"|AQ\.[A-Za-z0-9._-]{50}"   # Google authorization key (AI Studio, 2026+)
+    r")"
+)
+
+# Output only: user input and published artifacts keep _SECRET_KEY_PATTERN,
+# since these shapes also match pasted connect credentials and token code.
+_TOKEN_SHAPE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*"  # JWT
+    r"|ya29\.[A-Za-z0-9_-]{20,}"  # Google OAuth access token
+)
+_TOKEN_KEY = (
+    r"(?<![A-Za-z0-9])"
+    r"(?i:access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret)"
+)
+# A marker this module writes in place of a secret: `[DS_...]` and provider labels
+# from `scrub_credentials`, `[REDACTED_API_KEY]` and `[REDACTED_TOKEN]`. Every one
+# holds an underscore, so a bracketed run without one, such as the `[Q]` in a
+# password `x7[Q]abc`, is not a marker. `SCRUBBED_VALUE_RE` in `anton/tools.py`
+# is built from it.
+_SCRUB_MARKER = r"\[(?:DS_\w+|[A-Z][A-Z0-9]*_[A-Z0-9_]*)\]"
+# A quoted value with no quote, backslash or space, unless it is a whole marker; for
+# Bearer values and code-like token values. Clipped output may lack the closing quote.
+_NARROW_QUOTED_VALUE = (
+    r"(?!(?:\$?\{[^\"'\\\s{}]*\}|" + _SCRUB_MARKER + r")(?![^\"'\\\s]))"
+    r"(?:[^\"'\\\s]|\\/|\\u[0-9a-fA-F]{4}){16,}"
+)
+# A Bearer value cannot hold a space or a quote, so prose after `"Bearer ` stays.
+_QUOTED_BEARER_VALUE_PATTERN = re.compile(r"(\\?[\"'](?i:bearer)[ \t]+)" + _NARROW_QUOTED_VALUE)
+_NARROW_QUOTED_VALUE_PATTERN = re.compile(_NARROW_QUOTED_VALUE)
+# Group 1 is the backslashes before the value's quote, which its closing quote
+# repeats; 31 covers five levels of JSON in JSON.
+_QUOTED_TOKEN_OPENER_PATTERN = re.compile(_TOKEN_KEY + r"\\*[\"']?\s*[:=]\s*(\\{0,31})([\"'])")
+# Scanned length of one value; longer than any token or secret a cell prints.
+_QUOTED_VALUE_SCAN_MAX = 16_384
+# A template expression (Helm, Jinja, GitHub Actions) is a whole marker too.
+_WHOLE_MARKER_PATTERN = re.compile(
+    r"\$?\{[^\"'\\\s{}]*\}|" + _SCRUB_MARKER + r"|\$?\{\{[^{}\r\n]*\}\}"
+)
+# PHP, Lua and SQL join strings with ` . `, ` .. ` and ` || `.
+_CODE_OPERATOR_AFTER = re.compile(r"\s*(?:[+,()%]|(?:if|else|or|and)\b)|\s+(?:\.\.?|\|\|)\s")
+_CODE_OPERATOR_BEFORE = re.compile(r"(?:[+,()%]|\b(?:if|else|or|and))\s*$|\s(?:\.\.?|\|\|)\s*$")
+_CODE_OPERATOR_BEFORE_WINDOW = 64
+_CODE_LEADING_OPERATOR = re.compile(r"\s*(?:[+,)]|\.\.?|\|\||[=!]=|(?:not\s+)?in|is)(?:\s|$)")
+_QUOTE_OR_LINE_BREAK_PATTERN = re.compile(r"(?<!\\)(\\*)([\"'])|[\r\n]")
+_LINE_BREAK_PATTERN = re.compile(r"[\r\n]")
+_WORD_BEFORE_PATTERN = re.compile(r"[A-Za-z0-9]+$")
+# Lowercase Python string prefixes; `b'`, `f'` and `rb'` open a literal, not prose.
+_STRING_PREFIXES = frozenset({"b", "r", "u", "f", "rb", "br", "fr", "rf"})
+# An f-string is formatted before it prints, so one after a key is source code.
+_FORMAT_STRING_PREFIXES = frozenset(prefix for prefix in _STRING_PREFIXES if "f" in prefix)
+# An unquoted Bearer value, on its line or the next; a lowercase word after
+# `Bearer` is prose.
+_BEARER_VALUE_PATTERN = re.compile(
+    r"((?i:\bbearer)(?:[ \t]+|[ \t]*\r?\n[ \t]*)"
+    r"(?![a-z_/-]+(?![A-Za-z0-9._~+/=%!-])))"
+    r"(?!!)[A-Za-z0-9._~+/=%!-]{16,}"
+    r"(?![A-Za-z0-9._~+/=%!(-])"
+)
+# The characters that open a marker, reference, placeholder or mask. A value
+# starting with one stays readable only as `_unquoted_value_is_placeholder` allows.
+_PLACEHOLDER_OPENERS = "$[{<*"
+# Group 1 is the `:` or `=` before the value; spaces alone separate a printed
+# table column. The value starts like a token or with a placeholder opener; a
+# quoted value is left to the quoted pass.
+_UNQUOTED_TOKEN_OPENER_PATTERN = re.compile(
+    _TOKEN_KEY + r"\\?[\"']?(?:[ \t]*([:=])[ \t]*|[ \t]+)"
+    r"(?=[A-Za-z0-9._~+/%" + re.escape(_PLACEHOLDER_OPENERS) + r"-])"
+)
+# An unquoted value ends at a line break or at `&`, `,` or `;`, which separate
+# query parameters and list items. In a column or a URL a space ends it too;
+# elsewhere it runs on through spaces up to the next `key=value` pair. Base64
+# padding at a value's end is no pair. A run of spaces is tried from its first
+# space only, so a long run costs one pass; a value never starts on a space.
+_WORD_VALUE_END_PATTERN = re.compile(r"[\s&,;]")
+_SPACED_VALUE_END_PATTERN = re.compile(r"[\r\n&,;]|(?<![ \t])[ \t]+(?=[A-Za-z_][\w.-]*=[^\s=])")
+# A PHC password hash (`$argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>`) separates
+# its parameters with commas, so they do not end the value.
+_HASH_PARAMETERS_PATTERN = re.compile(
+    r"\$[a-z0-9-]+(?:\$v=[0-9]+)?\$[a-z0-9-]+=[A-Za-z0-9/+.-]*"
+    r"(?:,[a-z0-9-]+=[A-Za-z0-9/+.-]*)+(?=\$)"
+)
+_IDENTIFIER_PATH = r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
+# A value start that cannot be a secret: a scrub marker; a shell, env or JS
+# template reference (`$NAME`, `${NAME}`, `${session.token}`, `$(command)`, or
+# `${NAME:-default}` with a default under the 16-character floor); a template
+# placeholder of a name (`{{ access_token }}`, `${{ secrets.TOKEN }}`,
+# `{{ .Values.token | b64enc }}`, `{token}`, `{access_token!r}`); an angle-bracket
+# placeholder (`<your-access-token>`, `<your access token>`); or asterisks with at
+# most four characters after them (`****abcd`). A `$` before a digit or a `$name$`
+# chain is a password hash, which none of these matches whole.
+_PLACEHOLDER_PATTERN = re.compile(
+    _SCRUB_MARKER
+    + r"|\$(?:[A-Za-z_]\w*|\([^()\r\n]*\)"
+    + r"|\{" + _IDENTIFIER_PATH + r"(?::?[-=?+][^\s\"'\\{}]{0,15})?\})"
+    + r"|\$?\{\{[ \t]*\.?" + _IDENTIFIER_PATH + r"(?:[ \t]*\|[ \t]*[A-Za-z_]\w*)*[ \t]*\}\}"
+    + r"|\{" + _IDENTIFIER_PATH + r"(?:![rsa])?\}"
+    + r"|<[A-Za-z_][\w-]*(?: [\w-]+)*>"
+    + r"|\*+[^\s*]{0,4}"
+)
+# What ends a placeholder in a string literal: the quote that closes the string
+# or an escaped line break, after any spaces, as in `f"access_token: {token}\n"`.
+_LITERAL_END_PATTERN = re.compile(r"[ \t]*(?:[\"'`]|\\[rn])")
+# Quotes and closing brackets at the end of a value close what holds it.
+_VALUE_TRAILER = " \t\"'`\\)]}>"
+_TOKEN_CHARS_PATTERN = re.compile(r"[A-Za-z0-9._~+/=%!-]*")
+# Unquoted values can be source code the model reads and may write back: a
+# lowercase-led dotted path, all-lowercase words, a PascalCase type or an
+# UPPER_SNAKE constant is code or prose. PascalCase words need three letters and
+# UPPER_SNAKE parts are letters with at most one trailing digit.
+_CODE_VALUE_PATTERN = re.compile(
+    r"[a-z_/-]+(?:[ \t]+[a-z_/-]+)*|[a-z_]\w*(?:\.[A-Za-z_]\w*)+"
+    r"|(?:[A-Z][a-z]{2,}){2,}|[A-Z]{2,}[0-9]?(?:_[A-Z]{2,}[0-9]?)+"
+)
+# What follows a value's first word in code rather than in a secret: an index,
+# a closing bracket or a `::` path, or after a space an operator, a comment, a
+# call or a keyword.
+_CODE_AFTER_WORD_PATTERN = re.compile(
+    r"[\[)\]}]|::"
+    r"|[ \t]+(?:#|//|\(|[A-Za-z_][\w.]*\(|[-+*/%=!<>|?:.]+(?![^ \t])|(?:if|else|or|and|not|in|is)\b)"
 )
 
 
@@ -216,6 +344,7 @@ def _reset_registered_ds_vars() -> None:
     _DS_SECRET_VARS.reset()
     _DS_KNOWN_VARS.reset()
     _ds_env_values.reset()
+    _held_exact_secrets.set(None)
 
 
 def parse_connection_slug(
@@ -295,45 +424,647 @@ def _register_unregistered_connection_vars(vault: DataVault, engine: str, name: 
             _DS_SECRET_VARS.add(key)
 
 
+# A saved value this long or shorter is hidden only as a whole word and in its
+# own case, so a short password does not hit ordinary text; a longer one is
+# hidden anywhere, ASCII case folded. Unknown DS_* and provider values this
+# short are not hidden at all.
+_SHORT_SECRET_MAX = 8
+# A value of at least this many UTF-8 bytes is hidden in base64 too; its
+# shortest base64 form is then 6 characters.
+_BASE64_MIN_BYTES = 5
+# A literal run shorter than this is in most text, so checking for it first
+# would only add work; the pattern runs instead.
+_ANCHOR_MIN_LENGTH = 4
+# Runs of characters every supported encoder prints as they are.
+_PLAIN_RUN_PATTERN = re.compile(r"[A-Za-z0-9._-]+")
+# A run of backslashes in a value doubles at each level of escaping, so it
+# matches a run of any length. It takes every backslash in a row, so the
+# escape of the character after it (JSON's `\u00e9` after an escaped
+# backslash) may start with none left.
+_VALUE_UNIT_PATTERN = re.compile(r"\\+|.", re.DOTALL)
+_BACKSLASH_RUN = r"(?:\\++|(?:%5[Cc])++)"
+_ESCAPE = r"\\++"
+_ESCAPE_AFTER_BACKSLASH_RUN = r"\\*+"
+_CONTROL_ESCAPES = {"\n": "n", "\r": "r", "\t": "t", "\b": "b", "\f": "f"}
+_HTML_ENTITY_NAMES = {"&": "amp", "<": "lt", ">": "gt", '"': "quot", "'": "apos"}
+# The two characters that differ between the standard and URL-safe alphabets.
+_BASE64_ALPHABET_CHARS = {"+": r"(?:%2[Bb]|[+-])", "/": r"(?:%2[Ff]|\\*+/|_)"}
+_BASE64_ANCHOR_PATTERN = re.compile(r"[A-Za-z0-9]+")
+_BASE64_CHAR = r"[A-Za-z0-9+/_-]"
+_BASE64_PADDING = r"(?:=|%3[Dd]){0,2}"
+_TO_URLSAFE_BASE64 = str.maketrans("+/", "-_")
+_SCRUB_MARKER_PATTERN = re.compile(_SCRUB_MARKER)
+
+
+@dataclass(frozen=True)
+class _ExactSecret:
+    """A value `scrub_credentials` hides wherever it appears, and the label shown in its place."""
+
+    label: str
+    value: str
+
+
+# Every value this turn has hidden by value, keyed by value. A pad keeps the DS_*
+# values it started with until the turn ends, so a rebuild that no longer lists one
+# (its connection removed or edited mid-turn) must not stop hiding it. Opened by
+# begin_ds_turn_scope and mutated in place, like the registries above.
+_held_exact_secrets: ContextVar[dict[str, _ExactSecret] | None] = ContextVar(
+    "held_exact_secrets", default=None
+)
+
+
+def _hold_exact_secrets() -> None:
+    """Keep hiding, until this turn ends, every value the turn hides by value now."""
+    held = _held_exact_secrets.get()
+    if held is not None:
+        for secret in _exact_secrets():
+            held.setdefault(secret.value, secret)
+
+
+@dataclass(frozen=True)
+class _SecretForms:
+    """The matcher for one saved value in every form `scrub_credentials` hides.
+
+    Every match of `pattern` contains one of `anchors`, lowercase when
+    `folded`; `anchors` is empty when one is shorter than `_ANCHOR_MIN_LENGTH`.
+    `literal_forms` are the concrete encoded strings, for the cut-edge helpers.
+    """
+
+    pattern: re.Pattern[str]
+    anchors: tuple[str, ...]
+    folded: bool
+    literal_forms: tuple[str, ...]
+
+
+class _MarkerSpans:
+    """Where the scrub markers in one text start and end.
+
+    A saved value can turn up inside a marker's label in another case, such
+    as `custom_prod` in `[DS_CUSTOM_PROD__PASSWORD]`; such a match is part of
+    the marker, not a secret. A match that holds a whole marker-shaped run,
+    such as a password `p[A_B]ss`, is still the secret.
+    """
+
+    def __init__(self, text: str) -> None:
+        """Find every marker in `text`; markers never overlap one another."""
+        spans = [found.span() for found in _SCRUB_MARKER_PATTERN.finditer(text)]
+        self.starts = [start for start, _ in spans]
+        self.ends = [end for _, end in spans]
+
+    def cuts(self, start: int, end: int) -> bool:
+        """Return whether `text[start:end]` starts or ends strictly inside a marker, short of its whole label.
+
+        A match that is a marker's whole label is a secret printed in brackets,
+        such as `[PROD_DB_PASS_2024]`: a label is a variable name, which a
+        saved value almost never equals.
+        """
+        for position in (start, end):
+            index = bisect.bisect_left(self.starts, position) - 1
+            if index >= 0 and position < self.ends[index]:
+                return (start, end) != (self.starts[index] + 1, self.ends[index] - 1)
+        return False
+
+
+def _redact_outside_markers(
+    pattern: re.Pattern[str], replacement: str, text: str, markers: _MarkerSpans
+) -> tuple[str, int]:
+    """Replace each match of `pattern` in `text` with `replacement`, except one that cuts into a marker.
+
+    `markers` are the markers in `text`, from an earlier scrub or from this
+    one. Returns the new text and the number of matches, replaced or not.
+    """
+    return pattern.subn(
+        lambda found: found.group() if markers.cuts(*found.span()) else replacement, text
+    )
+
+
+def _hex_pattern(number: int, width: int) -> str:
+    """Return a pattern for `number` written in at least `width` hex digits of either case."""
+    return "".join(
+        f"[{digit}{digit.lower()}]" if digit.isalpha() else digit for digit in f"{number:0{width}X}"
+    )
+
+
+def _escaped_char_patterns(char: str, escape: str) -> list[str]:
+    """Return patterns for `char` written as a backslash escape, at any depth of escaping.
+
+    JSON writes `\\n` or `\\uXXXX` (two for a character past U+FFFF); Python's
+    `ascii()` writes `\\xXX`, `\\uXXXX` or `\\UXXXXXXXX`; a bytes repr writes
+    each UTF-8 byte as `\\xXX`. `escape` is the pattern for the backslashes.
+    """
+    code = ord(char)
+    patterns = []
+    if code < 0x20 or code > 0x7E or char in _HTML_ENTITY_NAMES:
+        utf16 = char.encode("utf-16-be")
+        patterns.append("".join(
+            escape + "u" + _hex_pattern(int.from_bytes(utf16[i : i + 2], "big"), 4)
+            for i in range(0, len(utf16), 2)
+        ))
+    if code > 0xFFFF:
+        patterns.append(escape + "U" + _hex_pattern(code, 8))
+    if code > 0x7F:
+        patterns.append("".join(escape + "x" + _hex_pattern(byte, 2) for byte in char.encode()))
+    if code < 0x20 or 0x7F <= code <= 0xFF:
+        patterns.append(escape + "x" + _hex_pattern(code, 2))
+    if char in _CONTROL_ESCAPES:
+        patterns.append(escape + _CONTROL_ESCAPES[char])
+    return patterns
+
+
+def _char_pattern(char: str, escape: str) -> str:
+    """Return a pattern for one value character as printed or as a supported encoder writes it.
+
+    A plain character stands for itself. Any other also matches a backslash
+    escape, an HTML entity, its UTF-8 `%XX` bytes, `+` for a space, and
+    itself after any backslashes. Longer forms come first, so `&amp;` is
+    taken whole rather than as `&`.
+    """
+    if _PLAIN_RUN_PATTERN.fullmatch(char):
+        return re.escape(char)
+    alternatives = _escaped_char_patterns(char, escape)
+    if char in _HTML_ENTITY_NAMES:
+        alternatives.append(f"&{_HTML_ENTITY_NAMES[char]};")
+    if char in _HTML_ENTITY_NAMES or ord(char) > 0x7E:
+        alternatives.append(f"&#0*{ord(char)};|&#[xX]0*{_hex_pattern(ord(char), 1)};")
+    alternatives.append("".join("%" + _hex_pattern(byte, 2) for byte in char.encode()))
+    if char == " ":
+        alternatives.append(r"\+")
+    alternatives.append(r"\\*+" + re.escape(char))
+    return "(?:" + "|".join(alternatives) + ")"
+
+
+def _value_pattern(value: str) -> str:
+    """Return a pattern for `value` as printed, URL-encoded, or JSON-, HTML- or backslash-escaped."""
+    parts = []
+    escape = _ESCAPE
+    for unit in _VALUE_UNIT_PATTERN.findall(value):
+        if unit[0] == "\\":
+            parts.append(_BACKSLASH_RUN)
+            escape = _ESCAPE_AFTER_BACKSLASH_RUN
+        else:
+            parts.append(_char_pattern(unit, escape))
+            escape = _ESCAPE
+    return "".join(parts)
+
+
+def _base64_cores(raw: bytes) -> list[str]:
+    """Return, for each byte offset modulo 3, the base64 characters that encode only `raw`.
+
+    A value inside a longer base64 string, such as the password in an HTTP
+    Basic header, starts at an offset set by what comes before it.
+    """
+    cores = []
+    for offset in range(3):
+        encoded = base64.b64encode(bytes(offset) + raw).decode()
+        cores.append(encoded[(4 * offset + 2) // 3 : 8 * (offset + len(raw)) // 6])
+    return cores
+
+
+def _base64_pattern(core: str, offset: int) -> str:
+    """Return a pattern for `core` in either alphabet, padded or not, percent-encoded or not.
+
+    It takes the character at each end that mixes the value's bits with a
+    neighbor's too, so none of the value's bits stay readable.
+    """
+    lead = _BASE64_CHAR + "?" if offset else ""
+    body = "".join(_BASE64_ALPHABET_CHARS.get(char, char) for char in core)
+    return lead + body + _BASE64_CHAR + "?" + _BASE64_PADDING
+
+
+@functools.lru_cache(maxsize=1024)
+def _secret_forms(value: str) -> _SecretForms:
+    """Build the matcher for `value` in every form `scrub_credentials` hides.
+
+    The forms are the value as printed, URL-encoded (`quote`, `quote_plus`, hex
+    of either case), JSON-, HTML- and backslash-escaped at any depth, and,
+    from `_BASE64_MIN_BYTES`, base64 at each byte offset in either alphabet.
+    Cached per value, since the same values come back on every call and every turn.
+    """
+    folded = len(value) > _SHORT_SECRET_MAX
+    body = _value_pattern(value)
+    if not folded:
+        # Only an edge that is a word character needs a non-word neighbor.
+        if re.match(r"\w", value[0]):
+            body = r"(?<!\w)" + body
+        if re.match(r"\w", value[-1]):
+            body += r"(?!\w)"
+    branches = [body]
+    anchors = [max(_PLAIN_RUN_PATTERN.findall(value), key=len, default="")]
+    literal_forms = [
+        value,
+        urllib.parse.quote(value, safe=""),
+        urllib.parse.quote_plus(value),
+        json.dumps(value)[1:-1],
+        html.escape(value),
+    ]
+    raw = value.encode()
+    if len(raw) >= _BASE64_MIN_BYTES:
+        for offset, core in enumerate(_base64_cores(raw)):
+            branches.append(_base64_pattern(core, offset))
+            anchors.append(max(_BASE64_ANCHOR_PATTERN.findall(core), key=len, default=""))
+            literal_forms += [core, core.translate(_TO_URLSAFE_BASE64)]
+    if folded:
+        anchors = [anchor.lower() for anchor in anchors]
+    if min(len(anchor) for anchor in anchors) < _ANCHOR_MIN_LENGTH:
+        anchors = []
+    return _SecretForms(
+        pattern=re.compile("|".join(branches), re.IGNORECASE | re.ASCII if folded else 0),
+        anchors=tuple(anchors),
+        folded=folded,
+        literal_forms=tuple(dict.fromkeys(literal_forms)),
+    )
+
+
 def scrub_credentials(text: str) -> str:
     """Remove secret values from scratchpad/tool output before it reaches the LLM.
 
-    Redacts, in order:
+    Redacts, longest value first:
       * DS_* values registered as secret via register_secret_vars (driven by
         DatasourceField.secret=true). Non-secret fields of known engines
         (DS_HOST, DS_PORT, DS_BASE_URL, …) stay readable so the LLM can reason
         about connection errors.
       * Unknown DS_* vars (custom engines not yet in the registry) — any long
         value, conservatively.
-      * Provider credentials (ENG-463): the values of _PROVIDER_SECRET_VARS,
-        then anything matching a well-known key shape (_SECRET_KEY_PATTERN), so
-        a raw `mdb_`/`sk-`/`AIza`/`AQ.` key can't reach model context via a tool
-        result, traceback, or settings echo.
+      * Provider credentials (ENG-463): the values of _PROVIDER_SECRET_VARS.
+    Each value is matched in every form `_secret_forms` builds: as printed,
+    URL-encoded, escaped, or in base64, but never inside a marker already in
+    the text. Then anything matching a well-known key shape
+    (_SECRET_KEY_PATTERN) is redacted, so a raw `mdb_`/`sk-`/`AIza`/`AQ.` key
+    can't reach model context via a tool result, traceback, or settings echo.
     """
-    for key in _DS_SECRET_VARS:
-        value = _ds_env_values.get(key)
-        if not value:
-            continue
-        text = re.sub(r'(?<!\w)' + re.escape(value) + r'(?!\w)', f'[{key}]', text)
-    for key, value in _ds_env_values.items():
-        if key in _DS_KNOWN_VARS:
-            continue
-        # Length guard only for unknown DS_* vars (not registered secrets).
-        # Unknown vars are matched heuristically — a short value like "on"
-        # or "true" in a DS_ENABLE_X var should not be scrubbed.
-        # Registered secret vars bypass this check entirely.
-        if not value or len(value) <= 8:
-            continue
-        text = text.replace(value, f"[{key}]")
-    # Provider keys: exact-value first (informative label), then by shape to
-    # catch any that didn't originate from one of our env vars.
-    for key in _PROVIDER_SECRET_VARS:
-        value = os.environ.get(key, "")
-        if not value or len(value) <= 8:
-            continue
-        text = re.sub(r'(?<!\w)' + re.escape(value) + r'(?!\w)', f'[{key}]', text)
+    lowered: str | None = None
+    markers: _MarkerSpans | None = None
+    for secret in _exact_secrets():
+        forms = _secret_forms(secret.value)
+        if forms.anchors:
+            if forms.folded and lowered is None:
+                lowered = text.lower()
+            haystack = lowered if forms.folded else text
+            if not any(anchor in haystack for anchor in forms.anchors):
+                continue
+        if markers is None:
+            markers = _MarkerSpans(text)
+        text, count = _redact_outside_markers(forms.pattern, f"[{secret.label}]", text, markers)
+        if count:
+            lowered = markers = None
     text = _SECRET_KEY_PATTERN.sub("[REDACTED_API_KEY]", text)
     return text
+
+
+def _exact_secrets() -> list[_ExactSecret]:
+    """Return the values `scrub_credentials` hides by value this turn, longest first.
+
+    Every registered secret, unknown DS_* values over `_SHORT_SECRET_MAX`
+    characters, provider keys over it, and any value the turn held earlier and
+    the current map no longer has. Longest first, so a value that holds a
+    shorter one goes whole; values of one length keep that order, so a
+    registered secret's label wins.
+    """
+    secrets = [_ExactSecret(key, _ds_env_values.get(key)) for key in _DS_SECRET_VARS]
+    # Unknown DS_* vars are matched heuristically, so a short value such as
+    # "on" or "true" in a DS_ENABLE_X var stays.
+    secrets += [
+        _ExactSecret(key, value) for key, value in _ds_env_values.items()
+        if key not in _DS_KNOWN_VARS and len(value) > _SHORT_SECRET_MAX
+    ]
+    for key in _PROVIDER_SECRET_VARS:
+        value = os.environ.get(key, "")
+        if len(value) > _SHORT_SECRET_MAX:
+            secrets.append(_ExactSecret(key, value))
+    live = {secret.value for secret in secrets}
+    secrets += [
+        secret for value, secret in (_held_exact_secrets.get() or {}).items()
+        if value not in live
+    ]
+    return sorted(
+        (secret for secret in secrets if secret.value),
+        key=lambda secret: len(secret.value),
+        reverse=True,
+    )
+
+
+def _exact_secret_forms() -> list[str]:
+    """Return the concrete forms, as printed and encoded, of every value `scrub_credentials` hides by value."""
+    return [form for secret in _exact_secrets() for form in _secret_forms(secret.value).literal_forms]
+
+
+def longest_exact_secret() -> int:
+    """Return the length of the longest form of any value `scrub_credentials` hides by value this turn.
+
+    A caller that cuts output before scrubbing it needs this much text past the
+    cut for such a form to match whole. Counts only what the scrub matches, so
+    a long non-secret field does not hold output back. Returns 0 when there is none.
+    """
+    return max((len(form) for form in _exact_secret_forms()), default=0)
+
+
+def exact_secret_prefix_at_end(text: str) -> int:
+    """Return the length of the longest end of `text` that starts, but does not complete, an exact-match secret.
+
+    Output cut mid-write can end partway through a secret, or an encoded form
+    of one, which the exact-value scrub cannot see. Call it on scrubbed text,
+    so a whole secret at the end is already a placeholder. Returns 0 when the
+    end starts no such form.
+    """
+    longest = 0
+    for form in _exact_secret_forms():
+        for length in range(min(len(form) - 1, len(text)), longest, -1):
+            if text.endswith(form[:length]):
+                longest = length
+                break
+    return longest
+
+
+def exact_secret_suffix_at_start(text: str) -> int:
+    """Return the length of the longest start of `text` that ends, but does not complete, an exact-match secret.
+
+    The start-of-text counterpart of `exact_secret_prefix_at_end`, for output
+    whose beginning was dropped. Call it on scrubbed text. Returns 0 when the
+    start ends no such form.
+    """
+    longest = 0
+    for form in _exact_secret_forms():
+        for length in range(min(len(form) - 1, len(text)), longest, -1):
+            if text.startswith(form[-length:]):
+                longest = length
+                break
+    return longest
+
+
+@functools.cache
+def _value_end_pattern(quote: str, depth: int) -> re.Pattern[str]:
+    """Return the pattern for what ends a value opened by `quote` after `depth` backslashes.
+
+    That is the same quote after exactly `depth` backslashes, or a line break
+    for a value cut off early.
+    """
+    return re.compile(r"(?<!\\)\\{%d}%s|[\r\n]" % (depth, quote))
+
+
+class _OpenLiterals:
+    """Track which string literal is open at each escape depth on the current line.
+
+    A quote opens a literal at its depth, and only the same kind of quote
+    closes it; the other kind inside is content. After a redacted value the
+    rest of its line reads as data, since a value that ran past its real
+    end leaves the state wrong. A line break resets both.
+    """
+
+    def __init__(self, text: str) -> None:
+        """Start at the beginning of `text` with no literal open."""
+        self.text = text
+        self.position = 0
+        self.open: dict[int, str] = {}
+        self.trusted = True
+
+    def advance(self, end: int) -> None:
+        """Count every quote and line break from the current position up to `end`."""
+        for found in _QUOTE_OR_LINE_BREAK_PATTERN.finditer(self.text, self.position, end):
+            quote, depth = found.group(2), len(found.group(1) or "")
+            if quote is None:
+                self.open.clear()
+                self.trusted = True
+            elif depth in self.open:
+                if self.open[depth] == quote:
+                    del self.open[depth]
+            elif not _is_apostrophe(self.text, found):
+                self.open[depth] = quote
+        self.position = max(self.position, end)
+
+    def is_open(self, quote: str, depth: int) -> bool:
+        """Return whether a `quote` literal at `depth` is open and the line can still be read as code."""
+        return self.trusted and self.open.get(depth) == quote
+
+    def skip_redacted(self, end: int) -> None:
+        """Pass over a redacted value; the rest of its line is data."""
+        self.trusted = False
+        self.position = end
+
+
+def _is_apostrophe(text: str, found: re.Match[str]) -> bool:
+    """Return whether a matched `'` is prose, as in `it's`, `90's` or `users'`, and so opens no literal.
+
+    A lowercase string prefix right before it (`b'`, `f'`, `rb'`) opens a
+    literal. Otherwise a word right before it of three or more characters,
+    or a letter right after it, marks prose.
+    """
+    if found.group(2) != "'" or found.group(1):
+        return False
+    word = _WORD_BEFORE_PATTERN.search(text, max(0, found.start() - 3), found.start())
+    if word is None or word.group() in _STRING_PREFIXES:
+        return False
+    return len(word.group()) >= 3 or (found.end() < len(text) and text[found.end()].isalpha())
+
+
+def _quoted_value_end(text: str, start: int, quote: str, depth: int) -> int:
+    """Return where a quoted value starting at `start` ends.
+
+    It ends at the first `quote` preceded by exactly `depth` backslashes, the
+    escaping its opening quote had; a quote with more backslashes is part of
+    the value. A line break or the end of `text` ends a value cut off early.
+    A value with no end within `_QUOTED_VALUE_SCAN_MAX` runs to the end of
+    its line, so nothing past the scan is shown.
+    """
+    limit = min(len(text), start + _QUOTED_VALUE_SCAN_MAX)
+    found = _value_end_pattern(quote, depth).search(text, start, limit)
+    if found:
+        return found.start()
+    line_break = _LINE_BREAK_PATTERN.search(text, limit)
+    return line_break.start() if line_break else len(text)
+
+
+def _looks_like_code(
+    text: str, start: int, end: int, quote: str, depth: int, literals: _OpenLiterals
+) -> bool:
+    """Return whether `text[start:end]`, a quoted value, is really code between two string literals.
+
+    Only a quote that closes a literal opened before the key is a code
+    boundary: the opening quote itself, when an operator follows it, or a
+    quote inside the value next to an operator. Inside a literal the key
+    opened, every quote and operator is part of the value.
+    """
+    if literals.is_open(quote, depth) and _CODE_LEADING_OPERATOR.match(text, start, end):
+        return True
+    other = "'" if quote == '"' else '"'
+    for boundary in _QUOTE_OR_LINE_BREAK_PATTERN.finditer(text, start, end):
+        boundary_quote, boundary_depth = boundary.group(2), len(boundary.group(1))
+        if not (
+            (boundary_quote == other and boundary_depth == depth)
+            or (boundary_quote == quote and boundary_depth < depth)
+        ):
+            continue
+        if not literals.is_open(boundary_quote, boundary_depth):
+            continue
+        if _CODE_OPERATOR_AFTER.match(text, boundary.end(), end):
+            return True
+        window_start = max(start, boundary.start() - _CODE_OPERATOR_BEFORE_WINDOW)
+        if _CODE_OPERATOR_BEFORE.search(text, window_start, boundary.start()):
+            return True
+    return False
+
+
+def _redact_quoted_token_values(text: str) -> str:
+    """Redact each quoted value after a token key, up to its real closing quote.
+
+    The value may hold quotes, spaces and escapes at any nesting depth. A
+    value that looks like code falls back to the narrow grammar, so source
+    lines read as written. Returns `text` with each redacted value replaced.
+    """
+    parts: list[str] = []
+    position = 0
+    literals = _OpenLiterals(text)
+    for opener in _QUOTED_TOKEN_OPENER_PATTERN.finditer(text):
+        if opener.start() < position:
+            continue
+        literals.advance(opener.start(1))
+        start = opener.end()
+        depth, quote = len(opener.group(1)), opener.group(2)
+        end = _quoted_value_end(text, start, quote, depth)
+        scanned_whole = end - start < _QUOTED_VALUE_SCAN_MAX
+        if scanned_whole and _looks_like_code(text, start, end, quote, depth, literals):
+            narrow = _NARROW_QUOTED_VALUE_PATTERN.match(text, start)
+            if narrow is None:
+                continue
+            end = narrow.end()
+        elif end - start < 16 or _WHOLE_MARKER_PATTERN.fullmatch(text, start, end):
+            continue
+        parts.append(text[position:start])
+        parts.append("[REDACTED_TOKEN]")
+        literals.skip_redacted(end)
+        position = end
+    parts.append(text[position:])
+    return "".join(parts)
+
+
+def _unquoted_value_reads_as_code(text: str, start: int, end: int) -> bool:
+    """Return whether `text[start:end]`, an unquoted value, reads as code or prose rather than a secret.
+
+    It does when the whole value is code-shaped, when its first word is called
+    or opens an f-string, or when a first word that is short or code-shaped is
+    followed by code. A quote, `@`, `#` or a plain word after the first word
+    continues a secret.
+    """
+    if _CODE_VALUE_PATTERN.fullmatch(text, start, end):
+        return True
+    word_end = _TOKEN_CHARS_PATTERN.match(text, start, end).end()
+    if word_end == end:
+        return False
+    if text[word_end] == "(":
+        return True
+    if text[word_end] in "\"'" and text[start:word_end] in _FORMAT_STRING_PREFIXES:
+        return True
+    word_is_code = word_end - start < 16 or _CODE_VALUE_PATTERN.fullmatch(text, start, word_end)
+    return bool(word_is_code and _CODE_AFTER_WORD_PATTERN.match(text, word_end, end))
+
+
+def _unquoted_value_is_placeholder(text: str, start: int, end: int, raw_end: int) -> bool:
+    """Return whether `text[start:end]`, an unquoted value, is a marker, reference, placeholder or mask.
+
+    `raw_end` is where the value ended before its trailing quotes and brackets
+    were dropped, since a marker or placeholder closes with one. The value
+    stays when the placeholder is all of it, or when code, a closing quote or
+    an escaped line break follows it. A plain word after it continues a secret.
+    """
+    placeholder = _PLACEHOLDER_PATTERN.match(text, start, raw_end)
+    if placeholder is None:
+        return False
+    rest = placeholder.end()
+    return (
+        rest >= end
+        or _CODE_AFTER_WORD_PATTERN.match(text, rest, end) is not None
+        or _LITERAL_END_PATTERN.match(text, rest, end) is not None
+    )
+
+
+class _NextMatch:
+    """Find the first match of a pattern at or after a position in one text, reusing the last search.
+
+    `Pattern.search(text, pos)` tries each position the same way whatever
+    `pos` is, so a match found from an earlier position is still the first
+    one from any later position up to its start.
+    """
+
+    def __init__(self, pattern: re.Pattern[str], text: str) -> None:
+        """Search `text` for `pattern`, with nothing searched yet."""
+        self.pattern = pattern
+        self.text = text
+        self.searched_from = len(text) + 1
+        self.found: re.Match[str] | None = None
+
+    def at_or_after(self, position: int) -> re.Match[str] | None:
+        """Return the first match that starts at or after `position`, or None."""
+        still_ahead = self.found is None or self.found.start() >= position
+        if not (self.searched_from <= position and still_ahead):
+            self.found = self.pattern.search(self.text, position)
+            self.searched_from = position
+        return self.found
+
+
+def _trim_value_trailer(text: str, start: int, end: int) -> int:
+    """Return where `text[start:end]` ends once its trailing spaces, quotes and closing brackets are dropped."""
+    while end > start and text[end - 1] in _VALUE_TRAILER:
+        end -= 1
+    return end
+
+
+def _redact_unquoted_token_values(text: str) -> str:
+    """Redact each unquoted value after a token key, through the end of the value.
+
+    The value may hold quotes, `@` and `#`, and spaces after `:` or `=` outside
+    a URL. A value under 16 characters stays, and so does one that reads as
+    code or prose or, when it starts with `$`, `[`, `{`, `<` or `*`, one that
+    is a marker, reference, placeholder or mask. Returns `text` with each
+    redacted value replaced.
+    """
+    parts: list[str] = []
+    position = 0
+    # A value that stays readable is not skipped past, so the values after it
+    # overlap it; reusing each end search and trailer trim scans the text once.
+    word_value_ends = _NextMatch(_WORD_VALUE_END_PATTERN, text)
+    spaced_value_ends = _NextMatch(_SPACED_VALUE_END_PATTERN, text)
+    trimmed_raw_end = trimmed_end = -1
+    for opener in _UNQUOTED_TOKEN_OPENER_PATTERN.finditer(text):
+        if opener.start() < position:
+            continue
+        start = opener.end()
+        in_url = opener.start() > 0 and text[opener.start() - 1] in "?&#"
+        spaced = opener.group(1) is not None and not in_url
+        hash_parameters = _HASH_PARAMETERS_PATTERN.match(text, start)
+        search_from = hash_parameters.end() if hash_parameters else start
+        found = (spaced_value_ends if spaced else word_value_ends).at_or_after(search_from)
+        raw_end = found.start() if found else len(text)
+        if raw_end != trimmed_raw_end:
+            trimmed_raw_end, trimmed_end = raw_end, _trim_value_trailer(text, start, raw_end)
+        end = max(start, trimmed_end)
+        if end - start < 16:
+            continue
+        if text[start] in _PLACEHOLDER_OPENERS:
+            if _unquoted_value_is_placeholder(text, start, end, raw_end):
+                continue
+        elif _unquoted_value_reads_as_code(text, start, end):
+            continue
+        parts.append(text[position:start])
+        parts.append("[REDACTED_TOKEN]")
+        position = end
+    parts.append(text[position:])
+    return "".join(parts)
+
+
+def scrub_output(text: str) -> str:
+    """Scrub tool and scratchpad output before it reaches the LLM, a stream, or storage.
+
+    Runs `scrub_credentials`, then redacts OAuth tokens that no configured
+    value names: JWTs, Google `ya29.` tokens, `Bearer` values, and the values
+    of access/refresh/id token and client secret keys. Use it on output only;
+    inbound user text keeps `scrub_credentials` so pasted connect
+    credentials still reach the vault.
+    """
+    text = scrub_credentials(text)
+    text = _TOKEN_SHAPE_PATTERN.sub("[REDACTED_TOKEN]", text)
+    text = _redact_quoted_token_values(text)
+    text = _QUOTED_BEARER_VALUE_PATTERN.sub(r"\1[REDACTED_TOKEN]", text)
+    text = _BEARER_VALUE_PATTERN.sub(r"\1[REDACTED_TOKEN]", text)
+    return _redact_unquoted_token_values(text)
 
 
 def unscrub_marker(vault: "DataVault", marker: str) -> str | None:
@@ -532,6 +1263,9 @@ def collect_datasource_catalog(
 
     `slugs`, when given, leaves every other connection out before its record
     is read: a remote vault fetches each record over the network.
+
+    An unnamed connection's block shows its engine as the label, suffixed to
+    stay unique within the returned catalog; its `label` field stays "".
     """
     _reject_bare_string(slugs)
     try:
@@ -568,6 +1302,7 @@ def collect_datasource_catalog(
     engine_names: dict[str, str] = {}
     notes: dict[str, str] = {}
     connections: list[CatalogConnection] = []
+    created_at: list[str] = []
     for c in conns:
         engine = c["engine"]
         slug = f"{engine}-{c['name']}"
@@ -602,8 +1337,8 @@ def collect_datasource_catalog(
             fields.get("_label", "")
         ).strip()
 
-        lines = [f"\n### Slug: `{slug}` — Label: {user_label or '(none)'}"]
-        lines.append(f"Engine: {engine_name}")
+        # The slug/label header is prepended below, once every stored label is known.
+        lines = [f"Engine: {engine_name}"]
         # Same non-secret allowlist `_connection_identity()` encodes
         # (host/database/email, secure_keys-gated) — inlined here as
         # independent lines instead of one collapsed string.
@@ -627,6 +1362,7 @@ def collect_datasource_catalog(
             fields.get("auth_type") == "oauth"
             or bool(_parse_picked_files(fields.get("_picked_files")))
         )
+        created_at.append(str(c.get("created_at") or ""))
         connections.append(
             CatalogConnection(
                 slug=slug,
@@ -637,6 +1373,25 @@ def collect_datasource_catalog(
                 footer=_GOOGLE_DRIVE_PARAGRAPH if google_drive_access else "",
             )
         )
+    # An unnamed connection shows its engine, not "(none)", since "(none)" made
+    # the model estimate figures it lacked. The suffix rule matches
+    # ensure_unique_user_label, against rendered connections only, because
+    # `slugs` must not trigger reads of records it leaves out. Oldest first,
+    # so adding a connection never renames one the model already knows.
+    labels = [conn.label for conn in connections]
+    taken = {label for label in labels if label}
+    unnamed = [i for i, label in enumerate(labels) if not label]
+    for i in sorted(unnamed, key=lambda i: (created_at[i], connections[i].slug)):
+        base = connections[i].engine or connections[i].slug
+        label, n = base, 2
+        while label in taken:
+            label, n = f"{base} {n}", n + 1
+        taken.add(label)
+        labels[i] = label
+    connections = [
+        replace(conn, block=f"\n### Slug: `{conn.slug}` — Label: {label}\n{conn.block}")
+        for conn, label in zip(connections, labels)
+    ]
     return DatasourceCatalog(connections=tuple(connections), notes=notes)
 
 
@@ -720,7 +1475,9 @@ def restore_namespaced_env(vault: DataVault) -> None:
     only, and reach a subprocess through its own env (the scratchpad manager
     derives them from the same vault). Two turns on different vaults can run
     at once without seeing each other's credentials, and a connection this
-    turn has disabled cannot be reinstated by another turn.
+    turn has disabled cannot be reinstated by another turn. A value the turn
+    already hid stays hidden until the turn ends, even when the vault no
+    longer lists it, because the turn's pads still hold it.
     """
     # Kept so a failed rebuild restores what the turn had rather than leaving
     # it with nothing, which would silently turn scrubbing off for the turn.
@@ -778,6 +1535,7 @@ def _rebuild_ds_registries(vault: DataVault) -> None:
                 engine, name, exc_info=True,
             )
     _ds_env_values.set(env_values)
+    _hold_exact_secrets()
 
 
 def find_matching_connection(

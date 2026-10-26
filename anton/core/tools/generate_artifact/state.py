@@ -7,11 +7,15 @@ return the Pydantic verdict models below. Verifiers return `VerifyResult`.
 from __future__ import annotations
 
 import asyncio
+import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from anton.core.llm.client import ModelRoute
 
 from .debug_trace import NullTrace, GenTrace  # noqa: F401  (GenTrace re-exported for typing)
 from .progress import PEEK_GROUPS, LivePeek, StepCounter, label_for, plan_steps
@@ -19,6 +23,9 @@ from .attachments import Attachment
 
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
+    from anton.core.artifacts.live_app_slots import LiveAppLaunchError, LiveAppLaunchResult
+    from anton.core.artifacts.render_check import CheckedView, Comparison, RenderScreenshot, RenderStatus, ViewCoverage
+    from anton.core.tools.tool_handlers import PageKey
     from anton.utils.datasources import DatasourceCatalog
 
 # ── Budgets (see design spec) ────────────────────────────────────────────────
@@ -31,6 +38,10 @@ GEN_LOOP_MAX_RETRIES: int = 1
 GEN_VERIFY_MAX_RETRIES: int = 1
 RUNAPP_MAX_RETRIES: int = 1
 
+# Every "not enough data" error starts with this; the tool handler keys the
+# text it gives the agent on it.
+NOT_ENOUGH_DATA_PREFIX = "not enough data:"
+
 # Per-line detail cap for GenState.journal() — keeps the journal compact when
 # a step's detail is long (full text still lives in data_notes / trace_log).
 JOURNAL_DETAIL_MAX: int = 300
@@ -41,12 +52,11 @@ JOURNAL_DETAIL_MAX: int = 300
 # their internal thinking from the same budget (a 25 842-character spec was
 # measured dying at 8192 output tokens).
 #
-# The two values are what the MindsHub gateway actually accepts, not round
-# numbers: measured 2026-08-24 against `api.mindshub.ai/v1`, alias `opus` —
-# 8192/16384/20480 answer normally, 24576 and above return HTTP 500. That 500
-# is classified as a transient provider error, so an over-large budget does not
-# fail fast; it burns the retry ladder first. Raise both together, and re-measure
-# before doing so.
+# The gateway used to answer HTTP 500 above 20480 output tokens for a
+# non-streamed call; it now assembles such calls from an internal stream, so
+# that limit is gone. These calls are streamed anyway. Re-measure before
+# raising them. A top effort's larger streamed budget replaces both
+# (engine._budget_for_effort).
 SPEC_MAX_TOKENS: int = 16384
 SPEC_MAX_TOKENS_RETRY: int = 20480
 
@@ -72,6 +82,8 @@ SPEC_MAX_TOKENS_RETRY: int = 20480
 # The planning model is also less token-efficient on this content (1.57
 # characters per token against the coding model's 2.62), so 8192 bought it
 # ~12 800 characters — under the size of an average artifact.
+#
+# A top effort's larger streamed budget replaces it (engine._budget_for_effort).
 GEN_WRITE_MAX_TOKENS: int = 20480
 
 # The same budget restated in CHARACTERS, because that is the unit the model
@@ -88,6 +100,25 @@ GEN_WRITE_MAX_TOKENS: int = 20480
 # Deliberately conservative: overshooting costs the whole part (a body with no
 # end marker writes nothing), undershooting costs one extra round.
 REPLY_BODY_CHARS: int = 30_000
+
+# The builder's own model and effort, which the host passes in the process
+# environment.
+ARTIFACT_MODEL_ENV_VAR = "ANTON_ARTIFACT_MODEL"
+ARTIFACT_EFFORT_ENV_VAR = "ANTON_ARTIFACT_REASONING_EFFORT"
+
+
+def artifact_model_route() -> ModelRoute | None:
+    """The model and effort every call of the pipeline asks for, or None to
+    build on the agent's own, as with the variable unset or blank.
+
+    Read from the process environment alone, as the render check's address is
+    (`configured_url` in anton/core/artifacts/render_check.py). A blank effort
+    sends none, so the model runs its own default.
+    """
+    model = os.environ.get(ARTIFACT_MODEL_ENV_VAR, "").strip()
+    if not model:
+        return None
+    return ModelRoute(model=model, effort=os.environ.get(ARTIFACT_EFFORT_ENV_VAR, "").strip() or None)
 
 # Reserved out of MAX_QUESTIONS_PER_TURN for the brief phase: one
 # `show_and_confirm` call plus up to two "revise brief, show again" cycles.
@@ -121,7 +152,10 @@ class RequiredDataItem(BaseModel):
 class RequiredData(BaseModel):
     """`define_required_data`: what data is needed and where to get it."""
 
-    items: list[RequiredDataItem]
+    items: list[RequiredDataItem] = Field(
+        description="Data still missing for the task, one entry per item. "
+        "Empty when nothing is missing."
+    )
     reasoning: str
 
 
@@ -143,12 +177,95 @@ class VerifyResult:
         return not self.errors
 
 
+@dataclass(frozen=True)
+class BrowserCheck:
+    """One load of the page in a browser, or why the page was not loaded.
+
+    `status` is `passed` or `failed` when a browser loaded the page (`verdict`
+    holds its findings as verifier messages), `unverified` when none did or
+    the check could not vouch for it (`reason` says why; the verdict is
+    empty). `findings_listed` says whether `reason` also lists what an
+    unverified check still found. `screenshot` is the render check's
+    desktop view, when it sent one. `coverage` names the views a browser
+    that loaded the page measured and the tabs and toggles it left
+    unopened; None when no browser loaded it. `views` are those views as
+    the render check listed them, empty from the local browser, which
+    presses nothing and lists none. `comparison` is the render check's
+    comparison with the page as the turn found it, when the check was sent
+    one.
+    """
+
+    status: "RenderStatus"
+    verdict: VerifyResult = field(default_factory=VerifyResult)
+    reason: str = ""
+    findings_listed: bool = False
+    screenshot: "RenderScreenshot | None" = None
+    coverage: "ViewCoverage | None" = None
+    views: "tuple[CheckedView, ...]" = ()
+    comparison: "Comparison | None" = None
+
+
+@dataclass(frozen=True)
+class BrowserCheckFailed:
+    """How a run ends when its last build passed the static checks and
+    failed its browser check. The page that build wrote stays on disk, and
+    the agent repairs it in a scratchpad cell instead of the run building
+    it again.
+
+    `page` is the file the check loaded, relative to the artifact folder.
+    `findings` are the check's findings as the build's verdict worded them,
+    `views` the views it measured, `screenshot` its view of the page when it
+    sent one. `error` is the run's terminal message, for the trace. All of
+    it comes from the last build's own check: an earlier build's browser
+    fields on `GenState` can name a page a later build deleted.
+    `comparison` is that check's comparison with the page as the turn found
+    it, when there was one.
+    """
+
+    page: str
+    findings: tuple[str, ...]
+    views: "tuple[CheckedView, ...]"
+    screenshot: "RenderScreenshot | None"
+    error: str
+    comparison: "Comparison | None" = None
+
+
 # ── FSM state ────────────────────────────────────────────────────────────────
 @dataclass
 class StepResult:
     node: str
     outcome: str
     detail: str = ""
+
+
+# Language for a direct caller that names none (bench runs, tests); the tool
+# handler requires `user_language`. A concrete name, never "the language of
+# the user request": that wording made the model pick an unrelated language.
+DEFAULT_USER_LANGUAGE = "English"
+# Longest `user_language` the tool accepts. A language name fits; a sentence
+# about the user would be quoted into every step header and change the
+# call fingerprint each time it is reworded.
+MAX_USER_LANGUAGE_CHARS = 40
+
+
+def language_name(user_language: str | None) -> str:
+    """The language every step writes in, as the prompts name it."""
+    return " ".join((user_language or "").split()) or DEFAULT_USER_LANGUAGE
+
+
+def settled_artifact_type(state) -> str:
+    """The type gathering settled on, or the registered one before it ran."""
+    return state.final_artifact_type or state.artifact_type
+
+
+def known_data_usable(state) -> bool:
+    """Whether `known_data` can stand in for executed code.
+
+    Only for an html-app, whose page embeds a snapshot. A fullstack backend
+    reads its source at run time and needs working access code in
+    `data_notes`.
+    """
+    return settled_artifact_type(state) == "html-app" and bool((state.known_data or "").strip())
 
 
 @dataclass
@@ -177,6 +294,9 @@ class GenState:
     prd: str = ""
     data_notes: str = ""
     data_iterations: int = 0
+    # The data loop's one fetch against a "not possible" verdict was spent.
+    # Per call, never persisted: a repeat call gets its own attempt.
+    forced_fetch_used: bool = False
     api_spec: str | None = None
     files_written: list[str] = field(default_factory=list)
     # Generation inputs (spec.md, openapi.json) rather than user-facing output:
@@ -189,6 +309,38 @@ class GenState:
     # learn that a check was skipped rather than passed (S-03).
     verify_warnings: list[str] = field(default_factory=list)
     checks_skipped: list[str] = field(default_factory=list)
+    # The latest browser load of the page this run: `passed`, `failed`, or
+    # `unverified` when no browser loaded it or the check could not vouch for
+    # it. None until a browser step runs. The result reports whether it
+    # passed, and the session records it for the end-of-turn line.
+    browser_status: "RenderStatus | None" = None
+    # Whether the latest load was unverified and its `checks_skipped` line
+    # lists what the check still found. The session then lists those
+    # findings no second time this turn.
+    browser_findings_listed: bool = False
+    # The render check's desktop view of the latest load, when it sent one.
+    # Reaches the calling agent as an image beside the result.
+    browser_screenshot: "RenderScreenshot | None" = None
+    # The views the latest load measured and the tabs and toggles it left
+    # unopened, or None when no browser loaded the page. Beside a pass, the
+    # result names both, so the agent calls only those views verified.
+    browser_coverage: "ViewCoverage | None" = None
+    # The page the latest load checked, by its path inside the artifact
+    # folder (`index.html`); it captions the screenshot. The generator may
+    # have named it differently from the primary the run started with.
+    browser_page: str = ""
+    # The artifact's main page as it was when the turn began, and its key:
+    # each build's browser check is compared with it. None for a new
+    # artifact, a fullstack app, or without the render-check service.
+    previous_page: "tuple[PageKey, str] | None" = None
+    # The latest browser check's comparison with `previous_page`.
+    comparison: "Comparison | None" = None
+    # Held while `_embed_attachments` rewrites the page. The tool handler sets
+    # `abandoned` under it before it puts the page back for a run the turn
+    # gave up on: the embedding thread outlives the cancelled task and must
+    # not write over the restored page.
+    page_lock: threading.Lock = field(default_factory=threading.Lock)
+    abandoned: threading.Event = field(default_factory=threading.Event)
     # Files the user attached to the conversation, as the tool call named
     # them (S-01). Data files are read by the gathering step; assets are
     # copied into the artifact by `orchestrator._stage_attachments`.
@@ -198,6 +350,11 @@ class GenState:
     # cannot reach its `/api/*`, so the file path is not one.
     app_url: str | None = None
     app_port: int | None = None
+    # A fullstack app launched into an app slot (`live_app_slots`): its
+    # address, slot and the declared connections it didn't get. No port.
+    live_app: "LiveAppLaunchResult | None" = None
+    # Why a live app's launch didn't happen, when no new backend could fix it.
+    launch_failure: "LiveAppLaunchError | None" = None
     trace: list[StepResult] = field(default_factory=list)
     error: str | None = None
     trace_log: "GenTrace | NullTrace" = field(default_factory=NullTrace)
@@ -207,6 +364,11 @@ class GenState:
     # is called from synchronous FSM code that cannot await a full queue, and
     # `QueueFull` there would abort a generation over a progress line.
     progress: "asyncio.Queue[str | None] | None" = None
+    # Steps that already showed an "attempt 2" line for a truncation retry.
+    # Later retries of the same step show only on the live status line, which
+    # every retry sets, so a gathering run with several cut rounds does not
+    # repeat the same row.
+    retry_announced: set[str] = field(default_factory=set)
     # Where this run entered the pipeline (`discovery.checkpoint.ENTRY_*`,
     # set by `orchestrator.run`): a resumed run has fewer steps ahead of it,
     # and the `N of M` on every progress line counts only those.
@@ -225,11 +387,24 @@ class GenState:
     agent_understanding: str = ""
     known_data: str = ""
     user_preferences: str = ""
+    # English name of the language the user writes in, as the calling agent
+    # stated it. Read through `language_name`.
+    user_language: str = ""
     # The session's connections as data (slugs and DS_* names, no values), or
     # None when nothing is connected. Filled by the entry point; rendered whole
     # as `datasource_context`, and for only the declared sources by the
     # backend prompt.
     datasource_catalog: "DatasourceCatalog | None" = None
+    # The project's anton.md as the `## Project rules` section
+    # (`prompts.project_rules_section`), or "" when it has none. Read once per
+    # call by the entry point and placed in every step's system prompt. Not
+    # persisted, so an edit to anton.md applies from the next call.
+    project_rules: str = ""
+    # The skills the host trusts for artifact builds
+    # (`SkillStore.list_for_artifacts`) as the `## Artifact skills` section
+    # (`prompts.artifact_skills_section`), or "". Read with `project_rules`;
+    # the page writers, the backend writer and the fetch step get it.
+    artifact_skills: str = ""
     # The `## Scratchpads already in this session` section of the gathering
     # kickoff (`discovery.prompts.render_scratchpads_context`): the pads the
     # calling agent already ran, so the step reuses them instead of guessing
@@ -264,6 +439,10 @@ class GenState:
     # correction the notes are full of the PREVIOUS gathering's cells, and an
     # emptiness check would read that as "everything is covered".
     unverified_sources: list[str] = field(default_factory=list)
+    # Declared sources that only the `known_data` mark verified. A new
+    # iteration that brings no `known_data` puts them back in
+    # `unverified_sources`: nothing else vouches for them.
+    known_data_verified: list[str] = field(default_factory=list)
     # Raw material for the deterministic renderers in discovery/notes.py.
     scratchpad_execs: list[dict] = field(default_factory=list)
     web_calls: list[dict] = field(default_factory=list)
@@ -282,6 +461,11 @@ class GenState:
     # `announce_brief` sent it in this call, or (acting first) an earlier turn
     # showed it — set by `orchestrator.run` from the entry. Not persisted.
     brief_shown: bool = False
+    # A gathering question timed out. The user is away, so the brief is
+    # written but not shown for confirmation: the run hands back
+    # `needs_confirmation`, and their late answer to the still-open card
+    # arrives as a repeat call carrying it. Not persisted.
+    question_unanswered: bool = False
     # Installed by the entry point. None on the bench harness and in unit
     # tests that construct a state directly, so every read goes through
     # `winding_down()`.
@@ -312,8 +496,20 @@ class GenState:
         if self._pipeline_tools is None:
             from .discovery.sub_tools import pipeline_tool_schemas
 
-            self._pipeline_tools = pipeline_tool_schemas()
+            self._pipeline_tools = pipeline_tool_schemas(self.buildable_types)
         return self._pipeline_tools
+
+    @property
+    def buildable_types(self) -> tuple[str, ...]:
+        """The types this run may settle on, in schema order: html-app alone
+        where the session offers no fullstack app, because nothing there
+        starts an app backend (`live_app_slots.fullstack_offered`, read once
+        by the session into `_fullstack_offered` for its tools and prompt)."""
+        from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES_ORDERED
+
+        if getattr(self.session, "_fullstack_offered", True):
+            return GENERATOR_ARTIFACT_TYPES_ORDERED
+        return ("html-app",)
 
     def __post_init__(self) -> None:
         if self.is_fullstack is None:

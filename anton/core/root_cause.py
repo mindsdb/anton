@@ -132,6 +132,8 @@ _SENTINEL_REASONS = {
     # The agent passed bad or missing arguments — it can fix these itself.
     "scratchpad_empty_code": (TIER_SELF, "empty_code"),
     "scratchpad_missing_name": (TIER_SELF, "missing_name"),
+    # No `action` and no `code`, or an action the tool does not have.
+    "scratchpad_unknown_action": (TIER_SELF, "invalid_argument"),
     "missing_name": (TIER_SELF, "missing_argument"),
     "missing_slug": (TIER_SELF, "missing_argument"),
     "missing_description": (TIER_SELF, "missing_argument"),
@@ -142,10 +144,16 @@ _SENTINEL_REASONS = {
     # A refused package spec (flag/URL/path-shaped entry) is the agent's own
     # bad argument, not an environment wall (ENG-1635).
     "package_install_rejected": (TIER_SELF, "invalid_argument"),
+    # A pad name that leads outside the venvs folder (absolute, `..`, NUL):
+    # the agent's own bad argument, and the message says which part.
+    "scratchpad_invalid_name": (TIER_SELF, "invalid_argument"),
     # The single-scratchpad guard's challenge to a NEW pad name. Guidance the
     # agent acts on by reusing the pad it already has (the outcome is even
     # `ok=True`), so it is the agent's own argument choice, never a wall.
     "new_scratchpad_challenged": (TIER_SELF, "invalid_argument"),
+    # A cell held for the user's approval and not approved. The user's call,
+    # never an environment wall; the model is told to report it, not retry.
+    "write_not_approved": (TIER_SELF, "invalid_argument"),
     # `read_image`, ENG-2248: both are the agent's own file choice, and both
     # messages tell it what to do instead (use a real image / resize).
     "not_an_image": (TIER_SELF, "invalid_argument"),
@@ -167,12 +175,38 @@ _SENTINEL_REASONS = {
     # resolves to a DIFFERENT class is the kind of collision a future editor
     # reads straight past.
     "path_not_found": (TIER_SELF, "unknown_resource"),
+    # `read_text_file`: each refusal is about the agent's own argument — a
+    # path, a range, a file it chose — and the message says what to do instead.
+    "missing_path": (TIER_SELF, "missing_argument"),
+    "invalid_path": (TIER_SELF, "invalid_argument"),
+    "not_a_file": (TIER_SELF, "invalid_argument"),
+    "access_denied": (TIER_SELF, "invalid_argument"),
+    "file_too_large": (TIER_SELF, "invalid_argument"),
+    "not_text": (TIER_SELF, "invalid_argument"),
+    "invalid_range": (TIER_SELF, "invalid_argument"),
+    "invalid_fields": (TIER_SELF, "invalid_argument"),
     # Genuine walls: the environment is missing something the agent cannot add.
     "package_install_failed": (TIER_WALL, "missing_dependency"),
     "store_unavailable": (TIER_WALL, "service_unavailable"),
     # Could be environment or config and the sentinel does not say which, so it
     # stays out of every trip rung until something distinguishes them.
     "launch_failed": (TIER_UNCLASSIFIED, "unclassified"),
+    # Live apps in app slots (`live_app_slots`). The person refused the launch
+    # card: their call, like a held cell, never a wall.
+    "live_app_not_approved": (TIER_SELF, "invalid_argument"),
+    # A `path` or `extra_args` a slot won't run, or launch files the agent
+    # made unsendable (a link, a cap, no `backend.py`): its own to fix.
+    "live_app_invalid_launch": (TIER_SELF, "invalid_argument"),
+    "live_app_invalid_files": (TIER_SELF, "invalid_argument"),
+    # No slot answered, no host records launches, or a setting is broken:
+    # only the operator can fix these, same shape as `store_unavailable`.
+    "live_app_unavailable": (TIER_WALL, "service_unavailable"),
+    # Other people hold every slot. Each frees itself in time, so retrying
+    # later can succeed: transient, never a wall.
+    "live_app_slots_full": (TIER_TRANSIENT, "live_app_slots_full"),
+    # The slot image lacks a requirement. A rewritten backend may drop it, or
+    # the app may truly need it; nothing here tells which.
+    "live_app_missing_package": (TIER_UNCLASSIFIED, "unclassified"),
     # `generate_artifact` stopped somewhere inside its own pipeline. The
     # single string it returns names the node, but the causes behind that
     # node span everything from a truncated spec to a missing data source, so
@@ -187,6 +221,11 @@ _SENTINEL_REASONS = {
     # A bare `except Exception` around a PIL round-trip: a missing Pillow is a
     # wall, a corrupt BMP is not, and the sentinel cannot tell them apart.
     "bmp_convert_failed": (TIER_UNCLASSIFIED, "unclassified"),
+    # `read_image` once the model provider refused a request carrying a
+    # tool's image and took it without one. The model may take no image
+    # input, or the refusal may have had another cause the provider only
+    # worded around an image, so it stays out of every trip rung.
+    "images_refused": (TIER_UNCLASSIFIED, "unclassified"),
     # MCP connectors (ENG-1816): a rejected/expired token needs a user
     # reconnect, same shape as a 401 (`_STATUS_WALLS["401"] = "auth_missing"`)
     # — the agent cannot fix this by retrying, so it's a genuine wall.

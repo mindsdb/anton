@@ -714,9 +714,9 @@ class TestScratchpadEnvironment:
         await pad.start()
         try:
             cell = await pad.execute(
-                "import os; print(os.environ.get('ANTHROPIC_API_KEY', 'MISSING'))"
+                "import os; print(os.environ.get('ANTHROPIC_API_KEY') == 'sk-ant-test-123')"
             )
-            assert cell.stdout.strip() == "sk-ant-test-123"
+            assert cell.stdout.strip() == "True"
         finally:
             await pad.close()
 
@@ -728,9 +728,9 @@ class TestScratchpadEnvironment:
         await pad.start()
         try:
             cell = await pad.execute(
-                "import os; print(os.environ.get('DS_POSTGRES_PROD__PASSWORD', 'NOT_FOUND'))"
+                "import os; print(os.environ.get('DS_POSTGRES_PROD__PASSWORD') == 'inherited-secret')"
             )
-            assert cell.stdout.strip() == "inherited-secret"
+            assert cell.stdout.strip() == "True"
         finally:
             await pad.close()
 
@@ -1447,6 +1447,70 @@ class TestSessionPersistence:
         finally:
             await pad2.cleanup()
 
+    async def test_variables_are_cleared_when_a_connection_is_gone(self, tmp_path, monkeypatch):
+        """ENG-3305: a variable can hold a copy of a connection secret.
+
+        The next turn's output scrubber knows only the connections that turn
+        still has, so restoring such a copy after its connection was removed
+        would print the secret in clear.
+        """
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        venvs_base = tmp_path / "venvs"
+        pad = make_scratchpad(
+            name="gone", _venvs_base=venvs_base, session_id="c",
+            scratchpad_ds_env={"DS_A": "a-secret-value"},
+        )
+        await pad.start()
+        cell = await pad.execute("import os\nkept = os.environ['DS_A']")
+        assert cell.error is None, cell.error
+        await pad.close()
+
+        pad2 = make_scratchpad(
+            name="gone", _venvs_base=venvs_base, session_id="c", scratchpad_ds_env={},
+        )
+        await pad2.start()
+        try:
+            cell = await pad2.execute("print('kept' in dir())")
+            assert cell.error is None, cell.error
+            assert cell.stdout.strip() == "False"
+            assert "A connection this conversation used is gone" in cell.logs
+        finally:
+            await pad2.cleanup()
+
+    @pytest.mark.parametrize(
+        "restart_env",
+        [
+            {"DS_A": "a-secret-value", "DS_B": "b-secret-value"},
+            {"DS_A": "a-secret-value", "DS_B": "b-secret-value", "DS_C": "added-later"},
+        ],
+        ids=["unchanged", "one-added"],
+    )
+    async def test_variables_survive_when_every_connection_is_still_there(
+        self, tmp_path, monkeypatch, restart_env
+    ):
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        venvs_base = tmp_path / "venvs"
+        pad = make_scratchpad(
+            name="kept", _venvs_base=venvs_base, session_id="c",
+            scratchpad_ds_env={"DS_A": "a-secret-value", "DS_B": "b-secret-value"},
+        )
+        await pad.start()
+        cell = await pad.execute("import os\nkept = os.environ['DS_A']")
+        assert cell.error is None, cell.error
+        await pad.close()
+
+        pad2 = make_scratchpad(
+            name="kept", _venvs_base=venvs_base, session_id="c", scratchpad_ds_env=restart_env,
+        )
+        await pad2.start()
+        try:
+            cell = await pad2.execute("print(kept == os.environ['DS_A'])")
+            assert cell.error is None, cell.error
+            assert cell.stdout.strip() == "True"
+            assert "cleared" not in cell.logs
+        finally:
+            await pad2.cleanup()
+
     async def test_namespace_isolated_per_pad_name(self, tmp_path, monkeypatch):
         """A different pad name must not see another pad's namespace."""
         monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
@@ -1533,14 +1597,19 @@ class TestSessionPersistence:
             await again.cleanup()
 
     def test_snapshot_path_contains_a_traversing_pad_name(self, tmp_path):
-        """A model-chosen pad name flows into a path, so it must not escape the root."""
-        pad = make_scratchpad(
-            name="../../etc/passwd", _venvs_base=tmp_path / "venvs", session_id="conv"
-        )
-        path = pad._session_snapshot_path()
+        """A model-chosen pad name flows into a path, so it must not escape the root.
+
+        The runtime refuses such a name outright; the snapshot path stays
+        inside its root even for a name that reaches it some other way.
+        """
+        from anton.core.backends.local import snapshot_file
+
+        with pytest.raises(ValueError, match="'..'"):
+            make_scratchpad(name="../../etc/passwd", _venvs_base=tmp_path / "venvs", session_id="conv")
+        path = snapshot_file(tmp_path / "venvs", "conv", "../../etc/passwd")
         assert path is not None
         root = (tmp_path / "venvs").parent / "scratchpad-sessions"
-        assert str(path).startswith(str(root.resolve()))
+        assert str(path.resolve()).startswith(str(root.resolve()))
         assert ".." not in path.parts
 
     async def test_reset_still_clears_state(self, tmp_path, monkeypatch):
@@ -1775,11 +1844,10 @@ class TestSessionPersistence:
     async def test_legacy_snapshot_with_a_file_handle_is_not_materialised(
         self, tmp_path, monkeypatch
     ):
-        """Snapshots written before the dump-side filter can still hold handles.
+        """A snapshot file can hold a handle the dump-side filter never saw.
 
         Loading such a snapshot must drop the handle instead of re-opening (and
-        truncating) its file — the load-side guard is what protects conversations
-        that carried a snapshot across the deploy of the fix.
+        truncating) its file.
         """
         import dill
 
@@ -1794,8 +1862,9 @@ class TestSessionPersistence:
         pad = make_scratchpad(name="legacy", _venvs_base=venvs_base, session_id="c")
         snapshot = pad._session_snapshot_path(create=True)
         assert snapshot is not None
-        # The on-disk envelope format of scratchpad_boot (magic, version, blobs).
-        envelope = ("__anton_snapshot__", 2, {"legacy": blob, "ok": dill.dumps(42)})
+        # The on-disk envelope format of scratchpad_boot (magic, version, blobs,
+        # DS_* names).
+        envelope = ("__anton_snapshot__", 3, {"legacy": blob, "ok": dill.dumps(42)}, ())
         with open(snapshot, "wb") as f:
             dill.dump(envelope, f)
 
@@ -2113,30 +2182,50 @@ class TestAgentAuthoredModuleSnapshots:
         finally:
             await pad.cleanup()
 
-    async def test_a_snapshot_in_the_old_format_still_loads(self, tmp_path, monkeypatch):
-        """A conversation in flight across the upgrade keeps its state.
+    @pytest.mark.parametrize("old_format", ["single-stream", "envelope-v2"])
+    async def test_a_snapshot_in_an_older_format_is_discarded_once(
+        self, tmp_path, monkeypatch, old_format
+    ):
+        """ENG-3305: an older snapshot does not record which connections it saw.
 
-        The pre-ENG-1366 snapshot is one stream holding real objects; the new one is an
-        envelope of individually-pickled values. The loader must read both, or the
-        release costs every open conversation a cold turn.
+        A variable in it can hold a copy of a connection secret that the current
+        turn no longer scrubs, so it is cleared once, and the snapshot the next
+        cell writes loads as usual.
         """
         import dill
 
         monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        venvs_base = tmp_path / "venvs"
         pad = make_scratchpad(
-            name="legacy", _venvs_base=tmp_path / "venvs", session_id="c"
+            name="legacy", _venvs_base=venvs_base, session_id="c", scratchpad_ds_env={},
         )
         snapshot = pad._session_snapshot_path(create=True)
         assert snapshot is not None
-        snapshot.write_bytes(dill.dumps({"carried_over": [1, 2, 3]}))
+        if old_format == "single-stream":
+            # Before ENG-1366: one stream holding the real objects.
+            old = {"carried_over": [1, 2, 3]}
+        else:
+            old = ("__anton_snapshot__", 2, {"carried_over": dill.dumps([1, 2, 3])})
+        snapshot.write_bytes(dill.dumps(old))
 
         await pad.start()
+        cell = await pad.execute("print('carried_over' in dir())\nfresh = 1")
+        assert cell.error is None, cell.error
+        assert cell.stdout.strip() == "False"
+        assert "older format" in cell.logs
+        await pad.close()
+
+        pad2 = make_scratchpad(
+            name="legacy", _venvs_base=venvs_base, session_id="c", scratchpad_ds_env={},
+        )
+        await pad2.start()
         try:
-            cell = await pad.execute("print(carried_over)")
+            cell = await pad2.execute("print(fresh)")
             assert cell.error is None, cell.error
-            assert cell.stdout.strip() == "[1, 2, 3]", cell.stdout
+            assert cell.stdout.strip() == "1"
+            assert "cleared" not in cell.logs
         finally:
-            await pad.cleanup()
+            await pad2.cleanup()
 
 
 class TestConcurrentTurnsOnDivergentVaults:

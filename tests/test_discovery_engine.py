@@ -12,6 +12,7 @@ import pytest
 from anton.core.llm.provider import LLMResponse, ToolCall, Usage
 from anton.core.tools.generate_artifact.discovery import engine
 from anton.core.tools.generate_artifact.discovery.state import PrdState
+from tests.streaming_llm import StreamingLLM
 
 
 def _response(content="", tool_calls=None) -> LLMResponse:
@@ -52,7 +53,7 @@ def _session_with_plan_sequence(*responses) -> SimpleNamespace:
     async def _next(**kwargs):
         return next(it)
 
-    llm = SimpleNamespace(plan=AsyncMock(side_effect=_next), code=AsyncMock(side_effect=_next))
+    llm = StreamingLLM(plan=AsyncMock(side_effect=_next), code=AsyncMock(side_effect=_next))
     return SimpleNamespace(_llm=llm, question_count=0, elicitor=None, emit=AsyncMock())
 
 
@@ -512,3 +513,74 @@ async def test_only_cells_that_ran_are_recorded_for_the_data_notes(monkeypatch):
     # The model still sees every result, refusal included — only the notes skip it.
     result_blocks = state.messages[2]["content"]
     assert len(result_blocks) == 4
+
+
+async def test_a_cell_that_left_out_action_is_recorded_and_verifies_its_source(monkeypatch):
+    """A call with `code` and no `action` runs as `exec`: its cell goes into
+    the data notes, and the source it ran against counts as verified."""
+    from anton.core.tools.registry import ToolOutcome
+
+    async def fake_handle_scratchpad(session, inp):
+        return ToolOutcome(content="[output] 504 rows", ok=True)
+
+    monkeypatch.setattr(
+        "anton.core.tools.tool_handlers.handle_scratchpad", fake_handle_scratchpad
+    )
+    session = _session_with_plan_sequence(
+        _response(tool_calls=[_tc("scratchpad", {"name": "hr", "code": "print(2)"})]),
+        _response(tool_calls=[_tc("finish_gathering", {
+            "summary": "ok",
+            "artifact_type": "html-app",
+            "data_sources": ["hr table"],
+        })]),
+    )
+    state = _state(session)
+    await engine.run_gathering_loop(state)
+    assert [(x["code"], x["output"]) for x in state.scratchpad_execs] == [("print(2)", "[output] 504 rows")]
+    assert state.unverified_sources == []
+
+
+_SITES = "site,lat,lon\nToronto,43.7,-79.4\nAustin,30.3,-97.7"
+
+
+def _finish(artifact_type="html-app", mark="known_data"):
+    return _response(tool_calls=[_tc("finish_gathering", {
+        "artifact_type": artifact_type,
+        "summary": "the rows are in the known data",
+        "data_sources": ["sites"],
+        "data_findings": [{"source": "sites", "verified_by": mark}],
+    })])
+
+
+async def test_a_source_whose_rows_are_in_known_data_is_verified():
+    state = _state(_session_with_plan_sequence(_finish()), known_data=_SITES)
+    await engine.run_gathering_loop(state)
+    assert state.unverified_sources == []
+    assert state.known_data_verified == ["sites"]
+
+
+async def test_an_unmarked_source_stays_unverified_despite_known_data():
+    state = _state(_session_with_plan_sequence(_finish(mark="")), known_data=_SITES)
+    await engine.run_gathering_loop(state)
+    assert state.unverified_sources == ["sites"]
+
+
+@pytest.mark.parametrize("artifact_type, known_data", [
+    ("fullstack-stateless-app", _SITES),
+    ("html-app", ""),
+])
+async def test_the_mark_does_not_count_where_known_data_cannot_stand_in_for_code(artifact_type, known_data):
+    state = _state(_session_with_plan_sequence(_finish(artifact_type=artifact_type)), known_data=known_data)
+    await engine.run_gathering_loop(state)
+    assert state.unverified_sources == ["sites"]
+
+
+async def test_marked_rows_skip_the_data_loop_and_reach_the_page_builder(tmp_path: Path):
+    from anton.core.tools.generate_artifact import orchestrator
+
+    state = _state(_session_with_plan_sequence(_finish()), known_data=_SITES, artifact_path=tmp_path)
+    await engine.run_gathering_loop(state)
+    # The session's fake LLM has no `generate_object`: a decision call fails.
+    assert await orchestrator._data_phase(state) is None
+    assert [s.outcome for s in state.trace if s.node == "data_check"] == ["skipped"]
+    assert _SITES in orchestrator._spec_context(state)

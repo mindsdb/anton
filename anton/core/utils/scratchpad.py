@@ -1,12 +1,491 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
-from typing import TYPE_CHECKING
+import re
+import time
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
+from pydantic import BaseModel, ConfigDict
+
+from anton.core.backends.sandbox import cell_sandbox_of, validate_pad_name
 from anton.core.tools.registry import ToolOutcome
+from anton.core.utils.write_check import (
+    CellWrites,
+    FileChange,
+    HttpWrite,
+    HttpWriteRule,
+    ProjectSnapshot,
+    SqlWrite,
+    find_cell_writes,
+    snapshot_project_files,
+)
 
 if TYPE_CHECKING:
+    from anton.core.backends.manager import ScratchpadManager
     from anton.core.session import ChatSession
+
+logger = logging.getLogger(__name__)
+
+# Reasons a scratchpad exec result carries when its cell never ran, so a
+# caller that records executed cells can tell them from a cell that did
+# (`discovery.engine`, `generate_artifact.engine._run_loop` and the turn's
+# hand-back report).
+CELL_NOT_RUN_REASONS = frozenset({"new_scratchpad_challenged", "write_not_approved"})
+
+# Every `action` the scratchpad tool takes, in the order its schema lists them.
+SCRATCHPAD_ACTIONS: tuple[str, ...] = ("exec", "view", "reset", "remove", "dump", "install")
+
+
+def scratchpad_action(tc_input: dict) -> str:
+    """The action a scratchpad call asks for.
+
+    Tools go to the model without strict schemas, so a call can leave out
+    `action`. One that carries `code` can only mean to run it, so it is an
+    `exec`; one with neither gets "", which no action matches.
+    """
+    action = tc_input.get("action")
+    if not action and tc_input.get("code"):
+        return "exec"
+    return action if isinstance(action, str) else ""
+
+
+def fill_in_scratchpad_action(tc_input: dict) -> None:
+    """Write the `exec` that `scratchpad_action` reads into a call that left
+    `action` out, before the call is stored in history. A reader of the
+    stored call then sees the action that ran: cowork-server rebuilds an
+    earlier turn's cells from these rows and counts a step as a cell only
+    when its `action` is `exec`. cowork-server's cell replay reads another
+    field, the action the turn names on the call's `StreamToolResult`,
+    which cowork-server stores as `tool_action`."""
+    if not tc_input.get("action") and scratchpad_action(tc_input) == "exec":
+        tc_input["action"] = "exec"
+
+
+RefusalCause = Literal["cancelled", "timeout", "unavailable", "error", "unanswered_earlier"]
+# What a logged decision says came of a held cell: "stopped" when the turn
+# ended while its card waited, so no refusal went back to the model.
+DecisionStatus = RefusalCause | Literal["approved", "not_held", "stopped"]
+
+_WHY = {
+    "cancelled": "they declined it",
+    "timeout": "no one answered in time",
+    "unavailable": "there is no way to ask them here",
+    "error": "the approval request failed",
+    "unanswered_earlier": "an earlier approval request in this turn went unanswered",
+}
+
+
+def refusal_why(cause: RefusalCause) -> str:
+    """Why a card didn't approve, in the words the gate's refusal uses."""
+    return _WHY[cause]
+
+# What the refusal names of one list: a file change's paths, the requests,
+# or the data changes with no SQL text. The card names every one.
+_REFUSAL_PATHS = 20
+_TILDE_RUN = re.compile("~{3,}")
+_BACKTICK_RUN = re.compile("`+")
+
+
+@dataclass
+class WriteGate:
+    """Per-session state for holding cells that change a database, existing
+    files, or data behind an HTTP API.
+
+    Present on a session only when the host turns the setting on. `begin_turn`
+    records what the project and shared folders held when the turn began.
+    `http_rules` are the endpoints the operator lists as writes
+    (`write_approval_http`).
+    """
+
+    snapshots: tuple[ProjectSnapshot, ...] = ()
+    # After one card goes unanswered, later flagged cells in the same turn are
+    # refused without a new card, so an unattended turn doesn't wait out the
+    # timeout once per cell.
+    unanswered: bool = False
+    http_rules: tuple[HttpWriteRule, ...] = ()
+
+    async def begin_turn(self, *, manager: ScratchpadManager) -> None:
+        self.unanswered = False
+        taken_at = time.time()
+        roots: list[tuple[Literal["project", "shared"], Path]] = []
+        if manager.workspace_path is not None:
+            roots.append(("project", manager.workspace_path))
+        policy = cell_sandbox_of(manager)
+        if policy is not None and policy.shared_dir is not None:
+            roots.append(("shared", policy.shared_dir))
+        self.snapshots = tuple([
+            await asyncio.to_thread(
+                snapshot_project_files, root=root, label=label, taken_at=taken_at
+            )
+            for label, root in roots
+        ])
+
+
+class WriteApprovalDecision(BaseModel):
+    """One logged decision: what a held cell would change and what came of it.
+    Never the code or the statement itself."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kinds: tuple[str, ...]
+    count: int
+    status: DecisionStatus
+
+
+def _inert(text: str) -> str:
+    """`text` with each HTML comment mark split by a zero-width space. Cowork
+    drops `<!-- ... -->` from a card before it reads the Markdown, code
+    included, and drops everything after an unclosed `<!--`."""
+    return text.replace("<!--", "<\u200b!--").replace("-->", "--\u200b>")
+
+
+def _fence(text: str) -> str:
+    """`text` in a code fence nothing inside it can end, so the card shows it
+    as written. Cowork's math pass rewrites a `$` or `\\(` outside code, and
+    it reads a fence as code from one run of three backticks, or of three
+    tildes, to the next. So a text with three backticks in a row goes in
+    tildes, and a run of three tildes inside it is split with a zero-width
+    space."""
+    text = _inert(text)
+    if "```" not in text:
+        return "```\n" + text + "\n```"
+    return "~~~\n" + _TILDE_RUN.sub(lambda m: "\u200b".join(m.group()), text) + "\n~~~"
+
+
+def _code_span(text: str) -> str:
+    """`text` in a code span longer than any run of backticks inside it."""
+    ticks = max((len(run) for run in _BACKTICK_RUN.findall(text)), default=0) + 1
+    pad = " " if text[:1] in ("`", " ") or text[-1:] in ("`", " ") else ""
+    return "`" * ticks + pad + text + pad + "`" * ticks
+
+
+def _shown_path(path: str) -> str:
+    """`path` as the card and the refusal name it: as written, or as Python
+    writes it, in quotes, when it holds a character that doesn't show as
+    itself (a line break, a tab, a text direction override, a zero-width
+    space) or a backslash, or starts with a quote."""
+    if path.isprintable() and "\\" not in path and not path.startswith(("'", '"')):
+        return path
+    return repr(path)
+
+
+def _wholes(change: FileChange) -> str:
+    """The root folders `change` takes whole, as the card names them; "" for none."""
+    wholes = []
+    if change.whole_project:
+        wholes.append("the whole project folder")
+    if change.whole_shared:
+        wholes.append("the whole shared folder")
+    return " and ".join(wholes)
+
+
+# How each call-write reads on the card and in the refusal.
+_CALL_VIA = {
+    "procedure": "run a stored procedure or function",
+    "sqlalchemy": "change data through SQLAlchemy",
+    "mongodb": "change data in MongoDB",
+    "dynamodb": "change data in DynamoDB",
+    "bigquery": "change data in BigQuery",
+    "redis": "change data in Redis",
+    "elasticsearch": "change data in Elasticsearch",
+    "data_store": "change data in a data store",
+    "sql_file": "run a SQL file too big to check",
+}
+
+
+def _describe_calls(writes: CellWrites) -> list[str]:
+    """The first held data changes with no SQL text, for the refusal: what
+    each does and the code line it does it in. The card names every one."""
+    out = [f"{_CALL_VIA[call.via]} in {_code_span(call.call)}" for call in writes.calls[:_REFUSAL_PATHS]]
+    more = len(writes.calls) - _REFUSAL_PATHS
+    return out + ([f"make {more} more such data changes"] if more > 0 else [])
+
+
+def _describe_requests(writes: CellWrites) -> list[str]:
+    """The first held requests, for the refusal: the method and the URL.
+    The card names every one."""
+    out = [_request_summary(write) for write in writes.http[:_REFUSAL_PATHS]]
+    more = len(writes.http) - _REFUSAL_PATHS
+    return out + ([f"send {more} more such requests"] if more > 0 else [])
+
+
+def _run_time_from(code: str) -> str:
+    """`, from <code>`, naming the code that decides a value when the step
+    runs, or nothing when the check cannot show that code."""
+    return f", from {_code_span(_inert(code))}" if code else ""
+
+
+def _request_summary(write: HttpWrite) -> str:
+    """One request for the refusal, in words where the code decides a part."""
+    method = _http_method(write.method) if write.method_code is None else "a request"
+    if write.url_code is not None:
+        text = f"send {method} to an address the code decides when it runs{_run_time_from(write.url_code)}"
+    else:
+        text = f"send {method} to {_code_span(_shown_path(write.url))}"
+    if write.method_code is not None:
+        text += f" (the code decides its method when it runs{_run_time_from(write.method_code)})"
+    return text
+
+
+def _describe_files(writes: CellWrites) -> list[str]:
+    """Each held file change for the refusal: the first paths it names, or
+    the code that picks the path when it runs. The card names every path.
+    A change to a SQLite or DuckDB file reads as a change, as the card says,
+    not an overwrite."""
+    out = []
+    for change in writes.held_files:
+        action = "change" if change.statements else change.action
+        wholes = _wholes(change)
+        if wholes:
+            out.append(f"{action} {wholes}")
+        if change.paths:
+            named = ", ".join(_code_span(_shown_path(p)) for p in change.paths[:_REFUSAL_PATHS])
+            more = len(change.paths) - _REFUSAL_PATHS
+            out.append(f"{action} {named}" + (f" and {more} more" if more > 0 else ""))
+        if not (wholes or change.paths):
+            out.append(f"{action} a file or folder it picks when it runs, in {_code_span(change.call)}")
+    return out
+
+
+def _summary(writes: CellWrites) -> str:
+    parts = []
+    if writes.sql:
+        parts.append("change data in a connected source")
+    parts += _describe_calls(writes)
+    parts += _describe_files(writes)
+    parts += _describe_requests(writes)
+    if writes.unchecked:
+        parts.append("run code the check couldn't read")
+    return "; ".join(parts)
+
+
+def _statement_text(write: SqlWrite) -> str:
+    """One statement as the card fences it, with the values it passes."""
+    return write.statement + (f"\nwith values {write.values}" if write.values else "")
+
+
+def _file_lines(change: FileChange, *, also: bool = False) -> list[str]:
+    """One file change on the card: the root folders it takes whole, every
+    path it names, or the code that picks the path when it runs. With
+    `also`, the change raises no card on its own, but the Approve runs it
+    too. A change to a SQLite or DuckDB file names the file and quotes each
+    statement it runs, as a SQL write's statements are quoted."""
+    would = "This step would also" if also else "This step would"
+    if change.statements:
+        files = "this database file" if len(change.paths) == 1 else "these database files"
+        lines = [f"{would} change {files}:", "", _fence("\n".join(_shown_path(p) for p in change.paths)), "",
+                 "It would run:", ""]
+        for write in change.statements:
+            lines += [_fence(_statement_text(write)), ""]
+        return lines
+    lead = f"{would} {'append to' if change.action == 'append' else change.action}"
+    lines: list[str] = []
+    wholes = _wholes(change)
+    if wholes:
+        lines += [f"{lead} {wholes}.", ""]
+    if change.paths:
+        lines += [f"{lead}:", "", _fence("\n".join(_shown_path(p) for p in change.paths)), ""]
+    if not (wholes or change.paths):
+        lines += [f"{lead} a file or folder it picks when it runs, in this code:", "", _fence(change.call), ""]
+    return lines
+
+
+def _http_method(method: str) -> str:
+    """A written-out method as the card's prose names it: as it is when it is
+    a word, else as code. A method is any text an HTTP library sends, so one
+    such as `<!--` would otherwise open an HTML comment that Cowork drops
+    from the card, and with it the held requests that follow."""
+    return method if method.isalpha() else _code_span(_inert(method))
+
+
+def _request_lines(request: HttpWrite) -> list[str]:
+    """One request on the card. A method or an address the code decides when
+    it runs is said in words, with the code that decides it, never shown as a
+    bare `{placeholder}` where the method or the address would stand."""
+    method = _http_method(request.method) if request.method_code is None else "a request"
+    if request.url_code is not None:
+        lead = f"This step would send {method} to an address the code decides when it runs{_run_time_from(request.url_code)}:"
+        lines = [lead, "", _fence(request.call), ""]
+    else:
+        lines = [f"This step would send {method} to:", "", _fence(_shown_path(request.url)), "", _fence(request.call), ""]
+    if request.method_code is not None:
+        lines += [f"The code decides the request's method when it runs{_run_time_from(request.method_code)}.", ""]
+    return lines
+
+
+def _card_prompt(writes: CellWrites) -> str:
+    """The card: every statement, file change and request the step would
+    make, whole, since one Approve runs them all. Statements, paths, URLs and
+    code go in fences, so Cowork's Markdown shows them as written."""
+    lines = ["**Approve this change?**", ""]
+    if writes.sql:
+        lines += ["This step would change data in a connected source:", ""]
+        for write in writes.sql:
+            lines += [_fence(_statement_text(write)), ""]
+        if any(write.run_time_parts for write in writes.sql):
+            lines += ["A part in braces, `{...}`, is the code that fills in that value when the step runs.", ""]
+    for call in writes.calls:
+        lines += [f"This step would {_CALL_VIA[call.via]}:", "", _fence(call.call), ""]
+        if call.runs and call.runs != call.call:
+            lines += ["That call runs:", "", _fence(call.runs), ""]
+    for change in writes.held_files:
+        lines += _file_lines(change)
+    # An append, or an overwrite of a file the agent owns, raises no card on
+    # its own, but the Approve runs it too.
+    for change in writes.not_held_files:
+        lines += _file_lines(change, also=True)
+    for request in writes.http:
+        lines += _request_lines(request)
+    later = [*writes.http, *(w for change in writes.files for w in change.statements)]
+    if any(w.run_time_parts for w in later) and not any(w.run_time_parts for w in writes.sql):
+        lines += ["A part in braces, `{...}`, is the code that fills in that value when the step runs.", ""]
+    shown = [*(p for change in writes.files for p in change.paths), *(r.url for r in writes.http)]
+    if any(_shown_path(p) != p for p in shown):
+        lines += ["A name in quotes is written with escapes, as Python writes it: `\\n` is a line break "
+                  "and `\\\\` a backslash.", ""]
+    if writes.unchecked:
+        lines += ["This step can't be checked before it runs.", ""]
+    lines.append("It runs only if you approve. Cancel, Skip or no answer stops it.")
+    return "\n".join(lines)
+
+
+def _refusal(writes: CellWrites, cause: RefusalCause) -> ToolOutcome:
+    # ok=True on purpose: a refusal is the user's decision, not a tool
+    # failure, so it must not feed the error streak, whose nudge tells the
+    # model to try another library or source.
+    return ToolOutcome(
+        content=(
+            f"Not run: this step would {_summary(writes)}. That needs the user's approval, "
+            f"and {_WHY[cause]}. Nothing in this cell ran. The user didn't approve this "
+            "change, so it must not be made another way: don't rewrite the cell, build the "
+            "statement, path or URL at run time, or use another tool for it. Tell the user what "
+            "the step would change and that it needs their approval."
+        ),
+        ok=True,
+        reason="write_not_approved",
+    )
+
+
+async def _ask_approval(session: ChatSession, writes: CellWrites) -> RefusalCause | None:
+    """Ask Approve or Cancel for a held cell. None when the user picks Approve, else why not."""
+    return await ask_approval_card(
+        session, _card_prompt(writes),
+        approve_detail="Run this step once", cancel_detail="Leave the data and files as they are",
+    )
+
+
+async def ask_approval_card(
+    session: ChatSession,
+    prompt: str,
+    *,
+    approve_detail: str,
+    cancel_detail: str,
+    log_label: str = "write approval",
+) -> RefusalCause | None:
+    """Ask the gate's Approve or Cancel card with `prompt`. None when the user
+    picks Approve, else why not. The live-app launch card asks through it too.
+
+    One unanswered card per turn: after a card times out, every later card in
+    the turn is refused without asking, so an unattended turn doesn't wait
+    out the timeout once per card. Sessions without a `WriteGate` keep no
+    such memory."""
+    from anton.core.interaction.elicit import AskOption, AskRequest, elicit
+
+    gate = getattr(session, "_write_gate", None)
+    if isinstance(gate, WriteGate) and gate.unanswered:
+        return "unanswered_earlier"
+    request = AskRequest(
+        prompt=prompt,
+        options=(
+            AskOption(value="approve", label="Approve", detail=approve_detail),
+            AskOption(value="cancel", label="Cancel", detail=cancel_detail),
+        ),
+        # No typed answer and no default: only a picked Approve clears the card.
+        allow_custom=False,
+        timeout_s=getattr(session.elicitor, "timeout_s", None),
+    )
+    try:
+        # Not counted against the turn's questions: the card is the gate's,
+        # not the model's, so it spends none of the model's own.
+        answer = await elicit(session, f"write:{uuid.uuid4().hex}", request, counted=False)
+    except Exception as exc:
+        # The type only: a traceback's frames would print the card and the
+        # statement under a host that logs local variables.
+        logger.warning("%s: the question failed (%s)", log_label, type(exc).__name__)
+        return "error"
+    if answer.status == "answered" and answer.values == ("approve",):
+        return None
+    if answer.status in ("answered", "cancelled"):
+        return "cancelled"
+    if answer.status == "timeout" and isinstance(gate, WriteGate):
+        gate.unanswered = True
+    if answer.status in ("timeout", "unavailable"):
+        return answer.status
+    return "error"
+
+
+def _log_decision(*, writes: CellWrites, status: DecisionStatus) -> None:
+    """Log what came of a cell: for one that ran with no card, the changes
+    it was let make (appends, and overwrites of the agent's own files);
+    otherwise what its card held."""
+    if status == "not_held":
+        kinds = tuple(sorted({f.action for f in writes.not_held_files}))
+        count = len(writes.not_held_files)
+    else:
+        kinds, count = writes.kinds(), len(writes.sql) + len(writes.calls) + len(writes.held_files) + len(writes.http)
+    decision = WriteApprovalDecision(kinds=kinds, count=count, status=status)
+    # WARNING: hosts log at WARNING by default, and this line is the record of
+    # a held write.
+    logger.warning("write approval: %s", decision.model_dump_json())
+
+
+async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> ToolOutcome | None:
+    """Hold a cell that changes a database, existing files, or data behind
+    an HTTP API until the user approves it. None when the cell may run;
+    otherwise the refusal to return in its place, before any of it runs.
+
+    Only sessions with a `WriteGate` (the `write_approval` setting) check
+    anything. A check that fails asks too, since it can't clear the cell.
+    """
+    gate = getattr(session, "_write_gate", None)
+    if not isinstance(gate, WriteGate):
+        return None
+    # The cells compaction folded away come first: the pad's process still
+    # holds what they imported and bound. Their outcomes still decide whether
+    # the check can count a write as one that ran.
+    compacted = tuple(getattr(pad, "compacted_cells", ()))
+    cells = tuple(getattr(pad, "cells", ()) or ())
+    earlier = (*(cell.code for cell in compacted), *(cell.code for cell in cells))
+    errored = (*(cell.errored for cell in compacted), *(bool(getattr(cell, "error", None)) for cell in cells))
+    try:
+        writes = await asyncio.to_thread(
+            find_cell_writes,
+            code=code, earlier_code=earlier, snapshots=gate.snapshots, http_rules=gate.http_rules,
+            earlier_errored=errored,
+        )
+    except Exception as exc:
+        # The type only, as for a failed question.
+        logger.warning("write approval: the check failed (%s)", type(exc).__name__)
+        writes = CellWrites(unchecked=True)
+    if not writes.needs_approval():
+        if writes.not_held_files:
+            _log_decision(writes=writes, status="not_held")
+        return None
+    try:
+        cause = await _ask_approval(session, writes)
+    except asyncio.CancelledError:
+        # Stop, or the host ending the turn, while the card waited.
+        _log_decision(writes=writes, status="stopped")
+        raise
+    _log_decision(writes=writes, status=cause or "approved")
+    if cause is None:
+        return None
+    return _refusal(writes, cause)
 
 
 def _acc_observe(session, kind: str, detail: dict, *, severity: int = 1) -> None:
@@ -26,6 +505,20 @@ _INSTALL_FAILURE_PREFIXES = ("Install failed", "Install timed out", "Install ref
 _INSTALL_NOOP_RESULTS = frozenset(
     {"No packages specified.", "All packages already installed."}
 )
+
+
+def refuse_pad_name(name: str) -> ToolOutcome | None:
+    """A refusal for a scratchpad name that is not one plain folder name, else None.
+
+    The name becomes a folder the host deletes and recreates, so anything but
+    one plain folder name (see `validate_pad_name`) is refused before any pad
+    is built or recorded.
+    """
+    try:
+        validate_pad_name(name)
+    except ValueError as exc:
+        return ToolOutcome(content=str(exc), ok=False, reason="scratchpad_invalid_name")
+    return None
 
 
 def install_call_failed(result: str) -> bool:
@@ -227,7 +720,8 @@ async def prepare_scratchpad_exec(session: ChatSession, tc_input: dict):
 
     Returns (pad, code, description, estimated_time, estimated_seconds) or
     a ToolOutcome whose content is the message when the call should not run
-    (empty code, a single-scratchpad challenge, or a failed package install).
+    (empty code, a single-scratchpad challenge, a change the user didn't
+    approve, or a failed package install).
     The outcome carries the explicit failure verdict, so the error streak no
     longer depends on the message's wording (ENG-1276).
 
@@ -239,6 +733,9 @@ async def prepare_scratchpad_exec(session: ChatSession, tc_input: dict):
     """
     name = tc_input.get("name", "")
     code = tc_input.get("code", "")
+    refused_name = refuse_pad_name(name)
+    if refused_name is not None:
+        return refused_name
     if not code or not code.strip():
         # An empty `code` on an exec call is almost never the model meaning
         # to run nothing — it's the large-payload drop: an oversized `code`
@@ -309,7 +806,10 @@ async def prepare_scratchpad_exec(session: ChatSession, tc_input: dict):
         # wording happening to avoid the substring markers, ENG-1276).
         return ToolOutcome(
             content=(
-                f"You already have an active scratchpad ('{existing}') with live state "
+                # "Not run: " opens every result for a cell that never ran, so a
+                # host can mark the step as not run (cowork-server's
+                # classify_cell_status).
+                f"Not run: you already have an active scratchpad ('{existing}') with live state "
                 f"(imports, variables, fetched data). Starting a new one named '{name}' "
                 "creates a SEPARATE, empty environment — nothing from the existing "
                 "scratchpad is available there, so you'd re-import and re-fetch. Reuse the "
@@ -330,6 +830,11 @@ async def prepare_scratchpad_exec(session: ChatSession, tc_input: dict):
             pass
 
     pad = await session._scratchpads.get_or_create(name)
+
+    # Before the installs, so a refused cell installs nothing either.
+    held = await hold_unapproved_write(session, pad=pad, code=code)
+    if held is not None:
+        return held
 
     # Install explicitly declared packages before running the cell
     packages = tc_input.get("packages", [])
@@ -379,6 +884,10 @@ def format_cell_result(cell) -> str:
     [logs]   — library logging (httpx, urllib3, etc.) captured at INFO+
     [stderr] — warnings and stderr writes
     [error]  — Python traceback if the cell raised an exception
+
+    cowork-server's figure sources read these labels, the truncation note and
+    the no-output sentence (cowork/harnesses/anton_harness/stream_formatter.py),
+    so a change here needs the same change there.
     """
     parts: list[str] = []
     if cell.stdout:
