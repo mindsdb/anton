@@ -140,6 +140,7 @@ from anton.core.tools.tool_handlers import (
     UNANSWERED_QUESTION_REASONS,
     _fire_post_execute,
     _fire_pre_execute,
+    capture_turn_pages,
     cell_content_with_lint,
     check_cell_artifacts,
     PageKey,
@@ -149,7 +150,9 @@ from anton.core.tools.tool_handlers import (
     snapshot_existing_artifacts,
     unanswered_question_line,
 )
+from anton.core.artifacts.page_copies import TurnPages
 from anton.core.artifacts.render_check import (
+    CheckedView,
     RenderStatus,
     confirm_refused_screenshots,
     confirm_refused_tool_images,
@@ -2170,6 +2173,20 @@ class ChatSession:
         # `checks_skipped`. A later unverified check of such a page lists
         # none (`tool_handlers.check_cell_artifacts`). Reset every turn.
         self._unverified_findings_listed: set[PageKey] = set()
+        # The repair cells each page used this turn: cells that changed a
+        # page whose last check this turn failed. A page gets
+        # `tool_handlers.REPAIR_CELLS` of them (`check_cell_artifacts`).
+        # Reset every turn.
+        self._repair_cells: dict[PageKey, int] = {}
+        # The views the check that failed a page this turn measured, kept
+        # until the page passes. Until then, a check of the page that no
+        # longer finds one of them fails, even after an unverified check in
+        # between (`tool_handlers._check_pages`). Reset every turn.
+        self._failed_views: dict[PageKey, tuple[CheckedView, ...]] = {}
+        # Each artifact's main page as the turn found it, the render check's
+        # comparison of each page with it, and the pages anton put back
+        # (`page_copies.TurnPages`). Reset every turn.
+        self._turn_pages = TurnPages()
         # Set once the model refused a request carrying render-check
         # screenshots and took it without them
         # (`_confirm_render_screenshots_refused`). From then on the checks'
@@ -2333,13 +2350,24 @@ class ChatSession:
     def _unverified_page_lines(self) -> list[str]:
         """The lines that end the turn's final message on a sandboxed
         deployment: one per artifact with a page that did not pass its last
-        browser check this turn. Written by anton, not the model, so the user
-        hears it whatever the reply claims. Empty without a sandbox: there
-        each cell's check (`tool_handlers._check_pages`) already tells the
-        agent which page failed or was not checked in a browser."""
-        if not self._page_checks or cell_sandbox_of(self._scratchpads) is None:
+        browser check this turn, then what the turn put back, broke, blanked
+        or removed against the pages as it found them
+        (`TurnPages.end_lines`). Written by anton, not the model, so the
+        user hears it whatever the reply claims. Empty without a sandbox:
+        there each cell's check (`tool_handlers._check_pages`) already tells
+        the agent which page failed or was not checked in a browser."""
+        turn_pages = getattr(self, "_turn_pages", None)
+        # A page put back with no status known for it leaves no record in
+        # `_page_checks` (`record_page_checks(restored=)`), and still gets its line.
+        if not self._page_checks and (turn_pages is None or not turn_pages.has_restored()):
             return []
-        return page_check_lines(resolve_artifact_store(self), checks=self._page_checks)
+        if cell_sandbox_of(self._scratchpads) is None:
+            return []
+        store = resolve_artifact_store(self)
+        return [
+            *page_check_lines(store, checks=self._page_checks),
+            *(turn_pages.end_lines(store, checks=self._page_checks) if turn_pages is not None else []),
+        ]
 
     @property
     def memory_read(self) -> MemoryRead | None:
@@ -5541,6 +5569,9 @@ class ChatSession:
         self._artifacts_touched = set()
         self._page_checks = {}
         self._unverified_findings_listed = set()
+        self._repair_cells = {}
+        self._failed_views = {}
+        self._turn_pages = TurnPages()
         # What the project held when this turn began: a cell may delete or
         # rename a file it wrote this turn without asking, not one from before.
         if self._write_gate is not None:
@@ -6891,6 +6922,8 @@ class ChatSession:
                                 # (below) can tell which artifact this cell
                                 # actually touched
                                 artifact_store = resolve_artifact_store(self)
+                                if artifact_store is not None:
+                                    await capture_turn_pages(self, artifact_store)
                                 before_artifacts = (
                                     snapshot_existing_artifacts(artifact_store)
                                     if artifact_store is not None

@@ -323,7 +323,9 @@ technical spec, then the code with static verification, \
 and for fullstack apps launches the backend and health-checks it — so you do \
 NOT call `launch_backend` afterwards. Do NOT write a PRD yourself and do NOT \
 write a generator-built artifact's files yourself in the scratchpad; the \
-pipeline's checks are what keep the result openable and deployable. Every status other than `generated` \
+pipeline's checks are what keep the result openable and deployable. The one \
+exception is `browser_check_failed`: the page failed its browser check, and you \
+repair it in a scratchpad cell as its `instruction` says. Every status other than `generated` \
 carries an `instruction` — follow it. `needs_confirmation` means show \
 `brief_summary` and, if the user agrees, call again with the SAME \
 `user_request`; a correction goes in `agent_understanding` with \
@@ -437,6 +439,8 @@ code, or `generate_artifact` returned an error and the user asked you to continu
 manually. Only then call `recall_skill("build-html-dashboard")` first and follow \
 the loaded output contract (charting library, theme, file layout, large-dataset \
 handling). Never write dashboard HTML by hand from memory of those rules. \
+Repairing a page that came back as `browser_check_failed` is not building it \
+by hand: follow that result's `instruction`, with no skill call. \
 Changing a report's content or adding sections needs neither: use report_tools \
 (DIRECT REPORTS).\
 """
@@ -460,7 +464,8 @@ has fully specified follows DIRECT REPORTS in the ARTIFACTS section; otherwise \
 up building a generator-made dashboard BY HAND instead \
 (rewriting its code, or the generator failed and the user asked you \
 to continue; not for changing a report's content), call `recall_skill("build-html-dashboard")` first and follow the \
-loaded output contract. \
+loaded output contract. A page that came back as `browser_check_failed` you \
+repair as that result's `instruction` says, with no skill call. \
 Fallback only if `create_artifact` is unavailable: save to `{output_dir}` \
 (create it if needed).\
 """

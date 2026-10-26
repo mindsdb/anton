@@ -493,12 +493,16 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "SAME `user_request` and `user_language`.\n"
         "- `cancelled` — the user declined. Do not build the artifact by "
         "hand.\n"
+        "- `browser_check_failed` — the page passed the static checks but "
+        "failed its browser check; it is on disk. Repair it yourself in a "
+        "scratchpad cell, as its `instruction` says.\n"
         "- `stopped_over_budget` — the turn ran out of tokens and the "
         "pipeline stopped cleanly; what it finished is on disk.\n\n"
         "Every status but `generated` carries an `instruction` saying what to "
         "do next — follow it. On a technical failure, report it to the user "
         "and ask how to proceed; NEVER fall back to building the artifact "
-        "yourself."
+        "yourself. The one exception is `browser_check_failed`: repair that "
+        "page in place, never rebuild it."
     ),
     input_schema={
         "type": "object",

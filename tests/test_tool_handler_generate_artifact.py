@@ -8,6 +8,7 @@ The handler is an async generator, so every case here drains it via
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -984,3 +985,106 @@ async def test_act_first_relays_the_brief_between_the_steps_and_reports_it(
     # Already shown: the text is not resent into the agent's history.
     assert "brief_summary" not in payload
     assert "brief_shown" in payload["instruction"]
+
+
+def _browser_check_failed():
+    from anton.core.artifacts.render_check import CheckedView, RenderScreenshot
+    from anton.core.tools.generate_artifact.state import BrowserCheckFailed
+
+    return BrowserCheckFailed(
+        page="dashboard.html",
+        findings=("Loaded in a headless browser, the page logged a console error: "
+                  "console.error: Route network failed: ROUTES is not defined (desktop)",),
+        views=(CheckedView(pressed=None, viewports=["desktop"]), CheckedView(pressed="Routes", viewports=["desktop"])),
+        screenshot=RenderScreenshot(media_type="image/png", data="iVBORw0KGgo="),
+        error="Frontend verification failed after 2 attempt(s): x",
+    )
+
+
+async def test_a_rebuild_that_failed_its_browser_check_names_what_it_broke_and_removed(tmp_path: Path, monkeypatch):
+    """A rebuild of an existing page comes back to repair knowing which views drew before and fail
+    now, and which it dropped: the same comparison a built page's result carries."""
+    from dataclasses import replace
+
+    from anton.core.artifacts.render_check import Comparison
+    from anton.core.tools import tool_handlers
+
+    comparison = Comparison.model_validate({
+        "previous": "complete", "previous_status": "passed", "removal_checked": "all",
+        "compared": [{"pressed": "Routes", "viewports": ["desktop"]}],
+        "broken_views": [{"pressed": "Routes", "reason": "new_problem", "viewports": ["desktop"], "findings": []}],
+        "removed_views": [{"pressed": "Globe"}], "removed_controls": ["Globe"],
+    })
+    slug = _make_artifact(tmp_path, type="html-app")
+
+    async def fake_generate(**kw):
+        return replace(_browser_check_failed(), comparison=comparison)
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    session = _session(tmp_path)
+    session._render_screenshots_refused = True
+    _, result = await _collect_raw(session, {"slug": slug, "user_request": "rebuild it", "agent_understanding": "a page"})
+
+    body = json.loads(result.content)
+    assert body["changes_from_previous"] == {"broke": ["“Routes”"], "blank": [], "removed": ["“Globe”"], "shrank": []}
+    assert body["instruction"].endswith(tool_handlers._CHANGES_INSTRUCTION)
+    assert list(body)[-1] == "instruction"
+
+
+@pytest.mark.parametrize("refused", [False, True])
+async def test_a_page_that_failed_its_browser_check_comes_back_to_repair(tmp_path: Path, monkeypatch, refused):
+    """The result names the page the last build wrote, its findings, the
+    views its check measured and the repair budget, with the check's
+    screenshot unless the model refused one. Nothing in it tells the agent
+    not to repair; it tells the agent how."""
+    slug = _make_artifact(tmp_path, type="html-app")
+
+    async def fake_generate(**kw):
+        return _browser_check_failed()
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    session = _session(tmp_path)
+    session._render_screenshots_refused = refused
+    _, result = await _collect_raw(session, {"slug": slug, "user_request": "build it", "agent_understanding": "a page"})
+
+    assert (result.ok, result.reason) == (True, "")
+    if refused:
+        assert isinstance(result.content, str)
+        text = result.content
+    else:
+        text = result.content[0]["text"]
+        assert any(block.get("type") == "image" for block in result.content[1:])
+    body = json.loads(text)
+    assert body["status"] == "browser_check_failed"
+    assert body["page"] == "dashboard.html"
+    assert body["findings"] == list(_browser_check_failed().findings)
+    assert body["views_measured"] == "at desktop size, as it opens and behind “Routes”"
+    assert body["repair_cells"] == 2
+    # A first build has nothing to compare with.
+    assert "changes_from_previous" not in body
+    instruction = body["instruction"]
+    assert "do NOT build or repair" not in text and "ask how they want to proceed" not in text
+    for step in ("repair it yourself now", "`read_text_file`", "scratchpad cell", "`runView`",
+                 "Do NOT call generate_artifact again", "needs no `recall_skill`"):
+        assert step in instruction, step
+
+
+def test_no_rule_forbids_the_repair_and_each_names_the_one_path():
+    """The rules that send a generator failure back to the user each make
+    one exception: a page that came back as `browser_check_failed`."""
+    from anton.core.llm import prompts
+    from anton.core.tools.tool_defs import GENERATE_ARTIFACT_TOOL
+
+    skill = Path(__file__).resolve().parents[1] / "anton/core/memory/builtin_skills/build-html-dashboard/SKILL.md"
+    frontmatter = skill.read_text(encoding="utf-8").split("---")[1]
+    rules = {
+        "tool": GENERATE_ARTIFACT_TOOL.description,
+        "artifacts": prompts.ARTIFACTS_PROMPT,
+        "html": prompts.VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
+        "markdown": prompts.VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
+        "skill": frontmatter,
+    }
+    for name, text in rules.items():
+        flat = " ".join(text.split())
+        assert "browser_check_failed" in flat, name
+    assert "The one exception is `browser_check_failed`: repair that page in place" in " ".join(rules["tool"].split())
