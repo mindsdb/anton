@@ -322,6 +322,46 @@ class TestEncode:
         assert any("disabled" in a.lower() for a in actions)
 
 
+class TestMemorizeScope:
+    """What the model reads when it picks a memory's scope, and where its pick lands."""
+
+    def test_the_model_is_told_a_rule_given_in_a_project_stays_there(self):
+        from anton.core.llm.prompts import CHAT_SYSTEM_PROMPT
+        from anton.core.tools.tool_defs import MEMORIZE_TOOL
+
+        entry = MEMORIZE_TOOL.input_schema["properties"]["entries"]["items"]["properties"]
+        assert entry["scope"]["description"].startswith("'project' unless the user says")
+        assert "is 'project', even when it says 'always'" in MEMORIZE_TOOL.description
+        assert "'Always show amounts in EUR' is 'project'" in MEMORIZE_TOOL.description
+        assert "Choose 'global' only when the user says it applies to all their projects" in MEMORIZE_TOOL.description
+        assert "An instruction on how to answer or work is a rule, not a profile entry." in MEMORIZE_TOOL.description
+        assert 'Scope is "project" unless the user says a rule applies to all their projects' in CHAT_SYSTEM_PROMPT
+        assert "Never memorize what the project's own instructions in anton.md already say" in CHAT_SYSTEM_PROMPT
+        assert "Choose \"global\" for universal knowledge" not in CHAT_SYSTEM_PROMPT
+
+    async def test_a_rule_kept_to_one_project_never_reaches_another(self, tmp_path):
+        g, a, b = (tmp_path / name for name in ("global", "a", "b"))
+        for folder in (g, a, b):
+            folder.mkdir()
+        session = SimpleNamespace(
+            _cortex=Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(a)), _memory_writes=set()
+        )
+        session._track_memory_write = types.MethodType(ChatSession._track_memory_write, session)
+        session.settle_memory_writes = types.MethodType(ChatSession.settle_memory_writes, session)
+
+        await handle_memorize(session, {"entries": [
+            {"text": "Show amounts in EUR", "kind": "always", "scope": "project"},
+        ]})
+        await session.settle_memory_writes()
+
+        assert "Show amounts in EUR" in (a / "rules.md").read_text()
+        assert not (g / "rules.md").exists()
+        in_b = await Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(b)).build_memory_context(
+            "Add 10 and 20 dollars"
+        )
+        assert "EUR" not in in_b
+
+
 class TestOrphanedIdentityMigration:
     def test_migrates_project_identity_to_global_on_init(self, dirs):
         g, p = dirs
@@ -443,6 +483,25 @@ class TestMaybeUpdateIdentity:
         await cortex.maybe_update_identity("Hi, I'm Jorge")
         assert (g / "profile.md").exists()
         assert "Name: Jorge" in (g / "profile.md").read_text()
+
+    async def test_asks_only_for_who_the_user_is(self, dirs):
+        # The profile is read in every project and the call can't see which
+        # project the messages came from, so a rule must not be asked for.
+        from anton.core.memory.cortex import _IdentityFacts
+
+        g, p = dirs
+        mock_llm = AsyncMock()
+        mock_llm.generate_object_code = AsyncMock(return_value=_IdentityFacts(facts=[]))
+        cortex = Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="copilot", llm_client=mock_llm)
+
+        await cortex.maybe_update_identity("In this project, always show amounts in EUR.")
+
+        system = mock_llm.generate_object_code.call_args.kwargs["system"]
+        facts = _IdentityFacts.model_fields["facts"].description
+        assert "leave out every instruction or preference about how to answer or do the work" in system
+        assert "Leave out anything the user says about one project." in system
+        assert "Never include an instruction or preference about how to answer" in facts
+        assert "preferences, or working style" not in system + facts
 
 
 # ─────────────────────────────────────────────────────────────────────────────

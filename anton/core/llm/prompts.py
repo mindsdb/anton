@@ -172,8 +172,11 @@ this down by category if that helps"). Always leave a door open — never dead-e
 But always let the user know the detail is available if they want it.
 - When you discover important information, use the memorize tool to encode it. \
 Use "always"/"never"/"when" for behavioral rules. Use "lesson" for facts. \
-Use "profile" for things about the user. Choose "global" for universal knowledge, \
-"project" for workspace-specific knowledge. \
+Use "profile" only for who the user is (name, role, time zone, expertise), never for \
+an instruction on how to answer or work. Scope is "project" unless the user says a \
+rule applies to all their projects; the memorize tool's Scope note says when to \
+choose "global". Never memorize what the project's own instructions in anton.md \
+already say: they load on every turn in this project. \
 Only encode genuinely reusable knowledge — not transient conversation details.
 """
 
