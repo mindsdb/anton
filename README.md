@@ -355,15 +355,47 @@ service repos through the `calver-release.yml` reusable workflow in
 [mindsdb/github-actions](https://github.com/mindsdb/github-actions); this repo's
 workflow supplies the major component and consumes the resulting `tag`/`version` outputs.
 
+### Reviewed dependency updates
+
+`uv.lock` selects the dependencies used by CI and release checks. Docker uses `uv sync --locked --no-dev --group scratchpad`; the scratchpad group includes `boto3` and its dependencies in that same lock. Its initial SDK selection matches the successful image build on October 21, 2026. Existing runtime selections are unchanged.
+
+`anton/release-requirements.txt` is generated from the runtime lock with markers and artifact hashes. Both release archives include it. CI rejects a stale export or an archive with a different export. Wheel, source and Git smoke installs install the hashed registry requirements first, then Anton without resolving dependencies again.
+
+The shell and PowerShell installers and the CLI auto-updater resolve one release tag to a commit and use that commit's requirements as constraints. They refuse missing or empty exports before replacing the installation. Rerun the installer to select a newer release; a generic `uv tool upgrade` does not apply this contract. These tool installs constrain versions; the release smoke tests additionally enforce artifact hashes.
+
+To update a dependency deliberately:
+
+```sh
+# Advance tool.uv.exclude-newer in pyproject.toml to the reviewed cutoff first.
+uv lock --upgrade-package <package-name>
+python scripts/release_contract.py
+uv sync --locked --group dev
+uv run --locked --group dev pytest
+```
+
+Review the lock and export diffs together, then publish through the normal release checks. Changing a source file does not update dependency versions. Public `Requires-Dist` keeps compatibility ranges for library consumers; an independent `pip install anton-agent` resolves those ranges. Python, build backends and operating-system packages remain separate image inputs. Packages an agent explicitly installs during a task remain runtime user work.
+
 ### Staging release candidates
 
-Every push to `staging` publishes a **release candidate** through [`.github/workflows/publish-staging.yml`](.github/workflows/publish-staging.yml): it cuts a PEP 440 pre-release tag (`v2.YY.M.DD.SEQrcN`), publishes a GitHub pre-release, and uploads the wheel to PyPI — so cowork-server staging installs an immutable, versioned Anton instead of a mutable branch or hand-pinned commit (ENG-1159). These never reach production: resolvers ignore pre-releases unless a specifier names one, and PyPI's `info.version` (read by the prod desktop updater) excludes them.
+Every push to `staging` publishes a **release candidate** through [`.github/workflows/publish-staging.yml`](.github/workflows/publish-staging.yml): it cuts a PEP 440 pre-release tag (`v2.YY.M.DD.SEQrcN`), publishes a GitHub pre-release, and uploads the wheel to PyPI — so a reviewed cowork-server lock can select an immutable, versioned Anton. These never reach production: resolvers ignore pre-releases unless a specifier names one, and PyPI's `info.version` (read by the prod desktop updater) excludes them.
 
 ### What you should NOT do
 
 - **Don't create GitHub releases manually.** The `v*` tag namespace is locked via a repo ruleset — only the release workflow can create them. Manual attempts will be rejected by GitHub.
 - **Don't push `v*` tags directly.** Same protection applies.
 - **Don't hand-edit a version.** There's no version file to bump — the tag is the source of truth, and both publishers derive the wheel version from it.
+
+### Running the test suite
+
+CI runs four unit-test shards on separate runners while stub E2E runs alongside them. Each shard collects the full unit suite, then selects whole files using a stable hash of their repository-relative paths. Separate checkouts keep the shared scratchpad workspaces isolated. The `run-tests` check requires every shard, stub E2E and the Windows installer tests to succeed; failed or skipped jobs cannot pass the gate. Test durations are printed for the slowest 20 cases.
+
+Without shard options, pytest still runs the full selected suite. To reproduce one CI shard:
+
+```sh
+uv run --locked --group dev pytest tests/ --ignore=tests/e2e --shard-index 0 --shard-count 4 --durations=20
+```
+
+Run indices 0 through 3 in separate checkouts to reproduce all shards concurrently. Stub E2E uses `uv run --locked --group dev pytest tests/e2e/ --durations=20`.
 
 ### Editing CI / workflows
 
@@ -372,3 +404,9 @@ Anything under [`.github/`](.github/) is owned by `@mindsdb/devops` via [CODEOWN
 ### Hotfixes / out-of-band releases
 
 If you genuinely need to release outside the normal flow (e.g. an admin hotfix), coordinate with `@mindsdb/devops` to bypass the tag ruleset. The e2e workflow's version-match guard will still verify the release tag matches `anton.__version__` and fail loudly on mismatch.
+
+## Diagnostics
+
+The CLI, cloud-turn, and resident launcher share safe diagnostic settings.
+See [structured logging](docs/structured-logging.md) for defaults, troubleshooting
+overrides, retained evidence streams and rollout requirements.

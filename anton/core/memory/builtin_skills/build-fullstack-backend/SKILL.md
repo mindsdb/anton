@@ -188,15 +188,31 @@ These are the same checks `generate_artifact` runs on its own output (see the `#
     from anton_state import Collection
     todos = Collection(get_store(), "todos")
     await todos.put("id1", {"text": "buy milk"})     # pk defaults to one partition
+    item = await todos.get("id1")                       # None if missing; an item written by put also carries pk, sk, _key, _v
     items = await todos.list()                          # all items in the collection
     n = await Collection(get_store(), "counters").increment("visits", field="n")
+    ```
+    CHANGE A STORED DOCUMENT by reading it, modifying it and putting it back with the `_v` it was read with. If another request wrote in between, the put raises `ConditionalCheckFailed` and writes nothing, instead of silently overwriting that write; answer 409. Handle a missing document first, and make sure some endpoint creates it, e.g. a "new game" route calling `await games.put("current", new_game(), if_not_exists=True)`; until then this route answers 404:
+    ```python
+    from fastapi import HTTPException
+    from anton_state import ConditionalCheckFailed
+
+    games = Collection(get_store(), "games")
+    game = await games.get("current")
+    if game is None:
+        raise HTTPException(status_code=404, detail="no game")
+    game["moves"].append(cell)
+    try:
+        await games.put("current", game, if_version=game["_v"])
+    except ConditionalCheckFailed:
+        raise HTTPException(status_code=409, detail="state changed, reload")
     ```
     Low-level `store` methods (all async; NO `scan()` / "list everything"):
     * `await store.get(pk, sk=None)` → one item or `None`
     * `await store.put(item)` → write (dict MUST include `pk` and, if the schema has a sort key, `sk`); `_v` is set by the store — never set it yourself
     * `await store.delete(pk, sk=None)`
     * `await store.query(pk, *, sk_prefix=None, filters=None, limit=None)` → items sharing partition key `pk` (NO secondary indexes in v1 — there is no `index=` argument)
-    * `await store.increment(pk, sk=None, *, field, by=1)` → atomic counter (use this for counters; do NOT hand-roll read-modify-write)
+    * `await store.increment(pk, sk=None, *, field, by=1)` → atomic counter (use this for counters; never read-modify-write a counter by hand)
     * `await store.update(pk, sk=None, *, set_fields=None, add_fields=None, if_version=None)` → atomic partial update
     DESIGN KEYS AROUND ACCESS PATTERNS: every "list" must map to a single `query(pk=...)` (or `Collection.list()`). Do NOT call the store in a loop — collect with one `query`. Do NOT wrap a STATE mutation (`put`/`delete`/`increment`/`update`) in your own retry loop: on a timeout the outcome is unknown and a retry can double-apply — surface the error instead.
 

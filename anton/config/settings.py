@@ -117,6 +117,12 @@ class AntonSettings(CoreSettings):
     # Read-only skill roots the host ships alongside its own tools (ENG-764).
     # Take precedence over anton's built-ins; user skills still shadow them.
     skills_extra_roots: list[Path] | None = None
+    # Folders whose skills marked `applies_to: artifacts` an artifact build
+    # follows without a recall, named by the host per turn. anton's built-ins
+    # are always followed. None: the host named none, so a session with
+    # extra roots (a host's) follows only the built-ins, and one without (the
+    # CLI) also follows `skills_root`. See `SkillStore.list_for_artifacts`.
+    skills_artifact_roots: list[Path] | None = None
     # Staging area for skills the agent builds, drained by the host at end of
     # turn. Unset means the agent gets no skill-authoring tool:
     # - a host with no drafts area has nowhere to put a built skill

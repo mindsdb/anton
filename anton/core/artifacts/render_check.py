@@ -16,6 +16,16 @@ verified or working only where the check saw it, and calls the views
 behind the unpressed tabs and toggles unchecked. An older service sends
 neither field, which reads as the page as it opens only.
 
+A request may also carry the page as it was when the turn began
+(`previous_html`). The service then compares the two, and its answer names
+the views the edit removed, the views that drew before and broke, the views
+that draw fewer than half the marks they drew, and the tabs and toggles
+that are gone (`comparison`). The comparison never changes
+`status` or `findings`; what anton does with it is `page_copies`' and
+`tool_handlers._check_pages`'. A service that predates the comparison
+refuses such a request with 400; anton then asks once more with the page
+alone, so the page keeps its own verdict without a comparison.
+
 The service's URL comes from `ANTON_RENDER_CHECK_URL` in this process's
 environment, read at call time the way `html_lint` reads
 `ANTON_HTML_LINT_BROWSER`. Unset, no caller asks the service anything.
@@ -66,10 +76,12 @@ BUSY_RETRY_MIN_SECONDS = 5.0
 # The largest page anton sends, counted in UTF-8 bytes, as on disk.
 MAX_PAGE_BYTES = 8 * 1024 * 1024
 # The service refuses a larger request body with 413; anton does not send
-# one. JSON escaping doubles every quote, backslash and newline of the page,
-# so a page under `MAX_PAGE_BYTES` with inline data needs up to twice its
-# size, plus the rest of the request.
+# one. JSON escaping doubles every quote, backslash and newline of a page,
+# so a request with one page needs up to twice its size plus the rest of
+# the request; one that also carries the page as it was before the turn,
+# twice that. The service's own caps are the same.
 MAX_BODY_BYTES = 2 * MAX_PAGE_BYTES + 1024
+MAX_COMPARED_BODY_BYTES = 4 * MAX_PAGE_BYTES + 2048
 # anton reads at most this much of an error answer, to tell a busy service
 # from one that cannot check.
 MAX_ERROR_BODY_BYTES = 4096
@@ -115,15 +127,19 @@ _FAILED_DESPITE_TIMEOUT_KINDS = frozenset({"uncaught_exception", "console_error"
 
 
 class RenderCheckRequest(BaseModel):
-    """`POST /v1/check` body: the entry file's text as it sits on disk.
+    """`POST /v1/check` body: the entry file's text as it sits on disk and,
+    to compare it with, the page as it was when the turn began.
 
-    The service injects the preview shim and the `<base>` itself.
+    The service injects the preview shim and the `<base>` itself. A request
+    without `previous_html` leaves the key out (`check_html` dumps it with
+    `exclude_none`), so it is the body an older service accepts.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     html: str
     screenshot: bool = True
+    previous_html: str | None = None
 
 
 class RenderFinding(BaseModel):
@@ -167,6 +183,85 @@ class UnreachableResource(BaseModel):
 
     url: str
     reason: str
+
+
+class ViewRef(BaseModel):
+    """A view an edit removed, by the label of the tab or toggle that showed it."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    pressed: str
+
+
+class BrokenView(BaseModel):
+    """A state of the page that drew before the edit and does not now.
+
+    `new_problem`: a kind of view problem the previous page did not have
+    there, with the new page's `findings`. `no_view`: no graphic shows any
+    more and no finding says so, so `findings` is empty; the service can't
+    tell that from a view the user asked to remove, so it fails nothing.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    pressed: str | None
+    reason: Literal["new_problem", "no_view"]
+    viewports: list[Viewport]
+    findings: list[RenderFinding] = Field(default_factory=list)
+
+
+class ShrunkView(BaseModel):
+    """A view, `view` as findings name it, that drew at least five marks of
+    a kind in state `pressed` before the edit and fewer than half as many of
+    that kind now, at `viewports`; `before` and `after` are that kind's
+    marks at the first of them. The service counts an svg view's markers,
+    bars and other shapes kind by kind, and a canvas's marks not at all;
+    the render check's own docs say which table rows and HTML map markers
+    count. Not a failure: the service can't tell a filter the user asked
+    for from data the edit lost."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    pressed: str | None
+    view: str
+    viewports: list[Viewport]
+    before: int
+    after: int
+
+
+class Comparison(BaseModel):
+    """The service's comparison of the page with `previous_html`.
+
+    `previous` says how fully the previous page was checked: `not_checked`
+    means not at all, so every list is empty and says nothing.
+    `broken_views` speaks for the states in `compared` only, and
+    `removal_checked` says which removals the service could see. A service
+    that predates `shrunk_views` sends none.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    previous: Literal["complete", "incomplete", "not_checked"]
+    previous_status: RenderStatus | None = None
+    compared: list[CheckedView] = Field(default_factory=list)
+    removal_checked: Literal["all", "top_level", "none"] = "none"
+    removed_views: list[ViewRef] = Field(default_factory=list)
+    broken_views: list[BrokenView] = Field(default_factory=list)
+    removed_controls: list[str] = Field(default_factory=list)
+    shrunk_views: list[ShrunkView] = Field(default_factory=list)
+
+    @property
+    def informative(self) -> bool:
+        """Whether the lists say something: the service checked the previous
+        page, and the new page's check got far enough to compare a state or
+        to see a removal. A check of the new page cut short (a timeout, a
+        crash) compares nothing, so its empty lists say nothing."""
+        return self.previous != "not_checked" and (bool(self.compared) or self.removal_checked != "none")
+
+    @property
+    def has_new_problem(self) -> bool:
+        """Whether a view that drew before has a kind of problem it did not have."""
+        return any(view.reason == "new_problem" for view in self.broken_views)
 
 
 class RenderScreenshot(BaseModel):
@@ -247,6 +342,21 @@ class RenderCheckResult(BaseModel):
     policy: str = ""
     views: list[CheckedView] = Field(default_factory=list)
     unopened: list[UnopenedToggle] = Field(default_factory=list)
+    # The comparison with `previous_html`, when the request sent one.
+    comparison: Comparison | None = None
+
+    @field_validator("comparison", mode="wrap")
+    @classmethod
+    def _comparison_or_none(cls, value, handler):
+        """A comparison that does not parse is dropped, not the verdict: the
+        page's own status and findings stand without it."""
+        try:
+            return handler(value)
+        except ValidationError:
+            _log.warning(
+                "the render-check service answered a comparison that does not parse; it is dropped", exc_info=True
+            )
+            return None
 
     @model_validator(mode="after")
     def _status_follows_the_rule(self) -> "RenderCheckResult":
@@ -294,6 +404,10 @@ class RenderCheckUnavailable(BaseModel):
 
     @property
     def screenshot(self) -> None:
+        return None
+
+    @property
+    def comparison(self) -> None:
         return None
 
     @property
@@ -441,10 +555,68 @@ def _views(views: Sequence[CheckedView]) -> str:
     return " and ".join(parts)
 
 
+def joined(parts: Sequence[str]) -> str:
+    """`A`, `A and B`, `A, B and C`."""
+    return parts[0] if len(parts) == 1 else f"{', '.join(parts[:-1])} and {parts[-1]}"
+
+
+def agree(items: Sequence, one: str, many: str) -> str:
+    """ONE for a single item, MANY for more: `it` or `them`, `fails` or `fail`."""
+    return one if len(items) == 1 else many
+
+
 def _quoted(labels: Sequence[str]) -> str:
     """`“A”`, `“A” and “B”`, `“A”, “B” and “C”`, each label scrubbed."""
-    names = [f"“{scrub_output(label)}”" for label in labels]
-    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+    return joined([f"“{scrub_output(label)}”" for label in labels])
+
+
+# How `comparison_notes` names the page before any press.
+_AS_IT_OPENS = "the page as it opens"
+
+
+def state_label(pressed: str | None) -> str:
+    """The state PRESSED as a sentence names it: the tab or toggle's label,
+    quoted and scrubbed, or `the page as it opens` for None."""
+    return _AS_IT_OPENS if pressed is None else f"“{scrub_output(pressed)}”"
+
+
+class ComparisonNotes(NamedTuple):
+    """The views a comparison names, as labels ready for a sentence: those
+    this turn's edits broke (`new_problem`), left without a graphic
+    (`no_view`), removed, and left fewer than half their marks (`shrank`,
+    each with the view and both counts), each once."""
+
+    broke: list[str]
+    blank: list[str]
+    removed: list[str]
+    shrank: list[str]
+
+    @property
+    def found(self) -> bool:
+        return bool(self.broke or self.blank or self.removed or self.shrank)
+
+
+def comparison_notes(comparison: Comparison | None) -> ComparisonNotes:
+    """The views COMPARISON names, quoted and scrubbed like `view_coverage`'s
+    labels, the page before any press as `the page as it opens`. Empty when
+    nothing was compared: no comparison, or a previous page the service did
+    not check. Removed views come first, then removed tabs and toggles that
+    showed none. A shrunk view reads `“Map” (svg#lanes: 3 of 40 marks)`."""
+    if comparison is None or not comparison.informative:
+        return ComparisonNotes(broke=[], blank=[], removed=[], shrank=[])
+
+    def states(reason: str) -> list[str]:
+        return list(dict.fromkeys(state_label(view.pressed) for view in comparison.broken_views if view.reason == reason))
+
+    removed = dict.fromkeys([*(view.pressed for view in comparison.removed_views), *comparison.removed_controls])
+    shrank = dict.fromkeys(
+        f"{state_label(view.pressed)} ({scrub_output(view.view)}: {view.after} of {view.before} marks)"
+        for view in comparison.shrunk_views
+    )
+    return ComparisonNotes(
+        broke=states("new_problem"), blank=states("no_view"), removed=[state_label(name) for name in removed],
+        shrank=list(shrank),
+    )
 
 
 def configured_url() -> str | None:
@@ -468,10 +640,33 @@ class _Reply(NamedTuple):
     content: bytes = b""
     unavailable: RenderCheckUnavailable | None = None
     busy: bool = False
+    status: int = 0
 
 
-def check_html(html: str, *, screenshot: bool = True, timeout: float = TIMEOUT_SECONDS) -> RenderCheckOutcome:
+# The least time left in which a page whose request with the previous page
+# got 400 is asked once more alone.
+_RENDER_ALONE_MIN_SECONDS = 1.0
+
+
+def _request_body(html: str, *, screenshot: bool, previous_html: str | None) -> bytes:
+    """The request's JSON, without `previous_html` when it is None."""
+    return RenderCheckRequest(
+        html=html, screenshot=screenshot, previous_html=previous_html
+    ).model_dump_json(exclude_none=True).encode("utf-8")
+
+
+def check_html(
+    html: str, *, previous_html: str | None = None, screenshot: bool = True, timeout: float = TIMEOUT_SECONDS
+) -> RenderCheckOutcome:
     """Ask the service to load `html`. Never raises.
+
+    `previous_html`, the page as it was when the turn began, asks the
+    service to compare the two (`RenderCheckResult.comparison`). Without it
+    the request is the one an older service accepts. The comparison never
+    costs the page its own verdict: a previous page over `MAX_PAGE_BYTES`,
+    or a request with it over `MAX_COMPARED_BODY_BYTES`, goes without it,
+    and a 400 to a request with it, as an older service answers, is asked
+    once more without it.
 
     `timeout` is anton's limit for this call, a second ask included; a
     caller with a smaller budget left passes what remains. A service busy
@@ -488,8 +683,23 @@ def check_html(html: str, *, screenshot: bool = True, timeout: float = TIMEOUT_S
             reason=f"the page is {page_bytes // 1024} KB, over the render check's "
             f"{MAX_PAGE_BYTES // (1024 * 1024)} MB limit"
         )
-    body = RenderCheckRequest(html=html, screenshot=screenshot).model_dump_json().encode("utf-8")
-    if len(body) > MAX_BODY_BYTES:
+    if previous_html is not None:
+        previous_bytes = len(previous_html.encode("utf-8"))
+        if previous_bytes > MAX_PAGE_BYTES:
+            _log.info(
+                "comparison skipped: the page as it was before this turn is %d KB, over the %d MB limit",
+                previous_bytes // 1024, MAX_PAGE_BYTES // (1024 * 1024),
+            )
+            previous_html = None
+    body = _request_body(html, screenshot=screenshot, previous_html=previous_html)
+    if previous_html is not None and len(body) > MAX_COMPARED_BODY_BYTES:
+        _log.info(
+            "comparison skipped: the request with the page as it was before this turn is %d KB once "
+            "JSON-escaped, over the %d MB limit", len(body) // 1024, MAX_COMPARED_BODY_BYTES // (1024 * 1024),
+        )
+        previous_html = None
+        body = _request_body(html, screenshot=screenshot, previous_html=None)
+    if previous_html is None and len(body) > MAX_BODY_BYTES:
         return RenderCheckUnavailable(
             reason=f"the page's request is {len(body) // 1024} KB once JSON-escaped, over the render "
             f"check's {MAX_BODY_BYTES // (1024 * 1024)} MB request limit"
@@ -502,6 +712,16 @@ def check_html(html: str, *, screenshot: bool = True, timeout: float = TIMEOUT_S
             _log.info("render check at %s is busy; asking once more in %.0f s", base, BUSY_RETRY_SECONDS)
             time.sleep(BUSY_RETRY_SECONDS)
             reply = _post(base, body=body, timeout=left)
+    if reply.unavailable is not None and previous_html is not None and reply.status == 400:
+        # A service that predates page comparison refuses the field before it
+        # checks anything, so asking again with the page alone costs little.
+        _log.warning(
+            "the render-check service at %s rejected a request with previous_html; it may predate page "
+            "comparison, so the page is checked alone", base,
+        )
+        left = timeout - (time.monotonic() - started)
+        if left >= _RENDER_ALONE_MIN_SECONDS:
+            reply = _post(base, body=_request_body(html, screenshot=screenshot, previous_html=None), timeout=left)
     if reply.unavailable is not None:
         return reply.unavailable
     try:
@@ -532,6 +752,7 @@ def _post(base: str, *, body: bytes, timeout: float) -> _Reply:
                     return _Reply(
                         unavailable=RenderCheckUnavailable(reason=_status_reason(response.status_code)),
                         busy=response.status_code == 503 and _says_busy(response),
+                        status=response.status_code,
                     )
                 content = bytearray()
                 for chunk in response.iter_bytes():
@@ -574,10 +795,34 @@ def _says_busy(response: httpx.Response) -> bool:
         return False
 
 
+class _ReadRefused(PermissionError):
+    """The sandbox policy does not let the person's cells read the page.
+    Its own type, so a refused read is told apart from a file the OS would
+    not open (EACCES)."""
+
+
+def read_page_bytes(path: Path, *, cell_sandbox: CellSandbox | None) -> bytes:
+    """PATH's bytes, read as `check_file` reads a page: only where the
+    person's own cells may read (a `PermissionError` otherwise), never
+    through a link, never past `MAX_PAGE_BYTES` (EFBIG). Raises OSError."""
+    # Resolving a name that agent code is swapping can itself fail.
+    real = Path(os.path.realpath(path))
+    if cell_sandbox is not None and not cell_sandbox.allows_read(real):
+        raise _ReadRefused(f"{real} is outside the files this conversation may read")
+    return read_bytes_nofollow(real.anchor, real, limit=MAX_PAGE_BYTES)
+
+
 def check_file(
-    path: Path, *, cell_sandbox: CellSandbox | None, screenshot: bool = True, timeout: float = TIMEOUT_SECONDS
+    path: Path,
+    *,
+    cell_sandbox: CellSandbox | None,
+    previous_html: str | None = None,
+    screenshot: bool = True,
+    timeout: float = TIMEOUT_SECONDS,
 ) -> RenderCheckOutcome:
     """Read the page at `path` and ask the service to load it. Never raises.
+
+    `previous_html` goes to the service as `check_html` sends it.
 
     This process reads the file outside the sandbox, so under a policy it
     reads only what the person's own cells may read. `allows_read` approves
@@ -590,12 +835,9 @@ def check_file(
     """
     started = time.monotonic()
     try:
-        # Inside the try: resolving a name that agent code is swapping can
-        # itself fail.
-        real = Path(os.path.realpath(path))
-        if cell_sandbox is not None and not cell_sandbox.allows_read(real):
-            return RenderCheckUnavailable(reason="the page is outside the files this conversation may read")
-        data = read_bytes_nofollow(real.anchor, real, limit=MAX_PAGE_BYTES)
+        data = read_page_bytes(path, cell_sandbox=cell_sandbox)
+    except _ReadRefused:
+        return RenderCheckUnavailable(reason="the page is outside the files this conversation may read")
     except OSError as exc:
         if exc.errno == errno.EFBIG:
             return RenderCheckUnavailable(
@@ -603,7 +845,10 @@ def check_file(
             )
         return RenderCheckUnavailable(reason=f"the page could not be read ({exc.strerror or type(exc).__name__})")
     remaining = timeout - (time.monotonic() - started)
-    return check_html(data.decode("utf-8", errors="replace"), screenshot=screenshot, timeout=max(remaining, 1.0))
+    return check_html(
+        data.decode("utf-8", errors="replace"), previous_html=previous_html, screenshot=screenshot,
+        timeout=max(remaining, 1.0),
+    )
 
 
 # Opens the caption beside every render screenshot in a tool result, so

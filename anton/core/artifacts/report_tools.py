@@ -305,7 +305,7 @@ _SHOWN_TAG = re.compile(r"</?(?:h[1-6]|p|a|div|section|span|table|tr|td|th|ul|ol
 class _Reader(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.ids, self.links, self.scripts, self.text = [], [], [], []
+        self.ids, self.links, self.resources, self.text = [], [], [], []
         self.lang = self.viewport = self.title = None
         self.tables, self._table, self._row, self._cell, self._skip, self._in_title = [], None, None, None, 0, False
         self.shown_tags, self._code = [], 0
@@ -321,7 +321,7 @@ class _Reader(HTMLParser):
         elif tag == "a" and a.get("href") is not None:
             self.links.append(a["href"])
         elif tag in ("script", "link", "img", "iframe") and (a.get("src") or (tag == "link" and a.get("href"))):
-            self.scripts.append(a.get("src") or a.get("href"))
+            self.resources.append((tag, a.get("src") or a.get("href")))
         elif tag in ("script", "style"):
             self._skip += 1
         elif tag in ("code", "pre"):
@@ -369,10 +369,27 @@ class _Reader(HTMLParser):
         self.text.append(text)
 
 
+# The one host the app preview loads a script from (cowork's web shell,
+# `script-src`), where the html-app generator loads Tailwind, ECharts and its
+# map libraries. Matched by host, as the generator's verifier matches it
+# (`generate_artifact.verifiers._PREVIEW_SCRIPT_HOST`); the preview loads no
+# external stylesheet or image from any host.
+_PREVIEW_SCRIPT_HOST = "cdn.jsdelivr.net"
+_EXTERNAL_URL = re.compile(r"\s*(?:https?:)?//([^/?#\s:]+)", re.I)
+
+
+def _external_host(url: str | None) -> str | None:
+    """The host of an `http(s)://` or `//` URL, lower case, or None for any
+    other value (a relative path, `data:`)."""
+    m = _EXTERNAL_URL.match(url or "")
+    return m.group(1).lower() if m else None
+
+
 def check(path) -> dict:
     """Read a saved page back. Raises ValueError on structural problems.
 
-    Checks: lang and viewport present, no external scripts, styles or images,
+    Checks: lang and viewport present, no external scripts (but scripts from
+    the app preview's script host, `cdn.jsdelivr.net`), styles or images,
     unique element ids, every local link resolving to an existing file, and no
     HTML tags shown to the reader as text (markup passed as a plain string is
     escaped; wrap trusted markup from these helpers, or pass it to ``section``).
@@ -388,7 +405,10 @@ def check(path) -> dict:
         problems.append("html element has no lang")
     if not reader.viewport:
         problems.append("no viewport meta tag")
-    external = [s for s in reader.scripts if re.match(r"\s*(https?:)?//", s or "")]
+    external = [
+        url for tag, url in reader.resources
+        if (host := _external_host(url)) is not None and not (tag == "script" and host == _PREVIEW_SCRIPT_HOST)
+    ]
     if external:
         problems.append(f"external resources: {external}")
     dupes = sorted({i for i in reader.ids if reader.ids.count(i) > 1})

@@ -14,7 +14,6 @@ from types import SimpleNamespace
 from anton.core.artifacts.models import ARTIFACT_TYPES, GENERATOR_ARTIFACT_TYPES
 from anton.core.tools.generate_artifact.discovery import sub_tools
 from anton.core.tools.generate_artifact.discovery.prompts import (
-    DATASOURCES_HEADER,
     GATHERING_CONTINUE,
     build_call_kickoff,
     build_pipeline_system_prompt,
@@ -27,7 +26,7 @@ from anton.core.tools.generate_artifact.discovery.prompts import (
     render_scratchpads_context,
 )
 from anton.core.tools.generate_artifact.state import GenState
-from anton.utils.datasources import CatalogConnection, DatasourceCatalog
+from anton.utils.datasources import DATASOURCES_HEADER, CatalogConnection, DatasourceCatalog
 
 
 def _state(**over) -> GenState:
@@ -358,3 +357,37 @@ def test_the_pipeline_prompt_does_not_promise_a_confirmation():
     assert "for confirmation" not in text
     assert "the user agreed to" not in text
     assert "`draft_brief` — a short brief shown to the user" in text
+
+
+def test_call_kickoff_names_the_known_data_section_as_the_rules_quote_it():
+    from anton.core.tools.generate_artifact.prompts import KNOWN_DATA_HEADER
+
+    assert f"{KNOWN_DATA_HEADER}\n" in build_call_kickoff(_state())
+
+
+def test_the_rules_let_known_data_verify_a_source_and_drop_the_old_rule():
+    from anton.core.tools.generate_artifact.discovery import prompts as discovery_prompts
+    from anton.core.tools.generate_artifact.prompts import KNOWN_DATA_HEADER
+
+    template = discovery_prompts._GATHERING_TEMPLATE
+    assert "verified only if you ran code" not in template
+    assert 'verified_by: "known_data"' in template
+    assert KNOWN_DATA_HEADER.removeprefix("## ") in template
+    assert "without the values does not count" in template
+
+
+def test_the_finish_gathering_schema_mentions_the_known_data_mark():
+    from anton.core.tools.generate_artifact.discovery.sub_tools import FINISH_GATHERING_SCHEMA
+
+    props = FINISH_GATHERING_SCHEMA["input_schema"]["properties"]
+    assert "has had no code run against it" not in props["data_sources"]["description"]
+    assert "is not verified" in props["data_sources"]["description"]
+    verified_by = props["data_findings"]["items"]["properties"]["verified_by"]["description"]
+    assert "`known_data`" in verified_by
+
+
+def test_the_redraw_asks_for_the_known_data_mark():
+    from anton.core.tools.generate_artifact.discovery import prompts as discovery_prompts
+
+    assert "data_findings" in discovery_prompts._REDRAW_RESTATE
+    assert 'verified_by: "known_data"' in discovery_prompts._REDRAW_RESTATE

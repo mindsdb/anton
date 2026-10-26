@@ -387,7 +387,7 @@ def test_generator_prompts_allow_only_the_attached_assets_as_local_files():
 def test_gathering_instruction_treats_an_attached_data_file_as_a_source():
     from anton.core.tools.generate_artifact.discovery.prompts import _GATHERING_INSTRUCTION
 
-    assert "A data file under `## Attached files` is such a source" in _GATHERING_INSTRUCTION
+    assert "A data file under `## Attached files` is an external source too" in _GATHERING_INSTRUCTION
 
 
 # ── checkpoint round trip and restore ───────────────────────────────────────

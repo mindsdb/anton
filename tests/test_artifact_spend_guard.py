@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from anton.core.tools.generate_artifact.spend import WIND_DOWN_ROUNDS, SpendGuard
+from tests.streaming_llm import StreamingLLM
 
 
 def _session(reached: bool):
@@ -76,7 +77,7 @@ class _CeilingSession:
         self.calls = 0
         self.question_count = 0
         self.elicitor = None
-        self._llm = SimpleNamespace()
+        self._llm = StreamingLLM()
 
     def spend_ceiling_reached(self) -> bool:
         return self.calls >= self._trips_after
@@ -318,10 +319,11 @@ async def test_a_data_fetch_that_runs_out_of_budget_is_not_reported_as_data(tmp_
 
     orig, engine._run_loop = engine._run_loop, _fake_loop
     try:
-        note = await orchestrator._fetch_data_sample(state)
+        note, ok = await orchestrator._fetch_data_sample(state)
     finally:
         engine._run_loop = orig
 
+    assert ok is False
     assert "budget" in note
     assert "no summary" not in note
 

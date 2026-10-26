@@ -237,5 +237,33 @@ def test_a_finding_on_an_edited_page_still_reaches_the_agent(monkeypatch, tmp_pa
 
     lint = tool_handlers.lint_changed_artifact_files(store, before)
 
-    assert lint.messages == [f"{slug}/index.html — console_error: boom"]
+    assert lint.messages == [
+        f"{slug}/index.html — console_error: boom",
+        f"{slug}/index.html — {tool_handlers._repairs_left_line(tool_handlers.REPAIR_CELLS)}",
+    ]
     assert lint.page_checks == {(slug, "index.html"): "failed"}
+
+
+def test_the_local_browser_holds_a_failed_page_to_the_same_repair_budget(monkeypatch, tmp_path: Path):
+    """Without the render-check service the local browser checks the page,
+    and the second failed repair of it lists no findings either."""
+    from anton.core.artifacts.html_lint import HtmlFinding
+    from anton.core.tools import tool_handlers
+
+    monkeypatch.delenv("ANTON_RENDER_CHECK_URL", raising=False)
+    monkeypatch.setattr(
+        "anton.core.artifacts.html_lint.lint_html",
+        lambda path, *, cell_sandbox: [HtmlFinding(kind="console_error", detail="boom")],
+    )
+    store, slug = _dashboard(tmp_path)
+    key = tool_handlers.PageKey(slug, "index.html")
+    for used in range(tool_handlers.REPAIR_CELLS):
+        before = tool_handlers.snapshot_existing_artifacts(store)
+        (store.root / slug / "index.html").write_text(f"<html><body><script>boom({used})</script></body></html>")
+        lint = tool_handlers.lint_changed_artifact_files(
+            store, before, failing=frozenset({key}), repairs_used={key: used},
+        )
+        assert lint.repaired == frozenset({key})
+
+    assert lint.messages == [f"{slug}/index.html — {tool_handlers._NO_REPAIRS_LEFT}"]
+    assert lint.page_checks == {key: "failed"}

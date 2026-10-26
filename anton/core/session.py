@@ -24,9 +24,19 @@ from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
 from anton.core.datasources.data_vault import DataVault
 from anton.core.llm import jev as _jev
+from anton.core.llm.effort import (
+    TRUNCATION_RETRY_NOTE,
+    client_stream_budget,
+    retry_budget,
+)
 from anton.core.llm.endpoints import ENDPOINT_MINDSHUB, classify_base_url, classify_endpoint
 from anton.core.llm.identity import DeploymentIdentity, product_lines, serving_model_lines
-from anton.core.llm.liveness import ModelCallTracker, arm_turn_tracker, disarm_turn_tracker
+from anton.core.llm.liveness import (
+    MODEL_WAIT_PHASE,
+    ModelCallTracker,
+    arm_turn_tracker,
+    disarm_turn_tracker,
+)
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.acc import AnteriorCingulate
 from anton.core.root_cause import RootCauseLedger
@@ -71,8 +81,11 @@ from anton.core.llm.provider import (
     TransientProviderError,
     context_window,
     damaged_tool_call_result,
+    is_stream_drop,
     is_image_refusal,
+    log_background_done,
     provider_failure_kind,
+    usage_log_enabled,
 )
 from anton.core.llm.structured import looks_truncated, truncation_verdict, usable_tool_call
 from anton.core.llm.tracing import (
@@ -100,6 +113,9 @@ from anton.core.tools.tool_defs import (
     SCRATCHPAD_TOOL,
     SELECT_PATH_TOOL,
     SELECT_PATH_TOOL_PICK_ONLY,
+    STATIC_CREATE_ARTIFACT_TOOL,
+    STATIC_GENERATE_ARTIFACT_TOOL,
+    STATIC_UPDATE_ARTIFACT_METADATA_TOOL,
     UPDATE_ARTIFACT_METADATA_TOOL,
     ToolDef,
 )
@@ -121,8 +137,10 @@ from anton.core.utils.write_check import parse_http_write_rules
 # handle_scratchpad's own exec branch (tool_handlers.py) rather than duplicated
 # here, since this inline streaming exec bypasses that handler entirely.
 from anton.core.tools.tool_handlers import (
+    UNANSWERED_QUESTION_REASONS,
     _fire_post_execute,
     _fire_pre_execute,
+    capture_turn_pages,
     cell_content_with_lint,
     check_cell_artifacts,
     PageKey,
@@ -130,8 +148,11 @@ from anton.core.tools.tool_handlers import (
     preliminary_cell,
     resolve_artifact_store,
     snapshot_existing_artifacts,
+    unanswered_question_line,
 )
+from anton.core.artifacts.page_copies import TurnPages
 from anton.core.artifacts.render_check import (
+    CheckedView,
     RenderStatus,
     confirm_refused_screenshots,
     confirm_refused_tool_images,
@@ -237,6 +258,17 @@ def _legacy_looks_like_failure(text: str) -> bool:
     return any(m in text for m in _LEGACY_FAILURE_MARKERS)
 
 
+# Strong references: asyncio keeps only a weak one to a task nothing else holds.
+_BACKGROUND_MARKERS: set[asyncio.Task] = set()
+
+
+async def _log_background_done_after(tasks: set[asyncio.Task], trace: TraceContext) -> None:
+    # `wait`, not `gather`: a failed task keeps its exception for asyncio to report.
+    if tasks:
+        await asyncio.wait(tasks)
+    log_background_done(trace)
+
+
 def _discarded_call_reason(tc: ToolCall) -> str:
     """Why this call's step is closing without having run.
 
@@ -261,8 +293,31 @@ def _known_scratchpad_action(tc: ToolCall) -> str | None:
     return action if action in allowed else None
 
 
-def _discarded_tool_call_events(tc: ToolCall) -> list[StreamEvent]:
+_NOT_RUN_AFTER_UNANSWERED_QUESTION = (
+    "Not run: an earlier question in this turn went unanswered, so the turn stopped there"
+)
+
+
+def _not_run_after_unanswered_question(tc: ToolCall) -> dict:
+    """The `tool_result` for a call that came after an unanswered question.
+
+    The call never runs, but every `tool_use` in history still needs its result.
+    """
+    return {
+        "type": "tool_result",
+        "tool_use_id": tc.id,
+        "content": f"{_NOT_RUN_AFTER_UNANSWERED_QUESTION}.",
+        # cowork-server's figure sources skip any history result marked
+        # is_error, since its text is anton's, not the tool's output.
+        "is_error": True,
+    }
+
+
+def _discarded_tool_call_events(tc: ToolCall, reason: str | None = None) -> list[StreamEvent]:
     """Everything a consumer needs to retire the step of a call we refuse to run.
+
+    ``reason`` is why, for a call refused for something other than a cut-off
+    round; by default it is `_discarded_call_reason`'s.
 
     The provider announces a tool call as it streams (`StreamToolUseStart`), long
     before anything decides whether the call is usable, so a step is already open
@@ -287,7 +342,8 @@ def _discarded_tool_call_events(tc: ToolCall) -> list[StreamEvent]:
         return [StreamTaskProgress(
             phase="tool_done", message=tc.name, eta_seconds=0.0, id=tc.id, ok=False,
         )]
-    reason = _discarded_call_reason(tc)
+    if reason is None:
+        reason = _discarded_call_reason(tc)
     return [
         StreamTaskProgress(
             phase="scratchpad_done", message=reason, eta_seconds=0.0, id=tc.id, ok=False,
@@ -309,6 +365,7 @@ if TYPE_CHECKING:
     from rich.console import Console
     from anton.context.self_awareness import SelfAwarenessContext
     from anton.chat_ui import EscapeWatcher
+    from anton.core.artifacts.live_app_slots import LiveAppHost
     from anton.core.llm.client import LLMClient
     from anton.core.mcp.client import McpSession
     from anton.core.memory.cortex import Cortex
@@ -626,9 +683,10 @@ def _build_finish_authorization_request(message: str) -> tuple[str, list[dict]]:
 #
 # An EXHAUSTED ladder counts toward the latch. `retrying` is false at the last
 # budget, so the only truncation that ever reaches the latch check is one that
-# blew past 4096 after already blowing past 2048 — never a single sample of a
-# model's verbosity. Against the distribution above that is a statement about
-# the model. Typed transients never latch, see `_TRANSIENT_VERDICT_ERRORS`.
+# blew past the ladder's last budget after already blowing past its first —
+# never a single sample of a model's verbosity. Against the distribution above
+# that is a statement about the model. Typed transients never latch, see
+# `_TRANSIENT_VERDICT_ERRORS`.
 #
 # Accepted cost, worth knowing: unlike a rejected `tool_choice`, this is a
 # STOCHASTIC failure. Two unlucky ladders with no successful verdict between
@@ -637,6 +695,24 @@ def _build_finish_authorization_request(message: str) -> tuple[str, list[dict]]:
 # clears, and the shorter window at `_VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED`
 # are what bound that.
 _VERIFIER_TOKEN_BUDGETS = (2048, 4096)
+
+# At max the model thinks before it calls the verdict tool, and its thinking
+# spends from the same budget (ENG-3719). Replayed at max through MindsHub on
+# 2026-10-24, the 2048 try was cut 3 of 3 on `sonnet-5-5` and `opus-5-5`, and
+# the 4096 retry 2 of 3 on `opus-5-5`, so the check latched. The call is not
+# streamed, so its last budget must also finish inside the gateway's 110 s for
+# a whole non-streamed request: at max the slowest 8192-token non-streamed call
+# took 73.9 s on `opus-5-5`. Replayed on 2026-10-25, a 4096 first try gave its
+# verdict 6 of 6 on both models, in 3 to 23 s. Below max the ladder above
+# holds: a verdict at xhigh took 457 of 2048.
+_VERIFIER_TOKEN_BUDGETS_AT_MAX = (4096, 8192)
+
+
+def _verifier_token_budgets(llm) -> tuple[int, ...]:
+    """The verdict call's budget ladder at the coding role's effort."""
+    effort = getattr(getattr(llm, "coding_provider", None), "reasoning_effort", None)
+    return _VERIFIER_TOKEN_BUDGETS_AT_MAX if effort == "max" else _VERIFIER_TOKEN_BUDGETS
+
 
 # Verdict-call failures that are transient by nature rather than statements about
 # the model's capability. The latch exists for a model that *cannot* produce a
@@ -1672,6 +1748,9 @@ class ChatSessionConfig:
     # session, since the folders differ per person; a runtime factory that
     # cannot take it makes the session refuse to build.
     cell_sandbox: CellSandbox | None = None
+    # Who launches live apps and where each launch is recorded. Set by a host
+    # that runs live apps in app slots (`live_app_slots`); None launches none.
+    live_app_host: LiveAppHost | None = None
     console: Console | None = None
     initial_history: list[dict] | None = None
     history_store: HistoryStore | None = None
@@ -1852,6 +1931,9 @@ class ChatSession:
         # writes when the content filter stops every hand-back. Reset per turn in
         # turn_stream.
         self._turn_steps: list[_TurnStep] = []
+        # Survives automatic recovery; only a new user turn clears this stop.
+        self._unanswered_question: str | None = None
+        self._unanswered_question_reported = False
         # Whether this turn's own message told the agent to keep going (None
         # until a limit first asks), and the limits that message has already
         # carried past once.
@@ -1924,6 +2006,10 @@ class ChatSession:
         # Kept so an artifact backend can be given the same project .env the
         # scratchpad gets; it is never applied to this process.
         self._workspace_env_overlay = config.workspace_env_overlay or {}
+        self._live_app_host = config.live_app_host
+        # The slugs generate_artifact is building now: the check after each
+        # cell leaves their live apps alone, since the run launches them.
+        self._live_apps_building: set[str] = set()
         self._console = config.console
         if self._console is None:
             # connect_new_datasource's interactive mode needs a terminal to
@@ -2050,6 +2136,11 @@ class ChatSession:
             workspace_env_overlay=config.workspace_env_overlay,
             cell_sandbox=config.cell_sandbox,
         )
+        # Sandboxed without live apps, nothing starts an app backend, so the
+        # artifact tools and the prompt offer html-apps only.
+        from anton.core.artifacts.live_app_slots import fullstack_offered
+
+        self._fullstack_offered = fullstack_offered(config.cell_sandbox)
 
         self.tool_registry = ToolRegistry()
         # Procedural memory: brain-inspired skills (Stage 1 = declarative).
@@ -2058,6 +2149,7 @@ class ChatSession:
         self._skill_store = SkillStore(
             root=getattr(s, "skills_root", None),
             extra_roots=getattr(s, "skills_extra_roots", None),
+            artifact_roots=getattr(s, "skills_artifact_roots", None),
         )
         # Where `create_skill_draft` stages skills the agent builds. None means
         # the host stages none, and the tool is not registered at all.
@@ -2081,6 +2173,20 @@ class ChatSession:
         # `checks_skipped`. A later unverified check of such a page lists
         # none (`tool_handlers.check_cell_artifacts`). Reset every turn.
         self._unverified_findings_listed: set[PageKey] = set()
+        # The repair cells each page used this turn: cells that changed a
+        # page whose last check this turn failed. A page gets
+        # `tool_handlers.REPAIR_CELLS` of them (`check_cell_artifacts`).
+        # Reset every turn.
+        self._repair_cells: dict[PageKey, int] = {}
+        # The views the check that failed a page this turn measured, kept
+        # until the page passes. Until then, a check of the page that no
+        # longer finds one of them fails, even after an unverified check in
+        # between (`tool_handlers._check_pages`). Reset every turn.
+        self._failed_views: dict[PageKey, tuple[CheckedView, ...]] = {}
+        # Each artifact's main page as the turn found it, the render check's
+        # comparison of each page with it, and the pages anton put back
+        # (`page_copies.TurnPages`). Reset every turn.
+        self._turn_pages = TurnPages()
         # Set once the model refused a request carrying render-check
         # screenshots and took it without them
         # (`_confirm_render_screenshots_refused`). From then on the checks'
@@ -2089,6 +2195,9 @@ class ChatSession:
         # generate_artifact sets it too when the model refused its retry's
         # screenshot (`engine._run_loop`).
         self._render_screenshots_refused = False
+        # The same, for builder models generate_artifact runs on that the agent
+        # doesn't (`tool_handlers._builder_model`), one entry per model.
+        self._builder_screenshots_refused: set[str] = set()
         # Set once the model refused a request carrying an image a tool
         # returned (what `read_image` loaded) and took it without that image
         # (`_confirm_tool_images_refused`). From then on `read_image` answers
@@ -2241,13 +2350,24 @@ class ChatSession:
     def _unverified_page_lines(self) -> list[str]:
         """The lines that end the turn's final message on a sandboxed
         deployment: one per artifact with a page that did not pass its last
-        browser check this turn. Written by anton, not the model, so the user
-        hears it whatever the reply claims. Empty without a sandbox: there
-        each cell's check (`tool_handlers._check_pages`) already tells the
-        agent which page failed or was not checked in a browser."""
-        if not self._page_checks or cell_sandbox_of(self._scratchpads) is None:
+        browser check this turn, then what the turn put back, broke, blanked
+        or removed against the pages as it found them
+        (`TurnPages.end_lines`). Written by anton, not the model, so the
+        user hears it whatever the reply claims. Empty without a sandbox:
+        there each cell's check (`tool_handlers._check_pages`) already tells
+        the agent which page failed or was not checked in a browser."""
+        turn_pages = getattr(self, "_turn_pages", None)
+        # A page put back with no status known for it leaves no record in
+        # `_page_checks` (`record_page_checks(restored=)`), and still gets its line.
+        if not self._page_checks and (turn_pages is None or not turn_pages.has_restored()):
             return []
-        return page_check_lines(resolve_artifact_store(self), checks=self._page_checks)
+        if cell_sandbox_of(self._scratchpads) is None:
+            return []
+        store = resolve_artifact_store(self)
+        return [
+            *page_check_lines(store, checks=self._page_checks),
+            *(turn_pages.end_lines(store, checks=self._page_checks) if turn_pages is not None else []),
+        ]
 
     @property
     def memory_read(self) -> MemoryRead | None:
@@ -2891,6 +3011,7 @@ class ChatSession:
                 getattr(self, "_surface", None), getattr(self, "_deployment_identity", None)
             ),
             deployment_identity=getattr(self, "_deployment_identity", None),
+            fullstack_offered=getattr(self, "_fullstack_offered", True),
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
             output_dir=self._output_dir,
@@ -3149,11 +3270,15 @@ class ChatSession:
         # would just return error strings — better to hide the tools
         # entirely so the LLM doesn't try to use them.
         if self._workspace is not None:
-            self.tool_registry.register_tool(CREATE_ARTIFACT_TOOL)
+            fullstack = self._fullstack_offered
+            self.tool_registry.register_tool(CREATE_ARTIFACT_TOOL if fullstack else STATIC_CREATE_ARTIFACT_TOOL)
             self.tool_registry.register_tool(LIST_ARTIFACTS_TOOL)
-            self.tool_registry.register_tool(UPDATE_ARTIFACT_METADATA_TOOL)
-            self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
-            self.tool_registry.register_tool(GENERATE_ARTIFACT_TOOL)
+            self.tool_registry.register_tool(
+                UPDATE_ARTIFACT_METADATA_TOOL if fullstack else STATIC_UPDATE_ARTIFACT_METADATA_TOOL
+            )
+            if fullstack:
+                self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
+            self.tool_registry.register_tool(GENERATE_ARTIFACT_TOOL if fullstack else STATIC_GENERATE_ARTIFACT_TOOL)
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""
@@ -3377,11 +3502,13 @@ class ChatSession:
             # smaller `max_tokens` (or a distinct router model with a lower
             # output cap) would otherwise get a 400 on every compaction, and the
             # handler below logs only the exception type — proactive compaction
-            # would be dead and invisible. Read through `_turn_max_tokens` for
+            # would be dead and invisible. Read through `_client_max_tokens` for
             # its defensive fallback: a client that doesn't expose the attribute
             # would otherwise make `min()` raise, and the raise lands in that
-            # same blind `except`.
-            output_budget_tokens = min(_SUMMARY_OUTPUT_BUDGET, self._turn_max_tokens())
+            # same blind `except`. Not `_turn_max_tokens`: that is the
+            # streamed-call budget, which can be larger than what a non-streamed
+            # call may ask for.
+            output_budget_tokens = min(_SUMMARY_OUTPUT_BUDGET, self._client_max_tokens())
             summary_response = await self._llm.summarize(
                 system=_SUMMARY_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_content}],
@@ -3538,6 +3665,27 @@ class ChatSession:
         if retry_after is not None and retry_after > 0:
             return min(max(float(retry_after), d), max_delay)
         return d
+
+    def _attempt_limit_error(
+        self, exc: TransientProviderError, attempts: int
+    ) -> ProviderOverloadedError:
+        """The terminal for a transient that outlasted its retry count.
+
+        Keeps anton's own typed message: it already says what happened ("The
+        model provider returned 500.") and is the one detail that tells a user
+        or a support thread which failure this was. Only the attempt count is
+        new. Names the model that actually failed (planning or coding), so the
+        card's provider lookup and its BYOK-vs-managed nudge are right.
+        """
+        detail = str(exc).rstrip()
+        if detail and detail[-1] not in ".!?":
+            detail += "."
+        return ProviderOverloadedError(
+            f"{detail} It did not recover after {attempts} attempts.",
+            provider=getattr(exc, "provider", "") or "",
+            model=(getattr(exc, "model", "") or "")
+            or getattr(self._llm, "planning_model", "") or "",
+        )
 
     async def _backoff_sleep(self, delay: float) -> bool:
         """Sleep `delay` seconds, waking early if the turn is cancelled.
@@ -4942,6 +5090,7 @@ class ChatSession:
         system: str,
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
+        wait_note: str | None = None,
         messages_factory: Callable[[], list[dict]] | None = None,
         allow_native_web_tools: bool = True,
     ) -> AsyncIterator[StreamEvent]:
@@ -4975,6 +5124,8 @@ class ChatSession:
             kwargs["tools"] = tools
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
+        if wait_note is not None:
+            kwargs["wait_note"] = wait_note
         if allow_native_web_tools and self._native_web_tools:
             kwargs["native_web_tools"] = self._native_web_tools
 
@@ -5287,11 +5438,31 @@ class ChatSession:
         )
         try:
             async for item in inner:
+                kind, payload = item
+                if kind == "result" and payload.reason in UNANSWERED_QUESTION_REASONS:
+                    # Latch before cleanup or result bookkeeping can raise and
+                    # send the outer turn into automatic recovery.
+                    self._unanswered_question = unanswered_question_line(tc.input, payload.reason)
                 yield item
         finally:
             # Same-task close, so the inner `finally` cancels the dispatch on
             # a Stop rather than waiting for GC (hazard 4 below).
             await inner.aclose()
+
+    def _unanswered_question_events(self, *, cancels_continuation: bool) -> list[StreamEvent]:
+        """Close an unanswered turn once, including after bookkeeping fails."""
+        if self._unanswered_question is None or self._unanswered_question_reported:
+            return []
+        if self._turn_cost is not None:
+            self._turn_cost.ended_by = "question_unanswered"
+        self._append_history({"role": "assistant", "content": self._unanswered_question})
+        self._unanswered_question_reported = True
+        events: list[StreamEvent] = []
+        # This notice keeps the earlier answer instead of replacing it.
+        if cancels_continuation:
+            events.append(StreamTaskProgress(phase="handback", message=""))
+        events.append(StreamTextDelta(text=self._unanswered_question))
+        return events
 
     async def _run_draining(self, coro):
         """Run *coro* while forwarding whatever it emits out of band.
@@ -5390,12 +5561,17 @@ class ChatSession:
             self.emitter = TurnEmitter()
         self.question_count = 0
         self.answer_wait_s = 0.0
+        self._unanswered_question = None
+        self._unanswered_question_reported = False
         # Per-turn, so a long-lived session (the CLI reuses one across turns)
         # reports only what the CURRENT turn touched. Hosts that build a fresh
         # session per turn get the same result either way.
         self._artifacts_touched = set()
         self._page_checks = {}
         self._unverified_findings_listed = set()
+        self._repair_cells = {}
+        self._failed_views = {}
+        self._turn_pages = TurnPages()
         # What the project held when this turn began: a cell may delete or
         # rename a file it wrote this turn without asking, not one from before.
         if self._write_gate is not None:
@@ -5478,6 +5654,7 @@ class ChatSession:
         assistant_text_parts: list[str] = []
         _max_auto_retries = 2
         _retry_count = 0
+        _drop_retries = 0
         # The one resend this turn allows after the model refused a request
         # over a render-check screenshot (see the handler below), and whether
         # it still waits for a request that goes through without them. The
@@ -5562,6 +5739,7 @@ class ChatSession:
         _calls_token = arm_turn_tracker(_turn_calls)
 
         _turn_exc: BaseException | None = None
+        _turn_raised = False
         # A wrap-up failure the retry-exhausted site has already booked, so
         # the finally keeps that terminal instead of filing it as "error".
         _booked_exc: BaseException | None = None
@@ -5591,6 +5769,19 @@ class ChatSession:
                         yield event
                     break  # completed successfully
                 except Exception as _agent_exc:
+                    if self._unanswered_question is not None:
+                        # An unanswered question is terminal even if subsequent
+                        # bookkeeping failed. Never ask the model to recover it.
+                        self._seal_dangling_tool_uses("the turn stopped after an unanswered question")
+                        for event in self._unanswered_question_events(
+                            cancels_continuation=_replacement_pending,
+                        ):
+                            if isinstance(event, StreamTextDelta):
+                                assistant_text_parts.append(event.text)
+                            yield event
+                        _replacement_pending = False
+                        break
+
                     # Token/billing limits, model-gate 403s, and endpoint/model
                     # 404s (ENG-1139) are deterministic — the auto-retry below
                     # would just re-send the same doomed request (and burn its
@@ -5608,6 +5799,27 @@ class ChatSession:
                     # host's reconnect/update-key card.
                     if _is_provider_auth_error(_agent_exc):
                         raise
+
+                    # A connection that died after the response started. It is
+                    # counted, not timed like the incident window below: that
+                    # window is wall-clock time from the turn's first transient,
+                    # and one long stream outlasts it, so a second drop would
+                    # end the turn without a retry. Same backoff and no recovery
+                    # note, as for any provider blip.
+                    if is_stream_drop(_agent_exc):
+                        self._seal_dangling_tool_uses("interrupted by a transient provider error")
+                        if _drop_retries < _max_auto_retries:
+                            delay = self._transient_backoff_delay(_drop_retries)
+                            _drop_retries += 1
+                            if await self._backoff_sleep(delay):
+                                break
+                            continue
+                        _stamp_retry_terminal(
+                            self._turn_cost, _agent_exc, "request_attempt_limit"
+                        )
+                        raise self._attempt_limit_error(
+                            _agent_exc, _drop_retries + 1
+                        ) from _agent_exc
 
                     # ENG-673: a mid-stream transient failure that had NO prior
                     # retry (overload smuggled into a 200, or a truncated stream).
@@ -5923,12 +6135,6 @@ class ChatSession:
                             _stamp_retry_terminal(
                                 self._turn_cost, _agent_exc, "request_attempt_limit"
                             )
-                            # Name the model that actually failed (planning OR
-                            # coding) so the card's provider lookup — and so the
-                            # BYOK-vs-managed nudge it picks — is right.
-                            _model = (getattr(_agent_exc, "model", "") or "") or getattr(
-                                self._llm, "planning_model", ""
-                            ) or ""
                             # NO rate-limit special case here, deliberately.
                             # A 429 reaching the COUNT path is by definition one
                             # `classify_transient` could NOT confirm was a
@@ -5946,21 +6152,8 @@ class ChatSession:
                             # rate_limited card has no interval to time-gate its
                             # Retry with. The generic branch below is honest —
                             # anton's own typed message, no claim either way.
-                            # KEEP anton's own classification in the copy. The
-                            # typed message already says what happened ("The
-                            # model provider returned 500.") and ENG-673 put it
-                            # there deliberately; replacing it with a generic
-                            # "could not be reached" would throw away the one
-                            # detail that tells a user — or a support thread —
-                            # which failure this was. Only the attempt count is
-                            # new information.
-                            _detail = str(_agent_exc).rstrip()
-                            if _detail and _detail[-1] not in ".!?":
-                                _detail += "."
-                            raise ProviderOverloadedError(
-                                f"{_detail} It did not recover after {_retry_count} attempts.",
-                                provider=getattr(_agent_exc, "provider", "") or "",
-                                model=_model,
+                            raise self._attempt_limit_error(
+                                _agent_exc, _retry_count
                             ) from _agent_exc
                         # Exhausted retries — stop and summarize for the user.
                         # Mark the terminal: the apology below is yielded as
@@ -6072,6 +6265,7 @@ class ChatSession:
             # happens to be handling (#309 review). Covers GeneratorExit and
             # CancelledError too, both BaseException, both real turn endings.
             _turn_exc = None if _e is _booked_exc else _e
+            _turn_raised = True
             raise
         finally:
             self._turn_memory = None
@@ -6107,6 +6301,9 @@ class ChatSession:
             # guard passes the books this turn opened so a late finalizer
             # can't close a newer turn's.
             self._emit_turn_cost(expected=_turn_cost_books, exc=_turn_exc)
+            if _turn_raised and usage_log_enabled():
+                # A turn that raised starts no end-of-turn work, so it is done now.
+                log_background_done(_turn_trace)
             try:
                 reset_trace_context(_trace_token)
             except ValueError:
@@ -6114,17 +6311,39 @@ class ChatSession:
                 # task anyway, so there is nothing to restore.
                 pass
 
-        # Log assistant response to episodic memory
-        if self._episodic is not None and assistant_text_parts:
-            self._episodic.log_turn(
-                self._turn_count + 1,
-                "assistant",
-                "".join(assistant_text_parts)[:2000],
-            )
+        usage_log = usage_log_enabled()
+        # The passes keep no handle on the tasks they start, and nothing else can
+        # start one before the `finally` below: no await in between.
+        before = asyncio.all_tasks() if usage_log else set()
+        try:
+            # Log assistant response to episodic memory
+            if self._episodic is not None and assistant_text_parts:
+                self._episodic.log_turn(
+                    self._turn_count + 1,
+                    "assistant",
+                    "".join(assistant_text_parts)[:2000],
+                )
 
+            self._turn_count += 1
+            self._persist_history()
+            self._start_background_work(user_input, _turn_trace)
+        finally:
+            if usage_log:
+                # Also when a step above failed: the turn already wrote its turn_cost line.
+                marker = asyncio.create_task(
+                    _log_background_done_after(asyncio.all_tasks() - before, _turn_trace)
+                )
+                _BACKGROUND_MARKERS.add(marker)
+                marker.add_done_callback(_BACKGROUND_MARKERS.discard)
+
+        # The books are closed, so ended_by is final. A clean exit can still book
+        # "cancelled" (the CLI's cancel flag); that is a Stop, not a hand-back.
+        if _turn_cost_books.ended_by not in ("completed", "cancelled", "error"):
+            yield StreamTurnEnded(ended_by=_turn_cost_books.ended_by)
+
+    def _start_background_work(self, user_input: str | list[dict], trace: TraceContext) -> None:
+        """Schedule the end-of-turn memory passes of the turn `trace` names; none blocks the reply."""
         # Identity extraction (Default Mode Network — every 5 turns)
-        self._turn_count += 1
-        self._persist_history()
         if self._background_memory_active:
             if self._turn_count % 5 == 0 and isinstance(user_input, str):
                 if self._episodic:
@@ -6137,29 +6356,32 @@ class ChatSession:
                 else:
                     messages_str = user_input
 
-                self._spawn_background(self._cortex.maybe_update_identity(messages_str), _turn_trace)
+                self._spawn_background(self._cortex.maybe_update_identity(messages_str), trace)
             # Periodic memory vacuum (Systems Consolidation). Its compaction
             # task is started inside, so it runs in the background context.
-            self._background_context(_turn_trace).run(self._cortex.maybe_vacuum)
+            self._background_context(trace).run(self._cortex.maybe_vacuum)
 
         # Cerebellar consolidation — same fire-and-forget contract as
         # the non-streaming turn. Lets the user-facing stream finish
         # immediately while supervised error learning runs in the background.
-        self._schedule_cerebellum_flush(_turn_trace)
+        self._schedule_cerebellum_flush(trace)
         self._schedule_acc_flush()
-
-        # The books are closed, so ended_by is final. A clean exit can still book
-        # "cancelled" (the CLI's cancel flag); that is a Stop, not a hand-back.
-        if _turn_cost_books.ended_by not in ("completed", "cancelled", "error"):
-            yield StreamTurnEnded(ended_by=_turn_cost_books.ended_by)
 
     def _turn_max_tokens(self) -> int:
         """Output-token budget the turn's planning calls actually run with.
 
-        `looks_truncated` compares output tokens against the budget the
-        call was given; the main loop never overrides ``max_tokens``, so
-        that is the client default. Falls back to LLMClient's own default
-        when the client doesn't expose one (mocks, exotic hosts).
+        `looks_truncated` compares output tokens against the budget the call
+        was given. The main loop never passes ``max_tokens``, so that is the
+        client's streamed-call budget for the planning role, which follows the
+        reasoning effort.
+        """
+        return client_stream_budget(self._llm, "planning", default=self._client_max_tokens())
+
+    def _client_max_tokens(self) -> int:
+        """The client's own ceiling for non-streamed calls.
+
+        Falls back to LLMClient's default when the client doesn't expose one
+        (mocks, exotic hosts).
         """
         budget = getattr(self._llm, "max_tokens", None)
         return budget if isinstance(budget, int) and budget > 0 else 8192
@@ -6200,7 +6422,8 @@ class ChatSession:
         identically (measured: three unchanged retries 14 minutes apart,
         all silent):
 
-        - the output budget is doubled for this one call, and
+        - the output budget is raised for this one call, up to the streamed-call
+          ceiling; at the ceiling only the nudge changes, and
         - a corrective nudge is injected into history, matching how the round
           died — "continue where you left off" when partial text arrived,
           "answer now, deliberate less" when the whole budget went to internal
@@ -6244,22 +6467,30 @@ class ChatSession:
             {"role": "assistant", "content": llm_response.content or ""}
         )
         self._append_history({"role": "user", "content": nudge})
-        retry_budget = budget * 2
+        bigger = retry_budget(budget)
         logger.warning(
             "Response truncated at the output budget without a usable tool call "
             "(output_tokens=%s, budget=%s, stop_reason=%s, silent=%s, "
-            "cut_tool_call=%s) — retrying once with max_tokens=%s",
+            "cut_tool_call=%s) — retrying once %s max_tokens=%s",
             llm_response.usage.output_tokens,
             budget,
             llm_response.stop_reason,
             silent,
             cut_tool_call,
-            retry_budget,
+            "with" if bigger > budget else "at the same",
+            bigger,
         )
 
         retry: StreamComplete | None = None
+        # The retry can think as long as the first try did. Hosts render this
+        # phase as the live status line, and the note keeps it there once their
+        # own still-working ticks take over.
+        yield StreamTaskProgress(phase=MODEL_WAIT_PHASE, message=TRUNCATION_RETRY_NOTE)
         async for event in self.plan_stream_with_recovery(
-            system=system, tools=tools, max_tokens=retry_budget
+            system=system,
+            tools=tools,
+            max_tokens=bigger,
+            wait_note=TRUNCATION_RETRY_NOTE,
         ):
             if isinstance(event, StreamComplete):
                 retry = event
@@ -6273,14 +6504,14 @@ class ChatSession:
         if (
             not retried.tool_calls
             and not (retried.content or "").strip()
-            and looks_truncated(retried, retry_budget)
+            and looks_truncated(retried, bigger)
         ):
             logger.error(
                 "Truncation retry also burned its whole budget with no "
                 "visible output (output_tokens=%s, retry_budget=%s) — "
                 "surfacing failure to the user",
                 retried.usage.output_tokens,
-                retry_budget,
+                bigger,
             )
             self._append_history(
                 {"role": "assistant", "content": _TRUNCATION_FAILURE_NOTICE}
@@ -6551,6 +6782,16 @@ class ChatSession:
 
                 tool_results: list[dict] = []
                 for tc in llm_response.tool_calls:
+                    # Nothing runs after a question nobody answered, whatever the
+                    # model sent with it. Refuse before inspecting its arguments.
+                    if self._unanswered_question is not None:
+                        tool_results.append(_not_run_after_unanswered_question(tc))
+                        for event in _discarded_tool_call_events(
+                            tc, _NOT_RUN_AFTER_UNANSWERED_QUESTION
+                        ):
+                            yield event
+                        continue
+
                     # ACC: tool_call emit. Args_summary is intentionally
                     # truncated — the ACC vocabulary documents it as a
                     # summary string, not a full payload. Detectors
@@ -6681,6 +6922,8 @@ class ChatSession:
                                 # (below) can tell which artifact this cell
                                 # actually touched
                                 artifact_store = resolve_artifact_store(self)
+                                if artifact_store is not None:
+                                    await capture_turn_pages(self, artifact_store)
                                 before_artifacts = (
                                     snapshot_existing_artifacts(artifact_store)
                                     if artifact_store is not None
@@ -6720,9 +6963,27 @@ class ChatSession:
                                     # this same check; this inline path is the
                                     # one the streaming product actually
                                     # takes, so it needs its own call.
-                                    lint = await check_cell_artifacts(
-                                        self, store=artifact_store, before=before_artifacts
-                                    )
+                                    if self.emitter is not None:
+                                        # Drained: the card a live app's
+                                        # relaunch raises reaches the host
+                                        # only through the emitter, as
+                                        # prepare's card does above.
+                                        lint = None
+                                        agen = self._run_draining(check_cell_artifacts(
+                                            self, store=artifact_store, before=before_artifacts
+                                        ))
+                                        try:
+                                            async for _kind, _payload in agen:
+                                                if _kind == "event":
+                                                    yield _payload
+                                                else:
+                                                    lint = _payload
+                                        finally:
+                                            await agen.aclose()
+                                    else:
+                                        lint = await check_cell_artifacts(
+                                            self, store=artifact_store, before=before_artifacts
+                                        )
                                     result_text = cell_content_with_lint(
                                         result_text, lint,
                                         cell_ok=not (cell.error or "").strip(),
@@ -7079,6 +7340,15 @@ class ChatSession:
                 # screenshot in it, the newest, is enough.
                 drop_older_screenshots(self._history)
 
+                # The turn ends here, on anton's own line, with no model call:
+                # one would get to answer the question itself. The answer, when
+                # it comes, starts the next turn.
+                if self._unanswered_question is not None:
+                    for event in self._unanswered_question_events(cancels_continuation=continuation > 0):
+                        yield event
+                    _reply_persisted = True
+                    break
+
                 # Rebuild: a tool this round (e.g. recall_skill) may have
                 # registered new tools the follow-up must see.
                 tools = self._build_tools()
@@ -7151,9 +7421,14 @@ class ChatSession:
 
             # --- Completion verification ---
             # Skip when too few tool rounds were used (pure Q&A and, at the
-            # default of 2, single-round turns) or when we hit the max-rounds
-            # hard stop.
-            if tool_round < self._verify_min_tool_rounds or _max_rounds_hit or _spend_ceiling_hit:
+            # default of 2, single-round turns), when we hit the max-rounds
+            # hard stop, or after an unanswered question.
+            if (
+                tool_round < self._verify_min_tool_rounds
+                or _max_rounds_hit
+                or _spend_ceiling_hit
+                or self._unanswered_question is not None
+            ):
                 break
 
             # Append the assistant's final text so the verifier can see it.
@@ -7282,7 +7557,8 @@ class ChatSession:
             # unbinds `exc` at the end of each clause, hence the copy.
             verdict_exc: BaseException | None = None
             # Skipped when Jev decided; otherwise exactly the LLM verifier as before.
-            for attempt, budget in enumerate(() if jev_decided else _VERIFIER_TOKEN_BUDGETS):
+            verdict_budgets = () if jev_decided else _verifier_token_budgets(self._llm)
+            for attempt, budget in enumerate(verdict_budgets):
                 try:
                     verdict = await self._llm.generate_object_code(
                         _VerifierVerdict,
@@ -7296,9 +7572,7 @@ class ChatSession:
                     # model narrated past `budget` before it reached the tool call
                     # (ENG-1081). Retry with more room. Any other structured-output
                     # failure won't be fixed by a bigger budget, so don't pay for it.
-                    retrying = exc.truncated and attempt + 1 < len(
-                        _VERIFIER_TOKEN_BUDGETS
-                    )
+                    retrying = exc.truncated and attempt + 1 < len(verdict_budgets)
                     verdict_failure = "truncated" if exc.truncated else "hard"
                     verdict_exc = exc
                     # WARNING only when this attempt ends the loop: a truncation

@@ -15,6 +15,7 @@ from anton.core.interaction.elicit import AskAnswer
 from anton.core.llm.provider import LLMResponse, ToolCall, Usage
 from anton.core.tools.generate_artifact.discovery import brief
 from anton.core.tools.generate_artifact.discovery.state import PrdState
+from tests.streaming_llm import StreamingLLM
 
 
 def _response(content: str) -> LLMResponse:
@@ -29,7 +30,7 @@ def _state(artifact_path: Path, **over) -> PrdState:
     # reach that branch.
     base = dict(
         session=SimpleNamespace(
-            _llm=SimpleNamespace(plan=AsyncMock()),
+            _llm=StreamingLLM(plan=AsyncMock()),
             question_count=0,
             elicitor=None,
             emit=AsyncMock(),
@@ -159,6 +160,18 @@ async def test_show_and_confirm_logs_a_node_per_outcome(monkeypatch):
     state.brief = "## Goal\n..."
     await brief.show_and_confirm(state)
     trace.node.assert_called_once_with("show_and_confirm", "accepted", detail="user picked accept")
+
+
+async def test_show_and_confirm_timeout_is_unconfirmed_not_cancelled(monkeypatch):
+    """A user who stepped away did not decline: their later Accept on the
+    still-open card has to resume the run, not find it cancelled."""
+    async def fake_elicit(session, request):
+        return AskAnswer(status="timeout")
+
+    monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_elicit)
+    state = _state(Path("/tmp/x"))
+    state.brief = "## Goal\n..."
+    assert await brief.show_and_confirm(state) == "unconfirmed"
 
 
 @pytest.mark.parametrize("status", ["limit", "unavailable", "error"])
@@ -423,3 +436,56 @@ def test_the_default_brief_is_the_confirm_variant():
     assert "- Proposals — one line per `assumption`" in text
     assert "End with two short lines" in text
     assert "- Assumptions —" not in text
+
+
+_SITES = "site,lat,lon\nToronto,43.7,-79.4"
+
+
+async def test_redraw_lets_a_new_source_whose_rows_are_in_known_data_count_as_verified(tmp_path):
+    state = _state(tmp_path, known_data=_SITES)
+    state.declared_sources = ["orders"]
+    state.session._llm.plan = AsyncMock(return_value=_redraw_response(
+        "## Goal\nRedrawn.",
+        data_sources=["orders", "sites"],
+        data_findings=[{"source": "sites", "verified_by": "known_data"}],
+    ))
+    await brief.redraw_brief(state)
+    assert state.unverified_sources == []
+    assert state.known_data_verified == ["sites"]
+
+
+async def test_redraw_keeps_what_the_rows_verified_on_an_earlier_call(tmp_path):
+    state = _state(tmp_path, known_data=_SITES)
+    state.declared_sources = ["sites", "orders"]
+    state.known_data_verified = ["sites"]
+    state.session._llm.plan = AsyncMock(return_value=_redraw_response(
+        "## Goal\nRedrawn.", data_sources=["sites", "orders"],
+    ))
+    await brief.redraw_brief(state)
+    assert state.unverified_sources == []
+    assert state.known_data_verified == ["sites"]
+
+
+async def test_redraw_keeps_a_source_that_was_still_unverified(tmp_path):
+    state = _state(tmp_path)
+    state.declared_sources = ["orders"]
+    state.unverified_sources = ["orders"]
+    state.session._llm.plan = AsyncMock(return_value=_redraw_response(
+        "## Goal\nRedrawn.", data_sources=["orders", "returns"],
+    ))
+    await brief.redraw_brief(state)
+    assert state.unverified_sources == ["orders", "returns"]
+
+
+async def test_redraw_to_a_fullstack_type_does_not_honour_the_mark(tmp_path):
+    state = _state(tmp_path, known_data=_SITES)
+    state.declared_sources = []
+    state.session._llm.plan = AsyncMock(return_value=_redraw_response(
+        "## Goal\nRedrawn.",
+        artifact_type="fullstack-stateless-app",
+        data_sources=["sites"],
+        data_findings=[{"source": "sites", "verified_by": "known_data"}],
+    ))
+    await brief.redraw_brief(state)
+    assert state.final_artifact_type == "fullstack-stateless-app"
+    assert state.unverified_sources == ["sites"]

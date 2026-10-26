@@ -23,6 +23,8 @@ import functools
 import inspect
 import json
 import logging
+from anton.diagnostics import configure_logging, make_formatter
+from structlog.contextvars import bind_contextvars, bound_contextvars
 import os
 import sys
 import time
@@ -49,12 +51,14 @@ from anton.core.llm.provider import ProviderErrorFilter
 
 logger = logging.getLogger(__name__)
 
-#: Bound step-event payloads (tool args / results) on the wire. Matches the
-#: cap cowork's SSE formatter applies to the same content.
 # Trace-block keys the pod applies to the session config rather than forwarding
 # as per-turn Langfuse metadata (see `stream_turn`).
 _SESSION_CONFIG_TRACE_KEYS = frozenset({"surface", "user_id", "organization_id"})
 
+#: Bound step-event payloads (tool args / results) on the wire. Cowork's SSE
+#: formatter caps results and other tools' args at the same length but keeps a
+#: scratchpad call's args whole; a remote turn's are cut here, and remote turns
+#: run no write check.
 MAX_STEP_CHARS = 65536
 MAX_PROGRESS_CHARS = 2000
 #: Per-string-field cap when shrinking a cell-result JSON to fit the wire.
@@ -118,6 +122,7 @@ def _stderr_log_handler(*, stream: TextIO) -> logging.Handler:
     sends to it, so no logged traceback prints a provider error body."""
     handler = logging.StreamHandler(stream)
     handler.addFilter(ProviderErrorFilter())
+    handler.setFormatter(make_formatter())
     return handler
 
 
@@ -136,7 +141,8 @@ def _isolated_protocol_stdout():
     sys.stdout = sys.stderr
     # The entrypoint owns the pod's logging. `force` replaces any root handler
     # configured before main(), so the filtered handler is the only one on stderr.
-    logging.basicConfig(handlers=[_stderr_log_handler(stream=sys.stderr)], level=logging.INFO, force=True)
+    configure_logging(stream=sys.stderr)
+    logging.getLogger().handlers[0].addFilter(ProviderErrorFilter())
 
     def emit(event: dict) -> None:
         data = (json.dumps(event) + "\n").encode("utf-8")
@@ -225,6 +231,13 @@ async def _settle_memory(session) -> None:
 async def stream_turn(
     raw_line: str, emit, session_builder=None, stdin: BinaryIO | None = None
 ) -> None:
+    with bound_contextvars(conversation_id=None):
+        await _stream_turn(raw_line, emit, session_builder, stdin)
+
+
+async def _stream_turn(
+    raw_line: str, emit, session_builder=None, stdin: BinaryIO | None = None
+) -> None:
     """Parse the request, run one turn, and emit exactly one terminal event.
 
     Streaming: assistant text is emitted as ``delta`` events as it arrives, then
@@ -281,6 +294,7 @@ async def stream_turn(
     elicitor = None
     try:
         req = TurnRequestV1.from_json(raw_line)
+        bind_contextvars(conversation_id=req.conversation_id)
         build = functools.partial(builder, req)
         if req.interactive and stdin is not None:
             # Before the build: the build is what registers `ask_user`, and a
@@ -292,7 +306,7 @@ async def stream_turn(
         # seconds (a turn-key OAuth token fetch per connector) — run it off
         # the event loop thread so the heartbeat ticker above keeps firing
         # instead of the controller seeing the turn go silent and stall it.
-        session = await asyncio.get_running_loop().run_in_executor(None, build)
+        session = await asyncio.to_thread(build)
         # Fold in any attachments cowork-server staged into the workspace (read
         # off the mount, so image bytes never crossed the stdin wire). Plain
         # string when there are none. Never fail the turn over this — degrade to
@@ -345,7 +359,7 @@ async def stream_turn(
                 wire({"kind": "tool_end", "id": event.id,
                       "args": args[:MAX_STEP_CHARS]})
             elif isinstance(event, StreamTaskProgress):
-                logger.info("progress [%s]: %s", event.phase, event.message)
+                logger.info("Turn progress", extra={"event": "turn_progress"})
                 phase = event.phase or ""
                 # A tool_progress line with an id is a step announcement: the
                 # first one opens the renderer's step, every one is a step the
@@ -380,7 +394,7 @@ async def stream_turn(
                       "action": event.action,
                       "content": _clip_result_content(event.content or "")})
             elif isinstance(event, StreamContextCompacted):
-                logger.info("context compacted: %s", event.message)
+                logger.debug("Context compacted", extra={"event": "context_compacted"})
                 wire({"kind": "compacted", "message": event.message})
             elif isinstance(event, StreamAskUser):
                 logger.info("ask_user question: %s", event.id)
@@ -451,7 +465,7 @@ async def stream_turn(
         terminal_emitted = True
     except Exception as exc:
         # ProviderErrorFilter omits provider bodies from diagnostics; the wire is unchanged.
-        logger.exception("cloud turn failed")
+        logger.exception("cloud turn failed", extra={"event": "turn_failed", "reason": "execution_failed"})
         failed = {"kind": "turn_failed", "error": _scrub(exc)}
         # A billing stop's reset instant rides beside the string, so the host
         # can say when the limit lifts. `reset_at` is already a normalized

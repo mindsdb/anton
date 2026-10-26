@@ -6,12 +6,10 @@ neither has to re-derive it — only the task-specific instructions differ.
 
 from __future__ import annotations
 
-from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES_ORDERED
-# The heading `build_datasource_context` renders, so the kickoff reads the same
-# whether or not anything is connected.
-from anton.utils.datasources import DATASOURCES_HEADER
+from anton.core.llm.prompts import ANTON_NOTE
 
 from ..attachments import render_for_gathering
+from ..prompts import KNOWN_DATA_HEADER, datasources_or_none, with_project_rules
 from .state import PrdState
 
 
@@ -22,10 +20,27 @@ def build_pipeline_system_prompt(state: PrdState) -> str:
     current artifact type, the remaining question budget, the instruction for
     the step being executed — arrives as a user message instead, because
     rewriting this string at a phase switch would discard the prefix cache
-    for the whole shared history.
+    for the whole shared history. The project's rules qualify: they are read
+    once per run, before this is first built.
     """
-    types_list = ", ".join(f"`{t}`" for t in GENERATOR_ARTIFACT_TYPES_ORDERED)
-    return (
+    types = state.buildable_types
+    types_list = ", ".join(f"`{t}`" for t in types)
+    fullstack_choice = (
+        "\n\nChoosing between the two fullstack types: pick "
+        "`fullstack-stateful-app` ONLY when the app must own durable state "
+        "of its own — data the app itself creates and keeps between "
+        "requests (user-created notes/todos, counters, settings, sessions). "
+        "That state lives in the platform STATE store, a document/key-value "
+        "store suited to LIGHT data keyed by id. An app that only reads "
+        "from or writes to EXTERNAL data sources (databases, APIs) is "
+        "`fullstack-stateless-app` — an external DB is a data source, not "
+        "app-owned state. Heavy or relational data (joins, transactions, "
+        "analytics) always belongs in an external database, which usually "
+        "means stateless. Prefer stateless when in doubt."
+        if "fullstack-stateless-app" in types
+        else ""
+    )
+    return with_project_rules(
         "You are producing a web artifact end to end, in one pipeline of "
         "steps. Each step has its own output — do not do the next step's "
         "work early:\n"
@@ -48,18 +63,9 @@ def build_pipeline_system_prompt(state: PrdState) -> str:
         "standing orders. The tool list stays the same for the whole "
         "pipeline; a tool being listed does NOT mean it is available on the "
         "current step. Calling one that is not available wastes a round and "
-        "is answered with a refusal naming the step.\n\n"
-        "Choosing between the two fullstack types: pick "
-        "`fullstack-stateful-app` ONLY when the app must own durable state "
-        "of its own — data the app itself creates and keeps between "
-        "requests (user-created notes/todos, counters, settings, sessions). "
-        "That state lives in the platform STATE store, a document/key-value "
-        "store suited to LIGHT data keyed by id. An app that only reads "
-        "from or writes to EXTERNAL data sources (databases, APIs) is "
-        "`fullstack-stateless-app` — an external DB is a data source, not "
-        "app-owned state. Heavy or relational data (joins, transactions, "
-        "analytics) always belongs in an external database, which usually "
-        "means stateless. Prefer stateless when in doubt."
+        "is answered with a refusal naming the step."
+        + fullstack_choice,
+        state.project_rules,
     )
 
 
@@ -107,15 +113,13 @@ def build_call_kickoff(state: PrdState) -> str:
     # backend generator receive (`build_datasource_context`): slugs and
     # DS_* names, never values. Without it a request over "the orders table"
     # sends the gathering model looking for connections blind.
-    connections = (state.datasource_context or "").strip() or (
-        f"{DATASOURCES_HEADER}\n(none)"
-    )
+    connections = datasources_or_none(state)
     pads = (state.scratchpads_context or "").strip()
     attached = render_for_gathering(state.attachments)
     return (
         f"## User request\n{state.user_request}\n\n"
         f"## Agent's understanding\n{state.agent_understanding}\n\n"
-        f"## Known data\n{state.known_data or '(none provided)'}\n\n"
+        f"{KNOWN_DATA_HEADER}\n{state.known_data or '(none provided)'}\n\n"
         + (f"{attached}\n\n" if attached else "")
         + (f"{pads}\n\n" if pads else "")
         + f"## User preferences\n{state.user_preferences or '(none known)'}\n\n"
@@ -163,6 +167,16 @@ GATHERING_CONTINUE = (
     "Continue gathering: call `finish_gathering` again once ready."
 )
 
+# Sent only with the retry of a discovery call the output budget cut off. The
+# cut reply is not in the conversation, so "continue" would have nothing to
+# continue from: the model is asked for the whole reply again, compactly.
+DISCOVERY_TRUNCATED_NUDGE = (
+    f"{ANTON_NOTE} Your previous reply to this step ran out of its output-token budget "
+    "and was discarded. Reply to the step again, in full. Keep your deliberation "
+    "brief and the reply compact. If the step needs a tool call, make it right "
+    "away and keep its arguments small."
+)
+
 _GATHERING_TEMPLATE = (
     "## Your task\n"
     "Answer three questions and record the answers with `finish_gathering`:\n"
@@ -171,8 +185,11 @@ _GATHERING_TEMPLATE = (
     "obtain a real sample in this step (scratchpad for databases, files and "
     "APIs — in a pad listed under `## Scratchpads already in this session` "
     "when there is one; web_fetch for pages) and record its shape in "
-    "`data_findings`. A data file under `## Attached files` is such a "
-    "source: read it in the scratchpad from the absolute path listed there. "
+    "`data_findings`. For an `html-app` whose rows or values are already "
+    "under `" + KNOWN_DATA_HEADER + "`, record "
+    "`verified_by: \"known_data\"` instead of fetching them again. A data "
+    "file under `## Attached files` is an external source too: read it in "
+    "the scratchpad from the absolute path listed there. "
     "If the artifact reads no external data, say so in `summary`.\n"
     "3. Open points — places where the request itself is ambiguous and only "
     "the user can settle it. Not ideas for extra features: a feature nobody "
@@ -192,10 +209,14 @@ _GATHERING_TEMPLATE = (
     "chose) or as an `open_point` (the user chooses, with your default) — "
     "never in both lists.\n"
     "{when_to_ask}"
-    "- A source is verified only if you ran code against it or fetched the "
-    "page in this step. A source you name in `data_sources` but did not "
-    "touch is fetched before generation starts — naming one is how you "
-    "request that.\n"
+    "- A source is verified if you ran code against it or fetched the page "
+    "in this step, or — for an `html-app` — if its rows or values "
+    "themselves are already under `" + KNOWN_DATA_HEADER + "`: then record "
+    "`verified_by: \"known_data\"` and do not fetch it again. A description "
+    "of the data (where it lives, its columns) without the values does not "
+    "count. A source you name in `data_sources` that is not verified is "
+    "fetched before generation starts — naming one is how you request "
+    "that.\n"
     "- Keep the whole `finish_gathering` call under about 30 lines.\n"
     "- Keep names of tables, fields, files and APIs as they are, whatever "
     "language you write in.\n\n"
@@ -245,7 +266,9 @@ _REDRAW_RESTATE = (
     "correction introduces a source nobody has fetched yet, that call is the "
     "only thing that will cause it to be fetched. For each source declared "
     "earlier that the corrected artifact still needs, use exactly the name it "
-    "was declared with, whatever language you write in."
+    "was declared with, whatever language you write in. For a source whose "
+    "rows or values are under `" + KNOWN_DATA_HEADER + "`, also pass a "
+    "`data_findings` entry with `verified_by: \"known_data\"`."
 )
 
 _REDRAW_CORRECTION_ACT_FIRST = (

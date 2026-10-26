@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import json
+import logging
 import os
 import hashlib
 import re
@@ -37,6 +38,14 @@ from anton.core.backends.wire import (
     RESULT_START,
     STDOUT_CHUNK_MARKER,
     STDOUT_SCRUB_MARGIN,
+    USAGE_MARKER,
+    USAGE_MARKER_ENV,
+)
+from anton.core.llm.provider import (
+    USAGE_LOG_ENV,
+    log_usage_record,
+    scratchpad_usage_record,
+    usage_log_enabled,
 )
 from anton.core.llm.tracing import get_trace_context, trace_context_to_json
 from anton.core.settings import CoreSettings
@@ -53,6 +62,8 @@ from anton.utils.nofollow import (
     unlink_matching_nofollow,
     write_text_nofollow,
 )
+
+logger = logging.getLogger(__name__)
 
 _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
 
@@ -405,6 +416,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # whether the launcher refused once the process has ended.
         self._cell_launch: SandboxedSpawn | None = None
         self._venv_workers: set[asyncio.Task[object]] = set()
+        # Teardown waits until a sandboxed start owns its process or has
+        # disposed of its launch descriptors, including subprocess creation.
+        self._pending_starts: set[asyncio.Future[object]] = set()
         self._proc: asyncio.subprocess.Process | None = None
         self._boot_path: str | None = None
         self._venv_dir: str | None = None
@@ -814,11 +828,11 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             if not self._verify_venv_python():
                 self._nuke_venv()
 
-    async def _drain_venv_workers(self) -> asyncio.CancelledError | None:
-        """Finish venv work and return any cancellation for the caller to raise."""
-        if not self._venv_workers:
+    async def _drain_runtime_work(self, *work: asyncio.Future[object]) -> asyncio.CancelledError | None:
+        """Finish captured runtime work, retaining repeated cancellation."""
+        if not work:
             return None
-        waiter = asyncio.gather(*self._venv_workers, return_exceptions=True)
+        waiter = asyncio.gather(*work, return_exceptions=True)
         cancelled: asyncio.CancelledError | None = None
         while not waiter.done():
             try:
@@ -828,7 +842,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         return cancelled
 
     async def _run_venv_work(self, work: Callable[[], _VenvResult]) -> _VenvResult:
-        """Offload venv work without leaving it running after cancellation."""
+        """Offload venv and launch preparation, draining it before teardown."""
         worker = asyncio.create_task(asyncio.to_thread(work))
         self._venv_workers.add(worker)
         try:
@@ -837,7 +851,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             except asyncio.CancelledError:
                 # A thread cannot be cancelled. Finish its mutations before the
                 # caller's finally closes this runtime and clears its paths.
-                await self._drain_venv_workers()
+                await self._drain_runtime_work(*self._venv_workers)
                 raise
         finally:
             self._venv_workers.discard(worker)
@@ -974,6 +988,20 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         Under a sandbox policy, the installed boot script runs instead, through
         the launcher, with the allowlisted environment.
         """
+        if self._cell_sandbox is None:
+            await self._start_process()
+            return
+        # Own the entire start before its first await. A close during venv
+        # verification must also wait for the launch that follows it.
+        finished = asyncio.get_running_loop().create_future()
+        self._pending_starts.add(finished)
+        try:
+            await self._start_process()
+        finally:
+            finished.set_result(None)
+            self._pending_starts.discard(finished)
+
+    async def _start_process(self) -> None:
         # _ensure_venv runs a subprocess on every start and may build the venv,
         # so it runs on a worker thread. On the event loop it would stall every
         # other turn and request the host serves until it finished.
@@ -1002,6 +1030,13 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             overlay = {k: v for k, v in overlay.items() if overlay_key_allowed(k)}
         # Before the DS_* strip, so a project .env cannot smuggle a credential.
         overlaid = _apply_workspace_overlay(env, overlay)
+        # The pad's log is the cell output the model reads, so its calls send
+        # their usage over the wire for this process to log instead.
+        env.pop(USAGE_LOG_ENV, None)
+        if usage_log_enabled():
+            env[USAGE_MARKER_ENV] = "1"
+        else:
+            env.pop(USAGE_MARKER_ENV, None)
         if self._scratchpad_ds_env is not None or policy is not None:
             # Never trust inherited DS_* values — strip them, then overlay
             # exactly what this pad should see. Under a policy a pad with no
@@ -1149,8 +1184,25 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     cwd=proc_cwd,
                     start_new_session=(sys.platform != "win32"),
                 )
-            launch = policy.launch(argv, env=env)
+            launch: SandboxedSpawn | None = None
+            launch_lock = threading.Lock()
+            launch_abandoned = False
+
+            def prepare_launch() -> None:
+                nonlocal launch
+                prepared = policy.launch(argv, env=env)
+                # Cancelling the worker task can finish the caller before this
+                # thread. Transfer ownership only while the caller still waits.
+                with launch_lock:
+                    if not launch_abandoned:
+                        launch = prepared
+                        return
+                prepared.close()
+                prepared.refusal()
+
             try:
+                await self._run_venv_work(prepare_launch)
+                assert launch is not None
                 proc = await asyncio.create_subprocess_exec(
                     *launch.argv,
                     stdin=asyncio.subprocess.PIPE,
@@ -1162,10 +1214,14 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     pass_fds=launch.pass_fds,
                 )
             except BaseException:
-                launch.refusal()
+                with launch_lock:
+                    launch_abandoned = True
+                if launch is not None:
+                    launch.refusal()
                 raise
             finally:
-                launch.close()
+                if launch is not None:
+                    launch.close()
             self._release_cell_launch()
             self._cell_launch = launch
             return proc
@@ -1230,7 +1286,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         """
         await self._stop_process()
         self.cells.clear()
-        self.compacted_code = ()
+        self.compacted_cells = ()
         # Before the discard: under a sandbox policy a refused health check
         # raises here, and the saved namespace must outlive a refusal.
         await self._run_venv_work(self._remove_broken_venv)
@@ -1303,7 +1359,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
     async def close(self) -> None:
         """Kill the process and save requirements; preserve the venv."""
-        cancelled = await self._drain_venv_workers()
+        cancelled = await self._drain_runtime_work(*self._venv_workers, *self._pending_starts)
         await self._stop_process()
         if self._venv_dir is not None:
             self._save_requirements()
@@ -1335,7 +1391,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
     async def cleanup(self) -> None:
         """Kill process and delete the venv entirely."""
-        cancelled = await self._drain_venv_workers()
+        cancelled = await self._drain_runtime_work(*self._venv_workers, *self._pending_starts)
         try:
             await self._stop_process()
             await self._run_venv_work(self._nuke_venv)
@@ -1711,6 +1767,20 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     last_output = elapsed
                     if _add_salvage_chunk(self._salvage, chunk):
                         self._salvage_dropped = True
+                continue
+
+            if line.startswith(USAGE_MARKER) and usage_log_enabled():
+                # Logged as it arrives, so a cell killed later keeps the calls it made.
+                # Off, the pad was not asked to send usage, so a line like this is cell output.
+                try:
+                    record = scratchpad_usage_record(json.loads(line[len(USAGE_MARKER) :]))
+                except json.JSONDecodeError:
+                    record = None
+                if record is None:
+                    # Length only: the line is raw cell output and may hold a secret.
+                    logger.warning("unreadable scratchpad usage line (%d chars)", len(line))
+                else:
+                    log_usage_record(record)
                 continue
 
             if line.startswith(PROGRESS_MARKER):
