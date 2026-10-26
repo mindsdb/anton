@@ -567,10 +567,12 @@ def _public_data_sources_skill(session) -> str:
     The catalog must not be copied into the prompt — it already lives in
     `builtin_skills/public-data-sources/SKILL.md` and is maintained there. The
     sub-generator has no `recall_skill`, so the body is fed in directly from the
-    same `SkillStore` the main agent uses.
+    same `SkillStore` the main agent uses, through `load_for_artifacts`: a
+    same-named skill replaces the built-in only from a folder an artifact
+    build trusts, never one linked in from another person.
 
-    In tests the session is an `AsyncMock`, and `store.load(...)` returns a
-    **coroutine**. Type-checking `declarative_md` alone is not enough: an
+    In tests the session is an `AsyncMock`, and `store.load_for_artifacts(...)`
+    returns a **coroutine**. Type-checking `declarative_md` alone is not enough: an
     abandoned coroutine surfaces as a RuntimeWarning at GC time, in the output of
     an arbitrary test rather than the one that created it. So it is closed
     explicitly — the same treatment as in `_list_connections`. (In `_pads_dict` no
@@ -579,7 +581,7 @@ def _public_data_sources_skill(session) -> str:
     """
     try:
         store = getattr(session, "_skill_store", None)
-        skill = store.load(_PUBLIC_SOURCES_SKILL) if store is not None else None
+        skill = store.load_for_artifacts(_PUBLIC_SOURCES_SKILL) if store is not None else None
         if inspect.iscoroutine(skill):
             skill.close()
             return ""

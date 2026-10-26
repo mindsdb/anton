@@ -473,3 +473,103 @@ class TestListForArtifacts:
         )
 
         assert [s.label for s in store.list_for_artifacts()] == ["builtin-marked"]
+
+    @pytest.mark.parametrize(
+        "files",
+        [
+            {"meta.json": b"[]", "declarative.md": b"x"},
+            {"meta.json": b"{}", "declarative.md": b"\xff\xfe not text"},
+        ],
+        ids=["meta-not-an-object", "declarative-not-utf8"],
+    )
+    def test_a_legacy_folder_it_cannot_read_leaves_the_store_working(
+        self, tmp_path: Path, builtins: Path, files: dict[str, bytes]
+    ):
+        """A host's store walks its root when it is built, so one folder there
+        that can't be read would otherwise fail every turn."""
+        own_store = tmp_path / "own"
+        _write_skill_md(own_store, "own-marked", "applies_to: artifacts\n")
+        turn = tmp_path / "turn"
+        turn.mkdir()
+        (turn / "own-marked").symlink_to(own_store / "own-marked", target_is_directory=True)
+        legacy = turn / "old_skill"
+        legacy.mkdir()
+        for name, data in files.items():
+            (legacy / name).write_bytes(data)
+
+        store = SkillStore(
+            root=turn, builtin_root=builtins, extra_roots=[tmp_path / "managed"],
+            artifact_roots=[own_store],
+        )
+
+        assert [s.label for s in store.list_for_artifacts()] == ["builtin-marked", "own-marked"]
+
+
+def _write_named(root: Path, label: str, body: str) -> Path:
+    d = root / label
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(
+        f"---\nname: {label}\ndescription: d\n---\n{body}\n", encoding="utf-8"
+    )
+    return d
+
+
+class TestLoadForArtifacts:
+    """A skill a generator step reads by name, such as `public-data-sources`."""
+
+    LABEL = "public-data-sources"
+
+    @pytest.fixture()
+    def builtins(self, tmp_path: Path) -> Path:
+        root = tmp_path / "builtins"
+        _write_named(root, self.LABEL, "BUILT-IN")
+        return root
+
+    def test_another_persons_same_named_skill_does_not_replace_the_builtin(
+        self, tmp_path: Path, builtins: Path
+    ):
+        """Where every person reads one store, the host links each person's
+        skills into the turn's root, so `load` would read theirs."""
+        theirs = _write_named(tmp_path / "someone-else", self.LABEL, "THEIRS")
+        turn = tmp_path / "turn"
+        turn.mkdir()
+        (turn / self.LABEL).symlink_to(theirs, target_is_directory=True)
+        store = SkillStore(
+            root=turn, builtin_root=builtins, extra_roots=[tmp_path / "managed"],
+            artifact_roots=[tmp_path / "own"],
+        )
+
+        assert store.load(self.LABEL).declarative_md.strip() == "THEIRS"
+        skill = store.load_for_artifacts(self.LABEL)
+        assert skill.declarative_md.strip() == "BUILT-IN"
+        assert skill.provenance == "builtin"
+
+    def test_the_askers_own_copy_replaces_the_builtin(self, tmp_path: Path, builtins: Path):
+        own_store = tmp_path / "own"
+        mine = _write_named(own_store, self.LABEL, "MINE")
+        turn = tmp_path / "turn"
+        turn.mkdir()
+        (turn / self.LABEL).symlink_to(mine, target_is_directory=True)
+        store = SkillStore(
+            root=turn, builtin_root=builtins, extra_roots=[tmp_path / "managed"],
+            artifact_roots=[own_store],
+        )
+
+        assert store.load_for_artifacts(self.LABEL).declarative_md.strip() == "MINE"
+
+    def test_a_cli_librarys_copy_replaces_the_builtin(self, tmp_path: Path, builtins: Path):
+        library = tmp_path / "user"
+        _write_named(library, self.LABEL, "MINE")
+        store = SkillStore(root=library, builtin_root=builtins)
+
+        assert store.load_for_artifacts(self.LABEL).declarative_md.strip() == "MINE"
+
+    def test_a_store_with_no_trusted_folders_reads_the_builtin(
+        self, tmp_path: Path, builtins: Path
+    ):
+        """A pod's root holds every member's skills, and it names no folder."""
+        tree = tmp_path / "members"
+        _write_named(tree, self.LABEL, "A-MEMBERS")
+        store = SkillStore(root=tree, builtin_root=builtins, artifact_roots=[])
+
+        assert store.load_for_artifacts(self.LABEL).declarative_md.strip() == "BUILT-IN"
