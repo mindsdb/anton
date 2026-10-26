@@ -26,8 +26,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from anton.core.backends.base import Cell
+from anton.core.backends.base import Cell, CompactedCell
 from anton.core.backends.local import LocalScratchpadRuntime
+from anton.core.backends.remote import RemoteScratchpadRuntime
 from anton.core.backends.sandbox import CellSandbox
 from anton.core.interaction.elicit import AskAnswer, AskRequest
 from anton.core.interaction.emitter import TurnEmitter
@@ -351,6 +352,39 @@ async def test_an_update_without_approve_never_runs(project, answer):
     history = _history_text(harness.session)
     assert "The user didn't approve this change, so it must not be made another way" in history
     assert "try one or two more genuine workarounds" not in history
+
+
+@pytest.mark.parametrize("answer", [APPROVE, CANCEL, SKIP, TIMEOUT], ids=["approve", "cancel", "skip", "timeout"])
+async def test_a_function_call_waits_for_approval_and_quotes_the_call(project, answer):
+    call = "cur.callfunc('purge_suppliers', int, [1])"
+    code = "import oracledb\nconn = oracledb.connect(dsn='x')\ncur = conn.cursor()\n" + call
+    harness = _session(project, code)
+    seen = await _run(harness=harness, answers=[answer])
+    assert len(seen.cards) == 1
+    assert seen.ran_before == [0]
+    prompt = seen.cards[0].request.prompt
+    assert "This step would run a stored procedure or function:" in prompt
+    assert f"```\n{call}\n```" in prompt
+    assert harness.pad.ran == ([code] if answer == APPROVE else [])
+    if answer != APPROVE:
+        assert "must not be made another way" in _history_text(harness.session)
+
+
+@pytest.mark.parametrize("answer", [APPROVE, CANCEL], ids=["approve", "cancel"])
+async def test_a_routine_bound_in_an_earlier_cell_waits_for_approval_where_it_runs(project, answer):
+    """A partial bound in one cell runs its routine in the cell that calls
+    it: that cell waits too, and its card shows which routine runs."""
+    bind = ("import oracledb\nimport functools\nconn = oracledb.connect(dsn='x')\ncur = conn.cursor()\n"
+            "purge = functools.partial(cur.callproc, 'purge_suppliers')")
+    call = "for sid in range(3):\n    purge([sid])"
+    harness = _session(project, bind, call)
+    seen = await _run(harness=harness, answers=[APPROVE, answer])
+    assert len(seen.cards) == 2
+    assert seen.ran_before == [0, 1]
+    prompt = seen.cards[1].request.prompt
+    assert "This step would run a stored procedure or function:\n\n```\npurge([sid])\n```" in prompt
+    assert "That call runs:\n\n```\npurge = functools.partial(cur.callproc, 'purge_suppliers')\n```" in prompt
+    assert harness.pad.ran == ([bind, call] if answer == APPROVE else [bind])
 
 
 async def test_a_refused_cell_closes_its_step_with_a_result_the_replay_skips(project):
@@ -901,15 +935,66 @@ async def test_compaction_leaves_the_check_every_earlier_cell(project, earlier, 
     assert (outcome is not None, elicitor.asked) == (held, int(held))
 
 
-def test_compaction_keeps_the_code_it_folds_in_order(project):
+@pytest.mark.parametrize("error", [None, "ValueError: stopped", "TimeoutError: cell timed out"])
+async def test_compaction_preserves_the_outcome_that_controls_file_ownership(project, error):
+    code = "maybe_fail()\nopen('stock.csv', 'w').write('first draft')"
+    pad = _runtime(project, code, *_FILLERS)
+    pad.cells[0].error = error
+    assert pad._compact_cells()
+    assert all(cell.code != code for cell in pad.cells)
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    outcome = await _hold()(session, pad=pad, code="open('stock.csv', 'w').write('second draft')")
+    assert (outcome is not None, elicitor.asked) == (bool(error), int(bool(error)))
+
+
+async def test_compaction_keeps_bindings_before_a_failed_cells_write(project):
+    code = "from os import remove\nraise ValueError('stopped')"
+    pad = _runtime(project, code, *_FILLERS)
+    pad.cells[0].error = "ValueError: stopped"
+    assert pad._compact_cells()
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    outcome = await _hold()(session, pad=pad, code="remove('report.pdf')")
+    assert outcome is not None
+    assert elicitor.asked == 1
+
+
+async def test_repeated_compaction_preserves_mixed_outcomes_past_unparsable_code(project):
+    # The repeated text must keep each execution's outcome, even when a
+    # failed parse before it is absent from the checker's parsed cells.
+    repeated = "maybe_fail()\nopen('stock.csv', 'w').write('draft')"
+    pad = _runtime(project, "def (", repeated, repeated, *_FILLERS)
+    pad.cells[0].error = "SyntaxError"
+    pad.cells[1].error = "ValueError"
+    assert pad._compact_cells()
+    pad.cells.extend([
+        Cell(code="raise RuntimeError()\nopen('report.pdf', 'w').write('draft')",
+             stdout="", stderr="", error="RuntimeError"),
+        *(Cell(code=code, stdout="", stderr="", error=None) for code in _FILLERS),
+    ])
+    assert pad._compact_cells()
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    assert await _hold()(session, pad=pad, code="open('stock.csv', 'w').write('final')") is None
+    assert await _hold()(session, pad=pad, code="open('report.pdf', 'w').write('final')") is not None
+    assert elicitor.asked == 1
+
+
+def test_compaction_keeps_code_and_outcome_in_order(project):
     pad = _runtime(project, *_FILLERS, "total_6 = 6")
+    pad.cells[1].error = "ValueError"
     assert pad._compact_cells()
     pad.cells.append(Cell(code="total_7 = 7", stdout="", stderr="", error=None))
     assert pad._compact_cells(), "a second compaction folds the first one's summary in too"
-    assert pad.compacted_code == ("total_0 = 0", "total_1 = 1", "total_2 = 2")
+    assert pad.compacted_cells == (
+        CompactedCell(code="total_0 = 0", errored=False),
+        CompactedCell(code="total_1 = 1", errored=True),
+        CompactedCell(code="total_2 = 2", errored=False),
+    )
 
 
-async def test_a_reset_forgets_the_compacted_code(project):
+async def test_a_reset_forgets_the_compacted_cells(project):
     pad = _runtime(project, *_FILLERS, "total_6 = 6")
     assert pad._compact_cells()
     with patch.object(pad, "_stop_process", AsyncMock()), \
@@ -917,7 +1002,25 @@ async def test_a_reset_forgets_the_compacted_code(project):
             patch.object(pad, "_discard_session_snapshot"), \
             patch.object(pad, "start", AsyncMock()):
         await pad.reset()
-    assert (pad.cells, pad.compacted_code) == ([], ())
+    assert (pad.cells, pad.compacted_cells) == ([], ())
+
+
+async def test_a_remote_reset_forgets_compacted_ownership(project):
+    pad = RemoteScratchpadRuntime(
+        name="main", endpoint_url="https://scratchpad.example.com", api_key="test",
+        workspace_path=project,
+        cells=[Cell(code="open('stock.csv', 'w').write('draft')", stdout="", stderr="", error=None),
+               *(Cell(code=code, stdout="", stderr="", error=None) for code in _FILLERS)],
+    )
+    assert pad._compact_cells()
+    with patch.object(pad, "_post", AsyncMock(return_value={})) as post:
+        await pad.reset()
+    post.assert_awaited_once_with("/scratchpad/reset", {"name": "main"})
+    assert (pad.cells, pad.compacted_cells) == ([], ())
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    assert await _hold()(session, pad=pad, code="open('stock.csv', 'w').write('final')") is not None
+    assert elicitor.asked == 1
 
 
 def test_a_refused_cell_is_not_working_code_for_the_artifact_pipeline():
