@@ -4841,6 +4841,9 @@ class _FileFinder:
 
     def walk(self, root: ast.AST) -> None:
         reader, cell = self.reader, self.cell
+        # The walk goes breadth first, so a database write is read after it,
+        # in source order: the card quotes a file's statements as they run.
+        database_writes: list[ast.Call] = []
         for node in ast.walk(root) if self.owned is not None else _nodes_that_run(root):
             if isinstance(node, ast.Attribute) and reader.dotted(node) in (*_DELETE_FUNCS, *_MOVE_FUNCS):
                 parent = cell.parents.get(node)
@@ -4886,11 +4889,13 @@ class _FileFinder:
                 if dest is not None:
                     self.overwrite(self.paths(dest), node)
             elif method in _EXECUTE or method in _READ_SQL or method == "to_sql":
-                self.database_write(node)
+                database_writes.append(node)
             else:
                 write = _file_write(node, reader)
                 if write is not None and write.kind != "create":
                     self.overwrite(self.paths(write.target), node, append=write.kind == "append")
+        for call in sorted(database_writes, key=lambda c: (c.lineno, c.col_offset)):
+            self.database_write(call)
 
     def lookup(self, *, node: ast.AST) -> bool:
         """Whether `node` is a lookup `_plain_lookup` can't read, on a module,

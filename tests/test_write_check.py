@@ -1381,6 +1381,19 @@ def test_a_database_file_the_agent_made_shows_its_statement_when_another_change_
     assert "It would run:\n\n```\nINSERT INTO t VALUES (1)\n```" in card
 
 
+@pytest.mark.parametrize("code, fenced", [
+    (SHIP + "with con:\n    con.execute('INSERT INTO archive SELECT * FROM orders')\ncon.execute('DELETE FROM orders')",
+     ["warehouse.db", "INSERT INTO archive SELECT * FROM orders", "DELETE FROM orders"]),
+    (SHIP + "for r in rows:\n    con.execute('INSERT INTO t VALUES (?)', r)\ncon.execute('UPDATE t SET a = 0')",
+     ["warehouse.db", "INSERT INTO t VALUES (?)\nwith values {r}", "UPDATE t SET a = 0"]),
+], ids=["with-block", "loop"])
+def test_a_database_file_s_statements_are_quoted_in_the_order_they_run(code, fenced, office):
+    """A write in a block runs before a later one outside it, so the card
+    quotes it first: a DELETE shown before the INSERT that archives the rows
+    would misstate the step."""
+    assert _fenced(_card(code, office)) == fenced
+
+
 def test_a_secret_in_a_database_file_s_statement_is_scrubbed_on_the_card(office):
     token = "ya29." + "a" * 30
     card = _card(SHIP + f"con.execute(\"UPDATE creds SET note = '{token}' WHERE id = 1\")", office)
