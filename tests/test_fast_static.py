@@ -287,3 +287,18 @@ def test_a_runtime_page_is_sized_by_its_program(tmp_path, monkeypatch):
     state = GenState(session=SimpleNamespace(), artifact_type="html-app", artifact_path=tmp_path, slug="r", act_first=True)
     assert len((tmp_path / "index.html").read_text()) > fast_static.MAX_EXISTING_CHARS
     assert fast_static.fits(state)
+
+
+async def test_discovery_gets_the_general_analysis_rules(tmp_path, monkeypatch):
+    from anton.core.tools.generate_artifact.discovery import engine
+    state = GenState(session=SimpleNamespace(history=[]), artifact_type="html-app", artifact_path=tmp_path,
+                     slug="r", act_first=True)
+
+    async def gather(received):
+        assert "check which values in the data belong to it" in received.pipeline_system
+        assert "compared against" in received.pipeline_system
+        received.gathering_complete = True
+        received.final_artifact_type = "html-app"
+
+    monkeypatch.setattr(engine, "run_gathering_loop", gather)
+    assert await fast_static.prepare(state)
