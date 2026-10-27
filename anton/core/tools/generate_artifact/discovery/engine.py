@@ -211,8 +211,7 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 continue
 
             if name == "finish_gathering":
-                if (os.environ.get("ANTON_STATIC_BATCH_FINISH") == "on" or
-                        os.environ.get("ANTON_STATIC_COHERENT_GATHER") == "on") and (
+                if os.environ.get("ANTON_STATIC_FAST_PATH") == "direct" and (
                     batch_failed or call_index != len(response.tool_calls) - 1
                 ):
                     reason = ("A source execution in this batch failed; inspect and fix it before finishing."

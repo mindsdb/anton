@@ -7,9 +7,7 @@ from .observed_data import credential_bearing, read_handoff
 
 def enabled(state):
     return (state.act_first and state.artifact_type == "html-app"
-            and os.environ.get("ANTON_STATIC_ATOMIC_GATHER") == "on"
-            and os.environ.get("ANTON_STATIC_DATA_BINDING") == "on"
-            and os.environ.get("ANTON_STATIC_CANONICAL_ONLY") == "on")
+            and os.environ.get("ANTON_STATIC_FAST_PATH") == "direct")
 
 
 def tools(schemas):

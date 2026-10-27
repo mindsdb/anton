@@ -42,7 +42,6 @@ from __future__ import annotations
 import base64
 import binascii
 import errno
-import hashlib
 import logging
 import os
 import time
@@ -91,8 +90,6 @@ MAX_ERROR_BODY_BYTES = 4096
 # and many findings; a page that logs without end cannot make this process
 # hold an answer of any size.
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
-# Only a requested materialization may also return an 8 MB document, JSON escaped.
-MAX_MATERIALIZED_RESPONSE_BYTES = 2 * MAX_PAGE_BYTES + MAX_RESPONSE_BYTES
 # At most this many distinct findings of one check reach the agent; the rest
 # are counted. A page that logs one error per data row would otherwise put
 # thousands of lines into one tool result, resent on every model call.
@@ -142,7 +139,6 @@ class RenderCheckRequest(BaseModel):
 
     html: str
     screenshot: bool = True
-    materialize_main: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,80}$")
     previous_html: str | None = None
 
 
@@ -346,9 +342,6 @@ class RenderCheckResult(BaseModel):
     policy: str = ""
     views: list[CheckedView] = Field(default_factory=list)
     unopened: list[UnopenedToggle] = Field(default_factory=list)
-    materialized_html: str | None = None
-    input_sha256: str | None = None
-    checked_html_sha256: str | None = None
     # The comparison with `previous_html`, when the request sent one.
     comparison: Comparison | None = None
 
@@ -655,18 +648,15 @@ class _Reply(NamedTuple):
 _RENDER_ALONE_MIN_SECONDS = 1.0
 
 
-def _request_body(
-    html: str, *, screenshot: bool, previous_html: str | None, materialize_main: str | None = None
-) -> bytes:
-    """The request's JSON, without `previous_html` or `materialize_main` when either is None."""
+def _request_body(html: str, *, screenshot: bool, previous_html: str | None) -> bytes:
+    """The request's JSON, without `previous_html` when it is None."""
     return RenderCheckRequest(
-        html=html, screenshot=screenshot, previous_html=previous_html, materialize_main=materialize_main
+        html=html, screenshot=screenshot, previous_html=previous_html
     ).model_dump_json(exclude_none=True).encode("utf-8")
 
 
 def check_html(
-    html: str, *, previous_html: str | None = None, screenshot: bool = True, timeout: float = TIMEOUT_SECONDS,
-    materialize_main: str | None = None,
+    html: str, *, previous_html: str | None = None, screenshot: bool = True, timeout: float = TIMEOUT_SECONDS
 ) -> RenderCheckOutcome:
     """Ask the service to load `html`. Never raises.
 
@@ -701,28 +691,27 @@ def check_html(
                 previous_bytes // 1024, MAX_PAGE_BYTES // (1024 * 1024),
             )
             previous_html = None
-    body = _request_body(html, screenshot=screenshot, previous_html=previous_html, materialize_main=materialize_main)
+    body = _request_body(html, screenshot=screenshot, previous_html=previous_html)
     if previous_html is not None and len(body) > MAX_COMPARED_BODY_BYTES:
         _log.info(
             "comparison skipped: the request with the page as it was before this turn is %d KB once "
             "JSON-escaped, over the %d MB limit", len(body) // 1024, MAX_COMPARED_BODY_BYTES // (1024 * 1024),
         )
         previous_html = None
-        body = _request_body(html, screenshot=screenshot, previous_html=None, materialize_main=materialize_main)
+        body = _request_body(html, screenshot=screenshot, previous_html=None)
     if previous_html is None and len(body) > MAX_BODY_BYTES:
         return RenderCheckUnavailable(
             reason=f"the page's request is {len(body) // 1024} KB once JSON-escaped, over the render "
             f"check's {MAX_BODY_BYTES // (1024 * 1024)} MB request limit"
         )
     started = time.monotonic()
-    response_options = {"response_limit": MAX_MATERIALIZED_RESPONSE_BYTES} if materialize_main else {}
-    reply = _post(base, body=body, timeout=timeout, **response_options)
+    reply = _post(base, body=body, timeout=timeout)
     if reply.busy:
         left = timeout - (time.monotonic() - started) - BUSY_RETRY_SECONDS
         if left >= BUSY_RETRY_MIN_SECONDS:
             _log.info("render check at %s is busy; asking once more in %.0f s", base, BUSY_RETRY_SECONDS)
             time.sleep(BUSY_RETRY_SECONDS)
-            reply = _post(base, body=body, timeout=left, **response_options)
+            reply = _post(base, body=body, timeout=left)
     if reply.unavailable is not None and previous_html is not None and reply.status == 400:
         # A service that predates page comparison refuses the field before it
         # checks anything, so asking again with the page alone costs little.
@@ -732,8 +721,7 @@ def check_html(
         )
         left = timeout - (time.monotonic() - started)
         if left >= _RENDER_ALONE_MIN_SECONDS:
-            alone = _request_body(html, screenshot=screenshot, previous_html=None, materialize_main=materialize_main)
-            reply = _post(base, body=alone, timeout=left, **response_options)
+            reply = _post(base, body=_request_body(html, screenshot=screenshot, previous_html=None), timeout=left)
     if reply.unavailable is not None:
         return reply.unavailable
     try:
@@ -746,27 +734,12 @@ def check_html(
             )
         _log.warning("render check at %s answered a body that does not parse", base, exc_info=True)
         return RenderCheckUnavailable(reason="the render-check service answered something that does not parse")
-    if materialize_main and result.materialized_html is not None:
-        transformed = result.materialized_html
-        marker = '<main id="' + materialize_main + '"></main>'
-        if html.count(marker) != 1:
-            return RenderCheckUnavailable(reason="materialization input did not contain exactly one empty main")
-        before, after = html.split(marker)
-        prefix = before + marker.removesuffix('</main>')
-        suffix = '</main>' + after
-        if (len(transformed.encode('utf-8')) > MAX_PAGE_BYTES
-                or result.input_sha256 != hashlib.sha256(html.encode('utf-8')).hexdigest()
-                or result.checked_html_sha256 != hashlib.sha256(transformed.encode('utf-8')).hexdigest()
-                or not transformed.startswith(prefix) or not transformed.endswith(suffix)):
-            return RenderCheckUnavailable(reason="materialization did not preserve the input or identify the checked final document")
-    elif result.materialized_html is not None:
-        return RenderCheckUnavailable(reason="the service transformed a document without being asked")
     if result.screenshot is not None and len(result.screenshot.data) > MAX_SCREENSHOT_BASE64_CHARS:
         result = result.model_copy(update={"screenshot": None})
     return result
 
 
-def _post(base: str, *, body: bytes, timeout: float, response_limit: int = MAX_RESPONSE_BYTES) -> _Reply:
+def _post(base: str, *, body: bytes, timeout: float) -> _Reply:
     """POST `body` to the service once. Never raises."""
     try:
         # trust_env=False: the service is a sibling container on an internal
@@ -784,10 +757,10 @@ def _post(base: str, *, body: bytes, timeout: float, response_limit: int = MAX_R
                 content = bytearray()
                 for chunk in response.iter_bytes():
                     content += chunk
-                    if len(content) > response_limit:
+                    if len(content) > MAX_RESPONSE_BYTES:
                         return _Reply(unavailable=RenderCheckUnavailable(
                             reason="the render check's answer is over "
-                            f"{response_limit // (1024 * 1024)} MB, more than anton reads"
+                            f"{MAX_RESPONSE_BYTES // (1024 * 1024)} MB, more than anton reads"
                         ))
     except httpx.TimeoutException:
         return _Reply(unavailable=RenderCheckUnavailable(
@@ -846,7 +819,6 @@ def check_file(
     previous_html: str | None = None,
     screenshot: bool = True,
     timeout: float = TIMEOUT_SECONDS,
-    materialize_main: str | None = None,
 ) -> RenderCheckOutcome:
     """Read the page at `path` and ask the service to load it. Never raises.
 
@@ -875,7 +847,7 @@ def check_file(
     remaining = timeout - (time.monotonic() - started)
     return check_html(
         data.decode("utf-8", errors="replace"), previous_html=previous_html, screenshot=screenshot,
-        timeout=max(remaining, 1.0), materialize_main=materialize_main,
+        timeout=max(remaining, 1.0),
     )
 
 

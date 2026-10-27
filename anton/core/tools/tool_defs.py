@@ -279,15 +279,6 @@ CREATE_ARTIFACT_TOOL = ToolDef(
     handler=handle_create_artifact,
 )
 
-if os.environ.get("ANTON_STATIC_FAST_PATH") in {"direct", "facts"}:
-    CREATE_ARTIFACT_TOOL = replace(CREATE_ARTIFACT_TOOL, description=CREATE_ARTIFACT_TOOL.description +
-        "\nSnapshot policy: for reports, dashboards, maps and analyses of current data, "
-        "choose html-app and fetch/embed the required data once. Client-side filtering, "
-        "charts and row details do not require a backend. Use fullstack when the USER "
-        "requires live refresh, runtime service access, writes or app-owned durable state. "
-        "A connection by itself is not a live-data requirement. Follow this policy over "
-        "the general preference for fullstack-stateless-app above.")
-
 
 UPDATE_ARTIFACT_METADATA_TOOL = ToolDef(
     name="update_artifact",
@@ -699,22 +690,30 @@ if os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on":
         "handoff. Preserve the user's request verbatim. For an EDIT, pass the existing "
         "slug instead of name so the existing artifact is updated."
     )
-    _single_schema = {
-        **GENERATE_ARTIFACT_TOOL.input_schema,
-        "properties": {**GENERATE_ARTIFACT_TOOL.input_schema["properties"],
-                       "name": {"type": "string", "description": "Name of a NEW artifact; omit for an existing-slug edit."}},
-        "required": [key for key in GENERATE_ARTIFACT_TOOL.input_schema["required"] if key != "slug"],
-        "anyOf": [{"required": ["slug"]}, {"required": ["name"]}],
-    }
-    GENERATE_ARTIFACT_TOOL = replace(GENERATE_ARTIFACT_TOOL,
-        description=_single_call_instructions + "\n\n" + GENERATE_ARTIFACT_TOOL.description,
-        input_schema=_single_schema,
-        prompt="ARTIFACT GENERATION:\n" + _single_call_instructions +
-               "\nFollow the returned instruction; the existing approval and verification rules still apply.")
-    CREATE_ARTIFACT_TOOL = replace(CREATE_ARTIFACT_TOOL,
-        description="For end-to-end generation, prefer generate_artifact(name=...) directly. "
-                    "Use this registration-only tool when writing the files manually.\n\n" + CREATE_ARTIFACT_TOOL.description)
 
+    # No top-level anyOf: providers reject it in tool schemas. The handler requires slug or name.
+    def _single_call(tool: ToolDef) -> ToolDef:
+        return replace(
+            tool,
+            description=_single_call_instructions + "\n\n" + tool.description,
+            input_schema={
+                **tool.input_schema,
+                "properties": {**tool.input_schema["properties"],
+                               "name": {"type": "string", "description": "Name of a NEW artifact; omit for an existing-slug edit."}},
+                "required": [key for key in tool.input_schema["required"] if key != "slug"],
+            },
+            prompt="ARTIFACT GENERATION:\n" + _single_call_instructions +
+                   "\nFollow the returned instruction; the existing approval and verification rules still apply.",
+        )
+
+    def _registration_only(tool: ToolDef) -> ToolDef:
+        return replace(tool, description="For end-to-end generation, prefer generate_artifact(name=...) directly. "
+                                         "Use this registration-only tool when writing the files manually.\n\n" + tool.description)
+
+    GENERATE_ARTIFACT_TOOL = _single_call(GENERATE_ARTIFACT_TOOL)
+    STATIC_GENERATE_ARTIFACT_TOOL = _single_call(STATIC_GENERATE_ARTIFACT_TOOL)
+    CREATE_ARTIFACT_TOOL = _registration_only(CREATE_ARTIFACT_TOOL)
+    STATIC_CREATE_ARTIFACT_TOOL = _registration_only(STATIC_CREATE_ARTIFACT_TOOL)
 
 RECALL_TOOL = ToolDef(
     name="recall",

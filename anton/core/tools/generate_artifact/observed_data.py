@@ -1,6 +1,6 @@
 """Embed observed JSON without making a model transcribe the records again.
 
-Only complete JSON objects/arrays printed by source tools are eligible. Values
+Only the artifact's canonical observed-data.json handoff is embedded. Values
 remain data: script delimiters are escaped before insertion into the document.
 """
 from __future__ import annotations
@@ -18,8 +18,12 @@ def _invalid_constant(value):
     raise ValueError(f"Non-JSON constant: {value}")
 
 
-DECODER = json.JSONDecoder(parse_constant=_invalid_constant)
-CREDENTIAL = re.compile(r"^(access_token|refresh_token|id_token|client_secret|api_key|password|authorization|secret)$", re.I)
+# Compared after lowercasing and dropping "-" and "_", so apiKey, x-api-key and API_KEY all match.
+CREDENTIAL_KEYS = {
+    "accesstoken", "refreshtoken", "idtoken", "token", "bearer", "authorization", "password", "passwd",
+    "secret", "clientsecret", "apikey", "xapikey", "privatekey", "secretkey", "accesskey",
+    "secretaccesskey", "awssecretaccesskey", "sessiontoken", "connectionstring", "dsn",
+}
 
 
 def read_handoff(folder):
@@ -31,25 +35,10 @@ def read_handoff(folder):
     return value
 
 
-def values(text):
-    """Yield complete JSON printed at the beginning of an output line."""
-    cursor = 0
-    for match in re.finditer(r"(?m)^[ \t]*([\[{])", text):
-        start = match.start(1)
-        if start < cursor:
-            continue
-        try:
-            value, end = DECODER.raw_decode(text, start)
-        except (ValueError, RecursionError):
-            continue
-        if isinstance(value, (dict, list)):
-            cursor = end
-            yield start, end, value
-
-
 def credential_bearing(value):
     if isinstance(value, dict):
-        return any(CREDENTIAL.fullmatch(k) or credential_bearing(v) for k, v in value.items())
+        return any(re.sub(r"[-_]", "", str(k)).lower() in CREDENTIAL_KEYS or credential_bearing(v)
+                   for k, v in value.items())
     if isinstance(value, list):
         return any(credential_bearing(v) for v in value)
     return False
@@ -141,31 +130,13 @@ def previous_data(html):
     return {}
 
 
-def collect(observations, existing="", *, compact=False):
-    data = previous_data(existing)
-    notes = []
-    for text in observations:
-        found, cursor, parts = False, 0, []
-        for start, end, value in values(text):
-            if start < cursor:
-                continue
-            found = True
-            if credential_bearing(value):
-                parts += [text[cursor:start], "[Credential-bearing JSON omitted from page data.]"]
-                cursor = end
-                continue
-            key = identity(value)
-            data[key] = value
-            parts += [text[cursor:start], f"[Observed JSON {key}; embedded verbatim at window.ARTIFACT_DATA[{key!r}]]"]
-            cursor = end
-        parts.append(text[cursor:])
-        rendered = "".join(parts) if found else text
-        notes.append(rendered[:2500] + ("\n[Remaining console excerpt omitted.]" if len(rendered) > 2500 else ""))
+def collect(handoff, existing=""):
+    """Bind a fresh handoff; an edit without one keeps only the page's previous data."""
+    data = {identity(handoff): handoff} if handoff is not None else previous_data(existing)
     schemas = []
     for key, value in data.items():
-        schemas.extend(runtime_contract(value, "window.ARTIFACT_DATA[" + json.dumps(key) + "]", compact=compact))
-    return data, ("\n\n".join(notes) + "\n\nEmbedded JSON contracts (actual runtime access paths):\n" +
-                  "\n".join(schemas))
+        schemas.extend(runtime_contract(value, "window.ARTIFACT_DATA[" + json.dumps(key) + "]", compact=True))
+    return data, "Embedded JSON contracts (actual runtime access paths):\n" + "\n".join(schemas)
 
 
 def bind(html, data):

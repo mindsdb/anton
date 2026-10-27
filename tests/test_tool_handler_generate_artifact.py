@@ -115,6 +115,24 @@ async def test_new_page_failure_keeps_identity_and_authoritative_data_for_retry(
     assert Path(result["observed_data_file"]).read_text()=='{"revenue":42}'
     assert Path(result["last_saved_component_program"]).is_file()
     assert len(list((tmp_path/"artifacts").glob("*/metadata.json")))==1
+    assert result["message"].count("Error: artifact generation failed") == 1
+    assert "slug" in result["if_the_user_asks_to_retry"]
+
+
+def test_single_call_schema_has_no_top_level_combinator_and_covers_both_deployments(monkeypatch):
+    import importlib
+    import anton.core.tools.tool_defs as tool_defs
+
+    monkeypatch.setenv("ANTON_STATIC_SINGLE_CALL", "on")
+    try:
+        importlib.reload(tool_defs)
+        for tool in (tool_defs.GENERATE_ARTIFACT_TOOL, tool_defs.STATIC_GENERATE_ARTIFACT_TOOL):
+            schema = tool.input_schema
+            assert not {"anyOf", "oneOf", "allOf"} & set(schema)
+            assert "name" in schema["properties"] and "slug" not in schema["required"]
+    finally:
+        monkeypatch.delenv("ANTON_STATIC_SINGLE_CALL")
+        importlib.reload(tool_defs)
 
 
 async def test_fsm_failure_is_wrapped_with_report_instruction(tmp_path: Path, monkeypatch):

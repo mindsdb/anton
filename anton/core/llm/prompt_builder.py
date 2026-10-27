@@ -106,11 +106,10 @@ class ChatSystemPromptBuilder:
         )
         if direct_generation:
             instructions = (
-                "These are reusable procedures. For work you carry out yourself, call "
-                "recall_skill(label) when a procedure matches. For an HTML artifact "
-                "delegated to generate_artifact, recall a matching source procedure "
-                "first; discovery receives it, so do not also query the same source "
-                "beforehand."
+                "These are reusable procedures. Call recall_skill(label) when a procedure "
+                "matches. For an HTML artifact delegated to generate_artifact, pass what "
+                "a recalled source procedure says about access in known_data instead of "
+                "querying the same source beforehand."
             )
         lines: list[str] = ["", "", "## Procedural memory (skills available)", "", instructions, ""]
         for s in summaries:
@@ -169,8 +168,7 @@ class ChatSystemPromptBuilder:
         leaves out the fullstack types, the backend section and the backend
         skill's line: nothing on this deployment would start the app's
         backend."""
-        direct_generation = (os.environ.get("ANTON_STATIC_COHERENT_ENTRY") == "on"
-                             and os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on"
+        direct_generation = (os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on"
                              and any(getattr(tool, "name", "") == "generate_artifact"
                                      and "name" in tool.input_schema.get("properties", {})
                                      for tool in tool_defs or []))

@@ -515,14 +515,12 @@ async def generate(
     # other; the channel is the only thing they share.
     session._artifact_progress = progress
     try:
-        fast_mode = os.environ.get("ANTON_STATIC_FAST_PATH", "")
-        if (fast_mode in {"direct", "facts"} and state.act_first
-                and all(attachment.kind == KIND_DATA for attachment in state.attachments)):
-            from .fast_static import prepare, run as run_fast_static
-            if await prepare(state):
-                result = await run_fast_static(state, mode=fast_mode)
-            else:
-                result = await run(state, entry=entry)
+        from . import fast_static
+
+        if (os.environ.get("ANTON_STATIC_FAST_PATH") == "direct" and state.act_first
+                and all(attachment.kind == KIND_DATA for attachment in state.attachments)
+                and fast_static.fits(state) and await fast_static.prepare(state)):
+            result = await fast_static.run(state)
         else:
             result = await run(state, entry=entry)
     except BaseException as exc:

@@ -14,10 +14,9 @@ operation registers the folder, gathers and validates the data, builds the
 page, and applies the existing static and browser checks. Use this path for
 fully specified reports as well as requests whose requirements need settling.
 Pass the user's request verbatim and keep agent_understanding short. Pass
-data or procedures already observed as known_data; do not query a source
-solely to repeat work the generator will perform. Recall a matching source
-skill first; discovery receives the recalled procedure.
-Client-side filters and calculations work in a snapshot without a backend.
+data or procedures already observed as known_data, including the access
+details of a recalled source skill; do not query a source solely to repeat
+work the generator will perform.
 
 EXISTING ARTIFACTS:
 Find the existing artifact with list_artifacts, using match when its slug or

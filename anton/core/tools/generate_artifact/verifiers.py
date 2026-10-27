@@ -564,8 +564,7 @@ def verify_frontend(
 
 
 def verify_frontend_live(
-    entry: Path, *, cell_sandbox: CellSandbox | None, screenshot: bool = True, previous_html: str | None = None,
-    materialize_main: str | None = None,
+    entry: Path, *, cell_sandbox: CellSandbox | None, screenshot: bool = True, previous_html: str | None = None
 ) -> BrowserCheck:
     """Load the written page once in a browser.
 
@@ -608,8 +607,7 @@ def verify_frontend_live(
     """
     if render_check.configured_url() is not None:
         outcome = render_check.check_file(
-            entry.resolve(), cell_sandbox=cell_sandbox, screenshot=screenshot, previous_html=previous_html,
-            materialize_main=materialize_main,
+            entry.resolve(), cell_sandbox=cell_sandbox, screenshot=screenshot, previous_html=previous_html
         )
         if outcome.status == "unverified":
             found = render_check.unverified_findings(outcome)
@@ -621,7 +619,6 @@ def verify_frontend_live(
         return BrowserCheck(
             status="passed" if verdict.ok else "failed", verdict=verdict, screenshot=outcome.screenshot,
             coverage=outcome.coverage, views=tuple(outcome.views), comparison=outcome.comparison,
-            materialized_html=outcome.materialized_html,
         )
     findings = lint_html(entry.resolve(), cell_sandbox=cell_sandbox)
     if findings is None:

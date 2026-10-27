@@ -55,7 +55,7 @@ def existing_program(html):
     return match.group(1).strip() if match else None
 
 
-def document(program, *, chart_tables=False, timeline_axis=False, render_contract=False, geo_controls=False):
+def document(program):
     program = program.strip()
     fenced = re.fullmatch(r"```(?:javascript|js)?\s*\n(.*?)\n```", program, re.S | re.I)
     if fenced:
@@ -63,15 +63,7 @@ def document(program, *, chart_tables=False, timeline_axis=False, render_contrac
     if not re.search(r"\bCoworkPage\s*\(", program) or re.search(r"</script\s*>", program, re.I):
         raise ValueError("Return a complete JavaScript program calling await CoworkPage(config), without HTML or script tags.")
     css = (HERE / "presentation.css").read_text()
-    runtime = (HERE / "presentation.js").read_text()
-    if chart_tables:
-        runtime += "\n" + (HERE / "presentation_data.js").read_text()
-    if timeline_axis:
-        runtime += "\n" + (HERE / "presentation_timeline.js").read_text()
-    if render_contract:
-        runtime += "\n" + (HERE / "presentation_contract.js").read_text()
-    if geo_controls:
-        runtime += "\n" + (HERE / "presentation_geography.js").read_text()
+    runtime = (HERE / "presentation.js").read_text() + "\n" + (HERE / "presentation_data.js").read_text()
     return ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
             '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
             "<title>Artifact</title><style>" + css + "</style></head><body>"

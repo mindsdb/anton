@@ -73,10 +73,6 @@ dependencies = [
 clipboard = [
     "Pillow>=12.3.0",
 ]
-# Offline GeoNames place lookup for artifact generation.
-geo = [
-    "geonamescache==3.0.1",
-]
 
 [dependency-groups]
 scratchpad = [

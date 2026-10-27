@@ -1884,7 +1884,8 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
             slug = artifact.slug
             _track_artifact(session, store, slug, summary=f"Created artifact: {name}")
     if not slug:
-        yield "Error: `slug` is required."
+        yield ("Error: `slug` (an existing artifact) or `name` (a new one) is required."
+               if os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on" else "Error: `slug` is required.")
         return
     artifact = store.open(slug)
     if artifact is None:
@@ -2010,13 +2011,14 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
             return await coro
 
     def failure_context(detail):
+        message = detail if detail.startswith("Error:") else _generation_failed(detail)
         if os.environ.get("ANTON_STATIC_SINGLE_CALL") != "on":
-            return _generation_failed(detail) if not detail.startswith("Error:") else detail
+            return message
         # Creation may have happened inside this call. Losing its identity on
         # failure makes a caller recreate the artifact or discard collected data.
         recovery = {"status": "failed", "slug": slug, "path": str(folder),
-                    "primary": artifact.primary, "message": _generation_failed(detail),
-                    "retry_instruction": "If retrying, reuse this slug and its saved source data. Do not create another artifact or substitute demo/default values."}
+                    "primary": artifact.primary, "message": message,
+                    "if_the_user_asks_to_retry": "Call generate_artifact with this slug; it keeps the saved source data. Do not create another artifact or substitute demo/default values."}
         for key, name in (("observed_data_file", "observed-data.json"),
                           ("last_saved_component_program", "presentation-program.js")):
             if (folder / name).is_file():

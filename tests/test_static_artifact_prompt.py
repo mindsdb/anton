@@ -16,7 +16,6 @@ def build(*, has_name=True, proactive=False, act_first=True):
 
 def enable(monkeypatch):
     monkeypatch.setenv("ANTON_STATIC_SINGLE_CALL", "on")
-    monkeypatch.setenv("ANTON_STATIC_COHERENT_ENTRY", "on")
 
 
 def test_delegated_artifacts_have_no_competing_registration_or_data_fetch_instruction(monkeypatch):
@@ -32,12 +31,11 @@ def test_delegated_artifacts_have_no_competing_registration_or_data_fetch_instru
 
 
 def test_old_tool_schema_and_default_configuration_keep_the_existing_workflow(monkeypatch):
-    monkeypatch.delenv("ANTON_STATIC_COHERENT_ENTRY", raising=False)
+    monkeypatch.delenv("ANTON_STATIC_SINGLE_CALL", raising=False)
     baseline = build(has_name=False)
+    assert "REGISTER FIRST, always" in build()
     enable(monkeypatch)
     assert build(has_name=False) == baseline
-    monkeypatch.delenv("ANTON_STATIC_COHERENT_ENTRY")
-    assert "REGISTER FIRST, always" in build()
 
 
 def test_proactive_preference_and_ask_first_are_preserved(monkeypatch):
