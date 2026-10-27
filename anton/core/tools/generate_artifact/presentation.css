@@ -5,3 +5,7 @@
 @media(prefers-reduced-motion:no-preference){button,select{transition:background-color .12s,border-color .12s}}
 .section-header:has(.data-toggle){display:grid;grid-template-columns:minmax(0,1fr) auto;gap:5px 16px}.section-header:has(.data-toggle) .caption{grid-column:1/-1;grid-row:2}.data-toggle{grid-column:2;grid-row:1;margin-left:0}.data-panel{max-height:none;overflow:visible}.table-wrap{overflow:auto}
 @media(min-width:600px){.table-wrap table{min-width:var(--table-width,0px)}.table-wrap th,.table-wrap td{overflow-wrap:normal;word-break:normal}}
+.geo-legend{display:flex;flex-wrap:wrap;gap:8px 20px;list-style:none;padding:0;margin:12px 0 0;font-size:13px;color:var(--muted)}.geo-legend li{display:inline-flex;gap:8px;align-items:center}.legend-key{display:inline-block;width:22px;height:4px;border-radius:2px;flex-shrink:0}
+.geo-view{position:relative}.point-annotations{position:absolute;inset:0;pointer-events:none}.point-note{position:absolute;font-size:11px;line-height:16px;white-space:nowrap;color:#e6edf3;text-shadow:-1px 0 #101923,1px 0 #101923,0 -1px #101923,0 1px #101923}.point-leader{position:absolute;height:0;border-top:1px solid #8ba7bc;transform-origin:left center}
+@keyframes cowork-route-flow{from{stroke-dashoffset:0}to{stroke-dashoffset:-30}}
+@media(prefers-reduced-motion:no-preference){.route-motion{stroke-dasharray:5 5;animation:cowork-route-flow 2s linear infinite}}

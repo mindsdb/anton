@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -96,3 +97,9 @@ async def test_the_component_writer_is_told_how_render_receives_controls(tmp_pat
                      artifact_type="html-app", artifact_path=tmp_path, slug="page", act_first=True)
     assert (await fast_static.run(state))["status"] == "generated"
     assert "object keyed by control IDs" in systems[0]
+
+
+def test_maps_get_label_placement_and_legends_and_motion_only_on_request():
+    page = component_page.document("await CoworkPage({title:'T',sections:[]});")
+    assert "CoworkMapLabels" in page and "CoworkGeoLegend" in page
+    assert "Only when the user asks for motion" in Path(fast_static.__file__).read_text()

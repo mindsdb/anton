@@ -58,17 +58,20 @@
         .backgroundColor('#101923').showAtmosphere(false).globeImageUrl(null).bumpImageUrl(null)
         .polygonsData(land.features).polygonCapColor(() => '#29445a').polygonSideColor(() => '#182b3b')
         .polygonStrokeColor(() => '#6d8b9f').polygonAltitude(.002)
-        .pointsData(points).pointLat(p => p.lat).pointLng(p => p.lon).pointRadius(.35).pointAltitude(.02)
+        .pointsData(points).pointLat(p => p.lat).pointLng(p => p.lon).pointRadius(window.CoworkGlobeLabels ? .7 : .35).pointAltitude(.02)
         .pointColor(p => p.color || '#f0bc62').pointLabel(p => escape(p.label || p.name))
-        .labelsData(points.filter(p=>p.label)).labelLat(p=>p.lat).labelLng(p=>p.lon)
+        .labelsData(window.CoworkGlobeLabels?[]:points.filter(p=>p.label)).labelLat(p=>p.lat).labelLng(p=>p.lon)
         .labelText(p=>p.label).labelColor(()=>'#e6edf3').labelSize(.55).labelAltitude(.035)
         .arcsData(routes).arcStartLat(r => r.from[1]).arcStartLng(r => r.from[0])
         .arcEndLat(r => r.to[1]).arcEndLng(r => r.to[0]).arcColor(r => r.color || '#83b6f5')
         .arcStroke(.45).arcLabel(r => escape(r.label || ''));
-      const center=section.center;
+      const focus=points.length?points:routes.flatMap(route=>[route.from,route.to].map(pair=>({lon:pair[0],lat:pair[1]})));
+      const center=section.center||window.CoworkGeoCenter?.(focus);
       if (center) { coordinate(center); globe.pointOfView({lng: center[0], lat: center[1], altitude: 2.2}, 0); }
       const observer = new ResizeObserver(() => globe.width(node.clientWidth).height(node.clientHeight));
       observer.observe(node); cleanup.push(() => {observer.disconnect(); globe._destructor();});
+      if(window.CoworkGlobeLabels)CoworkGlobeLabels(node,globe,points,cleanup);
+      if(window.CoworkGeoMotion)CoworkGeoMotion(node,section,globe);
     } else if (section.library === 'echarts') {
       await load('echarts'); if (!node.isConnected) return;
       echarts.registerMap('cowork-world', land);
@@ -87,7 +90,8 @@
       group.selectAll('path.route').data(routes).join('path').attr('class','route').attr('d',r=>path({type:'LineString',coordinates:[r.from,r.to]})).attr('fill','none').attr('stroke',r=>r.color||'#83b6f5').attr('stroke-width',2).append('title').text(r=>r.label||'');
       group.selectAll('circle').data(points).join('circle').attr('cx',p=>projection([p.lon,p.lat])[0]).attr('cy',p=>projection([p.lon,p.lat])[1]).attr('r',4).attr('fill',p=>p.color||'#f0bc62').append('title').text(p=>p.label||p.name||'');
       const placed=[];
-      for(const point of points.filter(p=>p.label)){
+      if(window.CoworkMapLabels)CoworkMapLabels(group,points,projection,w,h);
+      else for(const point of points.filter(p=>p.label)){
         const [px,py]=projection([point.lon,point.lat]);
         const text=group.append('text').text(point.label).attr('font-size',11).attr('fill','#e6edf3').attr('stroke','#101923').attr('stroke-width',3).attr('paint-order','stroke');
         const width=text.node().getComputedTextLength(),x=Math.max(8,Math.min(w-width-8,px+8));
@@ -97,6 +101,7 @@
         text.attr('x',x).attr('y',y);placed.push({x,y,w:width});
       }
       svg.call(d3.zoom().filter(event=>event.type!=='wheel'||event.ctrlKey).scaleExtent([1,8]).on('zoom',event=>group.attr('transform',event.transform)));
+      if(window.CoworkGeoMotion)CoworkGeoMotion(node,section);
     }
   }
   async function drawChart(node, section, cleanup) {
@@ -210,6 +215,7 @@
         if(!view.querySelector('canvas,svg'))throw new Error('The requested view did not draw.');
         view.setAttribute('aria-busy','false');
         if(chart&&window.CoworkChartData)CoworkChartData(chart,head,section,config,section.id,openData,cleanup);
+        if(['map','globe'].includes(s.type)&&window.CoworkGeoLegend)CoworkGeoLegend(section,s);
         if(current!==version)return;
       }
     }

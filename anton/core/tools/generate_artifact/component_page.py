@@ -81,7 +81,7 @@ def document(program):
             "render receives an object keyed by control ids, never a string. Read the control's value by "
             "its id, for example render: ({view}) => view === 'orders' ? ... or selection.view === 'orders'."
         )
-    runtime = "\n".join((HERE / name).read_text() for name in ("presentation_contract.js", "presentation.js", "presentation_data.js"))
+    runtime = "\n".join((HERE / name).read_text() for name in ("presentation_contract.js", "presentation.js", "presentation_data.js", "presentation_geography.js"))
     return ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
             '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
             "<title>Artifact</title><style>" + css + "</style></head><body>"

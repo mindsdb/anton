@@ -278,6 +278,10 @@ async def run(state):
         "id:'scope', read selection.scope or destructure render:({scope})=>({...}). Never "
         "compare the whole selection object to a string or use it as a source dictionary key. "
         "Unknown control keys and printing objects trigger a precise repair error."
+        "\nMap and globe sections also take legend:[{label,color}] for a visible color key; "
+        "point labels are placed so they don't overlap. Only when the user asks for motion: "
+        "D3 maps take routeMotion:true and globes take autoRotate:true with an optional "
+        "rotationSpeed between -4 and 4. Motion respects the reader's reduced-motion setting."
     )
     messages = [{"role": "user", "content": context}]
     attempt = 0
