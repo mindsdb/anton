@@ -329,7 +329,7 @@ Every push to `staging` publishes a **release candidate** through [`.github/work
 
 ### Scratchpad image
 
-[`.github/workflows/scratchpad-dev-build.yml`](.github/workflows/scratchpad-dev-build.yml) builds the scratchpad pod image and pushes it to ECR. It runs on a GitHub-hosted runner and gets short-lived AWS credentials through GitHub OIDC.
+[`.github/workflows/scratchpad-dev-build.yml`](.github/workflows/scratchpad-dev-build.yml) builds the scratchpad pod image and pushes it to ECR. It runs on a GitHub-hosted runner and gets short-lived AWS credentials through GitHub OIDC. Both roles live in the account the `AWS_DEV_ACCOUNT_ID` organization secret names, which the release pipelines pass to the build.
 
 | Run | GitHub environment | AWS role | ECR repository |
 |---|---|---|---|

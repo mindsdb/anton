@@ -23,6 +23,7 @@ there, and nothing in this tree can see it. ``_reachable_labels`` returns
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 from typing import NamedTuple
@@ -53,8 +54,13 @@ _GATE_CONDITION = "needs.gate.outputs.run == 'true'"
 # events start.
 _WRITE_ACCESS_TRIGGERS = frozenset({"push", "schedule", "workflow_dispatch", "workflow_call"})
 
-_DEV_ROLE = "arn:aws:iam::168681354662:role/gha-anton-ecr-dev"
-_PROD_ROLE = "arn:aws:iam::168681354662:role/gha-anton-ecr-prod"
+_DEV_ROLE = "gha-anton-ecr-dev"
+_PROD_ROLE = "gha-anton-ecr-prod"
+
+# Both roles live in the account this organization secret names. The build
+# spells the ARN out from it, so the account id never enters this repository.
+_ACCOUNT_SECRET = "AWS_DEV_ACCOUNT_ID"
+_ROLE_TO_ASSUME = "arn:aws:iam::${{ secrets.%s }}:role/${{ needs.gate.outputs.role }}" % _ACCOUNT_SECRET
 
 
 class _GateRun(NamedTuple):
@@ -484,8 +490,9 @@ def test_the_build_uses_the_target_the_gate_picked(workflow: dict) -> None:
         "subject no longer matches the role it assumes"
     )
     credentials = _step_using(build, "aws-actions/configure-aws-credentials").get("with") or {}
-    assert _expression(credentials.get("role-to-assume")) == "needs.gate.outputs.role", (
-        "the build assumes a role the gate did not pick"
+    assert credentials.get("role-to-assume") == _ROLE_TO_ASSUME, (
+        "the build assumes a role the gate did not pick, or names its account "
+        "some other way than the organization secret"
     )
     push = _step_using(build, "mindsdb/github-actions/build-push-ecr").get("with") or {}
     assert _expression(push.get("module-name")) == "needs.gate.outputs.repository", (
@@ -495,6 +502,29 @@ def test_the_build_uses_the_target_the_gate_picked(workflow: dict) -> None:
         "the build no longer uses this runner's own builder; the shared action's "
         "default reaches for the in-cluster one"
     )
+
+
+def test_each_release_pipeline_passes_the_account_secret_and_nothing_else(
+    workflows: dict[str, dict], workflow: dict
+) -> None:
+    """A called workflow sees only the secrets its caller passes. Without this
+    one the ARN names no account, and the release's image build fails."""
+    declared = workflow.get(True, workflow.get("on"))["workflow_call"].get("secrets") or {}
+    assert set(declared) == {_ACCOUNT_SECRET}
+    assert declared[_ACCOUNT_SECRET].get("required") is True
+    for filename in _RELEASE_CALLERS:
+        passed = _image_build_caller(workflows, filename).get("secrets")
+        assert passed == {_ACCOUNT_SECRET: "${{ secrets.%s }}" % _ACCOUNT_SECRET}, (
+            f"{filename} passes {passed!r} to {_WORKFLOW.name}"
+        )
+
+
+def test_no_workflow_names_an_aws_account(workflows: dict[str, dict]) -> None:
+    """This repository is public. An account id in a workflow is in its history
+    and in every run's log."""
+    for filename in workflows:
+        text = (_WORKFLOW_DIR / filename).read_text(encoding="utf-8")
+        assert not re.search(r"arn:aws:[a-z0-9-]*:[a-z0-9-]*:[0-9]{12}:", text), f"{filename} names an AWS account"
 
 
 def test_the_build_assumes_the_role_before_it_pushes(workflow: dict) -> None:

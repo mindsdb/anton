@@ -65,6 +65,8 @@ jobs:
     with:
       environment: production
       version: ${{ needs.auto-release.outputs.version }}
+    secrets:
+      AWS_DEV_ACCOUNT_ID: ${{ secrets.AWS_DEV_ACCOUNT_ID }}
 
   publish:
     name: Publish to PyPI

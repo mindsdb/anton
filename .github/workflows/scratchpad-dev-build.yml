@@ -41,6 +41,10 @@ on:
         description: "The anton version the image reports; the tag the caller just minted."
         type: string
         required: true
+    secrets:
+      AWS_DEV_ACCOUNT_ID:
+        description: "The AWS account that holds both ECR writer roles."
+        required: true
 
 permissions:
   contents: read
@@ -98,8 +102,8 @@ jobs:
 
       # One row per way in. Which role a job can assume follows from the
       # environment it names, because the trust policies on the
-      # gha-anton-ecr-dev and gha-anton-ecr-prod IAM roles (mindsdb/terraform)
-      # match the OIDC subject and ref. A pull request names no environment,
+      # gha-anton-ecr-dev and gha-anton-ecr-prod IAM roles match the OIDC
+      # subject and ref. A pull request names no environment,
       # so its token carries the pull_request subject, which only the dev role
       # trusts. The prod role trusts only the prod environment on main, and
       # the prod environment admits only main.
@@ -113,17 +117,17 @@ jobs:
           case "${CALLED_FOR:-}" in
             "")
               environment=""
-              role="arn:aws:iam::168681354662:role/gha-anton-ecr-dev"
+              role="gha-anton-ecr-dev"
               repository="minds-anton-scratchpad-dev"
               ;;
             staging)
               environment="staging"
-              role="arn:aws:iam::168681354662:role/gha-anton-ecr-dev"
+              role="gha-anton-ecr-dev"
               repository="minds-anton-scratchpad-dev"
               ;;
             production)
               environment="prod"
-              role="arn:aws:iam::168681354662:role/gha-anton-ecr-prod"
+              role="gha-anton-ecr-prod"
               repository="minds-anton-scratchpad"
               ;;
             *)
@@ -239,10 +243,14 @@ jobs:
         with:
           persist-credentials: false
       - uses: mindsdb/github-actions/setup-env@main
+      # Both roles live in one account. Its id is an organization secret, so it
+      # stays out of this public repository and GitHub masks it in the log. The
+      # gate outputs only the role name, because GitHub drops a job output that
+      # holds a secret.
       - name: Assume the ECR writer role
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          role-to-assume: ${{ needs.gate.outputs.role }}
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_DEV_ACCOUNT_ID }}:role/${{ needs.gate.outputs.role }}
           aws-region: ${{ env.AWS_REGION }}
       - id: build
         uses: mindsdb/github-actions/build-push-ecr@main

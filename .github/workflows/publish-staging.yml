@@ -49,6 +49,8 @@ jobs:
     with:
       environment: staging
       version: ${{ needs.release.outputs.version }}
+    secrets:
+      AWS_DEV_ACCOUNT_ID: ${{ secrets.AWS_DEV_ACCOUNT_ID }}
 
   publish:
     name: Build and publish pre-release to PyPI
