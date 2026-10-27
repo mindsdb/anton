@@ -458,6 +458,35 @@ async def test_fast_path_accepts_validated_data_uploads_but_keeps_asset_staging(
     if expected_fast:
         assert prepare.call_args.args[0].attachments[0].path == str(csv)
 
+async def test_a_page_the_direct_writer_cannot_finish_goes_through_the_normal_pipeline(tmp_path, monkeypatch):
+    from anton.core.tools.generate_artifact import fast_static
+
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    result = {"status": "generated", "files_written": [], "internal_files": [], "trace": []}
+    seen = []
+
+    async def normal(state, **kwargs):
+        seen.append((list(state.messages), state.gathering_complete))
+        return result
+
+    async def prepare(state):
+        state.messages.append({"role": "user", "content": "gathered"})
+        state.gathering_complete = True
+        return True
+
+    monkeypatch.setenv("ANTON_STATIC_FAST_PATH", "direct")
+    monkeypatch.setattr(fast_static, "prepare", prepare)
+    monkeypatch.setattr(fast_static, "run", AsyncMock(return_value=None))
+    monkeypatch.setattr(orchestrator, "run", normal)
+    monkeypatch.setattr(engine, "_scratchpads_context", lambda session: "")
+    monkeypatch.setattr(orchestrator, "_datasource_catalog", lambda session: None)
+    session = SimpleNamespace(act_first=True, _workspace=SimpleNamespace(base=tmp_path), _scratchpads=None)
+    await engine.generate(session=session, slug="report", artifact_path=artifact, artifact_type="html-app",
+                          user_request="Show sales", agent_understanding="A report")
+    assert seen == [([], False)]
+
+
 async def test_generate_records_kept_and_dropped_attachments(tmp_path: Path, monkeypatch):
     csv, _ = _files(tmp_path)
     art = tmp_path / "art"

@@ -521,6 +521,9 @@ async def generate(
                 and all(attachment.kind == KIND_DATA for attachment in state.attachments)
                 and fast_static.fits(state) and await fast_static.prepare(state)):
             result = await fast_static.run(state)
+            if result is None:
+                fast_static.reset_discovery(state)
+                result = await run(state, entry=entry)
         else:
             result = await run(state, entry=entry)
     except BaseException as exc:

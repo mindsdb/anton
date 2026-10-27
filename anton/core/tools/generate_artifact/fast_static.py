@@ -12,6 +12,7 @@ import copy
 import os
 import re
 
+from anton.core.llm.structured import looks_truncated
 from anton.utils.datasources import scrub_output
 from anton.utils.nofollow import read_bytes_nofollow
 
@@ -21,7 +22,8 @@ from .orchestrator import _finish, _stopped_over_budget
 
 MAX_SOURCE_CHARS = 96000
 MAX_PAGE_CHARS = 18000
-MAX_EXISTING_CHARS = 96000
+# About what WRITER_TOKENS can return.
+MAX_EXISTING_CHARS = 24000
 WRITER_TOKENS = 8000
 SOURCE_TOOLS = {"scratchpad", "read_text_file", "web_fetch", "web_search", "recall_skill"}
 
@@ -33,12 +35,26 @@ def _existing_page(state, path):
         return ""
 
 
+def reset_discovery(state):
+    """Before the normal pipeline runs: its gathering must not continue or trust this one."""
+    state._pipeline_system, state._pipeline_tools = "", None
+    state.messages, state.scratchpad_execs, state.web_calls = [], [], []
+    state.gathering_notes, state.web_notes, state.final_artifact_type = "", "", ""
+    state.assumptions, state.open_points, state.declared_sources = [], [], []
+    state.unverified_sources, state.known_data_verified = [], []
+    state.gathering_complete = False
+
+
 def fits(state):
-    """The writer returns the whole page in one reply, so a larger page keeps the normal pipeline."""
-    from . import observed_data
+    """The writer returns the whole page (or its program) in one reply; a larger one keeps the normal pipeline."""
+    from . import component_page, observed_data
 
     path = sub_tools._sandboxed_path(state.artifact_path, state.primary or "index.html")
-    return path is not None and len(observed_data.strip_binding(_existing_page(state, path))) <= MAX_EXISTING_CHARS
+    if path is None:
+        return False
+    page = observed_data.strip_binding(_existing_page(state, path))
+    program = component_page.existing_program(page) if os.environ.get("ANTON_STATIC_COMPONENT_WRITER") == "on" else None
+    return len(program if program is not None else page) <= MAX_EXISTING_CHARS
 
 
 def _text(value):
@@ -161,7 +177,7 @@ async def prepare(state):
     await run_gathering_loop(state)
     final_type = state.final_artifact_type or state.artifact_type
     if final_type != "html-app" or not state.gathering_complete or state.unverified_sources:
-        state._pipeline_system, state._pipeline_tools = "", None
+        reset_discovery(state)
         return False
     if final_type != state.artifact_type:
         from anton.core.tools.tool_handlers import resolve_artifact_store
@@ -195,7 +211,8 @@ async def run(state):
         state.internal_files.append("observed-data.json")
         if observed_data.credential_bearing(handoff):
             handoff = None
-            state.verify_warnings.append("The structured source handoff contains credentials and was not embedded.")
+            (state.artifact_path / "observed-data.json").unlink(missing_ok=True)
+            state.verify_warnings.append("The structured source handoff contained credentials and was deleted, not embedded.")
     except FileNotFoundError:
         pass
     except (OSError, ValueError, RecursionError):
@@ -266,6 +283,9 @@ async def run(state):
             system=component_system if components else system, messages=messages, max_tokens=WRITER_TOKENS,
         ), on_text=state.peek_for("generate_frontend"))
         state.peek_done("generate_frontend")
+        if looks_truncated(response, WRITER_TOKENS):
+            state.record("fast_static", "fallback", "the page did not fit in one writer reply")
+            return None
         if components and response.content.strip() == component_page.FALLBACK:
             components = False
             full_context = context + ("\n\nExisting full HTML for the ordinary writer:\n" + existing_html if existing_html and existing_html != existing else "")
@@ -284,7 +304,7 @@ async def run(state):
         verdict = await asyncio.to_thread(verifiers.verify_frontend, html, is_fullstack=False)
         if not verdict.ok:
             state.record("fast_static_check", "failed", "; ".join(verdict.errors))
-            messages += [{"role": "assistant", "content": response.content if components else html},
+            messages += [{"role": "assistant", "content": response.content},
                          {"role": "user", "content": "Repair these existing static checks: " + "; ".join(verdict.errors)}]
             attempt += 1
             continue
@@ -315,7 +335,7 @@ async def run(state):
         if live.status == "failed":
             state.record("fast_static_browser", "failed", "; ".join(live.verdict.errors))
             if attempt == 0:
-                messages += [{"role": "assistant", "content": response.content if components else html},
+                messages += [{"role": "assistant", "content": response.content},
                              {"role": "user", "content": "Repair these existing browser checks: " + "; ".join(live.verdict.errors)}]
                 attempt += 1
                 continue

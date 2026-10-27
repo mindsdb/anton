@@ -33,5 +33,7 @@ set; with all three unset, generation is the same as without this code.
    policy, screenshot setting and the previous page for comparison. A page that still fails
    the browser check after one repair ends as `BrowserCheckFailed`, like the normal pipeline.
 
-Anything else (other types, other attachments, ask-first mode, or an existing page over
-96,000 characters) uses the normal pipeline.
+Anything else (other types, other attachments, ask-first mode, or an existing page or
+program over 24,000 characters) uses the normal pipeline, and so does a page the writer
+cannot finish in one reply. The handoff and the saved program are internal files: they are
+never listed or published.

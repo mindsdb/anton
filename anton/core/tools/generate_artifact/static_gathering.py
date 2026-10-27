@@ -49,4 +49,5 @@ def validate_handoff(folder, before):
         raise ValueError("This execution did not write a fresh observed-data.json.")
     value = read_handoff(folder)
     if credential_bearing(value):
-        raise ValueError("The data handoff contains credentials; save data without credentials.")
+        (folder / "observed-data.json").unlink(missing_ok=True)
+        raise ValueError("The data handoff contains credentials and was deleted; save data without credentials.")

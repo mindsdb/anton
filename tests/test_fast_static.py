@@ -211,3 +211,79 @@ async def test_coherent_gather_changes_only_its_copied_control_tool(tmp_path, mo
     monkeypatch.setattr(engine, "run_gathering_loop", gather)
     assert await fast_static.prepare(state)
     assert original_finish["description"] == before
+
+
+def test_the_handoff_and_program_are_internal_files():
+    from anton.core.artifacts.internal_files import GENERATION_INPUT_FILES, NON_CONTENT_NAMES
+    assert {"observed-data.json", "presentation-program.js"} <= GENERATION_INPUT_FILES <= NON_CONTENT_NAMES
+
+
+async def test_a_handoff_with_credentials_is_deleted_not_embedded(tmp_path, monkeypatch):
+    import json
+    html = '<html lang="en"><head><meta name="viewport" content="width=device-width"></head><body>ok</body></html>'
+
+    async def stream(**kwargs):
+        yield StreamComplete(LLMResponse(content=html))
+
+    (tmp_path / "observed-data.json").write_text(json.dumps({"rows": [1], "api_key": "x"}))
+    monkeypatch.setattr(fast_static.verifiers, "verify_frontend_live", lambda *a, **kw: BrowserCheck(status="passed"))
+    state = GenState(session=SimpleNamespace(_llm=SimpleNamespace(code_stream=stream), history=[]),
+                     artifact_type="html-app", artifact_path=tmp_path, slug="r", act_first=True)
+    assert (await fast_static.run(state))["status"] == "generated"
+    assert not (tmp_path / "observed-data.json").exists()
+    assert '"api_key"' not in (tmp_path / "index.html").read_text()
+
+
+async def test_a_repair_resends_the_reply_without_the_embedded_data(tmp_path, monkeypatch):
+    import json
+    from anton.core.tools.generate_artifact.verifiers import VerifyResult
+    html = '<html lang="en"><head><meta name="viewport" content="width=device-width"></head><body>ok</body></html>'
+    calls = []
+
+    async def stream(**kwargs):
+        calls.append(kwargs)
+        yield StreamComplete(LLMResponse(content=html))
+
+    (tmp_path / "observed-data.json").write_text(json.dumps({"rows": ["large-dataset-marker"]}))
+    results = iter([BrowserCheck(status="failed", verdict=VerifyResult(errors=["blank"])), BrowserCheck(status="passed")])
+    monkeypatch.setattr(fast_static.verifiers, "verify_frontend_live", lambda *a, **kw: next(results))
+    state = GenState(session=SimpleNamespace(_llm=SimpleNamespace(code_stream=stream), history=[]),
+                     artifact_type="html-app", artifact_path=tmp_path, slug="r", act_first=True)
+    assert (await fast_static.run(state))["status"] == "generated"
+    assert calls[1]["messages"][1] == {"role": "assistant", "content": html}
+
+
+async def test_a_reply_that_runs_out_of_room_hands_back_to_the_normal_pipeline(tmp_path):
+    async def stream(**kwargs):
+        yield StreamComplete(LLMResponse(content="<html><body>cut", stop_reason="max_tokens"))
+
+    state = GenState(session=SimpleNamespace(_llm=SimpleNamespace(code_stream=stream), history=[]),
+                     artifact_type="html-app", artifact_path=tmp_path, slug="r", act_first=True)
+    assert await fast_static.run(state) is None
+    assert not (tmp_path / "index.html").exists()
+
+
+async def test_a_fallback_starts_discovery_over(tmp_path, monkeypatch):
+    from anton.core.tools.generate_artifact.discovery import engine
+    state = GenState(session=SimpleNamespace(history=[]), artifact_type="html-app", artifact_path=tmp_path,
+                     slug="r", act_first=True)
+
+    async def gather(received):
+        received.messages.append({"role": "user", "content": "gathered"})
+        received.scratchpad_execs.append({"code": "x"})
+        received.gathering_complete = True
+        received.final_artifact_type = "fullstack-stateless-app"
+
+    monkeypatch.setattr(engine, "run_gathering_loop", gather)
+    assert await fast_static.prepare(state) is False
+    assert state.messages == [] and state.scratchpad_execs == []
+    assert not state.gathering_complete and state.final_artifact_type == ""
+
+
+def test_a_runtime_page_is_sized_by_its_program(tmp_path, monkeypatch):
+    from anton.core.tools.generate_artifact import component_page
+    monkeypatch.setenv("ANTON_STATIC_COMPONENT_WRITER", "on")
+    (tmp_path / "index.html").write_text(component_page.document("await CoworkPage({title:'T',sections:[]});"))
+    state = GenState(session=SimpleNamespace(), artifact_type="html-app", artifact_path=tmp_path, slug="r", act_first=True)
+    assert len((tmp_path / "index.html").read_text()) > fast_static.MAX_EXISTING_CHARS
+    assert fast_static.fits(state)
