@@ -181,6 +181,7 @@
       controls.append(wrap);
     }
     if (controls.children.length) root.append(controls);
+    if (config.overview) summary(root, config.overview, 'overview');
     root.append(body);
     async function update() {
       const current=++version;dispose();body.replaceChildren();
