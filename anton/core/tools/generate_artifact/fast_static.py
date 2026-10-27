@@ -251,6 +251,10 @@ async def run(state):
         "table, including flow links. Keep all other requested tables and interactions. "
         "config.dataLabels can override localized labels: data, series, item, value, "
         "source, target, previous, next. Built-in languages: en, es, fr, de, pt, it."
+        "\nThe render argument is ALWAYS an object keyed by control IDs. If a control has "
+        "id:'scope', read selection.scope or destructure render:({scope})=>({...}). Never "
+        "compare the whole selection object to a string or use it as a source dictionary key. "
+        "Unknown control keys and printing objects trigger a precise repair error."
     )
     messages = [{"role": "user", "content": context}]
     attempt = 0

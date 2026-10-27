@@ -20,6 +20,7 @@
   }
   function el(tag, text, className) {
     const node = document.createElement(tag);
+    text = CoworkText(text);
     if (text !== undefined && text !== null) node.textContent = String(text);
     if (className) node.className = className;
     return node;
@@ -29,7 +30,7 @@
   }
   window.CoworkNumber = (value, unit = '', lang = document.documentElement.lang || 'en') => {
     if (value === null || value === undefined || typeof value === 'number' && !Number.isFinite(value)) return '—';
-    if (typeof value !== 'number') return String(value);
+    if (typeof value !== 'number') {CoworkText(value);return String(value);}
     if (/^[A-Z]{3}$/.test(unit)) return new Intl.NumberFormat(lang, {style: 'currency', currency: unit, maximumFractionDigits: 2}).format(value);
     return new Intl.NumberFormat(lang, {maximumFractionDigits: 2}).format(value) + (unit ? (unit === '%' ? '' : ' ') + unit : '');
   };
@@ -183,7 +184,7 @@
     root.append(body);
     async function update() {
       const current=++version;dispose();body.replaceChildren();
-      const page = config.render ? config.render({...selected}) : config;
+      const page = config.render ? config.render(CoworkSelection(selected)) : config;
       summary(body, page, 'page');
       for(const [index,s] of (page.sections||[]).entries()){
         const section=el('section',null,'section');section.id=s.id||'section-'+index;

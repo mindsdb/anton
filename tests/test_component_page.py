@@ -63,3 +63,36 @@ async def test_component_repair_receives_the_program_and_retains_bound_data(tmp_
     assert calls[1]["messages"][1]["content"]==PROGRAM
     assert list(observed_data.previous_data((tmp_path/"index.html").read_text()).values())==[data]
     assert (tmp_path/"presentation-program.js").read_text()==PROGRAM
+
+
+@pytest.mark.parametrize("program,rejected", [
+    ("await CoworkPage({title:'T',controls:[{id:'view',type:'tabs',value:'a',options:[]}],"
+     "render: selection => selection === 'a' ? {sections:[]} : {sections:[]}});", True),
+    ("const render = s => { switch (s) { default: return {sections:[]}; } };\n"
+     "await CoworkPage({title:'T',controls:[],render});", True),
+    ("await CoworkPage({title:'T',controls:[{id:'view',type:'tabs',value:'a',options:[]}],"
+     "render: ({view}) => view === 'a' ? {sections:[]} : {sections:[]}});", False),
+    ("await CoworkPage({title:'T',controls:[],render: selection => selection.view === 'a' ? {sections:[]} : {sections:[]}});", False),
+    ("const open = rows.filter(s => s === 'Open');\n"
+     "await CoworkPage({title:'T',controls:[],render: s => ({sections:[]})});", False),
+])
+def test_a_render_that_treats_the_selection_as_a_string_is_sent_back_for_repair(program, rejected):
+    if rejected:
+        with pytest.raises(ValueError, match="keyed by control ids"):
+            component_page.document(program)
+    else:
+        assert component_page.existing_program(component_page.document(program)) == program
+
+
+async def test_the_component_writer_is_told_how_render_receives_controls(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTON_STATIC_COMPONENT_WRITER", "on")
+    (tmp_path / "observed-data.json").write_text(json.dumps({"revenue": 42}))
+    systems = []
+    async def stream(**kwargs):
+        systems.append(kwargs["system"])
+        yield StreamComplete(LLMResponse(content=PROGRAM))
+    monkeypatch.setattr(fast_static.verifiers, "verify_frontend_live", lambda *a, **kw: BrowserCheck(status="passed"))
+    state = GenState(session=SimpleNamespace(history=[], _llm=SimpleNamespace(code_stream=stream)),
+                     artifact_type="html-app", artifact_path=tmp_path, slug="page", act_first=True)
+    assert (await fast_static.run(state))["status"] == "generated"
+    assert "object keyed by control IDs" in systems[0]

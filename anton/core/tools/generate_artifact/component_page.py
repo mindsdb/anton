@@ -6,7 +6,6 @@ HERE = Path(__file__).parent
 BEGIN = "/* cowork-presentation-begin */"
 END = "/* cowork-presentation-end */"
 FALLBACK = "USE_HTML_WRITER"
-
 SYSTEM = """Build the user's complete static artifact using the provided presentation runtime.
 Return only JavaScript, without HTML, markdown or commentary. The host supplies all CSS, library
 loading, sizing, phone reflow and the exact source JSON at window.ARTIFACT_DATA. Do not reproduce
@@ -50,6 +49,20 @@ requested scope and show exact values in labels, a table or details as well as t
 Keep visible text in the user's language. Do not invent currency or translate source identifiers.
 """
 
+def _compares_selection(program):
+    """render(selection) used as a string: every control would show the same view."""
+    head = r"render\s*[:=]\s*(?:function\s*)?\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*(?:=>|\{)"
+    for name in {match.group(1) for match in re.finditer(head, program)}:
+        arg = re.escape(name)
+        heads = len(re.findall(head.replace("([A-Za-z_$][\\w$]*)", arg), program))
+        # A name bound again outside render may be compared in another function.
+        binds = re.findall(rf"\b{arg}\s*\)?\s*=>|function\s*[\w$]*\s*\(\s*{arg}\b|\b(?:const|let|var)\s+{arg}\b", program)
+        if len(binds) <= heads and re.search(
+                rf"(?<!typeof )\b{arg}\s*[!=]==?\s*['\"`]|['\"`]\s*[!=]==?\s*{arg}\b|switch\s*\(\s*{arg}\s*\)", program):
+            return True
+    return False
+
+
 def existing_program(html):
     match = re.search(re.escape(BEGIN) + r"(.*?)" + re.escape(END), html, re.S)
     return match.group(1).strip() if match else None
@@ -63,7 +76,12 @@ def document(program):
     if not re.search(r"\bCoworkPage\s*\(", program) or re.search(r"</script\s*>", program, re.I):
         raise ValueError("Return a complete JavaScript program calling await CoworkPage(config), without HTML or script tags.")
     css = (HERE / "presentation.css").read_text()
-    runtime = (HERE / "presentation.js").read_text() + "\n" + (HERE / "presentation_data.js").read_text()
+    if _compares_selection(program):
+        raise ValueError(
+            "render receives an object keyed by control ids, never a string. Read the control's value by "
+            "its id, for example render: ({view}) => view === 'orders' ? ... or selection.view === 'orders'."
+        )
+    runtime = "\n".join((HERE / name).read_text() for name in ("presentation_contract.js", "presentation.js", "presentation_data.js"))
     return ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
             '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
             "<title>Artifact</title><style>" + css + "</style></head><body>"
