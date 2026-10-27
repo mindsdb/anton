@@ -34,7 +34,10 @@ sections are any of:
   routes?:[{from:[lon,lat],to:[lon,lat],label?,color?}],center?:[lon,lat],library?:'d3'|'echarts'}.
   Map defaults to real D3 world geography with zoom/pan. Globe is actual rotatable globe.gl with
   country polygons and routes; it has no external textures. ECharts is an alternative for maps.
-  Use only observed or documented/geocoded coordinates. Report unresolved places in text, not fake positions.
+  Use coordinates from the data when it has them. For a well-known named place (a city, port or
+  country) without coordinates, use its approximate coordinates and say on the page that those
+  positions are approximate. Never invent a position for an unknown place, code or address; list
+  those places in text instead.
   A point's label is short VISIBLE text.
 - {type:'timeline',title,caption?,items:[{time,label,detail?}]} for actual event milestones.
 - {type:'text',title,text} for concise narrative or an explicit source limitation.

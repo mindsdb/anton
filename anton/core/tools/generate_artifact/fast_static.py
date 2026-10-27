@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import importlib.util
 import os
 import re
 
@@ -151,28 +150,6 @@ async def prepare(state):
         "copies of the same records. Source documentation remains instructions for "
         "access, not evidence for invented rows."
     )
-    # Experiment: offline place lookup, as in the earlier benchmarked version.
-    if os.environ.get("ANTON_STATIC_GEOCODING") == "on" and importlib.util.find_spec("geonamescache") is not None:
-        state._pipeline_system += (
-            "\nFor geographic views, resolve ONLY the actual places needed for the requested entities "
-            "and position roles during this collection. Use the installed local helper: "
-            "`from anton.core.tools.generate_artifact.geo_index import resolve_place`; "
-            "`position = resolve_place(observed_place, source_country)` returns lat, lon, country, "
-            "location, geonameid and GeoNames provenance. Country can be omitted only for a unique "
-            "place. Catch ValueError to keep ambiguous/unmatched places explicitly unresolved; do "
-            "not guess a candidate. Save each resolved position alongside its actual source entity "
-            "id and location role in observed-data.json. Do not geocode arbitrary identifiers, "
-            "country columns or descriptive labels. Retain source-supplied coordinates when they "
-            "describe the requested position. Credit GeoNames in a page using this lookup."
-            "\nGeocoding return contract: resolve_place returns a JSON mapping containing lat, "
-            "lon, country, location, geonameid and source. Retain that returned mapping directly "
-            "with the entity and position role; mapping access such as point['lat'] is supported. "
-            "An optional country must describe this exact place/position, not the organization's "
-            "home country or an origin/destination elsewhere. A place containing its own country "
-            "can be resolved without an unrelated hint. Catch only ValueError for an unresolved "
-            "place and preserve str(error); TypeError and AttributeError are programming errors "
-            "to repair, not evidence that coordinates are unavailable."
-        )
     state._pipeline_tools = copy.deepcopy([tool for tool in state.pipeline_tools
                                            if tool.get("name") in {"scratchpad", "web_fetch", "web_search", "ask_user", "finish_gathering"}])
     for tool in state._pipeline_tools:
