@@ -1506,6 +1506,11 @@ def _brief_and_notes(state) -> str:
     known = known_data_section(state)
     if known:
         parts.append(known)
+    from .data_files import state_files_section
+
+    files = state_files_section(state)
+    if files:
+        parts.append(files)
     if getattr(state, "web_notes", "").strip():
         parts.append(state.web_notes.strip())
     journal = state.journal()
@@ -1724,7 +1729,9 @@ TECH_SPEC_CARRY_FORWARD = (
     "what the build step needs and cannot get elsewhere: exact figures and "
     "computed values, quotes to display, image URLs, the source link, the "
     "full text of anything the artifact must reproduce exactly. Do not "
-    "paraphrase what must be reproduced exactly."
+    "paraphrase what must be reproduced exactly. Data under `## Data files` "
+    "reaches the build step in full: never copy its rows into the spec, refer "
+    "to a file by its id."
 )
 
 _TECH_SPEC_NO_RESTATE = (

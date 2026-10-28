@@ -1233,3 +1233,7 @@ def test_the_graph_shows_the_forced_fetch_and_the_loop_back():
     assert 'is_possible_to_fetch -> fetch_data_sample    [label="no, once, when connections exist"]' in g
     assert "fetch_data_sample    -> define_required_data" in g
     assert 'fetch_data_sample    -> not_enough_data      [label="iterations exhausted"]' in g
+
+
+def test_spec_does_not_copy_the_data_files():
+    assert "`## Data files`" in prompts.TECH_SPEC_CARRY_FORWARD

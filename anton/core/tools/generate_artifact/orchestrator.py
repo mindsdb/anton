@@ -394,6 +394,13 @@ async def _write_tech_spec(state: GenState) -> str | None:
         # conversation, so it continues it rather than being handed a summary.
         system = state.pipeline_system
         user = prompts.build_tech_spec_instruction(state)
+        # The data loop ran after the gathering history this call continues.
+        loop_files = [f for f in state.data_files if f.id in state.loop_data_ids]
+        if loop_files:
+            section = data_files.files_section(
+                state.artifact_path, loop_files, cell_sandbox=_cell_sandbox(state)
+            )
+            user = section + "\n\n" + user
         messages = state.messages
         tools = state.pipeline_tools
     else:
@@ -465,6 +472,9 @@ def _spec_context(state: GenState) -> str:
     known = prompts.known_data_section(state)
     if known:
         parts.append(known)
+    files = data_files.state_files_section(state)
+    if files:
+        parts.append(files)
     journal = state.journal()
     if journal:
         parts.append("## Progress journal (steps completed so far)\n" + journal)

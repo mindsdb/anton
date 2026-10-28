@@ -2282,3 +2282,34 @@ def test_a_finished_run_keeps_only_its_data_files(tmp_path: Path):
     orchestrator._finish(st)
     assert sorted(p.name for p in folder.iterdir()) == ["2.json"]
     assert cp.load(tmp_path).data_files == [{"id": "2", "sources": ["orders"], "description": ""}]
+
+
+def test_spec_context_carries_the_data_files_after_known_data(tmp_path: Path):
+    (tmp_path / DATA_DIRNAME).mkdir()
+    (tmp_path / DATA_DIRNAME / "1.json").write_text(json.dumps([{"Id": "SO-5001"}]))
+    st = _state(tmp_path, known_data="scratchpad `p`, variable `df` (DataFrame)")
+    st.data_files = [DataFile("1", ["orders"])]
+    text = orchestrator._spec_context(st)
+    assert text.index("## Known data") < text.index("## Data files")
+    assert "SO-5001" in text
+    assert "## Data files" in prompts._brief_and_notes(st)
+
+
+async def test_hot_path_spec_sees_the_files_the_data_loop_saved(tmp_path: Path, monkeypatch):
+    """The data loop runs after the PRD; on the hot path the spec step reads
+    only the gathering history, so its files are shown to it separately."""
+    (tmp_path / DATA_DIRNAME).mkdir()
+    (tmp_path / DATA_DIRNAME / "2.json").write_text(json.dumps([{"Id": "SO-5001"}]))
+    st = _state(tmp_path)
+    st.messages = [{"role": "user", "content": "gathering"}, {"role": "assistant", "content": "ok"}]
+    st.data_files = [DataFile("2", ["orders"])]
+    st.loop_data_ids = ["2"]
+    seen = {}
+
+    async def fake_plan(session, **kw):
+        seen["user"] = kw["user"]
+        return "## Insights\n- x", None
+
+    monkeypatch.setattr(orchestrator.engine, "_plan_whole_document", fake_plan)
+    assert await orchestrator._write_tech_spec(st) is None
+    assert "## Data files" in seen["user"] and "SO-5001" in seen["user"]
