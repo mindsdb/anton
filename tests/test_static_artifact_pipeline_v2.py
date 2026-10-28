@@ -120,7 +120,7 @@ async def test_large_evidence_uses_catalog_and_exact_inspection(tmp_path,monkeyp
     st=state(tmp_path,VALID);st.session._llm.code_stream=stream
     monkeypatch.setattr('anton.core.tools.generate_artifact.verifiers.verify_frontend_live',lambda *a,**k:BrowserCheck(status='passed'))
     assert (await compose(st,large))['status']=='generated'
-    assert 'schema catalog' in calls[0]['messages'][0]['content']
+    assert 'schema catalog' in calls[0]['messages'][0]['content'].lower()
     assert len(calls[0]['messages'][0]['content'])<10000
     assert any('499500' in str(m) for m in calls[1]['messages'])
 
@@ -171,3 +171,16 @@ async def test_loaded_source_cannot_be_declared_unavailable_without_a_read_attem
     assert 'Source failed' in await module.collect(st)
     assert len(calls)==3
     assert 'no source read has run yet' in str(calls[-1]['messages'])
+
+
+async def test_large_text_cells_do_not_escape_the_bounded_catalog(tmp_path,monkeypatch):
+    large=Evidence.model_validate({'datasets':{'documents':{'source':{'label':'Long text QA'},'rows':[{'body':'x'*300000,'count':2}]}}})
+    seen=[]
+    async def stream(**kwargs):
+        seen.append(kwargs)
+        yield StreamComplete(response=LLMResponse(content='',tool_calls=[ToolCall('compose','compose_static_artifact',VALID)]))
+    st=state(tmp_path,VALID);st.session._llm.code_stream=stream
+    monkeypatch.setattr('anton.core.tools.generate_artifact.verifiers.verify_frontend_live',lambda *a,**k:BrowserCheck(status='passed'))
+    assert (await compose(st,large))['status']=='generated'
+    assert len(seen[0]['messages'][0]['content'])<10000
+    assert '"truncated": true' in seen[0]['messages'][0]['content']
