@@ -7,23 +7,23 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-from anton.core.tools.generate_artifact import prompts, verifiers
+from anton.core.tools.generate_artifact import prompts
 
 
 def test_the_generator_prompts_pin_the_versions_the_check_carries():
     """A floating `@4`/`@5` gets whatever jsDelivr serves today, which the
-    check's mirror does not hold, so the page could only be unverified."""
+    check's mirror does not hold, so the page could only be unverified. The
+    prompts name each package the check carries at its exact version."""
     for prompt in (
         prompts.build_subagent_system_prompt(Path("/tmp/a")),
         prompts.build_frontend_system_prompt(Path("/tmp/a")),
     ):
-        assert "https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.3" in prompt
-        assert "https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js" in prompt
-        assert "@tailwindcss/browser@4\"" not in prompt and "echarts@5/" not in prompt
+        for package in prompts.CHECKED_LIBRARIES:
+            assert re.fullmatch(r"@?[\w./-]+@\d+\.\d+\.\d+", package), package
+            assert f"`{package}`" in prompt, package
 
 
 def test_the_verifier_contract_names_the_external_resource_warning():
@@ -60,12 +60,12 @@ def test_a_tabs_views_start_through_the_helper_too():
         prompts.build_subagent_system_prompt(Path("/tmp/a")),
         prompts.build_frontend_system_prompt(Path("/tmp/a")),
     ):
-        tab_rule = prompt.index("Multi-tab dashboards")
+        tab_rule = prompt.index("drawn when it\n  is first shown")
         helper = prompt.index("function runView(name, el, setup)")
         # The tab rule sits in the design rules, after the contract that
         # defines the helper it names.
         assert helper < tab_rule
-        assert "`initChartsFor(name)` starts each view on that tab through `runView`" in prompt
+        assert "and starts through `runView` too" in prompt
 
 
 def test_the_helper_names_the_failed_view_first_in_both_channels():
@@ -83,7 +83,6 @@ _GENERATOR_PROMPTS = (
     prompts.build_subagent_system_prompt(Path("/tmp/a")),
     prompts.build_frontend_system_prompt(Path("/tmp/a")),
 )
-_MAP_PACKAGES = ("d3@7.9.0", "topojson-client@3.1.0", "world-atlas@2.0.2", "globe.gl@2.34.2")
 
 
 def _skill() -> str:
@@ -91,24 +90,13 @@ def _skill() -> str:
     return path.read_text(encoding="utf-8")
 
 
-def test_the_generator_prompts_carry_the_tested_map_and_globe_recipes():
-    """A world-map request goes to generate_artifact, which recalls no skill.
-    Told that Tailwind and ECharts were the only resources a page may load,
-    and given no recipe, the generator had no tested way to draw a map:
-    ECharts ships no world outline. The spec writer's fixed stack names the
-    same packages, or spec.md forbids what the generator is told to use."""
+def test_the_generator_prompts_point_maps_at_published_geometry():
+    """ECharts ships no world outline and a hand-typed one is wrong, so a map
+    draws published geometry the check carries. No recipe is prescribed."""
     for prompt in _GENERATOR_PROMPTS:
         flat = " ".join(prompt.split())
-        for package in _MAP_PACKAGES:
-            assert package in flat, package
-        assert "echarts.registerMap('world', countries)" in flat
-        assert ".polygonsData(countries.features)" in flat
-        assert "d3.json(WORLD_ATLAS)" in flat
-        assert "the recipe packages under MAPS AND GLOBES" in flat
-        assert "for a map or globe, the recipe packages and world atlas named there" in flat
-    spec = " ".join(prompts.build_tech_spec_instruction(SimpleNamespace(prd="", artifact_type="html-app")).split())
-    for package in _MAP_PACKAGES:
-        assert package in spec, package
+        assert "never from coordinates typed by hand" in flat
+        assert "`world-atlas@2.0.2`" in flat and "`topojson-client@3.1.0`" in flat
 
 
 def test_the_generator_prompts_state_the_preview_policy():
@@ -118,31 +106,6 @@ def test_the_generator_prompts_state_the_preview_policy():
         assert "no external stylesheet or web font, no external image or map tile" in flat
         assert "Leaflet, raster map tiles, MapLibre" in flat
         assert "so the page renders on every deployment" in flat
-
-
-def test_the_map_recipe_passes_the_static_check_it_is_written_for():
-    """The recipe's own lines, put into a page, pass `verify_frontend`; the
-    same atlas loaded with `fetch()` fails it, which is why the recipe uses
-    `d3.json`."""
-    rules = prompts._DESIGN_RULES
-    bullet = rules[rules.index("- MAPS AND GLOBES"):rules.index("- d3 into an")]
-    code = re.findall(r"^\s*`(.+)`$", bullet, re.M)
-    tags = [line for line in code if line.startswith("<script")]
-    script = [line for line in code if not line.startswith("<")]
-    assert len(tags) == 2 and len(script) == 2, code
-    page = (
-        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
-        '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
-        + "".join(tags)
-        + '</head><body><div id="world-map"></div><script>\n'
-        + "\n".join(script)
-        + "\n</script></body></html>"
-    )
-    result = verifiers.verify_frontend(page, is_fullstack=False)
-    assert (result.errors, result.warnings) == ([], [])
-    fetched = page.replace("d3.json(WORLD_ATLAS)",
-                           "fetch('https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json')")
-    assert verifiers.verify_frontend(fetched, is_fullstack=False).errors
 
 
 def test_the_skill_loads_the_atlas_the_way_the_check_allows():

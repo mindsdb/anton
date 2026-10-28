@@ -135,119 +135,88 @@ USING DATA:
 # Visual design rules (used in every type that has a frontend)
 # ---------------------------------------------------------------------------
 
-# Two halves, quoted under their own headings by both frontend builders
-# (html-app and the fullstack `static/index.html`).
+# The libraries the render-check service carries, at these exact versions. A
+# page that loads another one, or another version, is left unverified there.
+CHECKED_LIBRARIES = (
+    "@tailwindcss/browser@4.3.3",
+    "echarts@5.5.1",
+    "d3@7.9.0",
+    "topojson-client@3.1.0",
+    "world-atlas@2.0.2",
+    "globe.gl@2.34.2",
+    "three@0.169.0",
+    "gsap@3.12.5",
+    "3d-force-graph@1.73.4",
+)
+
+# Request-driven, not a house style: what the page holds and how it looks
+# follow the request and the data. The fixed parts are the deployment's
+# facts (preview policy, checked libraries) and data honesty.
 _DESIGN_RULES = """\
-VISUAL DESIGN (for every HTML file you produce):
-- SCOPE: render ONLY what the request, the PRD, `spec.md` and the API
-  specification ask for. No invented brand or company names, logos,
-  taglines, marketing copy or intro paragraphs, status pills or badges,
-  footers or disclaimers unless asked. Requested content includes the
-  functional states (loading, empty, error and API error messages) and what
-  the rules below require: chart subtitles, units, estimated or converted
-  notes. The layout rules arrange that content; they never add other content.
-- Dark theme: background #0d1117, text #e6edf3.
-  System sans-serif font stack, generous padding, responsive layout.
-- STYLING: Tailwind CSS is the recommended way to style the page. Load it
-  once in `<head>` via CDN:
-  `<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.3"></script>`
-  and use utility classes for layout, spacing, typography and colour
-  (`bg-[#0d1117] text-[#e6edf3]` for the theme). Hand-written CSS in a
-  `<style>` block stays allowed wherever utilities fall short — keyframes,
-  chart containers, complex selectors — or when the page is too small to
-  need a framework. No other CSS or JS library: the two CDN scripts named in
-  these rules (Tailwind, ECharts) and, for a map or globe, the recipe
-  packages under MAPS AND GLOBES, each at exactly the version shown, are the
-  ONLY external resources a page may load. They are fetched every time the
-  page opens, so a page that must work OFFLINE or without external resources
-  (brief or PRD says so) skips Tailwind and styles itself with hand-written
-  CSS.
-- ALWAYS use Apache ECharts for interactive charts via CDN:
-  `<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>`
-  Initialise with `echarts.init(dom, 'dark')` and customise background to #0d1117.
-  NEVER use Plotly, matplotlib, or other chart libraries unless explicitly asked.
-- MAPS AND GLOBES: ECharts ships no world outline, so a map or globe uses
-  one of these tested recipes, at exactly these versions. Load the world
-  atlas with d3@7.9.0 and topojson-client@3.1.0:
-  `<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>`
-  `<script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js"></script>`
-  `const WORLD_ATLAS = 'https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json';`
-  `d3.json(WORLD_ATLAS).then((world) => { const countries = topojson.feature(world, world.objects.countries); /* draw */ });`
-  Load it with `d3.json`, never `fetch()`: the verifier fails an absolute
-  URL in `fetch()`. Then draw `countries` in one of three ways:
-  - d3 into an `<svg>` (`d3.geoNaturalEarth1().fitSize([w, h], countries)`,
-    `d3.geoPath`);
-  - ECharts: `echarts.registerMap('world', countries)`, then a `map` series
-    with `map: 'world'`;
-  - a globe: globe.gl@2.34.2
-    (`<script src="https://cdn.jsdelivr.net/npm/globe.gl@2.34.2/dist/globe.gl.min.js"></script>`)
-    with `.polygonsData(countries.features)`. It is heavy, so the browser
-    check may run out of time on it and leave the page unverified.
-  Never write GeoJSON into the page by hand: a world outline runs to hundreds
-  of KB. Leaflet, raster map tiles, MapLibre (it needs a web worker) and
-  echarts-gl (it needs `eval`) break the preview policy below.
+PAGE DESIGN (for every HTML file you produce):
+- CONTENT: build the page from what the request, the PRD, `spec.md` and the
+  data call for, and choose the elements that serve that reader: prose,
+  headline figures, tables, charts, maps, controls, images or plain HTML.
+  Use only the elements the task needs; a short answer can be a short page.
+  No invented brand or company names, logos, taglines, marketing copy,
+  status badges, footers or disclaimers unless asked. The functional states
+  a page needs (empty, error) are content too.
+- FACTS: every figure, name and date on the page is either given by the
+  data (`## Data`, known data, attached files, cited web sources) or
+  computed from it. Where a reader could not tell how a value was derived
+  (a total, a share, a rate, a conversion), say so next to it. When the data
+  does not cover something the request mentions, say so on the page in
+  plain words; never fill the gap with a plausible value, sample rows or a
+  placeholder. Label estimates, samples and converted units as such.
+- STYLE: pick a look that suits the content and its audience, unless the
+  project rules, the PRD or the brief set one. Keep it readable: enough
+  contrast, body text of at least 14 px, a clear heading hierarchy, numbers
+  formatted for people (thousands separators, sensible decimals, units).
+- LIBRARIES are optional: HTML, CSS, inline SVG and canvas written by hand
+  are often enough. Load one only when it clearly helps, from
+  `https://cdn.jsdelivr.net/npm/<package>@<exact version>/...`. The browser
+  check carries these packages at these versions: """ + ", ".join(f"`{p}`" for p in CHECKED_LIBRARIES) + """.
+  Any other library or version does not load there, which leaves the page
+  unverified. Libraries are fetched each time the page opens, so a page that
+  must work offline loads none.
+- CHARTS: choose the form from the question the data answers, title each
+  chart with what it shows, and label axes with the measure and its unit.
+  A handful of values can read better as a sentence or a small table.
+- MAPS: shapes come from published geometry loaded at a pinned version (for
+  example `world-atlas` with `topojson-client`, from the list above), never
+  from coordinates typed by hand. Fit the view to the area the data covers.
+- PHONE WIDTH: the page must read well at 390 px, not only fit: no fixed
+  width wider than the screen, wide tables scroll inside their own
+  container or reflow, charts resize with their container, and labels stay
+  legible.
+- CONTROLS: every control changes something visible: wire it to the
+  content it filters, sorts or switches. Leave out controls the page does
+  not need. A view inside a tab or panel that starts hidden is drawn when it
+  is first shown (a chart library measures its container, which has no size
+  while hidden), and starts through `runView` too.
 - PREVIEW POLICY: the web app preview runs the page in a sandboxed frame
   under a content security policy that blocks what it does not allow. Build
   to that policy so the page renders on every deployment: no external
   stylesheet or web font, no external image or map tile (embed an image as a
-  `data:` URI), no `eval` or `new Function`, and no web workers.
-- Chart type by purpose: line for change over time, bar for comparing
-  categories (horizontal when labels are long), stacked bar for composition
-  across categories, scatter for the relation between two measures. Pie or
-  donut ONLY for a simple part-of-a-whole with few slices — never for
-  comparison or change over time. Show a value with no dimension as a KPI
-  card, not a chart. Titles, legends and axis labels name what the data IS;
-  no chart junk (3D, gradients, decorative markers).
-- Axes and units: every axis label names the measure AND its unit
-  (`Revenue, USD`, `Latency, ms`, `Share, %`); every number in a tooltip,
-  axis or KPI goes through a `formatter` — thousands separators, fixed
-  decimals, currency or percent sign, unit suffix — never a raw float.
-  One date format per page, consistent between axes and tooltips. Say when
-  a value is estimated, sampled or converted, and from which unit.
-- Line smoothing: `smooth: false` on ALL line series by default.
-  Use `smooth: true` ONLY for cumulative / monotonic series (running totals, growth curves).
-  Line widths: 2.5 for primary, 1.5 for comparisons, 1 for reference lines.
-- Chart readability:
-  - `axisLabel: { rotate: -45 }` on crowded axes.
-  - `grid: { containLabel: true }` so labels never clip.
-  - `legend: { type: 'scroll', bottom: 0 }` for many series.
-  - Pie/donut: `label: { show: true, position: 'outside' }` + `labelLayout: { hideOverlap: true }`.
-  - Rich `tooltip` with `formatter` functions for precise hover values.
-  - `dataZoom` on time series so users can zoom.
-- Multi-tab dashboards: NEVER call `echarts.init()` on a hidden container.
-  Use lazy init — initialise charts only on first tab visibility.
-  Pattern: `const _rendered = new Set(['overview']); function showPage(name) { if (!_rendered.has(name)) { _rendered.add(name); initChartsFor(name); } }`
-  `initChartsFor(name)` starts each view on that tab through `runView`, the
-  helper in the verifier contract, so a view that fails on a tab fails alone.
-- Layout composition:
-  - Hero KPI cards at the top (large numbers, colour-coded ±, delta arrows).
-  - Main narrative chart immediately below KPIs.
-  - Supporting charts below, each with a subtitle explaining what it reveals.
-  - Use ECharts `markLine` for thresholds, `markPoint` for outliers,
-    `markArea` for highlighted regions.
-- Responsive (the page must read well on a 390 px phone, not only fit it):
-  - Multi-card grid: `grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr))`
-  - Chart containers: `width: 100%; height: min(420px, 60vh)`
-  - Register `window.addEventListener('resize', () => chart.resize())` on every ECharts instance.
-  - A table of more than 4 columns shows each row as a card below 640 px:
-    every `td` carries `data-label="<column name>"`, and a media query hides
-    the `thead` and sets `display: block` on `table`, `tbody`, `tr` and `td`
-    (keep `tr[hidden]` hidden), with `td::before { content: attr(data-label) }`.
-    A narrower table sits in `<div style="overflow-x: auto;">`. Never fixed table widths.
-  - Numbers, ids and dates never break inside a value: `white-space: nowrap` on
-    those cells. Never `overflow-wrap: anywhere` or `word-break: break-all` on
-    table cells: they squeeze every column to a letter or two.
-  - A map fits its projection to the plotted points (with a margin), not the
-    whole world, when they sit in one region. At phone width its labels and
-    legend stay inside the view and no smaller than 11 px: shorten or drop
-    labels that would overlap.
+  `data:` URI), no `eval` or `new Function`, and no web workers. Leaflet,
+  raster map tiles, MapLibre (it needs a web worker) and echarts-gl (it needs
+  `eval`) break it.
 - SECURITY: NEVER embed API keys, tokens, passwords, or connection strings in HTML/JS.
   Credentials were already used server-side; serialise only the resulting data.\
 """
 
+_VERIFIER_LEAD_SERVED = (
+    "A static verifier checks each of these after `finish`; a violation fails the\n"
+    "step and costs a regeneration, unless the item says it is only a warning:\n"
+)
+# The html-app builder gets its findings back at `finish` and fixes the same draft.
+_VERIFIER_LEAD_REVIEWED = (
+    "These are checked each time you call `finish`, and the findings come back\n"
+    "to you to fix in the same draft; a violation fails the page unless the item\n"
+    "says it is only a warning:\n"
+)
+
 _VERIFIER_CONTRACT = """\
-A static verifier checks each of these after `finish`; a violation fails the
-step and costs a regeneration, unless the item says it is only a warning:
 - A complete HTML document with an explicit `<body>`...`</body>`.
 - `<meta name="viewport" content="width=device-width, initial-scale=1.0">`.
 - No absolute URL in any `fetch()` call — relative paths only.
@@ -281,8 +250,8 @@ step and costs a regeneration, unless the item says it is only a warning:
 # speak of a fullstack app, and the failure it can see differs (a local file
 # under file://, a URL of the page's own origin over http).
 _BROWSER_GATE_HTML = """\
-- Where a headless browser is available, the page is also loaded once right
-  after these checks, on a deployment that supports it the way the app
+- Where a headless browser is available, the page is also loaded at each
+  review, on a deployment that supports it the way the app
   preview loads it: in a sandboxed frame under the preview's content security
   policy, at a desktop and a phone width. A console error, an uncaught
   exception, a
@@ -371,7 +340,8 @@ Not checked by the verifier, but the page breaks inside the frame without them:
 
 
 def _verifier_contract(*, served: bool) -> str:
-    return "## Verifier contract\n" + _VERIFIER_CONTRACT + "\n" + (
+    lead = _VERIFIER_LEAD_SERVED if served else _VERIFIER_LEAD_REVIEWED
+    return "## Verifier contract\n" + lead + _VERIFIER_CONTRACT + "\n" + (
         _BROWSER_GATE_SERVED if served else _BROWSER_GATE_HTML
     ) + "\n" + _CAUGHT_ERRORS + "\n\n" + _FRAME_NOTES
 
@@ -627,9 +597,8 @@ root-relative path instead of `api()`, or one whose `fetch()` names a path
 `openapi.json` does not define, fails the step.
 
 - Single self-contained HTML file: your own CSS in `<style>`, all JS in
-  `<script>`. The only external resources are the CDN scripts named in the
-  design rules (Tailwind, ECharts) and, for a map or globe, the recipe
-  packages and world atlas named there.
+  `<script>`. The only external resources are libraries loaded from
+  `https://cdn.jsdelivr.net/npm/` as the design rules describe.
 - Include the api-base meta tag in `<head>`:
   ```html
   <meta name="api-base" content="">
@@ -722,9 +691,8 @@ def _gen_html_task(target: str, *, fullstack: bool = False) -> str:
         body = f"""\
 Produce ONE self-contained HTML file named exactly `{target}`: the
 complete frontend of a fullstack app. Inline your own CSS and all JS; the
-only external resources allowed are the Tailwind and ECharts `<script>` tags
-from the CDNs named in the design rules and, for a map or globe, the recipe
-packages and world atlas named there. The backend is generated in parallel
+only external resources allowed are libraries loaded from
+`https://cdn.jsdelivr.net/npm/` as the design rules describe. The backend is generated in parallel
 and serves the endpoints listed under `## API Specification`: take exact
 paths and response shapes from there and call every one of them through the
 `api()` helper (see Fullstack rules). Embed no data — the page fetches it
@@ -733,16 +701,33 @@ are the assets listed under `## Attached files`, already in `static/`, by
 the relative name given there."""
     else:
         body = f"""\
-Produce ONE self-contained HTML file named exactly `{target}`, at the root
-of the artifact folder. Inline your own CSS and all JS and embed all data in
-the file. Do not reference any other file of the artifact, except the assets
-listed under `## Attached files`, by the relative name given there in quotes
-(`<img src="logo.png">`): once you have written the page, the pipeline
-replaces each such reference with the asset itself as a `data:` URI, since
-the app preview shows only the page. The only external resources allowed
-are the Tailwind and ECharts `<script>` tags from the CDNs named in the
-design rules and, for a map or globe, the recipe packages and world atlas
-named there."""
+Author ONE self-contained web page named exactly `{target}`, at the root of
+the artifact folder: you write its HTML, CSS and JavaScript yourself and
+decide what it shows and how, from the request and the data. Embed all data
+in the file. Do not reference any other file of the artifact, except the
+assets listed under `## Attached files`, by the relative name given there in
+quotes (`<img src="logo.png">`): once you have written the page, the
+pipeline replaces each such reference with the asset itself as a `data:`
+URI, since the app preview shows only the page. External resources are
+limited to libraries from `https://cdn.jsdelivr.net/npm/`, as the design
+rules describe."""
+        return f"""\
+You are a single-purpose worker inside an artifact-generation pipeline. This
+step is `generate_frontend`.
+
+## Your task
+{body}
+
+The goal is a correct, usable page, not only correct facts. When you call
+`finish`, the page is checked and loaded the way the app preview loads it,
+where this deployment can, and the review comes back to you as the result of
+`finish`: the problems the checks found, what the page actually shows (its
+headings, tables and rows, charts and whether they drew, controls and
+whether pressing them changed anything, how it fits a phone) and a
+screenshot when there is one. Compare that with the request, fix what is
+wrong with `edit_file`, and call `finish` again. When the review shows the
+page is right, call `finish` again unchanged to end.\
+"""
     return f"""\
 You are a single-purpose worker inside an artifact-generation pipeline. This
 step is `generate_frontend`.
@@ -759,8 +744,8 @@ Checking your own output is NOT part of the job.\
 
 PROJECT_RULES_HEADER = "## Project rules (follow, don't display)"
 
-# Said in both sections: the fixed blocks before them name one chart library,
-# a dark theme and the only scripts a page loads, and a project's rule or
+# Said in both sections: the fixed blocks before them carry defaults (the
+# backend skeleton, the libraries the check carries), and a project's rule or
 # skill asking otherwise must not be left for the model to weigh.
 OVER_DEFAULTS = (
     "Where they ask for something other than this prompt's defaults, such as "
@@ -848,9 +833,25 @@ def _gen_html_workflow(target: str, *, fullstack: bool = False) -> str:
         data_step = """\
 2. Data, only if needed: when the dataset to embed is not already printed
    under `## Data` in a usable shape, run ONE scratchpad cell that
-   aggregates it and prints it as JSON (a dashboard almost never needs raw
+   aggregates it and prints it as JSON (a page rarely needs raw
    rows). Skip this step when the data is already visible or the artifact
    needs none."""
+    if not fullstack:
+        return f"""\
+## Workflow
+1. Read the PRD, `## Data` and the specification. Decide what the reader
+   needs and which elements show it; note which values the data gives,
+   which you compute, and which it does not support.
+{data_step}
+3. Write the whole file in one reply: the body between the markers plus one
+   `write_file(path="{target}")` call — see Output protocol. Call `finish`
+   in the same reply or the next.
+4. Read the review that `finish` returns. Fix each real problem with
+   `edit_file` (one passage per call; several calls may share a reply), or
+   rewrite the file only when most of it must change. Then call `finish`.
+   Reviews are limited, so fix everything you can see in one pass.
+5. When the review shows nothing left to fix, call `finish` again unchanged.\
+"""
     return f"""\
 ## Workflow
 A typical run takes one or two rounds.
@@ -953,6 +954,15 @@ raw strings. Writing the text directly between the markers avoids this.\
 """
 
 
+_GEN_TOOLS_REVIEWED = _GEN_TOOLS.replace(
+    "- `finish(summary)` — call exactly once, after the file is written.",
+    "- `edit_file(path, old_text, new_text)` — replace one exact passage of the\n"
+    "  file; `old_text` must appear exactly once. For fixes after a review.\n"
+    "- `finish(summary)` — ends the step once the review shows nothing to fix;\n"
+    "  before that, it returns the review of your draft.",
+)
+
+
 def build_subagent_system_prompt(
     artifact_path: Path,
     *,
@@ -990,7 +1000,7 @@ def build_subagent_system_prompt(
             _GEN_SIZE_RULES,
             _verifier_contract(served=False),
             "## Design rules\n" + _DESIGN_RULES,
-            _GEN_TOOLS,
+            _GEN_TOOLS_REVIEWED,
             project_rules,
             artifact_skills,
             _ui_language(user_language),
@@ -1008,11 +1018,15 @@ def _kickoff_closing(*, fullstack: bool) -> str:
         else "run a scratchpad cell only if the data to embed is not already "
         "usable under `## Data`"
     )
+    ending = (
+        "then call `finish`." if fullstack
+        else "then call `finish` and revise the page against the review it returns."
+    )
     return (
         "Read the sections above, then follow the workflow from your "
         f"instructions: {data_clause}; write the file as text between "
         f"`{BEGIN}` and `{END}` plus one `write_file` call in the same reply; "
-        "then call `finish`."
+        + ending
     )
 
 
@@ -1651,13 +1665,10 @@ any other stack. Describe behaviour, screens, data flow, and endpoints on top of
 - The launcher assigns the port at run time: never mention a port number or
   an absolute URL anywhere in the spec.
 - Frontend: one self-contained HTML file (`static/index.html` for fullstack
-  types) — vanilla JavaScript, Tailwind CSS via CDN for styling (hand-written
-  CSS where needed), Apache ECharts for charts. A map or globe uses the
-  tested recipe: d3@7.9.0 and topojson-client@3.1.0 load world-atlas@2.0.2,
-  drawn with d3, with ECharts, or on a globe with globe.gl@2.34.2. These
-  libraries need network access when the page opens; when the PRD requires
-  offline use, the spec says so and the frontend is styled with hand-written
-  CSS only.
+  types) with its own CSS and vanilla JavaScript. The frontend step picks
+  its elements, look and any library itself, from the request and the data;
+  the spec names a theme, font or library only when the PRD asks for one.
+  When the PRD requires offline use, the spec says so.
 - Durable state (`fullstack-stateful-app` ONLY): the platform STATE store — a
   document/key-value store keyed by (partition key, sort key) with named
   collections, no scan, no secondary indexes, atomic counters. The spec must
@@ -1709,9 +1720,9 @@ _TECH_SPEC_CONTENT = (
     "prose, no design discussion. It tells the frontend generator what each "
     "visual is FOR.\n"
     "- `## Implementation notes`: component breakdown, state, interaction "
-    "details, timings, edge cases, exact UI strings. Terse bullets. Skip what "
-    "the frontend's own design rules already decide (theme, fonts, chart "
-    "library); name only what is specific to this artifact."
+    "details, timings, edge cases, exact UI strings. Terse bullets. No theme, "
+    "fonts or chart library unless the PRD asks for them; name only what is "
+    "specific to this artifact."
 )
 
 # The API contract (shapes, fields, formats, examples) lives in ONE place —

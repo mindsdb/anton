@@ -378,7 +378,7 @@ def test_stage_step_warns_that_an_attached_file_is_not_on_the_page(tmp_path: Pat
 
 def test_generator_prompts_allow_only_the_attached_assets_as_local_files():
     html = prompts.build_subagent_system_prompt(Path("/x"))
-    assert "except the assets\nlisted under `## Attached files`" in html
+    assert "except the assets listed under `## Attached files`" in " ".join(html.split())
     assert "`## Attached files`" in html  # the inputs list names the section
     front = prompts.build_frontend_system_prompt(Path("/x"))
     assert "assets listed under `## Attached files`, already in `static/`" in front

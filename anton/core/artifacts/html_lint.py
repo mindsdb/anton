@@ -32,6 +32,8 @@ _RUNNER_SCRIPT = Path(__file__).with_name("_html_lint_runner.js")
 # `verify_frontend` traces the reason a browser check was skipped).
 BROWSER_ENV_VAR = "ANTON_HTML_LINT_BROWSER"
 TIMEOUT_SECONDS = 8
+# Probe mode loads the page at two widths and presses up to a dozen controls.
+PROBE_TIMEOUT_SECONDS = 25
 _RESULT_START = "RESULT_JSON_START"
 _RESULT_END = "RESULT_JSON_END"
 
@@ -72,6 +74,43 @@ def lint_html(path: Path, *, cell_sandbox: CellSandbox | None) -> list[HtmlFindi
         return None
 
 
+@dataclass(frozen=True)
+class HtmlProbe:
+    """What `probe_html` saw: the load's findings, as `lint_html` returns
+    them, plus the runner's probe (an outline of the page at desktop and
+    phone width and the controls it pressed) and a JPEG screenshot."""
+
+    findings: list[HtmlFinding]
+    probe: dict
+    screenshot_jpeg_base64: str | None
+
+
+def probe_html(path: Path, *, cell_sandbox: CellSandbox | None) -> HtmlProbe | None:
+    """Load the page like `lint_html` and also measure what it shows.
+
+    For the artifact builder's review of its own draft. Same `None`
+    contract as `lint_html`, a sandbox policy included. The text in `probe`
+    is page text, unscrubbed: the caller scrubs what it shows.
+    """
+    if cell_sandbox is not None:
+        return None
+    try:
+        result = _run_runner(str(Path(path).resolve()), probe=True)
+    except Exception:
+        return None
+    if result is None:
+        return None
+    probe = result.get("probe")
+    if not isinstance(probe, dict):
+        return None
+    shot = probe.pop("screenshot", None)
+    return HtmlProbe(
+        findings=_findings_from_result(result),
+        probe=probe,
+        screenshot_jpeg_base64=shot if isinstance(shot, str) and shot else None,
+    )
+
+
 def lint_url(url: str, *, cell_sandbox: CellSandbox | None) -> list[HtmlFinding] | None:
     """Load a page served over http(s) — the fullstack frontend from its own
     running backend — and flag the same things `lint_html` does (S-02).
@@ -96,6 +135,14 @@ def lint_url(url: str, *, cell_sandbox: CellSandbox | None) -> list[HtmlFinding]
 
 def _lint_target(target: str) -> list[HtmlFinding] | None:
     """Run the Electron runner on `target` (an absolute path or a URL)."""
+    result = _run_runner(target, probe=False)
+    if result is None:
+        return None
+    return _findings_from_result(result)
+
+
+def _run_runner(target: str, *, probe: bool) -> dict | None:
+    """The runner's JSON result for `target`, or None when it produced none."""
     browser = discover_browser()
     if browser is None:
         return None
@@ -109,21 +156,22 @@ def _lint_target(target: str) -> list[HtmlFinding] | None:
         "ANTON_HTML_LINT_TARGET": target,
         "ANTON_HTML_LINT_RUNNER": str(_RUNNER_SCRIPT),
     }
+    if probe:
+        env["ANTON_HTML_LINT_PROBE"] = "1"
+    else:
+        env.pop("ANTON_HTML_LINT_PROBE", None)
     try:
         proc = subprocess.run(
             [browser, str(_RUNNER_SCRIPT), "--headless=new", "--disable-gpu"],
             env=env,
             capture_output=True,
-            timeout=TIMEOUT_SECONDS,
+            timeout=PROBE_TIMEOUT_SECONDS if probe else TIMEOUT_SECONDS,
             text=True,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
 
-    result = _extract_result(proc.stdout)
-    if result is None:
-        return None
-    return _findings_from_result(result)
+    return _extract_result(proc.stdout)
 
 
 def discover_browser() -> str | None:

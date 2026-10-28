@@ -621,10 +621,14 @@ def verify_frontend_live(
             coverage=outcome.coverage, views=tuple(outcome.views), comparison=outcome.comparison,
         )
     findings = lint_html(entry.resolve(), cell_sandbox=cell_sandbox)
+    return local_browser_check(findings, sandboxed=cell_sandbox is not None)
+
+
+def local_browser_check(findings: "list[html_lint.HtmlFinding] | None", *, sandboxed: bool) -> BrowserCheck:
+    """The local browser's findings for a page loaded from disk as a
+    `BrowserCheck`; None findings is a page no browser loaded."""
     if findings is None:
-        return BrowserCheck(
-            status="unverified", reason=browser_check_skip_reason(sandboxed=cell_sandbox is not None)
-        )
+        return BrowserCheck(status="unverified", reason=browser_check_skip_reason(sandboxed=sandboxed))
     verdict = _browser_verdict(findings, served=False)
     # The local browser presses nothing: it saw the page as it opens.
     return BrowserCheck(

@@ -29,7 +29,7 @@ from anton.core.backends.sandbox import BACKENDS_OFF_MESSAGE, CellSandbox, cell_
 from anton.utils.datasources import scrub_output
 from anton.utils.nofollow import read_text_nofollow, write_text_nofollow
 
-from . import attachments, engine, prompts, verifiers
+from . import attachments, engine, page_review, prompts, verifiers
 from .discovery import checkpoint as cp
 from .discovery.orchestrator import CANCELLED, run_discovery
 from .discovery.notes import (  # noqa: F401  (EXEC_* re-exported: tests import them from here)
@@ -762,14 +762,18 @@ def _kickoff_with_screenshot(
 
 def _terminal_error(
     side: str, *, verify_failures: int, verdict: VerifyResult | None, last_loop_error: str | None,
+    verify_exhausted: bool | None = None,
 ) -> str:
     """Name the cause that actually exhausted its budget.
 
-    "verification failed" only when the verifier's own retry budget ran out.
-    The old single wording claimed a verification retry that, on the
-    loop-failure path, never happened.
+    "verification failed" only when the verifier's own retry budget ran out
+    (`verify_exhausted`, by default more failures than it allows). The old
+    single wording claimed a verification retry that, on the loop-failure
+    path, never happened.
     """
-    if verify_failures > GEN_VERIFY_MAX_RETRIES and verdict is not None:
+    if verify_exhausted is None:
+        verify_exhausted = verify_failures > GEN_VERIFY_MAX_RETRIES
+    if verify_exhausted and verdict is not None:
         return (
             f"{side.capitalize()} verification failed after {verify_failures} attempt(s): "
             + "; ".join(verdict.errors)
@@ -953,6 +957,72 @@ def _adopt_entry_as_primary(state: GenState, entry_file: Path) -> None:
         state.primary = actual
 
 
+class _DraftReviewer:
+    """Reviews the html-app draft at each `finish` of its write loop
+    (`page_review`), so the builder revises the page it wrote instead of a
+    new build starting over.
+
+    The first review is always shown, so the builder compares what the page
+    shows with the request even when no check fails it. A `finish` on the
+    page as last reviewed is accepted: clean, or the builder chose to stop
+    with the problems it was shown, which the run's own verification then
+    reports. At most `page_review.MAX_DRAFT_REVIEWS` reviews per build.
+    """
+
+    def __init__(self, state: GenState) -> None:
+        self.state = state
+        self.used = 0
+        self.last: page_review.DraftReview | None = None
+
+    async def __call__(self, files_written: list[str], *, screenshot: bool = True) -> page_review.ReviewVerdict:
+        from anton.core.artifacts import render_check
+        from anton.core.tools.tool_handlers import render_screenshots_refused
+
+        state = self.state
+        entry = _frontend_entry(state, files_written)
+        if self.used >= page_review.MAX_DRAFT_REVIEWS:
+            return page_review.ReviewVerdict(accept=True)
+        if entry is None:
+            self.used += 1
+            target = state.primary or HTML_APP_DEFAULT_PRIMARY
+            return page_review.ReviewVerdict(
+                accept=False, content=f"No page is written yet. Write `{target}`, then call `finish`."
+            )
+        await asyncio.to_thread(_prepare_page, state, entry)
+        current = page_review.digest(entry.read_text(encoding="utf-8", errors="replace"))
+        if self.last is not None and self.last.digest == current:
+            return page_review.ReviewVerdict(accept=True)
+        state.step_started("verify_frontend", attempt=self.used)
+        review = await asyncio.to_thread(
+            page_review.review_draft, entry,
+            artifact_path=state.artifact_path, cell_sandbox=_cell_sandbox(state),
+            screenshot=screenshot and not render_screenshots_refused(state.session),
+            previous_html=state.previous_page[1] if state.previous_page is not None else None,
+        )
+        self.used += 1
+        self.last = review
+        state.trace_log.verifier(
+            node="review_draft", ok=not review.blocking,
+            errors=list(review.blocking), warnings=[*review.static.warnings, *review.live.verdict.warnings],
+        )
+        state.record("review_draft", "fail" if review.blocking else "ok", f"review {self.used}: {review.page}")
+        text = review.report(number=self.used, limit=page_review.MAX_DRAFT_REVIEWS)
+        if review.screenshot is None:
+            return page_review.ReviewVerdict(accept=False, content=text)
+        blocks = render_check.screenshot_blocks(review.screenshot, page=f"{state.slug}/{review.page}")
+        return page_review.ReviewVerdict(accept=False, content=[{"type": "text", "text": text}, *blocks])
+
+    def reviewed(self, entry: Path) -> "page_review.DraftReview | None":
+        """The last review, when it reviewed the page now on disk at `entry`."""
+        if self.last is None or self.last.page != entry.relative_to(self.state.artifact_path).as_posix():
+            return None
+        try:
+            text = entry.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        return self.last if page_review.digest(text) == self.last.digest else None
+
+
 class _AttemptCheck(NamedTuple):
     """An attempt's own browser check and the page it loaded."""
 
@@ -1010,6 +1080,9 @@ async def _gen_verify_frontend(
     # attempt got that far. Reset every attempt: `state.browser_*` keep an
     # earlier attempt's values, which can name a page this attempt deleted.
     last_check: _AttemptCheck | None = None
+    # A verify failure after the builder's in-loop reviews ends the run as an
+    # exhausted verification: see the break that sets it.
+    revised_out = False
     for attempt in range(GEN_LOOP_MAX_RETRIES + GEN_VERIFY_MAX_RETRIES + 1):
         state.step_started("generate_frontend", attempt=attempt)
         last_check = None
@@ -1041,6 +1114,7 @@ async def _gen_verify_frontend(
                 state, text=prompts.build_user_kickoff(_spec_context(state)) + extra, screenshot=failed_shot,
             )
         failed_shot = None
+        reviewer = None if state.is_fullstack else _DraftReviewer(state)
         try:
             result = await engine._run_loop(
                 session=state.session, system=system, kickoff=kickoff,
@@ -1048,6 +1122,7 @@ async def _gen_verify_frontend(
                 node_label="generate_frontend", attempt=attempt, trace=state.trace_log,
                 spend=state.spend,
                 on_text=state.peek_for("generate_frontend"),
+                review=reviewer,
             )
         finally:
             state.peek_done("generate_frontend")
@@ -1067,13 +1142,15 @@ async def _gen_verify_frontend(
         stale_html = [f for f in result["files_written"] if f.endswith(".html")]
         state.record("generate_frontend", "done", result.get("summary", ""))
 
-        state.step_started("verify_frontend", attempt=attempt)
         entry_file = _frontend_entry(state, result["files_written"])
-        if entry_file is not None and not state.is_fullstack:
+        if entry_file is not None:
             # Off the event loop, like the browser check below: the page and
             # each asset can be megabytes, and every conversation in the
             # process waits on this loop.
-            await asyncio.to_thread(_embed_attachments, state, entry_file)
+            await asyncio.to_thread(_prepare_page, state, entry_file)
+        reviewed = reviewer.reviewed(entry_file) if reviewer is not None and entry_file is not None else None
+        if reviewed is None:
+            state.step_started("verify_frontend", attempt=attempt)
         if entry_file is None:
             # One channel: this message rides on VerifyResult like every other
             # check — otherwise the contract lock cannot see it and the terminal
@@ -1082,6 +1159,18 @@ async def _gen_verify_frontend(
                 "No HTML entry file was written. Write static/index.html "
                 "(or the html-app page)."
             ])
+        elif reviewed is not None:
+            # The builder's last review checked exactly this page: its
+            # verdicts stand, and the browser does not load it twice.
+            # Copied, not shared: the extends below must not grow the review's lists.
+            verdict = VerifyResult()
+            verdict.errors.extend(reviewed.static.errors)
+            verdict.warnings.extend(reviewed.static.warnings)
+            _absorb_browser_check(state, reviewed.live, entry_file)
+            last_check = _AttemptCheck(check=reviewed.live, entry=entry_file)
+            if reviewed.live.status != "unverified":
+                verdict.errors.extend(reviewed.live.verdict.errors)
+                verdict.warnings.extend(reviewed.live.verdict.warnings)
         else:
             # In a thread: the static checks scan the whole page, which an
             # embedded asset can grow to tens of megabytes.
@@ -1108,19 +1197,11 @@ async def _gen_verify_frontend(
                     screenshot=not render_screenshots_refused(state.session),
                     previous_html=state.previous_page[1] if state.previous_page is not None else None,
                 )
-                state.browser_status = live.status
-                state.comparison = live.comparison
-                state.browser_findings_listed = live.findings_listed
-                state.browser_screenshot = live.screenshot
-                state.browser_coverage = live.coverage
-                state.browser_page = entry_file.relative_to(state.artifact_path).as_posix()
+                _absorb_browser_check(state, live, entry_file)
                 last_check = _AttemptCheck(check=live, entry=entry_file)
                 if live.status == "failed":
                     failed_shot = live.screenshot
-                if live.status == "unverified":
-                    state.trace_log.node("verify_frontend", "browser_skipped", live.reason)
-                    _note_skipped(state, f"browser load of the page: {live.reason}")
-                else:
+                if live.status != "unverified":
                     # `extend`, not `append`: the contract lock keys on
                     # `.append(...)` / `VerifyResult(...)` literals, and these
                     # strings are registered where `verify_frontend_live`
@@ -1144,12 +1225,18 @@ async def _gen_verify_frontend(
         verify_failures += 1
         if verify_failures > GEN_VERIFY_MAX_RETRIES:
             break
+        if reviewer is not None and reviewer.used:
+            # The builder already revised this page against its reviews; a new
+            # build would throw that work away and start over.
+            revised_out = True
+            break
         extra = _verification_feedback(verdict)
+    verify_exhausted = verify_failures > GEN_VERIFY_MAX_RETRIES or revised_out
     state.error = _terminal_error(
         "frontend", verify_failures=verify_failures, verdict=verdict,
-        last_loop_error=last_loop_error,
+        last_loop_error=last_loop_error, verify_exhausted=verify_exhausted,
     )
-    if verify_failures > GEN_VERIFY_MAX_RETRIES and last_check is not None and last_check.check.status == "failed":
+    if verify_exhausted and last_check is not None and last_check.check.status == "failed":
         # The last build passed the static checks, since the browser check
         # runs only then, and failed in a browser. Its page is the one left
         # on disk: the agent repairs that page against these findings.
@@ -1621,6 +1708,48 @@ def _embed_attachments(state: GenState, entry_file: Path) -> None:
                 write_text_nofollow(state.artifact_path, entry_file, embedded)
     except (OSError, ValueError):
         state.trace_log.node("verify_frontend", "embed_skipped", "the page could not be rewritten")
+
+
+def _absorb_browser_check(state: GenState, live: BrowserCheck, entry_file: Path) -> None:
+    """Record a browser check of `entry_file` on the state the result reads."""
+    state.browser_status = live.status
+    state.comparison = live.comparison
+    state.browser_findings_listed = live.findings_listed
+    state.browser_screenshot = live.screenshot
+    state.browser_coverage = live.coverage
+    state.browser_page = entry_file.relative_to(state.artifact_path).as_posix()
+    if live.status == "unverified":
+        state.trace_log.node("verify_frontend", "browser_skipped", live.reason)
+        _note_skipped(state, f"browser load of the page: {live.reason}")
+
+
+def _prepare_page(state: GenState, entry_file: Path) -> None:
+    """Make the written page what may be shared: attached assets embedded
+    (html-app only) and secrets scrubbed (`page_review.scrub_page`), before
+    any check or review reads it."""
+    if not state.is_fullstack:
+        _embed_attachments(state, entry_file)
+    _scrub_page(state, entry_file)
+
+
+def _scrub_page(state: GenState, entry_file: Path) -> None:
+    """Remove secret values from the page, the handoff boundary to the
+    published link. A page that cannot be rewritten is left as it is."""
+    try:
+        html = read_text_nofollow(state.artifact_path, entry_file)
+        scrubbed = page_review.scrub_page(html)
+        if scrubbed == html:
+            return
+        with state.page_lock:
+            if state.abandoned.is_set():
+                return
+            write_text_nofollow(state.artifact_path, entry_file, scrubbed)
+    except (OSError, ValueError):
+        state.trace_log.node("verify_frontend", "scrub_skipped", "the page could not be rewritten")
+        return
+    note = "a credential-like value was removed from the page; it now shows a [REDACTED] marker there"
+    if note not in state.verify_warnings:
+        state.verify_warnings.append(note)
 
 
 def _note_skipped(state: GenState, text: str) -> None:

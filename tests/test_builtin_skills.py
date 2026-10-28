@@ -762,10 +762,15 @@ class TestPipelineContractMirrored:
 
     # FRONTEND_MARKERS minus the two the pipeline contract does not state
     # today (they live only in the skill): pre-existing drift, recorded
-    # separately and not fixed here.
+    # separately and not fixed here. The chart-style phrases are the skill's
+    # own advice: the pipeline's design section follows the request and
+    # prescribes no chart style, and no check enforces one.
     PIPELINE_MIRRORED_MARKERS = tuple(
         m for m in FRONTEND_MARKERS
-        if m not in ('primary="index.html"', "never for comparison or change over time")
+        if m not in (
+            'primary="index.html"', "never for comparison or change over time",
+            "Chart type by purpose", "names the measure AND its unit", "never a raw float",
+        )
     )
 
     def test_backend_skill_states_the_verifier_contract(self, store):

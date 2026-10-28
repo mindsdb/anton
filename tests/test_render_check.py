@@ -1063,25 +1063,34 @@ class _RequestCapExceeded(RuntimeError):
     """Not an image refusal, so nothing in anton resends after it."""
 
 
+def _images_in(blocks) -> int:
+    """Image blocks in `blocks`, those inside a tool result included."""
+    count = 0
+    for b in blocks if isinstance(blocks, list) else []:
+        if isinstance(b, dict) and b.get("type") == "image":
+            count += 1
+        elif isinstance(b, dict) and b.get("type") == "tool_result":
+            count += _images_in(b.get("content"))
+    return count
+
+
 class _GeneratorModel:
     """The generator's model behind `plan_stream` and `code_stream`: every
-    request it takes writes the page, and finishes unless `finishes(n,
-    images)` says otherwise. `refuses(n, images)` picks the requests it
-    refuses with an image 400. Both pick by the request's 1-based number and
-    the image parts it carries. Records each request's count, and raises
+    request it takes writes the page, `page(n)`, and finishes unless
+    `finishes(n, images)` says otherwise. `refuses(n, images)` picks the
+    requests it refuses with an image 400. All pick by the request's 1-based
+    number and the image parts it carries, a review's screenshot in a tool
+    result included. Records each request's count, and raises
     `_RequestCapExceeded` past `_REQUEST_CAP` requests."""
 
-    def __init__(self, *, refuses, finishes=lambda n, images: True) -> None:
+    def __init__(self, *, refuses, finishes=lambda n, images: True, page=lambda n: _PAGE) -> None:
         self.refuses = refuses
         self.finishes = finishes
+        self.page = page
         self.images: list[int] = []
 
     def stream(self, *, system, messages, tools=None, max_tokens=None):
-        images = sum(
-            1
-            for m in messages if isinstance(m.get("content"), list)
-            for b in m["content"] if isinstance(b, dict) and b.get("type") == "image"
-        )
+        images = sum(_images_in(m.get("content")) for m in messages)
         self.images.append(images)
         return self._reply(len(self.images), images=images)
 
@@ -1095,7 +1104,7 @@ class _GeneratorModel:
             raise _ImagePart400("Invalid content type. image_url is only supported by certain models.")
         finish = [ToolCall(id=f"f{n}", name="finish", input={"summary": "wrote the page"})]
         yield StreamComplete(response=LLMResponse(
-            content=f"{FILE_BEGIN_MARKER}\n{_PAGE}\n{FILE_END_MARKER}",
+            content=f"{FILE_BEGIN_MARKER}\n{self.page(n)}\n{FILE_END_MARKER}",
             tool_calls=[
                 ToolCall(id=f"w{n}", name="write_file", input={"path": "index.html"}),
                 *(finish if self.finishes(n, images) else []),
@@ -1112,15 +1121,20 @@ def _gen_state_on(project: Path, *, policy, model: _GeneratorModel) -> GenState:
     return st
 
 
-async def test_a_refused_retry_screenshot_is_dropped_once_and_later_attempts_send_none(
-    service, project, policy, monkeypatch
+def _edited_until(last: int):
+    """A page that changes with each request up to request `last`, then stays."""
+    return lambda n: _PAGE.replace(">hi<", f">hi {min(n, last)}<")
+
+
+async def test_a_refused_review_screenshot_is_dropped_once_and_later_reviews_send_none(
+    service, project, policy
 ):
-    """A model that takes no image input refuses the retry that shows the
-    failed page. The generator sends that request once more without the
-    image, the session records the refusal, and the attempt after it carries
-    no screenshot: one refused request in the whole run."""
-    monkeypatch.setattr(orchestrator, "GEN_VERIFY_MAX_RETRIES", 2)
-    model = _GeneratorModel(refuses=lambda n, images: images > 0)
+    """A model that takes no image input refuses the request that carries the
+    first review's screenshot. The loop sends it once more without the image
+    and asks later reviews for none: one refused request in the whole build,
+    and the builder revises the same draft rather than a new build starting."""
+    # Request 3 is the resend of request 2, so drafts change through request 4.
+    model = _GeneratorModel(refuses=lambda n, images: images > 0, page=_edited_until(4))
     st = _gen_state_on(project, policy=policy, model=model)
     service.answer(
         (200, _answer("failed", findings=[_CSP]), 0.0),
@@ -1130,23 +1144,20 @@ async def test_a_refused_retry_screenshot_is_dropped_once_and_later_attempts_sen
 
     assert await orchestrator._gen_verify_frontend(st) is None
 
-    # Attempt 1; attempt 2 with the screenshot, refused, then without it;
-    # attempt 3, which knows the model refuses images.
-    assert model.images == [0, 1, 0, 0]
-    assert st.session._render_screenshots_refused is True
-    # The checks after the refusal ask the service for no screenshot.
+    # Draft 1 reviewed with a screenshot; the request carrying it refused and
+    # sent without it; drafts 2 and 3 reviewed without one; then the clean
+    # draft finishes unchanged.
+    assert model.images == [0, 1, 0, 0, 0]
     assert [r["body"]["screenshot"] for r in service.requests] == [True, False, False]
     assert st.browser_status == "passed"
 
 
 async def test_the_coding_models_refusal_leaves_the_main_agents_screenshots_on(service, project, policy):
-    """Round 0 runs on the planning model, the main agent's own, and later
-    rounds on the coding model. Here only the coding model refuses images:
-    round 0 takes the retry's screenshot and writes without finishing, round
-    1 is refused over it and sent once more without it. That refusal says
-    nothing about the main agent's model, so its checks keep screenshots."""
-    planner = _GeneratorModel(refuses=lambda n, images: False, finishes=lambda n, images: images == 0)
-    coder = _GeneratorModel(refuses=lambda n, images: images > 0)
+    """A review's screenshot first rides on round 1, which runs on the coding
+    model. Its refusal says nothing about the main agent's model, which runs
+    round 0, so the main agent's checks keep their screenshots."""
+    planner = _GeneratorModel(refuses=lambda n, images: False)
+    coder = _GeneratorModel(refuses=lambda n, images: images > 0, page=lambda n: _PAGE.replace(">hi<", ">hi 2<"))
     st = _gen_state(project, policy)
     st.session._render_screenshots_refused = False
     st.session._llm = SimpleNamespace(plan_stream=planner.stream, code_stream=coder.stream, max_tokens=None)
@@ -1154,12 +1165,10 @@ async def test_the_coding_models_refusal_leaves_the_main_agents_screenshots_on(s
 
     assert await orchestrator._gen_verify_frontend(st) is None
 
-    # Attempt 1 on the planner; attempt 2's round 0 on the planner with the
-    # screenshot, then round 1 on the coder, refused once and sent without it.
-    assert planner.images == [0, 1]
-    assert coder.images == [1, 0]
+    assert planner.images == [0]
+    assert coder.images == [1, 0, 0]
     assert st.session._render_screenshots_refused is False
-    assert [r["body"]["screenshot"] for r in service.requests] == [True, True]
+    assert [r["body"]["screenshot"] for r in service.requests] == [True, False]
     assert st.browser_status == "passed"
 
 

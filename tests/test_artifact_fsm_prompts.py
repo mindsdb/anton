@@ -470,7 +470,7 @@ def test_verifier_contract_promises_the_browser_load_for_both_page_kinds():
     assert "headless browser" not in prompts._VERIFIER_CONTRACT  # shared head only
     html = prompts.build_subagent_system_prompt(Path("/tmp/a"))
     front = prompts.build_frontend_system_prompt(Path("/tmp/a"))
-    assert "the page is also loaded once right\n  after these checks" in html
+    assert "the page is also loaded at each\n  review" in html
     assert "local file that does not exist" in html
     assert "running backend" not in html
     assert "loaded once from\n  its running backend after the launch" in front
@@ -481,79 +481,28 @@ def test_verifier_contract_promises_the_browser_load_for_both_page_kinds():
         assert "single-file" not in text
 
 
-def test_design_rules_pick_the_chart_type_by_purpose():
-    """S-04: the rules set every ECharts option but never said which chart
-    fits which question; pie charts for comparisons and lines for categories
-    are the result. Both frontend prompts carry the block."""
-    rules = prompts._DESIGN_RULES
-    assert "Chart type by purpose" in rules
-    assert "line for change over time" in rules
-    assert "bar for comparing" in rules
-    assert "stacked bar for composition" in rules
-    assert "scatter for the relation" in rules
-    assert "donut ONLY for a simple part-of-a-whole" in rules
-    assert "KPI\n  card, not a chart" in rules
-    for text in (
-        prompts.build_subagent_system_prompt(Path("/tmp/a")),
-        prompts.build_frontend_system_prompt(Path("/tmp/a")),
-    ):
-        assert "Chart type by purpose" in text
-
-
-def test_design_rules_require_units_and_formatters():
-    """S-05: axis labels name the unit, every displayed number is formatted,
-    one date format per page."""
-    rules = prompts._DESIGN_RULES
-    assert "Axes and units" in rules
-    assert "names the measure AND its unit" in rules
-    assert "`Revenue, USD`" in rules
-    assert "goes through a `formatter`" in rules
-    assert "never a raw float" in rules
-    assert "One date format per page" in rules
-    assert "estimated, sampled or converted" in rules
-
-
-def test_design_rules_forbid_content_nobody_asked_for():
-    """Pages gained invented brand names, status pills, marketing copy and
-    footers that neither the request nor the PRD mentioned. Both page
-    prompts carry the scope rule."""
-    rules = prompts._DESIGN_RULES
-    assert "render ONLY what the request, the PRD, `spec.md` and the API" in rules
-    assert "invented brand" in rules
-    assert "they never add other content" in rules
-    # error states and the notes other design rules demand are not extras
-    assert "functional states (loading, empty, error and API error messages)" in rules
-    assert "chart subtitles, units, estimated or converted" in rules
-    for text in (
-        prompts.build_subagent_system_prompt(Path("/tmp/a")),
-        prompts.build_frontend_system_prompt(Path("/tmp/a")),
-    ):
-        assert "render ONLY what the request, the PRD, `spec.md` and the API" in text
-
-
-def test_design_rules_recommend_tailwind_but_keep_hand_written_css():
-    """Tailwind via CDN is the recommended styling; a `<style>` block stays
-    allowed, and no other library may be loaded. Both frontend prompts and
-    the spec writer's stack block must agree, or the spec forbids what the
-    frontend step is told to do."""
-    rules = prompts._DESIGN_RULES
-    assert "https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4" in rules
-    assert "recommended" in rules
-    assert "Hand-written CSS" in rules
-    assert "ONLY external resources" in rules
-    # Both CDNs need network at view time: an offline requirement wins over
-    # the recommendation, and the spec writer knows it too.
-    assert "OFFLINE" in rules
-    assert "offline" in prompts._TECH_SPEC_STACK
+def test_design_rules_impose_no_house_style():
+    """What a page holds and how it looks follow the request and the data:
+    neither frontend prompt nor the spec writer's stack mandates a theme, a
+    styling framework, a chart library or a dashboard layout."""
     for text in (
         prompts.build_subagent_system_prompt(Path("/tmp/a")),
         prompts.build_frontend_system_prompt(Path("/tmp/a")),
         prompts._TECH_SPEC_STACK,
     ):
-        assert "Tailwind" in text
-        assert "ECharts" in text
-    # The spec block no longer says "inline CSS" as if a framework were banned.
-    assert "inline CSS" not in prompts._TECH_SPEC_STACK
+        flat = " ".join(text.split())
+        for mandate in ("#0d1117", "Dark theme", "ALWAYS use Apache ECharts", "Hero KPI cards", "is the recommended way to style"):
+            assert mandate not in flat, mandate
+    assert "Tailwind" not in prompts._TECH_SPEC_STACK and "ECharts" not in prompts._TECH_SPEC_STACK
+
+
+def test_design_rules_keep_scope_and_data_honesty():
+    """No invented content, and every figure is given by the data or computed
+    from it, with gaps said rather than filled."""
+    flat = " ".join(prompts._DESIGN_RULES.split())
+    assert "No invented brand" in flat
+    assert "never fill the gap with a plausible value" in flat
+    assert "computed from it" in flat
 
 
 # ── backend prompt: same skeleton as the two frontend prompts ───────────────
@@ -632,7 +581,7 @@ def test_html_prompt_builder_takes_no_artifact_type():
     params = inspect.signature(prompts.build_subagent_system_prompt).parameters
     assert "artifact_type" not in params
     html = prompts.build_subagent_system_prompt(Path("/tmp/a"))
-    assert "ONE self-contained HTML" in html or "single self-contained HTML file" in html
+    assert "ONE self-contained web page" in html
     assert "backend.py" not in html
     assert "Unsupported artifact type" not in html
 
@@ -845,8 +794,7 @@ def test_tech_spec_instruction_leaves_the_frontends_design_rules_alone():
     """Seen live: the spec spent lines on palette, flip timing and a
     breakpoint the generator's own `_DESIGN_RULES` already decide."""
     instruction = prompts.build_tech_spec_instruction(_state(prd="# PRD"))
-    assert "frontend's own design rules" in instruction
-    assert "theme, fonts, chart library" in instruction
+    assert "No theme, fonts or chart library unless the PRD asks for them" in instruction
 
 
 def test_cold_and_hot_tech_spec_paths_ask_for_the_same_document():
@@ -862,7 +810,10 @@ def test_generator_prompts_say_verification_is_not_the_models_job():
     deterministic verifier repeats anyway — and the round budget died of it.
     The rule lives in the workflow block of every generator prompt."""
     for name, system in _generator_prompts().items():
-        # "file" for the two single-file pages, "files" for the backend.
+        if name == "html":
+            # The html-app builder revises its draft against the review `finish` returns.
+            continue
+        # "file" for the fullstack page, "files" for the backend.
         assert re.search(r"Do not read the files? back and do not run checks", system), name
         assert "deterministic verifier" in system, name
 
@@ -1060,7 +1011,6 @@ def test_html_prompt_states_each_rule_once():
     s = _html_prompt()
     assert s.count('name="viewport"') == 1
     assert s.count("VERIFICATION IS NOT YOUR JOB") == 0
-    assert "NOT part of the job" in s
 
 
 def test_html_prompt_names_the_ui_language():

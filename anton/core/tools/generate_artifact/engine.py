@@ -24,6 +24,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from anton.core.artifacts import render_check
 from anton.core.artifacts.internal_files import API_SPEC_FILENAME, PRD_FILENAME
 from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
 from anton.core.backends.sandbox import cell_sandbox_of
@@ -902,6 +903,7 @@ async def _run_loop(
     require_files: bool = True,
     spend=None,
     on_text=None,
+    review=None,
 ) -> dict | str:
     """Run one bounded sub-agent tool-call loop.
 
@@ -937,9 +939,20 @@ async def _run_loop(
     screenshot; a later round's refusal came from the coding model and
     drops only this loop's image. Only the kickoff's image is the loop's to
     drop, so this happens at most once per loop; a second refusal raises.
+
+    ``review``, when given, is called at each `finish` as
+    ``await review(files_written, screenshot=...)`` and returns a
+    `page_review.ReviewVerdict`. A verdict that does not accept answers the
+    `finish` call with the review (text, and a screenshot when there is
+    one) and the loop goes on, so the builder revises its draft with
+    `edit_file`, which only such a loop offers. The reviewer bounds how
+    often it refuses; over budget no review runs. Only the newest review
+    screenshot stays in the history; a refused one is dropped with the
+    kickoff's, after which reviews send none.
     """
     trace = trace or NullTrace()
-    tools = sub_tools.tool_schemas()
+    tools = sub_tools.tool_schemas(revise=review is not None)
+    screenshots_ok = True
     default_cap = _output_token_cap(session)
     messages: list[dict] = [{"role": "user", "content": kickoff}]
 
@@ -1007,19 +1020,27 @@ async def _run_loop(
             default_cap=default_cap,
             on_text=on_text,
         )
+        if review is not None:
+            # Each review can add a screenshot and every round re-sends them all.
+            render_check.drop_older_screenshots(messages)
         try:
             response, used_budget = await call()
         except Exception as exc:
             from anton.core.llm.provider import is_image_refusal
 
-            if not (is_image_refusal(exc) and _drop_kickoff_images(messages)):
+            if not is_image_refusal(exc):
                 raise
+            dropped = _drop_kickoff_images(messages) + render_check.drop_refused_screenshots(messages)
+            if not dropped:
+                raise
+            screenshots_ok = False
             logger.info(
-                "generate_artifact: the model refused the kickoff's screenshot; "
+                "generate_artifact: the model refused a screenshot; "
                 "sending the request once more without it"
             )
             # `messages` is the list `call` holds, now without the image.
             response, used_budget = await call()
+            render_check.confirm_refused_screenshots(messages)
             if first_round or routed_model() is not None:
                 # Round 0 runs on the planning model, the main agent's own,
                 # so its checks send no screenshot either from now on. A
@@ -1130,9 +1151,24 @@ async def _run_loop(
             inp = tc.input or {}
 
             if name == "finish":
+                if review is not None and not (spend is not None and spend.should_wind_down()):
+                    verdict = await review(list(files_written), screenshot=screenshots_ok)
+                    if not verdict.accept:
+                        result_blocks.append(sub_tools.tool_result(tc.id, verdict.content))
+                        continue
                 summary = str(inp.get("summary") or "").strip()
                 finished_summary = summary or "(no summary)"
                 result_blocks.append(sub_tools.tool_result(tc.id, "ok"))
+            elif name == "edit_file" and review is not None:
+                res = sub_tools.edit_file(
+                    artifact_path, inp.get("path", ""), inp.get("old_text"), inp.get("new_text")
+                )
+                if res.get("ok"):
+                    written = res["written"]
+                    if written not in files_written:
+                        files_written.append(written)
+                    trace.file_written(node=node_label, path=written)
+                result_blocks.append(sub_tools.tool_result(tc.id, res["message"]))
             elif name == "write_file":
                 if len(write_calls) > 1:
                     # One reply carries one body, so a second call has nothing

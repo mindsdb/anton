@@ -8,6 +8,8 @@ The write loop offers four:
     relative to the artifact folder and never returns line numbers.
   - ``finish(summary)``        — terminal tool; signals the loop to stop.
   - ``scratchpad``             — the main agent's scratchpad, unchanged.
+  - ``edit_file``              — only in a loop that reviews its draft: replace
+    one exact passage of a written file.
 
 Each handler accepts the artifact ``root`` plus the sub-agent's input dict and
 returns a string the engine forwards back to the LLM via a ``tool_result``
@@ -322,8 +324,32 @@ def _read_text_file_schema() -> dict:
     return {**schema, "input_schema": input_schema}
 
 
-def tool_schemas() -> list[dict]:
-    return [WRITE_FILE_SCHEMA, _read_text_file_schema(), FINISH_SCHEMA, _scratchpad_schema()]
+EDIT_FILE_SCHEMA: dict = {
+    "name": "edit_file",
+    "description": (
+        "Replace one exact passage of a file you already wrote. `old_text` must "
+        "appear exactly once in the file, whitespace included; it is replaced "
+        "with `new_text`. Use it to fix a specific problem in your draft without "
+        "rewriting the whole file. To change several places, make one call per "
+        "place."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Relative path inside the artifact folder."},
+            "old_text": {"type": "string", "description": "The exact passage to replace."},
+            "new_text": {"type": "string", "description": "What replaces it; may be empty."},
+        },
+        "required": ["path", "old_text", "new_text"],
+    },
+}
+
+
+def tool_schemas(*, revise: bool = False) -> list[dict]:
+    """The write loop's tools. `revise` adds `edit_file`, for a loop whose
+    `finish` returns a review of the draft to fix."""
+    tools = [WRITE_FILE_SCHEMA, _read_text_file_schema(), FINISH_SCHEMA, _scratchpad_schema()]
+    return [*tools, EDIT_FILE_SCHEMA] if revise else tools
 
 
 def is_host_path(path: str) -> bool:
@@ -450,4 +476,42 @@ def write_file(root: Path, rel_path: str, content: str, *, mode: str = "w") -> d
         "ok": True,
         "written": rel_written,
         "message": message,
+    }
+
+
+def edit_file(root: Path, rel_path: str, old_text: str, new_text: str) -> dict:
+    """Replace the single occurrence of ``old_text`` in ``<root>/<rel_path>``.
+
+    Same return shape as `write_file`. Refuses, writing nothing, when the
+    passage is missing or appears more than once: a guess at which one was
+    meant would change the wrong place without a sign.
+    """
+    target = _sandboxed_path(root, rel_path)
+    if target is None:
+        return {"ok": False, "message": f"Error: `path` must be inside the artifact folder (received: {rel_path!r})."}
+    if not isinstance(old_text, str) or not old_text or not isinstance(new_text, str):
+        return {"ok": False, "message": "Error: `old_text` must be a non-empty string and `new_text` a string."}
+    try:
+        text = target.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {"ok": False, "message": f"Error: {rel_path} does not exist yet; write it with `write_file` first."}
+    except (OSError, UnicodeDecodeError) as exc:
+        return {"ok": False, "message": f"Error: {rel_path} could not be read ({type(exc).__name__})."}
+    count = text.count(old_text)
+    if count != 1:
+        where = "does not appear" if count == 0 else f"appears {count} times"
+        return {
+            "ok": False,
+            "message": (
+                f"Error: `old_text` {where} in {rel_path}, so nothing was changed. Copy the "
+                "passage exactly as the file has it, with enough context to make it unique."
+            ),
+        }
+    updated = text.replace(old_text, new_text, 1)
+    target.write_text(updated, encoding="utf-8")
+    rel_written = str(target.relative_to(root.resolve()))
+    return {
+        "ok": True,
+        "written": rel_written,
+        "message": f"Edited {rel_written}; file now {len(updated)} characters / {count_lines(updated)} lines.",
     }

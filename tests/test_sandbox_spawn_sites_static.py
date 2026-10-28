@@ -86,7 +86,7 @@ ALLOWLIST = (
      "the verifier's compile and import checks, through the launcher"),
     ("core/artifacts/backend_launcher.py", "launch_artifact_backend", "asyncio.create_subprocess_exec", REFUSED,
      "app backends; launch_artifact_backend returns BACKENDS_OFF_MESSAGE under a policy first"),
-    ("core/artifacts/html_lint.py", "_lint_target", "subprocess.run", REFUSED,
+    ("core/artifacts/html_lint.py", "_run_runner", "subprocess.run", REFUSED,
      "the headless-browser lint; lint_html and lint_url return None under a policy first"),
     ("core/artifacts/xlsx_office_check.py", "_convert", "subprocess.Popen", REFUSED,
      "the LibreOffice check; check_xlsx_via_office and check_opens_via_office return None under a policy first"),
