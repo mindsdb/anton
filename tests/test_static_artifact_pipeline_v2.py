@@ -184,3 +184,22 @@ async def test_large_text_cells_do_not_escape_the_bounded_catalog(tmp_path,monke
     assert (await compose(st,large))['status']=='generated'
     assert len(seen[0]['messages'][0]['content'])<10000
     assert '"truncated": true' in seen[0]['messages'][0]['content']
+
+
+async def test_source_refusal_requires_an_attempt_even_before_procedure_recall(tmp_path):
+    import importlib
+    module=importlib.import_module('anton.core.tools.generate_artifact.static_v2.collect')
+    stop={'ready':False,'needs_data':True,'reason':'The requested source procedure is missing'}
+    responses=[LLMResponse(content='',tool_calls=[ToolCall('premature','finish_static_evidence',stop)]),
+        LLMResponse(content='',tool_calls=[ToolCall('lookup','recall_skill',{'label':'unavailable-source'})]),
+        LLMResponse(content='',tool_calls=[ToolCall('stop','finish_static_evidence',stop)])]
+    calls=[]
+    async def stream(**kwargs):
+        calls.append(kwargs)
+        yield StreamComplete(response=responses.pop(0))
+    st=state(tmp_path,VALID)
+    st.session._skill_store=SimpleNamespace(list_summaries=lambda:[],load_for_artifacts=lambda label:None)
+    st.session._llm.plan_stream=stream;st.session._llm.code_stream=stream
+    assert 'requested source procedure is missing' in await module.collect(st)
+    assert len(calls)==3
+    assert 'Source readers are available in this call' in str(calls[-1]['messages'])
