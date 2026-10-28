@@ -123,7 +123,8 @@ def validate(
             f"under id {next_free_id(artifact_path)} and up instead."
         )
     try:
-        load(artifact_path, file_id, cell_sandbox=cell_sandbox)
+        # Encoding too: a lone surrogate parses but cannot be written to the page.
+        serialize(load(artifact_path, file_id, cell_sandbox=cell_sandbox)).encode("utf-8")
     except FileNotFoundError:
         return f"{name} does not exist. Write it in a scratchpad cell first."
     except OSError as exc:
@@ -365,10 +366,11 @@ def summarize(
             head.append(f"Description: {item.description}")
         try:
             value = load(artifact_path, item.id, cell_sandbox=cell_sandbox)
+            size = len(serialize(value).encode('utf-8'))
         except (OSError, ValueError) as exc:
             entries.append("\n".join(head + [f"(unreadable: {exc})"]))
             continue
-        head.append(f"Size: {len(serialize(value).encode('utf-8')):,} bytes")
+        head.append(f"Size: {size:,} bytes")
         body = "\n".join(head + ["Structure:"] + _describe(value, "data", 0))
         if len(body) > SUMMARY_CHARS:
             body = body[:SUMMARY_CHARS] + " …"

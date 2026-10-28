@@ -193,3 +193,11 @@ def test_state_sections_do_not_touch_the_session_without_files(tmp_path):
     state = SimpleNamespace(artifact_path=tmp_path, data_files=[], previous_data_files=[], session=Exploding())
     assert data_files.state_files_section(state) == ""
     assert data_files.state_saved_files_section(state) == ""
+
+
+def test_lone_surrogates_are_not_valid_for_a_page(tmp_path):
+    _write(tmp_path, "1", '["\\ud800"]')
+    assert "unreadable" in data_files.summarize(tmp_path, [DataFile("1", ["s"])])
+    error = data_files.validate(tmp_path, "1")
+    assert error is not None and "not valid JSON" in error
+    assert data_files.restorable(tmp_path, [{"id": "1", "sources": ["s"]}]) == []
