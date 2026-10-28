@@ -238,7 +238,10 @@ async def compose(state, evidence: Evidence):
                 replace_text_nofollow(state.artifact_path, target, html, create_parents=True)
             state.files_written.append(primary)
             state.record('static_artifact_v2', 'done', f'{output.mode}; evidence={evidence.digest()}; browser={live.status}')
-            return {'status': 'generated', **_result_shell(state), 'static_artifact_version': 2,
+            origin = state.static_evidence_origin.get('mode', 'unknown')
+            row_count = sum(len(dataset.rows) for dataset in evidence.datasets.values())
+            outcome = f'generated; evidence origin={origin}, {len(evidence.datasets)} datasets / {row_count} rows; browser={live.status}'
+            return {'status': 'generated', **_result_shell(state), 'static_artifact_version': 2, 'outcome': outcome,
                     'content_review': review,
                     'data_publication': {'evidence_sha256': evidence.digest(), 'bindings': list(manifest['bindings']), 'origin': state.static_evidence_origin,
                         'datasets': {name: {'rows': len(dataset.rows), 'source_label': dataset.source.label[:200]} for name, dataset in evidence.datasets.items()}}}

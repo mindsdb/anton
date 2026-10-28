@@ -2104,6 +2104,9 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         instruction = f"{instruction} {_RESTORED_INSTRUCTION}"
     text = json.dumps(
         {
+            # Keep the host's factual static-build outcome visible in bounded
+            # parent/continuation transcripts, ahead of long paths and traces.
+            **({'outcome': result['outcome']} if result.get('static_artifact_version') == 2 and 'outcome' in result else {}),
             "slug": slug,
             "path": str(folder),
             **result,
