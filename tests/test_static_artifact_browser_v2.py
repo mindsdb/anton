@@ -66,6 +66,28 @@ def test_slide_controls_keyboard_exit_and_print_restore_all_content():
         browser.close()
 
 
+def test_custom_fragment_class_names_and_hidden_controls_do_not_become_host_views():
+    document=Document.model_validate({'kind':'slides','title':'Mixed content','sections':[
+        {'id':'one','blocks':[{'type':'html','html':'<section class="section" id="custom-section"><div class="chart" id="custom-chart">Custom diagram</div><button hidden id="custom-hidden">Hidden control</button></section>'}]},
+        {'id':'two','blocks':[{'type':'prose','text':'Second slide'}]}]})
+    with playwright.sync_playwright() as p:
+        browser=p.chromium.launch();page=browser.new_page();errors=[]
+        page.on('pageerror',lambda error:errors.append(str(error)))
+        page.set_content(render(document,Evidence()).html)
+        assert page.locator('#custom-chart').inner_text()=='Custom diagram'
+        assert page.locator('#custom-section').evaluate('(el)=>getComputedStyle(el).paddingTop')=='0px'
+        page.get_by_role('button',name='Present',exact=True).click()
+        assert page.get_by_role('status').inner_text()=='1 / 2'
+        page.get_by_role('button',name='Next slide').click()
+        assert page.get_by_role('status').inner_text()=='2 / 2'
+        assert page.get_by_role('button',name='Next slide').is_disabled()
+        page.emulate_media(media='print')
+        assert page.locator('#one').is_visible() and page.locator('#two').is_visible()
+        assert not page.locator('#custom-hidden').is_visible()
+        assert not errors
+        browser.close()
+
+
 def test_dark_report_prints_with_legible_text_and_chart_colors():
     def luminance(rgb):
         channels=[int(n)/255 for n in rgb.removeprefix('rgb(').removesuffix(')').split(',')]
