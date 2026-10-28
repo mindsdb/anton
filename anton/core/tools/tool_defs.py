@@ -677,6 +677,42 @@ STATIC_UPDATE_ARTIFACT_METADATA_TOOL = replace(
 )
 
 
+def _without_direct_reports(tool: ToolDef) -> ToolDef:
+    """`tool` with the DIRECT REPORTS routing dropped from its texts."""
+    if tool.name == "create_artifact":
+        return replace(tool, description=cut_spans(
+            tool.description,
+            (
+                ": a report the user has fully specified you build yourself "
+                "(DIRECT REPORTS in the ARTIFACTS section); anything else goes to",
+                " `generate_artifact(",
+                ": it goes to",
+            ),
+        ))
+    return replace(
+        tool,
+        description=cut_spans(
+            tool.description,
+            (
+                " whose requirements still need agreeing (a report the user has fully "
+                "specified is built directly — see DIRECT REPORTS)",
+                ".",
+                "",
+            ),
+        ),
+        prompt=cut_spans(
+            tool.prompt,
+            ("; a report the user has fully specified is built directly (DIRECT REPORTS)", ".\n", ""),
+        ),
+    )
+
+
+CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(CREATE_ARTIFACT_TOOL)
+STATIC_CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(STATIC_CREATE_ARTIFACT_TOOL)
+GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(GENERATE_ARTIFACT_TOOL)
+STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(STATIC_GENERATE_ARTIFACT_TOOL)
+
+
 
 RECALL_TOOL = ToolDef(
     name="recall",
