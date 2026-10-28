@@ -300,6 +300,7 @@ async def test_provided_records_use_the_bound_path_and_preserve_scalar_types(tmp
     from anton.core.tools.registry import ToolOutcome
     module=importlib.import_module('anton.core.tools.generate_artifact.static_v2.collect')
     seen=[];namespace={};paths=[]
+    monkeypatch.setenv('STATIC_EVIDENCE_PATH','stale environment value')
     payload='{"datasets":{"provided":{"source":{"label":"User records"},"rows":[{"id":"001","value":0.1234567890123456789,"active":true}]}}}'
     code=f'from pathlib import Path\nPath(STATIC_EVIDENCE_PATH).write_text({payload!r})\nSTATIC_EVIDENCE_PATH = "stale model value"'
     async def execute(session,arguments):
@@ -321,11 +322,14 @@ async def test_provided_records_use_the_bound_path_and_preserve_scalar_types(tmp
     assert evidence.datasets['provided'].rows==[{'id':'001','value':Decimal('0.1234567890123456789'),'active':True}]
     assert len(paths)==2 and paths[0]==paths[1]
     assert len(list((folder/'.static').glob('evidence-*.json')))==1
+    import os
+    assert Path(os.environ['STATIC_EVIDENCE_PATH']).read_text()==payload
 
 
-def test_bound_evidence_path_preserves_future_imports_and_code(tmp_path):
+def test_bound_evidence_path_preserves_future_imports_and_code(tmp_path,monkeypatch):
     import importlib
     module=importlib.import_module('anton.core.tools.generate_artifact.static_v2.collect')
+    monkeypatch.setenv('STATIC_EVIDENCE_PATH','stale')
     code='"Reader module"\nfrom __future__ import annotations\nresult: UnresolvedType = STATIC_EVIDENCE_PATH'
     namespace={}
     exec(module._bind_evidence_path(code,tmp_path/"Reader's file.json"),namespace)

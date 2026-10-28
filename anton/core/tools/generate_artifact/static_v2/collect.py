@@ -39,7 +39,8 @@ def _bind_evidence_path(code, path):
         offset = 0  # Let the normal scratchpad handler report invalid Python.
     lines = code.splitlines(keepends=True)
     prefix = ''.join(lines[:offset])
-    return prefix + ('\n' if prefix and not prefix.endswith('\n') else '') + f'STATIC_EVIDENCE_PATH = {str(path)!r}\n' + ''.join(lines[offset:])
+    binding = f'STATIC_EVIDENCE_PATH = {str(path)!r}\n__import__("os").environ["STATIC_EVIDENCE_PATH"] = STATIC_EVIDENCE_PATH\n'
+    return prefix + ('\n' if prefix and not prefix.endswith('\n') else '') + binding + ''.join(lines[offset:])
 
 
 async def collect(state, *, feedback: str = '') -> Evidence | str:

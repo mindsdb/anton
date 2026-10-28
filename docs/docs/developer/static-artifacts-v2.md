@@ -32,7 +32,7 @@ Collection reuses the session's existing scratchpad, text-file, trusted source-p
 question handlers. It cannot grant access a handler does not already grant.
 Each acquisition binds Python operations to its own fresh scratchpad, isolating it
 from parent notebook variables, live clients and restored namespace state. It
-initializes `STATIC_EVIDENCE_PATH` before each execution so source code can save
+initializes `STATIC_EVIDENCE_PATH` as a Python variable and environment entry before each execution so source code can save
 the complete records without copying an absolute host path. The host reads only
 that bound private file when collection finishes.
 Multiple calls in that acquisition share the same pad. Existing computations must arrive as

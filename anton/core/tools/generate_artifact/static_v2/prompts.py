@@ -57,7 +57,7 @@ another read of .anton/anton.md. The next stage can write reports, slides, inter
 and embedded supporting resources. Those authoring tools are intentionally absent from this
 evidence stage and their absence is never an evidence blocker. User-provided records are a valid
 source: persist them with scratchpad without fetching another source. The host initializes the
-string variable STATIC_EVIDENCE_PATH before every Python execution. Save evidence with
+Python string variable STATIC_EVIDENCE_PATH (also in os.environ) before every execution. Save evidence with
 Path(STATIC_EVIDENCE_PATH); do not copy, shorten, or reconstruct its path. No separate
 file-writing tool is required.
 Use the existing tools and their access restrictions. Scratchpad executes Python and can read
