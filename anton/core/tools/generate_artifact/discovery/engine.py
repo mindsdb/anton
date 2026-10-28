@@ -13,10 +13,18 @@ from typing import TYPE_CHECKING
 
 from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS, scratchpad_action
 
+from .. import data_files
 from .. import sub_tools as protocol
-from ..state import known_data_usable
+from ..data_files import DATA_NOT_SAVED_WARNING
+from ..state import known_data_is_reference, known_data_usable, settled_artifact_type
 from . import prompts, sub_tools
-from .notes import known_data_sources, render_gathering_notes, source_key, string_list
+from .notes import (
+    known_data_sources,
+    render_gathering_notes,
+    source_key,
+    string_list,
+    web_verified_sources,
+)
 from .state import PrdState, gathering_question_budget
 
 if TYPE_CHECKING:
@@ -54,6 +62,66 @@ def _exec_ran(outcome) -> bool:
     if getattr(outcome, "reason", "") in CELL_NOT_RUN_REASONS:
         return False
     return getattr(outcome, "ok", None) is not False
+
+
+_NOT_FINISHED = "Not finished — fix the data files and call `finish_gathering` again:\n"
+_SAVE_DATA = (
+    "Not finished — save the data the page needs into the data files folder named in the "
+    "step message and list it in `data_files`, then call `finish_gathering` again. Sources "
+    "without a data file: "
+)
+
+
+def _absorb_data_files(state: "PrdState", inp: dict) -> str | None:
+    """For an html-app: take the declared data files, or say why gathering
+    cannot finish yet. Data read by code is sent back once to be saved; the
+    second call is accepted either way, so gathering cannot get stuck on
+    data it cannot save."""
+    if settled_artifact_type(state) != "html-app":
+        return None
+    declared = data_files.parse_declared(inp.get("data_files"))
+    valid, errors = (data_files.check_declared(
+        state.artifact_path, declared, state.declared_sources,
+        cell_sandbox=data_files.sandbox_of(state.session), protected=state.data_snapshot,
+    ) if declared else ([], []))
+    if errors:
+        return _NOT_FINISHED + "\n".join(f"- {e}" for e in errors)
+    state.data_files = valid
+    if state.data_save_requested or not state.declared_sources:
+        return None
+    covered = data_files.covered_sources(valid)
+    if known_data_is_reference(state):
+        web = web_verified_sources(inp) if state.web_calls else set()
+        missing = [s for s in state.declared_sources if source_key(s) not in covered | web]
+    elif state.scratchpad_execs and not valid:
+        missing = list(state.declared_sources)
+    else:
+        missing = []
+    if not missing:
+        return None
+    state.data_save_requested = True
+    return _SAVE_DATA + ", ".join(missing) + "."
+
+
+def _apply_html_app_coverage(state: "PrdState", inp: dict) -> None:
+    """Data files verify the sources they cover. A reference to pad data
+    verifies nothing on its own, whatever else ran."""
+    # A `back_to_gathering` that saves the data clears what an earlier pass marked.
+    data_files.clear_data_not_saved(state)
+    covered = data_files.covered_sources(state.data_files)
+    if known_data_is_reference(state):
+        web = web_verified_sources(inp) if state.web_calls else set()
+        state.unverified_sources = [
+            s for s in state.declared_sources if source_key(s) not in covered | web
+        ]
+        state.known_data_verified = []
+        return
+    state.unverified_sources = [s for s in state.unverified_sources if source_key(s) not in covered]
+    if state.scratchpad_execs and state.declared_sources and not state.data_files:
+        state.record("gathering", "data_not_saved", ", ".join(state.declared_sources))
+        state.data_not_saved = True
+        if DATA_NOT_SAVED_WARNING not in state.verify_warnings:
+            state.verify_warnings.append(DATA_NOT_SAVED_WARNING)
 
 
 async def run_gathering_loop(state: "PrdState") -> None:
@@ -181,6 +249,11 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 state.assumptions = string_list(inp.get("assumptions"))
                 state.open_points = string_list(inp.get("open_points"))
                 state.declared_sources = string_list(inp.get("data_sources"))
+                refusal = _absorb_data_files(state, inp)
+                if refusal is not None:
+                    state.trace_log.node("gathering", "data_files_refused", detail=refusal[:200])
+                    result_blocks.append(protocol.tool_result(tc.id, refusal))
+                    continue
                 # On the hot path the gathering loop had the data tools and
                 # used them, so a source it declares is one it worked with.
                 # `web_calls` counts as much as `scratchpad_execs`: a source
@@ -204,8 +277,11 @@ async def run_gathering_loop(state: "PrdState") -> None:
                     if executed
                     else [s for s in state.declared_sources if source_key(s) in covered]
                 )
+                if settled_artifact_type(state) == "html-app":
+                    _apply_html_app_coverage(state, inp)
                 state.gathering_complete = True
-                result_blocks.append(protocol.tool_result(tc.id, "ok"))
+                section = data_files.state_files_section(state)
+                result_blocks.append(protocol.tool_result(tc.id, "ok" + (f"\n\n{section}" if section else "")))
                 finished = True
             elif name == "ask_user":
                 # The exhausted-budget case is handled by the gate above, so

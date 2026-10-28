@@ -11,7 +11,10 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from anton.core.artifacts.internal_files import DATA_DIRNAME
 from anton.core.artifacts.models import ARTIFACT_TYPES, GENERATOR_ARTIFACT_TYPES
+from anton.core.tools.generate_artifact.data_files import DataFile
+from anton.core.tools.generate_artifact.discovery import prompts as dprompts
 from anton.core.tools.generate_artifact.discovery import sub_tools
 from anton.core.tools.generate_artifact.discovery.prompts import (
     GATHERING_CONTINUE,
@@ -391,3 +394,27 @@ def test_the_redraw_asks_for_the_known_data_mark():
 
     assert "data_findings" in discovery_prompts._REDRAW_RESTATE
     assert 'verified_by: "known_data"' in discovery_prompts._REDRAW_RESTATE
+
+
+def test_gathering_step_names_the_data_folder_and_next_id(tmp_path):
+    (tmp_path / DATA_DIRNAME).mkdir()
+    (tmp_path / DATA_DIRNAME / "2.json").write_text("[]")
+    state = GenState(session=SimpleNamespace(question_count=0), artifact_type="html-app",
+                     artifact_path=tmp_path, slug="s")
+    text = dprompts.step_message(sub_tools.STEP_GATHERING, state)
+    assert f"{tmp_path / DATA_DIRNAME}/" in text and "first free id is 3" in text
+    assert "`data_files`" in text
+
+
+def test_kickoff_lists_saved_data_files(tmp_path):
+    (tmp_path / DATA_DIRNAME).mkdir()
+    (tmp_path / DATA_DIRNAME / "1.json").write_text('[{"Id": "SO-5001"}]')
+    state = GenState(session=SimpleNamespace(), artifact_type="html-app", artifact_path=tmp_path,
+                     slug="s", previous_data_files=[DataFile("1", ["orders"])])
+    assert "## Saved data files" in dprompts.build_call_kickoff(state)
+
+
+def test_finish_gathering_schema_declares_data_files():
+    props = sub_tools.FINISH_GATHERING_SCHEMA["input_schema"]["properties"]
+    item = props["data_files"]["items"]
+    assert item["required"] == ["id", "sources"]
