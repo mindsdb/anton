@@ -140,7 +140,15 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
     sections = []
     for section in document.sections:
         blocks = []
+        adjacent_metrics = []
+        def flush_metrics():
+            if adjacent_metrics:
+                content = ''.join(adjacent_metrics)
+                blocks.append(f'<div class="metric-row">{content}</div>' if len(adjacent_metrics)>1 else content)
+                adjacent_metrics.clear()
         for block in section.blocks:
+            if not isinstance(block, Metric):
+                flush_metrics()
             index = f'_view{len(bindings)}'
             if isinstance(block, Prose):
                 blocks.append('<div class="prose">' + ''.join(f'<p>{text(p)}</p>' for p in block.text.split('\n\n')) + '</div>')
@@ -151,11 +159,13 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
                     raise DataError(f"Unknown metric fact: {block.fact}")
                 published_facts[block.fact] = values[block.fact]
                 value = document.facts[block.fact].format.display(values[block.fact])
-                blocks.append(f'<div class="metric"><h3>{text(block.label)}</h3><p class="metric-value">{escape(value)}</p><p class="metric-detail">{text(block.detail)}</p></div>')
+                destination = adjacent_metrics if section.layout == 'flow' else blocks
+                destination.append(f'<div class="metric"><h3>{text(block.label)}</h3><p class="metric-value">{escape(value)}</p><p class="metric-detail">{text(block.detail)}</p></div>')
             elif isinstance(block, (Table, Chart)):
                 blocks.append(queried(block, index))
             elif isinstance(block, Html):
                 blocks.append(f'<div class="custom">{block.html}</div>')
+        flush_metrics()
         heading = (f'<p class="eyebrow">{text(section.eyebrow)}</p>' if section.eyebrow else '')
         heading += f'<h2>{text(section.title)}</h2>' if section.title else ''
         heading += f'<p class="section-summary">{text(section.summary)}</p>' if section.summary else ''
