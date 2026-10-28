@@ -120,6 +120,21 @@ async def test_success_returns_json_unchanged(tmp_path: Path, monkeypatch):
     assert "generation failed" not in out
 
 
+async def test_static_evidence_outcome_survives_the_completion_transcript_cap(tmp_path,monkeypatch):
+    from anton.core.session import _render_tool_result_content
+    folder=tmp_path/('long-project-name-'*5)/('another-long-segment-'*5);folder.mkdir(parents=True)
+    slug=_make_artifact(folder,'html-app')
+    outcome='generated; evidence origin=acquired, 2 datasets / 55 rows; browser=passed'
+    async def fake_generate(**kw):
+        return {'status':'generated','static_artifact_version':2,'outcome':outcome,'files_written':['index.html'],'verified_in_browser':True,'trace':[{'detail':'earlier validation retry '*100}]}
+    monkeypatch.setattr(gen_pkg,'generate',fake_generate)
+    _,out=await _collect(_session(folder),{'slug':slug,'user_request':'Make the report','agent_understanding':'Read the source during the build'})
+    assert json.loads(out)['status']=='generated'
+    compact=_render_tool_result_content(out,400)
+    assert outcome in compact
+    assert 'elided' in compact
+
+
 async def test_handler_forwards_primary_to_generate(monkeypatch, tmp_path):
     """The primary from metadata must reach the generator."""
     import anton.core.tools.tool_handlers as th
