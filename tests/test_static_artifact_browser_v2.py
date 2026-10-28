@@ -93,3 +93,39 @@ def test_wide_tables_recompose_as_complete_labelled_records_on_phones():
         page.set_viewport_size({'width':1440,'height':900})
         assert page.locator('td').first.evaluate('(cell)=>getComputedStyle(cell).display')=='table-cell'
         browser.close()
+
+
+@pytest.mark.parametrize('layer',['bindings','resources'])
+def test_large_injected_payload_keeps_utf8_before_encoding_sniff_limit(tmp_path,layer):
+    from anton.core.tools.generate_artifact.static_v2.compose import Custom,compile_output
+    from anton.core.tools.generate_artifact.static_v2.resources import embed
+    html='<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><h1>0° · Проверка</h1><p>Complete Unicode text.</p></body></html>'
+    if layer=='bindings':
+        evidence=Evidence.model_validate({'datasets':{'records':{'source':{'label':'Synthetic QA'},'rows':[{'body':'x'*5000}]}}})
+        html,_=compile_output(Custom(mode='html',html=html,bindings={'records':{'dataset':'records','columns':['body']}},views=[{'selector':'h1','binding':'records'}]),evidence)
+    else:
+        html=embed(html,{}, {'reference':{'data':{'body':'x'*5000},'source':{'label':'Synthetic QA','url':'https://assets.example/v1.json','bytes':5000,'sha256':'sha'}}})
+    assert html.index('<meta charset="utf-8">')<100
+    page_path=tmp_path/'unicode.html';page_path.write_text(html,encoding='utf-8')
+    with playwright.sync_playwright() as p:
+        browser=p.chromium.launch();page=browser.new_page()
+        page.goto(page_path.as_uri())
+        assert page.locator('h1').inner_text()=='0° · Проверка'
+        assert page.evaluate('document.characterSet')=='UTF-8'
+        browser.close()
+
+
+def test_embedded_reference_data_and_library_work_with_network_disabled(tmp_path):
+    from anton.core.tools.generate_artifact.static_v2.resources import embed
+    source={'label':'Synthetic resource QA','url':'https://assets.example/v1.json','bytes':40,'sha256':'sha'}
+    assets={'diagram':{'data':{'nodes':[1,2,3]},'source':source},
+        'library':{'data':'window.DIAGRAM_LIBRARY={count:window.ARTIFACT_RESOURCES.diagram.nodes.length};','source':{**source,'kind':'script'}}}
+    html=embed('<!doctype html><html><head></head><body><h1 id="count"></h1><script>document.getElementById("count").textContent=DIAGRAM_LIBRARY.count+" nodes";</script></body></html>',{},assets)
+    path=tmp_path/'offline.html';path.write_text(html,encoding='utf-8')
+    with playwright.sync_playwright() as p:
+        browser=p.chromium.launch();context=browser.new_context(offline=True);page=context.new_page()
+        errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
+        page.goto(path.as_uri())
+        assert page.locator('h1').inner_text()=='3 nodes'
+        assert not errors
+        browser.close()

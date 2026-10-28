@@ -25,10 +25,25 @@ def _script_json(value):
     return json_value(value).replace("<", "\\u003c").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
 
 
-def render(document: Document, evidence: Evidence) -> Rendered:
+def _inject_head(html, payload):
+    """Keep UTF-8 within the sniffing window, before even a large data script."""
+    head = re.search(r'<head(?:\s[^>]*)?>', html, re.I)
+    if head is None:
+        raise ValueError('An HTML head is required for data initialization')
+    charset = re.match(r'\s*<meta\s+charset\s*=\s*([\"\']?)utf-8\1\s*/?>', html[head.end():], re.I)
+    position = head.end() + charset.end() if charset else head.end()
+    prefix = '' if charset else '<meta charset="utf-8">'
+    if len((html[:position] + prefix).encode('utf-8')) > 1024:
+        raise ValueError('Move the HTML head and UTF-8 declaration into the first 1024 bytes')
+    return html[:position] + prefix + payload + html[position:]
+
+
+def render(document: Document, evidence: Evidence, *, resource_sources: dict | None = None) -> Rendered:
     values = resolve_facts(document, evidence)
     bindings = {name: execute(evidence, query) for name, query in document.bindings.items()}
     sources, published_facts = {}, {}
+    for name, metadata in (resource_sources or {}).items():
+        sources[f'reference:{name}'] = {'label': metadata['label'], 'url': metadata['url'], 'scope': 'Supporting visual resource'}
 
     def text(value):
         def substitute(match):

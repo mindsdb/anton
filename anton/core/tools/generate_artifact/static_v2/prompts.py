@@ -89,17 +89,25 @@ Each section is exactly one slide; keep it focused. Include title and source sec
 The document title and automatic source footer are reading metadata, not extra presentation slides.
 For visualizations or interactions the document contract cannot express, use an HTML block, or choose
 compose_custom_html for a fully custom page. This is a real escape hatch, not a reason to simplify the user's task.
-A custom full page supplies bindings as named queries and reads only window.ARTIFACT_DATA[name].
+A custom full page supplies bindings as named queries and reads those records from window.ARTIFACT_DATA[name].
 The host resolves and embeds these exact projected rows before the page's scripts execute. Never
 retype the evidence into code. Custom fragments in a document may read the resolved public bindings
 from window.ARTIFACT_DATA; never rely on outside state.
 A custom page must be a complete single HTML document with viewport metadata, inline styles,
 semantic controls, keyboard support, and responsive layouts. Embed data and media assets. No build,
-server, fetch-at-view-time data API, remote stylesheet/font, or hidden dependency. For a requested
-script library, use a pinned-version script from cdn.jsdelivr.net, the preview-approved script host,
-and pass the actual browser check. Honor explicit library requirements. Source links are fine.
+server, fetch-at-view-time data API, remote stylesheet/font, or hidden dependency. Bundle needed
+browser libraries with load_static_resource(kind="script") from a pinned npm version on
+cdn.jsdelivr.net, the preview-approved script host; their globals initialize before author scripts.
+Use a browser-ready distribution, not an ES module requiring further network imports.
+Honor explicit library requirements. Source links are fine.
 On phones, recompose wide tables as labelled records or show a focused summary with an accessible
 detail view. Keep essential fields and actions available; do not leave them beyond a clipped panel.
+For authentic supporting reference data, load_static_resource downloads bounded public JSON once
+and embeds it as window.ARTIFACT_RESOURCES[name]. The tool returns its shape and source hash;
+the complete data stays on the host and is embedded without model transcription. Use this for
+geographic geometry, topology, or diagram data rather than inventing real-world shapes. Use a
+pinned public resource URL, include visible attribution in custom pages, and reload saved resource references when editing.
+Reference data supports the visual; the user's actual records must still come from their designated evidence.
 Preserve the purpose, facts, and useful interactions of an existing artifact when editing it, while
 following the current change request. Return one complete result, with no unfinished placeholders.'''
 
