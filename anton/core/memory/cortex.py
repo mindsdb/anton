@@ -143,21 +143,29 @@ def _emit_rule_retrieval(**shape) -> None:
 class _IdentityFacts(BaseModel):
     """Result of the identity-extraction LLM call.
 
-    Each fact is a concise statement about the user (name, timezone,
-    expertise, preferences, tools). Empty list when nothing relevant
-    is found in the message.
+    Each fact is a concise statement about who the user is (name, role,
+    location, timezone, expertise, tools). Empty list when the messages
+    say nothing about that.
+
+    The facts land in the global profile, which every project reads, while
+    the call sees only the user's messages and not the project they came
+    from. So it saves no instruction on how to answer or work: the agent
+    saves those as rules through `memorize`, where it can see the project
+    and choose the scope.
     """
 
     facts: list[str] = Field(
         default_factory=list,
         description=(
-            "Identity facts extracted from the user message. Each fact "
-            "is a concise statement about the user. Examples: "
-            "'Name: Jorge', 'Timezone: PST', 'Prefers dark mode', "
-            "'Uses uv over pip'. Only extract facts that are clearly "
-            "about the user's identity, preferences, or working style. "
-            "Ignore transient conversation details. Return an empty list "
-            "if nothing identity-relevant is found."
+            "Facts about who the user is, extracted from their messages. "
+            "Each fact is a concise statement about the user. Examples: "
+            "'Name: Jorge', 'Timezone: PST', 'Role: data engineer', "
+            "'Works mostly in Python'. Never include an instruction or "
+            "preference about how to answer or do the work, such as a "
+            "currency, unit, format, tone or length, even when the user "
+            "says 'always', and never include anything said about one "
+            "project. Ignore transient conversation details. Return an "
+            "empty list when the messages say nothing about who the user is."
         ),
     )
 
@@ -189,7 +197,7 @@ class _CompactionResult(BaseModel):
 
 
 _IDENTITY_EXTRACT_PROMPT = """\
-Extract identity facts from this user message — concise statements about the user (name, timezone, expertise, preferences, tools). Only extract facts that are clearly about the user's identity, preferences, or working style. Ignore transient conversation details. Return an empty list if nothing identity-relevant is found.
+Extract facts about who the user is from these messages: their name, role, team, location, time zone, language, expertise and the tools they use. The profile you write applies in every project the user has, and the messages come from one of them. So leave out every instruction or preference about how to answer or do the work, such as a currency, unit, format, tone or length, even when the user says "always": the agent saves those as rules, with their own scope. Leave out anything the user says about one project. Ignore transient conversation details. Return an empty list when the messages say nothing about who the user is.
 """
 
 _COMPACTION_PROMPT = """\
@@ -208,6 +216,32 @@ An index you leave out is deleted. Be conservative — when in doubt, keep the e
 # They are also the only sections the system prompt renders, so a rule under
 # any other heading is neither shown nor counted in memory_read.
 _RULE_SECTIONS = ("always", "never", "when")
+
+
+def _read_memory_entries(path: Path) -> tuple[list[str], list[str]]:
+    """Read a memory file's `- ` entries with the section each one sits under.
+
+    Entries above the first heading (a hand-edited file) are kept rather than
+    dropped, under the same heading the keyword pass defaulted to. Headings
+    outside `_RULE_SECTIONS` fold into the first one too.
+    """
+    sections: list[str] = []
+    entries: list[str] = []
+    section = _RULE_SECTIONS[0]
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # A file removed under a running compaction has no entries to keep.
+        return sections, entries
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            heading = stripped[3:].lower()
+            section = heading if heading in _RULE_SECTIONS else _RULE_SECTIONS[0]
+        elif stripped.startswith("- "):
+            sections.append(section)
+            entries.append(stripped)
+    return sections, entries
 
 
 def _rule_section(engram: Engram) -> str:
@@ -796,20 +830,7 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         if not path.is_file():
             return
 
-        # Read with sections
-        sections: list[str] = []
-        entries: list[str] = []
-        # Entries above the first heading (a hand-edited file) are kept rather
-        # than dropped, under the same heading the keyword pass defaulted to.
-        section = _RULE_SECTIONS[0]
-        for line in path.read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if stripped.startswith("## "):
-                heading = stripped[3:].lower()
-                section = heading if heading in _RULE_SECTIONS else _RULE_SECTIONS[0]
-            elif stripped.startswith("- "):
-                sections.append(section)
-                entries.append(stripped)
+        sections, entries = _read_memory_entries(path)
 
         if len(entries) < 8:
             return
@@ -874,7 +895,22 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         else:
             new_content = "\n".join(["# Lessons", *(e for _, e in kept)]) + "\n"
 
-        hc._encode_with_lock(path, new_content, mode="write")
+        # The rebuild comes from the read above, and the model call sat between
+        # them. A memory written meanwhile, by this session or another process
+        # sharing the file, is on disk but not in that read, so a rewrite would
+        # erase it. The check and the replace run under the file's writer lock;
+        # compaction can wait for a later pass, the memory cannot be recovered.
+        if not hc.rewrite_if_unchanged(
+            path, new_content, read=_read_memory_entries, snapshot=(sections, entries)
+        ):
+            logger.info(
+                "memory-compaction: %s changed during the model call "
+                "(%d entries read, %d now), skipped",
+                path.name,
+                len(entries),
+                len(_read_memory_entries(path)[1]),
+            )
+            return
 
         # The only record that the file changed size, and the only pressure
         # against over-pruning: naming survivors by index makes dropping most

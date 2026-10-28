@@ -74,6 +74,16 @@ def test_table_accepts_dict_rows_and_right_aligns_numbers():
     assert '<th scope="col" class=num>Gap</th>' in html and "<td class=num>40</td>" in html
 
 
+def test_a_wide_table_shows_its_rows_as_cards_on_a_phone():
+    columns = ["Id", "Type", "Site", "Date", "Qty"]
+    wide = rt.table(columns, [["EX-1", "Late Supply", "PLT-PEN", "2026-11-27", 1500]], id="all")
+    assert '<table id="all" class="cards">' in wide
+    assert '<td data-label="Type">Late Supply</td>' in wide and '<td data-label="Qty" class=num>1500</td>' in wide
+    assert "cards" not in rt.table(COLS, ROWS) and "data-label" not in rt.table(COLS, ROWS)
+    # Cells may wrap between words, never inside one: that squeezed columns to a letter.
+    assert "overflow-wrap:anywhere" not in rt._CSS
+
+
 def test_table_rejects_a_row_of_the_wrong_length():
     with pytest.raises(ValueError):
         rt.table(COLS, [["only", "two"]])
@@ -125,6 +135,39 @@ def test_check_reports_structural_problems(tmp_path):
     message = str(info.value)
     for fragment in ("no lang", "no viewport", "external resources", "duplicate ids", "missing.csv"):
         assert fragment in message
+
+
+_GENERATED_HEAD = (
+    '<meta name="viewport" content="width=device-width">'
+    '<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.3"></script>'
+    '<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>'
+)
+
+
+def test_check_passes_the_generators_scripts_from_the_preview_script_host(tmp_path):
+    """An html-app the generator built loads Tailwind and ECharts from the
+    one host the preview loads scripts from; editing it with rt.update and
+    checking it must not report them."""
+    page = tmp_path / "index.html"
+    page.write_text(f'<!doctype html><html lang="en"><head>{_GENERATED_HEAD}</head><body><p id="a">x</p></body></html>')
+    rt.check(page)  # raises ValueError on any problem
+
+
+@pytest.mark.parametrize("resource", [
+    '<script src="https://unpkg.com/echarts@5.5.1/dist/echarts.min.js"></script>',
+    '<script src="https://cdn.jsdelivr.net.evil.example/x.js"></script>',
+    '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tailwindcss@3/dist/tailwind.min.css">',
+    '<img src="https://cdn.jsdelivr.net/npm/flag-icons/flags/4x3/ca.svg" alt="">',
+])
+def test_check_fails_any_other_external_resource(tmp_path, resource):
+    """Only a script from the preview's script host passes: a script from any
+    other host, and an external stylesheet or image from any host, is what the
+    preview blocks."""
+    page = tmp_path / "index.html"
+    page.write_text(f'<!doctype html><html lang="en"><head>{_GENERATED_HEAD}{resource}</head><body></body></html>')
+    with pytest.raises(ValueError, match="external resources") as info:
+        rt.check(page)
+    assert "jsdelivr.net/npm/echarts" not in str(info.value)
 
 
 def test_check_returns_what_the_page_shows(tmp_path):
@@ -285,6 +328,20 @@ def test_check_reports_markup_shown_as_text(tmp_path):
     rt.check(code)  # inside code or pre it is intended
     plain = rt.save(tmp_path / "plain.html", _page(rt.para("Stock < demand > 0; ids <P1>.")))
     rt.check(plain)
+
+
+def test_check_reports_a_style_script_or_svg_passed_as_a_plain_string(tmp_path):
+    svg = '<svg viewBox="0 0 10 10"><path d="M0 0 L10 10"/></svg>'
+    drawn = rt.save(tmp_path / "svg.html", _page(rt.section("Map", svg, id="map")))
+    with pytest.raises(ValueError, match=r"HTML tags shown as text: \['<svg viewBox.*rt\.Html\(markup\)"):
+        rt.check(drawn)
+    styled = rt.save(tmp_path / "style.html", _page(rt.section("Detail", rt.para("Rows."), id="detail")))
+    rt.insert(styled, "<style>.x{color:red}</style><script>go()</script>", after="detail")
+    assert rt.shown_markup(styled.read_text()) == ["<style>", "</style>", "<script>"]
+    fixed = rt.save(tmp_path / "fixed.html", _page(rt.section("Map", rt.Html(svg), id="map")))
+    rt.insert(fixed, rt.Html("<style>.x{color:red}</style>"), after="map")
+    rt.check(fixed)
+    rt.check(rt.save(tmp_path / "area.html", _page(rt.Html("<textarea>&lt;svg&gt;</textarea>"))))
 
 
 def test_insert_adds_new_parts_to_a_page_not_made_with_these_helpers(tmp_path):

@@ -322,6 +322,46 @@ class TestEncode:
         assert any("disabled" in a.lower() for a in actions)
 
 
+class TestMemorizeScope:
+    """What the model reads when it picks a memory's scope, and where its pick lands."""
+
+    def test_the_model_is_told_a_rule_given_in_a_project_stays_there(self):
+        from anton.core.llm.prompts import CHAT_SYSTEM_PROMPT
+        from anton.core.tools.tool_defs import MEMORIZE_TOOL
+
+        entry = MEMORIZE_TOOL.input_schema["properties"]["entries"]["items"]["properties"]
+        assert entry["scope"]["description"].startswith("'project' unless the user says")
+        assert "is 'project', even when it says 'always'" in MEMORIZE_TOOL.description
+        assert "'Always show amounts in EUR' is 'project'" in MEMORIZE_TOOL.description
+        assert "Choose 'global' only when the user says it applies to all their projects" in MEMORIZE_TOOL.description
+        assert "An instruction on how to answer or work is a rule, not a profile entry." in MEMORIZE_TOOL.description
+        assert 'Scope is "project" unless the user says a rule applies to all their projects' in CHAT_SYSTEM_PROMPT
+        assert "Never memorize what the project's own instructions in anton.md already say" in CHAT_SYSTEM_PROMPT
+        assert "Choose \"global\" for universal knowledge" not in CHAT_SYSTEM_PROMPT
+
+    async def test_a_rule_kept_to_one_project_never_reaches_another(self, tmp_path):
+        g, a, b = (tmp_path / name for name in ("global", "a", "b"))
+        for folder in (g, a, b):
+            folder.mkdir()
+        session = SimpleNamespace(
+            _cortex=Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(a)), _memory_writes=set()
+        )
+        session._track_memory_write = types.MethodType(ChatSession._track_memory_write, session)
+        session.settle_memory_writes = types.MethodType(ChatSession.settle_memory_writes, session)
+
+        await handle_memorize(session, {"entries": [
+            {"text": "Show amounts in EUR", "kind": "always", "scope": "project"},
+        ]})
+        await session.settle_memory_writes()
+
+        assert "Show amounts in EUR" in (a / "rules.md").read_text()
+        assert not (g / "rules.md").exists()
+        in_b = await Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(b)).build_memory_context(
+            "Add 10 and 20 dollars"
+        )
+        assert "EUR" not in in_b
+
+
 class TestOrphanedIdentityMigration:
     def test_migrates_project_identity_to_global_on_init(self, dirs):
         g, p = dirs
@@ -443,6 +483,25 @@ class TestMaybeUpdateIdentity:
         await cortex.maybe_update_identity("Hi, I'm Jorge")
         assert (g / "profile.md").exists()
         assert "Name: Jorge" in (g / "profile.md").read_text()
+
+    async def test_asks_only_for_who_the_user_is(self, dirs):
+        # The profile is read in every project and the call can't see which
+        # project the messages came from, so a rule must not be asked for.
+        from anton.core.memory.cortex import _IdentityFacts
+
+        g, p = dirs
+        mock_llm = AsyncMock()
+        mock_llm.generate_object_code = AsyncMock(return_value=_IdentityFacts(facts=[]))
+        cortex = Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="copilot", llm_client=mock_llm)
+
+        await cortex.maybe_update_identity("In this project, always show amounts in EUR.")
+
+        system = mock_llm.generate_object_code.call_args.kwargs["system"]
+        facts = _IdentityFacts.model_fields["facts"].description
+        assert "leave out every instruction or preference about how to answer or do the work" in system
+        assert "Leave out anything the user says about one project." in system
+        assert "Never include an instruction or preference about how to answer" in facts
+        assert "preferences, or working style" not in system + facts
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -828,6 +887,106 @@ class TestCompactFile:
         )
         await cortex._compact_file(hc, hc._lessons_path, "lesson")
         assert hc._lessons_path.read_text() == before
+
+    async def test_an_entry_saved_while_the_model_answers_survives(self, dirs, caplog):
+        """The rebuild comes from the read before the model call. A memory
+        written in between is on disk but not in that read, so a rewrite from
+        it would erase the memory."""
+        hc = self._lessons(dirs, 10)
+        reached_model = asyncio.Event()
+        answer = asyncio.Event()
+
+        class _Held(_CompactionLLM):
+            async def generate_object_code(self, schema, *, system, messages, max_tokens):
+                reached_model.set()
+                await answer.wait()
+                return await super().generate_object_code(
+                    schema, system=system, messages=messages, max_tokens=max_tokens
+                )
+
+        # keep=[1] would drop nine entries, so a rewrite and a skip leave
+        # different files; a merge of the late entry would too.
+        llm = _Held(keep=[1])
+        cortex = Cortex(global_hc=hc, project_hc=Hippocampus(dirs[1]), llm_client=llm)
+        compaction = asyncio.create_task(
+            cortex._compact_file(hc, hc._lessons_path, "lesson")
+        )
+        await reached_model.wait()
+        before = self._entries(hc)
+        hc.encode_lesson("Fact learned while compaction waited", topic="late")
+        answer.set()
+        with caplog.at_level(logging.INFO, logger="anton.core.memory.cortex"):
+            await compaction
+
+        entries = self._entries(hc)
+        assert entries[:10] == before
+        assert "while compaction waited" in entries[10]
+        skipped = [r.getMessage() for r in caplog.records if "skipped" in r.getMessage()]
+        assert len(skipped) == 1
+        assert "10 entries read, 11 now" in skipped[0]
+        assert "while compaction waited" not in skipped[0]
+
+    async def test_a_rule_saved_while_the_model_answers_survives(self, dirs, caplog):
+        """Rules go through a full-file rewrite on save, not an append, so the
+        change the re-read must notice is a rebuilt file."""
+        hc = Hippocampus(dirs[0])
+        for i in range(10):
+            hc.encode_rule(f"When topic {i} comes up, do thing {i}", kind="when")
+        reached_model = asyncio.Event()
+        answer = asyncio.Event()
+
+        class _Held(_CompactionLLM):
+            async def generate_object_code(self, schema, *, system, messages, max_tokens):
+                reached_model.set()
+                await answer.wait()
+                return await super().generate_object_code(
+                    schema, system=system, messages=messages, max_tokens=max_tokens
+                )
+
+        cortex = Cortex(
+            global_hc=hc, project_hc=Hippocampus(dirs[1]), llm_client=_Held(keep=[1])
+        )
+        compaction = asyncio.create_task(
+            cortex._compact_file(hc, hc._rules_path, "rules")
+        )
+        await reached_model.wait()
+        hc.encode_rule("When compaction is waiting, keep this rule", kind="when")
+        answer.set()
+        with caplog.at_level(logging.INFO, logger="anton.core.memory.cortex"):
+            await compaction
+
+        rules = [e.text for e in hc.get_rules()]
+        assert len(rules) == 11
+        assert "When compaction is waiting, keep this rule" in rules
+        assert any("10 entries read, 11 now" in r.getMessage() for r in caplog.records)
+
+    async def test_a_file_removed_while_the_model_answers_stays_removed(self, dirs, caplog):
+        hc = self._lessons(dirs, 10)
+        reached_model = asyncio.Event()
+        answer = asyncio.Event()
+
+        class _Held(_CompactionLLM):
+            async def generate_object_code(self, schema, *, system, messages, max_tokens):
+                reached_model.set()
+                await answer.wait()
+                return await super().generate_object_code(
+                    schema, system=system, messages=messages, max_tokens=max_tokens
+                )
+
+        cortex = Cortex(
+            global_hc=hc, project_hc=Hippocampus(dirs[1]), llm_client=_Held(keep=[1])
+        )
+        compaction = asyncio.create_task(
+            cortex._compact_file(hc, hc._lessons_path, "lesson")
+        )
+        await reached_model.wait()
+        hc._lessons_path.unlink()
+        answer.set()
+        with caplog.at_level(logging.INFO, logger="anton.core.memory.cortex"):
+            await compaction
+
+        assert not hc._lessons_path.exists()
+        assert any("10 entries read, 0 now" in r.getMessage() for r in caplog.records)
 
     async def test_short_file_is_not_sent_to_the_model(self, dirs):
         hc = self._lessons(dirs, 7)

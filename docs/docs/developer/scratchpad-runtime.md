@@ -296,6 +296,35 @@ check free to list what it finds. So the agent fixes them once and then
 reports the page as unverified, instead of editing a page that may work
 on every cell.
 
+Each check also compares the page with how it was when the turn began.
+Before the turn's first cell or `generate_artifact` run, anton keeps a copy
+of every artifact's main page but a fullstack app's
+(`page_copies.TurnPages.capture`): newest first, at most 64 MiB a turn,
+read the way the check reads a page. A check of a page with a copy sends it
+as `previous_html`, unless less than a whole check's time
+(`render_check.TIMEOUT_SECONDS`) is left of the cell's budget, and the
+service's `comparison` names the views the turn's edits broke, left without
+a graphic, removed, or left fewer than half the marks of a kind they drew:
+an svg view's markers, bars and other shapes, each kind counted apart, and
+a canvas's marks not at all; the render check's own docs say which table
+rows and HTML map markers count. A view that broke fails the page, so its
+repair cells apply. The others are not failures, and the agent hears about
+each set once a turn.
+When a page the turn's edits made worse fails with no repair cells left,
+anton puts the copy back. A `generate_artifact` run on an existing
+artifact that fails, stops over budget, crashes or is abandoned by the
+turn puts the main page back as it was when the run started: as the turn
+found it, when the run was the first to change it. A build that fails only
+its browser check comes back to repair with the same comparison
+(`changes_from_previous`). A run that never wrote (cancelled, needs
+confirmation) puts nothing back. On a sandboxed
+deployment the turn ends with a line for each page put back as the turn
+found it and for each view broken, blanked, removed or shrunk
+(`TurnPages.end_lines`). The comparison never costs a page its own verdict:
+a copy too large to send goes without it, and when a service that predates
+the comparison answers such a request 400, anton asks once more with the
+page alone.
+
 The service also presses each tab and toggle it finds, and a pass vouches
 only for the views it measured. The cell check's line for a passed page
 names them: the page as it opens and the view behind each tab or toggle the
@@ -415,8 +444,11 @@ inside the subprocess:
 - `generate_object(Model, system=..., messages=[...])` — forced-tool-call
   structured output. It shares `build_structured_tool` /
   `unwrap_structured_response` from `anton/core/llm/structured.py` with the
-  main process's `LLMClient.generate_object`; only the provider invocation
-  differs (sync subprocess vs async planning). See [LLM dispatch](/developer/llm-dispatch).
+  main process's `LLMClient.generate_object`, and `send_structured`, which
+  resends a call whose forced tool choice the model refused. The refusal is
+  remembered in that module, so it outlasts the provider each call builds; only
+  the provider invocation differs (sync subprocess vs async planning). See
+  [LLM dispatch](/developer/llm-dispatch).
 
 The boot script also provides `agentic_loop(...)` (a sync tool-call loop),
 `web_search(query)` (routes through the configured LLM's native web search),

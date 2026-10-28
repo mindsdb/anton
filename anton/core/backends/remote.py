@@ -103,7 +103,7 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
     async def reset(self) -> None:
         await self._post("/scratchpad/reset", {"name": self.name})
         self.cells.clear()
-        self.compacted_code = ()
+        self.compacted_cells = ()
 
     async def close(self) -> None:
         try:

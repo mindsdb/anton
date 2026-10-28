@@ -10,14 +10,16 @@ import pytest
 
 from anton.core.datasources.data_vault import LocalDataVault
 from anton.core.llm.provider import StreamComplete
-from anton.core.tools.generate_artifact import orchestrator
+from anton.core.tools.generate_artifact import engine, orchestrator, prompts
 from anton.core.tools.generate_artifact.discovery import checkpoint as cp
 from anton.core.tools.generate_artifact.state import (
-    BrowserCheck, FetchVerdict, GenState, RequiredData, RequiredDataItem, VerifyResult,
+    BrowserCheck, BrowserCheckFailed, FetchVerdict, GenState, RequiredData, RequiredDataItem,
+    VerifyResult,
 )
+from anton.utils.datasources import DATASOURCES_HEADER
 
 
-def _no_browser(entry, *, cell_sandbox, screenshot=True):
+def _no_browser(entry, *, cell_sandbox, screenshot=True, previous_html=None):
     """`verify_frontend_live` where no browser can load the page."""
     return BrowserCheck(
         status="unverified",
@@ -105,8 +107,8 @@ async def test_data_phase_exits_after_one_successful_fetch(tmp_path: Path, monke
         side_effect=lambda schema_class, **kw: gen_obj(schema_class, **kw)
     )
 
-    async def fake_fetch(state):
-        return "pulled a sample"
+    async def fake_fetch(state, required_text=""):
+        return "pulled a sample", True
     monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
 
     err = await orchestrator._data_phase(st)
@@ -131,11 +133,12 @@ async def test_fetch_data_sample_appends_exec_code(tmp_path: Path, monkeypatch):
         }
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
-    notes = await orchestrator._fetch_data_sample(st)
+    notes, ok = await orchestrator._fetch_data_sample(st)
     assert notes.startswith("pulled 100 rows")
     assert "### Code executed while fetching" in notes
     assert "df = q('select 1')" in notes
     assert "Output: ok 100 rows" in notes
+    assert ok is True
 
 
 def test_render_exec_notes_caps_and_drops_oldest():
@@ -190,11 +193,47 @@ async def test_gen_verify_backend_retries_once_then_succeeds(tmp_path: Path, mon
     monkeypatch.setattr(orchestrator.verifiers, "verify_backend", fake_verify)
     monkeypatch.setattr(orchestrator, "_map_datasources", fake_map)
     monkeypatch.setattr(orchestrator, "_declare_datasources", fake_declare)
+    # "REF" stands in for a connection reference, so the verify env, built on
+    # every host, can't be resolved from it.
+    monkeypatch.setattr(orchestrator, "_verify_datasource_env", lambda state: {})
 
     err = await orchestrator._gen_verify_backend(st)
     assert err is None
     assert calls["gen"] == 2  # one retry
     assert declared["refs"] == ["REF"]
+
+
+async def test_gen_verify_backend_hands_the_import_its_own_connections_without_a_sandbox(
+    tmp_path: Path, monkeypatch
+):
+    """The import check gets only the connections backend.py reads on every
+    host, as the launch does, not only under a sandbox."""
+    st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
+    st.api_spec = "{}"
+    seen = {}
+
+    async def fake_loop(**kw):
+        (tmp_path / "backend.py").write_text("x")
+        return {"files_written": ["backend.py"], "rounds_used": 1, "summary": "s"}
+
+    async def fake_verify(**kw):
+        seen.update(kw)
+        return VerifyResult(errors=[]), []
+
+    async def fake_declare(state, refs):
+        pass
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_backend", fake_verify)
+    monkeypatch.setattr(orchestrator, "_cell_sandbox", lambda state: None)
+    monkeypatch.setattr(orchestrator, "_map_datasources", lambda session, keys: ([], []))
+    monkeypatch.setattr(orchestrator, "_declare_datasources", fake_declare)
+    monkeypatch.setattr(
+        orchestrator, "_verify_datasource_env", lambda state: {"DS_PG_MAIN__PASSWORD": "pw"}
+    )
+
+    assert await orchestrator._gen_verify_backend(st) is None
+    assert seen["ds_env"] == {"DS_PG_MAIN__PASSWORD": "pw"}
 
 
 async def test_declare_datasources_writes_an_empty_list_to_clear_the_previous_one(
@@ -801,9 +840,9 @@ async def test_data_phase_still_fetches_when_a_source_is_unverified(
     st.session._llm.generate_object = AsyncMock(side_effect=seq)
     fetched = {"n": 0}
 
-    async def fake_fetch(state):
+    async def fake_fetch(state, required_text=""):
         fetched["n"] += 1
-        return "pulled totals"
+        return "pulled totals", True
 
     monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
 
@@ -859,7 +898,7 @@ def test_public_data_sources_skill_is_loaded_from_the_store():
         def __init__(self):
             self.asked = []
 
-        def load(self, label):
+        def load_for_artifacts(self, label):
             self.asked.append(label)
             return _Skill()
 
@@ -875,7 +914,7 @@ def test_public_data_sources_skill_is_loaded_from_the_store():
 
 
 def test_public_data_sources_skill_is_defensive():
-    """AsyncMock session: store.load() returns a coroutine that must be closed.
+    """AsyncMock session: store.load_for_artifacts() returns a coroutine that must be closed.
 
     We also assert the absence of a RuntimeWarning: without an explicit close() the
     abandoned coroutine surfaces at GC time in the output of an arbitrary test. The
@@ -889,7 +928,7 @@ def test_public_data_sources_skill_is_defensive():
         assert orchestrator._public_data_sources_skill(AsyncMock()) == ""
 
     class _MissingStore:
-        def load(self, label):
+        def load_for_artifacts(self, label):
             return None
 
     session = AsyncMock()
@@ -968,6 +1007,75 @@ async def test_frontend_two_verify_failures_are_terminal_with_honest_count(
 
     assert err is not None
     assert "Frontend verification failed after 2 attempt(s)" in err
+
+
+_BROWSER_ERROR = (
+    "Loaded in a headless browser, the page logged a console error: "
+    "console.error: Route network failed: ROUTES is not defined (desktop)"
+)
+_SHOT = "iVBORw0KGgo="
+
+
+def _failed_in_a_browser(entry, *, cell_sandbox, screenshot=True, previous_html=None):
+    """`verify_frontend_live` where a browser loaded the page, measured it as
+    it opens and behind "Routes", and failed it."""
+    from anton.core.artifacts.render_check import CheckedView, RenderScreenshot
+
+    return BrowserCheck(
+        status="failed", verdict=VerifyResult(errors=[_BROWSER_ERROR]),
+        screenshot=RenderScreenshot(media_type="image/png", data=_SHOT),
+        views=(CheckedView(pressed=None, viewports=["desktop"]), CheckedView(pressed="Routes", viewports=["desktop"])),
+    )
+
+
+@pytest.mark.parametrize("page", ["index.html", "dashboard.html"])
+async def test_a_last_build_that_fails_only_its_browser_check_comes_back_to_repair(
+    tmp_path: Path, monkeypatch, page
+):
+    """Both builds pass the static checks and fail in a browser. The run
+    ends with the page the last build wrote, still on disk, the check's
+    findings, the views it measured and its screenshot, and the primary
+    names that page, whatever the build called it."""
+    st = _state(tmp_path, artifact_type="html-app", is_fullstack=False)
+
+    async def fake_loop(**kw):
+        (tmp_path / page).write_text(_VALID_HTML)
+        return {"files_written": [page], "rounds_used": 1, "summary": "s"}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", _failed_in_a_browser)
+
+    result = await orchestrator._gen_verify_frontend(st)
+
+    assert isinstance(result, BrowserCheckFailed)
+    assert (result.page, result.findings) == (page, (_BROWSER_ERROR,))
+    assert [view.pressed for view in result.views] == [None, "Routes"]
+    assert result.screenshot is not None and result.screenshot.data == _SHOT
+    assert result.error.startswith("Frontend verification failed after 2 attempt(s)")
+    assert (tmp_path / page).is_file()
+    assert (st.primary or "index.html") == page
+
+
+async def test_a_browser_failure_then_a_static_failure_ends_with_the_old_string(tmp_path: Path, monkeypatch):
+    """The first build fails in a browser, the second fails the static
+    checks, so no browser loaded the page left on disk. The run must not
+    offer that page for repair on the strength of the first build's check,
+    which `GenState`'s browser fields still hold."""
+    st = _state(tmp_path, artifact_type="html-app", is_fullstack=False)
+    builds = iter([_VALID_HTML, "<html><body>no viewport</body></html>"])
+
+    async def fake_loop(**kw):
+        (tmp_path / "index.html").write_text(next(builds))
+        return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", _failed_in_a_browser)
+
+    result = await orchestrator._gen_verify_frontend(st)
+
+    assert isinstance(result, str)
+    assert result.startswith("Frontend verification failed after 2 attempt(s)")
+    assert st.browser_status == "failed"
 
 
 async def test_unfinished_loop_output_is_still_verified(tmp_path: Path, monkeypatch):
@@ -1049,7 +1157,7 @@ async def test_frontend_browser_findings_trigger_a_regeneration_with_the_message
     ])
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
     monkeypatch.setattr(
-        orchestrator.verifiers, "verify_frontend_live", lambda entry, *, cell_sandbox, screenshot=True: _loaded(next(live_verdicts))
+        orchestrator.verifiers, "verify_frontend_live", lambda entry, *, cell_sandbox, screenshot=True, previous_html=None: _loaded(next(live_verdicts))
     )
 
     err = await orchestrator._gen_verify_frontend(st)
@@ -1100,7 +1208,7 @@ async def test_frontend_browser_check_is_not_run_for_fullstack(tmp_path: Path, m
         )
         return {"files_written": ["static/index.html"], "rounds_used": 1, "summary": "s"}
 
-    def must_not_run(entry, *, cell_sandbox, screenshot=True):
+    def must_not_run(entry, *, cell_sandbox, screenshot=True, previous_html=None):
         raise AssertionError("the browser check must not run for a fullstack frontend")
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
@@ -1123,7 +1231,7 @@ async def test_frontend_browser_check_waits_for_the_static_checks_to_pass(
         (tmp_path / "index.html").write_text(html)
         return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
 
-    def fake_live(entry, *, cell_sandbox, screenshot=True):
+    def fake_live(entry, *, cell_sandbox, screenshot=True, previous_html=None):
         calls["live"] += 1
         return _loaded(VerifyResult())
 
@@ -1148,7 +1256,7 @@ async def test_the_browser_check_asks_for_no_screenshot_once_the_model_refused_o
         (tmp_path / "index.html").write_text(_VALID_HTML)
         return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
 
-    def fake_live(entry, *, cell_sandbox, screenshot=True):
+    def fake_live(entry, *, cell_sandbox, screenshot=True, previous_html=None):
         asked.append(screenshot)
         return _loaded(VerifyResult())
 
@@ -1313,7 +1421,7 @@ async def test_warnings_of_the_accepted_frontend_attempt_reach_the_result(tmp_pa
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
     monkeypatch.setattr(orchestrator.verifiers, "verify_frontend", fake_verify)
-    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", lambda entry, *, cell_sandbox, screenshot=True: _loaded(VerifyResult()))
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", lambda entry, *, cell_sandbox, screenshot=True, previous_html=None: _loaded(VerifyResult()))
 
     assert await orchestrator._gen_verify_frontend(st) is None
     assert st.verify_warnings == ["frontend: Significant blocks have no stable `id` attributes."]
@@ -1519,3 +1627,523 @@ async def test_tail_log_is_scrubbed_off_the_event_loop(tmp_path: Path, monkeypat
     await orchestrator._tail_log(_state(tmp_path))
 
     assert scrub_threads and loop_thread not in scrub_threads
+
+
+# ── known_data in the node and generator contexts ───────────────────────────
+
+_SITES = "site,lat,lon\nToronto,43.7,-79.4\nAustin,30.3,-97.7"
+
+
+def test_the_generators_see_the_known_data(tmp_path: Path):
+    st = _state(tmp_path, known_data=_SITES)
+    ctx = orchestrator._spec_context(st)
+    assert f"{prompts.KNOWN_DATA_HEADER}\n{_SITES}" in ctx
+
+
+def test_long_known_data_reaches_every_context_whole(tmp_path: Path):
+    """A header line over one long JSON line used to be cut down to the
+    header alone; nothing is cut now."""
+    rows = "Sites (as JSON):\n[" + ",".join(f'{{"site":"s{i}","lat":{i}.5}}' for i in range(600)) + "]"
+    st = _state(tmp_path, known_data=rows)
+    for context in (
+        orchestrator._spec_context(st),
+        prompts.build_fetch_data_kickoff(st),
+        prompts.build_required_data_prompt(st)[1],
+        prompts.build_can_fetch_prompt(st, "- sites")[1],
+    ):
+        assert f"{prompts.KNOWN_DATA_HEADER}\n{rows}" in context
+        assert "(truncated" not in context
+
+
+def test_without_known_data_no_section_is_added(tmp_path: Path):
+    st = _state(tmp_path)
+    assert prompts.KNOWN_DATA_HEADER not in orchestrator._spec_context(st)
+    assert prompts.KNOWN_DATA_HEADER not in prompts._brief_and_notes(st)
+
+
+# ── the data loop: "nothing missing" exit and the list the fetch gets ───────
+
+
+def _slug_catalog(*slugs: str, labels: dict[str, str] | None = None) -> SimpleNamespace:
+    """A `DatasourceCatalog` stand-in: the connections' names and the rendered section."""
+    labels = labels or {}
+    rendered = DATASOURCES_HEADER + "\n" + "\n".join(f"- {s} (REST API)" for s in slugs)
+    return SimpleNamespace(
+        connections=tuple(
+            SimpleNamespace(slug=s, label=labels.get(s, ""), engine="", engine_name="")
+            for s in slugs
+        ),
+        render=lambda slugs=None: rendered,
+    )
+
+
+def _unverified(st, *sources):
+    st.gathering_complete = True
+    st.declared_sources = list(sources)
+    st.unverified_sources = list(sources)
+    return st
+
+
+def _outcomes(st, node):
+    return [(s.outcome, s.detail) for s in st.trace if s.node == node]
+
+
+async def test_rows_in_known_data_need_no_fetch_when_gathering_did_not_mark_them(
+    tmp_path: Path, monkeypatch
+):
+    st = _unverified(_state(tmp_path, known_data=_SITES, datasource_catalog=_slug_catalog("rest-gw")), "sites")
+    st.public_sources = "## Public data sources\n- open-meteo"
+    seen = []
+
+    async def gen_obj(schema_class, *, system, messages):
+        seen.append((schema_class, messages[0]["content"]))
+        return RequiredData(items=[], reasoning="the rows are in the known data")
+
+    st.session._llm.generate_object = AsyncMock(side_effect=gen_obj)
+
+    async def no_fetch(state, required_text=""):
+        raise AssertionError("nothing is missing, so nothing is fetched")
+
+    monkeypatch.setattr(orchestrator, "_fetch_data_sample", no_fetch)
+
+    assert await orchestrator._data_phase(st) is None
+    assert st.unverified_sources == [] and st.gathering_complete is True
+    assert [s for s, _ in seen] == [RequiredData]
+    user = seen[0][1]
+    assert "- rest-gw (REST API)" in user and "open-meteo" in user and "Toronto,43.7,-79.4" in user
+    assert _outcomes(st, "define_required_data")[0][0] == "nothing_missing"
+
+
+@pytest.mark.parametrize("kw, why", [
+    (dict(artifact_type="fullstack-stateless-app", is_fullstack=True, known_data=_SITES),
+     "the backend reads it at run time"),
+    (dict(known_data=""), "no executed code read it and the known data does not hold its values"),
+])
+async def test_an_empty_list_is_rejected_when_nothing_vouches_for_the_sources(
+    tmp_path: Path, monkeypatch, kw, why
+):
+    st = _unverified(_state(tmp_path, **kw), "sites")
+    users = {}
+
+    async def gen_obj(schema_class, *, system, messages):
+        users[schema_class] = messages[0]["content"]
+        if schema_class is RequiredData:
+            return RequiredData(items=[], reasoning="nothing is missing")
+        return FetchVerdict(possible=True, reasoning="the pad has it")
+
+    st.session._llm.generate_object = AsyncMock(side_effect=gen_obj)
+    got = {}
+
+    async def fake_fetch(state, required_text=""):
+        got["text"] = required_text
+        return "pulled sites", True
+
+    monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
+
+    assert await orchestrator._data_phase(st) is None
+    assert _outcomes(st, "define_required_data") == [("nothing_missing_rejected", "sites")]
+    expected_line = f"- sites — needs executed code that reads it: {why}"
+    assert expected_line in users[FetchVerdict]
+    assert expected_line in got["text"]
+    assert "Run code that reads these sources even if their values appear under the known data" in got["text"]
+
+
+async def test_a_page_without_external_data_needs_no_fetch(tmp_path: Path, monkeypatch):
+    """Gathering ended without `finish_gathering` and declared nothing: an
+    empty list is accepted, as a successful fetch used to be: a gathering
+    without finish_gathering must still be able to leave the loop."""
+    st = _state(tmp_path)
+    st.gathering_complete = False
+    st.session._llm.generate_object = AsyncMock(
+        return_value=RequiredData(items=[], reasoning="the page needs no external data")
+    )
+
+    async def no_fetch(state, required_text=""):
+        raise AssertionError("nothing to fetch")
+
+    monkeypatch.setattr(orchestrator, "_fetch_data_sample", no_fetch)
+
+    assert await orchestrator._data_phase(st) is None
+    assert st.gathering_complete is True
+    assert st.session._llm.generate_object.await_count == 1
+
+
+@pytest.mark.parametrize("artifact_type, fetches", [
+    ("html-app", 0),
+    ("fullstack-stateless-app", 1),
+])
+async def test_a_repeat_call_builds_from_the_known_data_it_brings(
+    tmp_path: Path, monkeypatch, artifact_type, fetches
+):
+    """The call `not enough data` recommends: same request, data in
+    `known_data`. It enters at the spec phase, so gathering never runs."""
+    art = tmp_path / "art"
+    art.mkdir()
+    fullstack = artifact_type != "html-app"
+    first = _unverified(
+        _state(art, artifact_type=artifact_type, is_fullstack=fullstack, user_request="map the sites"),
+        "sites",
+    )
+    orchestrator._save_checkpoint(first, cp.STAGE_PRD_WRITTEN)
+    stored = cp.load(art)
+    assert cp.decide_entry(stored, request_fp=cp.request_fingerprint("map the sites")) == cp.ENTRY_SPEC
+
+    again = _state(
+        art, artifact_type=artifact_type, is_fullstack=fullstack,
+        user_request="map the sites", known_data=_SITES,
+    )
+    engine._restore(again, stored)
+    assert again.unverified_sources == ["sites"]
+
+    again.session._llm.generate_object = AsyncMock(
+        side_effect=lambda schema_class, **kw: (
+            RequiredData(items=[], reasoning="the rows are in the known data")
+            if schema_class is RequiredData
+            else FetchVerdict(possible=True, reasoning="the pad has it")
+        )
+    )
+    fetched = []
+
+    async def fake_fetch(state, required_text=""):
+        fetched.append(required_text)
+        return "pulled sites", True
+
+    monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
+
+    assert await orchestrator._data_phase(again) is None
+    assert len(fetched) == fetches
+    if fetches:
+        assert "the backend reads it at run time" in fetched[0]
+        assert "Run code that reads these sources" in fetched[0]
+
+
+async def test_the_fetch_gets_the_full_list_define_wrote(tmp_path: Path, monkeypatch):
+    long_why = "needed for the chart " * 30
+    st = _unverified(_state(tmp_path), "orders")
+    st.session._llm.generate_object = AsyncMock(side_effect=[
+        RequiredData(items=[RequiredDataItem(name="orders", where="rest-gw /orders", why=long_why)], reasoning="r"),
+        FetchVerdict(possible=True, reasoning="yes"),
+    ])
+    got = {}
+
+    async def fake_fetch(state, required_text=""):
+        got["text"] = required_text
+        return "pulled orders", True
+
+    monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
+
+    await orchestrator._data_phase(st)
+    expected = f"- orders — from rest-gw /orders ({long_why})"
+    assert got["text"] == expected
+    assert _outcomes(st, "define_required_data") == [("done", expected)]
+
+
+async def test_the_fetch_loop_gets_the_list_the_pads_and_the_language(tmp_path: Path, monkeypatch):
+    st = _state(
+        tmp_path, user_language="Spanish",
+        scratchpads_context="## Scratchpads already in this session\n- main (3 cells)",
+    )
+    seen = {}
+
+    async def fake_run_loop(**kw):
+        seen.update(kw)
+        return {"files_written": [], "rounds_used": 1, "summary": "s", "scratchpad_execs": []}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
+    await orchestrator._fetch_data_sample(st, "- sites — from rest-gw (map)")
+    assert "Write `reasoning` and any summary in Spanish." in seen["system"]
+    assert "## Data to fetch in this step\n- sites — from rest-gw (map)" in seen["kickoff"]
+    assert "- main (3 cells)" in seen["kickoff"]
+
+
+def test_a_repeat_call_without_known_data_builds_from_the_saved_copy(tmp_path: Path):
+    art = tmp_path / "art"
+    art.mkdir()
+    orchestrator._save_checkpoint(_state(art, user_request="map", known_data=_SITES), cp.STAGE_PRD_WRITTEN)
+    stored = cp.load(art)
+    assert stored.known_data == _SITES
+
+    again = _state(art, user_request="map")
+    engine._restore(again, stored, entry=cp.ENTRY_SPEC)
+    assert again.known_data == _SITES
+    assert again.call_changed is False
+
+    other = _state(art, user_request="map", known_data="site,lat\nOslo,59.9")
+    engine._restore(other, stored, entry=cp.ENTRY_SPEC)
+    assert other.known_data == "site,lat\nOslo,59.9"
+    assert other.call_changed is True
+
+
+def test_a_new_iteration_without_known_data_reads_the_sources_its_rows_verified(tmp_path: Path):
+    """A built page, then a new request that brings no rows: the old paste
+    may be what the user asked to drop, so it is not inherited, and the
+    sources only it verified go back to the data loop."""
+    art = tmp_path / "art"
+    art.mkdir()
+    first = _state(art, user_request="map", known_data=_SITES)
+    first.declared_sources = ["sites", "regions"]
+    first.known_data_verified = ["sites"]
+    orchestrator._save_checkpoint(first, cp.STAGE_GENERATED)
+    stored = cp.load(art)
+    assert stored.known_data_verified == ["sites"]
+
+    again = _state(art, user_request="map")
+    engine._restore(again, stored, entry=cp.ENTRY_NEW_ITERATION)
+    assert again.known_data == ""
+    assert again.unverified_sources == ["sites"]
+    assert again.known_data_verified == []
+    assert orchestrator._needs_data_loop(again)
+
+    brought = _state(art, user_request="map", known_data="site,lat\nOslo,59.9")
+    engine._restore(brought, stored, entry=cp.ENTRY_NEW_ITERATION)
+    assert brought.known_data == "site,lat\nOslo,59.9"
+    assert brought.unverified_sources == []
+
+
+# ── the fetch verdict and the forced fetch ──────────────────────────────────
+
+_SITES_ITEM = RequiredDataItem(name="sites", where="rest-gw /sites endpoint", why="map")
+
+
+@pytest.mark.parametrize("loop_result", [
+    "generator exceeded round budget (20) without writing any files.",
+    {"files_written": [], "rounds_used": 1, "summary": "nothing", "scratchpad_execs": []},
+    {"files_written": [], "rounds_used": 1, "summary": "tried",
+     "scratchpad_execs": [{"name": "pad", "code": "get('/sites')", "output": "401", "ok": False}]},
+])
+async def test_a_fetch_without_a_cell_that_succeeded_is_not_data(tmp_path: Path, monkeypatch, loop_result):
+    async def fake_run_loop(**kw):
+        return loop_result
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
+    notes, ok = await orchestrator._fetch_data_sample(_state(tmp_path))
+    assert ok is False
+    if isinstance(loop_result, dict):
+        assert "(the fetch step ran no cell that succeeded)" in notes
+
+
+async def test_one_cell_that_succeeded_makes_the_fetch_count(tmp_path: Path, monkeypatch):
+    async def fake_run_loop(**kw):
+        return {
+            "files_written": [], "rounds_used": 2, "summary": "read the sites",
+            "scratchpad_execs": [
+                {"name": "pad", "code": "get('/site')", "output": "404", "ok": False},
+                {"name": "pad", "code": "rows = get('/sites')", "output": "13 rows", "ok": True},
+            ],
+        }
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
+    notes, ok = await orchestrator._fetch_data_sample(_state(tmp_path))
+    assert ok is True
+    assert "Scratchpad `pad` (failed):" in notes
+    assert "(the fetch step ran no cell that succeeded)" not in notes
+
+
+async def test_failed_fetches_keep_the_sources_unverified_until_the_loop_gives_up(
+    tmp_path: Path, monkeypatch
+):
+    st = _state(tmp_path)
+    st.gathering_complete = False
+    st.declared_sources = ["sites"]
+    st.unverified_sources = ["sites"]
+    st.session._llm.generate_object = AsyncMock(
+        side_effect=lambda schema_class, **kw: (
+            RequiredData(items=[_SITES_ITEM], reasoning="sites are missing")
+            if schema_class is RequiredData
+            else FetchVerdict(possible=True, reasoning="rest-gw has them")
+        )
+    )
+    fetched = []
+
+    async def fake_fetch(state, required_text=""):
+        fetched.append(state.data_notes)
+        return "(data fetch step reported: 401)", False
+
+    monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
+
+    err = await orchestrator._data_phase(st)
+    assert len(fetched) == orchestrator.DATA_LOOP_MAX
+    assert "(data fetch step reported: 401)" in fetched[1], "the next iteration did not see the failure"
+    assert err.startswith("not enough data: the data loop did not converge")
+    assert st.unverified_sources == ["sites"]
+    assert st.gathering_complete is False
+    assert [o for o, _ in _outcomes(st, "fetch_data_sample")] == ["fail"] * orchestrator.DATA_LOOP_MAX
+
+
+async def test_a_no_with_a_connection_gets_one_forced_fetch_then_names_where_it_looked(
+    tmp_path: Path, monkeypatch
+):
+    st = _unverified(_state(tmp_path, datasource_catalog=_slug_catalog("rest-gw", "crm")), "sites")
+    st.session._llm.generate_object = AsyncMock(
+        side_effect=lambda schema_class, **kw: (
+            RequiredData(items=[_SITES_ITEM], reasoning="sites are missing")
+            if schema_class is RequiredData
+            else FetchVerdict(possible=False, reasoning="no source holds the sites")
+        )
+    )
+    fetched = []
+
+    async def fake_fetch(state, required_text=""):
+        fetched.append(required_text)
+        return "listed the endpoints, no sites", True
+
+    monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
+
+    err = await orchestrator._data_phase(st)
+    assert len(fetched) == 1
+    assert err == "not enough data: no source holds the sites. Looked in: rest-gw, rest-gw /sites endpoint."
+    assert "crm" not in err
+    assert [o for o, _ in _outcomes(st, "is_possible_to_fetch")] == ["no_but_trying", "no"]
+
+
+async def test_a_forced_fetch_that_finds_the_data_lets_the_build_go_on(tmp_path: Path, monkeypatch):
+    st = _unverified(
+        _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True,
+               datasource_catalog=_slug_catalog("rest-gw")),
+        "sites",
+    )
+    st.session._llm.generate_object = AsyncMock(side_effect=[
+        RequiredData(items=[_SITES_ITEM], reasoning="sites are missing"),
+        FetchVerdict(possible=False, reasoning="not sure any source has them"),
+        RequiredData(items=[], reasoning="the fetch read the sites"),
+    ])
+
+    async def fake_fetch(state, required_text=""):
+        return "read 13 sites from rest-gw", True
+
+    monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
+
+    assert await orchestrator._data_phase(st) is None
+    assert st.unverified_sources == [] and st.gathering_complete is True
+    assert _outcomes(st, "define_required_data")[-1][0] == "nothing_missing"
+
+
+async def test_a_no_without_connections_fails_without_a_fetch(tmp_path: Path, monkeypatch):
+    st = _unverified(_state(tmp_path), "sites")
+    st.session._llm.generate_object = AsyncMock(side_effect=[
+        RequiredData(items=[_SITES_ITEM], reasoning="sites are missing"),
+        FetchVerdict(possible=False, reasoning="nothing is connected"),
+    ])
+
+    async def no_fetch(state, required_text=""):
+        raise AssertionError("no connection, no forced fetch")
+
+    monkeypatch.setattr(orchestrator, "_fetch_data_sample", no_fetch)
+
+    err = await orchestrator._data_phase(st)
+    assert err == "not enough data: nothing is connected"
+
+
+def test_the_error_names_the_first_connections_when_none_is_mentioned(tmp_path: Path):
+    st = _state(tmp_path, datasource_catalog=_slug_catalog("a", "b", "c", "d", "e", "f"))
+    st.forced_fetch_used = True
+    err = orchestrator._not_enough_data(st, "gave up", None)
+    assert err == "not enough data: gave up. Looked in: a, b, c, d, e."
+    st2 = _state(tmp_path, datasource_catalog=_slug_catalog("a"))
+    st2.forced_fetch_used = True
+    assert orchestrator._not_enough_data(st2, "gave up.", None) == "not enough data: gave up. Looked in: a."
+    assert orchestrator._not_enough_data(st2, "why?", None) == "not enough data: why? Looked in: a."
+
+
+def test_the_error_names_the_connections_the_required_data_mentions(tmp_path: Path):
+    """The backend prompt's rule: slug or label, 3+ characters, so `db`
+    does not match inside "mongodb"."""
+    st = _state(tmp_path, datasource_catalog=_slug_catalog("db", "crm", "wh1", labels={"wh1": "Warehouse"}))
+    st.forced_fetch_used = True
+    required = RequiredData(
+        items=[
+            RequiredDataItem(name="orders", where="mongodb collection on CRM", why="chart"),
+            RequiredDataItem(name="stock", where="the warehouse tables", why="chart"),
+        ],
+        reasoning="r",
+    )
+    err = orchestrator._not_enough_data(st, "no orders ", required)
+    assert err == (
+        "not enough data: no orders. Looked in: crm, wh1, "
+        "mongodb collection on CRM, the warehouse tables."
+    )
+
+
+async def test_no_forced_fetch_when_no_iteration_is_left_to_judge_it(tmp_path: Path, monkeypatch):
+    """A forced fetch runs after can-fetch said no; only the next define can
+    tell whether it found anything. On the last iteration there is no next
+    define, so the "no" stands."""
+    st = _unverified(_state(tmp_path, datasource_catalog=_slug_catalog("rest-gw")), "sites")
+    st.session._llm.generate_object = AsyncMock(side_effect=[
+        RequiredData(items=[_SITES_ITEM], reasoning="sites are missing"),
+        FetchVerdict(possible=True, reasoning="rest-gw has them"),
+        RequiredData(items=[_SITES_ITEM], reasoning="sites are missing"),
+        FetchVerdict(possible=True, reasoning="rest-gw has them"),
+        RequiredData(items=[_SITES_ITEM], reasoning="sites are missing"),
+        FetchVerdict(possible=False, reasoning="the endpoint keeps failing"),
+    ])
+    fetched = []
+
+    async def fake_fetch(state, required_text=""):
+        fetched.append(required_text)
+        return "(data fetch step reported: 500)", False
+
+    monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
+
+    err = await orchestrator._data_phase(st)
+    assert len(fetched) == 2
+    assert err == "not enough data: the endpoint keeps failing"
+    assert st.forced_fetch_used is False
+    assert [o for o, _ in _outcomes(st, "is_possible_to_fetch")] == ["yes", "yes", "no"]
+
+
+async def test_a_rejected_empty_list_does_not_become_the_users_reason(tmp_path: Path, monkeypatch):
+    """Define said the rows are there; the loop rejected that and every fetch
+    failed. The error must not tell the user the data was there."""
+    st = _unverified(_state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True), "sites")
+    st.session._llm.generate_object = AsyncMock(
+        side_effect=lambda schema_class, **kw: (
+            RequiredData(items=[], reasoning="the rows are already in the known data")
+            if schema_class is RequiredData
+            else FetchVerdict(possible=True, reasoning="the pad has it")
+        )
+    )
+
+    async def fake_fetch(state, required_text=""):
+        return "(data fetch step reported: 500)", False
+
+    monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
+
+    err = await orchestrator._data_phase(st)
+    assert err.startswith("not enough data: the data loop did not converge")
+    assert err.endswith("Last assessment: no executed code read sites")
+    assert "already in the known data" not in err
+
+
+def test_a_backend_heading_in_known_data_does_not_replace_the_specs(tmp_path: Path):
+    from anton.core.tools.generate_artifact import engine as gen_engine
+
+    (tmp_path / "spec.md").write_text("## Backend\n- `GET /api/sites` — the sites\n", encoding="utf-8")
+    st = _state(
+        tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True,
+        known_data="## Backend\n- GET /api/regions\n\nsite,lat\nToronto,43.7",
+    )
+    ctx = orchestrator._spec_context(st)
+    assert set(gen_engine._declared_api_paths(ctx)) == {"/api/sites"}
+    assert ctx.index("## Technical specification") < ctx.index(prompts.KNOWN_DATA_HEADER)
+    assert ctx.rstrip().endswith(prompts.KNOWN_DATA_FOOTER) or prompts.KNOWN_DATA_FOOTER in ctx
+
+
+async def test_known_data_is_scrubbed_before_any_step_sees_it(tmp_path: Path, monkeypatch):
+    seen = {}
+
+    async def fake_run(state, *, entry):
+        seen["known_data"] = state.known_data
+        return {"status": "generated", "files_written": [], "trace": []}
+
+    monkeypatch.setattr(orchestrator, "run", fake_run)
+    secret = "sk-ant-api03-" + "A" * 40
+    session = _session()
+    session._scratchpads.agent_pads = Mock(return_value=set())
+    await engine.generate(
+        session=session, artifact_type="html-app", artifact_path=tmp_path, slug="a",
+        user_request="map the sites", agent_understanding="a map",
+        known_data=f"site,lat\nToronto,43.7\nfetched with key {secret}",
+    )
+    assert "Toronto,43.7" in seen["known_data"]
+    assert secret not in seen["known_data"]

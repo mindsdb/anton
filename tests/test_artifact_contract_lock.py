@@ -386,6 +386,8 @@ RULES: tuple[Rule, ...] = (
          _both(_FRONT_BOTH, "__antonCommentsLayer")),
     Rule("errors", "Frontend opens a <script> block but never closes it with </script>.",
          _both(_FRONT_BOTH, "must be closed")),
+    Rule("errors", "The page shows HTML tags as text, so that markup does not render or run: ",
+         _both(_FRONT_BOTH, "No HTML tag shown as text")),
     Rule("errors", "Frontend must not use universal `* { ... !important }` rules.",
          _both(_FRONT_BOTH, "!important")),
     Rule("errors", "Frontend uses an extreme z-index (> 1000); keep it within a sane range.",

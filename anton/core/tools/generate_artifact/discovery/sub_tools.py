@@ -23,6 +23,7 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, NamedTuple
 
 from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES_ORDERED
+from anton.core.llm.client import asked_model
 
 from ..sub_tools import tool_schema
 
@@ -80,9 +81,9 @@ FINISH_GATHERING_SCHEMA: dict = {
                     "Short names of the data sources this artifact reads "
                     '(e.g. "orders table", "the article at <url>"). Empty '
                     "when the artifact needs no external data. A source "
-                    "named here that has had no code run against it is "
+                    "named here that is not verified (see the rules) is "
                     "fetched before generation starts, so naming one you "
-                    "have not touched is how you ask for it."
+                    "have not verified is how you ask for it."
                 ),
             },
             "data_findings": {
@@ -98,7 +99,10 @@ FINISH_GATHERING_SCHEMA: dict = {
                             "type": "string",
                             "description": (
                                 "How the sample was obtained: scratchpad "
-                                "name and cell, or the URL fetched."
+                                "name and cell, the URL fetched, or "
+                                "`known_data` when the rows or values are "
+                                "already in the known data the calling "
+                                "agent passed in."
                             ),
                         },
                         "shape": {
@@ -239,6 +243,7 @@ async def call_with_room(
         state.trace_log.llm_call(
             node=step, method=method, system=system, messages=msgs,
             response=response, attempt=number, round=round_idx,
+            model=asked_model(llm, role),
         )
         return response, used or budget
 
@@ -518,19 +523,34 @@ _STEP_TASK = {
 }
 
 
-def pipeline_tool_schemas() -> list[dict]:
+def pipeline_tool_schemas(types: tuple[str, ...] = GENERATOR_ARTIFACT_TYPES_ORDERED) -> list[dict]:
     """The ONE tool array used by every call in phases A-D.
 
     Fixed contents, fixed order, built the same way every time: it is part of
     the cached prefix, and a reordered array is a changed prefix. Availability
     per step is decided by `rejection_for`, never by dropping entries here.
+    ``types`` are the ones `finish_gathering` may settle on
+    (`GenState.buildable_types`).
     """
+    finish = FINISH_GATHERING_SCHEMA
+    if types != GENERATOR_ARTIFACT_TYPES_ORDERED:
+        schema = finish["input_schema"]
+        finish = {
+            **finish,
+            "input_schema": {
+                **schema,
+                "properties": {
+                    **schema["properties"],
+                    "artifact_type": {**schema["properties"]["artifact_type"], "enum": list(types)},
+                },
+            },
+        }
     return [
         _scratchpad_schema(),
         _web_search_schema(),
         _web_fetch_schema(),
         _ask_user_schema(),
-        FINISH_GATHERING_SCHEMA,
+        finish,
     ]
 
 
