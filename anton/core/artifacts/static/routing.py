@@ -15,6 +15,9 @@ Reading a connected source while building a report also needs no backend.
 Register with create_artifact, then call generate_artifact with the original
 user_request, user_language, and agent_understanding. Pass exact known_data,
 source procedures, requested style, and actual attached file paths when available.
+When using an existing computation, pass its complete records or export the complete
+records to a private file and pass that path. The builder uses a separate Python
+scratchpad and cannot access variables left in the parent notebook.
 The engine gathers evidence, composes the artifact, and checks the actual page.
 Use it for fully specified work as well as open-ended requests. Do not write
 the page in scratchpad or use the older report helpers or dashboard skill.

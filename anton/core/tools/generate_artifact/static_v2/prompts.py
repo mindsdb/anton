@@ -25,10 +25,22 @@ def context(state):
                         size += len(value)
             if len(users) < 3 and _text(content):
                 users.append(scrub_output(_text(content)))
+    contracts, remaining, omitted = [], 63_744, 0
+    for label, body in state.static_source_contracts.items():
+        entry = f'\n--- {label} ---\n{body}\n'
+        if len(entry) <= remaining:
+            contracts.append(entry)
+            remaining -= len(entry)
+        else:
+            omitted += 1
+    if omitted:
+        contracts.append(f'\n[{omitted} read procedures omitted from this bounded handoff. Do not guess missing field or unit semantics.]')
+    contracts = ''.join(contracts)
     return (
         f'Current request: {state.user_request}\nCalling agent context: {state.agent_understanding}\n'
         f'Known data: {state.known_data}\nPreferences: {state.user_preferences}\n'
         f'Evidence origin (reused means cached, never a fresh source read): {state.static_evidence_origin}\n'
+        f'Trusted source procedures already read (access, schema, units and date semantics; not presentation defaults): {contracts}\n'
         f'Attached files: {[{"path": str(a.path), "kind": a.kind} for a in state.attachments]}\n'
         f'Output language: {state.user_language}\nProject rules: {state.project_rules}\n'
         f'Source procedure catalog (metadata; read the trusted body before using it): {catalog(state.session)}\n'
@@ -51,7 +63,11 @@ HTTP APIs, databases, and files using the documented source contract; it is not 
 Use requests/urllib or the documented client inside scratchpad for connected services.
 For example, a source read is a scratchpad call with action="exec", a scratchpad name, the
 Python access code in code, one_line_description, and estimated_execution_time_seconds.
-Reuse a scratchpad listed in the context. The source procedure supplies the actual protocol,
+This evidence pass owns the dedicated fresh scratchpad SOURCE_SCRATCHPAD. It starts without
+parent notebook variables; use it for all Python calls in this pass. Read complete records from
+the designated source or supplied file, or persist the exact user-provided records. Never assume
+a parent variable, HTTP client, response object, or prior notebook snapshot exists here.
+The source procedure supplies the actual protocol,
 endpoint, credentials and query syntax; do not substitute a guessed GET or route. Do not
 claim a source is unavailable without attempting its documented read operation. Honor the exact user-designated source and scope.
 A missing designated source is a blocker: never silently substitute a same-named file, another project,
