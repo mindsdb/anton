@@ -35,9 +35,9 @@ main{min-width:0;max-width:1080px}
 #_artifact-content > .section .eyebrow{margin-bottom:10px}
 .section-summary{color:var(--muted);margin-top:12px;font-size:17px}
 .blocks{display:grid;gap:26px}
-.blocks>*{min-width:0}
+.blocks>*,.metric-row>*{min-width:0}
 .blocks.split{grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}
-.blocks.metrics{grid-template-columns:repeat(auto-fit,minmax(min(190px,100%),1fr));gap:24px}
+.blocks.metrics,.metric-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(190px,100%),1fr));gap:24px}
 .metric{padding:18px 0 4px;border-top:2px solid var(--accent)}
 .metric h3{color:var(--muted);font-size:13px;font-weight:550}
 .metric-value{font-size:clamp(28px,3.5vw,42px);font-weight:650;letter-spacing:-.04em;line-height:1.2;margin-top:10px;font-variant-numeric:tabular-nums}

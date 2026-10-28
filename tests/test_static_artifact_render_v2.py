@@ -80,6 +80,19 @@ def test_aggregated_calculation_can_render_without_publishing_measure_inputs():
     assert json.loads(match[1])['bindings']['_view0']==[{'name':'A','rate':'0.5'}]
 
 
+def test_flow_groups_adjacent_metrics_without_crossing_other_content_or_losing_facts():
+    facts={name:{'type':'query','query':{'dataset':'rows','columns':['amount']},'field':'amount'} for name in ['one','two','three']}
+    doc=document([{'type':'metric','label':'One','fact':'one'},{'type':'metric','label':'Two','fact':'two'},
+        {'type':'prose','text':'Keep this between the metric groups.'},{'type':'metric','label':'Three','fact':'three'}],facts=facts)
+    result=render(doc,evidence())
+    assert result.html.count('<div class="metric-row">')==1
+    assert result.html.count('<div class="metric">')==3
+    assert '</div></div><div class="prose"><p>Keep this between' in result.html
+    assert set(result.manifest['facts'])==set(facts)
+    doc.sections[0].layout='split'
+    assert '<div class="metric-row">' not in render(doc,evidence()).html
+
+
 def test_custom_binding_is_available_before_fragment_scripts_execute():
     doc=document([{'type':'html','html':'<script>window.test=JSON.parse(document.getElementById("_artifact-bindings").textContent).bindings.choices;</script>'}],
                  bindings={'choices':{'dataset':'rows','columns':['amount']}},views=[{'selector':'body','binding':'choices','minimum':'one'}])

@@ -92,7 +92,9 @@ all records on the host.
 contain prose, metrics, tables, charts, callouts, and custom HTML fragments. Flow,
 split, and metric layouts recompose at narrow widths. The theme controls light or
 dark mode, accent, typography, and density. Reports have an outline, inspectable
-chart data, and print styles. Standard bar/line/scatter charts use container-sized
+chart data, and print styles. Consecutive metrics in a flow section form a responsive
+row, without requiring the author to create artificial sections just to group KPIs.
+Standard bar/line/scatter charts use container-sized
 SVG, readable labels, units, focusable marks, and full data tables. Tables with
 more than four columns recompose into labelled records on phones; every field
 stays visible, while desktop retains the comparison table. Missing line
