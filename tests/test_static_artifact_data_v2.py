@@ -1,4 +1,5 @@
 from decimal import Decimal
+import json
 
 import pytest
 from pydantic import ValidationError
@@ -8,6 +9,20 @@ from anton.core.artifacts.static.data import DataError, Evidence, Query, execute
 
 def evidence(rows):
     return Evidence.model_validate({"datasets": {"orders": {"source": {"label": "Uploaded orders"}, "rows": rows}}})
+
+
+def test_authoring_json_preserves_number_types_and_exact_decimal_digits():
+    from anton.core.artifacts.static.data import exact_json,json_value
+    value=Decimal('0.12345678901234567890123456789')
+    encoded=exact_json({'amount':value,'label':'0.12345678901234567890123456789','flag':True,'none':None})
+    decoded=json.loads(encoded,parse_float=Decimal)
+    assert decoded['amount']==value and isinstance(decoded['amount'],Decimal)
+    assert isinstance(decoded['label'],str) and decoded['flag'] is True and decoded['none'] is None
+    assert isinstance(json.loads(json_value({'amount':value}))['amount'],str)
+
+
+def test_evidence_digest_distinguishes_decimal_values_from_literal_strings():
+    assert evidence([{'value':Decimal('1.25')}]).digest()!=evidence([{'value':'1.25'}]).digest()
 
 
 def test_decimal_arithmetic_and_grouping_preserve_missing_values():

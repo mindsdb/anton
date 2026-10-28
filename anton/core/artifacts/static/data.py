@@ -44,7 +44,7 @@ class Evidence(Model):
     datasets: dict[Name, Dataset] = Field(default_factory=dict, max_length=100)
 
     def digest(self) -> str:
-        return sha256(self.model_dump_json().encode()).hexdigest()
+        return sha256(exact_json(self.model_dump()).encode()).hexdigest()
 
 
 class Filter(Model):
@@ -186,3 +186,20 @@ def json_value(value):
             return str(item)
         raise TypeError(f"Not JSON serializable: {type(item).__name__}")
     return json.dumps(value, ensure_ascii=False, allow_nan=False, default=encode)
+
+
+def exact_json(value):
+    """Host/authoring JSON: Decimal stays a number without float conversion.
+
+    Browser bindings use json_value instead, where decimal strings prevent
+    JavaScript's numeric parser from losing precision.
+    """
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise DataError('JSON requires finite numbers')
+        return str(value)
+    if isinstance(value, dict):
+        return '{' + ','.join(json.dumps(key, ensure_ascii=False) + ':' + exact_json(item) for key, item in value.items()) + '}'
+    if isinstance(value, list):
+        return '[' + ','.join(exact_json(item) for item in value) + ']'
+    return json.dumps(value, ensure_ascii=False, allow_nan=False)
