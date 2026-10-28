@@ -123,3 +123,30 @@ async def test_large_evidence_uses_catalog_and_exact_inspection(tmp_path,monkeyp
     assert 'schema catalog' in calls[0]['messages'][0]['content']
     assert len(calls[0]['messages'][0]['content'])<10000
     assert any('499500' in str(m) for m in calls[1]['messages'])
+
+
+async def test_source_procedure_reader_uses_trusted_full_body_even_after_parent_recall():
+    from anton.core.tools.generate_artifact.static_v2.source_skills import catalog, recall
+    store=SimpleNamespace(list_summaries=lambda:[{'label':'sensor-observations','description':'Read observations using the documented endpoint'}],
+        load_for_artifacts=Mock(return_value=SimpleNamespace(declarative_md='Read /v7/observations with the documented time basis.')))
+    session=SimpleNamespace(_skill_store=store,_recalled_skills={'sensor-observations'})
+    assert 'sensor-observations' in catalog(session)
+    result=await recall(session,{'label':'sensor-observations'})
+    assert result.ok and '/v7/observations' in result.content
+    store.load_for_artifacts.assert_called_once_with('sensor-observations')
+    store.load_for_artifacts.return_value=None
+    assert not (await recall(session,{'label':'different-source'})).ok
+
+
+async def test_collector_offers_source_procedures_and_never_conversation_memory(tmp_path):
+    import importlib
+    module=importlib.import_module('anton.core.tools.generate_artifact.static_v2.collect')
+    seen=[]
+    async def stream(**kwargs):
+        seen.append(kwargs)
+        yield StreamComplete(response=LLMResponse(content='',tool_calls=[ToolCall('finish','finish_static_evidence',{'ready':True,'needs_data':False,'reason':'Qualitative artifact'})]))
+    st=state(tmp_path,VALID);st.session._llm.plan_stream=stream
+    result=await module.collect(st)
+    assert isinstance(result,Evidence)
+    names={tool['name'] for tool in seen[0]['tools']}
+    assert 'recall_skill' in names and 'recall' not in names

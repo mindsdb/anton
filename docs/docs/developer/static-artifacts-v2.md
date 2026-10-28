@@ -21,8 +21,10 @@ compiler; slide reader/presentation runtime; render/data integrity checks; gener
 
 ## Evidence
 
-Collection reuses the session's existing scratchpad, text-file, recall, web, and
+Collection reuses the session's existing scratchpad, text-file, trusted source-procedure, web, and
 question handlers. It cannot grant access a handler does not already grant.
+Source procedures come from the same artifact-trusted skill store. The delegate receives the full body even when the parent already recalled it; conversation-memory recall is not a source documentation tool.
+
 Source selection remains an agent responsibility: acquisition success and a
 source label are **not proof** that the agent selected the authorized source.
 Explicit source restrictions take precedence over plans, prior pages, and
@@ -75,8 +77,7 @@ page. Named queries are resolved and inserted as `window.ARTIFACT_DATA` before
 any author script executes. Custom document fragments can read the page's
 `window.ARTIFACT_DATA` bindings and use queries declared in `document.bindings`. This
 route supports arbitrary HTML, SVG, canvas, and client-side interaction, under
-the existing artifact sandbox and content security policy. It requires embedded
-assets and no build, server, remote font, or CDN dependency.
+the existing artifact sandbox and content security policy. It requires embedded data/media, inline styles, and no build, server, or remote fonts. Explicitly requested script libraries may use a pinned version from the preview-approved `cdn.jsdelivr.net` host and must pass the actual browser check; the standard compiler has no network dependency.
 
 Only resolved public bindings and referenced fact values enter a compiled
 page. Unselected fields and unused facts stay out. Query definitions can refer

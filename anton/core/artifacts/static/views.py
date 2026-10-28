@@ -9,7 +9,7 @@ from .data import DataError, Model, Name
 class View(Model):
     selector: str = Field(min_length=1, max_length=240)
     binding: Name
-    minimum: Literal['rows', 'one'] = 'rows'
+    minimum: Literal['rows', 'one'] = 'one'
 
 
 def checks(bindings, views, *, covered=()):

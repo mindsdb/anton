@@ -23,16 +23,18 @@ FINISH = {"name": "finish_static_evidence", "description": "Finish only after so
 
 
 async def collect(state) -> Evidence | str:
-    from anton.core.tools.tool_defs import SCRATCHPAD_TOOL, READ_TEXT_FILE_TOOL, RECALL_TOOL
+    from anton.core.tools.tool_defs import SCRATCHPAD_TOOL, READ_TEXT_FILE_TOOL
+    from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
+    from .source_skills import recall
     from anton.core.tools.web_tools import WEB_FETCH_FALLBACK_TOOL, WEB_SEARCH_FALLBACK_TOOL
-    from anton.core.tools.tool_handlers import handle_scratchpad, handle_read_text_file, handle_recall
+    from anton.core.tools.tool_handlers import handle_scratchpad, handle_read_text_file
 
     path = state.artifact_path / '.static' / f'evidence-{uuid.uuid4().hex}.json'
     make_dirs_nofollow(state.artifact_path, path.parent)
     system = COLLECT.replace('EVIDENCE_PATH', repr(str(path)))
-    definitions = [SCRATCHPAD_TOOL, READ_TEXT_FILE_TOOL, RECALL_TOOL, WEB_FETCH_FALLBACK_TOOL, WEB_SEARCH_FALLBACK_TOOL]
+    definitions = [SCRATCHPAD_TOOL, READ_TEXT_FILE_TOOL, RECALL_SKILL_TOOL, WEB_FETCH_FALLBACK_TOOL, WEB_SEARCH_FALLBACK_TOOL]
     tools = [protocol.tool_schema(t) for t in definitions] + [_ask_user_schema(), FINISH]
-    handlers = {SCRATCHPAD_TOOL.name: handle_scratchpad, READ_TEXT_FILE_TOOL.name: handle_read_text_file, RECALL_TOOL.name: handle_recall}
+    handlers = {SCRATCHPAD_TOOL.name: handle_scratchpad, READ_TEXT_FILE_TOOL.name: handle_read_text_file, RECALL_SKILL_TOOL.name: recall}
     handlers.update({name: handler for name, (handler, _) in _web_tools().items()})
     messages = [{"role": "user", "content": context(state)}]
     questions = gathering_question_budget(state.session, act_first=state.act_first)
