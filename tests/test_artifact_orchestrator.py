@@ -176,6 +176,44 @@ async def test_fetch_for_an_html_app_without_a_file_fails(tmp_path: Path, monkey
     assert ok is False and "no valid data file" in notes
 
 
+async def test_a_file_only_a_cell_mentions_is_not_taken_as_data(tmp_path: Path, monkeypatch):
+    """The summary names 1.json; a valid 2.json that only a cell's code mentions
+    is a scratch file, not data for the page."""
+    st = _state(tmp_path)
+    st.unverified_sources = ["orders"]
+
+    async def fake_run_loop(**kw):
+        (tmp_path / DATA_DIRNAME).mkdir()
+        (tmp_path / DATA_DIRNAME / "1.json").write_text(json.dumps([{"v": 1}]))
+        (tmp_path / DATA_DIRNAME / "2.json").write_text(json.dumps([{"tmp": 1}]))
+        return {"files_written": [], "rounds_used": 2, "summary": "saved .anton-data/1.json",
+                "scratchpad_execs": [{"name": "p", "output": "ok",
+                                      "code": "json.dump(rows, open('.anton-data/2.json', 'w'))"}]}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
+    notes, ok = await orchestrator._fetch_data_sample(st)
+    assert ok is True
+    assert [f.id for f in st.data_files] == ["1"]
+    assert st.loop_data_ids == ["1"]
+
+
+async def test_a_summary_that_names_no_file_takes_the_new_valid_one(tmp_path: Path, monkeypatch):
+    st = _state(tmp_path)
+    st.unverified_sources = ["orders"]
+
+    async def fake_run_loop(**kw):
+        (tmp_path / DATA_DIRNAME).mkdir()
+        (tmp_path / DATA_DIRNAME / "1.json").write_text(json.dumps([{"v": 1}]))
+        return {"files_written": [], "rounds_used": 1, "summary": "saved the orders",
+                "scratchpad_execs": [{"name": "p", "code": "save()", "output": "ok"}]}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
+    notes, ok = await orchestrator._fetch_data_sample(st)
+    assert ok is True
+    assert [f.id for f in st.data_files] == ["1"]
+    assert st.loop_data_ids == ["1"]
+
+
 async def test_fetch_counts_the_size_of_all_data_files(tmp_path: Path, monkeypatch):
     """Gathering's file and the fetched one each fit; together they do not."""
     (tmp_path / DATA_DIRNAME).mkdir()

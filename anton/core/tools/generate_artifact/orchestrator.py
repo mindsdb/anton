@@ -130,7 +130,8 @@ async def _fetch_data_sample(state: GenState, required_text: str = "") -> tuple[
         # what stops the pipeline. Said plainly rather than folded into a
         # summary, which would read as a fetch that completed.
         return "(data fetch stopped: the turn's budget ran out mid-fetch)", False
-    summary = result.get("summary") or "(fetch produced no summary)"
+    step_summary = result.get("summary") or ""
+    summary = step_summary or "(fetch produced no summary)"
     execs = result.get("scratchpad_execs") or []
     exec_notes = _render_exec_notes(execs)
     if exec_notes:
@@ -141,10 +142,11 @@ async def _fetch_data_sample(state: GenState, required_text: str = "") -> tuple[
             summary += "\n\n(the fetch step ran no cell that succeeded)"
         return summary, ok
     new_ids = data_files.written_since(state.artifact_path, before)
-    named = [i for i in new_ids if data_files.rel_name(i) in summary]
+    # Only the step's own summary names files: the notes appended above carry cell code too.
+    named = [i for i in new_ids if data_files.rel_name(i) in step_summary]
     sources = list(state.unverified_sources or state.declared_sources or ["fetched data"])
     candidates = [
-        data_files.DataFile(id=i, sources=sources, description=(result.get("summary") or "")[:300])
+        data_files.DataFile(id=i, sources=sources, description=step_summary[:300])
         for i in (named or new_ids)
     ]
     valid, errors = (data_files.check_declared(
