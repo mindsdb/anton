@@ -3271,14 +3271,19 @@ class ChatSession:
         # entirely so the LLM doesn't try to use them.
         if self._workspace is not None:
             fullstack = self._fullstack_offered
-            self.tool_registry.register_tool(CREATE_ARTIFACT_TOOL if fullstack else STATIC_CREATE_ARTIFACT_TOOL)
+            create = CREATE_ARTIFACT_TOOL if fullstack else STATIC_CREATE_ARTIFACT_TOOL
+            generate = GENERATE_ARTIFACT_TOOL if fullstack else STATIC_GENERATE_ARTIFACT_TOOL
+            from anton.core.artifacts.static import routing
+            if routing.enabled(self._act_first):
+                create, generate = routing.authoring_tools(create, generate, fullstack=fullstack)
+            self.tool_registry.register_tool(create)
             self.tool_registry.register_tool(LIST_ARTIFACTS_TOOL)
             self.tool_registry.register_tool(
                 UPDATE_ARTIFACT_METADATA_TOOL if fullstack else STATIC_UPDATE_ARTIFACT_METADATA_TOOL
             )
             if fullstack:
                 self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
-            self.tool_registry.register_tool(GENERATE_ARTIFACT_TOOL if fullstack else STATIC_GENERATE_ARTIFACT_TOOL)
+            self.tool_registry.register_tool(generate)
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""

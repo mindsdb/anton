@@ -8,8 +8,13 @@ interaction without waiting for another component to be added.
 
 ## Evaluation rollout
 
-`ANTON_STATIC_ARTIFACTS=v2` selects the new engine for `html-app` generation in
-act-first mode. The flag is deliberately separate from the earlier experimental
+`ANTON_STATIC_ARTIFACTS=v2` selects the new engine and its parent-agent authoring
+contract for `html-app` generation in act-first mode. Fully specified HTML reports
+and subsequent edits use the same engine. Reading a connected source at build time
+does not require a backend; client-side filters and drill-downs use embedded data.
+Apps that actually require protected-source refresh, authenticated actions, or
+external writes at viewing time retain the fullstack route.
+The flag is deliberately separate from the earlier experimental
 static flags. Unset, the existing pipeline runs. Fullstack and confirmation-first
 workflows retain their current behavior. Do not enable the replacement by default
 until its quality and edit behavior have been measured on the unmodified artifact
