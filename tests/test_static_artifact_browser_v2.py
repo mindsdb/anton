@@ -66,6 +66,22 @@ def test_slide_controls_keyboard_exit_and_print_restore_all_content():
         browser.close()
 
 
+def test_zero_and_small_bar_values_keep_their_true_scaled_widths():
+    evidence=Evidence.model_validate({'datasets':{'readings':{'source':{'label':'Synthetic scale QA'},'rows':[
+        {'label':'Zero','value':0},{'label':'Small','value':0.001},{'label':'Large','value':1000}]}}})
+    document=Document.model_validate({'title':'Scaled values','sections':[{'id':'chart','blocks':[
+        {'type':'chart','title':'Observed amounts','kind':'bar','query':'readings','x':'label','series':[{'field':'value','label':'Value'}]}]}]})
+    with playwright.sync_playwright() as p:
+        browser=p.chromium.launch();page=browser.new_page(viewport={'width':390,'height':844})
+        page.set_content(render(document,evidence).html)
+        page.wait_for_function('document.querySelectorAll(".chart svg rect").length===3')
+        widths=page.locator('.chart svg rect').evaluate_all('(elements)=>elements.map(el=>Number(el.getAttribute("width")))')
+        assert widths[0]==0
+        assert widths[1]/widths[2]==pytest.approx(0.000001)
+        assert page.locator('.chart-data table tbody tr').count()==3
+        browser.close()
+
+
 def test_custom_fragment_class_names_and_hidden_controls_do_not_become_host_views():
     document=Document.model_validate({'kind':'slides','title':'Mixed content','sections':[
         {'id':'one','blocks':[{'type':'html','html':'<section class="section" id="custom-section"><div class="chart" id="custom-chart">Custom diagram</div><button hidden id="custom-hidden">Hidden control</button></section>'}]},

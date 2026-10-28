@@ -92,7 +92,7 @@
         series.forEach((s,i)=>{const value=plotted(row,s); if(value===null)return;
           const text=spec.display[n][i], x=scaleX(Math.min(0,value)), end=scaleX(Math.max(0,value));
           const by=y+(stackedLabels?labelHeight+24:step/2+3)-series.length*10+i*20;
-          mark(svg,'rect',{x,y:by,width:Math.max(1,end-x),height:14,fill:colors[i],rx:1},`${label}, ${s.label}: ${text}`);
+          mark(svg,'rect',{x,y:by,width:Math.max(0,end-x),height:14,fill:colors[i],rx:1},`${label}, ${s.label}: ${text}`);
           if(series.length===1)svg.append(svgNode('text',{x:width-right+8,y:by+12},text));
         });
       });
