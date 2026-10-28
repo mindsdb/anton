@@ -129,6 +129,7 @@ class Document(Model):
     language: str = Field(default="en", pattern=r"^[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*$")
     theme: Theme = Field(default_factory=Theme)
     facts: dict[Name, Fact] = Field(default_factory=dict, max_length=200)
+    bindings: dict[Name, Query] = Field(default_factory=dict, max_length=100)
     sections: list[Section] = Field(min_length=1, max_length=100)
 
     @model_validator(mode="after")
