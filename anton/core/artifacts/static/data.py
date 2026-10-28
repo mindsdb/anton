@@ -71,6 +71,15 @@ class Order(Model):
     descending: bool = False
 
 
+BinaryOp = Literal['add', 'subtract', 'multiply', 'divide']
+
+
+class QueryCalculation(Model):
+    name: Name
+    op: BinaryOp
+    fields: list[str] = Field(min_length=2, max_length=2)
+
+
 class Query(Model):
     dataset: Name
     columns: list[str] = Field(default_factory=list)
@@ -78,10 +87,11 @@ class Query(Model):
     group_by: list[str] = Field(default_factory=list)
     measures: list[Measure] = Field(default_factory=list)
     order_by: list[Order] = Field(default_factory=list)
+    calculations: list[QueryCalculation] = Field(default_factory=list, max_length=50)
 
     @model_validator(mode="after")
     def shape(self):
-        names = self.group_by + [m.name for m in self.measures]
+        names = self.group_by + [m.name for m in self.measures] + [c.name for c in self.calculations]
         if len(names) != len(set(names)):
             raise ValueError("Query output names must be unique")
         if self.measures and self.columns:
@@ -104,6 +114,23 @@ def number(value) -> Decimal:
     if not result.is_finite() or abs(result.adjusted()) > 1000:
         raise DataError("Expected a finite number with a decimal exponent between -1000 and 1000")
     return result
+
+
+def calculate(op: BinaryOp, a, b):
+    if a is None or b is None:
+        return None
+    a, b = number(a), number(b)
+    with localcontext() as context:
+        context.prec = 4096
+        if op == 'divide':
+            return a / b if b else None
+        if op == 'add':
+            return a + b
+        if op == 'subtract':
+            return a - b
+        if op == 'multiply':
+            return a * b
+        raise DataError(f'Unknown calculation: {op}')
 
 
 def _matches(row: dict, condition: Filter) -> bool:
@@ -148,8 +175,25 @@ def execute(evidence: Evidence, query: Query) -> list[dict]:
     if query.dataset not in evidence.datasets:
         raise DataError(f"Unknown dataset: {query.dataset}")
     source = evidence.datasets[query.dataset].rows
-    required = set(query.columns + query.group_by + [w.field for w in query.where])
+    calculated = {c.name for c in query.calculations}
+    required = set(query.columns) - calculated
+    required.update(query.group_by + [w.field for w in query.where])
     required.update(m.field for m in query.measures if m.field)
+    available = set(query.group_by + [m.name for m in query.measures]) if query.measures else {key for row in source for key in row}
+    produced = set()
+    for calculation in query.calculations:
+        if calculation.name in available:
+            raise DataError(f'Calculation would overwrite field: {calculation.name}')
+        inputs = set(calculation.fields)
+        if (inputs & calculated) - produced:
+            raise DataError('Calculations may reference only source/output fields or earlier calculations')
+        if query.measures:
+            if missing := inputs - available:
+                raise DataError(f'Calculation needs query output fields: {sorted(missing)}')
+        else:
+            required.update(inputs - produced)
+        available.add(calculation.name)
+        produced.add(calculation.name)
     for index, row in enumerate(source):
         missing = required - row.keys()
         if missing:
@@ -164,9 +208,14 @@ def execute(evidence: Evidence, query: Query) -> list[dict]:
             groups[()] = []
         rows = [{field: group[0][field] for field in query.group_by} |
                 {m.name: _aggregate(group, m) for m in query.measures} for key, group in groups.items()]
-    else:
+    if query.calculations:
+        rows = [dict(row) for row in rows]
+        for row in rows:
+            for calculation in query.calculations:
+                row[calculation.name] = calculate(calculation.op, *(row[field] for field in calculation.fields))
+    if not query.measures:
         rows = [{k: r[k] for k in query.columns} for r in rows]
-    output_fields = set(query.group_by + [m.name for m in query.measures] if query.measures else query.columns)
+    output_fields = set(query.group_by + [m.name for m in query.measures] + list(calculated) if query.measures else query.columns)
     for order in reversed(query.order_by):
         if order.field not in output_fields:
             raise DataError(f"Cannot sort by unselected field: {order.field}")

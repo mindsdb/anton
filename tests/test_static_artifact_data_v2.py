@@ -46,6 +46,70 @@ def test_projection_does_not_export_unselected_fields():
     assert data.datasets["orders"].rows[0]["private"] == "secret"
 
 
+def test_query_calculations_resolve_rates_and_variances_before_public_projection():
+    data=evidence([{'name':'A','actual':Decimal('0.3'),'private_plan':Decimal('0.2')},
+        {'name':'B','actual':4,'private_plan':0}, {'name':'C','actual':None,'private_plan':3}])
+    before=data.model_dump()
+    query=Query.model_validate({'dataset':'orders','columns':['name','rate','variance'],
+        'calculations':[{'name':'rate','op':'divide','fields':['actual','private_plan']},
+            {'name':'variance','op':'subtract','fields':['actual','private_plan']}],
+        'order_by':[{'field':'rate','descending':True}]})
+    assert execute(data,query)==[{'name':'A','rate':Decimal('1.5'),'variance':Decimal('0.1')},
+        {'name':'B','rate':None,'variance':Decimal(4)}, {'name':'C','rate':None,'variance':None}]
+    assert data.model_dump()==before
+
+
+def test_calculation_can_divide_grouped_totals_and_chain_earlier_outputs():
+    data=evidence([{'team':'a','actual':1,'plan':2},{'team':'a','actual':4,'plan':8},
+        {'team':'b','actual':9,'plan':10}])
+    query=Query.model_validate({'dataset':'orders','group_by':['team'],
+        'measures':[{'name':'done','op':'sum','field':'actual'},{'name':'target','op':'sum','field':'plan'}],
+        'calculations':[{'name':'rate','op':'divide','fields':['done','target']},
+            {'name':'squared','op':'multiply','fields':['rate','rate']}],
+        'order_by':[{'field':'rate','descending':True}]})
+    assert execute(data,query)==[{'team':'b','done':Decimal(9),'target':Decimal(10),'rate':Decimal('.9'),'squared':Decimal('.81')},
+        {'team':'a','done':Decimal(5),'target':Decimal(10),'rate':Decimal('.5'),'squared':Decimal('.25')}]
+
+
+def test_calculation_input_coverage_is_checked_before_source_filtering():
+    query=Query.model_validate({'dataset':'orders','columns':['rate'],'where':[{'field':'name','value':'A'}],
+        'calculations':[{'name':'rate','op':'divide','fields':['actual','plan']}]})
+    with pytest.raises(DataError,match='missing fields'):
+        execute(evidence([{'name':'A','actual':1,'plan':2},{'name':'B','actual':3}]),query)
+
+
+@pytest.mark.parametrize('calculations',[
+    [{'name':'actual','op':'add','fields':['plan','plan']}],
+    [{'name':'one','op':'add','fields':['two','actual']},{'name':'two','op':'add','fields':['actual','plan']}],
+    [{'name':'one','op':'divide','fields':['one','actual']}],
+])
+def test_query_calculations_reject_shadowing_and_forward_or_cyclic_references(calculations):
+    query=Query(dataset='orders',columns=['actual'],calculations=calculations)
+    with pytest.raises(DataError):
+        execute(evidence([{'actual':1,'plan':2}]),query)
+
+
+@pytest.mark.parametrize('value',['4',True])
+def test_query_calculation_does_not_coerce_nonnumeric_inputs(value):
+    query=Query(dataset='orders',columns=['rate'],calculations=[{'name':'rate','op':'divide','fields':['actual','plan']}])
+    with pytest.raises(DataError,match='Expected a number'):
+        execute(evidence([{'actual':value,'plan':2}]),query)
+
+
+def test_aggregate_calculation_cannot_read_unaggregated_source_fields():
+    query=Query(dataset='orders',measures=[{'name':'total','op':'sum','field':'actual'}],
+        calculations=[{'name':'rate','op':'divide','fields':['total','plan']}])
+    with pytest.raises(DataError,match='query output fields'):
+        execute(evidence([{'actual':1,'plan':2}]),query)
+
+
+def test_empty_query_calculations_do_not_invent_records_or_zero_totals():
+    calc=[{'name':'rate','op':'divide','fields':['actual','plan']}]
+    assert execute(evidence([]),Query(dataset='orders',columns=['rate'],calculations=calc))==[]
+    query=Query(dataset='orders',measures=[{'name':field,'op':'sum','field':field} for field in ['actual','plan']],calculations=calc)
+    assert execute(evidence([]),query)==[{'actual':None,'plan':None,'rate':None}]
+
+
 @pytest.mark.parametrize("value", ["12", True])
 def test_numeric_fields_are_not_silently_coerced(value):
     q = Query.model_validate({"dataset": "orders", "measures": [{"name": "n", "op": "sum", "field": "net"}]})

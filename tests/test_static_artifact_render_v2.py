@@ -40,6 +40,19 @@ def test_portable_html_escapes_text_and_scripts_and_projects_private_columns():
     assert json.loads(match[1])['bindings']['_view0'][0]['amount']==9007199254740993
 
 
+def test_calculated_public_rate_does_not_publish_input_only_fields():
+    source=Evidence.model_validate({'datasets':{'rows':{'source':{'label':'Synthetic rates'},'rows':[
+        {'name':'A','private_actual':1,'private_plan':2,'private_note':'DO_NOT_EXPORT'}]}}})
+    query={'dataset':'rows','columns':['name','rate'],'calculations':[{'name':'rate','op':'divide','fields':['private_actual','private_plan']}]}
+    doc=document([{'type':'table','title':'Rates','query':query,'columns':[
+        {'field':'name','label':'Name'},{'field':'rate','label':'Rate','format':{'percent':'ratio','decimals':1}}]}])
+    result=render(doc,source)
+    assert '50.0%' in result.html
+    assert all(value not in result.html for value in ['private_actual','private_plan','DO_NOT_EXPORT'])
+    match=re.search(r'id="_artifact-bindings">(.*?)</script>',result.html,re.S)
+    assert json.loads(match[1])['bindings']['_view0']==[{'name':'A','rate':'0.5'}]
+
+
 def test_custom_binding_is_available_before_fragment_scripts_execute():
     doc=document([{'type':'html','html':'<script>window.test=JSON.parse(document.getElementById("_artifact-bindings").textContent).bindings.choices;</script>'}],
                  bindings={'choices':{'dataset':'rows','columns':['amount']}},views=[{'selector':'body','binding':'choices','minimum':'one'}])

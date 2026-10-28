@@ -96,6 +96,14 @@ and sort exact evidence. They never silently coerce strings, drop incomplete row
 values with zero. Aggregates propagate nulls by default; missing="skip" is an explicit choice
 for observed values only and must be disclosed in the narrative. Don't invent a literal total, category, unit, source, causal explanation, or conclusion.
 Use inspect_static_data for exact exploratory queries when the evidence arrives as a schema catalog.
+Queries support exact row-wise and grouped-output arithmetic with calculations:
+[{"name":"rate","op":"divide","fields":["completed","planned"]},
+ {"name":"variance","op":"subtract","fields":["completed","planned"]}].
+Calculations run after source filtering and aggregation, before final row projection and sorting.
+They use source fields (row queries) or grouped/measure output fields (aggregate queries), or an
+earlier calculation. They cannot overwrite fields or reference future calculations. Select only
+the public final columns; input-only fields need not be published. Null inputs or division by zero
+produce null. Use percent="ratio" to display a calculated fraction; no browser arithmetic is needed.
 Bind chart/table data with a query. Row queries require explicit columns. Aggregated queries use group_by
 and measures instead. Bar charts compare categories; line charts use the query's row order; scatter
 charts need numeric x. Always supply units and a useful caption. Missing line values remain gaps.

@@ -56,6 +56,16 @@ numeric types are errors. Aggregates propagate nulls unless `missing="skip"`
 explicitly requests observed values only. Count without a field counts rows;
 count with a field counts non-null values. An empty sum is unavailable, not zero.
 
+Queries also support ordered `calculations` with a name, an arithmetic operation
+(add/subtract/multiply/divide), and two field inputs. They run after source filters
+and grouping/aggregation, then before final projection and sorting. Row inputs can
+be source fields; aggregate inputs must be grouped/measure outputs. Earlier calculated
+fields may be referenced, while forward references and overwriting fields fail.
+Only explicitly selected final row columns are published, so input-only private
+fields stay private. Arithmetic shares the scalar-fact implementation and precision;
+null inputs or division by zero produce null. This covers row rates/variances and
+ratios of grouped totals without requiring custom HTML.
+
 Facts select one exact query result or calculate over named facts. Division by
 zero and missing inputs produce unavailable values. Text uses `{{fact_name}}`
 and metrics bind to facts, so changing layout does not retype a total. The
