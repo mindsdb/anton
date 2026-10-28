@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import warnings
 from pathlib import Path
@@ -124,7 +125,7 @@ async def test_data_phase_exits_after_one_successful_fetch(tmp_path: Path, monke
 # ── fetch_data_sample: exec-code record + journal handoff ────────────────────
 
 async def test_fetch_data_sample_appends_exec_code(tmp_path: Path, monkeypatch):
-    st = _state(tmp_path)
+    st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
 
     async def fake_run_loop(**kw):
         return {
@@ -141,6 +142,83 @@ async def test_fetch_data_sample_appends_exec_code(tmp_path: Path, monkeypatch):
     assert "df = q('select 1')" in notes
     assert "Output: ok 100 rows" in notes
     assert ok is True
+
+
+async def test_fetch_for_an_html_app_counts_only_a_saved_data_file(tmp_path: Path, monkeypatch):
+    st = _state(tmp_path)
+    st.unverified_sources = ["orders"]
+
+    async def fake_run_loop(**kw):
+        assert "data files folder" in kw["system"].lower()
+        (tmp_path / DATA_DIRNAME).mkdir()
+        (tmp_path / DATA_DIRNAME / "1.json").write_text(json.dumps([{"v": 1}]))
+        (tmp_path / DATA_DIRNAME / "2.json").write_text("not json")
+        return {"files_written": [], "rounds_used": 2, "summary": "saved .anton-data/1.json",
+                "scratchpad_execs": [{"name": "p", "code": "save()", "output": "ok"}]}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
+    notes, ok = await orchestrator._fetch_data_sample(st)
+    assert ok is True
+    assert st.data_files == [DataFile("1", ["orders"], "saved .anton-data/1.json")]
+    assert st.loop_data_ids == ["1"]
+
+
+async def test_fetch_for_an_html_app_without_a_file_fails(tmp_path: Path, monkeypatch):
+    st = _state(tmp_path)
+    st.unverified_sources = ["orders"]
+
+    async def fake_run_loop(**kw):
+        return {"files_written": [], "rounds_used": 1, "summary": "looked",
+                "scratchpad_execs": [{"name": "p", "code": "print(1)", "output": "1"}]}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
+    notes, ok = await orchestrator._fetch_data_sample(st)
+    assert ok is False and "no valid data file" in notes
+
+
+async def test_fetch_counts_the_size_of_all_data_files(tmp_path: Path, monkeypatch):
+    """Gathering's file and the fetched one each fit; together they do not."""
+    (tmp_path / DATA_DIRNAME).mkdir()
+    (tmp_path / DATA_DIRNAME / "1.json").write_text(json.dumps(["x" * 300]))
+    st = _state(tmp_path)
+    st.unverified_sources = ["orders"]
+    st.data_files = [DataFile("1", ["regions"])]
+    monkeypatch.setattr(orchestrator.data_files, "MAX_PAGE_BYTES", 500)
+
+    async def fake_run_loop(**kw):
+        (tmp_path / DATA_DIRNAME / "2.json").write_text(json.dumps(["y" * 300]))
+        return {"files_written": [], "rounds_used": 1, "summary": "saved .anton-data/2.json",
+                "scratchpad_execs": [{"name": "p", "code": "save()", "output": "ok"}]}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
+    notes, ok = await orchestrator._fetch_data_sample(st)
+    assert ok is False and "page limit" in notes
+    assert [f.id for f in st.data_files] == ["1"]
+
+
+async def test_a_saved_fetch_clears_the_data_not_saved_warning(tmp_path: Path, monkeypatch):
+    """An earlier pass did not save the data; this fetch did, so neither the
+    result nor the next checkpoint repeats the warning."""
+    from anton.core.tools.generate_artifact.data_files import DATA_NOT_SAVED_WARNING
+
+    st = _state(tmp_path)
+    st.declared_sources = ["orders"]
+    st.unverified_sources = ["orders"]
+    st.data_not_saved = True
+    st.verify_warnings.append(DATA_NOT_SAVED_WARNING)
+
+    async def fake_run_loop(**kw):
+        (tmp_path / DATA_DIRNAME).mkdir()
+        (tmp_path / DATA_DIRNAME / "1.json").write_text(json.dumps([{"v": 1}]))
+        return {"files_written": [], "rounds_used": 1, "summary": "saved .anton-data/1.json",
+                "scratchpad_execs": [{"name": "p", "code": "save()", "output": "ok"}]}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
+    notes, ok = await orchestrator._fetch_data_sample(st)
+    assert ok is True and st.data_not_saved is False
+    result = orchestrator._finish(st)
+    assert DATA_NOT_SAVED_WARNING not in result["warnings"]
+    assert cp.load(tmp_path).data_not_saved is False
 
 
 def test_render_exec_notes_caps_and_drops_oldest():
@@ -1918,7 +1996,8 @@ async def test_a_fetch_without_a_cell_that_succeeded_is_not_data(tmp_path: Path,
         return loop_result
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
-    notes, ok = await orchestrator._fetch_data_sample(_state(tmp_path))
+    st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
+    notes, ok = await orchestrator._fetch_data_sample(st)
     assert ok is False
     if isinstance(loop_result, dict):
         assert "(the fetch step ran no cell that succeeded)" in notes
@@ -1935,7 +2014,8 @@ async def test_one_cell_that_succeeded_makes_the_fetch_count(tmp_path: Path, mon
         }
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
-    notes, ok = await orchestrator._fetch_data_sample(_state(tmp_path))
+    st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
+    notes, ok = await orchestrator._fetch_data_sample(st)
     assert ok is True
     assert "Scratchpad `pad` (failed):" in notes
     assert "(the fetch step ran no cell that succeeded)" not in notes

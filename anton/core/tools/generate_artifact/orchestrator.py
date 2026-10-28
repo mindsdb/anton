@@ -89,14 +89,17 @@ async def _decide(state: GenState, schema, prompt_pair, node: str) -> object:
 
 
 async def _fetch_data_sample(state: GenState, required_text: str = "") -> tuple[str, bool]:
-    """Run a scratchpad loop that pulls a data sample.
+    """Run a scratchpad loop that pulls the data the page needs.
 
-    Returns the notes for `data_notes` and whether the loop ran at least one
-    cell that succeeded — the only evidence the data loop accepts that data
-    was read.
+    Returns the notes for `data_notes` and whether the loop produced the
+    evidence the data loop accepts that data was read: for an html-app, a
+    valid data file saved to `.anton-data/`; otherwise at least one cell
+    that succeeded.
     """
     if state.public_sources is None:
         state.public_sources = _public_data_sources_skill(state.session)
+    save = settled_artifact_type(state) == "html-app"
+    before = data_files.snapshot(state.artifact_path) if save else {}
     try:
         result = await engine._run_loop(
             on_text=state.peek_for("fetch_data_sample"),
@@ -108,6 +111,7 @@ async def _fetch_data_sample(state: GenState, required_text: str = "") -> tuple[
                 project_rules=state.project_rules,
                 artifact_skills=state.artifact_skills,
                 user_language=state.user_language,
+                save_data=save,
             ),
             kickoff=prompts.build_fetch_data_kickoff(state, required_text),
             artifact_path=state.artifact_path,
@@ -131,10 +135,40 @@ async def _fetch_data_sample(state: GenState, required_text: str = "") -> tuple[
     exec_notes = _render_exec_notes(execs)
     if exec_notes:
         summary += "\n\n" + exec_notes
-    ok = any(e.get("ok", True) for e in execs)
-    if not ok:
-        summary += "\n\n(the fetch step ran no cell that succeeded)"
-    return summary, ok
+    if not save:
+        ok = any(e.get("ok", True) for e in execs)
+        if not ok:
+            summary += "\n\n(the fetch step ran no cell that succeeded)"
+        return summary, ok
+    new_ids = data_files.written_since(state.artifact_path, before)
+    named = [i for i in new_ids if data_files.rel_name(i) in summary]
+    sources = list(state.unverified_sources or state.declared_sources or ["fetched data"])
+    candidates = [
+        data_files.DataFile(id=i, sources=sources, description=(result.get("summary") or "")[:300])
+        for i in (named or new_ids)
+    ]
+    valid, errors = (data_files.check_declared(
+        state.artifact_path, candidates, sources,
+        cell_sandbox=_cell_sandbox(state), protected=state.data_snapshot,
+    ) if candidates else ([], []))
+    if errors:
+        summary += "\n\n(data files rejected: " + "; ".join(errors) + ")"
+    if not valid:
+        summary += "\n\n(the fetch saved no valid data file to .anton-data/)"
+        return summary, False
+    new_ids = {f.id for f in valid}
+    others = [f for f in state.data_files if f.id not in new_ids]
+    # The page carries every file, so the limit applies to all of them together.
+    size_error = data_files.check_total_size(
+        state.artifact_path, others + valid, cell_sandbox=_cell_sandbox(state)
+    )
+    if size_error:
+        summary += f"\n\n({size_error})"
+        return summary, False
+    state.data_files = others + valid
+    state.loop_data_ids += [i for i in sorted(new_ids, key=int) if i not in state.loop_data_ids]
+    data_files.clear_data_not_saved(state)
+    return summary, True
 
 
 def _absorb_discovery_notes(state: GenState) -> None:

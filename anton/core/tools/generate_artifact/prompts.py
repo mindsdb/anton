@@ -28,7 +28,7 @@ from .sub_tools import FILE_BEGIN_MARKER as BEGIN, FILE_END_MARKER as END
 # How much file content fits in one reply, in characters — the unit the model
 # can compare against what it is about to write. Derived from the output budget
 # in state.py; quoted from the constant so the two cannot drift.
-from .state import REPLY_BODY_CHARS, language_name
+from .state import REPLY_BODY_CHARS, language_name, settled_artifact_type
 
 if TYPE_CHECKING:
     from anton.core.memory.skills import Skill
@@ -1581,24 +1581,45 @@ def build_fetch_data_system_prompt(
     project_rules: str = "",
     artifact_skills: str = "",
     user_language: str = "",
+    save_data: bool = False,
 ) -> str:
+    if save_data:
+        task = (
+            "You are the `fetch_data_sample` node. Use the `scratchpad` tool to run Python "
+            "that reads the required data (query the DB, call the API, read the file or "
+            "the page) and SAVE what the html-app page shows to the data files folder named "
+            "below: one `<id>.json` per dataset, from the first free id up, with only the "
+            "fields the page needs (aggregates only when the rows are too large), via "
+            "`df.to_json(path, orient=\"records\", date_format=\"iso\")` or "
+            "`json.dump(obj, f, default=str, allow_nan=False)`. Print only a short summary "
+            "(row count, fields), never the data. Do NOT write any other artifact files.\n\n"
+        )
+    else:
+        task = (
+            "You are the `fetch_data_sample` node. Use the `scratchpad` tool to "
+            "run Python that pulls a small SAMPLE of the required data (query the "
+            "DB, call the API, read the file). Confirm the shape and types. Do NOT "
+            "write any artifact files.\n\n"
+        )
+    finish_tail = (
+        "When done, call `finish(summary=...)` with a "
+        "precise description of WHICH scratchpad(s)/cell(s) you used, what each "
+        "produced, and the observed schema/sample — this summary is handed to "
+        "the next steps."
+    )
+    if save_data:
+        finish_tail += " Name each saved file as `.anton-data/<id>.json` in the summary."
     parts = [
         _ROLE_COMMON,
         _DATA_CONTEXT_HEADER
-        + "You are the `fetch_data_sample` node. Use the `scratchpad` tool to "
-        "run Python that pulls a small SAMPLE of the required data (query the "
-        "DB, call the API, read the file). Confirm the shape and types. Do NOT "
-        "write any artifact files.\n\n"
-        "Fetch ONLY WHAT IS MISSING. `## Data gathered so far` may already show "
+        + task
+        + "Fetch ONLY WHAT IS MISSING. `## Data gathered so far` may already show "
         "cells the main agent ran — do not repeat them.\n\n"
         "Work in the SAME scratchpad the brief names, not a new one: a fresh "
         "name is an isolated environment, so its variables, imports and working "
         "connection code do not exist there and you would rebuild them from "
         "scratch.\n\n"
-        "When done, call `finish(summary=...)` with a "
-        "precise description of WHICH scratchpad(s)/cell(s) you used, what each "
-        "produced, and the observed schema/sample — this summary is handed to "
-        "the next steps.",
+        + finish_tail,
     ]
     if public_sources.strip():
         parts.append(public_sources.strip())
@@ -1607,10 +1628,15 @@ def build_fetch_data_system_prompt(
     # Before the project rules: a project rule about language comes later and wins.
     parts.append(_reasoning_language(user_language))
     parts.extend(p for p in (project_rules, artifact_skills) if p)
-    parts.append(
-        "## Output folder\n"
-        f"(You will NOT write files here in this step.) Artifact folder: `{artifact_path}`"
-    )
+    if save_data:
+        from .data_files import save_hint
+
+        parts.append("## Output folder\n" + save_hint(artifact_path))
+    else:
+        parts.append(
+            "## Output folder\n"
+            f"(You will NOT write files here in this step.) Artifact folder: `{artifact_path}`"
+        )
     return "\n\n".join(parts)
 
 
@@ -1625,11 +1651,17 @@ def build_fetch_data_kickoff(state, required_text: str = "") -> str:
     pads = (getattr(state, "scratchpads_context", "") or "").strip()
     if pads:
         parts.append(pads)
-    parts.append(
-        "Use the `scratchpad` tool to fetch a data sample, then call "
-        "`finish` with a precise summary of the scratchpads/cells and the "
-        "schema/sample you observed."
-    )
+    if settled_artifact_type(state) == "html-app":
+        parts.append(
+            "Use the `scratchpad` tool to read the data and save it as data files, "
+            "then call `finish` with a summary naming each file."
+        )
+    else:
+        parts.append(
+            "Use the `scratchpad` tool to fetch a data sample, then call "
+            "`finish` with a precise summary of the scratchpads/cells and the "
+            "schema/sample you observed."
+        )
     return "\n\n".join(parts)
 
 
