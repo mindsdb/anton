@@ -645,6 +645,14 @@ class Hippocampus:
             self._write_unlocked(self._lessons_path, entry, mode="append")
 
 
+    def entry_file(self, kind: Literal["rules", "lesson"]) -> Path:
+        """The file that holds entries of `kind`: rules.md or lessons.md."""
+        if kind == "rules":
+            return self._rules_path
+        if kind == "lesson":
+            return self._lessons_path
+        raise ValueError(f"no memory file holds {kind!r} entries")
+
     def entry_count(self) -> int:
         """Count total entries across rules.md and lessons.md."""
         count = 0

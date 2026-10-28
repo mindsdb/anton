@@ -310,6 +310,8 @@ class CompactionInput:
 def read_compaction_input(path: Path, kind: Literal["rules", "lesson"]) -> CompactionInput:
     """Read a memory file for compaction. Plain file I/O, kept apart from the
     model call so a server can run it off its event loop."""
+    if kind not in _REBUILT_HEADINGS:
+        raise ValueError(f"cannot compact {kind!r} entries")
     text = _read_memory_text(path)
     sections, entries, notes = _parse_memory_entries(text or "", kind)
     return CompactionInput(kind=kind, text=text, sections=sections, entries=entries, notes=notes)
@@ -325,7 +327,7 @@ class CompactionPlan:
 
     def apply(self, hc: Hippocampus) -> bool:
         """Write the plan to `hc`'s file of the same kind; returns whether it was written."""
-        path = hc._rules_path if self.source.kind == "rules" else hc._lessons_path
+        path = hc.entry_file(self.source.kind)
         # The rebuild comes from the read before the model call. A memory
         # written meanwhile, by this session or another process sharing the
         # file, is on disk but not in that read, so a rewrite would erase it.

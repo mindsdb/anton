@@ -1302,6 +1302,13 @@ class TestCompactionHalves:
 
         assert text.rstrip().endswith("## When")
 
+    def test_an_unknown_kind_is_refused(self, dirs):
+        hc = self._lessons(dirs[0], 10)
+        with pytest.raises(ValueError):
+            read_compaction_input(hc._lessons_path, "lessons")
+        with pytest.raises(ValueError):
+            hc.entry_file("lessons")
+
     async def test_an_edit_to_text_that_is_not_an_entry_stops_the_rewrite(self, dirs):
         hc = self._lessons(dirs[0], 10)
         plan = await plan_compaction(
