@@ -1,6 +1,5 @@
 (() => {
   'use strict';
-  const root = document.documentElement;
   const outline = document.querySelector('#_artifact-outline');
   document.querySelector('[data-action="outline"]').addEventListener('click', event => {
     const open = outline.classList.toggle('open');
@@ -9,7 +8,7 @@
   const outlineButton=document.querySelector('[data-action="outline"]');
   outline.querySelectorAll('a').forEach(link=>link.addEventListener('click',()=>{outline.classList.remove('open');outlineButton.setAttribute('aria-expanded','false');}));
   const outlineObserver=new IntersectionObserver(entries=>{for(const entry of entries){if(entry.isIntersecting)outline.querySelectorAll('a').forEach(link=>link.setAttribute('aria-current',String(link.hash===`#${entry.target.id}`)));}}, {rootMargin:'-10% 0px -70% 0px'});
-  document.querySelectorAll('.section').forEach(section=>outlineObserver.observe(section));
+  document.querySelectorAll('#_artifact-content > .section').forEach(section=>outlineObserver.observe(section));
   document.querySelector('[data-action="print"]').addEventListener('click', () => window.print());
   const ns = 'http://www.w3.org/2000/svg';
   const svgNode = (tag, attrs = {}, text = '') => {
@@ -135,7 +134,7 @@
     if(!bar && spec.yLabel)svg.append(svgNode('text',{x:left,y:11,class:'axis-label'},spec.yLabel));
     container.append(svg);
   };
-  document.querySelectorAll('.chart').forEach(container => {
+  document.querySelectorAll('.chart[data-chart]').forEach(container => {
     const spec=JSON.parse(container.nextElementSibling.textContent);
     const details=container.parentElement.querySelector('.chart-data');
     let first=true;

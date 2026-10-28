@@ -29,10 +29,10 @@ main{min-width:0;max-width:1080px}
 .document-header{padding:54px 0 40px;border-bottom:2px solid var(--ink)}
 .document-header .eyebrow{margin-bottom:18px}
 .subtitle{font-size:18px;color:var(--muted);margin-top:22px;max-width:64ch}
-.section{padding:40px 0;border-bottom:1px solid var(--line);break-inside:avoid-page}
-.section>header{margin-bottom:24px}
-.section>header:empty{display:none}
-.section .eyebrow{margin-bottom:10px}
+#_artifact-content > .section{padding:40px 0;border-bottom:1px solid var(--line);break-inside:avoid-page}
+#_artifact-content > .section>header{margin-bottom:24px}
+#_artifact-content > .section>header:empty{display:none}
+#_artifact-content > .section .eyebrow{margin-bottom:10px}
 .section-summary{color:var(--muted);margin-top:12px;font-size:17px}
 .blocks{display:grid;gap:26px}
 .blocks>*{min-width:0}
@@ -56,13 +56,13 @@ th{position:sticky;top:0;background:var(--soft);font-size:11px;font-weight:650;c
 td,th{padding:12px 14px;border-bottom:1px solid var(--line);min-width:96px;max-width:320px;vertical-align:top}
 td.numeric{text-align:right;white-space:nowrap}
 tr:last-child td{border-bottom:0}
-.chart{min-height:20px;width:100%}
-.chart svg{display:block;width:100%;overflow:visible}
-.chart text{font-family:var(--font);fill:var(--muted);font-size:11px}
-.chart .axis-label{font-size:11px;font-weight:600}
-.chart .grid{stroke:var(--line);stroke-dasharray:3 4}
-.chart .mark{fill:var(--accent)}
-.chart .mark:focus{outline:none;filter:brightness(.7)}
+.chart[data-chart]{min-height:20px;width:100%}
+.chart[data-chart] svg{display:block;width:100%;overflow:visible}
+.chart[data-chart] text{font-family:var(--font);fill:var(--muted);font-size:11px}
+.chart[data-chart] .axis-label{font-size:11px;font-weight:600}
+.chart[data-chart] .grid{stroke:var(--line);stroke-dasharray:3 4}
+.chart[data-chart] .mark{fill:var(--accent)}
+.chart[data-chart] .mark:focus{outline:none;filter:brightness(.7)}
 .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin:12px 0}
 .legend i{display:inline-block;width:9px;height:9px;margin-right:7px;border-radius:50%}
 .chart-data{margin-top:18px;font-size:12px}
@@ -77,7 +77,7 @@ footer ul{padding-left:18px;max-width:80ch}
 .skip{position:absolute;left:16px;top:-80px;padding:10px;background:var(--paper);z-index:20}
 .skip:focus{top:10px}
 .editorial h1,.editorial h2{font-family:Georgia,"Times New Roman",serif;font-weight:500;letter-spacing:-.03em}
-.compact .section{padding:28px 0}
+.compact #_artifact-content > .section{padding:28px 0}
 .compact .blocks{gap:20px}
 .dark{color-scheme:dark;--page:#142221;--paper:#1b2c29;--ink:#edf3ee;--muted:#a7b8b0;--line:#3b4e46;--soft:#20342d}
 .dark .metric{border-color:var(--ink)}
@@ -98,7 +98,7 @@ nav.open{display:block}
 .reading-layout{padding:0 20px}
 .document-header{padding:30px 0}
 .subtitle{font-size:16px;margin-top:18px}
-.section{padding:30px 0}
+#_artifact-content > .section{padding:30px 0}
 .blocks.split{grid-template-columns:minmax(0,1fr)}
 .blocks.metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
 .metric-value{font-size:28px}
@@ -126,7 +126,7 @@ td,th{padding:10px}
 body{background:white;color:#1e2929;font-size:11pt}
 .document-header{padding-top:0}
 main{max-width:none}
-.section{break-inside:auto}
+#_artifact-content > .section{break-inside:auto}
 .table-scroll{overflow:visible;max-height:none}
 th{position:static}
 .blocks.split{grid-template-columns:1fr 1fr}
@@ -135,36 +135,35 @@ a{color:inherit}
 }
 
 [hidden]{display:none!important}
-[hidden]{display:none!important}
 .slide-controls{display:flex;align-items:center;gap:10px;font-size:12px;font-variant-numeric:tabular-nums}
 .slide-controls button{min-width:40px}
-.slides .document-header,.slides .section,.slides main>footer{background:var(--paper);padding:clamp(24px,4vw,56px);border:1px solid var(--line);margin:32px 0;min-height:340px}
+.slides .document-header,.slides #_artifact-content > .section,.slides main>footer{background:var(--paper);padding:clamp(24px,4vw,56px);border:1px solid var(--line);margin:32px 0;min-height:340px}
 .slides .document-header{min-height:460px;display:flex;flex-direction:column;justify-content:center}
-.slides .section>header{margin-bottom:30px}
+.slides #_artifact-content > .section>header{margin-bottom:30px}
 .slides .document-header h1{font-size:clamp(32px,4.2vw,64px)}
 .presenting .reading-layout{display:block;max-width:1480px}
 .presenting nav{display:none}
 .presenting nav.open{display:block}
 .presenting main{max-width:none}
-.presenting .document-header,.presenting .section,.presenting main>footer{min-height:calc(100svh - 130px);margin:24px 0}
+.presenting .document-header,.presenting #_artifact-content > .section,.presenting main>footer{min-height:calc(100svh - 130px);margin:24px 0}
 .presenting .toolbar{position:sticky;top:0;flex-wrap:wrap}
 .presenting .toolbar>div{width:auto}
-.presenting .section h2{font-size:clamp(26px,3.6vw,46px)}
+.presenting #_artifact-content > .section h2{font-size:clamp(26px,3.6vw,46px)}
 .presenting .blocks{gap:32px}
 .presenting .prose{font-size:clamp(17px,1.8vw,24px)}
 
-@media(max-width:640px){.slides .document-header,.slides .section,.slides main>footer{margin:20px 0;padding:24px 18px;min-height:0}
+@media(max-width:640px){.slides .document-header,.slides #_artifact-content > .section,.slides main>footer{margin:20px 0;padding:24px 18px;min-height:0}
 .slides .document-header{min-height:360px}
 .presenting .toolbar{justify-content:space-between}
 .presenting .toolbar>div{gap:5px}
 .presenting .toolbar button{padding:6px 9px}
-.presenting .section,.presenting .document-header{min-height:calc(100svh - 150px)}
+.presenting #_artifact-content > .section,.presenting .document-header{min-height:calc(100svh - 150px)}
 }
 
 @media print{.slide-controls{display:none!important}
-.slides .document-header,.slides .section,.slides main>footer,.presenting [hidden]{display:block!important;min-height:0;margin:0;padding:28pt 0;border:0;break-after:page}
+.slides .document-header,.slides #_artifact-content > .section,.slides main>footer{display:block!important;min-height:0;margin:0;padding:28pt 0;border:0;break-after:page}
 .slides main>footer{break-after:auto}
-.slides .section>header{margin-bottom:24pt}
+.slides #_artifact-content > .section>header{margin-bottom:24pt}
 .presenting .toolbar{display:none!important}
 }
 

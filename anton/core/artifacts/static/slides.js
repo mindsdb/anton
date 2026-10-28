@@ -2,7 +2,7 @@
   'use strict';
   if (!document.documentElement.classList.contains('slides')) return;
   const root=document.documentElement;
-  const slides=[...document.querySelectorAll('.section')];
+  const slides=[...document.querySelectorAll('#_artifact-content > .section')];
   const chrome=[...document.querySelectorAll('.document-header,main>footer')];
   const present=document.querySelector('[data-action="present"]');
   present.hidden=false;
