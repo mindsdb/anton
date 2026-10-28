@@ -370,8 +370,21 @@ Not checked by the verifier, but the page breaks inside the frame without them:
 """
 
 
+# html-app page only: the fullstack frontend keeps its data behind the API.
+_DATA_BLOCK_CONTRACT = """\
+- Data blocks, when `## Data files` lists files: each file the page shows
+  sits in exactly one `<script type="application/json" data-anton-data="<id>"></script>`
+  block with an id listed under `## Data files`, and a script reads it with
+  `JSON.parse(document.querySelector('script[data-anton-data="<id>"]').textContent)`.
+  A block with an unknown id, a repeated id, a block without
+  `type="application/json"`, a page with no data block while files are
+  listed, and blocks no script reads each fail the step.\
+"""
+
+
 def _verifier_contract(*, served: bool) -> str:
-    return "## Verifier contract\n" + _VERIFIER_CONTRACT + "\n" + (
+    contract = _VERIFIER_CONTRACT if served else _VERIFIER_CONTRACT + "\n" + _DATA_BLOCK_CONTRACT
+    return "## Verifier contract\n" + contract + "\n" + (
         _BROWSER_GATE_SERVED if served else _BROWSER_GATE_HTML
     ) + "\n" + _CAUGHT_ERRORS + "\n\n" + _FRAME_NOTES
 
@@ -698,7 +711,28 @@ The user message carries these sections, in this order (some may be absent):
   data files whose content arrived as `## Data`.
 - `## Technical specification` — `spec.md`: insights and implementation notes
   that complement the PRD rather than repeat it.
+- `## Known data` — what the calling agent passed in: values, or a pointer to
+  data that is now under `## Data files`.
+- `## Data files` — the data files this page is built from: id, sources and
+  a summary of each, with real sample records.
 - `## Progress journal` — one line per pipeline step done so far.\
+"""
+
+_GEN_DATA_FILES = """\
+## Data files
+When the user message has a `## Data files` section, the page's data is in
+those files and nowhere else:
+- Put each file the page shows into exactly one empty block, written as is:
+  `<script type="application/json" data-anton-data="<id>"></script>`. The
+  pipeline fills it with the file after you write the page.
+- Read a block with
+  `JSON.parse(document.querySelector('script[data-anton-data="<id>"]').textContent)`
+  and compute every figure from that data in the page's script.
+- Never retype rows from a data file into the page, and never print a data
+  file in a cell or read it: the summary under `## Data files` is complete.
+- Never generate random, test or sample data unless the request asks for
+  it. If the PRD or the spec needs data the files do not hold, show what
+  they hold and say on the page what is missing.\
 """
 
 # Appended for the fullstack frontend: `build_frontend_kickoff` renders this
@@ -735,7 +769,9 @@ the relative name given there."""
         body = f"""\
 Produce ONE self-contained HTML file named exactly `{target}`, at the root
 of the artifact folder. Inline your own CSS and all JS and embed all data in
-the file. Do not reference any other file of the artifact, except the assets
+the file; data under `## Data files` goes in only through its data block (see
+`## Data files` below). Do not reference any other file of the artifact,
+except the assets
 listed under `## Attached files`, by the relative name given there in quotes
 (`<img src="logo.png">`): once you have written the page, the pipeline
 replaces each such reference with the asset itself as a `data:` URI, since
@@ -846,11 +882,12 @@ def _gen_html_workflow(target: str, *, fullstack: bool = False) -> str:
    shape unclear and `## Data` holds no sample of it; otherwise skip."""
     else:
         data_step = """\
-2. Data, only if needed: when the dataset to embed is not already printed
-   under `## Data` in a usable shape, run ONE scratchpad cell that
-   aggregates it and prints it as JSON (a dashboard almost never needs raw
-   rows). Skip this step when the data is already visible or the artifact
-   needs none."""
+2. Data, only if needed: data under `## Data files` is complete — never print
+   it in a cell or read its file. For other data, when the dataset to embed
+   is not already printed under `## Data` in a usable shape, run ONE
+   scratchpad cell that aggregates it and prints it as JSON (a dashboard
+   almost never needs raw rows). Skip this step when the data is already
+   visible or the artifact needs none."""
     return f"""\
 ## Workflow
 A typical run takes one or two rounds.
@@ -985,6 +1022,7 @@ def build_subagent_system_prompt(
         for part in [
             _gen_html_task(target),
             _gen_html_inputs(),
+            _GEN_DATA_FILES,
             _gen_html_workflow(target),
             _gen_html_output_protocol(target),
             _GEN_SIZE_RULES,
@@ -1006,7 +1044,7 @@ def _kickoff_closing(*, fullstack: bool) -> str:
         "unclear"
         if fullstack
         else "run a scratchpad cell only if the data to embed is not already "
-        "usable under `## Data`"
+        "usable under `## Data` or `## Data files`"
     )
     return (
         "Read the sections above, then follow the workflow from your "

@@ -1120,6 +1120,12 @@ async def _gen_verify_frontend(
             # each asset can be megabytes, and every conversation in the
             # process waits on this loop.
             await asyncio.to_thread(_embed_attachments, state, entry_file)
+            fatal = await asyncio.to_thread(_fill_data_blocks, state, entry_file)
+            if fatal is not None:
+                # Another attempt cannot shrink the data or bring a file back.
+                state.record("verify_frontend", "fail", fatal)
+                state.error = fatal
+                return state.error
         if entry_file is None:
             # One channel: this message rides on VerifyResult like every other
             # check — otherwise the contract lock cannot see it and the terminal
@@ -1138,6 +1144,7 @@ async def _gen_verify_frontend(
                     verifiers.contract_operations(state.api_spec)
                 ) if state.is_fullstack else None,
                 live_app=state.is_fullstack and _runs_live_apps(state),
+                data_ids=None if state.is_fullstack else {f.id for f in state.data_files},
             )
             if verdict.ok and not state.is_fullstack:
                 # Second gate, only once the text checks pass and only for the
@@ -1667,6 +1674,32 @@ def _embed_attachments(state: GenState, entry_file: Path) -> None:
                 write_text_nofollow(state.artifact_path, entry_file, embedded)
     except (OSError, ValueError):
         state.trace_log.node("verify_frontend", "embed_skipped", "the page could not be rewritten")
+
+
+def _fill_data_blocks(state: GenState, entry_file: Path) -> str | None:
+    """Put each data file into its block on the html-app page, before the page
+    is verified. Returns the error that ends the run, or None. Written under
+    `page_lock`, like `_embed_attachments`, and not at all once the run was
+    given up."""
+    if not state.data_files:
+        return None
+    try:
+        html = read_text_nofollow(state.artifact_path, entry_file)
+    except OSError:
+        # The checks that follow report a page they cannot read.
+        state.trace_log.node("verify_frontend", "fill_skipped", "the page could not be read")
+        return None
+    result = data_files.fill_page(
+        html, state.artifact_path, state.data_files, cell_sandbox=_cell_sandbox(state)
+    )
+    if result.fatal is not None:
+        return result.fatal
+    if result.html != html:
+        with state.page_lock:
+            if state.abandoned.is_set():
+                return None
+            write_text_nofollow(state.artifact_path, entry_file, result.html)
+    return None
 
 
 def _note_skipped(state: GenState, text: str) -> None:

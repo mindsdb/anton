@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from anton.core.artifacts.internal_files import DATA_DIRNAME
-from anton.core.tools.generate_artifact import data_files
+from anton.core.tools.generate_artifact import data_files, verifiers
 from anton.core.tools.generate_artifact.data_files import DataFile
 
 
@@ -273,3 +273,32 @@ def test_fill_reports_a_file_that_cannot_be_encoded_for_the_page(tmp_path):
     _write(tmp_path, "1", '["\\ud800"]')
     result = data_files.fill_page(_PAGE, tmp_path, [DataFile("1", ["s"])])
     assert result.fatal is not None and "could not be read" in result.fatal
+
+
+_HEAD = '<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"></head><body><div id="a"></div>'
+_READ = "<script>const d=JSON.parse(document.querySelector('script[data-anton-data=\"1\"]').textContent);</script>"
+
+
+def _errors(body: str, ids=frozenset({"1"})) -> list[str]:
+    return verifiers.verify_frontend(_HEAD + body + "</body></html>", is_fullstack=False, data_ids=set(ids)).errors
+
+
+def test_a_page_that_follows_the_block_protocol_passes():
+    assert _errors('<script type="application/json" data-anton-data="1"></script>' + _READ) == []
+
+
+@pytest.mark.parametrize("body, fragment", [
+    ('<script type="application/json" data-anton-data="7"></script>' + _READ, "does not exist"),
+    ('<script type="application/json" data-anton-data="1"></script>' * 2 + _READ, "more than once"),
+    ('<script data-anton-data="1"></script>' + _READ, "not a JSON script"),
+    ("<script>const rows=[1,2];</script>", "no data block"),
+    ('<script type="application/json" data-anton-data="1"></script><script>go()</script>', "No script reads"),
+])
+def test_block_protocol_errors(body, fragment):
+    errors = _errors(body)
+    assert any(fragment in e for e in errors), errors
+
+
+def test_no_block_checks_without_data_ids():
+    page = _HEAD + "<script>const rows=[1];</script></body></html>"
+    assert verifiers.verify_frontend(page, is_fullstack=False).errors == []

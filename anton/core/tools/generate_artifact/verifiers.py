@@ -25,6 +25,7 @@ from anton.core.backends.sandbox import CellSandbox, SandboxedSpawn, cell_sandbo
 from anton.core.utils.scratchpad import install_call_failed
 from anton.utils.datasources import scrub_output
 
+from . import data_files
 from .state import BrowserCheck, VerifyResult
 
 _FETCH_CALL = re.compile(r"""fetch\s*\(\s*(?:api\s*\(\s*)?['"]([^'"]+)['"]""")
@@ -401,13 +402,20 @@ def _root_relative_detail(html: str, *, is_fullstack: bool) -> str | None:
 
 
 def verify_frontend(
-    html: str, *, is_fullstack: bool, api_paths: set[str] | None = None, live_app: bool = False
+    html: str,
+    *,
+    is_fullstack: bool,
+    api_paths: set[str] | None = None,
+    live_app: bool = False,
+    data_ids: set[str] | None = None,
 ) -> VerifyResult:
     """Static checks of the page. `api_paths` (from `contract_paths`) is the
     set of normalised `openapi.json` paths a fullstack page may call; None
     skips that comparison — html-app pages and callers without a contract.
     `live_app` is set for a fullstack page that runs as a live app, whose
-    content security policy loads scripts from one origin only."""
+    content security policy loads scripts from one origin only. `data_ids`
+    is the set of data file ids an html-app page may fill into its blocks;
+    None skips the block checks."""
     errors: list[str] = []
     warnings: list[str] = []
     low = html.lower()
@@ -495,6 +503,43 @@ def verify_frontend(
             f"The page shows HTML tags as text, so that markup does not render or run: {shown}. "
             "Escape only text values, never the page's own markup."
         )
+
+    # 5d. Data blocks (html-app with data files). Only the pipeline's own
+    #     protocol is checked, never how the page builds its views.
+    if data_ids is not None:
+        blocks = data_files.find_blocks(html)
+        ids = [b.file_id for b in blocks]
+        unknown = sorted({i for i in ids if i not in data_ids})
+        if unknown:
+            errors.append(
+                f"Data block names a data file that does not exist: {', '.join(unknown)}. "
+                f"The ids under `## Data files` are: {', '.join(sorted(data_ids)) or 'none'}."
+            )
+        repeated = sorted({i for i in ids if ids.count(i) > 1})
+        if repeated:
+            errors.append(
+                f"Data block id is used more than once: {', '.join(repeated)}. "
+                "Put each data file into exactly one block."
+            )
+        not_json = sorted({
+            b.file_id for b in blocks
+            if (b.attrs.get("type") or "").strip().lower() != "application/json"
+        })
+        if not_json:
+            errors.append(
+                f"Data block is not a JSON script: {', '.join(not_json)}. Write it as "
+                '<script type="application/json" data-anton-data="<id>"></script>.'
+            )
+        if data_ids and not blocks:
+            errors.append(
+                f"The page has no data block, but `## Data files` lists data for it. Add "
+                f'<script type="application/json" data-anton-data="<id>"></script> for each '
+                f"file the page shows and read it with {data_files.READ_CALL}."
+            )
+        elif blocks and not data_files.reads_blocks(html, blocks):
+            errors.append(
+                f"No script reads the data blocks. Read each block with {data_files.READ_CALL}."
+            )
 
     # 6. Forbidden globals / CSS.
     if "__antonCommentsLayer" in html:

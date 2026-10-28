@@ -1475,9 +1475,10 @@ async def test_gen_verify_frontend_hands_the_contract_paths_to_the_verifier(tmp_
         (tmp_path / "static" / "index.html").write_text(_VALID_PAGE)
         return {"files_written": ["static/index.html"], "rounds_used": 1, "summary": "s"}
 
-    def fake_verify(html, *, is_fullstack, api_paths=None, live_app=False):
+    def fake_verify(html, *, is_fullstack, api_paths=None, live_app=False, data_ids=None):
         seen["api_paths"] = api_paths
         seen["live_app"] = live_app
+        seen["data_ids"] = data_ids
         return VerifyResult(errors=[])
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
@@ -1487,6 +1488,8 @@ async def test_gen_verify_frontend_hands_the_contract_paths_to_the_verifier(tmp_
     assert seen["api_paths"] == {"/api/items"}
     # No sandbox, no live apps: the page isn't held to a live app's script rule.
     assert seen["live_app"] is False
+    # The fullstack page keeps its data behind the API: no block checks.
+    assert seen["data_ids"] is None
 
 
 # ── S-03: skipped checks and accepted warnings reach the result ─────────────
@@ -1534,7 +1537,7 @@ async def test_warnings_of_the_accepted_frontend_attempt_reach_the_result(tmp_pa
         (tmp_path / "index.html").write_text(_VALID_HTML)
         return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
 
-    def fake_verify(html, *, is_fullstack, api_paths=None, live_app=False):
+    def fake_verify(html, *, is_fullstack, api_paths=None, live_app=False, data_ids=None):
         return VerifyResult(errors=[], warnings=["Significant blocks have no stable `id` attributes."])
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
@@ -2313,3 +2316,85 @@ async def test_hot_path_spec_sees_the_files_the_data_loop_saved(tmp_path: Path, 
     monkeypatch.setattr(orchestrator.engine, "_plan_whole_document", fake_plan)
     assert await orchestrator._write_tech_spec(st) is None
     assert "## Data files" in seen["user"] and "SO-5001" in seen["user"]
+
+
+_GOOD_PAGE = (
+    '<html><head><meta name="viewport" content="width=device-width"></head><body><div id="a"></div>'
+    '<script type="application/json" data-anton-data="1"></script>'
+    "<script>const d=JSON.parse(document.querySelector('script[data-anton-data=\"1\"]').textContent);</script>"
+    "</body></html>"
+)
+
+
+async def test_frontend_fills_the_data_blocks_before_the_checks(tmp_path: Path, monkeypatch):
+    (tmp_path / DATA_DIRNAME).mkdir()
+    (tmp_path / DATA_DIRNAME / "1.json").write_text(json.dumps([{"Id": "SO-5001"}]))
+    st = _state(tmp_path)
+    st.data_files = [DataFile("1", ["orders"])]
+
+    async def fake_loop(**kw):
+        (tmp_path / "index.html").write_text(_GOOD_PAGE)
+        return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", _no_browser)
+    assert await orchestrator._gen_verify_frontend(st) is None
+    assert "SO-5001" in (tmp_path / "index.html").read_text()
+
+
+async def test_an_oversized_page_stops_without_a_retry(tmp_path: Path, monkeypatch):
+    (tmp_path / DATA_DIRNAME).mkdir()
+    # The file fits the limit it is read with; the page with it does not.
+    (tmp_path / DATA_DIRNAME / "1.json").write_text(json.dumps(["x" * 400]))
+    st = _state(tmp_path)
+    st.data_files = [DataFile("1", ["orders"])]
+    calls = {"n": 0}
+
+    async def fake_loop(**kw):
+        calls["n"] += 1
+        (tmp_path / "index.html").write_text(_GOOD_PAGE)
+        return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.data_files, "MAX_PAGE_BYTES", len(_GOOD_PAGE) + 300)
+    err = await orchestrator._gen_verify_frontend(st)
+    assert calls["n"] == 1 and err is not None and "page limit" in err
+
+
+async def test_an_unknown_block_id_is_retried(tmp_path: Path, monkeypatch):
+    (tmp_path / DATA_DIRNAME).mkdir()
+    (tmp_path / DATA_DIRNAME / "1.json").write_text("[1]")
+    st = _state(tmp_path)
+    st.data_files = [DataFile("1", ["orders"])]
+    pages = iter([_GOOD_PAGE.replace('data-anton-data="1"></script>', 'data-anton-data="9"></script>'), _GOOD_PAGE])
+
+    async def fake_loop(**kw):
+        (tmp_path / "index.html").write_text(next(pages))
+        return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", _no_browser)
+    assert await orchestrator._gen_verify_frontend(st) is None
+
+
+def test_filling_the_data_blocks_writes_nothing_once_the_run_is_abandoned(tmp_path: Path):
+    (tmp_path / DATA_DIRNAME).mkdir()
+    (tmp_path / DATA_DIRNAME / "1.json").write_text(json.dumps([{"Id": "SO-5001"}]))
+    st = _state(tmp_path)
+    st.data_files = [DataFile("1", ["orders"])]
+    page = tmp_path / "index.html"
+    page.write_text(_GOOD_PAGE)
+
+    st.abandoned.set()
+    assert orchestrator._fill_data_blocks(st, page) is None
+    assert page.read_text() == _GOOD_PAGE
+
+    st.abandoned.clear()
+    assert orchestrator._fill_data_blocks(st, page) is None
+    assert "SO-5001" in page.read_text()
+
+
+def test_filling_the_data_blocks_leaves_an_unreadable_page_to_the_checks(tmp_path: Path):
+    st = _state(tmp_path)
+    st.data_files = [DataFile("1", ["orders"])]
+    assert orchestrator._fill_data_blocks(st, tmp_path / "missing.html") is None
