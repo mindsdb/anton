@@ -80,3 +80,32 @@ def test_fact_cycles_and_unknown_references_fail_explicitly():
         "sections": [{"id": "one", "blocks": [{"type": "prose", "text": "Test"}]}]})
     with pytest.raises(DataError, match="Cyclic fact"):
         resolve_facts(doc, evidence([]))
+
+
+def test_partial_missing_aggregate_requires_explicit_skip():
+    q=Query.model_validate({'dataset':'orders','measures':[{'name':'total','op':'sum','field':'net'}]})
+    data=evidence([{'net':3},{'net':None}])
+    assert execute(data,q)==[{'total':None}]
+    q.measures[0].missing='skip'
+    assert execute(data,q)==[{'total':Decimal(3)}]
+
+
+def test_numeric_group_keys_are_value_based_but_booleans_are_distinct():
+    q=Query.model_validate({'dataset':'orders','group_by':['key'],'measures':[{'name':'n','op':'count'}]})
+    assert execute(evidence([{'key':1},{'key':1.0},{'key':True}]),q)==[{'key':1,'n':2},{'key':True,'n':1}]
+
+
+def test_json_decimal_precision_can_be_preserved_at_acquisition():
+    import json
+    data=Evidence.model_validate(json.loads('{"datasets":{"orders":{"source":{"label":"Exact JSON"},"rows":[{"net":0.1234567890123456789}]}}}',parse_float=Decimal))
+    q=Query.model_validate({'dataset':'orders','measures':[{'name':'total','op':'sum','field':'net'}]})
+    assert execute(data,q)==[{'total':Decimal('0.1234567890123456789')}]
+
+
+def test_large_integer_sum_and_formatted_value_do_not_round_away_units():
+    from anton.core.artifacts.static.document import Format
+    value=10**35+1
+    q=Query.model_validate({'dataset':'orders','measures':[{'name':'total','op':'sum','field':'net'}]})
+    result=execute(evidence([{'net':10**35},{'net':1}]),q)[0]['total']
+    assert result==Decimal(value)
+    assert Format().display(result).replace(',','')==str(value)

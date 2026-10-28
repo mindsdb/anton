@@ -28,15 +28,15 @@ def test_portable_html_escapes_text_and_scripts_and_projects_private_columns():
     assert '&lt;Unsafe title&gt;' in result.html
     assert '9,007,199,254,740,993' in result.html
     assert verify_frontend(result.html, is_fullstack=False).ok
-    match=re.search(r'id="artifact-bindings">(.*?)</script>',result.html,re.S)
+    match=re.search(r'id="_artifact-bindings">(.*?)</script>',result.html,re.S)
     assert json.loads(match[1])['bindings']['_view0'][0]['amount']==9007199254740993
 
 
 def test_custom_binding_is_available_before_fragment_scripts_execute():
-    doc=document([{'type':'html','html':'<script>window.test=JSON.parse(document.getElementById("artifact-bindings").textContent).bindings.choices;</script>'}],
-                 bindings={'choices':{'dataset':'rows','columns':['amount']}})
+    doc=document([{'type':'html','html':'<script>window.test=JSON.parse(document.getElementById("_artifact-bindings").textContent).bindings.choices;</script>'}],
+                 bindings={'choices':{'dataset':'rows','columns':['amount']}},views=[{'selector':'body','binding':'choices','minimum':'one'}])
     result=render(doc,evidence())
-    assert result.html.index('id="artifact-bindings"') < result.html.index('window.test=')
+    assert result.html.index('id="_artifact-bindings"') < result.html.index('window.test=')
     assert 'DO_NOT_EXPORT' not in result.html
 
 
@@ -70,3 +70,27 @@ def test_null_chart_gap_and_exact_chart_labels():
     spec=json.loads(re.search(r'class="chart-spec">(.*?)</script>',result.html,re.S)[1])
     assert spec['display']==[['9,007,199,254,740,993']]
     assert 'src="https://' not in result.html and '@import' not in result.html
+
+
+def test_visuals_can_reference_dataset_or_private_reusable_query():
+    doc=document([{'type':'table','title':'Amounts','query':'public_rows','columns':[{'field':'amount','label':'Amount'}]}],
+                 queries={'public_rows':{'dataset':'rows','columns':['amount']}})
+    result=render(doc,evidence())
+    assert '9007199254740993' in result.html and 'DO_NOT_EXPORT' not in result.html
+    doc.sections[0].blocks[0].query='rows'
+    assert render(doc,evidence()).manifest['bindings']['_view0']==[{'amount':9007199254740993}]
+
+
+def test_host_ids_do_not_reserve_natural_section_names_and_duplicate_custom_ids_fail():
+    doc=Document.model_validate({'title':'Title','sections':[{'id':'title','blocks':[{'type':'prose','text':'A title section.'}]}]})
+    assert 'id="_artifact-title"' in render(doc,Evidence()).html
+    doc.sections[0].blocks=[{'type':'html','html':'<div id="title"></div>'}]
+    doc=Document.model_validate(doc.model_dump())
+    with pytest.raises(DataError,match='Duplicate HTML id'):
+        render(doc,Evidence())
+
+
+def test_line_chart_rejects_ambiguous_text_sorting_instead_of_drawing_false_chronology():
+    block={'type':'chart','kind':'line','title':'Trend','x':'name','query':{'dataset':'rows','columns':['name','amount'],'order_by':[{'field':'name'}]},'series':[{'field':'amount','label':'Amount'}]}
+    with pytest.raises(DataError,match='Preserve source order'):
+        render(document([block]),evidence())

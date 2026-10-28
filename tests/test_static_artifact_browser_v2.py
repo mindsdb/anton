@@ -47,10 +47,8 @@ def test_slide_controls_keyboard_exit_and_print_restore_all_content():
         page.set_content(specimen('slides'))
         page.get_by_role('button',name='Present',exact=True).click()
         assert page.locator('.presenting').count()==1
-        assert page.locator('.section:visible').count()==0
-        page.get_by_role('button',name='Next slide').click()
-        page.wait_for_function('document.querySelectorAll(".chart svg").length===2')
         assert page.locator('#comparison:visible').count()==1
+        page.wait_for_function('document.querySelectorAll(".chart svg").length===2')
         page.get_by_role('button',name='Next slide').click()
         assert page.locator('#conclusion:visible').count()==1
         page.emulate_media(media='print')
@@ -61,4 +59,18 @@ def test_slide_controls_keyboard_exit_and_print_restore_all_content():
         assert page.locator('.presenting').count()==0
         assert page.locator('.section:visible').count()==2
         assert not errors
+        browser.close()
+
+
+def test_custom_render_contract_detects_empty_data_view():
+    data=Evidence.model_validate({'datasets':{'desks':{'source':{'label':'Synthetic QA'},'rows':[{'id':'D1'},{'id':'D2'}]}}})
+    doc=Document.model_validate({'title':'Desks','bindings':{'desks':{'dataset':'desks','columns':['id']}},
+        'views':[{'selector':'.desk','binding':'desks'}], 'sections':[{'id':'desks','blocks':[{'type':'html','html':'<div id="desk-grid"></div>'}]}]})
+    html=render(doc,data).html
+    with playwright.sync_playwright() as p:
+        browser=p.chromium.launch();page=browser.new_page();errors=[]
+        page.on('console',lambda message:errors.append(message.text) if message.type=='error' else None)
+        page.set_content(html)
+        page.get_by_role('alert').wait_for()
+        assert any('expected at least 2' in error for error in errors)
         browser.close()

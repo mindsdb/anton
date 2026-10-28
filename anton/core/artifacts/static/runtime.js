@@ -1,11 +1,15 @@
 (() => {
   'use strict';
   const root = document.documentElement;
-  const outline = document.querySelector('#outline');
+  const outline = document.querySelector('#_artifact-outline');
   document.querySelector('[data-action="outline"]').addEventListener('click', event => {
     const open = outline.classList.toggle('open');
     event.currentTarget.setAttribute('aria-expanded', String(open));
   });
+  const outlineButton=document.querySelector('[data-action="outline"]');
+  outline.querySelectorAll('a').forEach(link=>link.addEventListener('click',()=>{outline.classList.remove('open');outlineButton.setAttribute('aria-expanded','false');}));
+  const outlineObserver=new IntersectionObserver(entries=>{for(const entry of entries){if(entry.isIntersecting)outline.querySelectorAll('a').forEach(link=>link.setAttribute('aria-current',String(link.hash===`#${entry.target.id}`)));}}, {rootMargin:'-10% 0px -70% 0px'});
+  document.querySelectorAll('.section').forEach(section=>outlineObserver.observe(section));
   document.querySelector('[data-action="print"]').addEventListener('click', () => window.print());
   const ns = 'http://www.w3.org/2000/svg';
   const svgNode = (tag, attrs = {}, text = '') => {
@@ -41,7 +45,8 @@
     container.append(legend);
     const bar = spec.kind === 'bar', stackedLabels=bar && width<440;
     const left = bar ? (stackedLabels ? 0 : Math.min(width * .32, 170)) : 52;
-    const right = bar ? 68 : 20;
+    const valueWidth=Math.max(68,...spec.display.flat().map(value=>value.length*6.5+16));
+    const right = bar ? (series.length===1?Math.min(width*.55,valueWidth):20) : 20;
     const top = 18;
     const bottom = 54;
     const labelLines=spec.rows.map(row=>{
@@ -61,8 +66,8 @@
     const svg = svgNode('svg', {viewBox:`0 0 ${width} ${height}`, role:'img', 'aria-label':container.getAttribute('aria-label')});
     const scaleX = value => left + (value - low) / extent * plotW;
     const scaleY = value => top + (high - value) / extent * plotH;
-    for(let i=0;i<=4;i++) {
-      const value=low+extent*i/4;
+    for(let i=0;i<=Math.round(extent/tick);i++) {
+      const value=low+tick*i;
       if(bar) {const x=scaleX(value);svg.append(svgNode('line',{x1:x,x2:x,y1:top,y2:height-bottom,class:'grid'}));svg.append(svgNode('text',{x,y:height-bottom+22,'text-anchor':'middle'},compact(value)));}
       else {const y=scaleY(value);svg.append(svgNode('line',{x1:left,x2:width-right,y1:y,y2:y,class:'grid'}));svg.append(svgNode('text',{x:left-10,y:y+4,'text-anchor':'end'},compact(value)));}
     }

@@ -5,7 +5,7 @@ The acquisition layer owns access; this module never opens a source or network.
 """
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from hashlib import sha256
 import json
 import math
@@ -13,7 +13,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt, StrictStr, model_validator
 
-Scalar = StrictStr | StrictInt | StrictFloat | StrictBool | None
+Scalar = StrictStr | StrictInt | StrictFloat | StrictBool | Decimal | None
 Name = Annotated[str, Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,79}$")]
 
 
@@ -33,7 +33,7 @@ class Dataset(Model):
 
     @model_validator(mode="after")
     def finite(self):
-        if any(isinstance(v, float) and not math.isfinite(v) for r in self.rows for v in r.values()):
+        if any(isinstance(v, (float, Decimal)) and not math.isfinite(v) for r in self.rows for v in r.values()):
             raise ValueError("Evidence contains a non-finite number")
         return self
 
@@ -55,6 +55,7 @@ class Measure(Model):
     name: Name
     op: Literal["count", "sum", "mean", "min", "max"]
     field: str | None = None
+    missing: Literal["propagate", "skip"] = "propagate"
 
     @model_validator(mode="after")
     def field_required(self):
@@ -98,8 +99,8 @@ def number(value) -> Decimal:
     if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
         raise DataError(f"Expected a number, got {type(value).__name__}")
     result = Decimal(str(value))
-    if not result.is_finite():
-        raise DataError("Expected a finite number")
+    if not result.is_finite() or abs(result.adjusted()) > 1000:
+        raise DataError("Expected a finite number with a decimal exponent between -1000 and 1000")
     return result
 
 
@@ -127,13 +128,16 @@ def _aggregate(rows: list[dict], measure: Measure):
     values = [r[measure.field] for r in rows if r[measure.field] is not None] if measure.field else rows
     if measure.op == "count":
         return len(values)
+    if measure.missing == "propagate" and any(r[measure.field] is None for r in rows):
+        return None
     values = [number(v) for v in values]
     if not values:
         return None
-    if measure.op == "sum":
-        return sum(values, Decimal(0))
-    if measure.op == "mean":
-        return sum(values, Decimal(0)) / len(values)
+    if measure.op in ("sum", "mean"):
+        with localcontext() as context:
+            context.prec = 4096
+            total = sum(values, Decimal(0))
+            return total if measure.op == "sum" else total / len(values)
     return min(values) if measure.op == "min" else max(values)
 
 
@@ -152,11 +156,11 @@ def execute(evidence: Evidence, query: Query) -> list[dict]:
     if query.measures:
         groups = {}
         for row in rows:
-            key = tuple((type(row[k]).__name__, row[k]) for k in query.group_by)
+            key = tuple(("number", number(row[k])) if isinstance(row[k], (int, float, Decimal)) and not isinstance(row[k], bool) else (type(row[k]).__name__, row[k]) for k in query.group_by)
             groups.setdefault(key, []).append(row)
         if not query.group_by and not groups:
             groups[()] = []
-        rows = [dict(zip(query.group_by, (value for _, value in key))) |
+        rows = [{field: group[0][field] for field in query.group_by} |
                 {m.name: _aggregate(group, m) for m in query.measures} for key, group in groups.items()]
     else:
         rows = [{k: r[k] for k in query.columns} for r in rows]

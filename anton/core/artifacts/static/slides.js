@@ -2,7 +2,8 @@
   'use strict';
   if (!document.documentElement.classList.contains('slides')) return;
   const root=document.documentElement;
-  const slides=[...document.querySelectorAll('.document-header,.section,main>footer')];
+  const slides=[...document.querySelectorAll('.section')];
+  const chrome=[...document.querySelectorAll('.document-header,main>footer')];
   const present=document.querySelector('[data-action="present"]');
   present.hidden=false;
   const controls=document.createElement('div');controls.className='slide-controls';controls.hidden=true;
@@ -10,7 +11,7 @@
   document.querySelector('.toolbar').append(controls);
   const [previous,next]=controls.querySelectorAll('button');const status=controls.querySelector('span');
   let active=0, presenting=false;
-  const fromHash=()=>Math.max(0,slides.findIndex(s=>s.id===decodeURIComponent(location.hash.slice(1))));
+  const fromHash=()=>Math.max(0,slides.findIndex(s=>s.id===location.hash.slice(1)));
   const show=index=>{
     active=Math.max(0,Math.min(slides.length-1,index));
     slides.forEach((slide,n)=>{slide.hidden=presenting && n!==active;});
@@ -21,6 +22,7 @@
   const originalTitle=document.title;
   const toggle=()=>{
     presenting=!presenting;root.classList.toggle('presenting',presenting);
+    chrome.forEach(element=>element.hidden=presenting);
     controls.hidden=!presenting;present.textContent=presenting?'Read':'Present';
     present.setAttribute('aria-pressed',String(presenting));
     if(!presenting)document.title=originalTitle;
@@ -33,7 +35,7 @@
     const actions={ArrowRight:()=>show(active+1),ArrowDown:()=>show(active+1),' ':()=>show(active+1),ArrowLeft:()=>show(active-1),ArrowUp:()=>show(active-1),Home:()=>show(0),End:()=>show(slides.length-1),Escape:toggle};
     if(actions[event.key]){event.preventDefault();actions[event.key]();}
   });
-  document.querySelectorAll('#outline a').forEach(link=>link.addEventListener('click',()=>{const index=slides.findIndex(slide=>`#${slide.id}`===link.hash);if(index>=0)show(index);}));
+  document.querySelectorAll('#_artifact-outline a').forEach(link=>link.addEventListener('click',()=>{const index=slides.findIndex(slide=>`#${slide.id}`===link.hash);if(index>=0)show(index);}));
   window.addEventListener('hashchange',()=>show(fromHash()));
   show(fromHash());
 })();

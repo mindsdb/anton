@@ -158,3 +158,5 @@ a{color:inherit}
 .presenting .toolbar{display:none!important}
 }
 
+
+@media print{.slides .document-header,.slides main>footer,.slides.presenting .document-header,.slides.presenting main>footer{display:none!important}}
