@@ -275,6 +275,8 @@ def state_check_declared(
 ) -> tuple[list[DataFile], list[str]]:
     """`check_declared` for a run: its artifact, its sandbox and the files the
     call found on disk."""
+    if not declared:
+        return [], []
     return check_declared(
         state.artifact_path, declared, data_sources,
         cell_sandbox=sandbox_of(state.session), protected=state.data_snapshot,

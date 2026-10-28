@@ -659,7 +659,7 @@ def _restore(state, stored, *, entry: str = "") -> bool:
     stored_files = data_files.records(stored.data_files)
     saved_files = data_files.restorable(
         state.artifact_path, stored_files, cell_sandbox=data_files.sandbox_of(state.session)
-    )
+    ) if stored_files else []
     same_data = cp.normalize(state.known_data or "") == cp.normalize(stored.known_data or "")
     data_lost = False
     if entry == cp.ENTRY_NEW_ITERATION and (state.known_data or "").strip() and not same_data:
