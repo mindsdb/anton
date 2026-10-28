@@ -87,9 +87,9 @@ async def test_collector_rejects_failed_source_and_does_not_accept_stale_evidenc
     import importlib
     from anton.core.tools.registry import ToolOutcome
     module=importlib.import_module('anton.core.tools.generate_artifact.static_v2.collect')
-    finished={'ready':True,'needs_data':True,'reason':'Done'}
+    finished={'ready':True,'has_records':True,'reason':'Done'}
     responses=[LLMResponse(content='',tool_calls=[ToolCall('exec','scratchpad',{'action':'exec','name':'data','code':'fetch()'}), ToolCall('finish','finish_static_evidence',finished)]),
-               LLMResponse(content='',tool_calls=[ToolCall('stop','finish_static_evidence',{'ready':False,'needs_data':True,'reason':'The designated source is missing'})])]
+               LLMResponse(content='',tool_calls=[ToolCall('stop','finish_static_evidence',{'ready':False,'has_records':True,'reason':'The designated source is missing'})])]
     async def stream(**kwargs):
         yield StreamComplete(response=responses.pop(0))
     async def failed(*args):
@@ -104,8 +104,8 @@ async def test_collector_rejects_failed_source_and_does_not_accept_stale_evidenc
 async def test_collector_finish_before_source_call_is_not_accepted(tmp_path,monkeypatch):
     import importlib
     module=importlib.import_module('anton.core.tools.generate_artifact.static_v2.collect')
-    responses=[LLMResponse(content='',tool_calls=[ToolCall('finish','finish_static_evidence',{'ready':True,'needs_data':False,'reason':'No data'}),ToolCall('later','read_text_file',{'path':'/unused'})]),
-               LLMResponse(content='',tool_calls=[ToolCall('stop','finish_static_evidence',{'ready':False,'needs_data':False,'reason':'Source work is not finished'})])]
+    responses=[LLMResponse(content='',tool_calls=[ToolCall('finish','finish_static_evidence',{'ready':True,'has_records':False,'reason':'No data'}),ToolCall('later','read_text_file',{'path':'/unused'})]),
+               LLMResponse(content='',tool_calls=[ToolCall('stop','finish_static_evidence',{'ready':False,'has_records':False,'reason':'Source work is not finished'})])]
     async def stream(**kwargs):
         yield StreamComplete(response=responses.pop(0))
     handler=Mock(side_effect=AssertionError('A source after finish must not run'))
@@ -154,7 +154,7 @@ async def test_collector_offers_source_procedures_and_never_conversation_memory(
     seen=[]
     async def stream(**kwargs):
         seen.append(kwargs)
-        yield StreamComplete(response=LLMResponse(content='',tool_calls=[ToolCall('finish','finish_static_evidence',{'ready':True,'needs_data':False,'reason':'Qualitative artifact'})]))
+        yield StreamComplete(response=LLMResponse(content='',tool_calls=[ToolCall('finish','finish_static_evidence',{'ready':True,'has_records':False,'reason':'Qualitative artifact'})]))
     st=state(tmp_path,VALID);st.session._llm.plan_stream=stream
     result=await module.collect(st)
     assert isinstance(result,Evidence)
@@ -170,7 +170,7 @@ async def test_project_rules_are_returned_from_host_context_without_a_dotfile_re
         pytest.fail('Already supplied project rules must not trigger a source read')
     async def stream(**kwargs):
         seen.append(kwargs)
-        calls=[ToolCall('rules','read_text_file',{'path':'.anton/anton.md'})] if len(seen)==1 else [ToolCall('done','finish_static_evidence',{'ready':True,'needs_data':False,'reason':'Qualitative slides'})]
+        calls=[ToolCall('rules','read_text_file',{'path':'.anton/anton.md'})] if len(seen)==1 else [ToolCall('done','finish_static_evidence',{'ready':True,'has_records':False,'reason':'Qualitative slides'})]
         yield StreamComplete(response=LLMResponse(content='',tool_calls=calls))
     monkeypatch.setattr('anton.core.tools.tool_handlers.handle_read_text_file',forbidden_read)
     st=state(tmp_path,VALID);st.project_rules='Use the supplied house typography.'
@@ -179,11 +179,30 @@ async def test_project_rules_are_returned_from_host_context_without_a_dotfile_re
     assert 'Use the supplied house typography.' in str(seen[-1]['messages'])
 
 
+async def test_provided_records_require_a_saved_snapshot_and_preserve_scalar_types(tmp_path):
+    import ast
+    import importlib
+    import re
+    from decimal import Decimal
+    module=importlib.import_module('anton.core.tools.generate_artifact.static_v2.collect')
+    seen=[]
+    async def stream(**kwargs):
+        seen.append(kwargs)
+        if len(seen)>1:
+            assert 'Evidence not accepted' in str(kwargs['messages'])
+            path=Path(ast.literal_eval(re.search(r'records to (.+)\nas UTF',kwargs['system'])[1]))
+            path.write_text('{"datasets":{"provided":{"source":{"label":"User records"},"rows":[{"id":"001","value":0.1234567890123456789,"active":true}]}}}')
+        yield StreamComplete(response=LLMResponse(content='',tool_calls=[ToolCall('done','finish_static_evidence',{'ready':True,'has_records':True,'reason':'Provided records; no external access'})]))
+    st=state(tmp_path,VALID);st.session._llm.plan_stream=stream;st.session._llm.code_stream=stream
+    evidence=await module.collect(st)
+    assert evidence.datasets['provided'].rows==[{'id':'001','value':Decimal('0.1234567890123456789'),'active':True}]
+
+
 async def test_loaded_source_cannot_be_declared_unavailable_without_a_read_attempt(tmp_path,monkeypatch):
     import importlib
     from anton.core.tools.registry import ToolOutcome
     module=importlib.import_module('anton.core.tools.generate_artifact.static_v2.collect')
-    stop={'ready':False,'needs_data':True,'reason':'Source failed'}
+    stop={'ready':False,'has_records':True,'reason':'Source failed'}
     responses=[LLMResponse(content='',tool_calls=[ToolCall('procedure','recall_skill',{'label':'sensor'})]),
         LLMResponse(content='',tool_calls=[ToolCall('premature','finish_static_evidence',stop)]),
         LLMResponse(content='',tool_calls=[ToolCall('read','scratchpad',{'action':'exec','name':'source','code':'read_documented_source()'}),ToolCall('stop','finish_static_evidence',stop)])]
@@ -219,7 +238,7 @@ async def test_large_text_cells_do_not_escape_the_bounded_catalog(tmp_path,monke
 async def test_source_refusal_requires_an_attempt_even_before_procedure_recall(tmp_path):
     import importlib
     module=importlib.import_module('anton.core.tools.generate_artifact.static_v2.collect')
-    stop={'ready':False,'needs_data':True,'reason':'The requested source procedure is missing'}
+    stop={'ready':False,'has_records':True,'reason':'The requested source procedure is missing'}
     responses=[LLMResponse(content='',tool_calls=[ToolCall('premature','finish_static_evidence',stop)]),
         LLMResponse(content='',tool_calls=[ToolCall('lookup','recall_skill',{'label':'unavailable-source'})]),
         LLMResponse(content='',tool_calls=[ToolCall('stop','finish_static_evidence',stop)])]

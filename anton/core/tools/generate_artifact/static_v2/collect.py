@@ -18,8 +18,10 @@ from .prompts import COLLECT, context
 
 FINISH = {"name": "finish_static_evidence", "description": "Finish only after source tools succeed and evidence is saved, or report a blocker.",
           "input_schema": {"type": "object", "additionalProperties": False, "properties": {
-              "ready": {"type": "boolean"}, "needs_data": {"type": "boolean"}, "reason": {"type": "string"}},
-              "required": ["ready", "needs_data", "reason"]}}
+              "ready": {"type": "boolean"},
+              "has_records": {"type": "boolean", "description": "True whenever the task uses source records, including tables, CSV, coordinates or categorical records supplied directly by the user. It does not mean external access. False only for a purely qualitative artifact with no records."},
+              "reason": {"type": "string"}},
+              "required": ["ready", "has_records", "reason"]}}
 
 
 async def collect(state, *, feedback: str = '') -> Evidence | str:
@@ -61,9 +63,9 @@ async def collect(state, *, feedback: str = '') -> Evidence | str:
                 continue
             if call.name == FINISH['name']:
                 inp = call.input
-                if not isinstance(inp, dict) or set(inp) != {'ready', 'needs_data', 'reason'} or type(inp['ready']) is not bool or type(inp['needs_data']) is not bool or not isinstance(inp['reason'], str):
-                    result = 'Use ready and needs_data booleans and a reason string.'
-                elif not inp['ready'] and inp['needs_data'] and not source_attempted and not source_lookup_failed:
+                if not isinstance(inp, dict) or set(inp) != {'ready', 'has_records', 'reason'} or type(inp['ready']) is not bool or type(inp['has_records']) is not bool or not isinstance(inp['reason'], str):
+                    result = 'Use ready and has_records booleans and a reason string. User-provided records count as records; they do not require external access.'
+                elif not inp['ready'] and inp['has_records'] and not source_attempted and not source_lookup_failed:
                     result = 'Source readers are available in this call: recall_skill, scratchpad, read_text_file and web_fetch. Scratchpad executes Python HTTP, database and file reads. Read the exact source procedure and attempt its documented read before claiming it is unavailable; no source read has run yet. A failed lookup of the exact requested procedure may establish that its access contract is missing. Do not guess or substitute another source.'
                 elif not inp['ready']:
                     finished = 'Cannot build the requested static artifact: ' + inp['reason']
@@ -72,9 +74,9 @@ async def collect(state, *, feedback: str = '') -> Evidence | str:
                     result = 'A source tool failed. Resolve it before finishing; do not substitute an unauthorized source.'
                 else:
                     try:
-                        finished = Evidence.model_validate(json.loads(read_bytes_nofollow(state.artifact_path, path, limit=16 * 1024 * 1024), parse_float=Decimal)) if inp['needs_data'] else Evidence()
-                        if inp['needs_data'] and not finished.datasets:
-                            raise ValueError('needs_data=true requires at least one dataset')
+                        finished = Evidence.model_validate(json.loads(read_bytes_nofollow(state.artifact_path, path, limit=16 * 1024 * 1024), parse_float=Decimal)) if inp['has_records'] else Evidence()
+                        if inp['has_records'] and not finished.datasets:
+                            raise ValueError('has_records=true requires at least one dataset')
                         result = 'Evidence accepted.'
                     except (OSError, ValueError) as error:
                         result = f'Evidence not accepted: {error}. Write the complete evidence file and finish again.'
