@@ -129,6 +129,11 @@ request, evidence, candidate composition, resolved metadata, prior composition,
 and available desktop screenshot. It looks for concrete content, scope, unit,
 interaction, and edit errors. Rejections return specific corrections to the
 composer within the same bounded retry loop. An incomplete review cannot publish.
+When actual requested source records or fields are missing, the review can request
+one further evidence pass through the normal readers. The original request and
+source constraints stay intact. Ordinary calculations, formatting, and supporting
+visual assets remain composer corrections. A second incomplete evidence result
+stops without replacing the page.
 The result says no issues were found and whether a screenshot was provided;
 this is a heuristic check, not proof of every fact, interaction, or source's authority.
 Diagnostics keep the screenshot fingerprint rather than another base64 copy.

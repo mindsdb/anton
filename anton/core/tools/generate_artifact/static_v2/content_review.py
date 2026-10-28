@@ -1,5 +1,6 @@
 """A fresh review of content and intent, separate from mechanical rendering."""
 import hashlib
+from dataclasses import dataclass
 from typing import Annotated
 
 from pydantic import Field, StrictBool, model_validator
@@ -13,12 +14,20 @@ from .prompts import context
 class Review(Model):
     approved: StrictBool
     issues: list[Annotated[str, Field(min_length=1, max_length=600)]] = Field(max_length=8)
+    needs_evidence: StrictBool = Field(default=False, description='True only when requested source records, fields, or conditions are missing. Ordinary filtering, arithmetic, formatting and visual assets do not need new evidence.')
 
     @model_validator(mode='after')
     def consistent(self):
         if self.approved == bool(self.issues):
             raise ValueError('Approve with no issues, or reject with concrete issues')
+        if self.approved and self.needs_evidence:
+            raise ValueError('Missing evidence cannot be approved')
         return self
+
+
+@dataclass(frozen=True)
+class EvidenceRequest:
+    issues: tuple[str, ...]
 
 
 TOOL = {'name':'review_static_artifact','description':'Approve only when no concrete issue was found, or list specific corrections needed before publication.',
@@ -38,6 +47,11 @@ or reject merely because exhaustive proof or all private source rows are unavail
 catalog is not the full dataset. Approval means no concrete issue found, not proof of source authority.
 Return exactly one review_static_artifact call: approved=true with issues=[], or approved=false
 with actionable issues tied to the user's requirements. Do not rewrite the artifact yourself.'''
+
+SYSTEM += ''' Set needs_evidence=true only when actual requested source observations or fields are
+absent and cannot be recovered by querying the supplied evidence. A missing aggregate can be
+computed from present rows. Formatting, layout, scripts, and supporting reference assets are
+composer corrections, not reasons to acquire new business evidence.'''
 
 
 async def check(state, *, evidence, composition, manifest, previous, screenshot):
@@ -68,6 +82,8 @@ async def check(state, *, evidence, composition, manifest, previous, screenshot)
         raise ValueError('Content review returned invalid decision arguments')
     verdict=Review.model_validate(call.input)
     if not verdict.approved:
+        if verdict.needs_evidence:
+            return EvidenceRequest(tuple(verdict.issues))
         raise ValueError('Content review: '+'; '.join(verdict.issues))
     state.record('static_content_review','no_issues_found','Desktop screenshot provided' if screenshot else 'Text and evidence only')
     return {'status':'no_issues_found','screenshot_provided':screenshot is not None}

@@ -12,8 +12,8 @@ from anton.core.tools.generate_artifact.static_v2.compose import Structured,comp
 from tests.test_static_artifact_pipeline_v2 import state,VALID
 
 
-def response(approved,issues):
-    return StreamComplete(response=LLMResponse(content='',tool_calls=[ToolCall('review','review_static_artifact',{'approved':approved,'issues':issues})]))
+def response(approved,issues,needs_evidence=False):
+    return StreamComplete(response=LLMResponse(content='',tool_calls=[ToolCall('review','review_static_artifact',{'approved':approved,'issues':issues,'needs_evidence':needs_evidence})]))
 
 
 @pytest.mark.parametrize('with_screenshot',[False,True])
@@ -87,3 +87,42 @@ async def test_cancellation_during_content_review_prevents_publication(tmp_path,
     monkeypatch.setattr('anton.core.tools.generate_artifact.verifiers.verify_frontend_live',lambda *a,**k:BrowserCheck(status='passed'))
     assert 'cancelled' in await compose(st,Evidence())
     assert prior.read_text()=='PRIOR PAGE'
+
+
+async def test_missing_evidence_gets_one_source_refresh_before_publication(tmp_path,monkeypatch):
+    import importlib
+    pipeline=importlib.import_module('anton.core.tools.generate_artifact.static_v2')
+    prior=tmp_path/'index.html';prior.write_text('PRIOR PAGE');gathers=[];reviews=[]
+    async def gather(st,*,feedback=''):
+        gathers.append(feedback)
+        assert prior.read_text()=='PRIOR PAGE'
+        rows=[{'amount':2}] if len(gathers)==1 else [{'amount':2},{'amount':3}]
+        return Evidence.model_validate({'datasets':{'records':{'source':{'label':'Synthetic observations'},'rows':rows}}})
+    payload={'document':{'title':'Observed total','facts':{'total':{'type':'query','query':{'dataset':'records','measures':[{'name':'total','op':'sum','field':'amount'}]},'field':'total'}},
+        'sections':[{'id':'total','blocks':[{'type':'metric','label':'Total','fact':'total'}]}]}}
+    async def stream(**kwargs):
+        if kwargs['system']==content_review.SYSTEM:
+            reviews.append(kwargs)
+            yield response(len(reviews)>1,[] if len(reviews)>1 else ['The second requested observation is missing.'],needs_evidence=len(reviews)==1)
+        else:
+            yield StreamComplete(response=LLMResponse(content='',tool_calls=[ToolCall('compose','compose_static_artifact',payload)]))
+    st=state(tmp_path,VALID);st.session._llm.code_stream=stream
+    monkeypatch.setattr(pipeline,'collect',gather)
+    monkeypatch.setattr('anton.core.tools.generate_artifact.verifiers.verify_frontend_live',lambda *a,**k:BrowserCheck(status='passed'))
+    result=await pipeline.run(st)
+    assert result['status']=='generated' and len(gathers)==2 and len(reviews)==2
+    assert 'second requested observation' in gathers[1]
+    assert st.user_request=='Make a report'
+    assert 'metric-value">5<' in prior.read_text()
+
+
+async def test_source_refresh_is_bounded_and_never_replaces_a_page_when_still_incomplete(tmp_path,monkeypatch):
+    import importlib
+    pipeline=importlib.import_module('anton.core.tools.generate_artifact.static_v2')
+    prior=tmp_path/'index.html';prior.write_text('PRIOR PAGE');gathers=[]
+    async def gather(st,*,feedback=''):
+        gathers.append(feedback);return Evidence()
+    async def missing(*args):return content_review.EvidenceRequest(('Requested observation is still absent.',))
+    monkeypatch.setattr(pipeline,'collect',gather);monkeypatch.setattr(pipeline,'compose',missing)
+    assert 'still needs source evidence' in await pipeline.run(state(tmp_path,VALID))
+    assert len(gathers)==2 and prior.read_text()=='PRIOR PAGE'

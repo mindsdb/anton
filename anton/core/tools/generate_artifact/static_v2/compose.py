@@ -198,6 +198,8 @@ async def compose(state, evidence: Evidence):
                 return 'Static artifact stopped before publication; the previous artifact is preserved.'
             review = await content_review.check(state, evidence=evidence_text, composition=output,
                 manifest=manifest, previous=existing, screenshot=live.screenshot)
+            if isinstance(review,content_review.EvidenceRequest):
+                return review
             # Unavailable is reported honestly, never promoted into a browser pass.
             state.browser_status, state.browser_coverage = live.status, live.coverage
             state.browser_screenshot, state.browser_page = live.screenshot, primary
