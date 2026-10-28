@@ -10,6 +10,7 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import re
 import urllib.error
 import urllib.request
@@ -1823,6 +1824,9 @@ async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> "dict | str | B
 
 async def _run(state: GenState, *, entry: str) -> "dict | str | BrowserCheckFailed":
     state.entry = entry
+    if not state.is_fullstack and state.act_first and os.environ.get("ANTON_STATIC_ARTIFACTS") == "v2":
+        from .static_v2 import run as run_static_v2
+        return await run_static_v2(state)
     if state.is_fullstack and (refusal := _fullstack_refusal(state)) is not None:
         # A fullstack artifact is done only once its backend runs: refuse
         # before any question or brief when nothing here can run it. With

@@ -1,0 +1,101 @@
+"""Evidence collection through the product's existing source-access handlers."""
+from __future__ import annotations
+
+import uuid
+import json
+from decimal import Decimal
+
+from anton.core.artifacts.static.data import Evidence
+from anton.core.llm.structured import looks_truncated
+from anton.core.utils.scratchpad import scratchpad_action
+from anton.utils.nofollow import read_bytes_nofollow, make_dirs_nofollow
+from .. import sub_tools as protocol
+from ..discovery.engine import _exec_ran, _web_tools
+from ..discovery.sub_tools import dispatch_ask_user, _ask_user_schema
+from ..discovery.state import gathering_question_budget
+from ..streaming import _call_with_stream_retry
+from .prompts import COLLECT, context
+
+FINISH = {"name": "finish_static_evidence", "description": "Finish only after source tools succeed and evidence is saved, or report a blocker.",
+          "input_schema": {"type": "object", "additionalProperties": False, "properties": {
+              "ready": {"type": "boolean"}, "needs_data": {"type": "boolean"}, "reason": {"type": "string"}},
+              "required": ["ready", "needs_data", "reason"]}}
+
+
+async def collect(state) -> Evidence | str:
+    from anton.core.tools.tool_defs import SCRATCHPAD_TOOL, READ_TEXT_FILE_TOOL, RECALL_TOOL
+    from anton.core.tools.web_tools import WEB_FETCH_FALLBACK_TOOL, WEB_SEARCH_FALLBACK_TOOL
+    from anton.core.tools.tool_handlers import handle_scratchpad, handle_read_text_file, handle_recall
+
+    path = state.artifact_path / '.static' / f'evidence-{uuid.uuid4().hex}.json'
+    make_dirs_nofollow(state.artifact_path, path.parent)
+    system = COLLECT.replace('EVIDENCE_PATH', repr(str(path)))
+    definitions = [SCRATCHPAD_TOOL, READ_TEXT_FILE_TOOL, RECALL_TOOL, WEB_FETCH_FALLBACK_TOOL, WEB_SEARCH_FALLBACK_TOOL]
+    tools = [protocol.tool_schema(t) for t in definitions] + [_ask_user_schema(), FINISH]
+    handlers = {SCRATCHPAD_TOOL.name: handle_scratchpad, READ_TEXT_FILE_TOOL.name: handle_read_text_file, RECALL_TOOL.name: handle_recall}
+    handlers.update({name: handler for name, (handler, _) in _web_tools().items()})
+    messages = [{"role": "user", "content": context(state)}]
+    questions = gathering_question_budget(state.session, act_first=state.act_first)
+    source_failed = False
+    for round_index in range(16):
+        if state.winding_down() or state.abandoned.is_set():
+            return 'Static artifact stopped while gathering evidence; the previous artifact is preserved.'
+        state.step_started('gathering')
+        response, budget = await _call_with_stream_retry(
+            state.session._llm.plan_stream if round_index == 0 else state.session._llm.code_stream,
+            system=system, messages=messages, tools=tools, max_tokens=6000, default_cap=None,
+            on_text=state.peek_for('gathering'))
+        state.peek_done('gathering')
+        messages.append({"role": "assistant", "content": protocol.assistant_blocks(response)})
+        results, finished = [], None
+        for call in response.tool_calls:
+            if not isinstance(call.input, dict) or call.parse_error or call.repaired or looks_truncated(response, budget):
+                results.append(protocol.tool_result(call.id, 'Invalid or truncated call; nothing executed. Return complete valid arguments.'))
+                continue
+            if call.name == FINISH['name']:
+                inp = call.input
+                if not isinstance(inp, dict) or set(inp) != {'ready', 'needs_data', 'reason'} or type(inp['ready']) is not bool or type(inp['needs_data']) is not bool or not isinstance(inp['reason'], str):
+                    result = 'Use ready and needs_data booleans and a reason string.'
+                elif not inp['ready']:
+                    finished = 'Cannot build the requested static artifact: ' + inp['reason']
+                    result = 'Blocked; the previous artifact is preserved.'
+                elif source_failed:
+                    result = 'A source tool failed. Resolve it before finishing; do not substitute an unauthorized source.'
+                else:
+                    try:
+                        finished = Evidence.model_validate(json.loads(read_bytes_nofollow(state.artifact_path, path, limit=16 * 1024 * 1024), parse_float=Decimal)) if inp['needs_data'] else Evidence()
+                        if inp['needs_data'] and not finished.datasets:
+                            raise ValueError('needs_data=true requires at least one dataset')
+                        result = 'Evidence accepted.'
+                    except (OSError, ValueError) as error:
+                        result = f'Evidence not accepted: {error}. Write the complete evidence file and finish again.'
+                results.append(protocol.tool_result(call.id, result))
+            elif finished is not None:
+                finished = None
+                results.append(protocol.tool_result(call.id, 'Source tools cannot follow finish_static_evidence. Finish again after the final source result.'))
+            elif call.name == 'ask_user':
+                if questions <= 0:
+                    result = 'Question budget exhausted. Proceed from established constraints or report the blocker.'
+                else:
+                    answer = await dispatch_ask_user(state.session, call.input)
+                    questions -= 1
+                    if answer['status'] == 'timeout':
+                        return 'Waiting for the user’s answer; the previous artifact is preserved.'
+                    state.record_qa(answer['question'], answer['answer_summary'])
+                    result = answer['tool_result']
+                results.append(protocol.tool_result(call.id, result))
+            elif call.name in handlers:
+                outcome = await handlers[call.name](state.session, call.input)
+                result = protocol.unwrap_outcome(outcome)
+                state.trace_log.scratchpad(node='static_evidence', input=call.input, output=result)
+                if call.name == SCRATCHPAD_TOOL.name and scratchpad_action(call.input) == 'exec':
+                    source_failed = not _exec_ran(outcome)
+                elif getattr(outcome, 'ok', True) is False:
+                    source_failed = True
+                results.append(protocol.tool_result(call.id, result))
+            else:
+                results.append(protocol.tool_result(call.id, 'Unknown evidence tool.'))
+        messages.append({"role": "user", "content": results or 'Use the source tools, then finish_static_evidence.'})
+        if finished is not None:
+            return finished
+    return 'Static artifact evidence collection did not finish; the previous artifact is preserved.'
