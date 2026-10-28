@@ -178,13 +178,14 @@ def _gen_state(tmp_path, **kw):
     return GenState(**base)
 
 
-def _saved(tmp_path, known_data=""):
+def _saved(tmp_path, known_data="", known_data_verified=()):
     (tmp_path / DATA_DIRNAME).mkdir(exist_ok=True)
     (tmp_path / DATA_DIRNAME / "1.json").write_text(json.dumps([{"v": 1}]))
     return cp.DiscoveryCheckpoint(
         pipeline_stage=cp.STAGE_GENERATED,
         declared_sources=["orders"],
         known_data=known_data,
+        known_data_verified=list(known_data_verified),
         data_files=[DataFile("1", ["orders"], "rows").to_dict()],
     )
 
@@ -201,13 +202,25 @@ def test_continuing_the_same_run_restores_data_files(tmp_path):
     assert state.data_files == [DataFile("1", ["orders"], "rows")]
 
 
-@pytest.mark.parametrize("known_data", ["", "scratchpad `pad`, variable `df` (DataFrame)"])
-def test_new_iteration_without_new_data_reuses_the_files(tmp_path, known_data):
-    stored = _saved(tmp_path, known_data="scratchpad `pad`, variable `df` (DataFrame)")
+@pytest.mark.parametrize(
+    "known_data, unverified",
+    [
+        # No data passed: what only the old data verified is read again, except
+        # what the saved file covers.
+        ("", ["regions"]),
+        ("scratchpad `pad`, variable `df` (DataFrame)", []),
+    ],
+)
+def test_new_iteration_without_new_data_reuses_the_files(tmp_path, known_data, unverified):
+    stored = _saved(
+        tmp_path,
+        known_data="scratchpad `pad`, variable `df` (DataFrame)",
+        known_data_verified=["orders", "regions"],
+    )
     state = _gen_state(tmp_path, known_data=known_data)
     gen_engine._restore(state, stored, entry=cp.ENTRY_NEW_ITERATION)
     assert [f.id for f in state.data_files] == ["1"]
-    assert "orders" not in state.unverified_sources
+    assert state.unverified_sources == unverified
 
 
 def test_new_iteration_with_other_data_fetches_again(tmp_path):
