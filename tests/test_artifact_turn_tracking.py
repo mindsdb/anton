@@ -315,7 +315,7 @@ def test_lint_walk_skips_revision_blobs(tmp_path, monkeypatch):
     index.write_text("<html></html>")
     monkeypatch.setattr(
         th, "_check_pages",
-        lambda store, pages, *, cell_sandbox, screenshot, findings_listed_earlier: th.ArtifactLint(
+        lambda store, pages, *, cell_sandbox, screenshot, findings_listed_earlier, **_: th.ArtifactLint(
             messages=[f"{p.slug}/{p.path.name} — bad {p.path.name}" for p in pages]
         ),
     )

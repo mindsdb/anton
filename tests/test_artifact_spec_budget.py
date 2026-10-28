@@ -364,6 +364,45 @@ def test_api_spec_problem_rejects_paths_that_differ_from_spec_md():
     assert p(renamed, {}) is None
 
 
+def test_api_spec_problem_names_every_missing_and_extra_path():
+    """The node retries once: a message naming only the first mismatch
+    leaves every other one for a retry it doesn't have."""
+    declared = engine._declared_api_paths(_BACKEND_SECTION)
+    off = _doc("/api/rooms", "/api/rooms/{code}", "/api/stats", "/api/players")
+    problem = engine._api_spec_problem(off, declared)
+    for path in ("/api/rooms/{code}/state", "/api/rooms/{code}/action"):
+        assert f"`{path}`" in problem.split("; the document adds")[0]
+    for path in ("/api/rooms/{code}", "/api/stats", "/api/players"):
+        assert f"`{path}`" in problem.split("; the document adds")[1]
+
+
+async def test_the_api_spec_step_sees_the_spec_it_copies_its_paths_from(tmp_path):
+    """Hot path: `make_api_spec` continues the shared history, and its
+    instruction alone tells it to keep every path "exactly as `spec.md`
+    writes it". The spec step sent the spec from a copy of that history and
+    kept only the file, so the API step never saw the spec it was told to
+    copy. Through the real planning call, both steps on one fake model."""
+    spec = _BACKEND_SECTION.removeprefix("## Technical specification\n")
+    api = json.dumps({"openapi": "3.0.0", "paths": {
+        "/api/rooms": {"post": {"responses": {"201": {}}}},
+        "/api/rooms/{code}/state": {"get": {"responses": {"200": {}}}},
+        "/api/rooms/{code}/action": {"post": {"responses": {"200": {}}}},
+    }})
+    session = AsyncMock()
+    session._llm.plan_stream = _stream_mock(
+        _response(spec, output_tokens=10), _response(api, output_tokens=10),
+    )
+    state = _state(tmp_path, session=session, artifact_type="fullstack-stateless-app", is_fullstack=True)
+    state.messages = [{"role": "user", "content": "kickoff"}, {"role": "assistant", "content": "# PRD"}]
+
+    assert await orchestrator._write_tech_spec(state) is None
+    assert await orchestrator._make_api_spec(state) is None
+
+    api_messages = session._llm.plan_stream.call_args_list[1].kwargs["messages"]
+    assert {"role": "assistant", "content": spec.strip()} in api_messages[:-1]
+    assert api_messages[-1]["content"].startswith(prompts.build_api_spec_instruction(stateless=True))
+
+
 async def test_a_renamed_path_is_sent_back_with_spec_md_quoted():
     calls: list[str] = []
 

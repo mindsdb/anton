@@ -37,6 +37,7 @@ from anton.core.artifacts.live_app_slots import (
     SlotUnavailable,
 )
 from anton.core.artifacts.models import DatasourceRef
+from anton.diagnostics import make_formatter
 
 _SLOTS = ("http://live-app-1:8001", "http://live-app-2:8001", "http://live-app-3:8001")
 _TOKEN = "t" * 64
@@ -855,6 +856,44 @@ async def test_a_refused_card_leaves_the_running_app_alone(tmp_path, slots, appr
     assert session._live_app_host.events == []
     assert slots[0].resets == 0 and slots[0].requests == []
     assert slots[0].app.artifact == "sales-demo"
+
+
+def _logged_decisions(caplog) -> list[dict]:
+    """Each launch decision this module logged, as a host's structured formatter writes it."""
+    formatter = make_formatter()
+    return [json.loads(formatter.format(record)) for record in caplog.records
+            if record.name == las.__name__ and record.funcName == "_log_launch_decision"]
+
+
+async def test_an_approved_launch_logs_its_app_and_connections_through_a_structured_host(
+        tmp_path, slots, approved, cards, caplog):
+    folder = _artifact(tmp_path)
+    with caplog.at_level(logging.WARNING, logger=las.__name__):
+        await las.launch_live_app(_session(), slug="sales-demo", folder=folder, datasources=_DECLARED)
+
+    (line,) = _logged_decisions(caplog)
+    assert (line["event"], line["outcome"]) == ("live_app_launch", "approved")
+    # cowork-server's formatter also keeps the slug as a field of its own.
+    (record,) = [r for r in caplog.records if r.funcName == "_log_launch_decision"]
+    assert record.artifact_slug == "sales-demo"
+    decision = json.loads(line["message"].removeprefix("live app launch: "))
+    assert decision["slug"] == "sales-demo" and decision["status"] == "approved"
+    assert decision["connections"] == ["postgres/demo:db", "rest/httpbin:http-read"]
+    assert _PG_PASSWORD not in line["message"] and _API_KEY not in line["message"]
+    assert _ME.email not in json.dumps(line)
+
+
+async def test_a_refused_launch_logs_its_outcome_through_a_structured_host(tmp_path, slots, approved, cards,
+                                                                        caplog):
+    cards.answer = "cancelled"
+    with caplog.at_level(logging.WARNING, logger=las.__name__):
+        with pytest.raises(LiveAppLaunchError):
+            await las.launch_live_app(_session(), slug="sales-demo", folder=_artifact(tmp_path), datasources=())
+
+    (line,) = _logged_decisions(caplog)
+    assert (line["event"], line["outcome"]) == ("live_app_launch", "cancelled")
+    decision = json.loads(line["message"].removeprefix("live app launch: "))
+    assert (decision["slug"], decision["status"]) == ("sales-demo", "cancelled")
 
 
 async def test_a_static_change_relaunches_without_a_card(tmp_path, slots, approved, cards):

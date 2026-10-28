@@ -23,10 +23,10 @@ class CoreSettings(BaseSettings):
     # streamed call sends; a non-streamed call is bounded over its whole
     # duration, across the SDK's retries. 0 or less turns it off, and then a
     # model call that never answers keeps the turn alive until the SDK, the
-    # gateway or a Stop ends it. Above 600, also raise the SDKs' 600 s read
-    # timeout: on an endpoint with no keepalives, a streamed call that goes
-    # quiet after its response starts ends at 600 s with a read-timeout error
-    # instead. Must be a finite number.
+    # gateway or a Stop ends it. Above LONGEST_SILENCE_S (1280 s), also raise
+    # the SDKs' read timeout, which the providers set to it: on an endpoint with
+    # no keepalives, a streamed call that goes quiet after its response starts
+    # ends at 1280 s with a read-timeout error instead. Must be a finite number.
     model_call_idle_timeout_s: float = Field(600.0, allow_inf_nan=False)
 
     # Session orchestration tuning
