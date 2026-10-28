@@ -19,12 +19,14 @@ SDK's own test pattern — no sockets, no threads, no subprocess).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from typing import Any
 
 import httpx2
 import mcp
+from mcp_types import CallToolResult
 from mcp_types import Tool as McpTool
 
 from anton.core.mcp.errors import McpPermanentError, classify_mcp_error
@@ -38,6 +40,14 @@ logger = logging.getLogger(__name__)
 #: directly on top. Log anything slower for a second look; re-measure again
 #: once a real server (not a local reference/stub) is in the loop.
 _SLOW_ROUND_TRIP_MS = 500.0
+
+# The SDK's own timeouts: httpx's 5 s default is too short, and a server may hold the stream open.
+_HTTP_TIMEOUT_SECONDS = 30.0
+_HTTP_READ_TIMEOUT_SECONDS = 300.0
+
+
+class _ClosedDuringReconnect(RuntimeError):
+    """The session was closed while a reconnect opened a client; expected at turn end."""
 
 
 class McpSession:
@@ -61,89 +71,221 @@ class McpSession:
         access_token: str | None = None,
         server: Any | None = None,
         read_timeout_seconds: float = 30.0,
+        redact_errors: bool = False,
     ) -> None:
+        """Store the target; nothing connects until `__aenter__`.
+
+        `redact_errors` makes every error this session logs, and every error
+        `close_mcp_sessions` logs for it, name exception classes only, with no
+        message or traceback: set it when the endpoint's errors can carry a
+        secret. Raises `ValueError` unless exactly one of `url` or `server` is given.
+        """
         if (url is None) == (server is None):
             raise ValueError("McpSession needs exactly one of `url` or `server`")
         self._url = url
         self._access_token = access_token
         self._server = server
         self._read_timeout_seconds = read_timeout_seconds
+        self.redact_errors = redact_errors
         self._http_client: httpx2.AsyncClient | None = None
         self._client: mcp.Client | None = None
+        self._owner: asyncio.Task[BaseException | None] | None = None
+        self._release: asyncio.Event | None = None
+        self._reconnect_lock = asyncio.Lock()
+        self._entered = False
+        self._closed = False
 
     async def __aenter__(self) -> "McpSession":
         await self._connect()
+        self._entered = True
         return self
 
     async def _connect(self) -> None:
+        """Open a fresh client in its own owner task and wait until it is ready.
+
+        Builds the HTTP client (url target) or uses the in-process server,
+        then starts `_hold_client` in a new task and waits for its handshake.
+        Sets `_client`, `_owner` and `_release` on success. Raises whatever
+        building the transport or the handshake raised; the HTTP client is
+        closed by then either way.
+        """
+        http_client: httpx2.AsyncClient | None = None
         if self._server is not None:
             target: Any = self._server
         else:
             headers = {"Authorization": f"Bearer {self._access_token}"} if self._access_token else {}
-            self._http_client = httpx2.AsyncClient(headers=headers)
-            from mcp.client.streamable_http import streamable_http_client
-
-            target = streamable_http_client(self._url, http_client=self._http_client)
-
-        client = mcp.Client(
-            target, raise_exceptions=True, read_timeout_seconds=self._read_timeout_seconds
-        )
-        started = time.monotonic()
+            http_client = httpx2.AsyncClient(
+                headers=headers,
+                timeout=httpx2.Timeout(
+                    _HTTP_TIMEOUT_SECONDS,
+                    read=_HTTP_READ_TIMEOUT_SECONDS,
+                ),
+            )
+            self._http_client = http_client
         try:
-            await client.__aenter__()
-        except Exception:
-            if self._http_client is not None:
-                await self._http_client.aclose()
+            if http_client is not None:
+                from mcp.client.streamable_http import streamable_http_client
+
+                target = streamable_http_client(self._url, http_client=http_client)
+            client = mcp.Client(
+                target, raise_exceptions=True, read_timeout_seconds=self._read_timeout_seconds
+            )
+        except BaseException:
+            # The owner task closes the HTTP client, but it has not started yet.
+            if http_client is not None:
+                await http_client.aclose()
+            raise
+        opened: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        release = asyncio.Event()
+        started = time.monotonic()
+        owner = asyncio.create_task(
+            self._hold_client(client, http_client, opened, release), name="mcp-session-owner"
+        )
+        try:
+            await opened
+        except asyncio.CancelledError:
+            owner.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await owner
+            raise
+        except BaseException:
+            await owner
             raise
         self._log_round_trip("initialize()", started)
         self._client = client
+        self._owner = owner
+        self._release = release
 
-    async def _reconnect(self) -> None:
-        """Close the dead client (best-effort) and open a fresh one against
-        the same target/token. Required, not optional, for `call_tool`'s
-        retry: once one task in a session's transport task group has failed,
-        the whole group — and the `Client` built on it — is unusable, so
-        simply calling `call_tool()` again on the same object cannot
-        succeed."""
-        if self._client is not None:
-            try:
-                await self._client.__aexit__(None, None, None)
-            except Exception:
-                logger.exception("McpSession: error closing the dead client before reconnecting")
-        if self._http_client is not None:
-            try:
-                await self._http_client.aclose()
-            except Exception:
-                logger.exception("McpSession: error closing the dead http client before reconnecting")
+    async def _hold_client(
+        self,
+        client: mcp.Client,
+        http_client: httpx2.AsyncClient | None,
+        opened: asyncio.Future[None],
+        release: asyncio.Event,
+    ) -> BaseException | None:
+        """Own one `mcp.Client` for its whole life, inside this one task.
+
+        Invariant: the SDK's transport and session open anyio task groups and
+        cancel scopes, which anyio binds to the task that entered them. They
+        must be exited in that same task, and when one of their background
+        tasks fails anyio cancels that task until the scopes exit. So no
+        caller's task may enter or exit a client: discovery opens it in a
+        short-lived task, tools call it from child tasks, the turn closes it
+        from another. This task is the only one that does either.
+
+        Resolves `opened` once the handshake is done (or with its failure), then
+        waits for `release`, or for anyio to cancel it because the transport
+        died, and exits the client. Always closes `http_client`. Returns the
+        error raised while exiting after `release` was set, so the closer can
+        report it; a transport death is logged here instead.
+        """
+        try:
+            async with client:
+                if not opened.done():
+                    opened.set_result(None)
+                await release.wait()
+        except Exception as exc:
+            if not opened.done():
+                opened.set_exception(exc)
+            elif release.is_set():
+                return exc
+            else:
+                logger.warning("McpSession: MCP transport closed after %s", _describe(exc))
+        except BaseException as exc:
+            if opened.done():
+                raise
+            # Handed to the waiting caller, which re-raises it; it must never wait forever.
+            if isinstance(exc, asyncio.CancelledError):
+                opened.cancel()
+            else:
+                opened.set_exception(exc)
+        finally:
+            if http_client is not None:
+                await http_client.aclose()
+        return None
+
+    async def _close_client(self) -> BaseException | None:
+        """Ask the current owner task to exit its client and wait for it.
+
+        Clears `_client`, `_owner`, `_release` and `_http_client`. Returns the
+        error the client raised while exiting, or None. Safe from any task.
+        The teardown is shielded, so a cancelled closer re-raises at once while
+        the owner still finishes the SDK's session DELETE and the HTTP close.
+        An owner its event loop already cancelled (opened under one
+        `asyncio.run`, closed under another) is logged and skipped.
+        """
+        owner, release = self._owner, self._release
         self._client = None
+        self._owner = None
+        self._release = None
         self._http_client = None
+        if owner is None or release is None:
+            return None
+        release.set()
+        if owner.cancelled():
+            logger.warning("McpSession: the session's owner task was already cancelled by its event loop")
+            return None
+        return await asyncio.shield(owner)
+
+    async def _reconnect(self, failed: mcp.Client | None) -> None:
+        """Replace `failed` with a fresh client against the same target/token.
+
+        Required, not optional, for `call_tool`'s retry: once one task in a
+        session's transport task group has failed, the whole group, and the
+        `Client` built on it, is unusable. A no-op when another call already
+        replaced `failed`; `failed=None` means no client was live, and a fresh
+        one is opened unless another call already did. Raises what `_connect`
+        raises, or `RuntimeError` when the session closed meanwhile; a close
+        error from the dead client is logged, never raised.
+        """
+        async with self._reconnect_lock:
+            if self._client is not failed:
+                return
+            close_error = await self._close_client()
+            if close_error is not None:
+                logger.warning("McpSession: closing the dead client failed with %s", _describe(close_error))
+            await self._connect_unless_closed()
+
+    async def _connect_unless_closed(self) -> None:
+        """Run `_connect`, then close what it opened if the session closed meanwhile.
+
+        Call with `_reconnect_lock` held. `__aexit__` does not take the lock, so
+        a close that lands during `_connect` finds no client to release; this is
+        the only place left that can. Raises `_ClosedDuringReconnect` (a
+        `RuntimeError`) in that case, and what `_connect` raises otherwise.
+        """
         await self._connect()
+        if not self._closed:
+            return
+        close_error = await self._close_client()
+        if close_error is not None:
+            logger.warning("McpSession: closing a client opened after close failed with %s", _describe(close_error))
+        raise _ClosedDuringReconnect("McpSession closed while it reconnected")
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        """Tear down the session. A cleanup failure here must never replace
-        or mask an exception already propagating out of the `async with`
-        block — the underlying SDK's in-process transport wraps teardown
-        errors in an `ExceptionGroup` when exiting mid-exception, which would
-        otherwise turn a clean, catchable error (e.g. `call_mcp_tool`'s
-        `RuntimeError` on a tool-level failure) into an opaque group a caller
-        can't match on. Swallow (log-only) a cleanup error when one is
-        already in flight; let it propagate normally otherwise."""
-        try:
-            if self._client is not None:
-                await self._client.__aexit__(exc_type, exc, tb)
-        except Exception:
-            if exc_type is not None:
-                logger.exception("McpSession: error closing session while another exception was propagating")
-            else:
-                raise
-        finally:
-            if self._http_client is not None:
-                await self._http_client.aclose()
-            self._client = None
+        """Tear down the session; safe from any task.
+
+        The owner task exits the client, so this never crosses task scopes. A
+        cleanup error is raised when nothing else is propagating, and only
+        logged when an exception is already leaving the `async with` block,
+        so it never replaces a clean, catchable error with an opaque one.
+        """
+        self._closed = True
+        close_error = await self._close_client()
+        if close_error is None:
+            return
+        if exc_type is not None:
+            logger.warning(
+                "McpSession: closing the session failed with %s while another exception was propagating",
+                _describe(close_error),
+            )
+            return
+        raise close_error
 
     async def list_tools(self) -> list[McpTool]:
         """List every tool this server advertises, unfiltered."""
-        client = self._require_client()
+        self._check_open()
+        client = await self._acquire_client()
         started = time.monotonic()
         result = await client.list_tools()
         self._log_round_trip("tools/list()", started)
@@ -194,11 +336,36 @@ class McpSession:
         one — verified empirically both ways before relying on it. A real
         cancellation is re-raised immediately, no retry attempted.
         """
+        result = await self._call_with_retry(name, arguments)
+        return _flatten_content(result.content), result.is_error
+
+    async def call_tool_structured(
+        self, name: str, arguments: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, str | list[dict], bool]:
+        """Call one tool and keep its structured result too.
+
+        Returns `(structured_content, content, is_error)`: the tool's MCP
+        `structured_content` (None when it sent none) beside what `call_tool`
+        returns. Retries, classifies and re-raises exactly as `call_tool`
+        does, since both go through `_call_with_retry`.
+        """
+        result = await self._call_with_retry(name, arguments)
+        return result.structured_content, _flatten_content(result.content), result.is_error
+
+    async def _call_with_retry(self, name: str, arguments: dict[str, Any]) -> CallToolResult:
+        """Run one `tools/call` with the retry and cancellation rules `call_tool` documents.
+
+        Returns the raw `CallToolResult`. Raises `McpPermanentError` at once,
+        `McpTransientError` or the original non-`Exception` failure after one
+        retry against a fresh session. May reconnect the session as a side effect.
+        """
         last_error: BaseException | None = None
+        self._check_open()
         for attempt in (1, 2):
+            client: mcp.Client | None = None
             try:
-                result = await self._require_client().call_tool(name, arguments)
-                return _flatten_content(result.content), result.is_error
+                client = await self._acquire_client()
+                return await client.call_tool(name, arguments)
             except (KeyboardInterrupt, SystemExit, GeneratorExit):
                 raise
             except BaseException as exc:  # noqa: BLE001 - reclassified/reraised below
@@ -214,19 +381,48 @@ class McpSession:
                     last_error = exc
                 if attempt == 2:
                     break
-                logger.info("MCP tool %s: transport failure, reconnecting and retrying once: %s", name, last_error)
+                logger.info(
+                    "MCP tool %s: transport failure, reconnecting and retrying once: %s",
+                    name,
+                    _describe(last_error) if self.redact_errors else last_error,
+                )
                 try:
-                    await self._reconnect()
-                except Exception:
-                    logger.exception("MCP tool %s: reconnect failed after a transport failure", name)
+                    await self._reconnect(client)
+                except _ClosedDuringReconnect:
+                    logger.debug("MCP tool %s: session closed during the reconnect", name)
+                    break
+                except Exception as exc:
+                    if self.redact_errors:
+                        logger.warning(
+                            "MCP tool %s: reconnect failed after a transport failure: %s", name, _describe(exc)
+                        )
+                    else:
+                        logger.exception("MCP tool %s: reconnect failed after a transport failure", name)
                     break
         assert last_error is not None
         raise last_error
 
-    def _require_client(self) -> mcp.Client:
-        if self._client is None:
+    def _check_open(self) -> None:
+        """Raise `RuntimeError` unless the session was entered and not yet closed."""
+        if not self._entered or self._closed:
             raise RuntimeError("McpSession used outside its `async with` block")
-        return self._client
+
+    async def _acquire_client(self) -> mcp.Client:
+        """Return the live client, opening one when a failed reconnect left none.
+
+        A call that starts while another call reconnects waits on the lock and
+        gets the new client. Raises what `_connect` raises, which the caller
+        classifies like any transport failure; `RuntimeError` once closed.
+        """
+        client = self._client
+        if client is not None:
+            return client
+        async with self._reconnect_lock:
+            self._check_open()
+            if self._client is None:
+                await self._connect_unless_closed()
+            assert self._client is not None
+            return self._client
 
     def _log_round_trip(self, label: str, started: float) -> None:
         elapsed_ms = (time.monotonic() - started) * 1000
@@ -242,3 +438,14 @@ def _flatten_content(blocks: list[Any]) -> str | list[dict]:
     if all(getattr(block, "type", None) == "text" for block in blocks):
         return "\n".join(getattr(block, "text", "") for block in blocks)
     return [block.model_dump(by_alias=True) for block in blocks]
+
+
+def _describe(exc: BaseException) -> str:
+    """Name `exc` by class only, with the classes inside an exception group.
+
+    Class names only: a transport error's message can carry a server URL or
+    a token-bearing request, and these lines are logged.
+    """
+    if isinstance(exc, BaseExceptionGroup):
+        return f"{type(exc).__name__}({', '.join(_describe(inner) for inner in exc.exceptions)})"
+    return type(exc).__name__
