@@ -8,7 +8,7 @@ import math
 import re
 
 from .views import checks, validate_ids
-from .data import DataError, Evidence, execute, json_value, number
+from .data import DataError, Evidence, calculate, execute, json_value, number
 from .document import Callout, Chart, Document, Html, Metric, Prose, Table, resolve_facts, resolve_query
 
 
@@ -86,7 +86,7 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
         fields = [c.field for c in block.columns] if isinstance(block, Table) else [block.x, *(s.field for s in block.series)]
         query = resolve_query(document, evidence, block.query, fields)
         rows = execute(evidence, query)
-        available = set(query.columns or query.group_by + [m.name for m in query.measures])
+        available = set(query.columns or query.group_by + [m.name for m in query.measures] + [c.name for c in query.calculations])
         if set(fields) - available:
             raise DataError(f"{block.title}: fields are not selected by its query: {sorted(set(fields) - available)}")
         if isinstance(block, Chart) and block.kind == 'line' and any(order.field == block.x for order in query.order_by):
@@ -105,15 +105,29 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
                 raise DataError(f"{block.title}: aggregate more than 5000 chart rows; the full data table can remain")
             columns = [Column(field=block.x, label=block.x_label or block.x),
                        *[Column(field=s.field, label=s.label, format=s.format) for s in block.series]]
-            numeric_fields = [s.field for s in block.series] + ([block.x] if block.kind == 'scatter' else [])
+            numeric_fields = [(s.field,100 if s.format.percent == 'ratio' else 1) for s in block.series] + ([(block.x,1)] if block.kind == 'scatter' else [])
             for row in public_rows:
-                for field in numeric_fields:
+                for field, scale in numeric_fields:
                     if row[field] is None and not (block.kind == 'scatter' and field == block.x):
                         continue
-                    exact = number(row[field])
+                    exact = calculate('multiply',number(row[field]),scale)
                     approximate = float(exact)
                     if not math.isfinite(approximate) or (exact and approximate == 0):
                         raise DataError(f'{block.title}: rescale {field} into representable chart units; the browser would overflow or turn a nonzero value into zero')
+            values=[float(calculate('multiply',row[series.field],100 if series.format.percent == 'ratio' else 1)) for row in public_rows for series in block.series if row[series.field] is not None]
+            low,high=min([0,*values]),max([0,*values])
+            rough=((high-low) or 1)/4
+            power=10.0**math.floor(math.log10(rough)) if rough>0 and math.isfinite(rough) else 0
+            if not power:
+                raise DataError(f'{block.title}: rescale the chart units; the browser cannot represent the axis extent')
+            tick=next(n*power for n in (1,2,5,10) if n*power>=rough)
+            limits=(math.floor(low/tick)*tick, math.ceil(high/tick)*tick)
+            if not all(math.isfinite(value) for value in (*limits,limits[1]-limits[0])):
+                raise DataError(f'{block.title}: rescale the chart units; the browser cannot represent the axis ticks')
+            if block.kind == 'scatter' and public_rows:
+                xs=[float(number(row[block.x])) for row in public_rows]
+                if not math.isfinite(max(xs)-min(xs)):
+                    raise DataError(f'{block.title}: rescale {block.x}; the browser cannot represent the scatter extent')
             chart = {"id": index, "kind": block.kind, "x": block.x, "xLabel": block.x_label,
                      "yLabel": block.y_label, "display": [[s.format.display(row[s.field]) for s in block.series] for row in public_rows], "series": [s.model_dump() for s in block.series], "rows": public_rows}
             content = f'<div class="chart" data-chart="{index}" aria-label="{text(block.title)}"></div>'

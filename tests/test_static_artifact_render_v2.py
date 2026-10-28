@@ -22,6 +22,20 @@ def test_chart_rejects_values_the_browser_would_overflow_or_turn_into_zero(value
         render(doc,evidence)
 
 
+@pytest.mark.parametrize('values',[[Decimal('1e-323')],[-1e308,1e308],[1.79e308]])
+def test_chart_rejects_an_unrepresentable_tick_extent(values):
+    source=Evidence.model_validate({'datasets':{'sample':{'source':{'label':'Extreme numeric QA'},'rows':[{'name':str(i),'value':v} for i,v in enumerate(values)]}}})
+    doc=document([{'type':'chart','title':'Extreme range','query':'sample','x':'name','series':[{'field':'value','label':'Value'}]}])
+    with pytest.raises(DataError,match='rescale'):
+        render(doc,source)
+
+
+def test_shared_chart_axis_rejects_incompatible_units():
+    with pytest.raises(ValueError,match='compatible units'):
+        document([{'type':'chart','title':'Incompatible','query':'sample','x':'name','series':[
+            {'field':'amount','label':'Amount'}, {'field':'rate','label':'Rate','format':{'percent':'ratio'}}]}])
+
+
 def evidence():
     return Evidence.model_validate({'datasets':{'rows':{'source':{'label':'Uploaded file'}, 'rows':[
         {'name':'</script><script>alert(1)</script>', 'amount':9007199254740993, 'private':'DO_NOT_EXPORT'}]}}})
@@ -49,6 +63,19 @@ def test_calculated_public_rate_does_not_publish_input_only_fields():
     result=render(doc,source)
     assert '50.0%' in result.html
     assert all(value not in result.html for value in ['private_actual','private_plan','DO_NOT_EXPORT'])
+    match=re.search(r'id="_artifact-bindings">(.*?)</script>',result.html,re.S)
+    assert json.loads(match[1])['bindings']['_view0']==[{'name':'A','rate':'0.5'}]
+
+
+def test_aggregated_calculation_can_render_without_publishing_measure_inputs():
+    source=Evidence.model_validate({'datasets':{'rows':{'source':{'label':'Synthetic grouped rates'},'rows':[
+        {'name':'A','actual':1,'plan':2},{'name':'A','actual':2,'plan':4}]}}})
+    query={'dataset':'rows','group_by':['name'],'measures':[
+        {'name':'done','op':'sum','field':'actual'},{'name':'target','op':'sum','field':'plan'}],
+        'calculations':[{'name':'rate','op':'divide','fields':['done','target']}]}
+    doc=document([{'type':'chart','title':'Grouped rates','query':query,'x':'name','series':[
+        {'field':'rate','label':'Rate','format':{'percent':'ratio'}}]}])
+    result=render(doc,source)
     match=re.search(r'id="_artifact-bindings">(.*?)</script>',result.html,re.S)
     assert json.loads(match[1])['bindings']['_view0']==[{'name':'A','rate':'0.5'}]
 

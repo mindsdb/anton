@@ -88,6 +88,30 @@ def test_custom_fragment_class_names_and_hidden_controls_do_not_become_host_view
         browser.close()
 
 
+@pytest.mark.parametrize('kind',['bar','line','scatter'])
+def test_percentage_geometry_and_axis_use_the_same_units(kind):
+    data=Evidence.model_validate({'datasets':{'sample':{'source':{'label':'Synthetic percentage scales'},'rows':[
+        {'x':1,'fraction':.5,'points':50},{'x':2,'fraction':.8,'points':80}]}}})
+    doc=Document.model_validate({'title':'Percentages','sections':[{'id':'one','blocks':[
+        {'type':'chart','title':'Equivalent scales','kind':kind,'query':'sample','x':'x','series':[
+            {'field':'fraction','label':'Fraction','format':{'percent':'ratio'}},
+            {'field':'points','label':'Points','format':{'percent':'points'}}]}]}]})
+    with playwright.sync_playwright() as p:
+        browser=p.chromium.launch();page=browser.new_page(viewport={'width':390,'height':844});errors=[]
+        page.on('pageerror',lambda error:errors.append(str(error)))
+        page.set_content(render(doc,data).html)
+        page.wait_for_function('document.querySelectorAll(".chart svg").length===1')
+        assert any('%' in text for text in page.locator('.chart svg text').all_text_contents())
+        marks=page.locator('.chart rect' if kind=='bar' else '.chart circle')
+        dimensions=marks.evaluate_all('(els)=>els.map(el=>el.getAttribute("width") || el.getAttribute("cy"))')
+        if kind=='bar':
+            assert dimensions[0]==dimensions[1] and dimensions[2]==dimensions[3]
+        else:
+            assert dimensions[0]==dimensions[2] and dimensions[1]==dimensions[3]
+        assert not errors and not page.evaluate('document.documentElement.scrollWidth>innerWidth')
+        browser.close()
+
+
 def test_dark_report_prints_with_legible_text_and_chart_colors():
     def luminance(rgb):
         channels=[int(n)/255 for n in rgb.removeprefix('rgb(').removesuffix(')').split(',')]
