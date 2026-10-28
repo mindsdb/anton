@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 from anton.core.artifacts import html_lint, render_check
 from anton.core.artifacts.html_lint import lint_html, lint_url
 from anton.core.artifacts.render_check import RenderFinding
+from anton.core.artifacts.report_tools import shown_markup
 from anton.core.backends.sandbox import CellSandbox, SandboxedSpawn, cell_sandbox_of
 from anton.core.utils.scratchpad import install_call_failed
 from anton.utils.datasources import scrub_output
@@ -486,6 +487,15 @@ def verify_frontend(
     if "<script" in low and "</script" not in low:
         errors.append("Frontend opens a <script> block but never closes it with </script>.")
 
+    # 5c. Markup shown as text. Escaped tags load without an error, so the
+    #     browser check passes such a page.
+    shown = shown_markup(html)
+    if shown:
+        errors.append(
+            f"The page shows HTML tags as text, so that markup does not render or run: {shown}. "
+            "Escape only text values, never the page's own markup."
+        )
+
     # 6. Forbidden globals / CSS.
     if "__antonCommentsLayer" in html:
         errors.append("Frontend must not use the global name window.__antonCommentsLayer.")
@@ -553,7 +563,9 @@ def verify_frontend(
     return VerifyResult(errors=errors, warnings=warnings)
 
 
-def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, screenshot: bool = True) -> BrowserCheck:
+def verify_frontend_live(
+    entry: Path, *, cell_sandbox: CellSandbox | None, screenshot: bool = True, previous_html: str | None = None
+) -> BrowserCheck:
     """Load the written page once in a browser.
 
     The class of defects the text checks above cannot see: a script that
@@ -570,9 +582,12 @@ def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, scree
     runs in its own container and only the page's text leaves this process.
     Otherwise the local Electron browser loads it (`html_lint`), which a
     sandbox policy refuses. `screenshot=False` asks the service for no
-    screenshot. A loaded page's `coverage` names the views the browser
-    measured: the service's, with the tabs and toggles it did not press, or
-    the page as it opens from the local browser, which presses nothing.
+    screenshot. `previous_html`, the page as the turn found it, asks the
+    render-check service to compare the two; a loaded page's `comparison`
+    carries the answer. The local browser compares nothing. A loaded page's
+    `coverage` names the views the browser measured: the service's, with the
+    tabs and toggles it did not press, or the page as it opens from the
+    local browser, which presses nothing.
 
     `unverified` when no browser loaded the page or the check could not
     vouch for it (no browser configured, a timeout, a library the check
@@ -591,7 +606,9 @@ def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, scree
     app directory, not the cwd.
     """
     if render_check.configured_url() is not None:
-        outcome = render_check.check_file(entry.resolve(), cell_sandbox=cell_sandbox, screenshot=screenshot)
+        outcome = render_check.check_file(
+            entry.resolve(), cell_sandbox=cell_sandbox, screenshot=screenshot, previous_html=previous_html
+        )
         if outcome.status == "unverified":
             found = render_check.unverified_findings(outcome)
             return BrowserCheck(
@@ -601,7 +618,7 @@ def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, scree
         verdict = _render_verdict(outcome.findings)
         return BrowserCheck(
             status="passed" if verdict.ok else "failed", verdict=verdict, screenshot=outcome.screenshot,
-            coverage=outcome.coverage,
+            coverage=outcome.coverage, views=tuple(outcome.views), comparison=outcome.comparison,
         )
     findings = lint_html(entry.resolve(), cell_sandbox=cell_sandbox)
     if findings is None:

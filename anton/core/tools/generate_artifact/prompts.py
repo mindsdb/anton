@@ -217,17 +217,30 @@ VISUAL DESIGN (for every HTML file you produce):
 - Multi-tab dashboards: NEVER call `echarts.init()` on a hidden container.
   Use lazy init — initialise charts only on first tab visibility.
   Pattern: `const _rendered = new Set(['overview']); function showPage(name) { if (!_rendered.has(name)) { _rendered.add(name); initChartsFor(name); } }`
+  `initChartsFor(name)` starts each view on that tab through `runView`, the
+  helper in the verifier contract, so a view that fails on a tab fails alone.
 - Layout composition:
   - Hero KPI cards at the top (large numbers, colour-coded ±, delta arrows).
   - Main narrative chart immediately below KPIs.
   - Supporting charts below, each with a subtitle explaining what it reveals.
   - Use ECharts `markLine` for thresholds, `markPoint` for outliers,
     `markArea` for highlighted regions.
-- Responsive:
-  - Multi-card grid: `grid-template-columns: repeat(auto-fit, minmax(360px, 1fr))`
+- Responsive (the page must read well on a 390 px phone, not only fit it):
+  - Multi-card grid: `grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr))`
   - Chart containers: `width: 100%; height: min(420px, 60vh)`
   - Register `window.addEventListener('resize', () => chart.resize())` on every ECharts instance.
-  - Tables wrapped in `<div style="overflow-x: auto;">` — never fixed widths.
+  - A table of more than 4 columns shows each row as a card below 640 px:
+    every `td` carries `data-label="<column name>"`, and a media query hides
+    the `thead` and sets `display: block` on `table`, `tbody`, `tr` and `td`
+    (keep `tr[hidden]` hidden), with `td::before { content: attr(data-label) }`.
+    A narrower table sits in `<div style="overflow-x: auto;">`. Never fixed table widths.
+  - Numbers, ids and dates never break inside a value: `white-space: nowrap` on
+    those cells. Never `overflow-wrap: anywhere` or `word-break: break-all` on
+    table cells: they squeeze every column to a letter or two.
+  - A map fits its projection to the plotted points (with a margin), not the
+    whole world, when they sit in one region. At phone width its labels and
+    legend stay inside the view and no smaller than 11 px: shorten or drop
+    labels that would overlap.
 - SECURITY: NEVER embed API keys, tokens, passwords, or connection strings in HTML/JS.
   Credentials were already used server-side; serialise only the resulting data.\
 """
@@ -249,6 +262,8 @@ step and costs a regeneration, unless the item says it is only a warning:
 - The global name `window.__antonCommentsLayer` is never used; the host app
   reserves it.
 - Every opened `<script>` block must be closed with `</script>`.
+- No HTML tag shown as text: escaped markup such as `&lt;div&gt;` outside
+  `<pre>`, `<code>` or `<textarea>`.
 - No universal `* { ... !important }` rule.
 - Every `z-index` is 1000 or below.
 - Significant block containers (`div`, `section`, `table`, `main`,
@@ -292,19 +307,49 @@ _BROWSER_GATE_SERVED = """\
 """
 
 
+# The one helper every view's setup goes through, here and, word for word, in
+# the build-html-dashboard skill. A throw or a rejected promise stays in its
+# view: the view shows a plain-text message and carries `data-view-failed`,
+# which the render check reports as a blank view whatever the message says.
+# The message names the view first in both channels: `console.error`, which
+# the render check counts, and `reportError`, which fires the window `error`
+# event the app preview's error list is built from. `el` may be missing, and
+# `fail` must not throw from inside the `catch`, or the error escapes the view.
+VIEW_HELPER_JS = (
+    "function runView(name, el, setup) { const fail = (err) => { "
+    "const why = err && err.message ? err.message : String(err); "
+    "if (el) { el.setAttribute('data-view-failed', name); el.textContent = name + ' could not load.'; } "
+    "console.error(name + ' failed: ' + why); "
+    "if (typeof reportError === 'function') reportError(new Error(name + ': ' + why)); }; "
+    "try { const done = setup(el); if (done && typeof done.then === 'function') done.catch(fail); } "
+    "catch (err) { fail(err); } }"
+)
+
+
 # Follows either browser-gate bullet. The browser check counts console errors,
 # so an error a view catches and only writes into the page never reaches it,
 # and an expected failure that logs one fails a page that works.
 _CAUGHT_ERRORS = """\
-- A view you guard with `try`/`catch` logs what it caught as well as writing
-  a short message into the view:
-  `try { drawMap(el); } catch (e) { console.error(e); el.textContent = 'The map could not load.'; }`.
-  A catch that only writes the message hides the error from the browser
-  check: at most the check reports the view as empty, and it cannot say what
-  broke it. Log with `console.error` only a view that failed to draw. An
-  expected failure stays silent or uses `console.warn`: the guarded storage
-  helper the browser storage note below asks for catches a throw on every
-  load in the preview frame, and a `console.error` there fails the check.\
+- Start every view through this one helper: each chart, map, globe or other
+  view that runs setup code, on load or on its tab's first visit. A view
+  whose setup throws or whose promise rejects then fails alone, with a
+  plain-text message in its place, and every other view still draws:
+  `""" + VIEW_HELPER_JS + """`
+  Call it with the view's title as the page shows it, its element and its
+  setup function, which may be `async`:
+  `runView('Shipment map', document.getElementById('world-map'), drawMap);`.
+  Await or return every promise the setup starts, such as the atlas's
+  `d3.json(...)`. Don't end it with a `.catch` of your own: the helper must
+  see the failure to name and mark the view.
+  Keep the helper as written: its `console.error` and `reportError` name the
+  failed view to the browser check and to the preview's error list, and
+  `data-view-failed` lets the check find the failed view whatever its
+  message says. A view's own `try`/`catch` that only writes a message hides
+  the error from the check. Log with `console.error` only a view that failed
+  to draw. An expected failure stays silent or uses `console.warn`: the
+  guarded storage helper the browser storage note below asks for catches a
+  throw on every load in the preview frame, and a `console.error` there
+  fails the check.\
 """
 
 

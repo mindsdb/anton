@@ -86,6 +86,26 @@ def test_the_public_data_sources_skill_is_not_fed_twice(tmp_path):
     assert orchestrator._artifact_skills(_session(store)) == ""
 
 
+def test_the_fetch_step_never_reads_another_persons_public_data_sources(tmp_path):
+    """The fetch step reads `public-data-sources` by name; a same-named skill
+    linked into the turn from another person's store must not replace it."""
+    builtins = tmp_path / "builtins"
+    _write_skill(builtins, "public-data-sources", "BUILT-IN-CATALOG", marked=False)
+    theirs = tmp_path / "someone-else"
+    _write_skill(theirs, "public-data-sources", "THEIR-CATALOG", marked=False)
+    turn = tmp_path / "turn"
+    turn.mkdir()
+    (turn / "public-data-sources").symlink_to(
+        theirs / "public-data-sources", target_is_directory=True
+    )
+    store = SkillStore(
+        root=turn, builtin_root=builtins, extra_roots=[tmp_path / "managed"],
+        artifact_roots=[tmp_path / "own"],
+    )
+
+    assert orchestrator._public_data_sources_skill(_session(store)).strip() == "BUILT-IN-CATALOG"
+
+
 def test_a_test_double_store_yields_no_skills():
     assert orchestrator._artifact_skills(_session()) == ""
 

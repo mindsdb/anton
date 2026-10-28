@@ -26,6 +26,7 @@ from .provider import (
     ToolCall,
     TransientProviderError,
     Usage,
+    call_effort,
     classify_404,
     classify_content_rejection,
     classify_markup_bad_request,
@@ -289,7 +290,7 @@ class AnthropicProvider(LLMProvider):
             kwargs["tools"] = merged_tools
         if tool_choice:
             kwargs["tool_choice"] = tool_choice
-        effort = reasoning_effort or self._reasoning_effort
+        effort = call_effort(reasoning_effort, self._reasoning_effort)
         if effort:
             kwargs["extra_body"] = {"output_config": {"effort": effort}}
         if beta_headers:
@@ -384,7 +385,7 @@ class AnthropicProvider(LLMProvider):
         }
         if merged_tools:
             kwargs["tools"] = merged_tools
-        effort = reasoning_effort or self._reasoning_effort
+        effort = call_effort(reasoning_effort, self._reasoning_effort)
         if effort:
             kwargs["extra_body"] = {"output_config": {"effort": effort}}
         if beta_headers:

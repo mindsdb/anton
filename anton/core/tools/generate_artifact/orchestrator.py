@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from anton.core.artifacts.internal_files import (
     API_SPEC_FILENAME,
@@ -23,6 +23,7 @@ from anton.core.artifacts.internal_files import (
     TECH_SPEC_FILENAME,
 )
 from anton.core.artifacts import live_app_slots
+from anton.core.llm.client import asked_model
 from anton.core.artifacts.store import BACKEND_LOG_FILENAME
 from anton.core.backends.sandbox import BACKENDS_OFF_MESSAGE, CellSandbox, cell_sandbox_of
 from anton.utils.datasources import scrub_output
@@ -45,6 +46,8 @@ from .state import (
     GEN_VERIFY_MAX_RETRIES,
     NOT_ENOUGH_DATA_PREFIX,
     RUNAPP_MAX_RETRIES,
+    BrowserCheck,
+    BrowserCheckFailed,
     FetchVerdict,
     GenState,
     RequiredData,
@@ -79,7 +82,7 @@ async def _decide(state: GenState, schema, prompt_pair, node: str) -> object:
     state.trace_log.llm_call(
         node=node, method="generate_object",
         system=system, messages=[{"role": "user", "content": user}],
-        value=value,
+        value=value, model=asked_model(state.session._llm, "planning"),
     )
     state.trace_log.verdict(node=node, schema=getattr(schema, "__name__", str(schema)), value=value)
     return result
@@ -385,6 +388,10 @@ async def _write_tech_spec(state: GenState) -> str | None:
         state.error = "make_tech_spec: model returned an empty specification."
         return state.error
     (state.artifact_path / TECH_SPEC_FILENAME).write_text(body, encoding="utf-8")
+    if messages is not None:
+        # Into the shared history, as the PRD step's reply is: the API-spec
+        # step continues this history and copies its paths from the spec.
+        state.messages.extend([{"role": "user", "content": user}, {"role": "assistant", "content": body}])
     if TECH_SPEC_FILENAME not in state.internal_files:
         state.internal_files.append(TECH_SPEC_FILENAME)
     state.record("make_tech_spec", "done", "wrote spec.md")
@@ -469,15 +476,22 @@ def _runs_live_apps(state: GenState) -> bool:
     return live_app_slots.live_apps_enabled() and _cell_sandbox(state) is not None
 
 
+# What the agent does instead where nothing starts an app backend.
+_BUILD_AN_HTML_APP = (
+    "Build it as an html-app instead: register one with `create_artifact` and "
+    "call `generate_artifact` on its slug."
+)
+
+
 def _fullstack_refusal(state: GenState) -> str | None:
     """Why no fullstack app can run here, or None. Sandboxed without live
-    apps, the sandbox starts no backend. With them, a launch that can never
-    succeed (no host records it, a setting is broken) refuses here too,
-    before the pipeline spends anything."""
+    apps, the sandbox starts no backend, and the refusal says to build an
+    html-app. With them, a launch that can never succeed (no host records it,
+    a setting is broken) refuses here too, before the pipeline spends anything."""
     if _cell_sandbox(state) is None:
         return None
     if not live_app_slots.live_apps_enabled():
-        return BACKENDS_OFF_MESSAGE
+        return f"{BACKENDS_OFF_MESSAGE} {_BUILD_AN_HTML_APP}"
     blocker = live_app_slots.live_app_launch_blocker(state.session)
     return str(blocker) if blocker is not None else None
 
@@ -555,10 +569,12 @@ def _public_data_sources_skill(session) -> str:
     The catalog must not be copied into the prompt — it already lives in
     `builtin_skills/public-data-sources/SKILL.md` and is maintained there. The
     sub-generator has no `recall_skill`, so the body is fed in directly from the
-    same `SkillStore` the main agent uses.
+    same `SkillStore` the main agent uses, through `load_for_artifacts`: a
+    same-named skill replaces the built-in only from a folder an artifact
+    build trusts, never one linked in from another person.
 
-    In tests the session is an `AsyncMock`, and `store.load(...)` returns a
-    **coroutine**. Type-checking `declarative_md` alone is not enough: an
+    In tests the session is an `AsyncMock`, and `store.load_for_artifacts(...)`
+    returns a **coroutine**. Type-checking `declarative_md` alone is not enough: an
     abandoned coroutine surfaces as a RuntimeWarning at GC time, in the output of
     an arbitrary test rather than the one that created it. So it is closed
     explicitly — the same treatment as in `_list_connections`. (In `_pads_dict` no
@@ -567,7 +583,7 @@ def _public_data_sources_skill(session) -> str:
     """
     try:
         store = getattr(session, "_skill_store", None)
-        skill = store.load(_PUBLIC_SOURCES_SKILL) if store is not None else None
+        skill = store.load_for_artifacts(_PUBLIC_SOURCES_SKILL) if store is not None else None
         if inspect.iscoroutine(skill):
             skill.close()
             return ""
@@ -916,10 +932,45 @@ def _read_frontend_html(state: GenState, written: list[str]) -> str | None:
     return entry.read_text(encoding="utf-8") if entry is not None else None
 
 
-async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str | None:
+def _adopt_entry_as_primary(state: GenState, entry_file: Path) -> None:
+    """Point the html-app's primary at the page its build wrote and checked.
+
+    The model may have named the file differently — bring metadata in line
+    with the fact, or the renderer opens the wrong file. Only for the page
+    the run ends with: if a later attempt still runs, its cleanup deletes
+    this file and a primary written now would dangle. The name is the one
+    just checked, not re-guessed from the list: with `partials.html`
+    written before `index.html`, the first `.html` is a file no verifier
+    opened (I-45).
+    """
+    actual = entry_file.relative_to(state.artifact_path).as_posix()
+    if actual != (state.primary or HTML_APP_DEFAULT_PRIMARY):
+        from anton.core.tools.tool_handlers import resolve_artifact_store
+
+        store = resolve_artifact_store(state.session)
+        if store is not None:
+            store.update(state.slug, primary=actual)
+        state.primary = actual
+
+
+class _AttemptCheck(NamedTuple):
+    """An attempt's own browser check and the page it loaded."""
+
+    check: BrowserCheck
+    entry: Path
+
+
+async def _gen_verify_frontend(
+    state: GenState, extra_context: str = ""
+) -> "str | BrowserCheckFailed | None":
     """Generate and verify the page. `extra_context` rides on the first
     kickoff — the browser findings from `_run_and_verify_app` when the
-    served fullstack page failed to load cleanly (S-02)."""
+    served fullstack page failed to load cleanly (S-02).
+
+    An html-app whose last build passed the static checks and failed its
+    browser check ends with `BrowserCheckFailed`: that build's page stays
+    on disk, and the agent repairs it. Every other failure ends with the
+    terminal error string."""
     if state.is_fullstack:
         system = prompts.build_frontend_system_prompt(
             state.artifact_path,
@@ -955,8 +1006,13 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
     # The `.html` files the previous attempt reported writing. Known on the
     # verify-failure path only: a loop failure returns a message, not a result.
     stale_html: list[str] = []
+    # This attempt's own browser check and the page it loaded, when the
+    # attempt got that far. Reset every attempt: `state.browser_*` keep an
+    # earlier attempt's values, which can name a page this attempt deleted.
+    last_check: _AttemptCheck | None = None
     for attempt in range(GEN_LOOP_MAX_RETRIES + GEN_VERIFY_MAX_RETRIES + 1):
         state.step_started("generate_frontend", attempt=attempt)
+        last_check = None
         if attempt > 0:
             # With append, a retry would extend the truncated remains of the
             # previous attempt. Delete deterministically: the "first chunk is
@@ -1050,12 +1106,15 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
                 live = await asyncio.to_thread(
                     verifiers.verify_frontend_live, entry_file, cell_sandbox=policy,
                     screenshot=not render_screenshots_refused(state.session),
+                    previous_html=state.previous_page[1] if state.previous_page is not None else None,
                 )
                 state.browser_status = live.status
+                state.comparison = live.comparison
                 state.browser_findings_listed = live.findings_listed
                 state.browser_screenshot = live.screenshot
                 state.browser_coverage = live.coverage
                 state.browser_page = entry_file.relative_to(state.artifact_path).as_posix()
+                last_check = _AttemptCheck(check=live, entry=entry_file)
                 if live.status == "failed":
                     failed_shot = live.screenshot
                 if live.status == "unverified":
@@ -1076,22 +1135,8 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
             errors=list(verdict.errors), warnings=list(verdict.warnings),
         )
         if verdict.ok:
-            # The model may have named the file differently — bring metadata in
-            # line with the fact, or the renderer opens the wrong file. Only after
-            # successful verification: if both attempts fail, the attempt-1 cleanup
-            # deletes the file and a primary written earlier would dangle. The
-            # name is the one that was just verified, not re-guessed from the
-            # list: with `partials.html` written before `index.html`, the first
-            # `.html` is a file no verifier opened (I-45).
             if not state.is_fullstack:
-                actual = entry_file.relative_to(state.artifact_path).as_posix()
-                if actual != (state.primary or HTML_APP_DEFAULT_PRIMARY):
-                    from anton.core.tools.tool_handlers import resolve_artifact_store
-
-                    store = resolve_artifact_store(state.session)
-                    if store is not None:
-                        store.update(state.slug, primary=actual)
-                    state.primary = actual
+                _adopt_entry_as_primary(state, entry_file)
             state.record("verify_frontend", "ok", "; ".join(verdict.warnings))
             state.verify_warnings.extend(f"frontend: {w}" for w in verdict.warnings)
             return None
@@ -1104,6 +1149,20 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
         "frontend", verify_failures=verify_failures, verdict=verdict,
         last_loop_error=last_loop_error,
     )
+    if verify_failures > GEN_VERIFY_MAX_RETRIES and last_check is not None and last_check.check.status == "failed":
+        # The last build passed the static checks, since the browser check
+        # runs only then, and failed in a browser. Its page is the one left
+        # on disk: the agent repairs that page against these findings.
+        live, entry_file = last_check
+        _adopt_entry_as_primary(state, entry_file)
+        return BrowserCheckFailed(
+            page=entry_file.relative_to(state.artifact_path).as_posix(),
+            findings=tuple(live.verdict.errors),
+            views=live.views,
+            screenshot=live.screenshot,
+            error=state.error,
+            comparison=live.comparison,
+        )
     return state.error
 
 
@@ -1571,7 +1630,12 @@ def _embed_attachments(state: GenState, entry_file: Path) -> None:
             html, state.attachments, state.artifact_path, cell_sandbox=_cell_sandbox(state)
         )
         if embedded != html:
-            write_text_nofollow(state.artifact_path, entry_file, embedded)
+            # The thread this runs in outlives a cancelled run: once the
+            # handler gave the run up and put the page back, write nothing.
+            with state.page_lock:
+                if state.abandoned.is_set():
+                    return
+                write_text_nofollow(state.artifact_path, entry_file, embedded)
     except (OSError, ValueError):
         state.trace_log.node("verify_frontend", "embed_skipped", "the page could not be rewritten")
 
@@ -1609,6 +1673,13 @@ def _result_shell(state: GenState) -> dict:
     if state.browser_status == "passed" and state.browser_coverage is not None:
         shell["browser_checked"] = state.browser_coverage.checked
         shell["browser_unchecked"] = state.browser_coverage.unchecked
+    # What the build broke, blanked or removed against the page as the turn
+    # found it. The handler's instruction has the agent name each one.
+    from anton.core.artifacts.render_check import comparison_notes
+
+    changes = comparison_notes(state.comparison)
+    if changes.found:
+        shell["changes_from_previous"] = changes._asdict()
     # Seen live: the agent presented `<path>/static/index.html` as the
     # entry point of a fullstack app: the
     # port was in the trace, the URL nowhere, and the system prompt's "prefer
@@ -1752,7 +1823,7 @@ def _stopped_over_budget(state: GenState, detail: str) -> dict:
     }
 
 
-async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
+async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> "dict | str | BrowserCheckFailed":
     """Walk the whole pipeline from wherever this call is entitled to start.
     Meanwhile the check after each cell leaves this artifact's live app
     alone: the run step is the run's only launch, and a cell in one write
@@ -1767,7 +1838,7 @@ async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
         building.discard(state.slug)
 
 
-async def _run(state: GenState, *, entry: str) -> dict | str:
+async def _run(state: GenState, *, entry: str) -> "dict | str | BrowserCheckFailed":
     state.entry = entry
     if state.is_fullstack and (refusal := _fullstack_refusal(state)) is not None:
         # A fullstack artifact is done only once its backend runs: refuse
