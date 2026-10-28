@@ -27,11 +27,12 @@ async def test_fresh_review_sees_request_evidence_previous_page_and_screenshot(t
     st.trace_log=SimpleNamespace(llm_call=lambda **kwargs:recorded.append(kwargs),node=lambda *a,**k:None)
     image=RenderScreenshot(media_type='image/png',data=base64.b64encode(b'synthetic image bytes').decode()) if with_screenshot else None
     result=await content_review.check(st,evidence='EXACT EVIDENCE',composition=Structured(mode='document',**VALID),
-        manifest={'facts':{'total':12},'bindings':{'items':[{'amount':12}]}},previous='PREVIOUS COMPOSITION',screenshot=image)
+        manifest={'facts':{'total':12},'bindings':{'items':[{'amount':12}]}},previous='PREVIOUS COMPOSITION',screenshot=image,browser_status='passed')
     assert result=={'status':'no_issues_found','screenshot_provided':with_screenshot}
     messages=seen[0]['messages'][0]['content']
     assert 'Make a report' in messages[0]['text'] and 'EXACT EVIDENCE' in messages[0]['text']
     assert 'PREVIOUS COMPOSITION' in messages[0]['text']
+    assert '"browser_check":{"status":"passed"}' in messages[0]['text']
     if with_screenshot:
         assert messages[1]['type']=='image'
         assert image.data not in str(recorded[0])
