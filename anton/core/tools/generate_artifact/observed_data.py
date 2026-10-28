@@ -9,7 +9,9 @@ import hashlib
 import json
 import re
 from html.parser import HTMLParser
+from urllib.parse import urlsplit
 
+from anton.utils.datasources import scrub_output
 from anton.utils.nofollow import read_bytes_nofollow
 
 DATA_ID = "cowork-observed-json"
@@ -24,6 +26,32 @@ CREDENTIAL_KEYS = {
     "secret", "clientsecret", "apikey", "xapikey", "privatekey", "secretkey", "accesskey",
     "secretaccesskey", "awssecretaccesskey", "sessiontoken", "connectionstring", "dsn",
 }
+_CREDENTIAL_WORDS = {"password", "passwd", "secret", "token", "credential", "credentials",
+                     "authorization", "auth", "bearer", "dsn"}
+_KEY_QUALIFIERS = {"api", "auth", "access", "private", "secret", "client", "session",
+                   "signing", "encryption", "aws", "ssh"}
+_URL = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s<>\"']+", re.I)
+
+
+def _credential_key(key):
+    key = str(key)
+    compact = re.sub(r"[-_]", "", key).lower()
+    if compact in CREDENTIAL_KEYS:
+        return True
+    words = re.findall(r"[a-z0-9]+", re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key).lower())
+    # Only the last word names what the value is: token_count and auth_status are ordinary columns.
+    return bool(words) and (words[-1] in _CREDENTIAL_WORDS or
+                            words[-1] == "key" and len(words) > 1 and words[-2] in _KEY_QUALIFIERS)
+
+
+def _credential_url(text):
+    for match in _URL.finditer(text):
+        try:
+            if urlsplit(match.group().rstrip(".,;)]}")).password is not None:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def read_handoff(folder):
@@ -35,13 +63,25 @@ def read_handoff(folder):
     return value
 
 
-def credential_bearing(value):
+def _credential_structure(value):
     if isinstance(value, dict):
-        return any(re.sub(r"[-_]", "", str(k)).lower() in CREDENTIAL_KEYS or credential_bearing(v)
+        return any(_credential_key(k) or _credential_structure(v)
                    for k, v in value.items())
     if isinstance(value, list):
-        return any(credential_bearing(v) for v in value)
+        return any(_credential_structure(v) for v in value)
+    if isinstance(value, str):
+        return _credential_url(value)
     return False
+
+
+def credential_bearing(value):
+    if _credential_structure(value):
+        return True
+    try:
+        wire = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError):
+        return True
+    return scrub_output(wire) != wire
 
 
 def identity(value):

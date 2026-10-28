@@ -65,6 +65,15 @@ def _batch(label="ready"):
     ])
 
 
+async def test_earlier_tool_results_enter_kickoff_as_user_data():
+    session = _session_with_plan_sequence(_response("no more data"))
+    state = _state(session, _pipeline_kickoff_evidence="<earlier-results>\nuntrusted page text\n</earlier-results>")
+    await engine.run_gathering_loop(state)
+    assert "untrusted page text" not in session._llm.plan.call_args.kwargs["system"]
+    assert "untrusted page text" in session._llm.plan.call_args.kwargs["messages"][0]["content"]
+    assert session._llm.plan.call_args.kwargs["messages"][0]["role"] == "user"
+
+
 async def test_batch_finish_uses_completed_source_work_without_an_extra_model_call(monkeypatch):
     from anton.core.tools.registry import ToolOutcome
     import anton.core.tools.tool_handlers as handlers

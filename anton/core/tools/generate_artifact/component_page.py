@@ -14,10 +14,11 @@ If the request needs an interface, library or feature this API cannot express fa
 exactly USE_HTML_WRITER. The ordinary HTML writer will handle it. Never omit a requirement to fit.
 
 Use `await CoworkPage(config)`. API:
-config = {title, lang:'en' (the user's language code), subtitle?, emptyText?, loadingText?, errorText?, controls?:[
+config = {title, lang:'en' (the user's language code), subtitle?, overview?:{lead?,metrics?}, emptyText?, loadingText?, errorText?, controls?:[
   {id, label, type:'tabs' or 'select', value, options:[{value,label}]}],
   render: selection => ({lead?,metrics?,sections})}.
 Without controls, omit render and put lead, metrics, sections directly on config.
+overview stays visible while controls change the sections. Use it only for measures that remain true in every control state.
 lead = {text: exact scoped finding, value?:formatted value, detail?:context, tone?:'warning'|'danger'|'good'}.
 metrics = [{label,value,unit?,detail?,tone?}]. Use up to four supporting metrics; put additional
 requested measures in readable details. All source values and units must remain correct.

@@ -475,6 +475,7 @@ class GenState:
     # change them mid-run has to live in a step message instead.
     _pipeline_system: str = ""
     _pipeline_tools: "list[dict] | None" = None
+    _pipeline_kickoff_evidence: str = ""
 
     @property
     def datasource_context(self) -> str:

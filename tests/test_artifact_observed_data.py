@@ -41,6 +41,21 @@ def test_credential_keys_are_recognized_in_common_spellings(key):
     assert not observed_data.credential_bearing({"source": {"rows": [1, 2]}})
 
 
+@pytest.mark.parametrize("key", ["supply_api_key", "MY_API_TOKEN", "X-Auth-Token"])
+def test_credentials_with_prefixes_are_rejected(key):
+    assert observed_data.credential_bearing({"source": {key: "dummy-secret"}})
+
+
+def test_credential_url_is_rejected_but_normal_urls_and_keys_are_allowed():
+    assert observed_data.credential_bearing({"source": "postgres://user:pass@host/db"})
+    assert not observed_data.credential_bearing({"source": "postgres://host/db", "primary_key": 42})
+
+
+def test_handoff_passes_through_output_scrubber(monkeypatch):
+    monkeypatch.setattr(observed_data, "scrub_output", lambda text: text.replace("dummy-secret", "[REDACTED]"))
+    assert observed_data.credential_bearing({"rows": [{"note": "dummy-secret"}]})
+
+
 def test_edit_keeps_existing_observed_data_when_no_new_query_is_needed():
     original = {"rows": [["A", 3.5], ["B", 8.25]]}
     data = {observed_data.identity(original): original}
@@ -74,3 +89,14 @@ def test_contract_keeps_small_objects_exact_and_describes_arrays():
     assert '"open":"no"' in text
     assert "is an ARRAY with 30 elements; iterate this array directly" in text
     assert "is an OBJECT with these exact observed values" in text
+
+
+@pytest.mark.parametrize("key", ["key", "primary_key", "sort_key", "token_count", "token_type", "auth_status",
+                                 "auth_method", "password_changed_at", "input_tokens", "author"])
+def test_ordinary_data_columns_are_not_credentials(key):
+    assert not observed_data.credential_bearing({"records": [{key: 3}]})
+
+
+@pytest.mark.parametrize("key", ["supply_api_key", "MY_API_TOKEN", "X-Auth-Token", "db_password", "clientSecret"])
+def test_credential_names_are_recognized_in_common_spellings(key):
+    assert observed_data.credential_bearing({"source": {key: "value"}})

@@ -10,12 +10,15 @@
   const atlas = 'https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json';
   const normalized = value => String(value).normalize('NFKD').toLowerCase().replace(/[^\p{L}\p{N}]/gu,'');
   function load(name) {
-    if (!library.has(name)) library.set(name, new Promise((resolve, reject) => {
-      const script = document.createElement('script');
-      script.src = urls[name]; script.onload = resolve;
-      script.onerror = () => reject(new Error('Could not load ' + name));
-      document.head.append(script);
-    }));
+    if (!library.has(name)) {
+      const pending = new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = urls[name]; script.onload = resolve;
+        script.onerror = () => {script.remove(); reject(new Error('Could not load ' + name));};
+        document.head.append(script);
+      });
+      library.set(name, pending.catch(error => {library.delete(name); throw error;}));
+    }
     return library.get(name);
   }
   function el(tag, text, className) {
@@ -31,20 +34,46 @@
   window.CoworkNumber = (value, unit = '', lang = document.documentElement.lang || 'en') => {
     if (value === null || value === undefined || typeof value === 'number' && !Number.isFinite(value)) return '—';
     if (typeof value !== 'number') {CoworkText(value);return String(value);}
-    if (/^[A-Z]{3}$/.test(unit)) return new Intl.NumberFormat(lang, {style: 'currency', currency: unit, maximumFractionDigits: 2}).format(value);
-    return new Intl.NumberFormat(lang, {maximumFractionDigits: 2}).format(value) + (unit ? (unit === '%' ? '' : ' ') + unit : '');
+    // Keep cards readable while preserving small nonzero measurements.
+    const precision = value && Math.abs(value) < .01 ? {maximumSignificantDigits: 2} : {maximumFractionDigits: 2};
+    if (/^[A-Z]{3}$/.test(unit)) return new Intl.NumberFormat(lang, {style: 'currency', currency: unit, ...precision}).format(value);
+    return new Intl.NumberFormat(lang, precision).format(value) + (unit ? (unit === '%' ? '' : ' ') + unit : '');
   };
   const escape = text => String(text ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   let countries;
   async function geography() {
     await Promise.all([load('d3'), load('topojson')]);
-    if (!countries) countries = d3.json(atlas).then(world => topojson.feature(world, world.objects.countries));
+    if (!countries) countries = d3.json(atlas).then(world => topojson.feature(world, world.objects.countries))
+      .catch(error => {countries = undefined; throw error;});
     return countries;
   }
   function coordinate(pair) {
     if (!Array.isArray(pair) || pair.length !== 2 || !pair.every(v => typeof v === 'number' && Number.isFinite(v)) || Math.abs(pair[0]) > 180 || Math.abs(pair[1]) > 90) throw new Error('A geographic coordinate must be a real [longitude, latitude] pair.');
     return pair;
   }
+  window.CoworkMapProjection = (section, land, w, h) => {
+    const projection = d3.geoNaturalEarth1().fitExtent([[12,12],[w-12,h-12]], land);
+    const worldScale = projection.scale();
+    const coordinates = [
+      ...(section.points || []).map(p => [p.lon, p.lat]),
+      ...(section.routes || []).flatMap(r => [r.from, r.to]),
+      ...(section.center ? [section.center] : []),
+    ];
+    if (!coordinates.length) return projection;
+    const longitude = coordinates.map(pair => pair[0]), latitude = coordinates.map(pair => pair[1]);
+    const west = Math.min(...longitude), east = Math.max(...longitude);
+    const south = Math.min(...latitude), north = Math.max(...latitude);
+    if (east-west > 80 || north-south > 50) return projection;
+    const lonPad = Math.max(4, (east-west)*.15), latPad = Math.max(4, (north-south)*.15);
+    const focus = {type:'MultiPoint',coordinates:[[west-lonPad,south-latPad],[east+lonPad,north+latPad]]};
+    projection.fitExtent([[20,20],[w-20,h-20]], focus);
+    if (projection.scale() > worldScale*24) {
+      projection.scale(worldScale*24);
+      const center = [(west+east)/2,(south+north)/2], point = projection(center), shift = projection.translate();
+      projection.translate([shift[0]+w/2-point[0],shift[1]+h/2-point[1]]);
+    }
+    return projection;
+  };
   async function drawGeography(node, section, cleanup) {
     const land = await geography();
     const points = section.points || [], routes = section.routes || [];
@@ -58,10 +87,9 @@
         .backgroundColor('#101923').showAtmosphere(false).globeImageUrl(null).bumpImageUrl(null)
         .polygonsData(land.features).polygonCapColor(() => '#29445a').polygonSideColor(() => '#182b3b')
         .polygonStrokeColor(() => '#6d8b9f').polygonAltitude(.002)
-        .pointsData(points).pointLat(p => p.lat).pointLng(p => p.lon).pointRadius(window.CoworkGlobeLabels ? .7 : .35).pointAltitude(.02)
+        .pointsData(points).pointLat(p => p.lat).pointLng(p => p.lon).pointRadius(.7).pointAltitude(.02)
         .pointColor(p => p.color || '#f0bc62').pointLabel(p => escape(p.label || p.name))
-        .labelsData(window.CoworkGlobeLabels?[]:points.filter(p=>p.label)).labelLat(p=>p.lat).labelLng(p=>p.lon)
-        .labelText(p=>p.label).labelColor(()=>'#e6edf3').labelSize(.55).labelAltitude(.035)
+        .labelsData([])
         .arcsData(routes).arcStartLat(r => r.from[1]).arcStartLng(r => r.from[0])
         .arcEndLat(r => r.to[1]).arcEndLng(r => r.to[0]).arcColor(r => r.color || '#83b6f5')
         .arcStroke(.45).arcLabel(r => escape(r.label || ''));
@@ -70,38 +98,33 @@
       if (center) { coordinate(center); globe.pointOfView({lng: center[0], lat: center[1], altitude: 2.2}, 0); }
       const observer = new ResizeObserver(() => globe.width(node.clientWidth).height(node.clientHeight));
       observer.observe(node); cleanup.push(() => {observer.disconnect(); globe._destructor();});
-      if(window.CoworkGlobeLabels)CoworkGlobeLabels(node,globe,points,cleanup);
-      if(window.CoworkGeoMotion)CoworkGeoMotion(node,section,globe);
+      CoworkGlobeLabels(node,globe,points,cleanup);
+      CoworkGeoMotion(node,section,globe);
     } else if (section.library === 'echarts') {
       await load('echarts'); if (!node.isConnected) return;
       echarts.registerMap('cowork-world', land);
       await drawChart(node, {option: {geo: {map: 'cowork-world', roam: true, itemStyle: {areaColor:'#233b50',borderColor:'#728a9b'}, label:{show:false}},
         tooltip: {formatter: p => escape(p.data?.displayLabel || (typeof p.data?.label==='string'?p.data.label:p.name) || '')}, series: [
-          {type:'scatter',coordinateSystem:'geo',data:points.map(p=>({name:p.name,displayLabel:p.label,value:[p.lon,p.lat],label:{show:!!p.label,formatter:()=>p.label,position:'right',color:'#e6edf3'}})),symbolSize:9,itemStyle:{color:'#f0bc62'}},
-          {type:'lines',coordinateSystem:'geo',data:routes.map(r=>({coords:[r.from,r.to],label:r.label})),lineStyle:{color:'#83b6f5',width:2,opacity:.85}}
+          {type:'scatter',coordinateSystem:'geo',data:points.map(p=>({name:p.name,displayLabel:p.label,value:[p.lon,p.lat],
+            itemStyle:{color:p.color||'#f0bc62'},label:{show:!!p.label,formatter:()=>p.label,position:'right',color:'#e6edf3'}})),
+            symbolSize:9,labelLayout:{hideOverlap:true}},
+          {type:'lines',coordinateSystem:'geo',data:routes.map(r=>({coords:[r.from,r.to],label:r.label,lineStyle:{color:r.color||'#83b6f5'}})),
+            lineStyle:{color:'#83b6f5',width:2,opacity:.85},
+            effect:{show:!!section.routeMotion&&!matchMedia('(prefers-reduced-motion: reduce)').matches,
+              constantSpeed:24,symbol:'circle',symbolSize:5}}
         ]}}, cleanup);
     } else {
       node.replaceChildren();
       const w = node.clientWidth, h = node.clientHeight;
-      const projection = d3.geoNaturalEarth1().fitExtent([[12,12],[w-12,h-12]], land);
+      const projection = CoworkMapProjection(section, land, w, h);
       const path = d3.geoPath(projection), svg = d3.select(node).append('svg').attr('viewBox', `0 0 ${w} ${h}`).attr('aria-label', section.title || '');
       const group = svg.append('g');
       group.selectAll('path.land').data(land.features).join('path').attr('class','land').attr('d',path).attr('fill','#233b50').attr('stroke','#647f93').attr('stroke-width',.55);
       group.selectAll('path.route').data(routes).join('path').attr('class','route').attr('d',r=>path({type:'LineString',coordinates:[r.from,r.to]})).attr('fill','none').attr('stroke',r=>r.color||'#83b6f5').attr('stroke-width',2).append('title').text(r=>r.label||'');
       group.selectAll('circle').data(points).join('circle').attr('cx',p=>projection([p.lon,p.lat])[0]).attr('cy',p=>projection([p.lon,p.lat])[1]).attr('r',4).attr('fill',p=>p.color||'#f0bc62').append('title').text(p=>p.label||p.name||'');
-      const placed=[];
-      if(window.CoworkMapLabels)CoworkMapLabels(group,points,projection,w,h);
-      else for(const point of points.filter(p=>p.label)){
-        const [px,py]=projection([point.lon,point.lat]);
-        const text=group.append('text').text(point.label).attr('font-size',11).attr('fill','#e6edf3').attr('stroke','#101923').attr('stroke-width',3).attr('paint-order','stroke');
-        const width=text.node().getComputedTextLength(),x=Math.max(8,Math.min(w-width-8,px+8));
-        let y=Math.max(14,Math.min(h-8,py-8));
-        for(let n=0;n<points.length&&placed.some(b=>x<b.x+b.w+5&&x+width>b.x-5&&Math.abs(y-b.y)<16);n++)y=Math.min(h-8,y+17);
-        group.insert('line',()=>text.node()).attr('x1',px).attr('y1',py).attr('x2',x).attr('y2',y-4).attr('stroke','#8ba7bc').attr('stroke-width',.7);
-        text.attr('x',x).attr('y',y);placed.push({x,y,w:width});
-      }
+      CoworkMapLabels(group,points,projection,w,h);
       svg.call(d3.zoom().filter(event=>event.type!=='wheel'||event.ctrlKey).scaleExtent([1,8]).on('zoom',event=>group.attr('transform',event.transform)));
-      if(window.CoworkGeoMotion)CoworkGeoMotion(node,section);
+      CoworkGeoMotion(node,section);
     }
   }
   async function drawChart(node, section, cleanup) {
@@ -159,6 +182,7 @@
     const root = document.getElementById('cowork-page'); root.replaceChildren();
     const header = el('header'); header.id = 'page-header'; header.append(el('h1',config.title));
     if (config.subtitle) header.append(el('p',config.subtitle,'subtitle')); root.append(header);
+    if (config.overview) summary(root, config.overview, 'overview');
     const selected = Object.create(null), openData = new Set(), controls = el('div',null,'controls'); controls.id = 'page-controls';
     const body = el('div'); body.id = 'page-content'; let version = 0, cleanup = [];
     function dispose(){cleanup.forEach(fn=>fn());cleanup=[];}
@@ -189,6 +213,7 @@
     root.append(body);
     async function update() {
       const current=++version;dispose();body.replaceChildren();
+      try {
       const page = config.render ? config.render(CoworkSelection(selected)) : config;
       summary(body, page, 'page');
       for(const [index,s] of (page.sections||[]).entries()){
@@ -207,16 +232,26 @@
         }
         const view=el('div',null,s.type==='chart'?'view':'view geo-view');section.append(view);
         view.setAttribute('aria-busy','true');view.append(el('p',config.loadingText||'…','loading'));
-        let chart;
-        if(s.type==='chart')chart=await drawChart(view,s,cleanup);
-        else if(s.type==='map'||s.type==='globe')await drawGeography(view,s,cleanup);
-        else throw new Error('Unsupported section type: '+s.type);
-        if(!view.isConnected||current!==version)return;
-        if(!view.querySelector('canvas,svg'))throw new Error('The requested view did not draw.');
-        view.setAttribute('aria-busy','false');
-        if(chart&&window.CoworkChartData)CoworkChartData(chart,head,section,config,section.id,openData,cleanup);
-        if(['map','globe'].includes(s.type)&&window.CoworkGeoLegend)CoworkGeoLegend(section,s);
+        try {
+          let chart;
+          if(s.type==='chart')chart=await drawChart(view,s,cleanup);
+          else if(s.type==='map'||s.type==='globe')await drawGeography(view,s,cleanup);
+          else throw new Error('Unsupported section type: '+s.type);
+          if(!view.isConnected||current!==version)return;
+          if(!view.querySelector('canvas,svg'))throw new Error('The requested view did not draw.');
+          view.setAttribute('aria-busy','false');
+          if(chart&&window.CoworkChartData)CoworkChartData(chart,head,section,config,section.id,openData,cleanup);
+          if(['map','globe'].includes(s.type)&&window.CoworkGeoLegend)CoworkGeoLegend(section,s);
+        } catch(error) {
+          if(!view.isConnected||current!==version)return;
+          const message=el('p',config.errorText||error.message,'failure');message.setAttribute('role','alert');
+          view.replaceChildren(message);view.setAttribute('aria-busy','false');console.error(error);
+        }
         if(current!==version)return;
+      }
+      } catch(error) {
+        // A superseded render must not replace the currently selected view with its error.
+        if(current===version)throw error;
       }
     }
     try{await update();}catch(error){dispose();throw error;}

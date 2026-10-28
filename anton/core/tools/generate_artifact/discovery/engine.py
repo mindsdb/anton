@@ -132,6 +132,7 @@ async def run_gathering_loop(state: "PrdState") -> None:
         state.messages.append({
             "role": "user",
             "content": prompts.build_call_kickoff(state)
+            + ("\n\n" + state._pipeline_kickoff_evidence if state._pipeline_kickoff_evidence else "")
             + "\n\n"
             + prompts.step_message(step, state),
         })

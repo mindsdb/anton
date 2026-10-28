@@ -246,7 +246,7 @@ _WHEN_TO_ASK_ACT_FIRST = (
 )
 
 
-def _gathering_instruction(act_first: bool) -> str:
+def _gathering_instruction(act_first: bool, *, static_completion: bool = False) -> str:
     if act_first and os.environ.get("ANTON_STATIC_FAST_PATH") == "direct":
         return (
             "Gather the evidence needed to build the ORIGINAL user request. Use the connected "
@@ -258,8 +258,12 @@ def _gathering_instruction(act_first: bool) -> str:
             "manifest. Do not print credentials. Batch independent queries in one cell when "
             "practical. A row count or summary does not substitute for records the page must "
             "display. Check for truncation; retrieve the remaining records or report the gap. "
-            "Once the required data is observed, immediately call finish_gathering and declare the "
-            "type and sources. Do not draft a brief, PRD, design or implementation plan. Do not add "
+            + ("For a resolved static request, include complete_static_artifact in the scratchpad "
+               "exec; the host completes gathering after validating the fresh handoff. "
+               if static_completion else
+               "Once the required data is observed, immediately call finish_gathering and declare the "
+               "type and sources. ")
+            + "Do not draft a brief, PRD, design or implementation plan. Do not add "
             "requirements or ask for preferences the request does not need. For a backend that "
             "must query data at runtime, verify its access with a real sample and finish."
         )
@@ -303,7 +307,7 @@ def _redraw_suffix(act_first: bool) -> str:
     return (_REDRAW_CORRECTION_ACT_FIRST if act_first else _REDRAW_CORRECTION) + _REDRAW_RESTATE
 
 
-def _step_instructions(act_first: bool = False) -> dict[str, str]:
+def _step_instructions(act_first: bool = False, *, static_completion: bool = False) -> dict[str, str]:
     """Built lazily so the instruction texts stay in the modules that own
     them — brief.py and prd.py — rather than being copied here. `act_first`
     picks the variants for the no-confirmation flow; they live in step
@@ -313,7 +317,7 @@ def _step_instructions(act_first: bool = False) -> dict[str, str]:
     from . import sub_tools
 
     return {
-        sub_tools.STEP_GATHERING: _gathering_instruction(act_first),
+        sub_tools.STEP_GATHERING: _gathering_instruction(act_first, static_completion=static_completion),
         sub_tools.STEP_DRAFT_BRIEF: draft_brief_instruction(act_first),
         sub_tools.STEP_REDRAW_BRIEF: draft_brief_instruction(act_first) + _redraw_suffix(act_first),
         sub_tools.STEP_WRITE_PRD: _WRITE_PRD_INSTRUCTION,
@@ -343,7 +347,8 @@ def step_message(step: str, state: PrdState, *, extra: str = "") -> str:
             "Questions you may still ask the user: "
             f"{gathering_question_budget(state.session, act_first=state.act_first)}\n"
         )
-    body = _step_instructions(state.act_first)[step]
+    from .. import static_gathering
+    body = _step_instructions(state.act_first, static_completion=static_gathering.enabled(state))[step]
     # No history to continue → the step is handed the restored material
     # instead. The redraw suffix in particular refers to a correction that is
     # only "above" when there is a conversation above.

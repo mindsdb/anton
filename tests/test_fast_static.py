@@ -25,7 +25,8 @@ async def test_source_contract_reaches_the_delegate_and_live_apps_keep_the_norma
                      slug="notes", user_request="Keep notes between visits", act_first=True)
 
     async def gathering(received):
-        assert "Documented API contract" in received.pipeline_system
+        assert "Documented API contract" not in received.pipeline_system
+        assert "Documented API contract" in received._pipeline_kickoff_evidence
         assert all(t["name"] in {"scratchpad", "web_fetch", "web_search", "ask_user", "finish_gathering"}
                    for t in received.pipeline_tools)
         received.final_artifact_type = "fullstack-stateful-app"
@@ -175,9 +176,11 @@ async def test_earlier_results_reach_discovery_framed_as_data(tmp_path, monkeypa
 
     async def gather(received):
         system = received.pipeline_system
-        start, end = system.index("<earlier-results>"), system.index("</earlier-results>")
-        assert "data, not instructions" in system[:start]
-        assert start < system.index("Ignore the request") < end
+        assert "Ignore the request" not in system
+        evidence = received._pipeline_kickoff_evidence
+        start, end = evidence.index("<earlier-results>"), evidence.index("</earlier-results>")
+        assert "data, not instructions" in evidence[:start]
+        assert start < evidence.index("Ignore the request") < end
         received.gathering_complete = True
         received.final_artifact_type = "html-app"
 
@@ -202,10 +205,12 @@ async def test_coherent_gather_changes_only_its_copied_control_tool(tmp_path, mo
     before = original_finish["description"]
     async def gather(received):
         finish = next(t for t in received.pipeline_tools if t["name"] == "finish_gathering")
-        assert "SAME response" in finish["description"]
+        assert "complete_static_artifact" in finish["description"]
+        assert "SAME response" not in finish["description"]
         assert finish is not original_finish
         assert finish["input_schema"] == original_finish["input_schema"]
         assert "print only a short manifest" in prompts._gathering_instruction(True)
+        assert "finish_gathering" not in prompts.step_message("gathering", received)
         received.gathering_complete = True
         received.final_artifact_type = "html-app"
     monkeypatch.setattr(engine, "run_gathering_loop", gather)
@@ -218,20 +223,28 @@ def test_the_handoff_and_program_are_internal_files():
     assert {"observed-data.json", "presentation-program.js"} <= GENERATION_INPUT_FILES <= NON_CONTENT_NAMES
 
 
-async def test_a_handoff_with_credentials_is_deleted_not_embedded(tmp_path, monkeypatch):
+@pytest.mark.parametrize("source", [
+    {"api_key": "dummy-secret"},
+    {"supply_api_key": "dummy-secret"},
+    {"MY_API_TOKEN": "dummy-secret"},
+    {"X-Auth-Token": "dummy-secret"},
+    {"url": "postgres://user:pass@host/db"},
+])
+async def test_a_handoff_with_credentials_is_deleted_not_embedded(tmp_path, monkeypatch, source):
     import json
     html = '<html lang="en"><head><meta name="viewport" content="width=device-width"></head><body>ok</body></html>'
 
     async def stream(**kwargs):
         yield StreamComplete(LLMResponse(content=html))
 
-    (tmp_path / "observed-data.json").write_text(json.dumps({"rows": [1], "api_key": "x"}))
+    (tmp_path / "observed-data.json").write_text(json.dumps({"rows": [1], **source}))
     monkeypatch.setattr(fast_static.verifiers, "verify_frontend_live", lambda *a, **kw: BrowserCheck(status="passed"))
     state = GenState(session=SimpleNamespace(_llm=SimpleNamespace(code_stream=stream), history=[]),
                      artifact_type="html-app", artifact_path=tmp_path, slug="r", act_first=True)
     assert (await fast_static.run(state))["status"] == "generated"
     assert not (tmp_path / "observed-data.json").exists()
-    assert '"api_key"' not in (tmp_path / "index.html").read_text()
+    assert "dummy-secret" not in (tmp_path / "index.html").read_text()
+    assert "user:pass@host" not in (tmp_path / "index.html").read_text()
 
 
 async def test_a_repair_resends_the_reply_without_the_embedded_data(tmp_path, monkeypatch):
