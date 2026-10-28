@@ -99,7 +99,7 @@ stays visible, while desktop retains the comparison table. Missing line
 values remain gaps. Large value labels are formatted on the host, before browser
 number conversion can lose integer precision.
 Percentage series normalize ratio/point inputs to the same percentage axis units,
-with percentage tick labels. Shared axes reject incompatible unit formats. Numeric
+with percentage tick labels. Shared axes reject mixing percentages and plain numeric values. Numeric
 extents or rounded ticks that the browser cannot represent require rescaled units.
 
 New pages start with the compiled document tool. Custom fragments handle unusual
