@@ -37,6 +37,10 @@ def test_charts_reflow_without_overflow_or_errors(width,height):
             label=page.locator('.chart svg text').filter(has_text='A very long category name').first
             assert label.locator('tspan').count()>=1
             assert 'A very long category name' in label.text_content()
+        if width>=641:
+            label=page.locator('.chart svg text').filter(has_text='A very long category name').first
+            assert label.locator('tspan').count()>=2
+            assert label.bounding_box()['x']>=page.locator('.chart').first.bounding_box()['x']-1
         browser.close()
 
 
