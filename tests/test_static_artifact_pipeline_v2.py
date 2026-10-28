@@ -8,7 +8,7 @@ import pytest
 from anton.core.artifacts.static.data import Evidence
 from anton.core.llm.provider import LLMResponse, StreamComplete, ToolCall
 from anton.core.tools.generate_artifact.state import GenState, BrowserCheck
-from anton.core.tools.generate_artifact.static_v2.compose import compose, compile_output, Custom
+from anton.core.tools.generate_artifact.static_v2.compose import compose, compile_output, Custom, Structured
 from anton.core.tools.generate_artifact.static_v2 import collect as collect_function
 from anton.core.tools.generate_artifact.static_v2.content_review import SYSTEM as REVIEW_SYSTEM
 
@@ -240,6 +240,58 @@ async def test_project_rules_are_returned_from_host_context_without_a_dotfile_re
     st.session._llm.plan_stream=stream;st.session._llm.code_stream=stream
     assert isinstance(await module.collect(st),Evidence)
     assert 'Use the supplied house typography.' in str(seen[-1]['messages'])
+
+
+async def test_evidence_passes_bind_a_fresh_pad_without_mutating_shared_tool_schema(tmp_path,monkeypatch):
+    import copy
+    import importlib
+    from anton.core.tools.registry import ToolOutcome
+    from anton.core.tools.tool_defs import SCRATCHPAD_TOOL
+    module=importlib.import_module('anton.core.tools.generate_artifact.static_v2.collect')
+    original=copy.deepcopy(module.protocol.tool_schema(SCRATCHPAD_TOOL));executed=[];offered=[]
+    async def execute(session,arguments):
+        executed.append(arguments)
+        return ToolOutcome(content='Executed',ok=True)
+    async def stream(**kwargs):
+        offered.append(next(t for t in kwargs['tools'] if t['name']=='scratchpad')['input_schema']['properties']['name']['enum'][0])
+        calls=[ToolCall('exec','scratchpad',{'action':'exec','name':'parent_notebook','code':'print("reader")'}),
+            ToolCall('finish','finish_static_evidence',{'ready':True,'has_records':False,'reason':'Qualitative result'})]
+        yield StreamComplete(response=LLMResponse(content='',tool_calls=calls))
+    monkeypatch.setattr('anton.core.tools.tool_handlers.handle_scratchpad',execute)
+    st=state(tmp_path,VALID);st.session._agent_scratchpad_names={'parent_notebook'}
+    st.session._llm.plan_stream=stream
+    for _ in range(2):assert isinstance(await module.collect(st),Evidence)
+    assert len(set(offered))==2
+    assert [call['name'] for call in executed]==offered
+    assert all(call['name']!='parent_notebook' and call['confirm_new_scratchpad'] is True for call in executed)
+    assert module.protocol.tool_schema(SCRATCHPAD_TOOL)==original
+
+
+async def test_read_source_schema_survives_the_composition_handoff(tmp_path):
+    import importlib
+    from anton.core.tools.generate_artifact.static_v2.prompts import context
+    module=importlib.import_module('anton.core.tools.generate_artifact.static_v2.collect')
+    body='Source schema: rates are already percentage points; the snapshot period comes from the source metadata.'
+    responses=[LLMResponse(content='',tool_calls=[ToolCall('source','recall_skill',{'label':'measurements'})]),
+        LLMResponse(content='',tool_calls=[ToolCall('done','finish_static_evidence',{'ready':True,'has_records':False,'reason':'Qualitative schema explanation'})])]
+    async def stream(**kwargs):yield StreamComplete(response=responses.pop(0))
+    st=state(tmp_path,VALID);st.session._llm.plan_stream=stream;st.session._llm.code_stream=stream
+    st.session._skill_store=SimpleNamespace(list_summaries=lambda:[{'label':'measurements'}],load_for_artifacts=lambda label:SimpleNamespace(declarative_md=body))
+    assert isinstance(await module.collect(st),Evidence)
+    assert st.static_source_contracts=={'measurements':body}
+    assert body in context(st)
+    html,_=compile_output(Structured(mode='document',**VALID),Evidence())
+    assert body not in html
+
+
+def test_source_contract_context_is_bounded_and_labels_omissions(tmp_path):
+    from anton.core.tools.generate_artifact.static_v2.prompts import context
+    st=state(tmp_path,VALID);st.static_source_contracts={'first':'A'*60_000,'second':'B'*60_000}
+    text=context(st)
+    handoff=text.split('Trusted source procedures already read',1)[1].split('Source procedure catalog',1)[0]
+    assert len(handoff)<64_000
+    assert 'A'*60_000 in handoff and 'B'*60_000 not in handoff
+    assert '1 read procedures omitted' in handoff
 
 
 async def test_provided_records_require_a_saved_snapshot_and_preserve_scalar_types(tmp_path):

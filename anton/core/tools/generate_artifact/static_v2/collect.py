@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import uuid
 import json
+import copy
 from decimal import Decimal
 
 from anton.core.artifacts.static.data import Evidence
 from anton.core.llm.structured import looks_truncated
 from anton.core.utils.scratchpad import scratchpad_action
 from anton.utils.nofollow import read_bytes_nofollow, make_dirs_nofollow
+from anton.utils.datasources import scrub_output
 from .. import sub_tools as protocol
 from ..discovery.engine import _exec_ran, _web_tools
 from ..discovery.sub_tools import dispatch_ask_user, _ask_user_schema
@@ -35,11 +37,16 @@ async def collect(state, *, feedback: str = '') -> Evidence | str:
     from anton.core.tools.web_tools import WEB_FETCH_FALLBACK_TOOL, WEB_SEARCH_FALLBACK_TOOL
     from anton.core.tools.tool_handlers import handle_scratchpad, handle_read_text_file
 
-    path = state.artifact_path / '.static' / f'evidence-{uuid.uuid4().hex}.json'
+    nonce = uuid.uuid4().hex
+    pad_name = 'static_evidence_' + nonce
+    path = state.artifact_path / '.static' / f'evidence-{nonce}.json'
     make_dirs_nofollow(state.artifact_path, path.parent)
-    system = COLLECT.replace('EVIDENCE_PATH', repr(str(path)))
+    system = COLLECT.replace('EVIDENCE_PATH', repr(str(path))).replace('SOURCE_SCRATCHPAD', repr(pad_name))
     definitions = [SCRATCHPAD_TOOL, READ_TEXT_FILE_TOOL, RECALL_SKILL_TOOL, WEB_FETCH_FALLBACK_TOOL, WEB_SEARCH_FALLBACK_TOOL]
     tools = [protocol.tool_schema(t) for t in definitions] + [_ask_user_schema(), FINISH]
+    tools[0] = copy.deepcopy(tools[0])
+    tools[0]['description'] += f' This evidence pass owns the fresh scratchpad {pad_name}; named operations are bound to it. Parent notebook variables are not available.'
+    tools[0]['input_schema']['properties']['name']['enum'] = [pad_name]
     saved = snapshots.load(state) if not feedback else None
     if saved is not None:
         tools.append(REUSE)
@@ -124,11 +131,14 @@ async def collect(state, *, feedback: str = '') -> Evidence | str:
                     continue
                 if call.name in ('read_text_file', 'web_fetch') or (call.name == SCRATCHPAD_TOOL.name and scratchpad_action(call.input) == 'exec'):
                     source_attempted = True
-                outcome = await handlers[call.name](state.session, call.input)
+                arguments = {**call.input, 'name': pad_name, 'confirm_new_scratchpad': True} if call.name == SCRATCHPAD_TOOL.name else call.input
+                outcome = await handlers[call.name](state.session, arguments)
                 if call.name == RECALL_SKILL_TOOL.name:
                     source_lookup_failed = getattr(outcome, 'ok', None) is False
                 result = protocol.unwrap_outcome(outcome)
-                state.trace_log.scratchpad(node='static_evidence', input=call.input, output=result)
+                if call.name == RECALL_SKILL_TOOL.name and not source_lookup_failed and isinstance(result, str):
+                    state.static_source_contracts[call.input['label'].strip()] = scrub_output(result)
+                state.trace_log.scratchpad(node='static_evidence', input=arguments, output=result)
                 if call.name == SCRATCHPAD_TOOL.name and scratchpad_action(call.input) == 'exec':
                     source_failed = not _exec_ran(outcome)
                 elif getattr(outcome, 'ok', True) is False:

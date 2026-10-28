@@ -30,7 +30,16 @@ content review, reader controls, and editing fixes.
 
 Collection reuses the session's existing scratchpad, text-file, trusted source-procedure, web, and
 question handlers. It cannot grant access a handler does not already grant.
+Each acquisition binds Python operations to its own fresh scratchpad, isolating it
+from parent notebook variables, live clients and restored namespace state. Multiple
+calls in that acquisition share the same pad. Existing computations must arrive as
+complete records or an actual private data file. Edits preserving data may still
+explicitly reuse the verified published evidence snapshot.
 Source procedures come from the same artifact-trusted skill store. The delegate receives the full body even when the parent already recalled it; conversation-memory recall is not a source documentation tool.
+Bodies read during acquisition travel to composition and content review, so field
+units, scenario definitions and date semantics are not lost at the handoff. That
+context is bounded at 64,000 characters with explicitly labelled omissions. These
+private contracts do not enter the published data manifest or page.
 
 Source selection remains an agent responsibility: acquisition success and a
 source label are **not proof** that the agent selected the authorized source.
