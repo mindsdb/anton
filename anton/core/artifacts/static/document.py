@@ -7,7 +7,7 @@ from typing import Annotated, Literal
 from pydantic import Field, model_validator
 
 from .views import View
-from .data import DataError, Evidence, Model, Name, Query, execute, number
+from .data import BinaryOp, DataError, Evidence, Model, Name, Query, calculate, execute, number
 
 
 class Format(Model):
@@ -44,7 +44,7 @@ class QueryFact(Model):
 
 class Calculation(Model):
     type: Literal["calculation"]
-    op: Literal["add", "subtract", "multiply", "divide"]
+    op: BinaryOp
     inputs: list[Name] = Field(min_length=2, max_length=2)
     format: Format = Field(default_factory=Format)
 
@@ -182,21 +182,7 @@ def resolve_facts(document: Document, evidence: Evidence) -> dict:
                 raise DataError(f"Fact {name} must select one row containing {fact.field}")
             value = rows[0][fact.field]
         else:
-            a, b = (resolve(i) for i in fact.inputs)
-            if a is None or b is None:
-                value = None
-            else:
-                a, b = number(a), number(b)
-                with localcontext() as context:
-                    context.prec = 4096
-                    if fact.op == "divide":
-                        value = a / b if b else None
-                    elif fact.op == "add":
-                        value = a + b
-                    elif fact.op == "subtract":
-                        value = a - b
-                    else:
-                        value = a * b
+            value = calculate(fact.op, *(resolve(i) for i in fact.inputs))
         visiting.remove(name)
         values[name] = value
         return value
