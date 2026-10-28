@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from html import escape
 from importlib.resources import files
+import math
 import re
 
 from .views import checks, validate_ids
@@ -104,12 +105,15 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
                 raise DataError(f"{block.title}: aggregate more than 5000 chart rows; the full data table can remain")
             columns = [Column(field=block.x, label=block.x_label or block.x),
                        *[Column(field=s.field, label=s.label, format=s.format) for s in block.series]]
+            numeric_fields = [s.field for s in block.series] + ([block.x] if block.kind == 'scatter' else [])
             for row in public_rows:
-                for series in block.series:
-                    if row[series.field] is not None:
-                        number(row[series.field])
-                if block.kind == "scatter":
-                    number(row[block.x])
+                for field in numeric_fields:
+                    if row[field] is None and not (block.kind == 'scatter' and field == block.x):
+                        continue
+                    exact = number(row[field])
+                    approximate = float(exact)
+                    if not math.isfinite(approximate) or (exact and approximate == 0):
+                        raise DataError(f'{block.title}: rescale {field} into representable chart units; the browser would overflow or turn a nonzero value into zero')
             chart = {"id": index, "kind": block.kind, "x": block.x, "xLabel": block.x_label,
                      "yLabel": block.y_label, "display": [[s.format.display(row[s.field]) for s in block.series] for row in public_rows], "series": [s.model_dump() for s in block.series], "rows": public_rows}
             content = f'<div class="chart" data-chart="{index}" aria-label="{text(block.title)}"></div>'

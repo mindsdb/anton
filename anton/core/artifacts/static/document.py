@@ -11,10 +11,10 @@ from .data import DataError, Evidence, Model, Name, Query, execute, number
 
 
 class Format(Model):
-    decimals: int = Field(default=0, ge=0, le=18)
+    decimals: int | None = Field(default=None, ge=0, le=18, description='Omit for automatic precision, up to six fractional places; set explicitly for fixed precision.')
     prefix: str = Field(default="", max_length=24)
     suffix: str = Field(default="", max_length=24)
-    percent: bool = False
+    percent: Literal['none', 'ratio', 'points'] = Field(default='none', description='ratio scales a fraction by 100; points preserves a value already in percentage points; none is not a percentage.')
     missing: str = "Not available"
 
     def display(self, value) -> str:
@@ -24,9 +24,14 @@ class Format(Model):
             value = number(value)
             with localcontext() as context:
                 context.prec = 4096
-                value *= 100 if self.percent else 1
-                value = value.quantize(Decimal(1).scaleb(-self.decimals), rounding=ROUND_HALF_UP)
-            return f"{self.prefix}{value:,.{self.decimals}f}{'%' if self.percent else ''}{self.suffix}"
+                value *= 100 if self.percent == 'ratio' else 1
+                if self.decimals is None and value and abs(value) < Decimal('0.000001'):
+                    mantissa, exponent = f'{value:.5E}'.split('E')
+                    shown = mantissa.rstrip('0').rstrip('.') + 'e' + str(int(exponent))
+                    return f"{self.prefix}{shown}{'%' if self.percent != 'none' else ''}{self.suffix}"
+                places = self.decimals if self.decimals is not None else min(6, max(0, -value.normalize().as_tuple().exponent))
+                value = value.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+            return f"{self.prefix}{value:,.{places}f}{'%' if self.percent != 'none' else ''}{self.suffix}"
         return f"{self.prefix}{value}{self.suffix}"
 
 

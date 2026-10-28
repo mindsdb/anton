@@ -51,6 +51,13 @@ count with a field counts non-null values. An empty sum is unavailable, not zero
 Facts select one exact query result or calculate over named facts. Division by
 zero and missing inputs produce unavailable values. Text uses `{{fact_name}}`
 and metrics bind to facts, so changing layout does not retype a total. The
+percentage formatter requires an explicit input scale: `percent="ratio"`
+turns 0.72 into 72%, while `percent="points"` preserves a source value of 72
+as 72%. A Boolean percentage flag is rejected. Public Decimal bindings remain
+exact decimal strings; custom browser arithmetic must convert them deliberately.
+Omitting decimal precision preserves useful fractional places, up to six, rather
+than rounding every value to an integer. Explicit precision supports 0–18 places.
+The
 compiler cannot prove that a written conclusion follows from the data, or that an
 arbitrary literal in agent-authored HTML is correct; those require generation
 and semantic evaluation.

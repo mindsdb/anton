@@ -129,3 +129,19 @@ def test_embedded_reference_data_and_library_work_with_network_disabled(tmp_path
         assert page.locator('h1').inner_text()=='3 nodes'
         assert not errors
         browser.close()
+
+
+@pytest.mark.parametrize('long_labels',[False,True])
+def test_time_axis_endpoint_labels_do_not_overlap_on_phones(long_labels):
+    from datetime import date,timedelta
+    data=Evidence.model_validate({'datasets':{'periods':{'source':{'label':'Synthetic weekly QA'},'rows':[
+        {'date':('W'*40+str(n)) if long_labels else str(date(2026,10,5)+timedelta(weeks=n)),'amount':n+1} for n in range(13)]}}})
+    doc=Document.model_validate({'title':'Weekly record','sections':[{'id':'trend','blocks':[{'type':'chart','title':'Observed amounts','kind':'line',
+        'query':'periods','x':'date','series':[{'field':'amount','label':'Amount'}]}]}]})
+    with playwright.sync_playwright() as p:
+        browser=p.chromium.launch();page=browser.new_page(viewport={'width':390,'height':844})
+        page.set_content(render(doc,data).html)
+        page.wait_for_function('document.querySelectorAll(".x-tick").length>=2')
+        boxes=page.locator('.x-tick').evaluate_all('(nodes)=>nodes.map(node=>{const r=node.getBoundingClientRect();return {left:r.left,right:r.right};})')
+        assert all(right['left']-left['right']>=5 for left,right in zip(boxes,boxes[1:]))
+        browser.close()
