@@ -2367,14 +2367,20 @@ async def test_an_unknown_block_id_is_retried(tmp_path: Path, monkeypatch):
     st = _state(tmp_path)
     st.data_files = [DataFile("1", ["orders"])]
     pages = iter([_GOOD_PAGE.replace('data-anton-data="1"></script>', 'data-anton-data="9"></script>'), _GOOD_PAGE])
+    calls = {"n": 0}
 
     async def fake_loop(**kw):
+        calls["n"] += 1
         (tmp_path / "index.html").write_text(next(pages))
         return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
     monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", _no_browser)
     assert await orchestrator._gen_verify_frontend(st) is None
+    assert calls["n"] == 2
+    failed = [s.detail for s in st.trace if s.node == "verify_frontend" and s.outcome == "fail"]
+    assert len(failed) == 1 and "does not exist" in failed[0]
+    assert 'data-anton-data="1">\n[1]\n</script>' in (tmp_path / "index.html").read_text()
 
 
 def test_filling_the_data_blocks_writes_nothing_once_the_run_is_abandoned(tmp_path: Path):

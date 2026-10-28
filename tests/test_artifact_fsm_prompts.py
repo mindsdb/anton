@@ -447,6 +447,23 @@ def test_verifier_contract_reaches_both_frontend_prompts():
         assert marker in rules, marker
 
 
+def test_data_files_are_described_in_the_html_prompt_only():
+    """Only the html-app page is built from data files: the fullstack prompts
+    keep their inputs list, and neither the sections nor the block rules reach them."""
+    html = prompts.build_subagent_system_prompt(Path("/tmp/a"))
+    assert "- `## Data files`" in html and "- `## Known data`" in html
+    assert "data-anton-data" in html and "Data blocks, when" in html
+    fullstack = (
+        prompts.build_frontend_system_prompt(Path("/tmp/a")),
+        prompts.build_backend_system_prompt(Path("/tmp/a"), stateless=True),
+        prompts.build_backend_system_prompt(Path("/tmp/a"), stateless=False),
+    )
+    for text in fullstack:
+        assert "## Data files" not in text
+        assert "## Known data" not in text
+        assert "data-anton-data" not in text
+
+
 def test_frame_notes_follow_the_browser_gate_in_both_frontend_prompts():
     """BROWSER STORAGE and LINKS are not verifier checks. They sit after the
     browser-gate bullet under their own lead sentence, so neither they nor

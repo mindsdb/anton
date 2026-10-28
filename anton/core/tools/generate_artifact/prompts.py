@@ -711,11 +711,16 @@ The user message carries these sections, in this order (some may be absent):
   data files whose content arrived as `## Data`.
 - `## Technical specification` — `spec.md`: insights and implementation notes
   that complement the PRD rather than repeat it.
+{data_inputs}- `## Progress journal` — one line per pipeline step done so far.\
+"""
+
+# Only the html page is built from data files; the fullstack prompts keep the
+# list above as it was.
+_GEN_DATA_INPUTS = """\
 - `## Known data` — what the calling agent passed in: values, or a pointer to
   data that is now under `## Data files`.
 - `## Data files` — the data files this page is built from: id, sources and
   a summary of each, with real sample records.
-- `## Progress journal` — one line per pipeline step done so far.\
 """
 
 _GEN_DATA_FILES = """\
@@ -744,7 +749,9 @@ _GEN_API_SPEC_INPUT = """\
 
 
 def _gen_html_inputs(*, fullstack: bool = False, backend: bool = False) -> str:
-    text = _GEN_HTML_INPUTS.format(prd_footer=PRD_SECTION_FOOTER)
+    text = _GEN_HTML_INPUTS.format(
+        prd_footer=PRD_SECTION_FOOTER, data_inputs="" if fullstack else _GEN_DATA_INPUTS
+    )
     if not fullstack:
         return text
     consumer = "your routes must serve" if backend else "your `fetch` calls must match"
