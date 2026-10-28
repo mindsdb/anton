@@ -94,6 +94,11 @@ async def collect(state, *, feedback: str = '') -> Evidence | str:
                     result = answer['tool_result']
                 results.append(protocol.tool_result(call.id, result))
             elif call.name in handlers:
+                if call.name == 'read_text_file' and call.input.get('path') == '.anton/anton.md':
+                    # These are the host's already-read rules, not a new file read
+                    # through (or around) the source tools' dot-file restrictions.
+                    results.append(protocol.tool_result(call.id, 'The host already supplied the project rules in this request:\n' + (state.project_rules or '(No project rules.)')))
+                    continue
                 if call.name in ('read_text_file', 'web_fetch') or (call.name == SCRATCHPAD_TOOL.name and scratchpad_action(call.input) == 'exec'):
                     source_attempted = True
                 outcome = await handlers[call.name](state.session, call.input)
