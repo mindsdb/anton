@@ -133,12 +133,12 @@ async def compose(state, evidence: Evidence):
             return 'Static artifact stopped before publication; the previous artifact is preserved.'
         state.step_started('generate_frontend', attempt=attempt)
         response, budget = await _call_with_stream_retry(state.session._llm.code_stream,
-            system=COMPOSE, messages=messages, tools=[TOOL, CUSTOM_TOOL, INSPECT, reference.TOOL], max_tokens=14000, default_cap=None,
+            system=COMPOSE, messages=messages, tools=[TOOL, CUSTOM_TOOL, INSPECT, reference.TOOL, reference.RELEASE_TOOL], max_tokens=14000, default_cap=None,
             on_text=state.peek_for('generate_frontend'))
         state.peek_done('generate_frontend')
         state.trace_log.llm_call(node='static_compose', method='code_stream', system=COMPOSE, messages=messages, response=response, attempt=attempt)
         messages.append({'role': 'assistant', 'content': protocol.assistant_blocks(response)})
-        if response.tool_calls and all(call.name in (INSPECT['name'], reference.TOOL['name']) for call in response.tool_calls) and not looks_truncated(response, budget):
+        if response.tool_calls and all(call.name in (INSPECT['name'], reference.TOOL['name'], reference.RELEASE_TOOL['name']) for call in response.tool_calls) and not looks_truncated(response, budget):
             results = []
             for call in response.tool_calls:
                 if state.winding_down() or state.abandoned.is_set():
@@ -146,6 +146,13 @@ async def compose(state, evidence: Evidence):
                 try:
                     if call.parse_error or call.repaired:
                         raise ValueError('Invalid query arguments')
+                    if call.name == reference.RELEASE_TOOL['name']:
+                        name = reference.Release.model_validate(call.input).name
+                        if name not in resources:
+                            raise ValueError(f'No resource named {name} is loaded')
+                        del resources[name]
+                        results.append(protocol.tool_result(call.id, f'Released {name}; it will not be embedded or execute in the next candidate.'))
+                        continue
                     if call.name == reference.TOOL['name']:
                         resource = reference.Resource.model_validate(call.input)
                         if resource.name not in resources and len(resources) >= 16:
@@ -198,7 +205,7 @@ async def compose(state, evidence: Evidence):
             if state.winding_down():
                 return 'Static artifact stopped before publication; the previous artifact is preserved.'
             review = await content_review.check(state, evidence=evidence_text, composition=output,
-                manifest=manifest, previous=existing, screenshot=live.screenshot)
+                manifest=manifest, previous=existing, screenshot=live.screenshot, browser_status=live.status)
             if isinstance(review,content_review.EvidenceRequest):
                 return review
             # Unavailable is reported honestly, never promoted into a browser pass.

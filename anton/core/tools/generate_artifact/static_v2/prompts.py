@@ -115,6 +115,11 @@ server, fetch-at-view-time data API, remote stylesheet/font, or hidden dependenc
 browser libraries with load_static_resource(kind="script") from a pinned npm version on
 cdn.jsdelivr.net, the preview-approved script host; their globals initialize before author scripts.
 Use a browser-ready distribution, not an ES module requiring further network imports.
+Partial library packages may require separate dependencies: use a complete browser bundle or
+load those dependencies first. Use maintained decoders/projections for geographic formats rather
+than hand-decoding topology or approximating boundaries. All loaded scripts execute, even if
+unused by your current HTML. Discard incompatible or unused bundles with release_static_resource
+before retrying; load replacement dependencies in their required order.
 Honor explicit library requirements. Source links are fine.
 On phones, recompose wide tables as labelled records or show a focused summary with an accessible
 detail view. Keep essential fields and actions available; do not leave them beyond a clipped panel.

@@ -34,7 +34,10 @@ TOOL = {'name':'review_static_artifact','description':'Approve only when no conc
         'input_schema':Review.model_json_schema()}
 
 SYSTEM = '''Review a candidate static artifact against the actual user request and supplied evidence.
-The candidate has passed mechanical checks; that alone does not establish correct content.
+The candidate has passed static checks; the current browser_check status is supplied separately.
+These checks alone do not establish correct content. Earlier tool failures in the conversation
+are historical, not findings about this candidate. Do not repeat old runtime errors as current
+when this candidate's browser check passed; assess its actual composition and screenshot.
 Look for concrete errors: omitted requested conditions or periods, incorrect filters/units/percent
 scales, duplicated data masquerading as a comparison, unsupported quantitative or causal claims,
 missing requested charts or interactions, invented geography, unreadable content, and regressions
@@ -71,10 +74,10 @@ If the user requested a fresh read, a refresh, or changed source scope, reused e
 reject with needs_evidence=true. Never describe cached evidence as freshly acquired.'''
 
 
-async def check(state, *, evidence, composition, manifest, previous, screenshot):
+async def check(state, *, evidence, composition, manifest, previous, screenshot, browser_status='unverified'):
     candidate = {'composition':composition.model_dump(), 'resolved_facts':manifest.get('facts', {}),
         'public_binding_rows':{name:len(rows) for name,rows in manifest['bindings'].items()},
-        'reference_sources':manifest.get('resources', {})}
+        'reference_sources':manifest.get('resources', {}), 'browser_check':{'status':browser_status}}
     text = context(state) + '\nEvidence (complete or explicitly labelled catalog):\n' + evidence
     text += '\nPrevious composition/page (preserve except for requested changes):\n' + previous
     text += '\nCandidate and host-resolved metadata:\n' + exact_json(candidate)

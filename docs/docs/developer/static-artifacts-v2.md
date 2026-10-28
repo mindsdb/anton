@@ -119,6 +119,10 @@ content hash. UTF-8 is declared before the payload, inside the browser's encodin
 sniffing window. Reference assets cannot replace the designated business evidence. Standard
 documents list reference sources; custom pages must attribute them. Saved
 recipes retain small reload references rather than duplicating the resource body.
+During repairs, `release_static_resource(name=...)` discards an incompatible or
+unused asset before the next candidate. Loaded scripts otherwise execute in load
+order even when the current author's code no longer references them. The content
+review receives the current browser status separately from historical failures.
 
 Only resolved public bindings and referenced fact values enter a compiled
 page. Unselected fields and unused facts stay out. Query definitions can refer

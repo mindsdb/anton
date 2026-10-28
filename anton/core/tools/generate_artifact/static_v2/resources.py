@@ -27,6 +27,13 @@ class Resource(Model):
 TOOL = {'name': 'load_static_resource', 'description': 'Embed supporting resources offline. kind=json loads authentic public reference data, such as geometry, topology, or diagram structure, as window.ARTIFACT_RESOURCES[name]. kind=script loads a browser-ready library bundle from a pinned npm version on cdn.jsdelivr.net and runs it before author scripts. Downloads use the normal web URL policy, are bounded, and never require a view-time fetch. Use public HTTPS URLs without credentials or query parameters. Never invent real-world geometry or replace the designated business evidence.', 'input_schema': Resource.model_json_schema()}
 
 
+class Release(Model):
+    name: Name
+
+
+RELEASE_TOOL = {'name': 'release_static_resource', 'description': 'Discard a previously loaded resource from this candidate. Use when a bundle is incompatible or an asset is no longer used. Remaining script resources execute in load order, even when author code does not reference them. This does not change the previous published page.', 'input_schema': Release.model_json_schema()}
+
+
 async def load(resource: Resource) -> dict:
     url = resource.url
     try:

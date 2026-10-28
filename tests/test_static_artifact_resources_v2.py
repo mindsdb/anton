@@ -105,6 +105,33 @@ async def test_pinned_browser_library_is_bundled_before_author_code(monkeypatch)
     assert '<script src=' not in html
 
 
+async def test_failed_candidate_can_release_a_broken_library_before_retrying(tmp_path,monkeypatch):
+    author_calls=[];checked=[]
+    html='<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><h1>Corrected diagram</h1></body></html>'
+    sequence=[ToolCall('load','load_static_resource',{'name':'unused','label':'Partial library','kind':'script','url':'https://cdn.jsdelivr.net/npm/diagram@1.2.3/partial.js'}),
+        ToolCall('compose','compose_custom_html',{'html':html}),
+        ToolCall('release','release_static_resource',{'name':'unused'}),
+        ToolCall('compose2','compose_custom_html',{'html':html})]
+    async def stream(**kwargs):
+        if kwargs['system']==REVIEW_SYSTEM:
+            yield review_response();return
+        author_calls.append(kwargs)
+        yield StreamComplete(response=LLMResponse(content='',tool_calls=[sequence.pop(0)]))
+    async def load(resource):
+        return {'data':'throw new Error("UNUSED_BUNDLE_FAILURE");','source':{'label':resource.label,'url':resource.url,'sha256':'sha','bytes':40,'kind':'script'}}
+    def check(path,**kwargs):
+        broken='UNUSED_BUNDLE_FAILURE' in path.read_text();checked.append(broken)
+        return BrowserCheck(status='failed',reason='Broken bundled script') if broken else BrowserCheck(status='passed')
+    monkeypatch.setattr(resources,'load',load)
+    monkeypatch.setattr('anton.core.tools.generate_artifact.verifiers.verify_frontend_live',check)
+    st=state(tmp_path,{});st.session._llm.code_stream=stream
+    assert (await compose(st,Evidence()))['status']=='generated'
+    assert checked==[True,False]
+    assert 'Released unused' in str(author_calls[-1]['messages'])
+    assert 'UNUSED_BUNDLE_FAILURE' not in (tmp_path/'index.html').read_text()
+    assert json.loads((tmp_path/'.static/composition.json').read_text())['resources']=={}
+
+
 @pytest.mark.parametrize('url',['https://unapproved.example/npm/diagram@1.2.3/browser.js','https://cdn.jsdelivr.net/npm/diagram@latest/browser.js'])
 async def test_script_requires_an_exact_version_on_the_approved_host(monkeypatch,url):
     transport(monkeypatch,lambda request:pytest.fail('Unapproved script must not be requested'))
