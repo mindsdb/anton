@@ -42,6 +42,16 @@ async def test_publication_replaces_page_only_after_candidate_browser_check(tmp_
     assert 'A result.' in old.read_text()
 
 
+async def test_generation_result_carries_current_evidence_counts_without_private_rows(tmp_path,monkeypatch):
+    evidence=Evidence.model_validate({'datasets':{'readings':{'source':{'label':'Documented source'},'rows':[{'n':2,'private':'PRIVATE_ROW_VALUE'}]}}})
+    monkeypatch.setattr('anton.core.tools.generate_artifact.verifiers.verify_frontend_live',lambda *a,**k:BrowserCheck(status='passed'))
+    st=state(tmp_path,VALID);st.known_data='Earlier parent read failed';st.static_evidence_origin={'mode':'acquired','acquired_at':'2026-10-28T12:00:00Z'}
+    result=await compose(st,evidence)
+    assert result['data_publication']['datasets']=={'readings':{'rows':1,'source_label':'Documented source'}}
+    assert result['data_publication']['origin']==st.static_evidence_origin
+    assert 'PRIVATE_ROW_VALUE' not in json.dumps(result)
+
+
 async def test_snapshot_write_failure_preserves_the_published_page(tmp_path,monkeypatch):
     old=tmp_path/'index.html';old.write_text('OLD PAGE')
     def fail(*args):

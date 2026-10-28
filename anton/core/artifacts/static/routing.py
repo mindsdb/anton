@@ -19,6 +19,10 @@ When using an existing computation, pass its complete records or export the comp
 records to a private file and pass that path. The builder uses a separate Python
 scratchpad and cannot access variables left in the parent notebook.
 The engine gathers evidence, composes the artifact, and checks the actual page.
+It can acquire source records during the build even when an earlier parent read
+failed. Its result's data_publication lists the evidence origin and dataset row
+counts. Use that current result; an earlier absence of parent records does not
+establish that the builder also lacked them. Cached origin still means cached.
 Use it for fully specified work as well as open-ended requests. Do not write
 the page in scratchpad or use the older report helpers or dashboard skill.
 For edits, find the existing slug with list_artifacts and call generate_artifact

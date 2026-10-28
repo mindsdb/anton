@@ -240,7 +240,8 @@ async def compose(state, evidence: Evidence):
             state.record('static_artifact_v2', 'done', f'{output.mode}; evidence={evidence.digest()}; browser={live.status}')
             return {'status': 'generated', **_result_shell(state), 'static_artifact_version': 2,
                     'content_review': review,
-                    'data_publication': {'evidence_sha256': evidence.digest(), 'bindings': list(manifest['bindings']), 'origin': state.static_evidence_origin}}
+                    'data_publication': {'evidence_sha256': evidence.digest(), 'bindings': list(manifest['bindings']), 'origin': state.static_evidence_origin,
+                        'datasets': {name: {'rows': len(dataset.rows), 'source_label': dataset.source.label[:200]} for name, dataset in evidence.datasets.items()}}}
         except (ValueError, OSError) as error:
             feedback = f'Artifact not published: {error}. Correct the complete composition. The prior page is intact.'
             state.record('static_artifact_v2', 'retry', str(error)[:500])
