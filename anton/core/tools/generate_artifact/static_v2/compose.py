@@ -21,6 +21,7 @@ from .. import sub_tools as protocol, verifiers, attachments
 from ..streaming import _call_with_stream_retry
 from .prompts import COMPOSE, context
 from . import resources as reference
+from . import content_review
 
 
 class Structured(Model):
@@ -191,6 +192,14 @@ async def compose(state, evidence: Evidence):
                 cell_sandbox=cell_sandbox_of(getattr(state.session, "_scratchpads", None)), previous_html=previous or None)
             if live.status == 'failed' or live.findings_listed:
                 raise ValueError('; '.join(live.verdict.errors) or live.reason)
+            if state.abandoned.is_set():
+                return 'Static artifact cancelled before publication; the previous artifact is preserved.'
+            if state.winding_down():
+                return 'Static artifact stopped before publication; the previous artifact is preserved.'
+            review = await content_review.check(state, evidence=evidence_text, composition=output,
+                manifest=manifest, previous=existing, screenshot=live.screenshot)
+            if isinstance(review,content_review.EvidenceRequest):
+                return review
             # Unavailable is reported honestly, never promoted into a browser pass.
             state.browser_status, state.browser_coverage = live.status, live.coverage
             state.browser_screenshot, state.browser_page = live.screenshot, primary
@@ -206,6 +215,7 @@ async def compose(state, evidence: Evidence):
             state.files_written.append(primary)
             state.record('static_artifact_v2', 'done', f'{output.mode}; evidence={evidence.digest()}; browser={live.status}')
             return {'status': 'generated', **_result_shell(state), 'static_artifact_version': 2,
+                    'content_review': review,
                     'data_publication': {'evidence_sha256': evidence.digest(), 'bindings': list(manifest['bindings'])}}
         except (ValueError, OSError) as error:
             feedback = f'Artifact not published: {error}. Correct the complete composition. The prior page is intact.'

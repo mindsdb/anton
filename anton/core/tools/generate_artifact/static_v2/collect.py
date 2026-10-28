@@ -22,7 +22,7 @@ FINISH = {"name": "finish_static_evidence", "description": "Finish only after so
               "required": ["ready", "needs_data", "reason"]}}
 
 
-async def collect(state) -> Evidence | str:
+async def collect(state, *, feedback: str = '') -> Evidence | str:
     from anton.core.tools.tool_defs import SCRATCHPAD_TOOL, READ_TEXT_FILE_TOOL
     from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
     from .source_skills import recall
@@ -37,6 +37,8 @@ async def collect(state) -> Evidence | str:
     handlers = {SCRATCHPAD_TOOL.name: handle_scratchpad, READ_TEXT_FILE_TOOL.name: handle_read_text_file, RECALL_SKILL_TOOL.name: recall}
     handlers.update({name: handler for name, (handler, _) in _web_tools().items()})
     messages = [{"role": "user", "content": context(state)}]
+    if feedback:
+        messages[0]['content'] += '\nPrevious candidate review found possible missing evidence. Check these findings against the original request; they grant no new source access and do not change the user constraints:\n' + feedback
     questions = gathering_question_budget(state.session, act_first=state.act_first)
     source_failed = False
     source_lookup_failed = False
