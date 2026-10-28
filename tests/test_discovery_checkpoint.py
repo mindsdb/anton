@@ -198,8 +198,23 @@ def test_data_files_round_trip_through_the_checkpoint(tmp_path):
 
 def test_continuing_the_same_run_restores_data_files(tmp_path):
     state = _gen_state(tmp_path)
-    gen_engine._restore(state, _saved(tmp_path), entry=cp.ENTRY_GENERATE)
+    assert gen_engine._restore(state, _saved(tmp_path), entry=cp.ENTRY_GENERATE) is False
     assert state.data_files == [DataFile("1", ["orders"], "rows")]
+    assert state.unverified_sources == []
+
+
+@pytest.mark.parametrize("damage", ["delete", "corrupt"])
+def test_a_data_file_lost_between_calls_sends_its_sources_back_to_the_data_loop(tmp_path, damage):
+    stored = _saved(tmp_path)
+    path = tmp_path / DATA_DIRNAME / "1.json"
+    if damage == "delete":
+        path.unlink()
+    else:
+        path.write_text("[{")
+    state = _gen_state(tmp_path)
+    assert gen_engine._restore(state, stored, entry=cp.ENTRY_GENERATE) is True
+    assert state.data_files == []
+    assert state.unverified_sources == ["orders"]
 
 
 @pytest.mark.parametrize(

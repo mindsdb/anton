@@ -418,6 +418,9 @@ def verify_frontend(
     None skips the block checks."""
     errors: list[str] = []
     warnings: list[str] = []
+    # The checks below judge the page's code; a filled data block holds rows
+    # that may contain anything, and no retry can change them.
+    html = data_files.without_data(html)
     low = html.lower()
 
     # 1. Valid document with an explicit <body>.

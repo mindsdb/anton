@@ -53,8 +53,23 @@ def test_a_changed_file_from_an_earlier_run_is_refused(tmp_path):
     path.write_text("[1, 2, 3]")
     os.utime(path, ns=(1, 1))
     error = data_files.validate(tmp_path, "1", protected=protected)
-    assert error is not None and "earlier run" in error and "id 2" in error
+    assert error is not None and "saved before this call" in error and "id 2" in error
     assert data_files.validate(tmp_path, "1") is None
+
+
+def test_a_deleted_file_from_an_earlier_run_is_reported_missing(tmp_path):
+    path = _write(tmp_path, "1", "[1]")
+    protected = data_files.snapshot(tmp_path)
+    path.unlink()
+    assert "does not exist" in data_files.validate(tmp_path, "1", protected=protected)
+
+
+def test_a_trailing_newline_is_not_part_of_an_id(tmp_path):
+    _write(tmp_path, "1", "[1]")
+    (tmp_path / DATA_DIRNAME / "2.json\n").write_text("[2]")
+    assert "not a data file id" in data_files.validate(tmp_path, "1\n")
+    assert DataFile.from_dict({"id": "1\n", "sources": ["s"]}) == DataFile("1", ["s"])
+    assert sorted(data_files.snapshot(tmp_path)) == ["1"]
 
 
 def test_unchanged_file_from_an_earlier_run_can_be_declared_again(tmp_path):
@@ -86,6 +101,31 @@ def test_parse_declared_tolerates_shapes():
     ])
     assert parsed == [DataFile("1", ["orders"], "rows"), DataFile("2", ["a", "b"], "")]
     assert data_files.parse_declared(None) == []
+
+
+def test_parse_declared_merges_an_id_listed_twice():
+    parsed = data_files.parse_declared([
+        {"id": 1, "sources": ["orders"]},
+        {"id": "1", "sources": ["regions", "orders"], "description": "both"},
+    ])
+    assert parsed == [DataFile("1", ["orders", "regions"], "both")]
+
+
+def test_a_file_listed_twice_counts_once_against_the_size_limit(tmp_path, monkeypatch):
+    _write(tmp_path, "1", json.dumps(["x" * 60]))
+    monkeypatch.setattr(data_files, "MAX_PAGE_BYTES", 100)
+    declared = data_files.parse_declared([
+        {"id": "1", "sources": ["orders"]}, {"id": "1", "sources": ["regions"]},
+    ])
+    valid, errors = data_files.check_declared(tmp_path, declared, ["orders", "regions"])
+    assert errors == [] and [f.id for f in valid] == ["1"]
+
+
+def test_merge_keeps_files_whose_sources_are_still_declared():
+    current = [DataFile("1", ["orders"]), DataFile("2", ["returns"]), DataFile("3", ["regions"])]
+    merged = data_files.merge(current, [DataFile("3", ["regions"], "new")], ["Orders", "regions"])
+    assert merged == [DataFile("1", ["orders"]), DataFile("3", ["regions"], "new")]
+    assert data_files.merge(current, [], ["orders"]) == [DataFile("1", ["orders"])]
 
 
 def test_check_declared_matches_sources_by_key(tmp_path):
@@ -283,6 +323,29 @@ def test_fill_leaves_a_real_block_with_an_unknown_id_as_it_is(tmp_path):
     assert filled[blocks["1"].body_start:blocks["1"].body_end] == "\n[1]\n"
 
 
+def test_fill_puts_a_file_into_its_first_block_only(tmp_path, monkeypatch):
+    _write(tmp_path, "1", json.dumps(["x" * 100]))
+    page = _PAGE.replace("<title>t</title>", "<title>t</title><script type=\"application/json\" data-anton-data=\"1\"></script>")
+    # Room for the data once, not twice: the repeat is the verifier's to report.
+    monkeypatch.setattr(data_files, "MAX_PAGE_BYTES", len(page) + 150)
+    result = data_files.fill_page(page, tmp_path, [DataFile("1", ["s"])])
+    assert result.fatal is None
+    first, second = data_files.find_blocks(result.html)
+    assert json.loads(result.html[first.body_start:first.body_end]) == ["x" * 100]
+    assert result.html[second.body_start:second.body_end] == ""
+
+
+def test_without_data_empties_every_block():
+    page = _PAGE.replace(
+        "data-anton-data='1' type=\"application/json\"></script>",
+        "data-anton-data='1' type=\"application/json\">[\"z-index: 5000\"]</script>",
+    )
+    blocks = data_files.find_blocks(data_files.without_data(page))
+    assert [b.file_id for b in blocks] == ["1"]
+    assert "z-index" not in data_files.without_data(page)
+    assert data_files.without_data("<p>no blocks</p>") == "<p>no blocks</p>"
+
+
 def test_fill_reports_a_file_that_cannot_be_encoded_for_the_page(tmp_path):
     _write(tmp_path, "1", '["\\ud800"]')
     result = data_files.fill_page(_PAGE, tmp_path, [DataFile("1", ["s"])])
@@ -311,6 +374,12 @@ def test_a_page_that_follows_the_block_protocol_passes():
 def test_block_protocol_errors(body, fragment):
     errors = _errors(body)
     assert any(fragment in e for e in errors), errors
+
+
+def test_data_in_a_filled_block_is_not_judged_as_page_code():
+    rows = json.dumps(["z-index: 5000", "fetch('https://example.com/x')", "* { color: red !important }"])
+    block = '<script type="application/json" data-anton-data="1">' + rows + "</script>"
+    assert _errors(block + _READ) == []
 
 
 def test_no_block_checks_without_data_ids():

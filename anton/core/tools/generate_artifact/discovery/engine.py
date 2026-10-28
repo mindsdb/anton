@@ -72,6 +72,15 @@ _SAVE_DATA = (
 )
 
 
+def _read_by_cells(state: "PrdState", inp: dict) -> list[str]:
+    """The declared sources only a cell can have read: not marked as coming
+    from usable `known_data` or from the web."""
+    elsewhere = known_data_sources(inp, usable=known_data_usable(state))
+    if state.web_calls:
+        elsewhere |= web_verified_sources(inp)
+    return [s for s in state.declared_sources if source_key(s) not in elsewhere]
+
+
 def _absorb_data_files(state: "PrdState", inp: dict) -> str | None:
     """For an html-app: take the declared data files, or say why gathering
     cannot finish yet. Data read by code is sent back once to be saved; the
@@ -93,15 +102,15 @@ def _absorb_data_files(state: "PrdState", inp: dict) -> str | None:
         covered = data_files.covered_sources(state.data_files)
         state.unverified_sources = [s for s in state.declared_sources if source_key(s) not in covered]
         return _NOT_FINISHED + "\n".join(f"- {e}" for e in errors)
-    state.data_files = valid
+    state.data_files = data_files.merge(state.data_files, valid, state.declared_sources)
     if state.data_save_requested or not state.declared_sources:
         return None
-    covered = data_files.covered_sources(valid)
+    covered = data_files.covered_sources(state.data_files)
     if known_data_is_reference(state):
         web = web_verified_sources(inp) if state.web_calls else set()
         missing = [s for s in state.declared_sources if source_key(s) not in covered | web]
-    elif state.scratchpad_execs and not valid:
-        missing = list(state.declared_sources)
+    elif state.scratchpad_execs and not state.data_files:
+        missing = _read_by_cells(state, inp)
     else:
         missing = []
     if not missing:
@@ -126,8 +135,9 @@ def _apply_html_app_coverage(state: "PrdState", inp: dict) -> None:
         state.known_data_verified = []
         return
     state.unverified_sources = [s for s in state.unverified_sources if source_key(s) not in covered]
-    if state.scratchpad_execs and state.declared_sources and not state.data_files:
-        state.record("gathering", "data_not_saved", ", ".join(state.declared_sources))
+    unsaved = _read_by_cells(state, inp) if state.scratchpad_execs and not state.data_files else []
+    if unsaved:
+        state.record("gathering", "data_not_saved", ", ".join(unsaved))
         state.data_not_saved = True
         if DATA_NOT_SAVED_WARNING not in state.verify_warnings:
             state.verify_warnings.append(DATA_NOT_SAVED_WARNING)

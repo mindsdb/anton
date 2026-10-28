@@ -549,7 +549,9 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
                     "plus row count, fields, filters and as-of "
                     "date when known. The tool saves referenced data itself. A "
                     "new request on a built artifact does not reuse the earlier "
-                    "call's value: pass it again."
+                    "call's value: pass it again, and say when the data in the "
+                    "scratchpad changed since then — the same text reuses the "
+                    "data saved last time."
                 ),
             },
             "user_preferences": {

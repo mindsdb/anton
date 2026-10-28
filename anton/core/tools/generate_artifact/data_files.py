@@ -29,8 +29,8 @@ from .state import settled_artifact_type
 if TYPE_CHECKING:
     from anton.core.backends.sandbox import CellSandbox
 
-ID_PATTERN = re.compile(r"^[1-9][0-9]{0,5}$")
-_FILE_NAME = re.compile(r"^([1-9][0-9]{0,5})\.json$")
+ID_PATTERN = re.compile(r"^[1-9][0-9]{0,5}\Z")
+_FILE_NAME = re.compile(r"^([1-9][0-9]{0,5})\.json\Z")
 # JSON's escape for "<": inside a JSON string it reads back as "<", and outside
 # strings "<" cannot occur, so replacing every "<" keeps the JSON exact while
 # a "</script>" in the data can no longer close the block.
@@ -123,9 +123,11 @@ def validate(
     if not ID_PATTERN.match(file_id):
         return f"`{file_id}` is not a data file id: use a positive number such as 1."
     name = rel_name(file_id)
-    if protected and file_id in protected and _stat(artifact_path, file_id) != protected[file_id]:
+    current = _stat(artifact_path, file_id)
+    # A missing file is reported as missing below, not as changed.
+    if protected and file_id in protected and current is not None and current != protected[file_id]:
         return (
-            f"{name} belongs to data saved by an earlier run and was changed. Save new data "
+            f"{name} holds data saved before this call and was changed. Save new data "
             f"under id {next_free_id(artifact_path)} and up instead."
         )
     try:
@@ -167,19 +169,24 @@ def check_total_size(
 
 def parse_declared(raw: object) -> list[DataFile]:
     """The `data_files` the model declared. The schema is a hint, so an id may
-    arrive as a number and `sources` as one string."""
+    arrive as a number and `sources` as one string. An id listed twice is one
+    file: its entries merge, so it is checked and counted once."""
     if not isinstance(raw, list):
         return []
-    parsed: list[DataFile] = []
+    parsed: dict[str, DataFile] = {}
     for entry in raw:
         if not isinstance(entry, dict) or entry.get("id") is None:
             continue
-        parsed.append(DataFile(
-            id=str(entry.get("id")).strip(),
-            sources=string_list(entry.get("sources")),
-            description=str(entry.get("description") or "").strip(),
-        ))
-    return parsed
+        file_id = str(entry.get("id")).strip()
+        sources = string_list(entry.get("sources"))
+        description = str(entry.get("description") or "").strip()
+        known = parsed.get(file_id)
+        if known is None:
+            parsed[file_id] = DataFile(id=file_id, sources=sources, description=description)
+            continue
+        known.sources += [s for s in sources if s not in known.sources]
+        known.description = known.description or description
+    return list(parsed.values())
 
 
 def check_declared(
@@ -219,6 +226,18 @@ def check_declared(
 
 def covered_sources(files: list[DataFile]) -> set[str]:
     return {source_key(s) for item in files for s in item.sources}
+
+
+def merge(current: list[DataFile], new: list[DataFile], declared: list[str]) -> list[DataFile]:
+    """`new` over `current`: a listed id takes its new record, and a file in
+    hand stays while one of its sources is still declared, so a call that
+    lists no files keeps the ones saved before it."""
+    keys = {source_key(s) for s in declared}
+    new_ids = {f.id for f in new}
+    return [
+        f for f in current
+        if f.id not in new_ids and any(source_key(s) in keys for s in f.sources)
+    ] + new
 
 
 def clear_data_not_saved(state: object) -> None:
@@ -489,6 +508,22 @@ def find_blocks(html: str) -> list[Block]:
     return blocks
 
 
+_BLOCK_ATTR_TEXT = re.compile(re.escape(BLOCK_ATTR), re.IGNORECASE)
+
+
+def without_data(html: str) -> str:
+    """`html` with every data block emptied, for checks that read the page's
+    own code as text: data is not code, and a retry cannot change it."""
+    if not _BLOCK_ATTR_TEXT.search(html):
+        return html
+    parts, cursor = [], 0
+    for block in find_blocks(html):
+        parts.append(html[cursor:block.body_start])
+        cursor = block.body_end
+    parts.append(html[cursor:])
+    return "".join(parts)
+
+
 def reads_blocks(html: str, blocks: list[Block]) -> bool:
     """Whether a script other than the blocks names the block attribute."""
     rest, cursor = [], 0
@@ -513,9 +548,14 @@ def fill_page(
     cell_sandbox: "CellSandbox | None" = None,
 ) -> FillResult:
     """`html` with each known block's body replaced by its file, on a line of
-    its own. Blocks with an unknown id stay as they are for the verifier."""
+    its own. Blocks with an unknown id, and a repeat of an id after its first
+    block, stay as they are for the verifier: a copy the page must drop anyway
+    does not count against the size limit."""
     known = {item.id for item in files}
-    blocks = [b for b in find_blocks(html) if b.file_id in known]
+    blocks: list[Block] = []
+    for block in find_blocks(html):
+        if block.file_id in known and all(b.file_id != block.file_id for b in blocks):
+            blocks.append(block)
     if not blocks:
         return FillResult(html)
     payload: dict[str, str] = {}

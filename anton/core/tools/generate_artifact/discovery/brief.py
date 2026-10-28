@@ -314,12 +314,7 @@ async def redraw_brief(state: PrdState) -> None:
                 state.artifact_path, listed, declared,
                 cell_sandbox=data_files.sandbox_of(state.session), protected=state.data_snapshot,
             ) if listed else ([], []))
-            still_declared = {source_key(s) for s in declared}
-            new_ids = {f.id for f in new_files}
-            state.data_files = [
-                f for f in state.data_files
-                if f.id not in new_ids and any(source_key(s) in still_declared for s in f.sources)
-            ] + new_files
+            state.data_files = data_files.merge(state.data_files, new_files, declared)
         # Anything the correction introduced has nothing executed against it,
         # unless its rows are in `known_data` — read after the type change
         # above, so a correction to a fullstack type does not honour the

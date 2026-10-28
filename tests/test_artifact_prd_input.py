@@ -12,6 +12,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import pytest
+
 from anton.core.artifacts.internal_files import PRD_FILENAME
 from anton.core.tools.generate_artifact import engine, orchestrator, prompts
 from anton.core.tools.generate_artifact.discovery import checkpoint as cp
@@ -178,6 +180,40 @@ async def test_a_resumed_spec_phase_does_not_read_a_contract_it_will_rewrite(tmp
     )
     assert seen["entry"] == cp.ENTRY_SPEC
     assert seen["api_spec"] is None
+
+
+@pytest.mark.parametrize("file_kept, entry", [(True, cp.ENTRY_GENERATE), (False, cp.ENTRY_SPEC)])
+async def test_a_resumed_generation_whose_data_file_is_gone_reads_the_data_again(
+    tmp_path: Path, monkeypatch, file_kept, entry
+):
+    from anton.core.artifacts.internal_files import DATA_DIRNAME
+
+    _write_prd(tmp_path, "## Goal\nOrders.")
+    if file_kept:
+        (tmp_path / DATA_DIRNAME).mkdir()
+        (tmp_path / DATA_DIRNAME / "1.json").write_text("[1]")
+    seen = {}
+
+    async def fake_run(state, *, entry):
+        seen["entry"] = entry
+        seen["unverified"] = list(state.unverified_sources)
+        return {"files_written": [], "internal_files": [], "summary": "", "trace": []}
+
+    cp.save(tmp_path, cp.DiscoveryCheckpoint(
+        request_fingerprint=cp.request_fingerprint("orders"),
+        pipeline_stage=cp.STAGE_SPEC_WRITTEN,
+        artifact_type="html-app",
+        declared_sources=["orders"],
+        gathering_complete=True,
+        data_files=[{"id": "1", "sources": ["orders"], "description": ""}],
+    ))
+    monkeypatch.setattr(orchestrator, "run", fake_run)
+    await engine.generate(
+        session=_unsandboxed_session(), artifact_type="html-app", artifact_path=tmp_path,
+        slug="a", user_request="orders", agent_understanding="orders",
+    )
+    assert seen["entry"] == entry
+    assert seen["unverified"] == ([] if file_kept else ["orders"])
 
 
 # ── reaching the nodes ──────────────────────────────────────────────────────

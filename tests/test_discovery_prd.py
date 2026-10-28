@@ -283,4 +283,4 @@ def test_write_prd_does_not_claim_an_agreement():
 
 
 def test_prd_copies_sample_rows_from_the_data_files():
-    assert "Copy the sample rows from `## Data files`" in prd._WRITE_PRD_INSTRUCTION
+    assert "take the sample rows from it and name the file by its id" in prd._WRITE_PRD_INSTRUCTION

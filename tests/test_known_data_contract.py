@@ -21,3 +21,10 @@ def test_known_data_asks_for_a_described_pad_reference():
 
 def test_data_unavailable_asks_for_the_variables():
     assert "the variables that hold the data" in _data_unavailable("no rows")
+
+
+def test_known_data_asks_to_say_when_pad_data_changed():
+    # The saved data is reused when `known_data` is the same text, so a
+    # refreshed pad has to show in the text.
+    schema = GENERATE_ARTIFACT_TOOL.input_schema["properties"]["known_data"]["description"]
+    assert "say when the data in the scratchpad changed" in schema

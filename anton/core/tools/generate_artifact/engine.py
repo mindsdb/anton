@@ -516,7 +516,11 @@ async def generate(
             artifact_path, stored.data_files, cell_sandbox=data_files.sandbox_of(session)
         )
     if entry != cp.ENTRY_FULL and stored is not None:
-        _restore(state, stored, entry=entry)
+        if _restore(state, stored, entry=entry) and entry == cp.ENTRY_GENERATE:
+            # The spec was written from a data file that is gone: the data
+            # loop reads it again and the spec is written anew.
+            entry = cp.ENTRY_SPEC
+            state.record("entry", entry, "a saved data file is missing")
         _load_prd(state)
         # Only where the spec phase is skipped: every other entry rewrites
         # the contract in `_make_api_spec`, and `_invalidate_specs` has
@@ -613,7 +617,7 @@ def _record_page_check(session, *, state, result: "dict | str | BrowserCheckFail
     )
 
 
-def _restore(state, stored, *, entry: str = "") -> None:
+def _restore(state, stored, *, entry: str = "") -> bool:
     """Rebuild in memory what the discovery phases produced last time.
 
     Everything phase E reads has to come back, not just the PRD: the
@@ -626,6 +630,9 @@ def _restore(state, stored, *, entry: str = "") -> None:
 
     `entry` decides whether a call without `known_data` inherits the saved
     copy: only a call that continues the same run does.
+
+    Returns whether a saved data file is gone or no longer valid; its sources
+    are then unverified again.
     """
     from .discovery import checkpoint as cp
 
@@ -651,19 +658,26 @@ def _restore(state, stored, *, entry: str = "") -> None:
     from . import data_files as data_files_mod
     from .discovery.notes import source_key
 
+    stored_files = [
+        f for f in (data_files_mod.DataFile.from_dict(r) for r in stored.data_files or []) if f is not None
+    ]
     saved_files = data_files_mod.restorable(
         state.artifact_path, stored.data_files,
         cell_sandbox=data_files_mod.sandbox_of(state.session),
     ) if stored.data_files else []
     same_data = cp.normalize(state.known_data or "") == cp.normalize(stored.known_data or "")
+    data_lost = False
     if entry == cp.ENTRY_NEW_ITERATION and (state.known_data or "").strip() and not same_data:
         # New data for the same request: the saved files may be what it replaces.
-        for source in sorted(data_files_mod.covered_sources(saved_files)):
-            for declared in state.declared_sources:
-                if source_key(declared) == source and declared not in state.unverified_sources:
-                    state.unverified_sources.append(declared)
+        stale = data_files_mod.covered_sources(stored_files)
     else:
         state.data_files = saved_files
+        # A file that is gone or no longer valid vouches for nothing.
+        stale = data_files_mod.covered_sources(stored_files) - data_files_mod.covered_sources(saved_files)
+        data_lost = bool(stale)
+    for declared in state.declared_sources:
+        if source_key(declared) in stale and declared not in state.unverified_sources:
+            state.unverified_sources.append(declared)
     if stored.data_not_saved:
         state.data_not_saved = True
         if data_files_mod.DATA_NOT_SAVED_WARNING not in state.verify_warnings:
@@ -691,6 +705,7 @@ def _restore(state, stored, *, entry: str = "") -> None:
         state.agent_understanding, state.known_data, state.user_preferences,
         state.user_language,
     )
+    return data_lost
 
 
 # ---------------------------------------------------------------------------

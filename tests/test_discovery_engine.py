@@ -634,6 +634,46 @@ async def test_data_read_by_a_cell_and_not_saved_is_sent_back_once_then_warned(m
     assert state.data_not_saved is True
 
 
+async def test_a_cell_check_on_rows_given_in_known_data_is_not_sent_back(monkeypatch, tmp_path):
+    async def fake_handle_scratchpad(session, inp):
+        return ToolOutcome(content="[output] float64", ok=True)
+
+    monkeypatch.setattr("anton.core.tools.tool_handlers.handle_scratchpad", fake_handle_scratchpad)
+    state = _state(_session_with_plan_sequence(
+        _response(tool_calls=[_tc("scratchpad", {"action": "exec", "name": "hr", "code": "print(2)"})]),
+        _finish_with_files(findings=[{"source": "orders", "verified_by": "known_data"}]),
+    ), artifact_path=tmp_path, known_data="Q1: 120, Q2: 140")
+    await engine.run_gathering_loop(state)
+    assert state.messages[4]["content"][0]["content"] == "ok"
+    assert state.gathering_complete is True
+    assert state.data_not_saved is False
+    assert engine.DATA_NOT_SAVED_WARNING not in state.verify_warnings
+
+
+@pytest.mark.parametrize("known_data, pad_names", [
+    ("", []),
+    ("scratchpad `supply_kpi`, variable `frames`", ["supply_kpi"]),
+])
+async def test_a_re_entry_that_lists_no_files_keeps_the_saved_ones(monkeypatch, tmp_path, known_data, pad_names):
+    async def fake_handle_scratchpad(session, inp):
+        return ToolOutcome(content="[output] 504 rows", ok=True)
+
+    monkeypatch.setattr("anton.core.tools.tool_handlers.handle_scratchpad", fake_handle_scratchpad)
+    _save(tmp_path)
+    state = _state(_session_with_plan_sequence(
+        _response(tool_calls=[_tc("scratchpad", {"action": "exec", "name": "hr", "code": "print(2)"})]),
+        _finish_with_files([{"id": "1", "sources": ["orders"]}]),
+        _finish_with_files(),
+    ), artifact_path=tmp_path, known_data=known_data, pad_names=pad_names)
+    await engine.run_gathering_loop(state)
+    await engine.run_gathering_loop(state)
+    assert [f.id for f in state.data_files] == ["1"]
+    assert state.messages[-1]["content"][0]["content"].startswith("ok")
+    assert state.gathering_complete is True
+    assert state.unverified_sources == []
+    assert state.data_not_saved is False
+
+
 @pytest.mark.parametrize("re_entry", [False, True])
 async def test_a_refused_save_left_unanswered_hands_the_sources_to_the_data_loop(tmp_path, re_entry):
     state = _state(_session_with_plan_sequence(
