@@ -18,7 +18,7 @@
     el.textContent = text;
     return el;
   };
-  const colors = [getComputedStyle(root).getPropertyValue('--accent').trim(), '#4787a8', '#a16d39', '#8d6e9d', '#7d8f46', '#bb6e71', '#6f839a', '#a18b64'];
+  const colors = ['var(--accent)', '#4787a8', '#a16d39', '#8d6e9d', '#7d8f46', '#bb6e71', '#6f839a', '#a18b64'];
   const numeric = value => value === null ? null : Number(value);
   const compact = value => new Intl.NumberFormat(document.documentElement.lang, {notation: 'compact', maximumFractionDigits: 1}).format(value);
   const mark = (svg, tag, attrs, label) => {

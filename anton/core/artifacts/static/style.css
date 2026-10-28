@@ -120,7 +120,8 @@ td,th{padding:10px}
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}
 }
 
-@media print{.toolbar,nav,.skip,.chart-data,.speaker-notes{display:none!important}
+@media print{:root{color-scheme:light;--page:#fff;--paper:#fff;--ink:#1e2929;--muted:#586764;--line:#d9e2dd;--soft:#eef3ef;--accent:#12685c}
+.toolbar,nav,.skip,.chart-data,.speaker-notes{display:none!important}
 .reading-layout{display:block;padding:0}
 body{background:white;color:#1e2929;font-size:11pt}
 .document-header{padding-top:0}
