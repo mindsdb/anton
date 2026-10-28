@@ -33,7 +33,9 @@ class Dataset(Model):
 
     @model_validator(mode="after")
     def finite(self):
-        if any(isinstance(v, (float, Decimal)) and not math.isfinite(v) for r in self.rows for v in r.values()):
+        if any((isinstance(v, Decimal) and not v.is_finite()) or
+               (isinstance(v, float) and not math.isfinite(v))
+               for r in self.rows for v in r.values()):
             raise ValueError("Evidence contains a non-finite number")
         return self
 

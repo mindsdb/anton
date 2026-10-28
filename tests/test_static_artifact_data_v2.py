@@ -49,9 +49,17 @@ def test_group_keys_do_not_merge_boolean_and_number():
     assert len(execute(evidence([{"key": True}, {"key": 1}]), q)) == 2
 
 
-def test_nonfinite_evidence_rejected():
+@pytest.mark.parametrize('value',[float('nan'),float('inf'),Decimal('Infinity'),Decimal('NaN')])
+def test_nonfinite_evidence_rejected(value):
     with pytest.raises(ValidationError, match="non-finite"):
-        evidence([{"net": float("nan")}])
+        evidence([{"net": value}])
+
+
+def test_finite_decimal_evidence_does_not_overflow_a_float_conversion():
+    value=Decimal('1e500')
+    data=evidence([{'net':value}])
+    query=Query(dataset='orders',measures=[{'name':'total','op':'sum','field':'net'}])
+    assert execute(data,query)==[{'total':value}]
 
 
 def test_sorted_projection_filters_and_nulls():
