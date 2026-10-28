@@ -24,6 +24,7 @@ from anton.core.backends.sandbox import cell_sandbox_of
 from anton.utils.nofollow import opened_dir_nofollow, read_bytes_nofollow, unlink_matching_nofollow
 
 from .discovery.notes import source_key, string_list
+from .state import settled_artifact_type
 
 if TYPE_CHECKING:
     from anton.core.backends.sandbox import CellSandbox
@@ -417,16 +418,18 @@ def saved_files_section(
     )
 
 
+# A run that moved from html-app to a fullstack type keeps its files, but its
+# generators have no data blocks to fill.
 def state_files_section(state: object) -> str:
     files = getattr(state, "data_files", None) or []
-    if not files:
+    if not files or settled_artifact_type(state) != "html-app":
         return ""
     return files_section(state.artifact_path, files, cell_sandbox=sandbox_of(state.session))
 
 
 def state_saved_files_section(state: object) -> str:
     files = getattr(state, "previous_data_files", None) or []
-    if not files:
+    if not files or settled_artifact_type(state) != "html-app":
         return ""
     return saved_files_section(state.artifact_path, files, cell_sandbox=sandbox_of(state.session))
 

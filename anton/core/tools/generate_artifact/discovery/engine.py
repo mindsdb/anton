@@ -76,7 +76,10 @@ def _absorb_data_files(state: "PrdState", inp: dict) -> str | None:
     """For an html-app: take the declared data files, or say why gathering
     cannot finish yet. Data read by code is sent back once to be saved; the
     second call is accepted either way, so gathering cannot get stuck on
-    data it cannot save."""
+    data it cannot save.
+
+    A refusal reopens gathering: if the model never calls `finish_gathering`
+    again, the data loop has to vouch for the sources instead."""
     if settled_artifact_type(state) != "html-app":
         return None
     declared = data_files.parse_declared(inp.get("data_files"))
@@ -85,6 +88,7 @@ def _absorb_data_files(state: "PrdState", inp: dict) -> str | None:
         cell_sandbox=data_files.sandbox_of(state.session), protected=state.data_snapshot,
     ) if declared else ([], []))
     if errors:
+        state.gathering_complete = False
         return _NOT_FINISHED + "\n".join(f"- {e}" for e in errors)
     state.data_files = valid
     if state.data_save_requested or not state.declared_sources:
@@ -100,6 +104,8 @@ def _absorb_data_files(state: "PrdState", inp: dict) -> str | None:
     if not missing:
         return None
     state.data_save_requested = True
+    state.gathering_complete = False
+    state.unverified_sources = missing
     return _SAVE_DATA + ", ".join(missing) + "."
 
 
@@ -134,10 +140,13 @@ async def run_gathering_loop(state: "PrdState") -> None:
         rather than resetting, so phase 2's exchange survives.
       - `state.qa_log` gains one entry per `ask_user` call actually asked.
       - `state.final_artifact_type` / `state.gathering_notes` are set by
-        `finish_gathering`. Left as `""` / the model's last text if the
-        loop exhausts `MAX_ROUNDS`, or the model stops without calling
-        `finish_gathering` — both are the best-effort case the caller
-        (orchestrator.run) falls back on.
+        every `finish_gathering` call, a refused one included. With no call
+        at all they stay `""` / the model's last text.
+      - `state.gathering_complete` is set by an accepted `finish_gathering`
+        and cleared by a refused one. Exhausting `MAX_ROUNDS` or stopping
+        without the call leaves it as it was, False on a first pass: the
+        best-effort case in which the caller's emergency data loop
+        re-checks the data.
     """
     budget = gathering_question_budget(state.session, act_first=state.act_first)
     # One array for the whole shared-prefix region; availability per step is
@@ -342,6 +351,6 @@ async def run_gathering_loop(state: "PrdState") -> None:
             )
             return
 
-    # MAX_ROUNDS exhausted without finish_gathering — best-effort; caller
-    # checks state.final_artifact_type (still "") to detect this case.
+    # MAX_ROUNDS exhausted without an accepted finish_gathering — best-effort;
+    # the caller's data loop re-checks unless an earlier pass vouched for it.
     state.trace_log.node("gathering", "fail", detail="MAX_ROUNDS exhausted without finish_gathering")

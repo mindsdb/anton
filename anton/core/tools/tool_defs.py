@@ -702,6 +702,7 @@ def _without_direct_reports(tool: ToolDef) -> ToolDef:
         ),
         prompt=cut_spans(
             tool.prompt,
+            (" whose requirements still need agreeing", ",", ""),
             ("; a report the user has fully specified is built directly (DIRECT REPORTS)", ".\n", ""),
         ),
     )

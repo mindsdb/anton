@@ -634,6 +634,29 @@ async def test_data_read_by_a_cell_and_not_saved_is_sent_back_once_then_warned(m
     assert state.data_not_saved is True
 
 
+@pytest.mark.parametrize("re_entry", [False, True])
+async def test_a_refused_save_left_unanswered_hands_the_sources_to_the_data_loop(tmp_path, re_entry):
+    state = _state(_session_with_plan_sequence(
+        _finish_with_files(findings=[{"source": "orders", "verified_by": "known_data"}]),
+        _response("the data is in the pad"),
+    ), artifact_path=tmp_path, known_data="scratchpad `supply_kpi`, variable `frames`",
+        pad_names=["supply_kpi"], gathering_complete=re_entry)
+    await engine.run_gathering_loop(state)
+    assert "save the data the page needs" in state.messages[2]["content"][0]["content"]
+    assert state.gathering_complete is False
+    assert state.unverified_sources == ["orders"]
+
+
+async def test_a_refused_data_file_left_unanswered_reopens_gathering(tmp_path):
+    state = _state(_session_with_plan_sequence(
+        _finish_with_files([{"id": "1", "sources": ["orders"]}]),
+        _response("done"),
+    ), artifact_path=tmp_path, gathering_complete=True)
+    await engine.run_gathering_loop(state)
+    assert "does not exist" in state.messages[2]["content"][0]["content"]
+    assert state.gathering_complete is False
+
+
 async def test_a_fullstack_gathering_ignores_data_files(tmp_path):
     state = _state(_session_with_plan_sequence(_response(tool_calls=[_tc("finish_gathering", {
         "summary": "ok", "artifact_type": "fullstack-stateless-app", "data_sources": ["orders"],

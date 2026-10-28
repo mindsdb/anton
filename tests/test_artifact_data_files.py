@@ -195,6 +195,20 @@ def test_state_sections_do_not_touch_the_session_without_files(tmp_path):
     assert data_files.state_saved_files_section(state) == ""
 
 
+def test_state_sections_are_empty_once_the_type_is_not_an_html_app(tmp_path):
+    _write(tmp_path, "1", "[1]")
+    files = [DataFile("1", ["s"])]
+    state = SimpleNamespace(
+        artifact_path=tmp_path, data_files=files, previous_data_files=files, session=None,
+        artifact_type="html-app", final_artifact_type="fullstack-stateless-app",
+    )
+    assert data_files.state_files_section(state) == ""
+    assert data_files.state_saved_files_section(state) == ""
+    state.final_artifact_type = "html-app"
+    assert data_files.state_files_section(state).startswith(data_files.DATA_FILES_HEADER)
+    assert data_files.state_saved_files_section(state).startswith(data_files.SAVED_DATA_FILES_HEADER)
+
+
 def test_lone_surrogates_are_not_valid_for_a_page(tmp_path):
     _write(tmp_path, "1", '["\\ud800"]')
     assert "unreadable" in data_files.summarize(tmp_path, [DataFile("1", ["s"])])

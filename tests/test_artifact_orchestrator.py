@@ -2400,7 +2400,29 @@ def test_filling_the_data_blocks_writes_nothing_once_the_run_is_abandoned(tmp_pa
     assert "SO-5001" in page.read_text()
 
 
-def test_filling_the_data_blocks_leaves_an_unreadable_page_to_the_checks(tmp_path: Path):
+def test_a_page_whose_data_blocks_cannot_be_filled_ends_the_run(tmp_path: Path):
+    st = _state(tmp_path)
+    st.trace_log = Mock()
+    st.data_files = [DataFile("1", ["orders"])]
+    (tmp_path / "real.html").write_text(_GOOD_PAGE)
+    (tmp_path / "index.html").symlink_to(tmp_path / "real.html")
+    fatal = orchestrator._fill_data_blocks(st, tmp_path / "index.html")
+    assert fatal is not None and "could not be read" in fatal
+    st.trace_log.node.assert_any_call("verify_frontend", "fill_skipped", "the page could not be read")
+    assert orchestrator._fill_data_blocks(_state(tmp_path), tmp_path / "missing.html") is None
+
+
+def test_a_page_whose_filled_data_cannot_be_written_ends_the_run(tmp_path: Path, monkeypatch):
+    (tmp_path / DATA_DIRNAME).mkdir()
+    (tmp_path / DATA_DIRNAME / "1.json").write_text("[1]")
     st = _state(tmp_path)
     st.data_files = [DataFile("1", ["orders"])]
-    assert orchestrator._fill_data_blocks(st, tmp_path / "missing.html") is None
+    page = tmp_path / "index.html"
+    page.write_text(_GOOD_PAGE)
+
+    def refuse(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(orchestrator, "write_text_nofollow", refuse)
+    fatal = orchestrator._fill_data_blocks(st, page)
+    assert fatal is not None and "could not be written" in fatal

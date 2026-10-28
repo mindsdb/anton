@@ -194,6 +194,11 @@ def test_gathering_step_records_each_decision_in_one_list_only():
     assert "never in both lists" in message
 
 
+def test_gathering_step_asks_only_an_html_app_to_save_pad_data_to_a_file():
+    message = step_message(sub_tools.STEP_GATHERING, _state())
+    assert "For an `html-app`, a reference to data in a scratchpad does not count either" in message
+
+
 def test_gathering_step_names_the_structured_fields():
     message = step_message(sub_tools.STEP_GATHERING, _state())
     for field_name in ("`data_findings`", "`assumptions`"):

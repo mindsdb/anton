@@ -1680,15 +1680,17 @@ def _fill_data_blocks(state: GenState, entry_file: Path) -> str | None:
     """Put each data file into its block on the html-app page, before the page
     is verified. Returns the error that ends the run, or None. Written under
     `page_lock`, like `_embed_attachments`, and not at all once the run was
-    given up."""
+    given up.
+
+    A page that cannot be read or written here ends the run: the checks that
+    follow read it by following links and would pass a page without its data."""
     if not state.data_files:
         return None
     try:
         html = read_text_nofollow(state.artifact_path, entry_file)
-    except OSError:
-        # The checks that follow report a page they cannot read.
+    except (OSError, ValueError) as exc:
         state.trace_log.node("verify_frontend", "fill_skipped", "the page could not be read")
-        return None
+        return _page_not_filled("read", exc)
     result = data_files.fill_page(
         html, state.artifact_path, state.data_files, cell_sandbox=_cell_sandbox(state)
     )
@@ -1698,8 +1700,18 @@ def _fill_data_blocks(state: GenState, entry_file: Path) -> str | None:
         with state.page_lock:
             if state.abandoned.is_set():
                 return None
-            write_text_nofollow(state.artifact_path, entry_file, result.html)
+            try:
+                write_text_nofollow(state.artifact_path, entry_file, result.html)
+            except (OSError, ValueError) as exc:
+                return _page_not_filled("written", exc)
     return None
+
+
+def _page_not_filled(action: str, exc: Exception) -> str:
+    return (
+        f"The page could not be {action} to fill its data blocks ({exc}), so it cannot "
+        "show its data. Call generate_artifact again."
+    )
 
 
 def _note_skipped(state: GenState, text: str) -> None:
