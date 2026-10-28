@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -260,14 +261,39 @@ def settled_artifact_type(state) -> str:
     return state.final_artifact_type or state.artifact_type
 
 
+_PAD_IN_BACKTICKS = re.compile(r"\b(?:scratch)?pad\s+`[^`\s]+`", re.IGNORECASE)
+
+
+def known_data_is_reference(state) -> bool:
+    """Whether `known_data` points at data in a pad: "scratchpad `<name>`"
+    for any name, or one of the session's pads in backticks or right after
+    "scratchpad"/"pad". Text that also carries values counts as a reference:
+    the pad holds the full rows."""
+    text = getattr(state, "known_data", "") or ""
+    if _PAD_IN_BACKTICKS.search(text):
+        return True
+    for name in getattr(state, "pad_names", None) or []:
+        escaped = re.escape(name)
+        if re.search(rf"`{escaped}`", text):
+            return True
+        if re.search(rf"\b(?:scratch)?pad\s+`?{escaped}(?![\w-])", text, re.IGNORECASE):
+            return True
+    return False
+
+
 def known_data_usable(state) -> bool:
     """Whether `known_data` can stand in for executed code.
 
-    Only for an html-app, whose page embeds a snapshot. A fullstack backend
+    Only for an html-app, whose page embeds a snapshot, and only when it
+    holds the values rather than a reference to a pad. A fullstack backend
     reads its source at run time and needs working access code in
     `data_notes`.
     """
-    return settled_artifact_type(state) == "html-app" and bool((state.known_data or "").strip())
+    return (
+        settled_artifact_type(state) == "html-app"
+        and bool((state.known_data or "").strip())
+        and not known_data_is_reference(state)
+    )
 
 
 @dataclass

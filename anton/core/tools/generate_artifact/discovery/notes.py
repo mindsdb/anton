@@ -164,6 +164,25 @@ def known_data_sources(inp: dict, *, usable: bool) -> set[str]:
     return covered
 
 
+_WEB_MARK = re.compile(r"^\s*https?://|\bweb_(?:search|fetch)\b", re.IGNORECASE)
+
+
+def web_verified_sources(inp: dict) -> set[str]:
+    """`source_key`s of the findings a `finish_gathering` call says came from
+    the web: a URL or a web tool in `verified_by`."""
+    findings = inp.get("data_findings")
+    if not isinstance(findings, list):
+        return set()
+    found: set[str] = set()
+    for item in findings:
+        if not isinstance(item, dict):
+            continue
+        key = source_key(item.get("source"))
+        if key and _WEB_MARK.search(str(item.get("verified_by") or "")):
+            found.add(key)
+    return found
+
+
 def render_gathering_notes(inp: dict) -> str:
     """Markdown record of a `finish_gathering` call, built by code.
 

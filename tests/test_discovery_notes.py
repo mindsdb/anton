@@ -11,6 +11,7 @@ from anton.core.tools.generate_artifact.discovery.notes import (
     render_gathering_notes,
     render_web_notes,
     source_key,
+    web_verified_sources,
 )
 
 
@@ -131,3 +132,13 @@ def test_a_failed_cell_is_marked_so_no_generator_takes_it_for_working_code():
     assert "Scratchpad `pad` (failed):\n```python\nget('/sites')" in out
     assert "Scratchpad `pad`:\n```python\nrows = q()" in out
     assert "Scratchpad `old`:\n```python\nx = 1" in out
+
+
+def test_web_verified_sources_takes_urls_and_web_tools():
+    inp = {"data_findings": [
+        {"source": "Article", "verified_by": "https://example.com/a"},
+        {"source": "Search", "verified_by": "web_search: oil price"},
+        {"source": "Orders", "verified_by": "scratchpad `g`, cell 2"},
+        {"source": "Rows", "verified_by": "known_data"},
+    ]}
+    assert web_verified_sources(inp) == {"article", "search"}
