@@ -4,6 +4,7 @@ from __future__ import annotations
 import uuid
 import json
 import copy
+import ast
 from decimal import Decimal
 
 from anton.core.artifacts.static.data import Evidence
@@ -30,6 +31,17 @@ REUSE = {'name': 'reuse_static_evidence', 'description': 'Finish with the exact 
     'input_schema': {'type': 'object', 'additionalProperties': False, 'properties': {'reason': {'type': 'string', 'minLength': 1}}, 'required': ['reason']}}
 
 
+def _bind_evidence_path(code, path):
+    # Future imports must remain before executable statements in a Python cell.
+    try:
+        offset = max((s.end_lineno for s in ast.parse(code).body if isinstance(s, ast.ImportFrom) and s.module == '__future__'), default=0)
+    except SyntaxError:
+        offset = 0  # Let the normal scratchpad handler report invalid Python.
+    lines = code.splitlines(keepends=True)
+    prefix = ''.join(lines[:offset])
+    return prefix + ('\n' if prefix and not prefix.endswith('\n') else '') + f'STATIC_EVIDENCE_PATH = {str(path)!r}\n' + ''.join(lines[offset:])
+
+
 async def collect(state, *, feedback: str = '') -> Evidence | str:
     from anton.core.tools.tool_defs import SCRATCHPAD_TOOL, READ_TEXT_FILE_TOOL
     from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
@@ -41,7 +53,7 @@ async def collect(state, *, feedback: str = '') -> Evidence | str:
     pad_name = 'static_evidence_' + nonce
     path = state.artifact_path / '.static' / f'evidence-{nonce}.json'
     make_dirs_nofollow(state.artifact_path, path.parent)
-    system = COLLECT.replace('EVIDENCE_PATH', repr(str(path))).replace('SOURCE_SCRATCHPAD', repr(pad_name))
+    system = COLLECT.replace('SOURCE_SCRATCHPAD', repr(pad_name))
     definitions = [SCRATCHPAD_TOOL, READ_TEXT_FILE_TOOL, RECALL_SKILL_TOOL, WEB_FETCH_FALLBACK_TOOL, WEB_SEARCH_FALLBACK_TOOL]
     tools = [protocol.tool_schema(t) for t in definitions] + [_ask_user_schema(), FINISH]
     tools[0] = copy.deepcopy(tools[0])
@@ -110,7 +122,7 @@ async def collect(state, *, feedback: str = '') -> Evidence | str:
                         state.static_evidence_origin = {'mode': 'acquired', 'acquired_at': snapshots.now()}
                         result = 'Evidence accepted.'
                     except (OSError, ValueError) as error:
-                        result = f'Evidence not accepted: {error}. Write the complete evidence file and finish again.'
+                        result = f'Evidence not accepted at STATIC_EVIDENCE_PATH: {error}. Write the complete evidence there using the supplied variable and finish again.'
                 results.append(protocol.tool_result(call.id, result))
             elif call.name == 'ask_user':
                 if questions <= 0:
@@ -132,6 +144,8 @@ async def collect(state, *, feedback: str = '') -> Evidence | str:
                 if call.name in ('read_text_file', 'web_fetch') or (call.name == SCRATCHPAD_TOOL.name and scratchpad_action(call.input) == 'exec'):
                     source_attempted = True
                 arguments = {**call.input, 'name': pad_name, 'confirm_new_scratchpad': True} if call.name == SCRATCHPAD_TOOL.name else call.input
+                if call.name == SCRATCHPAD_TOOL.name and scratchpad_action(call.input) == 'exec' and isinstance(arguments.get('code'), str):
+                    arguments['code'] = _bind_evidence_path(arguments['code'], path)
                 outcome = await handlers[call.name](state.session, arguments)
                 if call.name == RECALL_SKILL_TOOL.name:
                     source_lookup_failed = getattr(outcome, 'ok', None) is False
