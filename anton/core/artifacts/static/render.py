@@ -72,6 +72,10 @@ def render(document: Document, evidence: Evidence) -> Rendered:
         available = set(query.columns or query.group_by + [m.name for m in query.measures])
         if set(fields) - available:
             raise DataError(f"{block.title}: fields are not selected by its query: {sorted(set(fields) - available)}")
+        if isinstance(block, Chart) and block.kind == 'line' and any(order.field == block.x for order in query.order_by):
+            labels = [row[block.x] for row in rows if row[block.x] is not None]
+            if any(isinstance(label, str) and not re.fullmatch(r"\d{4}-\d{2}(?:-\d{2}(?:[T ].*)?)?", label) for label in labels):
+                raise DataError('Line charts must not lexicographically sort human-readable labels. Preserve source order, or order by an explicit numeric/ISO date key.')
         # Extra query fields may drive sorting; only displayed columns leave the host.
         public_rows = [{key: row[key] for key in dict.fromkeys(fields)} for row in rows]
         bindings[index] = public_rows

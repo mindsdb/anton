@@ -2,7 +2,8 @@
   'use strict';
   if (!document.documentElement.classList.contains('slides')) return;
   const root=document.documentElement;
-  const slides=[...document.querySelectorAll('.document-header,.section,main>footer')];
+  const slides=[...document.querySelectorAll('.section')];
+  const chrome=[...document.querySelectorAll('.document-header,main>footer')];
   const present=document.querySelector('[data-action="present"]');
   present.hidden=false;
   const controls=document.createElement('div');controls.className='slide-controls';controls.hidden=true;
@@ -21,6 +22,7 @@
   const originalTitle=document.title;
   const toggle=()=>{
     presenting=!presenting;root.classList.toggle('presenting',presenting);
+    chrome.forEach(element=>element.hidden=presenting);
     controls.hidden=!presenting;present.textContent=presenting?'Read':'Present';
     present.setAttribute('aria-pressed',String(presenting));
     if(!presenting)document.title=originalTitle;

@@ -47,10 +47,8 @@ def test_slide_controls_keyboard_exit_and_print_restore_all_content():
         page.set_content(specimen('slides'))
         page.get_by_role('button',name='Present',exact=True).click()
         assert page.locator('.presenting').count()==1
-        assert page.locator('.section:visible').count()==0
-        page.get_by_role('button',name='Next slide').click()
-        page.wait_for_function('document.querySelectorAll(".chart svg").length===2')
         assert page.locator('#comparison:visible').count()==1
+        page.wait_for_function('document.querySelectorAll(".chart svg").length===2')
         page.get_by_role('button',name='Next slide').click()
         assert page.locator('#conclusion:visible').count()==1
         page.emulate_media(media='print')

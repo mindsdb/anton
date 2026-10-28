@@ -88,3 +88,9 @@ def test_host_ids_do_not_reserve_natural_section_names_and_duplicate_custom_ids_
     doc=Document.model_validate(doc.model_dump())
     with pytest.raises(DataError,match='Duplicate HTML id'):
         render(doc,Evidence())
+
+
+def test_line_chart_rejects_ambiguous_text_sorting_instead_of_drawing_false_chronology():
+    block={'type':'chart','kind':'line','title':'Trend','x':'name','query':{'dataset':'rows','columns':['name','amount'],'order_by':[{'field':'name'}]},'series':[{'field':'amount','label':'Amount'}]}
+    with pytest.raises(DataError,match='Preserve source order'):
+        render(document([block]),evidence())
