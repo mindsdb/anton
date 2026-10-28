@@ -55,17 +55,50 @@ def test_every_view_starts_through_the_helper_after_the_browser_gate():
 
 def test_a_tabs_views_start_through_the_helper_too():
     """The tab rule starts a tab's charts on its first visit, from the click
-    handler, where an uncaught throw stops that tab's other views."""
+    handler, where an uncaught throw stops that tab's other views. It starts
+    each by its title: a setup function handed over by reference throws a
+    `ReferenceError` outside the helper when its script never parsed."""
     for prompt in (
         prompts.build_subagent_system_prompt(Path("/tmp/a")),
         prompts.build_frontend_system_prompt(Path("/tmp/a")),
     ):
         tab_rule = prompt.index("Multi-tab dashboards")
-        helper = prompt.index("function runView(name, el, setup)")
+        helper = prompt.index("function runView(name, el)")
         # The tab rule sits in the design rules, after the contract that
         # defines the helper it names.
         assert helper < tab_rule
-        assert "`initChartsFor(name)` starts each view on that tab through `runView`" in prompt
+        assert (
+            "`initChartsFor(name)` starts each view on that tab by its title with `runView(title, el)`"
+            in " ".join(prompt.split())
+        )
+
+
+def test_each_views_code_goes_in_a_script_of_its_own_and_starts_by_name():
+    """A browser parses a `<script>` element as a whole, so a syntax error in a
+    page's one script stopped every view. Both frontend prompts put the helper
+    alone first, each view's setup in a script of its own, and start each view
+    by its title, so the helper fails a view whose script never ran by name."""
+    for prompt in (
+        prompts.build_subagent_system_prompt(Path("/tmp/a")),
+        prompts.build_frontend_system_prompt(Path("/tmp/a")),
+    ):
+        flat = " ".join(prompt.split())
+        for rule in (
+            "Put the helper alone in the page's first inline `<script>`",
+            "Give each view an inline `<script>` of its own that holds only its setup",
+            "`<script>defineView('Shipment map', (el) => { /* draw the map */ });</script>`",
+            "The page's last script starts each view by its title",
+            "`runView('Shipment map', document.getElementById('world-map'));`",
+            "a syntax error in one view's script stops only that view",
+            "Never put two views' code in one script, and never pass a setup function to `runView`",
+            "Inline your own CSS and all JS, each view's code in a `<script>` of its own",
+        ):
+            assert rule in flat, rule
+        # The by-reference example is gone: it is the call that escapes the helper.
+        assert "drawMap" not in prompt
+    assert "your own JS in inline `<script>` elements, each view's code in a script of its own" in " ".join(
+        prompts.build_frontend_system_prompt(Path("/tmp/a")).split()
+    )
 
 
 def test_the_helper_names_the_failed_view_first_in_both_channels():
@@ -177,53 +210,87 @@ def test_the_skill_says_which_preview_blocks_what():
 def test_the_skill_carries_the_builders_helper_word_for_word():
     """A hand-built page follows the skill, a built one the builder's prompt:
     one helper text, so a page fails a view the same way either way. The
-    skill's build step and tab rule start every view through it."""
+    skill's build steps give each view a script of its own, and its tab rule
+    starts every view by its title."""
     skill = _skill()
+    flat = " ".join(skill.split())
     assert prompts.VIEW_HELPER_JS in skill
-    assert "Define the `runView` helper from item 10 first, and start every view through it" in skill
-    assert "`initChartsFor(name)` starts each view on that tab through `runView` (item 10)" in skill
+    for rule in (
+        "Put the helper alone in the page's first inline `<script>`",
+        "Write each view's setup as its own string, one `defineView(...)` call per view",
+        "for js in [js_helper, data_js, js_shared, *view_js, js_start]",
+        "Never join two views' code into one `<script>`",
+        "`initChartsFor(name)` starts each view on that tab by its title with `runView(title, el)` (item 10)",
+    ):
+        assert rule in flat, rule
+    assert "{data_js}{js_charts}" not in skill
     assert "catch (e) { console.error(e); el.textContent" not in skill
 
 
-# Runs the helper against stub elements. `queueMicrotask` and a timer let a
-# rejected promise settle before the report.
+# Runs each script the way a browser runs a page's `<script>` elements: each
+# is parsed on its own in one shared global scope, and one that does not parse
+# never runs. `node:vm` compiles each before it runs any line of it, as the
+# browser does. A timer lets a rejected promise settle before the report.
 _HELPER_HARNESS = r"""
-const errors = [], reported = [];
+const vm = require('node:vm');
+const errors = [], reported = [], unparsed = [];
 const element = (id) => ({id, attrs: {}, textContent: 'chart',
   setAttribute(k, v) { this.attrs[k] = v; }});
-global.console = {error: (...args) => errors.push(args)};
-global.reportError = (err) => reported.push(err instanceof Error ? err.message : String(err));
-eval(process.argv[1] + `
-const map = element('world-map'), globe = element('globe'), chart = element('trend-chart');
-runView('Shipment map', map, () => { undefinedThing.draw(); });
-runView('Globe', globe, async () => { await null; throw new Error('atlas fetch failed'); });
-runView('Trend chart', chart, (el) => { el.textContent = 'drawn'; });
-runView('Missing panel', null, (el) => { el.textContent = 'x'; });
-let after = 'script went on';
+const elements = {map: element('world-map'), globe: element('globe'), chart: element('trend-chart'),
+  atlas: element('atlas'), odd: element('odd')};
+const page = vm.createContext({
+  elements,
+  console: {error: (...args) => errors.push(args)},
+  reportError: (err) => reported.push(String(err && err.message)),
+});
+const scripts = [
+  process.argv[1],
+  "defineView('Shipment map', () => { undefinedThing.draw(); });",
+  "defineView('Globe', (el) => { el.textContent = 'drawn'; ) });",
+  "defineView('Trend chart', (el) => { el.textContent = 'drawn'; });",
+  "defineView('Atlas', async () => { await null; throw new Error('atlas fetch failed'); });",
+  "defineView('Missing panel', (el) => { el.textContent = 'x'; });",
+  "runView('Shipment map', elements.map); runView('Globe', elements.globe);" +
+  " runView('Trend chart', elements.chart); runView('Atlas', elements.atlas);" +
+  " runView('Missing panel', null); runView('constructor', elements.odd); after = 'script went on';",
+];
+for (const source of scripts) {
+  try { vm.runInContext(source, page); } catch (err) { unparsed.push(err.name); }
+}
+const state = (el) => [el.attrs['data-view-failed'] || null, el.textContent];
 setTimeout(() => process.stdout.write(JSON.stringify({
-  errors, reported, after,
-  map: [map.attrs['data-view-failed'] || null, map.textContent],
-  globe: [globe.attrs['data-view-failed'] || null, globe.textContent],
-  chart: [chart.attrs['data-view-failed'] || null, chart.textContent],
+  errors, reported, unparsed, after: page.after,
+  map: state(elements.map), globe: state(elements.globe), chart: state(elements.chart),
+  atlas: state(elements.atlas), odd: state(elements.odd),
 })), 20);
-`);
 """
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 def test_the_helper_keeps_a_failed_view_to_itself():
-    """A throw, a rejected promise and a missing element each fail only
-    their own view: the script goes on, the healthy view draws, and each
-    failure is marked, worded and reported with the view's name first."""
+    """A view whose script does not parse, a throw, a rejected promise and a
+    missing element each fail only their own view: the starting script goes
+    on, the healthy view draws, and each failure is marked, worded and
+    reported with the view's name first. The view whose script never ran has
+    no setup under its name, so the helper fails it by name instead of a
+    `ReferenceError` stopping the views started after it."""
     out = json.loads(subprocess.run(
         ["node", "-e", _HELPER_HARNESS, prompts.VIEW_HELPER_JS],
         text=True, capture_output=True, check=True,
     ).stdout)
+    assert out["unparsed"] == ["SyntaxError"]
     assert out["after"] == "script went on"
     assert out["chart"] == [None, "drawn"]
     assert out["map"] == ["Shipment map", "Shipment map could not load."]
     assert out["globe"] == ["Globe", "Globe could not load."]
-    assert [args[0].split(":")[0] for args in out["errors"]] == ["Shipment map failed", "Missing panel failed", "Globe failed"]
+    assert out["atlas"] == ["Atlas", "Atlas could not load."]
+    # A title that names an `Object` property finds no setup it never registered.
+    assert out["odd"] == ["constructor", "constructor could not load."]
+    assert [args[0].split(":")[0] for args in out["errors"]] == [
+        "Shipment map failed", "Globe failed", "Missing panel failed", "constructor failed", "Atlas failed",
+    ]
+    assert out["errors"][1] == ["Globe failed: no script defined this view"]
     assert all(len(args) == 1 for args in out["errors"])
     assert out["reported"][0].startswith("Shipment map: ")
-    assert out["reported"][2] == "Globe: atlas fetch failed"
+    assert out["reported"][1] == "Globe: no script defined this view"
+    assert out["reported"][4] == "Atlas: atlas fetch failed"
