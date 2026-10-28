@@ -74,10 +74,13 @@ Choose composition from the user's task, not a template. Give sections meaningfu
 put the central finding early; use metrics only when useful. Use charts only for comparisons they explain.
 Use flow, split, or metrics layouts deliberately; mix narrative, evidence, caveats, and conclusions.
 Choose accent and typography to suit the requested style. Respect exact user constraints over all plans.
-Every quantitative claim must use a fact binding {{fact_name}} in text or a metric bound to that fact.
+When the user specifies an exact set of outputs, do not add unrelated cards or views.
+In a structured document, every quantitative claim must use a fact binding {{fact_name}} in text or a metric bound to that fact.
 A query fact selects exactly one row; its field names an output column. For totals use a measure.
-A calculation fact adds, subtracts, multiplies, or divides two named facts. Percent formatting multiplies
-a ratio by 100; do not multiply it yourself. Queries filter, project explicit columns, group, aggregate,
+A calculation fact adds, subtracts, multiplies, or divides two named facts. Percent formatting declares
+the input scale: percent="ratio" multiplies a fraction by 100; percent="points" appends % to a value
+already in percentage points. For example 0.72 as ratio and 72 as points both display 72%. Never
+scale a source percentage twice. Queries filter, project explicit columns, group, aggregate,
 and sort exact evidence. They never silently coerce strings, drop incomplete rows, or replace missing
 values with zero. Aggregates propagate nulls by default; missing="skip" is an explicit choice
 for observed values only and must be disclosed in the narrative. Don't invent a literal total, category, unit, source, causal explanation, or conclusion.
@@ -91,7 +94,10 @@ For visualizations or interactions the document contract cannot express, use an 
 compose_custom_html for a fully custom page. This is a real escape hatch, not a reason to simplify the user's task.
 A custom full page supplies bindings as named queries and reads those records from window.ARTIFACT_DATA[name].
 The host resolves and embeds these exact projected rows before the page's scripts execute. Never
-retype the evidence into code. Custom fragments in a document may read the resolved public bindings
+retype the evidence into code. Use host query measures for custom-page aggregates. Decimal values
+are published as exact decimal strings: format them deliberately, and use Number only where a
+browser calculation or chart coordinate needs it. Never concatenate numeric strings when summing.
+Custom fragments in a document may read the resolved public bindings
 from window.ARTIFACT_DATA; never rely on outside state.
 A custom page must be a complete single HTML document with viewport metadata, inline styles,
 semantic controls, keyboard support, and responsive layouts. Embed data and media assets. No build,
@@ -117,8 +123,8 @@ or call compose_custom_html with exactly {"html": "<!doctype html>...", "binding
 Do not add mode, artifact, name, sources, queries, or other invented wrapper fields.
 The structured document has title, kind (report/slides), and sections. Each section requires id and blocks.
 Theme fields are mode (light/dark), accent (#RRGGBB), typography (sans/editorial), density (comfortable/compact). Do not add font.
-Format is {"decimals":1,"percent":true,"prefix":"","suffix":""}; percent is a boolean. Use readable precision unless the user requests more.
-A calculation fact is {"type":"calculation","op":"divide","inputs":["completed","capacity"],"format":{"percent":true,"decimals":1}}.
+Format is {"decimals":1,"percent":"ratio","prefix":"","suffix":""}; percent is none, ratio, or points. Use points for already-scaled source percentages. Use readable precision unless the user requests more.
+A calculation fact is {"type":"calculation","op":"divide","inputs":["completed","capacity"],"format":{"percent":"ratio","decimals":1}}.
 A metric block is {"type":"metric","label":"Total","fact":"total"}.
 A prose block is {"type":"prose","text":"Observed total: {{total}}."}.
 A chart block needs type, title, kind (bar/line/scatter), query, x, and series:[{field,label,format?}].

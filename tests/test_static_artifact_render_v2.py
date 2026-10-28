@@ -14,6 +14,14 @@ def document(blocks, **kwargs):
     return Document.model_validate({'title':'A report', 'sections':[{'id':'one', 'blocks':blocks}], **kwargs})
 
 
+@pytest.mark.parametrize('value',[Decimal('1e500'),Decimal('1e-500')])
+def test_chart_rejects_values_the_browser_would_overflow_or_turn_into_zero(value):
+    evidence=Evidence.model_validate({'datasets':{'sample':{'source':{'label':'Synthetic numeric QA'},'rows':[{'name':'A','value':value}]}}})
+    doc=document([{'type':'chart','title':'Amounts','query':'sample','x':'name','series':[{'field':'value','label':'Amount'}]}])
+    with pytest.raises(DataError,match='rescale'):
+        render(doc,evidence)
+
+
 def evidence():
     return Evidence.model_validate({'datasets':{'rows':{'source':{'label':'Uploaded file'}, 'rows':[
         {'name':'</script><script>alert(1)</script>', 'amount':9007199254740993, 'private':'DO_NOT_EXPORT'}]}}})

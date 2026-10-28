@@ -105,7 +105,25 @@
         for(let i=0;i<=4;i++) svg.append(svgNode('text',{x:left+plotW*i/4,y:height-bottom+24,'text-anchor':'middle'},compact(minX+(maxX-minX)*i/4)));
       } else {
         const stride=Math.max(1,Math.ceil(spec.rows.length/Math.max(2,Math.floor(plotW/90))));
-        spec.rows.forEach((row,n)=>{if(n%stride===0 || n===spec.rows.length-1)svg.append(svgNode('text',{x:xAt(n),y:height-bottom+24,'text-anchor':n===spec.rows.length-1?'end':n===0?'start':'middle'},String(row[spec.x]).length>16 ? String(row[spec.x]).slice(0,14)+'…' : String(row[spec.x])));});
+        const measure=document.createElement('canvas').getContext('2d');
+        if(measure)measure.font=`11px ${getComputedStyle(container).fontFamily}`;
+        const textWidth=text=>measure?measure.measureText(text).width:text.length*6.5;
+        const maxChars=Math.max(2,Math.min(16,Math.floor((plotW-20)/13)));
+        const labelAt=n=>{
+          const full=String(spec.rows[n][spec.x]);let keep=Math.min(full.length,maxChars), text=full.length>keep?full.slice(0,keep-1)+'…':full;
+          while(keep>0 && textWidth(text)>(plotW-16)/2){keep--;text=full.slice(0,keep)+'…';}
+          return {full,text};
+        };
+        const last=spec.rows.length-1, lastLabel=labelAt(last), lastStart=xAt(last)-textWidth(lastLabel.text);
+        let previousEnd=-Infinity;
+        spec.rows.forEach((row,n)=>{
+          if(n%stride!==0 && n!==last)return;
+          const label=labelAt(n), width=textWidth(label.text), anchor=n===last && last>0?'end':n===0?'start':'middle';
+          const start=xAt(n)-(anchor==='end'?width:anchor==='middle'?width/2:0), end=start+width;
+          if(n!==last && (start<previousEnd+12 || (n>0 && end>lastStart-12)))return;
+          const text=svgNode('text',{x:xAt(n),y:height-bottom+24,'text-anchor':anchor,class:'x-tick'},label.text);
+          text.append(svgNode('title',{},label.full));svg.append(text);previousEnd=end;
+        });
       }
     }
     svg.append(svgNode('text',{x:left+plotW/2,y:height-5,'text-anchor':'middle',class:'axis-label'},bar ? spec.yLabel : spec.xLabel));

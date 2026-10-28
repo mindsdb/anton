@@ -62,6 +62,28 @@ def test_finite_decimal_evidence_does_not_overflow_a_float_conversion():
     assert execute(data,query)==[{'total':value}]
 
 
+@pytest.mark.parametrize('value,scale,expected',[(Decimal('.125'),'ratio','12.5%'),(Decimal('12.5'),'points','12.5%'),
+    (Decimal('1.5'),'ratio','150.0%'),(Decimal('150'),'points','150.0%'),(Decimal('-12.5'),'points','-12.5%'),
+    (Decimal('0'),'ratio','0.0%'),(Decimal('12.5'),'none','12.5')])
+def test_percentage_input_scale_is_explicit(value,scale,expected):
+    from anton.core.artifacts.static.document import Format
+    assert Format(percent=scale,decimals=1).display(value)==expected
+
+
+def test_ambiguous_boolean_percent_format_is_rejected():
+    from anton.core.artifacts.static.document import Format
+    with pytest.raises(ValidationError):
+        Format(percent=True)
+
+
+@pytest.mark.parametrize('value,expected',[(Decimal('12.5'),'12.5'),(Decimal('1250.75'),'1,250.75'),
+    (Decimal('42.00'),'42'),(Decimal('0.000123'),'0.000123'),(Decimal('0.333333333333'),'0.333333'),
+    (Decimal('0.0000001234'),'1.234e-7'),(Decimal('-1e-500'),'-1e-500')])
+def test_automatic_precision_keeps_fractional_values_without_forcing_decimals_on_counts(value,expected):
+    from anton.core.artifacts.static.document import Format
+    assert Format().display(value)==expected
+
+
 def test_sorted_projection_filters_and_nulls():
     q = Query.model_validate({"dataset": "orders", "columns": ["net"], "where": [{"field": "region", "value": ["a"], "op": "in"}],
                              "order_by": [{"field": "net", "descending": True}]})
