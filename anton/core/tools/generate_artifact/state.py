@@ -400,6 +400,7 @@ class GenState:
     # call by the entry point and placed in every step's system prompt. Not
     # persisted, so an edit to anton.md applies from the next call.
     project_rules: str = ""
+    static_evidence_origin: dict = field(default_factory=dict)
     # The skills the host trusts for artifact builds
     # (`SkillStore.list_for_artifacts`) as the `## Artifact skills` section
     # (`prompts.artifact_skills_section`), or "". Read with `project_rules`;

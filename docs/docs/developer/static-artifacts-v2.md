@@ -21,8 +21,10 @@ until its quality and edit behavior have been measured on the unmodified artifac
 benchmark. No benchmark names, fixtures, answers, or family classifiers belong in
 this implementation.
 
-The implementation is a five-PR stack: evidence/document contract; report
+The core is split into five reviewable PRs: evidence/document contract; report
 compiler; slide reader/presentation runtime; render/data integrity checks; generation and publication.
+Follow-up PRs isolate source access, routing, numeric correctness, supporting resources,
+content review, reader controls, and editing fixes.
 
 ## Evidence
 
@@ -41,6 +43,9 @@ listing and publication. No acquisition code, credentials, private working
 columns, candidate pages, or recipes should ship as separate artifact files.
 
 Each dataset has a source label, optional URL, scope/caveats, and scalar records.
+User-provided CSV, tables, coordinates, and categorical records use the same snapshot
+and binding path as connected data. The collector's `has_records` field distinguishes
+record-based tasks from purely qualitative artifacts; it does not mean external access.
 The host reads the actual file, rather than a model's transcription of console
 output. Decimal JSON numbers retain their precision when parsed and remain numeric
 literals in authoring/inspection context. Literal strings remain strings, and the
@@ -152,6 +157,17 @@ page or interrupted recipe/page update invalidates the pair, so a later edit
 uses the actual page instead of trusting a stale recipe. Edits must preserve the
 artifact's purpose, facts, and useful interactions except where the user's
 current request changes them.
+
+A successful publication also saves its exact private evidence under a filename
+keyed by the page's SHA-256. Snapshot reuse is an explicit collector tool for edits
+preserving the data, with its original acquisition time visible to composition and
+review. A requested refresh can send reused evidence back for acquisition. Reuse
+is unavailable after source activity, after a failed exact source lookup, or during
+that evidence-refresh pass. It never silently replaces a failed fresh read.
+The host verifies the actual page hash, serialized evidence hash, and validated
+evidence digest before offering reuse. Changed pages, corrupted snapshots and
+snapshots for candidates never published do not match. Decimal, float, string and
+Boolean scalar types survive the private round trip; snapshots stay out of exports.
 
 ## Validation
 
