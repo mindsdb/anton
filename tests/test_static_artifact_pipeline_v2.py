@@ -162,6 +162,23 @@ async def test_collector_offers_source_procedures_and_never_conversation_memory(
     assert 'recall_skill' in names and 'recall' not in names
 
 
+async def test_project_rules_are_returned_from_host_context_without_a_dotfile_read(tmp_path,monkeypatch):
+    import importlib
+    module=importlib.import_module('anton.core.tools.generate_artifact.static_v2.collect')
+    seen=[]
+    async def forbidden_read(*args):
+        pytest.fail('Already supplied project rules must not trigger a source read')
+    async def stream(**kwargs):
+        seen.append(kwargs)
+        calls=[ToolCall('rules','read_text_file',{'path':'.anton/anton.md'})] if len(seen)==1 else [ToolCall('done','finish_static_evidence',{'ready':True,'needs_data':False,'reason':'Qualitative slides'})]
+        yield StreamComplete(response=LLMResponse(content='',tool_calls=calls))
+    monkeypatch.setattr('anton.core.tools.tool_handlers.handle_read_text_file',forbidden_read)
+    st=state(tmp_path,VALID);st.project_rules='Use the supplied house typography.'
+    st.session._llm.plan_stream=stream;st.session._llm.code_stream=stream
+    assert isinstance(await module.collect(st),Evidence)
+    assert 'Use the supplied house typography.' in str(seen[-1]['messages'])
+
+
 async def test_loaded_source_cannot_be_declared_unavailable_without_a_read_attempt(tmp_path,monkeypatch):
     import importlib
     from anton.core.tools.registry import ToolOutcome

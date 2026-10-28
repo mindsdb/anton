@@ -39,6 +39,12 @@ def context(state):
 
 
 COLLECT = '''You gather evidence for a static artifact: a report, presentation, or custom HTML experience.
+The host has already read and supplied the project rules below. Follow that body; do not require
+another read of .anton/anton.md. The next stage can write reports, slides, interactive HTML, charts,
+and embedded supporting resources. Those authoring tools are intentionally absent from this
+evidence stage and their absence is never an evidence blocker. User-provided records are a valid
+source: persist them with scratchpad without fetching another source. Scratchpad can write the
+absolute EVIDENCE_PATH using Python pathlib; no separate file-writing tool is required.
 Use the existing tools and their access restrictions. Scratchpad executes Python and can read
 HTTP APIs, databases, and files using the documented source contract; it is not limited to arithmetic.
 Use requests/urllib or the documented client inside scratchpad for connected services.
