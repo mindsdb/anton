@@ -127,3 +127,15 @@ def test_data_file_round_trips_through_dict():
     item = DataFile("7", ["orders"], "rows")
     assert DataFile.from_dict(item.to_dict()) == item
     assert DataFile.from_dict({"id": "0"}) is None
+
+
+def test_a_symlinked_data_folder_is_not_followed(tmp_path):
+    artifact = tmp_path / "art"
+    other = tmp_path / "other"
+    artifact.mkdir()
+    other.mkdir()
+    (other / "5.json").write_text("[5]")
+    os.symlink(other, artifact / DATA_DIRNAME)
+    assert data_files.snapshot(artifact) == {}
+    data_files.prune(artifact, set())
+    assert (other / "5.json").read_text() == "[5]"

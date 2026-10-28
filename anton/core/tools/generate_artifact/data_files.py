@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 from anton.core.artifacts.internal_files import DATA_DIRNAME
 from anton.core.artifacts.render_check import MAX_PAGE_BYTES
 from anton.core.backends.sandbox import cell_sandbox_of
-from anton.utils.nofollow import read_bytes_nofollow
+from anton.utils.nofollow import opened_dir_nofollow, read_bytes_nofollow, unlink_matching_nofollow
 
 from .discovery.notes import source_key, string_list
 
@@ -223,24 +223,27 @@ def restorable(
 
 
 def snapshot(artifact_path: Path) -> dict[str, tuple[int, int]]:
-    """id -> (mtime_ns, size) of each regular data file."""
+    """id -> (mtime_ns, size) of each regular data file. A folder that is a
+    symlink counts as empty. The folder is read through its descriptor, so a
+    link swapped in after the check is not followed either."""
     folder = Path(artifact_path) / DATA_DIRNAME
     found: dict[str, tuple[int, int]] = {}
     try:
-        entries = list(os.scandir(folder))
+        with opened_dir_nofollow(artifact_path, (DATA_DIRNAME,)) as dir_fd:
+            with os.scandir(folder if dir_fd is None else dir_fd) as entries:
+                for entry in entries:
+                    match = _FILE_NAME.match(entry.name)
+                    if match is None:
+                        continue
+                    try:
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                        st = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    found[match.group(1)] = (st.st_mtime_ns, st.st_size)
     except OSError:
         return found
-    for entry in entries:
-        match = _FILE_NAME.match(entry.name)
-        if match is None:
-            continue
-        try:
-            if not entry.is_file(follow_symlinks=False):
-                continue
-            st = entry.stat(follow_symlinks=False)
-        except OSError:
-            continue
-        found[match.group(1)] = (st.st_mtime_ns, st.st_size)
     return found
 
 
@@ -255,10 +258,11 @@ def next_free_id(artifact_path: Path) -> str:
 
 
 def prune(artifact_path: Path, keep: set[str]) -> None:
+    folder = Path(artifact_path) / DATA_DIRNAME
     for file_id in snapshot(artifact_path):
         if file_id not in keep:
             try:
-                _path(artifact_path, file_id).unlink()
+                unlink_matching_nofollow(artifact_path, folder, patterns=(f"{file_id}.json",))
             except OSError:
                 pass
 
