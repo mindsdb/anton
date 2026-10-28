@@ -224,10 +224,16 @@ def _rule_section(engram: Engram) -> str:
     return (engram.kind or _RULE_SECTIONS[0]).lower()
 
 
-# The lines a compaction rebuild writes itself, lowercased.
-_REBUILT_HEADINGS = frozenset(
-    {"# rules", "# lessons", *(f"## {name}" for name in _RULE_SECTIONS)}
-)
+# The headings a compaction rebuild writes itself, by file kind, lowercased.
+_REBUILT_HEADINGS = {
+    "rules": frozenset({"# rules", *(f"## {name}" for name in _RULE_SECTIONS)}),
+    "lesson": frozenset({"# lessons"}),
+}
+
+# Where a typed line goes back (the keys of `CompactionInput.notes`), besides
+# an entry's index (after that entry) and a section name (under its heading).
+_TITLE = "title"
+_TAIL = "tail"
 
 
 def _read_memory_text(path: Path) -> str | None:
@@ -238,30 +244,45 @@ def _read_memory_text(path: Path) -> str | None:
         return None
 
 
-def _parse_memory_entries(text: str) -> tuple[list[str], list[str], list[str]]:
+def _parse_memory_entries(
+    text: str, kind: Literal["rules", "lesson"]
+) -> tuple[list[str], list[str], dict[int | str, list[str]]]:
     """A memory file's `- ` entries with the section each one sits under, and
-    its other lines that a rebuild does not write itself.
+    its other lines that a rebuild does not write itself, by where they sat.
 
     Entries above the first heading (a hand-edited file) are kept rather than
     dropped, under the same heading the keyword pass defaulted to. Headings
     outside `_RULE_SECTIONS` fold into the first one too. The other lines are
-    text a person typed into the file; a rebuild must carry them over.
+    text a person typed into the file; a rebuild puts each back after the
+    entry or heading it followed.
     """
+    rebuilt = _REBUILT_HEADINGS[kind]
     sections: list[str] = []
     entries: list[str] = []
-    notes: list[str] = []
+    notes: dict[int | str, list[str]] = {}
     section = _RULE_SECTIONS[0]
+    anchor: int | str = _TITLE
     for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("- "):
+            anchor = len(entries)
             sections.append(section)
             entries.append(stripped)
             continue
-        if stripped.startswith("## "):
-            heading = stripped[3:].lower()
-            section = heading if heading in _RULE_SECTIONS else _RULE_SECTIONS[0]
-        if stripped and stripped.lower() not in _REBUILT_HEADINGS:
-            notes.append(line.rstrip())
+        if not stripped:
+            continue
+        lowered = stripped.lower()
+        if lowered in rebuilt:
+            if lowered.startswith("## "):
+                section = anchor = lowered[3:]
+            continue
+        if kind == "rules" and lowered.startswith("## "):
+            # get_rules files the rules below a heading under its name, and
+            # shows none of an unknown one. At the end of the file the heading
+            # cannot hide the rules that fold into the first section.
+            section = _RULE_SECTIONS[0]
+            anchor = _TAIL
+        notes.setdefault(anchor, []).append(line.rstrip())
     return sections, entries, notes
 
 
@@ -281,14 +302,16 @@ class CompactionInput:
     text: str | None
     sections: list[str]
     entries: list[str]
-    notes: list[str]
+    # Typed lines that are not entries, by the entry index or section they
+    # follow, or `_TITLE` / `_TAIL`.
+    notes: dict[int | str, list[str]]
 
 
 def read_compaction_input(path: Path, kind: Literal["rules", "lesson"]) -> CompactionInput:
     """Read a memory file for compaction. Plain file I/O, kept apart from the
     model call so a server can run it off its event loop."""
     text = _read_memory_text(path)
-    sections, entries, notes = _parse_memory_entries(text or "")
+    sections, entries, notes = _parse_memory_entries(text or "", kind)
     return CompactionInput(kind=kind, text=text, sections=sections, entries=entries, notes=notes)
 
 
@@ -319,7 +342,7 @@ class CompactionPlan:
                 "(%d entries read, %d now), skipped",
                 path.name,
                 len(self.source.entries),
-                len(_parse_memory_entries(now or "")[1]),
+                len(_parse_memory_entries(now or "", self.source.kind)[1]),
             )
             return False
 
@@ -371,11 +394,7 @@ async def plan_compaction(llm: LLMClient, source: CompactionInput) -> Compaction
         # alter one. Walking the file also bounds the indices for free:
         # duplicates collapse into the set, invented ones never come up.
         keep = set(result.keep)
-        kept = [
-            pair
-            for i, pair in enumerate(zip(sections, entries), 1)
-            if i in keep
-        ]
+        kept = {i for i in range(len(entries)) if i + 1 in keep}
     except Exception as exc:
         # Don't corrupt memory on failure — but never silently: an
         # unlogged swallow made a dead memory subsystem indistinguishable
@@ -393,20 +412,35 @@ async def plan_compaction(llm: LLMClient, source: CompactionInput) -> Compaction
         return None
 
     # Rebuild the file. Every entry still carries the `- ` prefix it was
-    # selected by, so nothing here has to re-add one. Typed text that is not
-    # an entry goes back right under the title, in its original order.
-    notes = [*source.notes, ""] if source.notes else []
+    # selected by, so nothing here has to re-add one. A typed line goes back
+    # after the entry it followed, kept or dropped, so it stays in place.
+    notes = source.notes
     if source.kind == "rules":
         # Each entry goes back under its own heading and no other, so the
         # rewrite is idempotent — a rule cannot be filed twice.
-        lines = ["# Rules", "", *notes]
+        lines = ["# Rules", ""]
+        if _TITLE in notes:
+            lines.extend([*notes[_TITLE], ""])
         for name in _RULE_SECTIONS:
             lines.append(f"## {name.capitalize()}")
-            lines.extend(e for s, e in kept if s == name)
+            lines.extend(notes.get(name, []))
+            for i, (section, entry) in enumerate(zip(sections, entries)):
+                if section != name:
+                    continue
+                if i in kept:
+                    lines.append(entry)
+                lines.extend(notes.get(i, []))
             lines.append("")
+        if _TAIL in notes:
+            lines.extend([*notes[_TAIL], ""])
         content = "\n".join(lines[:-1]) + "\n"
     else:
-        content = "\n".join(["# Lessons", *notes, *(e for _, e in kept)]) + "\n"
+        lines = ["# Lessons", *notes.get(_TITLE, [])]
+        for i, entry in enumerate(entries):
+            if i in kept:
+                lines.append(entry)
+            lines.extend(notes.get(i, []))
+        content = "\n".join(lines) + "\n"
     return CompactionPlan(source=source, content=content, kept=len(kept))
 
 
