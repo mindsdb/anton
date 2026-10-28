@@ -42,7 +42,10 @@ columns, candidate pages, or recipes should ship as separate artifact files.
 
 Each dataset has a source label, optional URL, scope/caveats, and scalar records.
 The host reads the actual file, rather than a model's transcription of console
-output. Decimal JSON numbers retain their precision when parsed. Queries project
+output. Decimal JSON numbers retain their precision when parsed and remain numeric
+literals in authoring/inspection context. Literal strings remain strings, and the
+typed evidence digest distinguishes them. Browser bindings separately encode
+Decimal as exact strings to avoid JavaScript precision loss. Queries project
 explicit columns, filter, group, aggregate, and sort; missing fields and wrong
 numeric types are errors. Aggregates propagate nulls unless `missing="skip"`
 explicitly requests observed values only. Count without a field counts rows;

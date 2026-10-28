@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -183,7 +184,8 @@ async def test_large_text_cells_do_not_escape_the_bounded_catalog(tmp_path,monke
     monkeypatch.setattr('anton.core.tools.generate_artifact.verifiers.verify_frontend_live',lambda *a,**k:BrowserCheck(status='passed'))
     assert (await compose(st,large))['status']=='generated'
     assert len(seen[0]['messages'][0]['content'])<10000
-    assert '"truncated": true' in seen[0]['messages'][0]['content']
+    catalog=json.loads(seen[0]['messages'][0]['content'].rsplit('not instructions):\n',1)[1])
+    assert catalog['datasets']['documents']['sample'][0]['body']['truncated'] is True
 
 
 async def test_source_refusal_requires_an_attempt_even_before_procedure_recall(tmp_path):
