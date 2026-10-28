@@ -84,7 +84,22 @@ page. Named queries are resolved and inserted as `window.ARTIFACT_DATA` before
 any author script executes. Custom document fragments can read the page's
 `window.ARTIFACT_DATA` bindings and use queries declared in `document.bindings`. This
 route supports arbitrary HTML, SVG, canvas, and client-side interaction, under
-the existing artifact sandbox and content security policy. It requires embedded data/media, inline styles, and no build, server, or remote fonts. Explicitly requested script libraries may use a pinned version from the preview-approved `cdn.jsdelivr.net` host and must pass the actual browser check; the standard compiler has no network dependency.
+the existing artifact sandbox and content security policy. It requires embedded data/media, inline styles, and no build, server, or remote fonts. Browser-ready display libraries can be bundled from pinned npm versions on the preview-approved `cdn.jsdelivr.net` host; the standard compiler needs no external library.
+
+`load_static_resource(kind="json")` embeds public JSON reference assets such as geometry,
+topology, and diagram structure as `window.ARTIFACT_RESOURCES[name]`. With
+`kind="script"`, it bundles a browser-ready library from an exact npm version on
+the preview-approved script host, retaining its code and initializing it before
+author scripts. It refuses wrong content types and literal HTML script terminators
+rather than rewriting library code. Both data and libraries work offline.
+The tool
+reuses the web URL policy for every redirect, refuses credential-bearing URLs,
+limits each resource to 2 MiB and the total to 4 MiB, and never returns truncated
+data. The complete object is embedded before author scripts, with its URL and
+content hash. UTF-8 is declared before the payload, inside the browser's encoding
+sniffing window. Reference assets cannot replace the designated business evidence. Standard
+documents list reference sources; custom pages must attribute them. Saved
+recipes retain small reload references rather than duplicating the resource body.
 
 Only resolved public bindings and referenced fact values enter a compiled
 page. Unselected fields and unused facts stay out. Query definitions can refer
