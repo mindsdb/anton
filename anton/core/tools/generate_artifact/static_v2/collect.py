@@ -39,7 +39,7 @@ async def collect(state) -> Evidence | str:
     messages = [{"role": "user", "content": context(state)}]
     questions = gathering_question_budget(state.session, act_first=state.act_first)
     source_failed = False
-    procedure_loaded = False
+    source_lookup_failed = False
     source_attempted = False
     for round_index in range(16):
         if state.winding_down() or state.abandoned.is_set():
@@ -61,8 +61,8 @@ async def collect(state) -> Evidence | str:
                 inp = call.input
                 if not isinstance(inp, dict) or set(inp) != {'ready', 'needs_data', 'reason'} or type(inp['ready']) is not bool or type(inp['needs_data']) is not bool or not isinstance(inp['reason'], str):
                     result = 'Use ready and needs_data booleans and a reason string.'
-                elif not inp['ready'] and procedure_loaded and not source_attempted:
-                    result = 'The exact source procedure was loaded. Scratchpad can execute Python HTTP, database and file reads. Attempt the documented source through an available reader before claiming it is unavailable; no source read has run yet.'
+                elif not inp['ready'] and inp['needs_data'] and not source_attempted and not source_lookup_failed:
+                    result = 'Source readers are available in this call: recall_skill, scratchpad, read_text_file and web_fetch. Scratchpad executes Python HTTP, database and file reads. Read the exact source procedure and attempt its documented read before claiming it is unavailable; no source read has run yet. A failed lookup of the exact requested procedure may establish that its access contract is missing. Do not guess or substitute another source.'
                 elif not inp['ready']:
                     finished = 'Cannot build the requested static artifact: ' + inp['reason']
                     result = 'Blocked; the previous artifact is preserved.'
@@ -95,8 +95,8 @@ async def collect(state) -> Evidence | str:
                 if call.name in ('read_text_file', 'web_fetch') or (call.name == SCRATCHPAD_TOOL.name and scratchpad_action(call.input) == 'exec'):
                     source_attempted = True
                 outcome = await handlers[call.name](state.session, call.input)
-                if call.name == RECALL_SKILL_TOOL.name and getattr(outcome, 'ok', None) is True:
-                    procedure_loaded = True
+                if call.name == RECALL_SKILL_TOOL.name:
+                    source_lookup_failed = getattr(outcome, 'ok', None) is False
                 result = protocol.unwrap_outcome(outcome)
                 state.trace_log.scratchpad(node='static_evidence', input=call.input, output=result)
                 if call.name == SCRATCHPAD_TOOL.name and scratchpad_action(call.input) == 'exec':
