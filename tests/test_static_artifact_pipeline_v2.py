@@ -150,3 +150,24 @@ async def test_collector_offers_source_procedures_and_never_conversation_memory(
     assert isinstance(result,Evidence)
     names={tool['name'] for tool in seen[0]['tools']}
     assert 'recall_skill' in names and 'recall' not in names
+
+
+async def test_loaded_source_cannot_be_declared_unavailable_without_a_read_attempt(tmp_path,monkeypatch):
+    import importlib
+    from anton.core.tools.registry import ToolOutcome
+    module=importlib.import_module('anton.core.tools.generate_artifact.static_v2.collect')
+    stop={'ready':False,'needs_data':True,'reason':'Source failed'}
+    responses=[LLMResponse(content='',tool_calls=[ToolCall('procedure','recall_skill',{'label':'sensor'})]),
+        LLMResponse(content='',tool_calls=[ToolCall('premature','finish_static_evidence',stop)]),
+        LLMResponse(content='',tool_calls=[ToolCall('read','scratchpad',{'action':'exec','name':'source','code':'read_documented_source()'}),ToolCall('stop','finish_static_evidence',stop)])]
+    calls=[]
+    async def stream(**kwargs):
+        calls.append(kwargs)
+        yield StreamComplete(response=responses.pop(0))
+    async def failed(*args):return ToolOutcome(content='The actual source read failed',ok=False)
+    monkeypatch.setattr('anton.core.tools.tool_handlers.handle_scratchpad',failed)
+    st=state(tmp_path,VALID);st.session._skill_store=SimpleNamespace(list_summaries=lambda:[{'label':'sensor'}],load_for_artifacts=lambda label:SimpleNamespace(declarative_md='Read the documented endpoint.'))
+    st.session._llm.plan_stream=stream;st.session._llm.code_stream=stream
+    assert 'Source failed' in await module.collect(st)
+    assert len(calls)==3
+    assert 'no source read has run yet' in str(calls[-1]['messages'])
