@@ -28,6 +28,8 @@ if TYPE_CHECKING:
     from anton.core.tools.tool_handlers import PageKey
     from anton.utils.datasources import DatasourceCatalog
 
+    from .data_files import DataFile
+
 # ── Budgets (see design spec) ────────────────────────────────────────────────
 DATA_LOOP_MAX: int = 3
 # Generation-loop failures (round budget, no tool calls) and verification
@@ -443,6 +445,25 @@ class GenState:
     # iteration that brings no `known_data` puts them back in
     # `unverified_sources`: nothing else vouches for them.
     known_data_verified: list[str] = field(default_factory=list)
+    # Data files this run builds the page from (`data_files.DataFile`):
+    # declared by gathering or a redraw, or found after a data-loop fetch.
+    data_files: list["DataFile"] = field(default_factory=list)
+    # The previous build's files a new request may list again.
+    previous_data_files: list["DataFile"] = field(default_factory=list)
+    # `data_files.snapshot` when the run started: those files are only reused,
+    # never rewritten.
+    data_snapshot: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # Gathering was already sent back once to save its data. Not persisted.
+    data_save_requested: bool = False
+    # The session's agent pads, to tell a reference to pad data in
+    # `known_data` from the values themselves.
+    pad_names: list[str] = field(default_factory=list)
+    # Gathering read data with code and did not save it. Persisted: in the
+    # ask-first flow the page is built by the next call, which must still warn.
+    data_not_saved: bool = False
+    # Ids the data loop saved this call. The spec step on the hot path sees
+    # only the gathering history, so these are shown to it separately.
+    loop_data_ids: list[str] = field(default_factory=list)
     # Raw material for the deterministic renderers in discovery/notes.py.
     scratchpad_execs: list[dict] = field(default_factory=list)
     web_calls: list[dict] = field(default_factory=list)

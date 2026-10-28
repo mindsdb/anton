@@ -118,16 +118,10 @@ _CONTENT_ARG_MSG = (
 )
 
 
-def _scratchpads_context(session) -> str:
-    """Render the pads the calling agent ran, for the gathering kickoff.
-
-    Names come from where the single-scratchpad guard looks
+def _agent_pad_names(session) -> set[str]:
+    """The pads the calling agent ran: where the single-scratchpad guard looks
     (`session._agent_scratchpad_names` plus the manager's persisted
-    `agent_pads()`), so the list is exactly the set a new name would be
-    refused against; system pads (the backend launcher's) are not in it.
-    Cell counts and the last description come from the loaded runtimes when
-    present. Best-effort: a session without a manager renders nothing.
-    """
+    `agent_pads()`). System pads are not among them."""
     names: set[str] = set()
     seen = getattr(session, "_agent_scratchpad_names", None)
     if isinstance(seen, set):
@@ -140,6 +134,19 @@ def _scratchpads_context(session) -> str:
                 names |= persisted
         except Exception:
             pass
+    return names
+
+
+def _scratchpads_context(session) -> str:
+    """Render the pads the calling agent ran, for the gathering kickoff.
+
+    Names come from `_agent_pad_names`, so the list is exactly the set a new
+    name would be refused against. Cell counts and the last description come
+    from the loaded runtimes when present. Best-effort: a session without a
+    manager renders nothing.
+    """
+    names = _agent_pad_names(session)
+    manager = getattr(session, "_scratchpads", None)
     if not names:
         return ""
     try:
@@ -469,6 +476,7 @@ async def generate(
         project_rules=_project_rules(session),
         artifact_skills=_artifact_skills(session),
         scratchpads_context=_scratchpads_context(session),
+        pad_names=sorted(_agent_pad_names(session)),
         trace_log=trace,
         progress=progress,
         spend=SpendGuard(session=session),
@@ -500,6 +508,13 @@ async def generate(
         stored, request_fp=cp.request_fingerprint(user_request)
     )
     state.record("entry", entry, "" if stored is None else stored.pipeline_stage)
+    from . import data_files
+
+    state.data_snapshot = data_files.snapshot(artifact_path)
+    if entry == cp.ENTRY_FULL and stored is not None and stored.data_files:
+        state.previous_data_files = data_files.restorable(
+            artifact_path, stored.data_files, cell_sandbox=data_files.sandbox_of(session)
+        )
     if entry != cp.ENTRY_FULL and stored is not None:
         _restore(state, stored, entry=entry)
         _load_prd(state)
@@ -633,6 +648,26 @@ def _restore(state, stored, *, entry: str = "") -> None:
             a for a in (Attachment.from_dict(d) for d in stored.attachments) if a is not None
         ]
     state.known_data_verified = list(stored.known_data_verified)
+    from . import data_files as data_files_mod
+    from .discovery.notes import source_key
+
+    saved_files = data_files_mod.restorable(
+        state.artifact_path, stored.data_files,
+        cell_sandbox=data_files_mod.sandbox_of(state.session),
+    ) if stored.data_files else []
+    same_data = cp.normalize(state.known_data or "") == cp.normalize(stored.known_data or "")
+    if entry == cp.ENTRY_NEW_ITERATION and (state.known_data or "").strip() and not same_data:
+        # New data for the same request: the saved files may be what it replaces.
+        for source in sorted(data_files_mod.covered_sources(saved_files)):
+            for declared in state.declared_sources:
+                if source_key(declared) == source and declared not in state.unverified_sources:
+                    state.unverified_sources.append(declared)
+    else:
+        state.data_files = saved_files
+    if stored.data_not_saved:
+        state.data_not_saved = True
+        if data_files_mod.DATA_NOT_SAVED_WARNING not in state.verify_warnings:
+            state.verify_warnings.append(data_files_mod.DATA_NOT_SAVED_WARNING)
     # Before the fingerprint: the saved fingerprint was taken over this same
     # text, so a call that omits it is not a change.
     if not (state.known_data or "").strip():
@@ -640,9 +675,12 @@ def _restore(state, stored, *, entry: str = "") -> None:
             # The previous run finished, and new work brings its own data:
             # rows from an earlier call may be what the user asked to drop.
             # Without them nothing vouches for the sources they verified, so
-            # the data loop reads those again.
+            # the data loop reads those again, except those the saved data
+            # files cover.
+            covered = data_files_mod.covered_sources(state.data_files)
             state.unverified_sources += [
-                s for s in state.known_data_verified if s not in state.unverified_sources
+                s for s in state.known_data_verified
+                if s not in state.unverified_sources and source_key(s) not in covered
             ]
             state.known_data_verified = []
         else:

@@ -38,6 +38,10 @@ _WRITE_HINT = (
     'Write it with df.to_json(path, orient="records", date_format="iso") or '
     "json.dump(obj, f, default=str, allow_nan=False)."
 )
+DATA_NOT_SAVED_WARNING = (
+    "data read by code in the gathering step was not saved to a data file, "
+    "so the page may not show all of it"
+)
 
 
 @dataclass
@@ -214,6 +218,18 @@ def check_declared(
 
 def covered_sources(files: list[DataFile]) -> set[str]:
     return {source_key(s) for item in files for s in item.sources}
+
+
+def clear_data_not_saved(state: object) -> None:
+    """Drop the "data not saved" mark and its warning once the data files
+    cover every declared source: the page is then built from saved data."""
+    if not getattr(state, "data_not_saved", False) or not state.data_files:
+        return
+    covered = covered_sources(state.data_files)
+    if all(source_key(s) in covered for s in state.declared_sources):
+        state.data_not_saved = False
+        while DATA_NOT_SAVED_WARNING in state.verify_warnings:
+            state.verify_warnings.remove(DATA_NOT_SAVED_WARNING)
 
 
 def restorable(

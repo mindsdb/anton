@@ -29,7 +29,7 @@ from anton.core.backends.sandbox import BACKENDS_OFF_MESSAGE, CellSandbox, cell_
 from anton.utils.datasources import scrub_output
 from anton.utils.nofollow import read_text_nofollow, write_text_nofollow
 
-from . import attachments, engine, prompts, verifiers
+from . import attachments, data_files, engine, prompts, verifiers
 from .discovery import checkpoint as cp
 from .discovery.orchestrator import CANCELLED, run_discovery
 from .discovery.notes import (  # noqa: F401  (EXEC_* re-exported: tests import them from here)
@@ -1713,6 +1713,8 @@ def _save_checkpoint(state: GenState, stage: str) -> None:
             attachments=[a.to_dict() for a in state.attachments],
             known_data=state.known_data,
             known_data_verified=list(state.known_data_verified),
+            data_files=[f.to_dict() for f in state.data_files],
+            data_not_saved=state.data_not_saved,
         ),
     )
 
@@ -1753,6 +1755,9 @@ def _brief_fields(state: GenState) -> dict:
 
 def _finish(state: GenState) -> dict:
     _save_checkpoint(state, cp.STAGE_GENERATED)
+    # Only a finished build deletes data: one that stopped may still be resumed
+    # or reused from the files it leaves.
+    data_files.prune(state.artifact_path, {f.id for f in state.data_files})
     return {"status": "generated", **_result_shell(state), **_brief_fields(state)}
 
 

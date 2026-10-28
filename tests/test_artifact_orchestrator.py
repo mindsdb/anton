@@ -8,9 +8,11 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from anton.core.artifacts.internal_files import DATA_DIRNAME
 from anton.core.datasources.data_vault import LocalDataVault
 from anton.core.llm.provider import StreamComplete
 from anton.core.tools.generate_artifact import engine, orchestrator, prompts
+from anton.core.tools.generate_artifact.data_files import DataFile
 from anton.core.tools.generate_artifact.discovery import checkpoint as cp
 from anton.core.tools.generate_artifact.state import (
     BrowserCheck, BrowserCheckFailed, FetchVerdict, GenState, RequiredData, RequiredDataItem,
@@ -2147,3 +2149,18 @@ async def test_known_data_is_scrubbed_before_any_step_sees_it(tmp_path: Path, mo
     )
     assert "Toronto,43.7" in seen["known_data"]
     assert secret not in seen["known_data"]
+
+
+# ── data files ──────────────────────────────────────────────────────────────
+
+
+def test_a_finished_run_keeps_only_its_data_files(tmp_path: Path):
+    folder = tmp_path / DATA_DIRNAME
+    folder.mkdir()
+    for name in ("1.json", "2.json"):
+        (folder / name).write_text("[]")
+    st = _state(tmp_path)
+    st.data_files = [DataFile("2", ["orders"])]
+    orchestrator._finish(st)
+    assert sorted(p.name for p in folder.iterdir()) == ["2.json"]
+    assert cp.load(tmp_path).data_files == [{"id": "2", "sources": ["orders"], "description": ""}]
