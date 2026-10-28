@@ -85,9 +85,13 @@ values remain gaps. Large value labels are formatted on the host, before browser
 number conversion can lose integer precision.
 
 Slides use the same evidence and blocks. Each section is exactly one slide; title and source sections are authored explicitly, and reading metadata adds no slides. Reading mode exposes the whole deck;
-presentation mode shows one slide with controls and keyboard navigation. Long
+presentation mode shows one slide with controls and keyboard navigation. Escape
+exits even when a presentation control has focus; navigation keys otherwise leave
+editable controls alone. Long
 content scrolls instead of being clipped or scaled into unreadable text. Print
 styles include every slide even while presentation mode hides inactive slides.
+Standard print styles use a light paper palette, including chart accents and
+source text, for both report themes.
 
 `compose_custom_html(html=..., bindings=...)` accepts a complete portable HTML
 page. Named queries are resolved and inserted as `window.ARTIFACT_DATA` before

@@ -31,8 +31,10 @@
   present.addEventListener('click',toggle);
   previous.addEventListener('click',()=>show(active-1));next.addEventListener('click',()=>show(active+1));
   document.addEventListener('keydown',event=>{
-    if(!presenting || event.altKey || event.ctrlKey || event.metaKey || event.target.closest('input,textarea,select,button,summary,[contenteditable]'))return;
-    const actions={ArrowRight:()=>show(active+1),ArrowDown:()=>show(active+1),' ':()=>show(active+1),ArrowLeft:()=>show(active-1),ArrowUp:()=>show(active-1),Home:()=>show(0),End:()=>show(slides.length-1),Escape:toggle};
+    if(!presenting || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey)return;
+    if(event.key==='Escape'){event.preventDefault();toggle();return;}
+    if(event.target.closest('input,textarea,select,button,summary,[contenteditable]'))return;
+    const actions={ArrowRight:()=>show(active+1),ArrowDown:()=>show(active+1),' ':()=>show(active+1),ArrowLeft:()=>show(active-1),ArrowUp:()=>show(active-1),Home:()=>show(0),End:()=>show(slides.length-1)};
     if(actions[event.key]){event.preventDefault();actions[event.key]();}
   });
   document.querySelectorAll('#_artifact-outline a').forEach(link=>link.addEventListener('click',()=>{const index=slides.findIndex(slide=>`#${slide.id}`===link.hash);if(index>=0)show(index);}));

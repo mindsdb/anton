@@ -18,7 +18,8 @@
     el.textContent = text;
     return el;
   };
-  const colors = [getComputedStyle(root).getPropertyValue('--accent').trim(), '#4787a8', '#a16d39', '#8d6e9d', '#7d8f46', '#bb6e71', '#6f839a', '#a18b64'];
+  const colors = ['var(--accent)', '#4787a8', '#a16d39', '#8d6e9d', '#7d8f46', '#bb6e71', '#6f839a', '#a18b64'];
+  const measure=document.createElement('canvas').getContext('2d');
   const numeric = value => value === null ? null : Number(value);
   const compact = value => new Intl.NumberFormat(document.documentElement.lang, {notation: 'compact', maximumFractionDigits: 1}).format(value);
   const mark = (svg, tag, attrs, label) => {
@@ -49,19 +50,26 @@
     const right = bar ? (series.length===1?Math.min(width*.55,valueWidth):20) : 20;
     const top = 18;
     const bottom = 54;
-    const labelLines=spec.rows.map(row=>{
+    if(measure)measure.font=`11px ${getComputedStyle(container).fontFamily}`;
+    const textWidth=text=>measure?measure.measureText(text).width:text.length*6.5;
+    const labelLines=bar?spec.rows.map(row=>{
       const words=String(row[spec.x] ?? 'Not available').split(/\s+/), lines=[''];
-      const chars=Math.max(10,Math.floor((width-16)/6.5));
+      const maxWidth=stackedLabels?width-16:Math.max(30,left-20);
       for(const word of words){
         let rest=word;
-        if(lines[lines.length-1] && lines[lines.length-1].length+word.length+1>chars)lines.push('');
-        while(rest.length>chars){lines[lines.length-1]+=rest.slice(0,chars);rest=rest.slice(chars);lines.push('');}
+        if(lines[lines.length-1] && textWidth(lines[lines.length-1]+' '+word)>maxWidth)lines.push('');
+        while(textWidth(rest)>maxWidth){
+          let chars=Math.max(1,Math.min(rest.length,Math.floor(maxWidth/6.5)));
+          while(chars>1 && textWidth(rest.slice(0,chars))>maxWidth)chars--;
+          while(chars<rest.length && textWidth(rest.slice(0,chars+1))<=maxWidth)chars++;
+          lines[lines.length-1]+=rest.slice(0,chars);rest=rest.slice(chars);lines.push('');
+        }
         lines[lines.length-1]+=(lines[lines.length-1]?' ':'')+rest;
       }
       return lines;
-    });
-    const labelHeight=stackedLabels?Math.max(...labelLines.map(lines=>lines.length))*14:0;
-    const height = bar ? spec.rows.length * Math.max(stackedLabels?66:38, series.length * 22 + (stackedLabels?labelHeight+28:14)) + bottom : Math.max(250, Math.min(width * .52, 380));
+    }):[];
+    const labelHeight=bar?Math.max(...labelLines.map(lines=>lines.length))*14:0;
+    const height = bar ? spec.rows.length * Math.max(stackedLabels?66:38, series.length * 22 + (stackedLabels?labelHeight+28:14), stackedLabels?0:labelHeight+14) + bottom : Math.max(250, Math.min(width * .52, 380));
     const plotW = Math.max(40, width - left - right), plotH = height - top - bottom;
     const svg = svgNode('svg', {viewBox:`0 0 ${width} ${height}`, role:'img', 'aria-label':container.getAttribute('aria-label')});
     const scaleX = value => left + (value - low) / extent * plotW;
@@ -75,13 +83,13 @@
       const step = plotH / spec.rows.length;
       spec.rows.forEach((row, n) => {
         const label=String(row[spec.x] ?? 'Not available'), y=top+n*step;
-        const labelNode=svgNode('text',{x:stackedLabels?0:left-12,y:stackedLabels?y+12:y+step/2+4,'text-anchor':stackedLabels?'start':'end'}, label);
-        if(stackedLabels){labelNode.textContent='';labelLines[n].forEach((line,j)=>labelNode.append(svgNode('tspan',{x:0,dy:j?14:0},line)));}
-        else if(label.length>22)labelNode.textContent=label.slice(0,20)+'…';
+        const labelX=stackedLabels?0:left-12;
+        const labelNode=svgNode('text',{x:labelX,y:stackedLabels?y+12:y+step/2+4-(labelLines[n].length-1)*7,'text-anchor':stackedLabels?'start':'end'});
+        labelLines[n].forEach((line,j)=>labelNode.append(svgNode('tspan',{x:labelX,dy:j?14:0},line)));
         labelNode.append(svgNode('title',{},label)); svg.append(labelNode);
         series.forEach((s,i)=>{const value=numeric(row[s.field]); if(value===null)return;
           const text=spec.display[n][i], x=scaleX(Math.min(0,value)), end=scaleX(Math.max(0,value));
-          const by=y+(stackedLabels?labelHeight+24:step/2)-series.length*10+i*20;
+          const by=y+(stackedLabels?labelHeight+24:step/2+3)-series.length*10+i*20;
           mark(svg,'rect',{x,y:by,width:Math.max(1,end-x),height:14,fill:colors[i],rx:1},`${label}, ${s.label}: ${text}`);
           if(series.length===1)svg.append(svgNode('text',{x:width-right+8,y:by+12},text));
         });
@@ -105,9 +113,6 @@
         for(let i=0;i<=4;i++) svg.append(svgNode('text',{x:left+plotW*i/4,y:height-bottom+24,'text-anchor':'middle'},compact(minX+(maxX-minX)*i/4)));
       } else {
         const stride=Math.max(1,Math.ceil(spec.rows.length/Math.max(2,Math.floor(plotW/90))));
-        const measure=document.createElement('canvas').getContext('2d');
-        if(measure)measure.font=`11px ${getComputedStyle(container).fontFamily}`;
-        const textWidth=text=>measure?measure.measureText(text).width:text.length*6.5;
         const maxChars=Math.max(2,Math.min(16,Math.floor((plotW-20)/13)));
         const labelAt=n=>{
           const full=String(spec.rows[n][spec.x]);let keep=Math.min(full.length,maxChars), text=full.length>keep?full.slice(0,keep-1)+'…':full;
