@@ -761,8 +761,9 @@ def test_known_data_asks_the_outer_agent_to_name_the_scratchpad():
     from anton.core.tools.tool_defs import GENERATE_ARTIFACT_TOOL
 
     schema_text = GENERATE_ARTIFACT_TOOL.input_schema["properties"]["known_data"]["description"]
-    assert "name the scratchpad" in schema_text
-    assert "NAME THE SCRATCHPAD" in GENERATE_ARTIFACT_TOOL.description
+    assert "a reference to data in a scratchpad" in schema_text
+    assert "the scratchpad in backticks" in schema_text
+    assert "pass a reference instead of the rows" in GENERATE_ARTIFACT_TOOL.description
 
 
 def test_known_data_asks_for_the_rows_and_says_a_new_request_does_not_inherit_it():
@@ -772,9 +773,7 @@ def test_known_data_asks_for_the_rows_and_says_a_new_request_does_not_inherit_it
 
     schema_text = GENERATE_ARTIFACT_TOOL.input_schema["properties"]["known_data"]["description"]
     for text in (schema_text, GENERATE_ARTIFACT_TOOL.description):
-        assert "rows or values" in text
-        assert "a few hundred rows at most" in text
-        assert "does not count" in text
+        assert "values themselves" in text
     assert "pass it again" in schema_text
     assert "Pass it on every call that needs it" in GENERATE_ARTIFACT_TOOL.description
 

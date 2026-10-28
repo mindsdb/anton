@@ -1623,7 +1623,8 @@ def _data_unavailable(reason: str) -> str:
         "scratchpad fallback. Tell the user which data is missing and where "
         "it was looked for, and ask them to connect the source or provide "
         "the data. Once they do, call generate_artifact again and pass the "
-        "data in `known_data`, naming the scratchpad and cell it lives in."
+        "data in `known_data`, naming the scratchpad and the variables that "
+        "hold the data."
     )
 
 
@@ -1789,7 +1790,9 @@ _STATUS_INSTRUCTIONS = {
         "`views_measured` names. That page is on disk: repair it yourself now, "
         "instead of asking the user how to proceed. Read it with "
         "`read_text_file`, then change it in a scratchpad cell to fix the code "
-        "each finding names. Keep every view, its tab and its `runView` call, "
+        "each finding names. Leave the `data-anton-data` blocks as they are: "
+        "each holds the page's data on a line of its own, so read the page by "
+        "line ranges around them. Keep every view, its tab and its `runView` call, "
         "and keep the `runView` helper with its `console.error`: a repair "
         "fixes a view's code, it never removes the view or its error report "
         "to quiet a finding. The browser check runs after each cell that "
