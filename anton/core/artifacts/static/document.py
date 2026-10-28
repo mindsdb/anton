@@ -102,6 +102,13 @@ class Chart(Model):
     y_label: str = ""
     caption: str = ""
 
+    @model_validator(mode='after')
+    def shared_axis_units(self):
+        units={(series.format.percent != 'none',series.format.prefix,series.format.suffix) for series in self.series}
+        if len(units)>1:
+            raise ValueError('A shared chart axis needs compatible units; use separate charts for different percentage/currency/unit formats')
+        return self
+
 
 class Html(Model):
     """Author-controlled fragment; runs under the host artifact sandbox/CSP."""

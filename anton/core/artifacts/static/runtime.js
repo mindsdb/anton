@@ -20,6 +20,7 @@
   const colors = ['var(--accent)', '#4787a8', '#a16d39', '#8d6e9d', '#7d8f46', '#bb6e71', '#6f839a', '#a18b64'];
   const measure=document.createElement('canvas').getContext('2d');
   const numeric = value => value === null ? null : Number(value);
+  const plotted = (row,series) => row[series.field] === null ? null : Number(row[series.field]) * (series.format.percent === 'ratio' ? 100 : 1);
   const compact = value => new Intl.NumberFormat(document.documentElement.lang, {notation: 'compact', maximumFractionDigits: 1}).format(value);
   const mark = (svg, tag, attrs, label) => {
     const el = svgNode(tag, {...attrs, tabindex: '0', role: 'img', 'aria-label': label});
@@ -32,7 +33,9 @@
     container.replaceChildren();
     if (!spec.rows.length) {container.textContent = 'No records match this selection.'; return;}
     const series = spec.series;
-    const allValues = spec.rows.flatMap(r => series.map(s => numeric(r[s.field]))).filter(v => v !== null);
+    const axis=series[0].format;
+    const axisLabel=value=>compact(value)+(axis.percent==='none'?'':'%');
+    const allValues = spec.rows.flatMap(r => series.map(s => plotted(r,s))).filter(v => v !== null);
     if (allValues.some(v => !Number.isFinite(v))) throw new Error('Chart requires finite numeric values');
     if (!allValues.length) {container.textContent = 'No observed numeric values.'; return;}
     const rawLow = Math.min(0, ...allValues), rawHigh = Math.max(0, ...allValues);
@@ -75,8 +78,8 @@
     const scaleY = value => top + (high - value) / extent * plotH;
     for(let i=0;i<=Math.round(extent/tick);i++) {
       const value=low+tick*i;
-      if(bar) {const x=scaleX(value);svg.append(svgNode('line',{x1:x,x2:x,y1:top,y2:height-bottom,class:'grid'}));svg.append(svgNode('text',{x,y:height-bottom+22,'text-anchor':'middle'},compact(value)));}
-      else {const y=scaleY(value);svg.append(svgNode('line',{x1:left,x2:width-right,y1:y,y2:y,class:'grid'}));svg.append(svgNode('text',{x:left-10,y:y+4,'text-anchor':'end'},compact(value)));}
+      if(bar) {const x=scaleX(value);svg.append(svgNode('line',{x1:x,x2:x,y1:top,y2:height-bottom,class:'grid'}));svg.append(svgNode('text',{x,y:height-bottom+22,'text-anchor':'middle'},axisLabel(value)));}
+      else {const y=scaleY(value);svg.append(svgNode('line',{x1:left,x2:width-right,y1:y,y2:y,class:'grid'}));svg.append(svgNode('text',{x:left-10,y:y+4,'text-anchor':'end'},axisLabel(value)));}
     }
     if (bar) {
       const step = plotH / spec.rows.length;
@@ -86,7 +89,7 @@
         const labelNode=svgNode('text',{x:labelX,y:stackedLabels?y+12:y+step/2+4-(labelLines[n].length-1)*7,'text-anchor':stackedLabels?'start':'end'});
         labelLines[n].forEach((line,j)=>labelNode.append(svgNode('tspan',{x:labelX,dy:j?14:0},line)));
         labelNode.append(svgNode('title',{},label)); svg.append(labelNode);
-        series.forEach((s,i)=>{const value=numeric(row[s.field]); if(value===null)return;
+        series.forEach((s,i)=>{const value=plotted(row,s); if(value===null)return;
           const text=spec.display[n][i], x=scaleX(Math.min(0,value)), end=scaleX(Math.max(0,value));
           const by=y+(stackedLabels?labelHeight+24:step/2+3)-series.length*10+i*20;
           mark(svg,'rect',{x,y:by,width:Math.max(1,end-x),height:14,fill:colors[i],rx:1},`${label}, ${s.label}: ${text}`);
@@ -101,7 +104,7 @@
       const xAt = index => left + ((scatter ? xs[index] : index) - minX) / (maxX-minX || 1) * plotW;
       series.forEach((s,i)=>{
         let path='';let connected=false;
-        spec.rows.forEach((row,n)=>{const value=numeric(row[s.field]); if(value===null){connected=false;return;}
+        spec.rows.forEach((row,n)=>{const value=plotted(row,s); if(value===null){connected=false;return;}
           const x=xAt(n), y=scaleY(value);
           path+=`${connected?'L':'M'}${x},${y}`;connected=true;
           mark(svg,'circle',{cx:x,cy:y,r:scatter?4:3,fill:colors[i]},`${row[spec.x]}, ${s.label}: ${spec.display[n][i]}`);

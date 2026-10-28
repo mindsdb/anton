@@ -98,6 +98,9 @@ more than four columns recompose into labelled records on phones; every field
 stays visible, while desktop retains the comparison table. Missing line
 values remain gaps. Large value labels are formatted on the host, before browser
 number conversion can lose integer precision.
+Percentage series normalize ratio/point inputs to the same percentage axis units,
+with percentage tick labels. Shared axes reject incompatible unit formats. Numeric
+extents or rounded ticks that the browser cannot represent require rescaled units.
 
 New pages start with the compiled document tool. Custom fragments handle unusual
 inner graphics or interactions. `choose_custom_surface(reason=...)` explicitly
