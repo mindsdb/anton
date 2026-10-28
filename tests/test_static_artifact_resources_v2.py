@@ -73,7 +73,8 @@ async def test_resource_tool_embeds_data_and_saves_only_reload_references_in_rec
             call=ToolCall('resource','load_static_resource',{'name':'diagram','label':'Public diagram','url':'https://assets.example/diagram-v1.json'})
         else:
             call=ToolCall('compose','compose_custom_html',{'html':'<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><h1>Diagram</h1><script>const nodes=window.ARTIFACT_RESOURCES.diagram.nodes;</script></body></html>'})
-        yield StreamComplete(response=LLMResponse(content='',tool_calls=[call]))
+        tool_calls=[ToolCall('surface','choose_custom_surface',{'reason':'An interactive full-page diagram'}),call] if len(calls)==1 else [call]
+        yield StreamComplete(response=LLMResponse(content='',tool_calls=tool_calls))
     async def load(resource):
         data={'x'*300000:'Complete asset'} if large_key else {'nodes':[{'id':'A'},{'id':'B'}]}
         return {'data':data,'source':{'label':resource.label,'url':resource.url,'sha256':'sha','bytes':len(json.dumps(data))}}
@@ -108,7 +109,8 @@ async def test_pinned_browser_library_is_bundled_before_author_code(monkeypatch)
 async def test_failed_candidate_can_release_a_broken_library_before_retrying(tmp_path,monkeypatch):
     author_calls=[];checked=[]
     html='<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><h1>Corrected diagram</h1></body></html>'
-    sequence=[ToolCall('load','load_static_resource',{'name':'unused','label':'Partial library','kind':'script','url':'https://cdn.jsdelivr.net/npm/diagram@1.2.3/partial.js'}),
+    sequence=[ToolCall('surface','choose_custom_surface',{'reason':'A custom interactive whole-page diagram'}),
+        ToolCall('load','load_static_resource',{'name':'unused','label':'Partial library','kind':'script','url':'https://cdn.jsdelivr.net/npm/diagram@1.2.3/partial.js'}),
         ToolCall('compose','compose_custom_html',{'html':html}),
         ToolCall('release','release_static_resource',{'name':'unused'}),
         ToolCall('compose2','compose_custom_html',{'html':html})]

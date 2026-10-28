@@ -78,6 +78,7 @@ If the exact requested source is unavailable or the task needs a live backend, r
 Do not write presentation HTML or make an artifact yet. The next stage handles composition.'''
 
 COMPOSE = '''You design and author a finished static artifact from exact supplied evidence.
+Both output modes create self-contained HTML. A request for HTML does not imply custom mode.
 Use a structured document for reports, charts, write-ups, and slides: it compiles to responsive semantic
 HTML, supports data inspection, a contents outline, light/dark themes, printing, and slide presentation.
 Choose composition from the user's task, not a template. Give sections meaningful takeaway headings;
@@ -101,7 +102,10 @@ charts need numeric x. Always supply units and a useful caption. Missing line va
 Each section is exactly one slide; keep it focused. Include title and source sections if requested.
 The document title and automatic source footer are reading metadata, not extra presentation slides.
 For visualizations or interactions the document contract cannot express, use an HTML block, or choose
-compose_custom_html for a fully custom page. This is a real escape hatch, not a reason to simplify the user's task.
+choose_custom_surface when the whole-page experience needs custom HTML. Explain why a compiled
+document with custom fragments cannot satisfy it; then compose_custom_html becomes available.
+This is a real escape hatch, not a reason to simplify the user's task. An existing custom page
+can be edited directly; preserve its useful design and interactions.
 A custom full page supplies bindings as named queries and reads those records from window.ARTIFACT_DATA[name].
 The host resolves and embeds these exact projected rows before the page's scripts execute. Never
 retype the evidence into code. Use host query measures for custom-page aggregates. Decimal values
@@ -117,7 +121,12 @@ cdn.jsdelivr.net, the preview-approved script host; their globals initialize bef
 Use a browser-ready distribution, not an ES module requiring further network imports.
 Partial library packages may require separate dependencies: use a complete browser bundle or
 load those dependencies first. Use maintained decoders/projections for geographic formats rather
-than hand-decoding topology or approximating boundaries. All loaded scripts execute, even if
+than hand-decoding topology or approximating boundaries. For geographic polygons, a simple
+longitude/latitude-to-pixel formula breaks rings at the antimeridian and poles. Use a maintained
+geographic path renderer with clipping, such as d3.geoPath(projection), and the same projection
+for point markers. A complete D3 browser bundle includes its geographic dependencies; a partial
+d3-geo bundle does not. Refit the projection to the real container when it resizes.
+All loaded scripts execute, even if
 unused by your current HTML. Discard incompatible or unused bundles with release_static_resource
 before retrying; load replacement dependencies in their required order.
 Honor explicit library requirements. Source links are fine.

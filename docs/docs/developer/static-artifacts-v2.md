@@ -89,6 +89,13 @@ stays visible, while desktop retains the comparison table. Missing line
 values remain gaps. Large value labels are formatted on the host, before browser
 number conversion can lose integer precision.
 
+New pages start with the compiled document tool. Custom fragments handle unusual
+inner graphics or interactions. `choose_custom_surface(reason=...)` explicitly
+enables the full-page HTML tool when the requested whole-page experience needs it;
+asking for HTML alone does not require custom mode. Existing custom or legacy
+pages can be edited directly, while saved typed documents retain the compiler as
+their default. Both routes produce portable HTML and pass the same publication checks.
+
 Slides use the same evidence and blocks. Each section is exactly one slide; title and source sections are authored explicitly, and reading metadata adds no slides. Reading mode exposes the whole deck;
 presentation mode shows one slide with controls and keyboard navigation. Escape
 exits even when a presentation control has focus; navigation keys otherwise leave
