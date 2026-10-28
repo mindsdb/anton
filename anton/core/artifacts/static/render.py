@@ -143,5 +143,5 @@ def render(document: Document, evidence: Evidence) -> Rendered:
 <div class="reading-layout"><nav id="outline" aria-label="Contents"><p class="eyebrow">Contents</p>{outline}</nav>
 <main id="content"><header class="document-header" id="title"><p class="eyebrow">{text(document.eyebrow)}</p><h1>{text(document.title)}</h1><p class="subtitle">{text(document.subtitle)}</p></header>
 {''.join(sections)}<footer id="sources"><h2>Sources</h2>{'<ul>' + source_list + '</ul>' if source_list else '<p>No external data sources.</p>'}</footer></main></div>
-<script>{_asset('runtime.js')}</script></body></html>'''
+<script>{_asset('runtime.js') + _asset('slides.js')}</script></body></html>'''
     return Rendered(html=html, manifest=manifest)
