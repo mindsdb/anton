@@ -165,6 +165,11 @@ class ChatSystemPromptBuilder:
             proactive_dashboards=proactive_dashboards,
             output_dir=output_dir,
         )
+        from anton.core.artifacts.static import routing
+        artifacts_section = ARTIFACTS_PROMPT if fullstack_offered else STATIC_ARTIFACTS_PROMPT
+        if routing.enabled(act_first):
+            artifacts_section = routing.artifact_prompt(fullstack_offered)
+            visualizations_section = routing.visualization_prompt(proactive_dashboards)
 
         prompt = ""
 
@@ -191,7 +196,7 @@ class ChatSystemPromptBuilder:
             # not also introduce itself as Anton in the prompt's opening line.
             identity_lead="You are an AI coworker" if deployment_identity is not None else "You are Anton",
             runtime_identity_section=runtime_identity_section,
-            artifacts_section=ARTIFACTS_PROMPT if fullstack_offered else STATIC_ARTIFACTS_PROMPT,
+            artifacts_section=artifacts_section,
             visualizations_section=visualizations_section,
             conversation_discipline=conversation_discipline,
             conversation_started=conversation_started,
