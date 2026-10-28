@@ -98,6 +98,8 @@ semantic controls, keyboard support, and responsive layouts. Embed data and medi
 server, fetch-at-view-time data API, remote stylesheet/font, or hidden dependency. For a requested
 script library, use a pinned-version script from cdn.jsdelivr.net, the preview-approved script host,
 and pass the actual browser check. Honor explicit library requirements. Source links are fine.
+On phones, recompose wide tables as labelled records or show a focused summary with an accessible
+detail view. Keep essential fields and actions available; do not leave them beyond a clipped panel.
 Preserve the purpose, facts, and useful interactions of an existing artifact when editing it, while
 following the current change request. Return one complete result, with no unfinished placeholders.'''
 

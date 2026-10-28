@@ -74,3 +74,22 @@ def test_custom_render_contract_detects_empty_data_view():
         page.get_by_role('alert').wait_for()
         assert any('expected at least 2' in error for error in errors)
         browser.close()
+
+
+def test_wide_tables_recompose_as_complete_labelled_records_on_phones():
+    columns=['Record','Category','Site','Date','Amount','Explanation']
+    data=Evidence.model_validate({'datasets':{'records':{'source':{'label':'Synthetic QA'},
+        'rows':[dict(zip(columns,['A','Inspection','A long site name','2026-10-01',12,'A complete observation that should wrap without losing any words.']))]}}})
+    doc=Document.model_validate({'title':'Wide data','sections':[{'id':'records','blocks':[{'type':'table','title':'Every field',
+        'query':'records','columns':[{'field':key,'label':key} for key in columns]}]}]})
+    with playwright.sync_playwright() as p:
+        browser=p.chromium.launch();page=browser.new_page(viewport={'width':390,'height':844})
+        page.set_content(render(doc,data).html)
+        assert page.get_by_role('table').count()==1
+        assert page.locator('td').count()==len(columns)
+        assert page.locator('td').evaluate_all('(cells)=>cells.every(cell=>getComputedStyle(cell).display==="grid" && cell.scrollWidth<=cell.clientWidth)')
+        assert page.locator('td').first.get_attribute('data-label')=='Record'
+        assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
+        page.set_viewport_size({'width':1440,'height':900})
+        assert page.locator('td').first.evaluate('(cell)=>getComputedStyle(cell).display')=='table-cell'
+        browser.close()
