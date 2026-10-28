@@ -14,6 +14,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -412,3 +413,115 @@ def state_saved_files_section(state: object) -> str:
     if not files:
         return ""
     return saved_files_section(state.artifact_path, files, cell_sandbox=sandbox_of(state.session))
+
+
+_SCRIPT_CLOSE = re.compile(r"</script\s*>", re.IGNORECASE)
+_SCRIPT_ELEMENT = re.compile(r"<script\b[^>]*>(.*?)</script\s*>", re.IGNORECASE | re.DOTALL)
+
+
+@dataclass(frozen=True)
+class Block:
+    file_id: str
+    attrs: dict[str, str | None]
+    tag_start: int
+    body_start: int
+    body_end: int
+    tag_end: int
+
+
+class _BlockFinder(HTMLParser):
+    """Opening `<script data-anton-data>` tags, by offset. A parser rather than
+    a regex: a block written inside a comment or an attribute value is text,
+    not a block."""
+
+    def __init__(self, html: str) -> None:
+        super().__init__(convert_charrefs=False)
+        self._line_starts = [0] + [m.end() for m in re.finditer("\n", html)]
+        self.opens: list[tuple[dict, int, int]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "script":
+            return
+        found = {name.lower(): value for name, value in attrs}
+        if BLOCK_ATTR not in found:
+            return
+        line, column = self.getpos()
+        start = self._line_starts[line - 1] + column
+        self.opens.append((found, start, start + len(self.get_starttag_text() or "")))
+
+
+def find_blocks(html: str) -> list[Block]:
+    finder = _BlockFinder(html)
+    finder.feed(html)
+    finder.close()
+    blocks: list[Block] = []
+    for attrs, tag_start, body_start in finder.opens:
+        close = _SCRIPT_CLOSE.search(html, body_start)
+        if close is None:
+            continue
+        blocks.append(Block(
+            file_id=str(attrs.get(BLOCK_ATTR) or "").strip(),
+            attrs=attrs,
+            tag_start=tag_start,
+            body_start=body_start,
+            body_end=close.start(),
+            tag_end=close.end(),
+        ))
+    return blocks
+
+
+def reads_blocks(html: str, blocks: list[Block]) -> bool:
+    """Whether a script other than the blocks names the block attribute."""
+    rest, cursor = [], 0
+    for block in sorted(blocks, key=lambda b: b.tag_start):
+        rest.append(html[cursor:block.tag_start])
+        cursor = block.tag_end
+    rest.append(html[cursor:])
+    return any(BLOCK_ATTR in m.group(1) for m in _SCRIPT_ELEMENT.finditer("".join(rest)))
+
+
+@dataclass(frozen=True)
+class FillResult:
+    html: str
+    fatal: str | None = None
+
+
+def fill_page(
+    html: str,
+    artifact_path: Path,
+    files: list[DataFile],
+    *,
+    cell_sandbox: "CellSandbox | None" = None,
+) -> FillResult:
+    """`html` with each known block's body replaced by its file, on a line of
+    its own. Blocks with an unknown id stay as they are for the verifier."""
+    known = {item.id for item in files}
+    blocks = [b for b in find_blocks(html) if b.file_id in known]
+    if not blocks:
+        return FillResult(html)
+    payload: dict[str, str] = {}
+    for file_id in {b.file_id for b in blocks}:
+        try:
+            payload[file_id] = serialize(load(artifact_path, file_id, cell_sandbox=cell_sandbox))
+            # A lone surrogate parses but cannot be encoded into the page.
+            payload[file_id].encode("utf-8")
+        except (OSError, ValueError, RecursionError) as exc:
+            return FillResult(html, fatal=(
+                f"The data file {rel_name(file_id)} could not be read ({exc}), so the page "
+                "cannot show its data. Call generate_artifact again so the data is saved anew."
+            ))
+    parts, cursor = [], 0
+    for block in sorted(blocks, key=lambda b: b.body_start):
+        parts.append(html[cursor:block.body_start])
+        parts.append("\n" + payload[block.file_id] + "\n")
+        cursor = block.body_end
+    parts.append(html[cursor:])
+    filled = "".join(parts)
+    size = len(filled.encode("utf-8"))
+    if size > MAX_PAGE_BYTES:
+        return FillResult(html, fatal=(
+            f"The page with its data is {size / (1024 * 1024):.1f} MB, over the "
+            f"{MAX_PAGE_BYTES // (1024 * 1024)} MB page limit. Save fewer rows or fields, or "
+            "aggregates, and call generate_artifact again."
+        ))
+    return FillResult(filled)

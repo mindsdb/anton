@@ -201,3 +201,75 @@ def test_lone_surrogates_are_not_valid_for_a_page(tmp_path):
     error = data_files.validate(tmp_path, "1")
     assert error is not None and "not valid JSON" in error
     assert data_files.restorable(tmp_path, [{"id": "1", "sources": ["s"]}]) == []
+
+
+_PAGE = (
+    "<!DOCTYPE html><html><head><title>t</title>"
+    "<script data-anton-data='1' type=\"application/json\"></script>"
+    "<!-- <script type=\"application/json\" data-anton-data=\"9\"></script> -->"
+    "</head><body><div id=\"k\"></div>"
+    "<script>const d = JSON.parse(document.querySelector('script[data-anton-data=\"1\"]').textContent);</script>"
+    "</body></html>"
+)
+
+
+def test_blocks_are_found_with_any_attribute_order_and_not_in_comments():
+    blocks = data_files.find_blocks(_PAGE)
+    assert [b.file_id for b in blocks] == ["1"]
+    assert blocks[0].attrs["type"] == "application/json"
+    assert _PAGE[blocks[0].body_start:blocks[0].body_end] == ""
+    assert data_files.reads_blocks(_PAGE, blocks) is True
+
+
+def test_a_block_nobody_reads_is_detected():
+    page = _PAGE.replace(
+        "document.querySelector('script[data-anton-data=\"1\"]')", "document.getElementById('x')"
+    )
+    assert data_files.reads_blocks(page, data_files.find_blocks(page)) is False
+
+
+def test_fill_inserts_compact_escaped_data_on_its_own_line(tmp_path):
+    _write(tmp_path, "1", json.dumps({"rows": [{"t": "</script>"}]}, indent=4))
+    result = data_files.fill_page(_PAGE, tmp_path, [DataFile("1", ["s"])])
+    assert result.fatal is None
+    block = data_files.find_blocks(result.html)[0]
+    body = result.html[block.body_start:block.body_end]
+    assert body.startswith("\n") and body.endswith("\n") and body.count("\n") == 2
+    assert "</script>" not in body
+    assert json.loads(body) == {"rows": [{"t": "</script>"}]}
+
+
+def test_fill_is_repeatable_and_leaves_unknown_ids(tmp_path):
+    _write(tmp_path, "1", "[1]")
+    files = [DataFile("1", ["s"])]
+    once = data_files.fill_page(_PAGE, tmp_path, files).html
+    _write(tmp_path, "1", "[2]")
+    twice = data_files.fill_page(once, tmp_path, files).html
+    block = data_files.find_blocks(twice)[0]
+    assert json.loads(twice[block.body_start:block.body_end]) == [2]
+    assert data_files.fill_page(_PAGE, tmp_path, []).html == _PAGE
+
+
+def test_fill_reports_an_unreadable_file_and_an_oversized_page(tmp_path, monkeypatch):
+    missing = data_files.fill_page(_PAGE, tmp_path, [DataFile("1", ["s"])])
+    assert missing.fatal is not None and ".anton-data/1.json" in missing.fatal
+    # The file itself fits the limit (it is read with it); the page with it does not.
+    _write(tmp_path, "1", json.dumps(["x" * 100]))
+    monkeypatch.setattr(data_files, "MAX_PAGE_BYTES", len(_PAGE) + 50)
+    big = data_files.fill_page(_PAGE, tmp_path, [DataFile("1", ["s"])])
+    assert big.fatal is not None and "page limit" in big.fatal
+
+
+def test_fill_leaves_a_real_block_with_an_unknown_id_as_it_is(tmp_path):
+    _write(tmp_path, "1", "[1]")
+    page = _PAGE.replace("</head>", "<script data-anton-data=\"8\" type=\"application/json\">[8]</script></head>")
+    filled = data_files.fill_page(page, tmp_path, [DataFile("1", ["s"])]).html
+    blocks = {b.file_id: b for b in data_files.find_blocks(filled)}
+    assert filled[blocks["8"].body_start:blocks["8"].body_end] == "[8]"
+    assert filled[blocks["1"].body_start:blocks["1"].body_end] == "\n[1]\n"
+
+
+def test_fill_reports_a_file_that_cannot_be_encoded_for_the_page(tmp_path):
+    _write(tmp_path, "1", '["\\ud800"]')
+    result = data_files.fill_page(_PAGE, tmp_path, [DataFile("1", ["s"])])
+    assert result.fatal is not None and "could not be read" in result.fatal
