@@ -68,7 +68,9 @@ contain prose, metrics, tables, charts, callouts, and custom HTML fragments. Flo
 split, and metric layouts recompose at narrow widths. The theme controls light or
 dark mode, accent, typography, and density. Reports have an outline, inspectable
 chart data, and print styles. Standard bar/line/scatter charts use container-sized
-SVG, readable labels, units, focusable marks, and full data tables. Missing line
+SVG, readable labels, units, focusable marks, and full data tables. Tables with
+more than four columns recompose into labelled records on phones; every field
+stays visible, while desktop retains the comparison table. Missing line
 values remain gaps. Large value labels are formatted on the host, before browser
 number conversion can lose integer precision.
 

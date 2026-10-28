@@ -60,10 +60,11 @@ def render(document: Document, evidence: Evidence) -> Rendered:
                 shown = escape(content)
                 if re.search(r'</?[A-Za-z][^>]*>', content):
                     shown = '<code>' + shown + '</code>'
-                cells.append(f'<td{numeric}>{shown}</td>')
+                cells.append(f'<td{numeric} data-label="{escape(c.label)}">{shown}</td>')
             body.append('<tr>' + ''.join(cells) + '</tr>')
         empty = f'<tr><td colspan="{len(columns)}">No records match this selection.</td></tr>'
-        return f'<div class="table-scroll" tabindex="0" role="region" aria-label="Data table"><table><thead><tr>{heads}</tr></thead><tbody>{"".join(body) or empty}</tbody></table></div>'
+        wide = ' wide-table' if len(columns) > 4 else ''
+        return f'<div class="table-scroll{wide}" tabindex="0" role="region" aria-label="Data table"><table role="table"><thead><tr>{heads}</tr></thead><tbody>{"".join(body) or empty}</tbody></table></div>'
 
     def queried(block, index):
         fields = [c.field for c in block.columns] if isinstance(block, Table) else [block.x, *(s.field for s in block.series)]

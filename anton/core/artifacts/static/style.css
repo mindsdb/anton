@@ -104,6 +104,15 @@ nav.open{display:block}
 .metric-value{font-size:28px}
 .metric h3{font-size:12px}
 td,th{padding:10px}
+.wide-table{max-height:none;overflow:visible}
+.wide-table table,.wide-table tbody{display:block}
+.wide-table thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+.wide-table tbody tr{display:block;padding:12px 0;border-bottom:1px solid var(--line)}
+.wide-table tbody tr:last-child{border-bottom:0}
+.wide-table td{display:grid;grid-template-columns:minmax(70px,.8fr) minmax(0,1.6fr);gap:12px;min-width:0;max-width:none;border:0;padding:5px 0;white-space:normal;text-align:left}
+.wide-table td:before{content:attr(data-label);font-size:11px;font-weight:650;color:var(--muted)}
+.wide-table td[colspan]{display:block}
+.wide-table td[colspan]:before{content:none}
 .callout{padding:16px}
 .section-summary{font-size:16px}
 }
