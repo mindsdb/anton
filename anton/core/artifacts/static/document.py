@@ -1,16 +1,17 @@
 """Versioned composition contract. New visuals can use a custom HTML block."""
 from __future__ import annotations
 
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP, localcontext
 from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
+from .views import View
 from .data import DataError, Evidence, Model, Name, Query, execute, number
 
 
 class Format(Model):
-    decimals: int = Field(default=0, ge=0, le=8)
+    decimals: int = Field(default=0, ge=0, le=18)
     prefix: str = Field(default="", max_length=24)
     suffix: str = Field(default="", max_length=24)
     percent: bool = False
@@ -20,15 +21,18 @@ class Format(Model):
         if value is None:
             return self.missing
         if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
-            value = number(value) * (100 if self.percent else 1)
-            value = value.quantize(Decimal(1).scaleb(-self.decimals), rounding=ROUND_HALF_UP)
+            value = number(value)
+            with localcontext() as context:
+                context.prec = 4096
+                value *= 100 if self.percent else 1
+                value = value.quantize(Decimal(1).scaleb(-self.decimals), rounding=ROUND_HALF_UP)
             return f"{self.prefix}{value:,.{self.decimals}f}{'%' if self.percent else ''}{self.suffix}"
         return f"{self.prefix}{value}{self.suffix}"
 
 
 class QueryFact(Model):
     type: Literal["query"] = "query"
-    query: Query
+    query: Query | Name
     field: str
     format: Format = Field(default_factory=Format)
 
@@ -71,7 +75,7 @@ class Column(Model):
 class Table(Model):
     type: Literal["table"]
     title: str
-    query: Query
+    query: Query | Name
     columns: list[Column] = Field(min_length=1, max_length=30)
     caption: str = ""
 
@@ -86,7 +90,7 @@ class Chart(Model):
     type: Literal["chart"]
     title: str
     kind: Literal["bar", "line", "scatter"] = "bar"
-    query: Query
+    query: Query | Name
     x: str
     series: list[Series] = Field(min_length=1, max_length=8)
     x_label: str = ""
@@ -129,16 +133,29 @@ class Document(Model):
     language: str = Field(default="en", pattern=r"^[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*$")
     theme: Theme = Field(default_factory=Theme)
     facts: dict[Name, Fact] = Field(default_factory=dict, max_length=200)
+    queries: dict[Name, Query] = Field(default_factory=dict, max_length=100)
     bindings: dict[Name, Query] = Field(default_factory=dict, max_length=100)
+    views: list[View] = Field(default_factory=list, max_length=100)
     sections: list[Section] = Field(min_length=1, max_length=100)
 
     @model_validator(mode="after")
     def unique_sections(self):
-        if any(s.id in {"content", "outline", "title", "sources", "artifact-bindings"} for s in self.sections):
-            raise ValueError("Section id is reserved by the document")
         if len({s.id for s in self.sections}) != len(self.sections):
             raise ValueError("Section ids must be unique")
         return self
+
+
+
+def resolve_query(document: Document, evidence: Evidence, query: Query | str, fields: list[str]) -> Query:
+    if isinstance(query, Query):
+        return query
+    if query in document.queries:
+        return document.queries[query]
+    if query in document.bindings:
+        return document.bindings[query]
+    if query in evidence.datasets:
+        return Query(dataset=query, columns=list(dict.fromkeys(fields)))
+    raise DataError(f"Unknown dataset or named query: {query}")
 
 
 def resolve_facts(document: Document, evidence: Evidence) -> dict:
@@ -155,7 +172,7 @@ def resolve_facts(document: Document, evidence: Evidence) -> dict:
         visiting.add(name)
         fact = document.facts[name]
         if isinstance(fact, QueryFact):
-            rows = execute(evidence, fact.query)
+            rows = execute(evidence, resolve_query(document, evidence, fact.query, [fact.field]))
             if len(rows) != 1 or fact.field not in rows[0]:
                 raise DataError(f"Fact {name} must select one row containing {fact.field}")
             value = rows[0][fact.field]
@@ -165,14 +182,16 @@ def resolve_facts(document: Document, evidence: Evidence) -> dict:
                 value = None
             else:
                 a, b = number(a), number(b)
-                if fact.op == "divide":
-                    value = a / b if b else None
-                elif fact.op == "add":
-                    value = a + b
-                elif fact.op == "subtract":
-                    value = a - b
-                else:
-                    value = a * b
+                with localcontext() as context:
+                    context.prec = 4096
+                    if fact.op == "divide":
+                        value = a / b if b else None
+                    elif fact.op == "add":
+                        value = a + b
+                    elif fact.op == "subtract":
+                        value = a - b
+                    else:
+                        value = a * b
         visiting.remove(name)
         values[name] = value
         return value
