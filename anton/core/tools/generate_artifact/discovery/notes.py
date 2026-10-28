@@ -9,6 +9,7 @@ a generator needs verbatim has to be here or in `spec.md`.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 
 # Caps for the exec-code record: per-cell code, per-cell output snippet, and
 # the whole section. Oldest cells are dropped first — the most recent ones are
@@ -150,26 +151,14 @@ def known_data_sources(inp: dict, *, usable: bool) -> set[str]:
     """
     if not usable:
         return set()
-    findings = inp.get("data_findings")
-    if not isinstance(findings, list):
-        return set()
-    covered: set[str] = set()
-    for f in findings:
-        if not isinstance(f, dict):
-            continue
-        key = source_key(f.get("source"))
-        mark = re.sub(r"[^a-z]+", "_", str(f.get("verified_by") or "").casefold()).strip("_")
-        if key and mark.startswith("known_data"):
-            covered.add(key)
-    return covered
+    return _sources_verified_by(
+        inp,
+        lambda by: re.sub(r"[^a-z]+", "_", by.casefold()).strip("_").startswith("known_data"),
+    )
 
 
-_WEB_MARK = re.compile(r"^\s*https?://|\bweb_(?:search|fetch)\b", re.IGNORECASE)
-
-
-def web_verified_sources(inp: dict) -> set[str]:
-    """`source_key`s of the findings a `finish_gathering` call says came from
-    the web: a URL or a web tool in `verified_by`."""
+def _sources_verified_by(inp: dict, matches: Callable[[str], bool]) -> set[str]:
+    """`source_key`s of the `data_findings` whose `verified_by` `matches`."""
     findings = inp.get("data_findings")
     if not isinstance(findings, list):
         return set()
@@ -178,9 +167,18 @@ def web_verified_sources(inp: dict) -> set[str]:
         if not isinstance(item, dict):
             continue
         key = source_key(item.get("source"))
-        if key and _WEB_MARK.search(str(item.get("verified_by") or "")):
+        if key and matches(str(item.get("verified_by") or "")):
             found.add(key)
     return found
+
+
+_WEB_MARK = re.compile(r"^\s*https?://|\bweb_(?:search|fetch)\b", re.IGNORECASE)
+
+
+def web_verified_sources(inp: dict) -> set[str]:
+    """`source_key`s of the findings a `finish_gathering` call says came from
+    the web: a URL or a web tool in `verified_by`."""
+    return _sources_verified_by(inp, lambda by: bool(_WEB_MARK.search(by)))
 
 
 def render_gathering_notes(inp: dict) -> str:

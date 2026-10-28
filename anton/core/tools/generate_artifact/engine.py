@@ -33,7 +33,7 @@ from anton.core.llm.effort import WRITE_BUDGET_BY_EFFORT, client_stream_budget
 from anton.core.llm.structured import looks_truncated
 from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS, scratchpad_action
 
-from . import sub_tools
+from . import data_files, sub_tools
 from .debug_trace import NullTrace
 from .spend import WIND_DOWN_ROUNDS
 from .state import GEN_WRITE_MAX_TOKENS, SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY, BrowserCheckFailed
@@ -508,12 +508,11 @@ async def generate(
         stored, request_fp=cp.request_fingerprint(user_request)
     )
     state.record("entry", entry, "" if stored is None else stored.pipeline_stage)
-    from . import data_files
-
     state.data_snapshot = data_files.snapshot(artifact_path)
     if entry == cp.ENTRY_FULL and stored is not None and stored.data_files:
         state.previous_data_files = data_files.restorable(
-            artifact_path, stored.data_files, cell_sandbox=data_files.sandbox_of(session)
+            artifact_path, data_files.records(stored.data_files),
+            cell_sandbox=data_files.sandbox_of(session),
         )
     if entry != cp.ENTRY_FULL and stored is not None:
         if _restore(state, stored, entry=entry) and entry == cp.ENTRY_GENERATE:
@@ -655,33 +654,27 @@ def _restore(state, stored, *, entry: str = "") -> bool:
             a for a in (Attachment.from_dict(d) for d in stored.attachments) if a is not None
         ]
     state.known_data_verified = list(stored.known_data_verified)
-    from . import data_files as data_files_mod
     from .discovery.notes import source_key
 
-    stored_files = [
-        f for f in (data_files_mod.DataFile.from_dict(r) for r in stored.data_files or []) if f is not None
-    ]
-    saved_files = data_files_mod.restorable(
-        state.artifact_path, stored.data_files,
-        cell_sandbox=data_files_mod.sandbox_of(state.session),
-    ) if stored.data_files else []
+    stored_files = data_files.records(stored.data_files)
+    saved_files = data_files.restorable(
+        state.artifact_path, stored_files, cell_sandbox=data_files.sandbox_of(state.session)
+    )
     same_data = cp.normalize(state.known_data or "") == cp.normalize(stored.known_data or "")
     data_lost = False
     if entry == cp.ENTRY_NEW_ITERATION and (state.known_data or "").strip() and not same_data:
         # New data for the same request: the saved files may be what it replaces.
-        stale = data_files_mod.covered_sources(stored_files)
+        stale = data_files.covered_sources(stored_files)
     else:
         state.data_files = saved_files
         # A file that is gone or no longer valid vouches for nothing.
-        stale = data_files_mod.covered_sources(stored_files) - data_files_mod.covered_sources(saved_files)
+        stale = data_files.covered_sources(stored_files) - data_files.covered_sources(saved_files)
         data_lost = bool(stale)
     for declared in state.declared_sources:
         if source_key(declared) in stale and declared not in state.unverified_sources:
             state.unverified_sources.append(declared)
     if stored.data_not_saved:
-        state.data_not_saved = True
-        if data_files_mod.DATA_NOT_SAVED_WARNING not in state.verify_warnings:
-            state.verify_warnings.append(data_files_mod.DATA_NOT_SAVED_WARNING)
+        data_files.mark_data_not_saved(state)
     # Before the fingerprint: the saved fingerprint was taken over this same
     # text, so a call that omits it is not a change.
     if not (state.known_data or "").strip():
@@ -691,7 +684,7 @@ def _restore(state, stored, *, entry: str = "") -> bool:
             # Without them nothing vouches for the sources they verified, so
             # the data loop reads those again, except those the saved data
             # files cover.
-            covered = data_files_mod.covered_sources(state.data_files)
+            covered = data_files.covered_sources(state.data_files)
             state.unverified_sources += [
                 s for s in state.known_data_verified
                 if s not in state.unverified_sources and source_key(s) not in covered

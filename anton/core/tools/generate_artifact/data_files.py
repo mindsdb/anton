@@ -10,9 +10,12 @@ instead of rows a model retyped or made up.
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import os
 import re
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
@@ -20,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from anton.core.artifacts.internal_files import DATA_DIRNAME
 from anton.core.artifacts.render_check import MAX_PAGE_BYTES
+from anton.core.artifacts.snapshot import DirSnapshot, diff_snapshots
 from anton.core.backends.sandbox import cell_sandbox_of
 from anton.utils.nofollow import opened_dir_nofollow, read_bytes_nofollow, unlink_matching_nofollow
 
@@ -77,30 +81,72 @@ def rel_name(file_id: str) -> str:
 
 
 def _path(artifact_path: Path, file_id: str) -> Path:
-    return Path(artifact_path) / DATA_DIRNAME / f"{file_id}.json"
+    return Path(artifact_path) / rel_name(file_id)
 
 
 def _reject_constant(name: str) -> Any:
     raise ValueError(f"{name} is not valid JSON")
 
 
-def load(artifact_path: Path, file_id: str, *, cell_sandbox: "CellSandbox | None" = None) -> dict | list:
-    """The parsed file. Raises OSError when it cannot be read and ValueError
-    when it is not a JSON object or array."""
+def _read(artifact_path: Path, file_id: str, cell_sandbox: "CellSandbox | None") -> bytes:
     path = _path(artifact_path, file_id)
     if cell_sandbox is not None and not cell_sandbox.allows_read(path):
         raise OSError(errno.EACCES, "outside the folders agent code may read", str(path))
-    raw = read_bytes_nofollow(artifact_path, path, limit=MAX_PAGE_BYTES)
+    return read_bytes_nofollow(artifact_path, path, limit=MAX_PAGE_BYTES)
+
+
+def _parse(raw: bytes) -> dict | list:
     value = json.loads(raw.decode("utf-8"), parse_constant=_reject_constant)
     if not isinstance(value, (dict, list)):
         raise ValueError("the top level must be a JSON object or array")
     return value
 
 
+def load(artifact_path: Path, file_id: str, *, cell_sandbox: "CellSandbox | None" = None) -> dict | list:
+    """The parsed file. Raises OSError when it cannot be read and ValueError
+    when it is not a JSON object or array."""
+    return _parse(_read(artifact_path, file_id, cell_sandbox))
+
+
 def serialize(value: object) -> str:
     """The form the page carries: compact JSON with every "<" escaped."""
     text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     return text.replace("<", _LT_ESCAPE)
+
+
+@dataclass(frozen=True)
+class _Content:
+    size: int  # UTF-8 bytes of the form the page carries
+    structure: str  # `_describe` lines, cut where no summary can show more
+
+
+_INSPECTED: "OrderedDict[bytes, _Content]" = OrderedDict()
+_INSPECTED_MAX = 32
+_INSPECTED_LOCK = threading.Lock()
+
+
+def _inspect(artifact_path: Path, file_id: str, cell_sandbox: "CellSandbox | None") -> _Content:
+    """What the checks and summaries need from a file, kept by its content:
+    a run asks about the same files at every step, and parsing megabytes of
+    JSON each time holds up the event loop. Raises as `load` does, and with
+    UnicodeEncodeError for a string the page cannot carry."""
+    raw = _read(artifact_path, file_id, cell_sandbox)
+    key = hashlib.blake2b(raw, digest_size=16).digest()
+    with _INSPECTED_LOCK:
+        known = _INSPECTED.get(key)
+        if known is not None:
+            _INSPECTED.move_to_end(key)
+            return known
+    value = _parse(raw)
+    content = _Content(
+        size=len(serialize(value).encode("utf-8")),
+        structure="\n".join(_describe(value, "data", 0))[:SUMMARY_CHARS + 1],
+    )
+    with _INSPECTED_LOCK:
+        _INSPECTED[key] = content
+        while len(_INSPECTED) > _INSPECTED_MAX:
+            _INSPECTED.popitem(last=False)
+    return content
 
 
 def _stat(artifact_path: Path, file_id: str) -> tuple[int, int] | None:
@@ -116,7 +162,7 @@ def validate(
     file_id: str,
     *,
     cell_sandbox: "CellSandbox | None" = None,
-    protected: dict[str, tuple[int, int]] | None = None,
+    protected: DirSnapshot | None = None,
 ) -> str | None:
     """Why the file cannot be used, or None. `protected` is `snapshot` taken
     when the run started: a file it lists must still be as it was then."""
@@ -132,7 +178,7 @@ def validate(
         )
     try:
         # Encoding too: a lone surrogate parses but cannot be written to the page.
-        serialize(load(artifact_path, file_id, cell_sandbox=cell_sandbox)).encode("utf-8")
+        _inspect(artifact_path, file_id, cell_sandbox)
     except FileNotFoundError:
         return f"{name} does not exist. Write it in a scratchpad cell first."
     except OSError as exc:
@@ -155,7 +201,7 @@ def check_total_size(
     total = 0
     for item in files:
         try:
-            total += len(serialize(load(artifact_path, item.id, cell_sandbox=cell_sandbox)).encode("utf-8"))
+            total += _inspect(artifact_path, item.id, cell_sandbox).size
         except (OSError, ValueError):
             continue
     if total > MAX_PAGE_BYTES:
@@ -195,7 +241,7 @@ def check_declared(
     data_sources: list[str],
     *,
     cell_sandbox: "CellSandbox | None" = None,
-    protected: dict[str, tuple[int, int]] | None = None,
+    protected: DirSnapshot | None = None,
 ) -> tuple[list[DataFile], list[str]]:
     """The declared files that can be used, and one error line per file that
     cannot. A file must name the `data_sources` it covers."""
@@ -224,6 +270,17 @@ def check_declared(
     return valid, errors
 
 
+def state_check_declared(
+    state: object, declared: list[DataFile], data_sources: list[str]
+) -> tuple[list[DataFile], list[str]]:
+    """`check_declared` for a run: its artifact, its sandbox and the files the
+    call found on disk."""
+    return check_declared(
+        state.artifact_path, declared, data_sources,
+        cell_sandbox=sandbox_of(state.session), protected=state.data_snapshot,
+    )
+
+
 def covered_sources(files: list[DataFile]) -> set[str]:
     return {source_key(s) for item in files for s in item.sources}
 
@@ -240,6 +297,12 @@ def merge(current: list[DataFile], new: list[DataFile], declared: list[str]) -> 
     ] + new
 
 
+def mark_data_not_saved(state: object) -> None:
+    state.data_not_saved = True
+    if DATA_NOT_SAVED_WARNING not in state.verify_warnings:
+        state.verify_warnings.append(DATA_NOT_SAVED_WARNING)
+
+
 def clear_data_not_saved(state: object) -> None:
     """Drop the "data not saved" mark and its warning once the data files
     cover every declared source: the page is then built from saved data."""
@@ -252,20 +315,24 @@ def clear_data_not_saved(state: object) -> None:
             state.verify_warnings.remove(DATA_NOT_SAVED_WARNING)
 
 
+def records(raw: list | None) -> list[DataFile]:
+    """The data file records `discovery.json` holds, malformed ones left out."""
+    return [f for f in (DataFile.from_dict(r) for r in raw or []) if f is not None]
+
+
 def restorable(
-    artifact_path: Path, raw: list, *, cell_sandbox: "CellSandbox | None" = None
+    artifact_path: Path, files: list[DataFile], *, cell_sandbox: "CellSandbox | None" = None
 ) -> list[DataFile]:
-    """Saved records whose files are still there and valid."""
-    files = [f for f in (DataFile.from_dict(r) for r in raw or []) if f is not None]
+    """The records whose files are still there and valid."""
     return [f for f in files if validate(artifact_path, f.id, cell_sandbox=cell_sandbox) is None]
 
 
-def snapshot(artifact_path: Path) -> dict[str, tuple[int, int]]:
+def snapshot(artifact_path: Path) -> DirSnapshot:
     """id -> (mtime_ns, size) of each regular data file. A folder that is a
     symlink counts as empty. The folder is read through its descriptor, so a
     link swapped in after the check is not followed either."""
     folder = Path(artifact_path) / DATA_DIRNAME
-    found: dict[str, tuple[int, int]] = {}
+    found: DirSnapshot = {}
     try:
         with opened_dir_nofollow(artifact_path, (DATA_DIRNAME,)) as dir_fd:
             with os.scandir(folder if dir_fd is None else dir_fd) as entries:
@@ -281,13 +348,12 @@ def snapshot(artifact_path: Path) -> dict[str, tuple[int, int]]:
                         continue
                     found[match.group(1)] = (st.st_mtime_ns, st.st_size)
     except OSError:
-        return found
+        pass
     return found
 
 
-def written_since(artifact_path: Path, before: dict[str, tuple[int, int]]) -> list[str]:
-    now = snapshot(artifact_path)
-    return sorted((i for i, sig in now.items() if before.get(i) != sig), key=int)
+def written_since(artifact_path: Path, before: DirSnapshot) -> list[str]:
+    return sorted(diff_snapshots(before, snapshot(artifact_path)), key=int)
 
 
 def next_free_id(artifact_path: Path) -> str:
@@ -296,13 +362,13 @@ def next_free_id(artifact_path: Path) -> str:
 
 
 def prune(artifact_path: Path, keep: set[str]) -> None:
-    folder = Path(artifact_path) / DATA_DIRNAME
-    for file_id in snapshot(artifact_path):
-        if file_id not in keep:
-            try:
-                unlink_matching_nofollow(artifact_path, folder, patterns=(f"{file_id}.json",))
-            except OSError:
-                pass
+    drop = tuple(f"{i}.json" for i in snapshot(artifact_path) if i not in keep)
+    if not drop:
+        return
+    try:
+        unlink_matching_nofollow(artifact_path, Path(artifact_path) / DATA_DIRNAME, patterns=drop)
+    except OSError:
+        pass
 
 
 def save_hint(artifact_path: Path) -> str:
@@ -402,13 +468,12 @@ def summarize(
         if item.description:
             head.append(f"Description: {item.description}")
         try:
-            value = load(artifact_path, item.id, cell_sandbox=cell_sandbox)
-            size = len(serialize(value).encode('utf-8'))
+            content = _inspect(artifact_path, item.id, cell_sandbox)
         except (OSError, ValueError) as exc:
             entries.append("\n".join(head + [f"(unreadable: {exc})"]))
             continue
-        head.append(f"Size: {size:,} bytes")
-        body = "\n".join(head + ["Structure:"] + _describe(value, "data", 0))
+        head.append(f"Size: {content.size:,} bytes")
+        body = "\n".join(head + ["Structure:", content.structure])
         if len(body) > SUMMARY_CHARS:
             body = body[:SUMMARY_CHARS] + " …"
         entries.append(body)
@@ -416,41 +481,32 @@ def summarize(
 
 
 def files_section(
-    artifact_path: Path, files: list[DataFile], *, cell_sandbox: "CellSandbox | None" = None
+    artifact_path: Path,
+    files: list[DataFile],
+    *,
+    cell_sandbox: "CellSandbox | None" = None,
+    saved: bool = False,
 ) -> str:
+    """The data files this build uses, or with `saved` the previous build's
+    files a new request may reuse."""
     if not files:
         return ""
-    return (
-        f"{DATA_FILES_HEADER}\n{_DATA_FILES_LEAD}\n\n"
-        + summarize(artifact_path, files, cell_sandbox=cell_sandbox)
+    header, lead = (
+        (SAVED_DATA_FILES_HEADER, _SAVED_DATA_FILES_LEAD) if saved
+        else (DATA_FILES_HEADER, _DATA_FILES_LEAD)
     )
-
-
-def saved_files_section(
-    artifact_path: Path, files: list[DataFile], *, cell_sandbox: "CellSandbox | None" = None
-) -> str:
-    if not files:
-        return ""
-    return (
-        f"{SAVED_DATA_FILES_HEADER}\n{_SAVED_DATA_FILES_LEAD}\n\n"
-        + summarize(artifact_path, files, cell_sandbox=cell_sandbox)
-    )
+    return f"{header}\n{lead}\n\n" + summarize(artifact_path, files, cell_sandbox=cell_sandbox)
 
 
 # A run that moved from html-app to a fullstack type keeps its files, but its
 # generators have no data blocks to fill.
-def state_files_section(state: object) -> str:
-    files = getattr(state, "data_files", None) or []
+def state_files_section(state: object, *, saved: bool = False) -> str:
+    files = getattr(state, "previous_data_files" if saved else "data_files", None) or []
     if not files or settled_artifact_type(state) != "html-app":
         return ""
-    return files_section(state.artifact_path, files, cell_sandbox=sandbox_of(state.session))
-
-
-def state_saved_files_section(state: object) -> str:
-    files = getattr(state, "previous_data_files", None) or []
-    if not files or settled_artifact_type(state) != "html-app":
-        return ""
-    return saved_files_section(state.artifact_path, files, cell_sandbox=sandbox_of(state.session))
+    return files_section(
+        state.artifact_path, files, cell_sandbox=sandbox_of(state.session), saved=saved
+    )
 
 
 _SCRIPT_CLOSE = re.compile(r"</script\s*>", re.IGNORECASE)
@@ -488,7 +544,14 @@ class _BlockFinder(HTMLParser):
         self.opens.append((found, start, start + len(self.get_starttag_text() or "")))
 
 
+_BLOCK_ATTR_TEXT = re.compile(re.escape(BLOCK_ATTR), re.IGNORECASE)
+
+
 def find_blocks(html: str) -> list[Block]:
+    """The page's data blocks in document order."""
+    # Most pages have none, and an embedded asset can make one tens of MB.
+    if not _BLOCK_ATTR_TEXT.search(html):
+        return []
     finder = _BlockFinder(html)
     finder.feed(html)
     finder.close()
@@ -508,30 +571,29 @@ def find_blocks(html: str) -> list[Block]:
     return blocks
 
 
-_BLOCK_ATTR_TEXT = re.compile(re.escape(BLOCK_ATTR), re.IGNORECASE)
+def _splice(html: str, spans: list[tuple[int, int, str]]) -> str:
+    """`html` with each (start, end) span, in document order, replaced."""
+    parts, cursor = [], 0
+    for start, end, text in spans:
+        parts += [html[cursor:start], text]
+        cursor = end
+    parts.append(html[cursor:])
+    return "".join(parts)
 
 
 def without_data(html: str) -> str:
     """`html` with every data block emptied, for checks that read the page's
     own code as text: data is not code, and a retry cannot change it."""
-    if not _BLOCK_ATTR_TEXT.search(html):
+    blocks = find_blocks(html)
+    if not blocks:
         return html
-    parts, cursor = [], 0
-    for block in find_blocks(html):
-        parts.append(html[cursor:block.body_start])
-        cursor = block.body_end
-    parts.append(html[cursor:])
-    return "".join(parts)
+    return _splice(html, [(b.body_start, b.body_end, "") for b in blocks])
 
 
 def reads_blocks(html: str, blocks: list[Block]) -> bool:
     """Whether a script other than the blocks names the block attribute."""
-    rest, cursor = [], 0
-    for block in sorted(blocks, key=lambda b: b.tag_start):
-        rest.append(html[cursor:block.tag_start])
-        cursor = block.tag_end
-    rest.append(html[cursor:])
-    return any(BLOCK_ATTR in m.group(1) for m in _SCRIPT_ELEMENT.finditer("".join(rest)))
+    rest = _splice(html, [(b.tag_start, b.tag_end, "") for b in blocks])
+    return any(BLOCK_ATTR in m.group(1) for m in _SCRIPT_ELEMENT.finditer(rest))
 
 
 @dataclass(frozen=True)
@@ -554,28 +616,23 @@ def fill_page(
     known = {item.id for item in files}
     blocks: list[Block] = []
     for block in find_blocks(html):
-        if block.file_id in known and all(b.file_id != block.file_id for b in blocks):
+        if block.file_id in known:
+            known.discard(block.file_id)
             blocks.append(block)
     if not blocks:
         return FillResult(html)
     payload: dict[str, str] = {}
-    for file_id in {b.file_id for b in blocks}:
+    for block in blocks:
         try:
-            payload[file_id] = serialize(load(artifact_path, file_id, cell_sandbox=cell_sandbox))
+            payload[block.file_id] = serialize(load(artifact_path, block.file_id, cell_sandbox=cell_sandbox))
             # A lone surrogate parses but cannot be encoded into the page.
-            payload[file_id].encode("utf-8")
+            payload[block.file_id].encode("utf-8")
         except (OSError, ValueError, RecursionError) as exc:
             return FillResult(html, fatal=(
-                f"The data file {rel_name(file_id)} could not be read ({exc}), so the page "
+                f"The data file {rel_name(block.file_id)} could not be read ({exc}), so the page "
                 "cannot show its data. Call generate_artifact again so the data is saved anew."
             ))
-    parts, cursor = [], 0
-    for block in sorted(blocks, key=lambda b: b.body_start):
-        parts.append(html[cursor:block.body_start])
-        parts.append("\n" + payload[block.file_id] + "\n")
-        cursor = block.body_end
-    parts.append(html[cursor:])
-    filled = "".join(parts)
+    filled = _splice(html, [(b.body_start, b.body_end, "\n" + payload[b.file_id] + "\n") for b in blocks])
     size = len(filled.encode("utf-8"))
     if size > MAX_PAGE_BYTES:
         return FillResult(html, fatal=(

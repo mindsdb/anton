@@ -12,6 +12,7 @@ import pytest
 
 from anton.core.artifacts.internal_files import DATA_DIRNAME
 from anton.core.llm.provider import LLMResponse, ToolCall, Usage
+from anton.core.tools.generate_artifact.data_files import DATA_NOT_SAVED_WARNING
 from anton.core.tools.generate_artifact.discovery import engine
 from anton.core.tools.generate_artifact.discovery.state import PrdState
 from anton.core.tools.registry import ToolOutcome
@@ -630,7 +631,7 @@ async def test_data_read_by_a_cell_and_not_saved_is_sent_back_once_then_warned(m
     assert "save the data the page needs" in state.messages[4]["content"][0]["content"]
     assert state.unverified_sources == []
     assert any(s.outcome == "data_not_saved" for s in state.trace)
-    assert engine.DATA_NOT_SAVED_WARNING in state.verify_warnings
+    assert DATA_NOT_SAVED_WARNING in state.verify_warnings
     assert state.data_not_saved is True
 
 
@@ -647,7 +648,7 @@ async def test_a_cell_check_on_rows_given_in_known_data_is_not_sent_back(monkeyp
     assert state.messages[4]["content"][0]["content"] == "ok"
     assert state.gathering_complete is True
     assert state.data_not_saved is False
-    assert engine.DATA_NOT_SAVED_WARNING not in state.verify_warnings
+    assert DATA_NOT_SAVED_WARNING not in state.verify_warnings
 
 
 @pytest.mark.parametrize("known_data, pad_names", [

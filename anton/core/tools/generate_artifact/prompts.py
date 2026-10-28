@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from anton.utils.datasources import DATASOURCES_HEADER
 
+from .data_files import save_hint, state_files_section
 from .discovery.notes import EXEC_OUTPUT_MAX
 
 # The body markers are quoted to the model in several places here and parsed in
@@ -1551,8 +1552,6 @@ def _brief_and_notes(state) -> str:
     known = known_data_section(state)
     if known:
         parts.append(known)
-    from .data_files import state_files_section
-
     files = state_files_section(state)
     if files:
         parts.append(files)
@@ -1679,8 +1678,6 @@ def build_fetch_data_system_prompt(
     parts.append(_reasoning_language(user_language))
     parts.extend(p for p in (project_rules, artifact_skills) if p)
     if save_data:
-        from .data_files import save_hint
-
         parts.append("## Output folder\n" + save_hint(artifact_path))
     else:
         parts.append(

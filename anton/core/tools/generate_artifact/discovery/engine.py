@@ -15,7 +15,6 @@ from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS, scratchpad_action
 
 from .. import data_files
 from .. import sub_tools as protocol
-from ..data_files import DATA_NOT_SAVED_WARNING
 from ..state import known_data_is_reference, known_data_usable, settled_artifact_type
 from . import prompts, sub_tools
 from .notes import (
@@ -72,9 +71,18 @@ _SAVE_DATA = (
 )
 
 
-def _read_by_cells(state: "PrdState", inp: dict) -> list[str]:
-    """The declared sources only a cell can have read: not marked as coming
-    from usable `known_data` or from the web."""
+def _unsaved_sources(state: "PrdState", inp: dict) -> list[str]:
+    """Declared sources whose data should be in a data file and is not. For a
+    reference to pad data: every source no file or fetched web page covers.
+    Otherwise, when cells ran and nothing was saved: the sources not marked
+    as coming from usable `known_data` or from the web."""
+    if known_data_is_reference(state):
+        covered = data_files.covered_sources(state.data_files)
+        if state.web_calls:
+            covered |= web_verified_sources(inp)
+        return [s for s in state.declared_sources if source_key(s) not in covered]
+    if not state.scratchpad_execs or state.data_files:
+        return []
     elsewhere = known_data_sources(inp, usable=known_data_usable(state))
     if state.web_calls:
         elsewhere |= web_verified_sources(inp)
@@ -91,11 +99,9 @@ def _absorb_data_files(state: "PrdState", inp: dict) -> str | None:
     again, the data loop has to vouch for the sources instead."""
     if settled_artifact_type(state) != "html-app":
         return None
-    declared = data_files.parse_declared(inp.get("data_files"))
-    valid, errors = (data_files.check_declared(
-        state.artifact_path, declared, state.declared_sources,
-        cell_sandbox=data_files.sandbox_of(state.session), protected=state.data_snapshot,
-    ) if declared else ([], []))
+    valid, errors = data_files.state_check_declared(
+        state, data_files.parse_declared(inp.get("data_files")), state.declared_sources
+    )
     if errors:
         state.gathering_complete = False
         # The refused call's own files are not recorded, so they cover nothing.
@@ -105,14 +111,7 @@ def _absorb_data_files(state: "PrdState", inp: dict) -> str | None:
     state.data_files = data_files.merge(state.data_files, valid, state.declared_sources)
     if state.data_save_requested or not state.declared_sources:
         return None
-    covered = data_files.covered_sources(state.data_files)
-    if known_data_is_reference(state):
-        web = web_verified_sources(inp) if state.web_calls else set()
-        missing = [s for s in state.declared_sources if source_key(s) not in covered | web]
-    elif state.scratchpad_execs and not state.data_files:
-        missing = _read_by_cells(state, inp)
-    else:
-        missing = []
+    missing = _unsaved_sources(state, inp)
     if not missing:
         return None
     state.data_save_requested = True
@@ -126,21 +125,16 @@ def _apply_html_app_coverage(state: "PrdState", inp: dict) -> None:
     verifies nothing on its own, whatever else ran."""
     # A `back_to_gathering` that saves the data clears what an earlier pass marked.
     data_files.clear_data_not_saved(state)
-    covered = data_files.covered_sources(state.data_files)
+    unsaved = _unsaved_sources(state, inp)
     if known_data_is_reference(state):
-        web = web_verified_sources(inp) if state.web_calls else set()
-        state.unverified_sources = [
-            s for s in state.declared_sources if source_key(s) not in covered | web
-        ]
+        state.unverified_sources = unsaved
         state.known_data_verified = []
         return
+    covered = data_files.covered_sources(state.data_files)
     state.unverified_sources = [s for s in state.unverified_sources if source_key(s) not in covered]
-    unsaved = _read_by_cells(state, inp) if state.scratchpad_execs and not state.data_files else []
     if unsaved:
         state.record("gathering", "data_not_saved", ", ".join(unsaved))
-        state.data_not_saved = True
-        if DATA_NOT_SAVED_WARNING not in state.verify_warnings:
-            state.verify_warnings.append(DATA_NOT_SAVED_WARNING)
+        data_files.mark_data_not_saved(state)
 
 
 async def run_gathering_loop(state: "PrdState") -> None:

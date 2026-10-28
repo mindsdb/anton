@@ -9,7 +9,9 @@ from __future__ import annotations
 from anton.core.llm.prompts import ANTON_NOTE
 
 from ..attachments import render_for_gathering
+from ..data_files import save_hint, state_files_section
 from ..prompts import KNOWN_DATA_HEADER, datasources_or_none, with_project_rules
+from ..state import settled_artifact_type
 from .state import PrdState
 
 
@@ -116,9 +118,7 @@ def build_call_kickoff(state: PrdState) -> str:
     connections = datasources_or_none(state)
     pads = (state.scratchpads_context or "").strip()
     attached = render_for_gathering(state.attachments)
-    from ..data_files import state_saved_files_section
-
-    saved = state_saved_files_section(state)
+    saved = state_files_section(state, saved=True)
     return (
         f"## User request\n{state.user_request}\n\n"
         f"## Agent's understanding\n{state.agent_understanding}\n\n"
@@ -148,8 +148,6 @@ def restored_context(state: PrdState) -> str:
             "## Data sources declared earlier\n"
             + "\n".join(f"- {s}" for s in state.declared_sources)
         )
-    from ..data_files import state_files_section
-
     files = state_files_section(state)
     if files:
         parts.append(files)
@@ -349,9 +347,7 @@ def step_message(step: str, state: PrdState, *, extra: str = "") -> str:
             "Questions you may still ask the user: "
             f"{gathering_question_budget(state.session, act_first=state.act_first)}\n"
         )
-        if (state.final_artifact_type or state.artifact_type) == "html-app":
-            from ..data_files import save_hint
-
+        if settled_artifact_type(state) == "html-app":
             header += save_hint(state.artifact_path)
     body = _step_instructions(state.act_first)[step]
     # No history to continue → the step is handed the restored material

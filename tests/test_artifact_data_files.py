@@ -158,10 +158,26 @@ def test_snapshot_written_since_next_id_and_prune(tmp_path):
     assert sorted(p.name for p in (tmp_path / DATA_DIRNAME).iterdir()) == ["3.json", "notes.txt"]
 
 
+def test_a_file_is_parsed_once_per_content(tmp_path, monkeypatch):
+    calls = []
+    parse = data_files._parse
+    monkeypatch.setattr(data_files, "_parse", lambda raw: calls.append(raw) or parse(raw))
+    path = _write(tmp_path, "1", json.dumps([{"k": "unique-" + str(tmp_path)}]))
+    files = [DataFile("1", ["s"])]
+    assert data_files.validate(tmp_path, "1") is None
+    assert data_files.check_total_size(tmp_path, files) is None
+    assert "unique-" in data_files.summarize(tmp_path, files)
+    assert len(calls) == 1
+    # New content is read again, never answered from what the old one held.
+    path.write_text("[{")
+    assert "not valid JSON" in data_files.validate(tmp_path, "1")
+    assert len(calls) == 2
+
+
 def test_restorable_keeps_only_valid_files(tmp_path):
     _write(tmp_path, "1", "[1]")
     raw = [{"id": "1", "sources": ["a"]}, {"id": "2", "sources": ["b"]}, {"id": "bad"}]
-    assert data_files.restorable(tmp_path, raw) == [DataFile("1", ["a"], "")]
+    assert data_files.restorable(tmp_path, data_files.records(raw)) == [DataFile("1", ["a"], "")]
 
 
 def test_data_file_round_trips_through_dict():
@@ -222,7 +238,7 @@ def test_sections_have_their_headers_and_are_empty_without_files(tmp_path):
     assert data_files.files_section(tmp_path, []) == ""
     assert data_files.files_section(tmp_path, files).startswith(data_files.DATA_FILES_HEADER)
     assert data_files.READ_CALL in data_files.files_section(tmp_path, files)
-    assert data_files.saved_files_section(tmp_path, files).startswith(data_files.SAVED_DATA_FILES_HEADER)
+    assert data_files.files_section(tmp_path, files, saved=True).startswith(data_files.SAVED_DATA_FILES_HEADER)
 
 
 def test_state_sections_do_not_touch_the_session_without_files(tmp_path):
@@ -232,7 +248,7 @@ def test_state_sections_do_not_touch_the_session_without_files(tmp_path):
 
     state = SimpleNamespace(artifact_path=tmp_path, data_files=[], previous_data_files=[], session=Exploding())
     assert data_files.state_files_section(state) == ""
-    assert data_files.state_saved_files_section(state) == ""
+    assert data_files.state_files_section(state, saved=True) == ""
 
 
 def test_state_sections_are_empty_once_the_type_is_not_an_html_app(tmp_path):
@@ -243,10 +259,10 @@ def test_state_sections_are_empty_once_the_type_is_not_an_html_app(tmp_path):
         artifact_type="html-app", final_artifact_type="fullstack-stateless-app",
     )
     assert data_files.state_files_section(state) == ""
-    assert data_files.state_saved_files_section(state) == ""
+    assert data_files.state_files_section(state, saved=True) == ""
     state.final_artifact_type = "html-app"
     assert data_files.state_files_section(state).startswith(data_files.DATA_FILES_HEADER)
-    assert data_files.state_saved_files_section(state).startswith(data_files.SAVED_DATA_FILES_HEADER)
+    assert data_files.state_files_section(state, saved=True).startswith(data_files.SAVED_DATA_FILES_HEADER)
 
 
 def test_lone_surrogates_are_not_valid_for_a_page(tmp_path):
@@ -254,7 +270,7 @@ def test_lone_surrogates_are_not_valid_for_a_page(tmp_path):
     assert "unreadable" in data_files.summarize(tmp_path, [DataFile("1", ["s"])])
     error = data_files.validate(tmp_path, "1")
     assert error is not None and "not valid JSON" in error
-    assert data_files.restorable(tmp_path, [{"id": "1", "sources": ["s"]}]) == []
+    assert data_files.restorable(tmp_path, [DataFile("1", ["s"])]) == []
 
 
 _PAGE = (

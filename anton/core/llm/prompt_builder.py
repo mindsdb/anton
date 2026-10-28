@@ -12,13 +12,10 @@ from .prompts import (
     CHAT_SYSTEM_PROMPT,
     CONVERSATION_DISCIPLINE_ACT_FIRST,
     CONVERSATION_DISCIPLINE_ASK_FIRST,
-    NO_DIRECT_REPORTS_ARTIFACTS_PROMPT,
-    NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT,
-    NO_DIRECT_REPORTS_VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
-    NO_DIRECT_REPORTS_VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
     STATIC_ARTIFACTS_PROMPT,
     VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
     VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
+    WITHOUT_DIRECT_REPORTS,
 )
 
 if TYPE_CHECKING:
@@ -146,12 +143,13 @@ class ChatSystemPromptBuilder:
         output_dir: str,
         direct_reports: bool = True,
     ) -> str:
-        if proactive_dashboards:
-            template = (VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT if direct_reports
-                        else NO_DIRECT_REPORTS_VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT)
-        else:
-            template = (VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT if direct_reports
-                        else NO_DIRECT_REPORTS_VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT)
+        template = (
+            VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT
+            if proactive_dashboards
+            else VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT
+        )
+        if not direct_reports:
+            template = WITHOUT_DIRECT_REPORTS[template]
         output_format = template.format(output_dir=output_dir)
         return BASE_VISUALIZATIONS_PROMPT.format(output_format=output_format)
 
@@ -186,11 +184,9 @@ class ChatSystemPromptBuilder:
             direct_reports=direct_reports,
         )
 
-        if fullstack_offered:
-            artifacts_section = ARTIFACTS_PROMPT if direct_reports else NO_DIRECT_REPORTS_ARTIFACTS_PROMPT
-        else:
-            artifacts_section = (STATIC_ARTIFACTS_PROMPT if direct_reports
-                                 else NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT)
+        artifacts_section = ARTIFACTS_PROMPT if fullstack_offered else STATIC_ARTIFACTS_PROMPT
+        if not direct_reports:
+            artifacts_section = WITHOUT_DIRECT_REPORTS[artifacts_section]
 
         prompt = ""
 

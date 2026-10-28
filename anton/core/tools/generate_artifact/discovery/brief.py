@@ -309,11 +309,9 @@ async def redraw_brief(state: PrdState) -> None:
             # sent back, so its source goes to the data loop instead. Files
             # already in hand stay while their sources are still declared, so
             # a reply that lists none changes nothing.
-            listed = data_files.parse_declared(finish_inp.get("data_files"))
-            new_files, _errors = (data_files.check_declared(
-                state.artifact_path, listed, declared,
-                cell_sandbox=data_files.sandbox_of(state.session), protected=state.data_snapshot,
-            ) if listed else ([], []))
+            new_files, _errors = data_files.state_check_declared(
+                state, data_files.parse_declared(finish_inp.get("data_files")), declared
+            )
             state.data_files = data_files.merge(state.data_files, new_files, declared)
         # Anything the correction introduced has nothing executed against it,
         # unless its rows are in `known_data` — read after the type change

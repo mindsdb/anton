@@ -25,7 +25,7 @@ from anton.core.artifacts.internal_files import (
 from anton.core.artifacts import live_app_slots
 from anton.core.llm.client import asked_model
 from anton.core.artifacts.store import BACKEND_LOG_FILENAME
-from anton.core.backends.sandbox import BACKENDS_OFF_MESSAGE, CellSandbox, cell_sandbox_of
+from anton.core.backends.sandbox import BACKENDS_OFF_MESSAGE, CellSandbox
 from anton.utils.datasources import scrub_output
 from anton.utils.nofollow import read_text_nofollow, write_text_nofollow
 
@@ -149,10 +149,7 @@ async def _fetch_data_sample(state: GenState, required_text: str = "") -> tuple[
         data_files.DataFile(id=i, sources=sources, description=step_summary[:300])
         for i in (named or new_ids)
     ]
-    valid, errors = (data_files.check_declared(
-        state.artifact_path, candidates, sources,
-        cell_sandbox=_cell_sandbox(state), protected=state.data_snapshot,
-    ) if candidates else ([], []))
+    valid, errors = data_files.state_check_declared(state, candidates, sources)
     if errors:
         summary += "\n\n(data files rejected: " + "; ".join(errors) + ")"
     if not valid:
@@ -512,7 +509,7 @@ async def _make_api_spec(state: GenState) -> str | None:
 
 def _cell_sandbox(state: GenState) -> CellSandbox | None:
     """The sandbox policy the session's scratchpads run agent code under, or None."""
-    return cell_sandbox_of(getattr(state.session, "_scratchpads", None))
+    return data_files.sandbox_of(state.session)
 
 
 def _runs_live_apps(state: GenState) -> bool:
