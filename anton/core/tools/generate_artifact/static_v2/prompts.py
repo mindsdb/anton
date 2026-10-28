@@ -56,8 +56,10 @@ The host has already read and supplied the project rules below. Follow that body
 another read of .anton/anton.md. The next stage can write reports, slides, interactive HTML, charts,
 and embedded supporting resources. Those authoring tools are intentionally absent from this
 evidence stage and their absence is never an evidence blocker. User-provided records are a valid
-source: persist them with scratchpad without fetching another source. Scratchpad can write the
-absolute EVIDENCE_PATH using Python pathlib; no separate file-writing tool is required.
+source: persist them with scratchpad without fetching another source. The host initializes the
+Python string variable STATIC_EVIDENCE_PATH (also in os.environ) before every execution. Save evidence with
+Path(STATIC_EVIDENCE_PATH); do not copy, shorten, or reconstruct its path. No separate
+file-writing tool is required.
 Use the existing tools and their access restrictions. Scratchpad executes Python and can read
 HTTP APIs, databases, and files using the documented source contract; it is not limited to arithmetic.
 Use requests/urllib or the documented client inside scratchpad for connected services.
@@ -77,7 +79,7 @@ The source procedure catalog is available in the request context; it is not conv
 Do not probe guessed endpoints when an access procedure is available. Fetch all required records (including pagination),
 validate join cardinalities, retain units and date semantics, and reconcile totals. Never infer a date
 filter from a reporting horizon without knowing the intended date field. Keep nulls null; never impute zero.
-For every record-based task, use scratchpad to save the complete observed relevant records to EVIDENCE_PATH
+For every record-based task, use scratchpad to save the complete observed relevant records to STATIC_EVIDENCE_PATH
 as UTF-8 JSON, json.dumps(..., allow_nan=False). The exact shape is:
 {"datasets":{"short_id":{"source":{"label":"source name","url":"optional URL","scope":"filters, time range, units, and caveats"},"rows":[{"field":123,"other_field":"value"}]}}}
 Rows contain scalar JSON values. Keep private columns out when possible. Do not retype or summarize a

@@ -294,23 +294,47 @@ def test_source_contract_context_is_bounded_and_labels_omissions(tmp_path):
     assert '1 read procedures omitted' in handoff
 
 
-async def test_provided_records_require_a_saved_snapshot_and_preserve_scalar_types(tmp_path):
-    import ast
+async def test_provided_records_use_the_bound_path_and_preserve_scalar_types(tmp_path,monkeypatch):
     import importlib
-    import re
     from decimal import Decimal
+    from anton.core.tools.registry import ToolOutcome
     module=importlib.import_module('anton.core.tools.generate_artifact.static_v2.collect')
-    seen=[]
+    seen=[];namespace={};paths=[]
+    monkeypatch.setenv('STATIC_EVIDENCE_PATH','stale environment value')
+    payload='{"datasets":{"provided":{"source":{"label":"User records"},"rows":[{"id":"001","value":0.1234567890123456789,"active":true}]}}}'
+    code=f'from pathlib import Path\nPath(STATIC_EVIDENCE_PATH).write_text({payload!r})\nSTATIC_EVIDENCE_PATH = "stale model value"'
+    async def execute(session,arguments):
+        exec(arguments['code'],namespace)
+        paths.append(arguments['code'].splitlines()[0])
+        return ToolOutcome(content='Saved',ok=True)
     async def stream(**kwargs):
         seen.append(kwargs)
-        if len(seen)>1:
+        if len(seen)==2:
             assert 'Evidence not accepted' in str(kwargs['messages'])
-            path=Path(ast.literal_eval(re.search(r'records to (.+)\nas UTF',kwargs['system'])[1]))
-            path.write_text('{"datasets":{"provided":{"source":{"label":"User records"},"rows":[{"id":"001","value":0.1234567890123456789,"active":true}]}}}')
-        yield StreamComplete(response=LLMResponse(content='',tool_calls=[ToolCall('done','finish_static_evidence',{'ready':True,'has_records':True,'reason':'Provided records; no external access'})]))
-    st=state(tmp_path,VALID);st.session._llm.plan_stream=stream;st.session._llm.code_stream=stream
+            calls=[ToolCall(str(i),'scratchpad',{'action':'exec','name':'source','code':code}) for i in range(2)]
+        else:
+            calls=[ToolCall('done','finish_static_evidence',{'ready':True,'has_records':True,'reason':'Provided records; no external access'})]
+        yield StreamComplete(response=LLMResponse(content='',tool_calls=calls))
+    monkeypatch.setattr('anton.core.tools.tool_handlers.handle_scratchpad',execute)
+    folder=tmp_path/"A long project name with an apostrophe's suffix-s";folder.mkdir()
+    st=state(folder,VALID);st.session._llm.plan_stream=stream;st.session._llm.code_stream=stream
     evidence=await module.collect(st)
     assert evidence.datasets['provided'].rows==[{'id':'001','value':Decimal('0.1234567890123456789'),'active':True}]
+    assert len(paths)==2 and paths[0]==paths[1]
+    assert len(list((folder/'.static').glob('evidence-*.json')))==1
+    import os
+    assert Path(os.environ['STATIC_EVIDENCE_PATH']).read_text()==payload
+
+
+def test_bound_evidence_path_preserves_future_imports_and_code(tmp_path,monkeypatch):
+    import importlib
+    module=importlib.import_module('anton.core.tools.generate_artifact.static_v2.collect')
+    monkeypatch.setenv('STATIC_EVIDENCE_PATH','stale')
+    code='"Reader module"\nfrom __future__ import annotations\nresult: UnresolvedType = STATIC_EVIDENCE_PATH'
+    namespace={}
+    exec(module._bind_evidence_path(code,tmp_path/"Reader's file.json"),namespace)
+    assert namespace['result']==str(tmp_path/"Reader's file.json")
+    assert namespace['__doc__']=='Reader module'
 
 
 async def test_loaded_source_cannot_be_declared_unavailable_without_a_read_attempt(tmp_path,monkeypatch):
