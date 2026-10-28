@@ -60,7 +60,7 @@ The source procedure catalog is available in the request context; it is not conv
 Do not probe guessed endpoints when an access procedure is available. Fetch all required records (including pagination),
 validate join cardinalities, retain units and date semantics, and reconcile totals. Never infer a date
 filter from a reporting horizon without knowing the intended date field. Keep nulls null; never impute zero.
-For tabular/numeric data, use scratchpad to save the complete observed relevant records to EVIDENCE_PATH
+For every record-based task, use scratchpad to save the complete observed relevant records to EVIDENCE_PATH
 as UTF-8 JSON, json.dumps(..., allow_nan=False). The exact shape is:
 {"datasets":{"short_id":{"source":{"label":"source name","url":"optional URL","scope":"filters, time range, units, and caveats"},"rows":[{"field":123,"other_field":"value"}]}}}
 Rows contain scalar JSON values. Keep private columns out when possible. Do not retype or summarize a
@@ -69,7 +69,10 @@ and a few representative records. Derived source tables may be computed in scrat
 the composer also has deterministic grouping, measures, and arithmetic. Clearly distinguish measured
 values, estimates, and missing values. Persist no credentials, tokens, or access-code in evidence.
 Finish with finish_static_evidence only after the final source tools succeed and the evidence file exists.
-If the request is qualitative or needs no numeric data, needs_data=false is valid; do not invent a dataset.
+User-provided CSV, tables, coordinates and categorical lists are source records, even when no external
+access is needed. Persist them and finish with has_records=true. Purely qualitative prose or design
+with no source records may use has_records=false; do not invent a dataset. Presentation-only edits
+still use the original records and source constraints; no new fetch does not mean no records.
 If the exact requested source is unavailable or the task needs a live backend, ready=false with the reason.
 Do not write presentation HTML or make an artifact yet. The next stage handles composition.'''
 
