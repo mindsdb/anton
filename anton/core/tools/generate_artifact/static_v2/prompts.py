@@ -121,7 +121,12 @@ cdn.jsdelivr.net, the preview-approved script host; their globals initialize bef
 Use a browser-ready distribution, not an ES module requiring further network imports.
 Partial library packages may require separate dependencies: use a complete browser bundle or
 load those dependencies first. Use maintained decoders/projections for geographic formats rather
-than hand-decoding topology or approximating boundaries. All loaded scripts execute, even if
+than hand-decoding topology or approximating boundaries. For geographic polygons, a simple
+longitude/latitude-to-pixel formula breaks rings at the antimeridian and poles. Use a maintained
+geographic path renderer with clipping, such as d3.geoPath(projection), and the same projection
+for point markers. A complete D3 browser bundle includes its geographic dependencies; a partial
+d3-geo bundle does not. Refit the projection to the real container when it resizes.
+All loaded scripts execute, even if
 unused by your current HTML. Discard incompatible or unused bundles with release_static_resource
 before retrying; load replacement dependencies in their required order.
 Honor explicit library requirements. Source links are fine.
