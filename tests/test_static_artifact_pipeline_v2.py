@@ -77,6 +77,59 @@ async def test_unavailable_browser_is_reported_without_claiming_pass(tmp_path,mo
     assert result['checks_skipped']==['Browser unavailable']
 
 
+async def test_new_and_saved_typed_documents_default_to_the_compiler(tmp_path,monkeypatch):
+    seen=[]
+    async def stream(**kwargs):
+        if kwargs['system']==REVIEW_SYSTEM:
+            yield review_response();return
+        seen.append(kwargs)
+        names={tool['name'] for tool in kwargs['tools']}
+        assert 'compose_static_artifact' in names and 'choose_custom_surface' in names
+        assert 'compose_custom_html' not in names
+        yield StreamComplete(response=LLMResponse(content='',tool_calls=[ToolCall('compose','compose_static_artifact',VALID)]))
+    monkeypatch.setattr('anton.core.tools.generate_artifact.verifiers.verify_frontend_live',lambda *a,**k:BrowserCheck(status='passed'))
+    for _ in range(2):
+        st=state(tmp_path,VALID);st.session._llm.code_stream=stream
+        assert (await compose(st,Evidence()))['status']=='generated'
+    assert len(seen)==2
+
+
+async def test_full_custom_page_requires_an_explicit_surface_choice(tmp_path,monkeypatch):
+    seen=[]
+    html='<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><h1>Interactive room</h1></body></html>'
+    async def stream(**kwargs):
+        if kwargs['system']==REVIEW_SYSTEM:
+            yield review_response();return
+        seen.append(kwargs)
+        assert not (tmp_path/'index.html').exists()
+        if len(seen)==2:
+            assert 'first call choose_custom_surface' in str(kwargs['messages'])
+            call=ToolCall('surface','choose_custom_surface',{'reason':'The requested interactive room uses the whole viewport'})
+        else:
+            if len(seen)==3:
+                assert 'compose_custom_html' in {tool['name'] for tool in kwargs['tools']}
+            call=ToolCall('custom','compose_custom_html',{'html':html})
+        yield StreamComplete(response=LLMResponse(content='',tool_calls=[call]))
+    monkeypatch.setattr('anton.core.tools.generate_artifact.verifiers.verify_frontend_live',lambda *a,**k:BrowserCheck(status='passed'))
+    st=state(tmp_path,VALID);st.session._llm.code_stream=stream
+    assert (await compose(st,Evidence()))['status']=='generated'
+    assert len(seen)==3
+
+
+async def test_existing_custom_page_can_be_edited_directly(tmp_path,monkeypatch):
+    html='<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><h1>Existing custom room</h1></body></html>'
+    (tmp_path/'index.html').write_text(html)
+    async def stream(**kwargs):
+        if kwargs['system']==REVIEW_SYSTEM:
+            yield review_response();return
+        assert 'compose_custom_html' in {tool['name'] for tool in kwargs['tools']}
+        yield StreamComplete(response=LLMResponse(content='',tool_calls=[ToolCall('edit','compose_custom_html',{'html':html.replace('Existing','Updated')})]))
+    monkeypatch.setattr('anton.core.tools.generate_artifact.verifiers.verify_frontend_live',lambda *a,**k:BrowserCheck(status='passed'))
+    st=state(tmp_path,VALID);st.session._llm.code_stream=stream
+    assert (await compose(st,Evidence()))['status']=='generated'
+    assert 'Updated custom room' in (tmp_path/'index.html').read_text()
+
+
 def test_custom_html_projection_is_bound_before_first_author_script():
     evidence=Evidence.model_validate({'datasets':{'items':{'source':{'label':'Source'},'rows':[{'name':'a','private':'SECRET'}]}}})
     output=Custom.model_validate({'mode':'html','html':'<!doctype html><html><head><script>window.result=window.ARTIFACT_DATA.items;</script></head><body>Hi</body></html>',

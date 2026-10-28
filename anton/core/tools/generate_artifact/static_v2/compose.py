@@ -47,11 +47,16 @@ class CustomComposition(Model):
     views: list[View] = Field(default_factory=list, max_length=100)
 
 
+class CustomSurface(Model):
+    reason: str = Field(min_length=1, max_length=600)
+
+
 INSPECT = {'name': 'inspect_static_data', 'description': 'Run a read-only query over the exact evidence. Use filters and aggregates; large results are rejected without truncation.', 'input_schema': Query.model_json_schema()}
 
 
 TOOL = {'name': 'compose_static_artifact', 'description': 'Compose a report or slide deck. The required document field contains the complete typed Document, with title, sections, and optional facts/theme/bindings.', 'input_schema': Composition.model_json_schema()}
 CUSTOM_TOOL = {'name': 'compose_custom_html', 'description': 'Compose a fully custom single HTML document. html is complete source; bindings is a dictionary of named data queries, read as window.ARTIFACT_DATA[name].', 'input_schema': CustomComposition.model_json_schema()}
+CUSTOM_SURFACE = {'name': 'choose_custom_surface', 'description': 'Choose a fully custom page when the requested whole-page experience cannot use a compiled report or slide deck, including custom HTML fragments. Explain why. Both compiled and custom outputs are self-contained HTML: asking for HTML alone does not require this choice. This enables compose_custom_html.', 'input_schema': CustomSurface.model_json_schema()}
 
 
 def compile_output(output, evidence, *, resource_sources=None):
@@ -93,9 +98,11 @@ async def compose(state, evidence: Evidence):
     if target is None or not primary.lower().endswith('.html'):
         return 'Static artifact primary must be an HTML path inside its artifact folder.'
     previous = _read(state, primary, 8 * 1024 * 1024)
+    custom_allowed = bool(previous)  # Preserve an existing custom or legacy page.
     try:
         saved = json.loads(_read(state, '.static/composition.json'))
         if saved['page_sha256'] == hashlib.sha256(previous.encode()).hexdigest():
+            custom_allowed = saved['composition'].get('mode') == 'html'
             existing = json.dumps(saved['composition']) + '\nReference resources (reload these if still used):\n' + json.dumps(saved.get('resources', {}))
         else:
             existing = previous
@@ -133,12 +140,12 @@ async def compose(state, evidence: Evidence):
             return 'Static artifact stopped before publication; the previous artifact is preserved.'
         state.step_started('generate_frontend', attempt=attempt)
         response, budget = await _call_with_stream_retry(state.session._llm.code_stream,
-            system=COMPOSE, messages=messages, tools=[TOOL, CUSTOM_TOOL, INSPECT, reference.TOOL, reference.RELEASE_TOOL], max_tokens=14000, default_cap=None,
+            system=COMPOSE, messages=messages, tools=[TOOL, CUSTOM_TOOL if custom_allowed else CUSTOM_SURFACE, INSPECT, reference.TOOL, reference.RELEASE_TOOL], max_tokens=14000, default_cap=None,
             on_text=state.peek_for('generate_frontend'))
         state.peek_done('generate_frontend')
         state.trace_log.llm_call(node='static_compose', method='code_stream', system=COMPOSE, messages=messages, response=response, attempt=attempt)
         messages.append({'role': 'assistant', 'content': protocol.assistant_blocks(response)})
-        if response.tool_calls and all(call.name in (INSPECT['name'], reference.TOOL['name'], reference.RELEASE_TOOL['name']) for call in response.tool_calls) and not looks_truncated(response, budget):
+        if response.tool_calls and all(call.name in (CUSTOM_SURFACE['name'], INSPECT['name'], reference.TOOL['name'], reference.RELEASE_TOOL['name']) for call in response.tool_calls) and not looks_truncated(response, budget):
             results = []
             for call in response.tool_calls:
                 if state.winding_down() or state.abandoned.is_set():
@@ -146,6 +153,12 @@ async def compose(state, evidence: Evidence):
                 try:
                     if call.parse_error or call.repaired:
                         raise ValueError('Invalid query arguments')
+                    if call.name == CUSTOM_SURFACE['name']:
+                        choice = CustomSurface.model_validate(call.input)
+                        custom_allowed = True
+                        state.record('static_surface', 'custom', choice.reason)
+                        results.append(protocol.tool_result(call.id, 'Custom whole-page composition enabled. Use compose_custom_html with exact public bindings and responsive, accessible controls.'))
+                        continue
                     if call.name == reference.RELEASE_TOOL['name']:
                         name = reference.Release.model_validate(call.input).name
                         if name not in resources:
@@ -185,6 +198,8 @@ async def compose(state, evidence: Evidence):
             call = response.tool_calls[0]
             if call.name not in (TOOL['name'], CUSTOM_TOOL['name']) or call.parse_error or call.repaired:
                 raise ValueError('Return valid, complete structured arguments')
+            if call.name == CUSTOM_TOOL['name'] and not custom_allowed:
+                raise ValueError('Use compose_static_artifact for reports/slides, or first call choose_custom_surface with the reason the whole-page experience needs custom HTML')
             output = Structured(mode='document', document=Composition.model_validate(call.input).document) if call.name == TOOL['name'] else Custom(mode='html', **CustomComposition.model_validate(call.input).model_dump())
             html, manifest = compile_output(output, evidence, resource_sources={name: item['source'] for name, item in resources.items()})
             html = reference.embed(html, manifest, resources)
