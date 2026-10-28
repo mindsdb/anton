@@ -42,6 +42,16 @@ async def test_publication_replaces_page_only_after_candidate_browser_check(tmp_
     assert 'A result.' in old.read_text()
 
 
+async def test_snapshot_write_failure_preserves_the_published_page(tmp_path,monkeypatch):
+    old=tmp_path/'index.html';old.write_text('OLD PAGE')
+    def fail(*args):
+        raise OSError('Private snapshot storage failed')
+    monkeypatch.setattr('anton.core.tools.generate_artifact.static_v2.snapshots.save',fail)
+    monkeypatch.setattr('anton.core.tools.generate_artifact.verifiers.verify_frontend_live',lambda *a,**k:BrowserCheck(status='passed'))
+    assert 'Private snapshot storage failed' in await compose(state(tmp_path,VALID),Evidence())
+    assert old.read_text()=='OLD PAGE'
+
+
 async def test_failed_composition_preserves_prior_page_and_recipe(tmp_path,monkeypatch):
     old=tmp_path/'index.html';old.write_text('OLD PAGE')
     recipe=tmp_path/'.static/composition.json';recipe.parent.mkdir();recipe.write_text('OLD RECIPE')

@@ -22,6 +22,7 @@ from ..streaming import _call_with_stream_retry
 from .prompts import COMPOSE, context
 from . import resources as reference
 from . import content_review
+from . import snapshots
 
 
 class Structured(Model):
@@ -209,6 +210,7 @@ async def compose(state, evidence: Evidence):
             with state.page_lock:
                 if state.abandoned.is_set():
                     return 'Static artifact cancelled before publication; the previous artifact is preserved.'
+                snapshots.save(state, html, evidence)
                 # Save the editable recipe before the final atomic page swap.
                 replace_text_nofollow(state.artifact_path, state.artifact_path / '.static/composition.json', json.dumps({'page_sha256': hashlib.sha256(html.encode()).hexdigest(), 'composition': output.model_dump(), 'resources': manifest.get('resources', {})}, ensure_ascii=False), create_parents=True)
                 replace_text_nofollow(state.artifact_path, target, html, create_parents=True)
@@ -216,7 +218,7 @@ async def compose(state, evidence: Evidence):
             state.record('static_artifact_v2', 'done', f'{output.mode}; evidence={evidence.digest()}; browser={live.status}')
             return {'status': 'generated', **_result_shell(state), 'static_artifact_version': 2,
                     'content_review': review,
-                    'data_publication': {'evidence_sha256': evidence.digest(), 'bindings': list(manifest['bindings'])}}
+                    'data_publication': {'evidence_sha256': evidence.digest(), 'bindings': list(manifest['bindings']), 'origin': state.static_evidence_origin}}
         except (ValueError, OSError) as error:
             feedback = f'Artifact not published: {error}. Correct the complete composition. The prior page is intact.'
             state.record('static_artifact_v2', 'retry', str(error)[:500])

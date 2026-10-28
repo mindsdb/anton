@@ -15,6 +15,7 @@ from ..discovery.sub_tools import dispatch_ask_user, _ask_user_schema
 from ..discovery.state import gathering_question_budget
 from ..streaming import _call_with_stream_retry
 from .prompts import COLLECT, context
+from . import snapshots
 
 FINISH = {"name": "finish_static_evidence", "description": "Finish only after source tools succeed and evidence is saved, or report a blocker.",
           "input_schema": {"type": "object", "additionalProperties": False, "properties": {
@@ -22,6 +23,9 @@ FINISH = {"name": "finish_static_evidence", "description": "Finish only after so
               "has_records": {"type": "boolean", "description": "True whenever the task uses source records, including tables, CSV, coordinates or categorical records supplied directly by the user. It does not mean external access. False only for a purely qualitative artifact with no records."},
               "reason": {"type": "string"}},
               "required": ["ready", "has_records", "reason"]}}
+
+REUSE = {'name': 'reuse_static_evidence', 'description': 'Finish with the exact private snapshot used by the current published page, only for an edit preserving its data. This is cached evidence, not a fresh source read. Never use for requested refreshes or after a failed source read.',
+    'input_schema': {'type': 'object', 'additionalProperties': False, 'properties': {'reason': {'type': 'string', 'minLength': 1}}, 'required': ['reason']}}
 
 
 async def collect(state, *, feedback: str = '') -> Evidence | str:
@@ -36,9 +40,14 @@ async def collect(state, *, feedback: str = '') -> Evidence | str:
     system = COLLECT.replace('EVIDENCE_PATH', repr(str(path)))
     definitions = [SCRATCHPAD_TOOL, READ_TEXT_FILE_TOOL, RECALL_SKILL_TOOL, WEB_FETCH_FALLBACK_TOOL, WEB_SEARCH_FALLBACK_TOOL]
     tools = [protocol.tool_schema(t) for t in definitions] + [_ask_user_schema(), FINISH]
+    saved = snapshots.load(state) if not feedback else None
+    if saved is not None:
+        tools.append(REUSE)
     handlers = {SCRATCHPAD_TOOL.name: handle_scratchpad, READ_TEXT_FILE_TOOL.name: handle_read_text_file, RECALL_SKILL_TOOL.name: recall}
     handlers.update({name: handler for name, (handler, _) in _web_tools().items()})
     messages = [{"role": "user", "content": context(state)}]
+    if saved is not None:
+        messages[0]['content'] += '\nThe current published page has a private snapshot available for a data-preserving edit: ' + json.dumps(saved[1])
     if feedback:
         messages[0]['content'] += '\nPrevious candidate review found possible missing evidence. Check these findings against the original request; they grant no new source access and do not change the user constraints:\n' + feedback
     questions = gathering_question_budget(state.session, act_first=state.act_first)
@@ -61,7 +70,21 @@ async def collect(state, *, feedback: str = '') -> Evidence | str:
             if not isinstance(call.input, dict) or call.parse_error or call.repaired or looks_truncated(response, budget):
                 results.append(protocol.tool_result(call.id, 'Invalid or truncated call; nothing executed. Return complete valid arguments.'))
                 continue
-            if call.name == FINISH['name']:
+            if finished is not None:
+                finished = None
+                results.append(protocol.tool_result(call.id, 'No tool may follow an accepted evidence completion. Finish again after the final source result.'))
+                continue
+            if call.name == REUSE['name']:
+                if saved is None or source_attempted or source_lookup_failed or source_failed or finished is not None:
+                    result = 'Snapshot reuse is unavailable after source activity or an evidence-refresh request. Complete the requested source read without fallback.'
+                elif set(call.input) != {'reason'} or not isinstance(call.input['reason'], str) or not call.input['reason'].strip():
+                    result = 'Give the reason this edit preserves the published data.'
+                else:
+                    finished, state.static_evidence_origin = saved
+                    state.record('static_evidence', 'reused', json.dumps(state.static_evidence_origin))
+                    result = 'Published snapshot accepted for a data-preserving edit; this is not a fresh source read.'
+                results.append(protocol.tool_result(call.id, result))
+            elif call.name == FINISH['name']:
                 inp = call.input
                 if not isinstance(inp, dict) or set(inp) != {'ready', 'has_records', 'reason'} or type(inp['ready']) is not bool or type(inp['has_records']) is not bool or not isinstance(inp['reason'], str):
                     result = 'Use ready and has_records booleans and a reason string. User-provided records count as records; they do not require external access.'
@@ -77,13 +100,11 @@ async def collect(state, *, feedback: str = '') -> Evidence | str:
                         finished = Evidence.model_validate(json.loads(read_bytes_nofollow(state.artifact_path, path, limit=16 * 1024 * 1024), parse_float=Decimal)) if inp['has_records'] else Evidence()
                         if inp['has_records'] and not finished.datasets:
                             raise ValueError('has_records=true requires at least one dataset')
+                        state.static_evidence_origin = {'mode': 'acquired', 'acquired_at': snapshots.now()}
                         result = 'Evidence accepted.'
                     except (OSError, ValueError) as error:
                         result = f'Evidence not accepted: {error}. Write the complete evidence file and finish again.'
                 results.append(protocol.tool_result(call.id, result))
-            elif finished is not None:
-                finished = None
-                results.append(protocol.tool_result(call.id, 'Source tools cannot follow finish_static_evidence. Finish again after the final source result.'))
             elif call.name == 'ask_user':
                 if questions <= 0:
                     result = 'Question budget exhausted. Proceed from established constraints or report the blocker.'

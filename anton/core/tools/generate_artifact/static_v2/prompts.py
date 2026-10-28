@@ -28,6 +28,7 @@ def context(state):
     return (
         f'Current request: {state.user_request}\nCalling agent context: {state.agent_understanding}\n'
         f'Known data: {state.known_data}\nPreferences: {state.user_preferences}\n'
+        f'Evidence origin (reused means cached, never a fresh source read): {state.static_evidence_origin}\n'
         f'Attached files: {[{"path": str(a.path), "kind": a.kind} for a in state.attachments]}\n'
         f'Output language: {state.user_language}\nProject rules: {state.project_rules}\n'
         f'Source procedure catalog (metadata; read the trusted body before using it): {catalog(state.session)}\n'

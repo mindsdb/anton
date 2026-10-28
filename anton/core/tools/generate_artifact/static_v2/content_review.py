@@ -65,6 +65,11 @@ absent and cannot be recovered by querying the supplied evidence. A missing aggr
 computed from present rows. Formatting, layout, scripts, and supporting reference assets are
 composer corrections, not reasons to acquire new business evidence.'''
 
+SYSTEM += ''' Evidence origin is explicit: reused means the private snapshot from the previous
+published page, with its original acquisition time. It is valid for an edit preserving that data.
+If the user requested a fresh read, a refresh, or changed source scope, reused evidence is insufficient:
+reject with needs_evidence=true. Never describe cached evidence as freshly acquired.'''
+
 
 async def check(state, *, evidence, composition, manifest, previous, screenshot):
     candidate = {'composition':composition.model_dump(), 'resolved_facts':manifest.get('facts', {}),
