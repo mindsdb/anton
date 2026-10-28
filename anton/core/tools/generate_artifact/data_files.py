@@ -273,3 +273,140 @@ def save_hint(artifact_path: Path) -> str:
         f"Data files folder: {folder}/ — save data as <id>.json there; "
         f"the first free id is {next_free_id(artifact_path)}.\n"
     )
+
+
+BLOCK_ATTR = "data-anton-data"
+READ_CALL = """JSON.parse(document.querySelector('script[data-anton-data="<id>"]').textContent)"""
+DATA_FILES_HEADER = "## Data files"
+SAVED_DATA_FILES_HEADER = "## Saved data files"
+SUMMARY_CHARS = 2000
+_SAMPLE_RECORDS = 3
+_MAX_DISTINCT = 20
+_MAX_DEPTH = 3
+_MAX_KEYS = 30
+
+_DATA_FILES_LEAD = (
+    "The pipeline puts each file into the page's "
+    '`<script type="application/json" data-anton-data="<id>"></script>` block; read it with '
+    f"`{READ_CALL}`. This summary is complete: do not print the files in a cell or read them."
+)
+_SAVED_DATA_FILES_LEAD = (
+    "Data saved by the previous build of this artifact. To use a file again, list its id in "
+    "`data_files` without writing it; a file nobody lists is deleted once this build succeeds."
+)
+
+
+def _type_name(value: object) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    return "object"
+
+
+def _describe(value: object, path: str, depth: int) -> list[str]:
+    indent = "  " * depth
+    if isinstance(value, dict):
+        keys = list(value)
+        lines = [f"{indent}- {path}: object with keys {json.dumps(keys[:_MAX_KEYS], ensure_ascii=False)}"]
+        if depth + 1 < _MAX_DEPTH:
+            for key in keys[:_MAX_KEYS]:
+                if isinstance(value[key], (dict, list)):
+                    child = f"{path}[{json.dumps(key, ensure_ascii=False)}]"
+                    lines.extend(_describe(value[key], child, depth + 1))
+        return lines
+    if isinstance(value, list):
+        records = [v for v in value if isinstance(v, dict)]
+        if value and len(records) == len(value):
+            fields = list(dict.fromkeys(k for r in records for k in r))
+            typed = []
+            for key in fields:
+                names = sorted({_type_name(r[key]) for r in records if key in r})
+                typed.append(f"{key} ({'/'.join(names)})")
+            lines = [
+                f"{indent}- {path}: array of {len(value)} records",
+                f"{indent}  fields: {', '.join(typed)}",
+            ]
+            for key in fields:
+                values = [r.get(key) for r in records if key in r]
+                if all(isinstance(v, (str, bool)) or v is None for v in values):
+                    distinct = list(dict.fromkeys(values))
+                    # Only fields whose values repeat: a status, not an id.
+                    if len(distinct) <= _MAX_DISTINCT and len(distinct) < len(values):
+                        lines.append(f"{indent}  {key} values: {json.dumps(distinct, ensure_ascii=False)}")
+            for record in records[:_SAMPLE_RECORDS]:
+                lines.append(f"{indent}  sample: {json.dumps(record, ensure_ascii=False)}")
+            return lines
+        first = json.dumps(value[:_SAMPLE_RECORDS], ensure_ascii=False)
+        return [f"{indent}- {path}: array of {len(value)} items, first: {first}"]
+    return [f"{indent}- {path} = {json.dumps(value, ensure_ascii=False)}"]
+
+
+def summarize(
+    artifact_path: Path, files: list[DataFile], *, cell_sandbox: "CellSandbox | None" = None
+) -> str:
+    """One bounded entry per file: what it covers and the shape of its data,
+    with real sample records, so later steps never need the file itself."""
+    entries: list[str] = []
+    for item in files:
+        head = [
+            f"### id {item.id} — {rel_name(item.id)}",
+            f"Sources: {', '.join(item.sources) or '(not named)'}",
+        ]
+        if item.description:
+            head.append(f"Description: {item.description}")
+        try:
+            value = load(artifact_path, item.id, cell_sandbox=cell_sandbox)
+        except (OSError, ValueError) as exc:
+            entries.append("\n".join(head + [f"(unreadable: {exc})"]))
+            continue
+        head.append(f"Size: {len(serialize(value).encode('utf-8')):,} bytes")
+        body = "\n".join(head + ["Structure:"] + _describe(value, "data", 0))
+        if len(body) > SUMMARY_CHARS:
+            body = body[:SUMMARY_CHARS] + " …"
+        entries.append(body)
+    return "\n\n".join(entries)
+
+
+def files_section(
+    artifact_path: Path, files: list[DataFile], *, cell_sandbox: "CellSandbox | None" = None
+) -> str:
+    if not files:
+        return ""
+    return (
+        f"{DATA_FILES_HEADER}\n{_DATA_FILES_LEAD}\n\n"
+        + summarize(artifact_path, files, cell_sandbox=cell_sandbox)
+    )
+
+
+def saved_files_section(
+    artifact_path: Path, files: list[DataFile], *, cell_sandbox: "CellSandbox | None" = None
+) -> str:
+    if not files:
+        return ""
+    return (
+        f"{SAVED_DATA_FILES_HEADER}\n{_SAVED_DATA_FILES_LEAD}\n\n"
+        + summarize(artifact_path, files, cell_sandbox=cell_sandbox)
+    )
+
+
+def state_files_section(state: object) -> str:
+    files = getattr(state, "data_files", None) or []
+    if not files:
+        return ""
+    return files_section(state.artifact_path, files, cell_sandbox=sandbox_of(state.session))
+
+
+def state_saved_files_section(state: object) -> str:
+    files = getattr(state, "previous_data_files", None) or []
+    if not files:
+        return ""
+    return saved_files_section(state.artifact_path, files, cell_sandbox=sandbox_of(state.session))

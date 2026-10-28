@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -139,3 +140,56 @@ def test_a_symlinked_data_folder_is_not_followed(tmp_path):
     assert data_files.snapshot(artifact) == {}
     data_files.prune(artifact, set())
     assert (other / "5.json").read_text() == "[5]"
+
+
+_FRAMES = {
+    "Base Plan": [
+        {"Id": "SO-5001", "Value": 60950.0, "Status": "On Time"},
+        {"Id": "SO-5002", "Value": 49290.0, "Status": "On Time"},
+    ],
+    "Supplier Delay": [
+        {"Id": "SO-5001", "Value": 60950.0, "Status": "Late"},
+        {"Id": "SO-5002", "Value": 49290.0, "Status": "On Time"},
+        {"Id": "SO-5003", "Value": 34000.0, "Status": "On Time"},
+        {"Id": "SO-5004", "Value": 66700.0, "Status": "On Time"},
+    ],
+}
+
+
+def test_summary_reaches_the_records_inside_a_dict(tmp_path):
+    _write(tmp_path, "1", json.dumps(_FRAMES))
+    text = data_files.summarize(tmp_path, [DataFile("1", ["orders"], "order lines")])
+    assert ".anton-data/1.json" in text and "orders" in text and "order lines" in text
+    assert 'data["Supplier Delay"]: array of 4 records' in text
+    assert "Id (string)" in text and "Value (number)" in text
+    assert '"Late"' in text
+    # Two records in one array, the first three of four in the other.
+    assert text.count("sample:") == 5
+    # Ids are unique, so they are not listed as values; only samples show them.
+    assert "SO-5004" not in text
+
+
+def test_summary_is_bounded(tmp_path):
+    rows = [{f"field_{i}": "x" * 50 for i in range(80)}]
+    _write(tmp_path, "1", json.dumps(rows))
+    text = data_files.summarize(tmp_path, [DataFile("1", ["s"])])
+    assert len(text) <= data_files.SUMMARY_CHARS + 200
+
+
+def test_sections_have_their_headers_and_are_empty_without_files(tmp_path):
+    _write(tmp_path, "1", "[1]")
+    files = [DataFile("1", ["s"])]
+    assert data_files.files_section(tmp_path, []) == ""
+    assert data_files.files_section(tmp_path, files).startswith(data_files.DATA_FILES_HEADER)
+    assert data_files.READ_CALL in data_files.files_section(tmp_path, files)
+    assert data_files.saved_files_section(tmp_path, files).startswith(data_files.SAVED_DATA_FILES_HEADER)
+
+
+def test_state_sections_do_not_touch_the_session_without_files(tmp_path):
+    class Exploding:
+        def __getattr__(self, name):
+            raise AssertionError("the session must not be read without data files")
+
+    state = SimpleNamespace(artifact_path=tmp_path, data_files=[], previous_data_files=[], session=Exploding())
+    assert data_files.state_files_section(state) == ""
+    assert data_files.state_saved_files_section(state) == ""
