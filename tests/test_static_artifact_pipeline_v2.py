@@ -10,10 +10,17 @@ from anton.core.llm.provider import LLMResponse, StreamComplete, ToolCall
 from anton.core.tools.generate_artifact.state import GenState, BrowserCheck
 from anton.core.tools.generate_artifact.static_v2.compose import compose, compile_output, Custom
 from anton.core.tools.generate_artifact.static_v2 import collect as collect_function
+from anton.core.tools.generate_artifact.static_v2.content_review import SYSTEM as REVIEW_SYSTEM
+
+
+def review_response():
+    return StreamComplete(response=LLMResponse(content='',tool_calls=[ToolCall('review','review_static_artifact',{'approved':True,'issues':[]})]))
 
 
 def state(tmp_path, payload):
     async def stream(**kwargs):
+        if kwargs['system']==REVIEW_SYSTEM:
+            yield review_response();return
         yield StreamComplete(response=LLMResponse(content='', tool_calls=[ToolCall('c','compose_static_artifact',payload)]))
     session=SimpleNamespace(_scratchpads=SimpleNamespace(cell_sandbox=None),_llm=SimpleNamespace(code_stream=stream),history=[])
     return GenState(session=session,artifact_type='html-app',artifact_path=tmp_path,slug='test',user_request='Make a report',agent_understanding='Use data',act_first=True)
@@ -113,6 +120,8 @@ async def test_large_evidence_uses_catalog_and_exact_inspection(tmp_path,monkeyp
     large=Evidence.model_validate({'datasets':{'items':{'source':{'label':'Generated QA'},'rows':[{'n':i,'text':'x'*120} for i in range(1000)]}}})
     calls=[]
     async def stream(**kwargs):
+        if kwargs['system']==REVIEW_SYSTEM:
+            yield review_response();return
         calls.append(kwargs)
         if len(calls)==1:
             yield StreamComplete(response=LLMResponse(content='',tool_calls=[ToolCall('inspect','inspect_static_data',{'dataset':'items','measures':[{'name':'total','op':'sum','field':'n'}]})]))
@@ -178,6 +187,8 @@ async def test_large_text_cells_do_not_escape_the_bounded_catalog(tmp_path,monke
     large=Evidence.model_validate({'datasets':{'documents':{'source':{'label':'Long text QA'},'rows':[{'body':'x'*300000,'count':2}]}}})
     seen=[]
     async def stream(**kwargs):
+        if kwargs['system']==REVIEW_SYSTEM:
+            yield review_response();return
         seen.append(kwargs)
         yield StreamComplete(response=LLMResponse(content='',tool_calls=[ToolCall('compose','compose_static_artifact',VALID)]))
     st=state(tmp_path,VALID);st.session._llm.code_stream=stream

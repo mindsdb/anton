@@ -124,7 +124,16 @@ public, including content in collapsed tables or inactive slides.
 
 The engine stages attached assets and candidate pages under `.static/`, runs the
 existing static/browser verifiers, and feeds concrete failures back to the
-composer. It replaces the primary HTML atomically only after an accepted check,
+composer. A fresh call to the configured coding model then reviews the actual
+request, evidence, candidate composition, resolved metadata, prior composition,
+and available desktop screenshot. It looks for concrete content, scope, unit,
+interaction, and edit errors. Rejections return specific corrections to the
+composer within the same bounded retry loop. An incomplete review cannot publish.
+The result says no issues were found and whether a screenshot was provided;
+this is a heuristic check, not proof of every fact, interaction, or source's authority.
+Diagnostics keep the screenshot fingerprint rather than another base64 copy.
+
+The engine replaces the primary HTML atomically only after accepted checks,
 under the existing cancellation lock. A failed build or abandoned generation
 leaves the previous page intact. Unavailable browser checks are reported as
 unverified, never as a pass.

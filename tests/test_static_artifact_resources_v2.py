@@ -9,7 +9,7 @@ from anton.core.llm.provider import LLMResponse, StreamComplete, ToolCall
 from anton.core.tools.generate_artifact.state import BrowserCheck
 from anton.core.tools.generate_artifact.static_v2 import resources
 from anton.core.tools.generate_artifact.static_v2.compose import compose
-from tests.test_static_artifact_pipeline_v2 import state
+from tests.test_static_artifact_pipeline_v2 import state,REVIEW_SYSTEM,review_response
 
 
 def transport(monkeypatch,handler,guard=lambda url:None):
@@ -66,6 +66,8 @@ async def test_credentials_and_non_public_resource_shapes_are_refused(monkeypatc
 async def test_resource_tool_embeds_data_and_saves_only_reload_references_in_recipe(tmp_path,monkeypatch,large_key):
     calls=[]
     async def stream(**kwargs):
+        if kwargs['system']==REVIEW_SYSTEM:
+            yield review_response();return
         calls.append(kwargs)
         if len(calls)==1:
             call=ToolCall('resource','load_static_resource',{'name':'diagram','label':'Public diagram','url':'https://assets.example/diagram-v1.json'})
