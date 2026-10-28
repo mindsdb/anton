@@ -72,7 +72,8 @@ HOUSEKEEPING_FILES = frozenset({
 
 # Separate from the file set because `store._reconcile` matches the two
 # differently (see there).
-HOUSEKEEPING_DIRS = frozenset({REVISIONS_DIRNAME})
+STATIC_WORK_DIRNAME = ".static"
+HOUSEKEEPING_DIRS = frozenset({REVISIONS_DIRNAME, STATIC_WORK_DIRNAME})
 
 NON_CONTENT_NAMES = HOUSEKEEPING_FILES | GENERATION_INPUT_FILES | HOUSEKEEPING_DIRS
 

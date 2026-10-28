@@ -65,7 +65,7 @@ def test_slide_controls_keyboard_exit_and_print_restore_all_content():
 def test_custom_render_contract_detects_empty_data_view():
     data=Evidence.model_validate({'datasets':{'desks':{'source':{'label':'Synthetic QA'},'rows':[{'id':'D1'},{'id':'D2'}]}}})
     doc=Document.model_validate({'title':'Desks','bindings':{'desks':{'dataset':'desks','columns':['id']}},
-        'views':[{'selector':'.desk','binding':'desks'}], 'sections':[{'id':'desks','blocks':[{'type':'html','html':'<div id="desk-grid"></div>'}]}]})
+        'views':[{'selector':'.desk','binding':'desks','minimum':'rows'}], 'sections':[{'id':'desks','blocks':[{'type':'html','html':'<div id="desk-grid"></div>'}]}]})
     html=render(doc,data).html
     with playwright.sync_playwright() as p:
         browser=p.chromium.launch();page=browser.new_page();errors=[]

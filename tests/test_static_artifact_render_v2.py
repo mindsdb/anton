@@ -84,8 +84,8 @@ def test_visuals_can_reference_dataset_or_private_reusable_query():
 def test_host_ids_do_not_reserve_natural_section_names_and_duplicate_custom_ids_fail():
     doc=Document.model_validate({'title':'Title','sections':[{'id':'title','blocks':[{'type':'prose','text':'A title section.'}]}]})
     assert 'id="_artifact-title"' in render(doc,Evidence()).html
-    doc.sections[0].blocks=[{'type':'html','html':'<div id="title"></div>'}]
-    doc=Document.model_validate(doc.model_dump())
+    from anton.core.artifacts.static.document import Html
+    doc.sections[0].blocks=[Html(type='html',html='<div id="title"></div>')]
     with pytest.raises(DataError,match='Duplicate HTML id'):
         render(doc,Evidence())
 
@@ -94,3 +94,10 @@ def test_line_chart_rejects_ambiguous_text_sorting_instead_of_drawing_false_chro
     block={'type':'chart','kind':'line','title':'Trend','x':'name','query':{'dataset':'rows','columns':['name','amount'],'order_by':[{'field':'name'}]},'series':[{'field':'amount','label':'Amount'}]}
     with pytest.raises(DataError,match='Preserve source order'):
         render(document([block]),evidence())
+
+
+def test_custom_views_default_to_one_component_and_can_require_all_records():
+    from anton.core.artifacts.static.views import View, checks
+    rows={'observations':[{'id':'a'},{'id':'b'}]}
+    assert checks(rows,[View(selector='.chart',binding='observations')])[0]['minimum']==1
+    assert checks(rows,[View(selector='.record',binding='observations',minimum='rows')])[0]['minimum']==2
