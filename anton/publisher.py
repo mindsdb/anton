@@ -17,6 +17,7 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 from anton.core.artifacts.internal_files import (
+    DATA_DIRNAME,
     GENERATION_INPUT_FILES,
     NON_CONTENT_NAMES,
     PUBLISHED_FILENAME,
@@ -109,7 +110,7 @@ DEFAULT_PUBLISH_URL = "https://view.mindshub.ai"
 # inputs (PRD, tech spec, discovery state) are the user's working documents,
 # not deliverables — they are hidden from `files[]` and must stay out of the
 # public bundle for the same reason.
-_BUNDLE_SKIP_NAMES = frozenset({PUBLISHED_FILENAME, REVISIONS_DIRNAME}) | GENERATION_INPUT_FILES
+_BUNDLE_SKIP_NAMES = frozenset({PUBLISHED_FILENAME, REVISIONS_DIRNAME, DATA_DIRNAME}) | GENERATION_INPUT_FILES
 
 # PBKDF2 parameters for access passwords. Stdlib-only (no argon2 dep) so
 # the same verification runs in the anton-services viewer Lambda without
