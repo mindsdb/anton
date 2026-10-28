@@ -89,6 +89,9 @@ def _absorb_data_files(state: "PrdState", inp: dict) -> str | None:
     ) if declared else ([], []))
     if errors:
         state.gathering_complete = False
+        # The refused call's own files are not recorded, so they cover nothing.
+        covered = data_files.covered_sources(state.data_files)
+        state.unverified_sources = [s for s in state.declared_sources if source_key(s) not in covered]
         return _NOT_FINISHED + "\n".join(f"- {e}" for e in errors)
     state.data_files = valid
     if state.data_save_requested or not state.declared_sources:
@@ -171,6 +174,8 @@ async def run_gathering_loop(state: "PrdState") -> None:
         })
 
     state.step_started(sub_tools.STEP_GATHERING)
+    # One save refusal per gathering pass: a re-entry reads new data.
+    state.data_save_requested = False
     questions_asked = 0
 
     for round_idx in range(MAX_ROUNDS):

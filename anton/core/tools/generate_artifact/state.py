@@ -479,7 +479,8 @@ class GenState:
     # `data_files.snapshot` when the run started: those files are only reused,
     # never rewritten.
     data_snapshot: dict[str, tuple[int, int]] = field(default_factory=dict)
-    # Gathering was already sent back once to save its data. Not persisted.
+    # The current gathering pass was already sent back once to save its data.
+    # Reset at the start of each pass. Not persisted.
     data_save_requested: bool = False
     # The session's agent pads, to tell a reference to pad data in
     # `known_data` from the values themselves.

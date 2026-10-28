@@ -657,6 +657,56 @@ async def test_a_refused_data_file_left_unanswered_reopens_gathering(tmp_path):
     assert state.gathering_complete is False
 
 
+async def test_a_refused_data_file_left_unanswered_hands_the_sources_to_the_data_loop(tmp_path):
+    state = _state(_session_with_plan_sequence(
+        _finish_with_files([{"id": "1", "sources": ["orders"]}]),
+        _response("the data is in the pad"),
+    ), artifact_path=tmp_path, known_data="scratchpad `supply_kpi`, variable `frames`",
+        pad_names=["supply_kpi"])
+    await engine.run_gathering_loop(state)
+    assert "does not exist" in state.messages[2]["content"][0]["content"]
+    assert state.gathering_complete is False
+    assert state.unverified_sources == ["orders"]
+
+
+async def test_a_refused_call_does_not_count_its_valid_files_as_saved(tmp_path):
+    _save(tmp_path, "1")
+    state = _state(_session_with_plan_sequence(
+        _finish_with_files(
+            [{"id": "1", "sources": ["orders"]}, {"id": "2", "sources": ["regions"]}],
+            sources=("orders", "regions"),
+        ),
+        _response("the data is in the pad"),
+    ), artifact_path=tmp_path, known_data="scratchpad `supply_kpi`, variable `frames`",
+        pad_names=["supply_kpi"])
+    await engine.run_gathering_loop(state)
+    assert "does not exist" in state.messages[2]["content"][0]["content"]
+    assert state.gathering_complete is False
+    assert state.data_files == []
+    assert state.unverified_sources == ["orders", "regions"]
+
+
+async def test_each_gathering_pass_gets_its_own_save_refusal(monkeypatch, tmp_path):
+    async def fake_handle_scratchpad(session, inp):
+        return ToolOutcome(content="[output] 504 rows", ok=True)
+
+    monkeypatch.setattr("anton.core.tools.tool_handlers.handle_scratchpad", fake_handle_scratchpad)
+    cell = _response(tool_calls=[_tc("scratchpad", {"action": "exec", "name": "hr", "code": "print(2)"})])
+    state = _state(_session_with_plan_sequence(
+        cell, _finish_with_files(), _finish_with_files(),
+        cell, _finish_with_files(), _finish_with_files(),
+    ), artifact_path=tmp_path)
+    await engine.run_gathering_loop(state)
+    assert state.data_save_requested is True
+    first_pass_len = len(state.messages)
+    await engine.run_gathering_loop(state)
+    results = [
+        b["content"] for m in state.messages[first_pass_len:] if isinstance(m["content"], list)
+        for b in m["content"] if b.get("type") == "tool_result"
+    ]
+    assert "save the data the page needs" in results[1]
+
+
 async def test_a_fullstack_gathering_ignores_data_files(tmp_path):
     state = _state(_session_with_plan_sequence(_response(tool_calls=[_tc("finish_gathering", {
         "summary": "ok", "artifact_type": "fullstack-stateless-app", "data_sources": ["orders"],
