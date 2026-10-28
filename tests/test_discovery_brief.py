@@ -4,6 +4,7 @@ Each step is tested in isolation with a fake `session._llm` and a
 monkeypatched `elicit`."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -11,8 +12,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from anton.core.artifacts import ArtifactStore
+from anton.core.artifacts.internal_files import DATA_DIRNAME
 from anton.core.interaction.elicit import AskAnswer
 from anton.core.llm.provider import LLMResponse, ToolCall, Usage
+from anton.core.tools.generate_artifact.data_files import DataFile
 from anton.core.tools.generate_artifact.discovery import brief
 from anton.core.tools.generate_artifact.discovery.state import PrdState
 from tests.streaming_llm import StreamingLLM
@@ -489,3 +492,77 @@ async def test_redraw_to_a_fullstack_type_does_not_honour_the_mark(tmp_path):
     await brief.redraw_brief(state)
     assert state.final_artifact_type == "fullstack-stateless-app"
     assert state.unverified_sources == ["sites"]
+
+
+async def test_redraw_counts_a_valid_saved_file(tmp_path):
+    (tmp_path / DATA_DIRNAME).mkdir()
+    (tmp_path / DATA_DIRNAME / "1.json").write_text(json.dumps([{"v": 1}]))
+    state = _state(tmp_path)
+    state.declared_sources = ["orders"]
+    state.session._llm.plan = AsyncMock(return_value=_redraw_response(
+        "## Goal\nRedrawn.", data_sources=["orders", "suppliers"],
+        data_files=[{"id": "1", "sources": ["suppliers"]}],
+    ))
+    await brief.redraw_brief(state)
+    assert [f.id for f in state.data_files] == ["1"]
+    assert "suppliers" not in state.unverified_sources
+
+
+async def test_redraw_sends_a_source_with_a_bad_file_to_the_data_loop(tmp_path):
+    state = _state(tmp_path)
+    state.declared_sources = ["orders"]
+    state.session._llm.plan = AsyncMock(return_value=_redraw_response(
+        "## Goal\nRedrawn.", data_sources=["orders", "suppliers"],
+        data_files=[{"id": "1", "sources": ["suppliers"]}],
+    ))
+    await brief.redraw_brief(state)
+    assert state.data_files == []
+    assert state.unverified_sources == ["suppliers"]
+
+
+def test_redraw_restate_says_it_cannot_save_new_data():
+    from anton.core.tools.generate_artifact.discovery import prompts as dprompts
+
+    assert "cannot run code" in dprompts._REDRAW_RESTATE
+
+
+async def test_redraw_keeps_restored_files_whose_sources_it_still_declares(tmp_path):
+    """An empty or missing `data_files` is no change: the restored file of a
+    source still declared stays, the one of a dropped source goes."""
+    state = _state(tmp_path)
+    state.declared_sources = ["orders", "regions"]
+    state.data_files = [DataFile("1", ["orders"]), DataFile("2", ["regions"])]
+    state.session._llm.plan = AsyncMock(return_value=_redraw_response(
+        "## Goal\nRedrawn.", data_sources=["orders"], data_files=[],
+    ))
+    await brief.redraw_brief(state)
+    assert [f.id for f in state.data_files] == ["1"]
+
+
+def test_restored_context_shows_the_data_files(tmp_path):
+    from anton.core.tools.generate_artifact.discovery import prompts as dprompts
+
+    (tmp_path / DATA_DIRNAME).mkdir()
+    (tmp_path / DATA_DIRNAME / "1.json").write_text('[{"Id": "SO-5001"}]')
+    state = _state(tmp_path)
+    state.data_files = [DataFile("1", ["orders"])]
+    text = dprompts.restored_context(state)
+    assert "## Data files" in text and "SO-5001" in text
+
+
+async def test_a_new_iteration_redraw_keeps_the_page_data(tmp_path):
+    """New iteration -> redraw -> finish: the file the page is built from is
+    neither dropped by the redraw nor pruned by the finish."""
+    from anton.core.tools.generate_artifact import orchestrator
+
+    (tmp_path / DATA_DIRNAME).mkdir()
+    (tmp_path / DATA_DIRNAME / "1.json").write_text("[1]")
+    state = _state(tmp_path)
+    state.declared_sources = ["orders"]
+    state.data_files = [DataFile("1", ["orders"])]
+    state.session._llm.plan = AsyncMock(return_value=_redraw_response(
+        "## Goal\nRedrawn.", data_sources=["orders"],
+    ))
+    await brief.redraw_brief(state)
+    orchestrator._finish(state)
+    assert (tmp_path / DATA_DIRNAME / "1.json").exists()

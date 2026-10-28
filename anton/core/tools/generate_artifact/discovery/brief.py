@@ -14,7 +14,8 @@ from pydantic import BaseModel
 from anton.core.llm.client import asked_model
 
 from . import sub_tools
-from ..state import known_data_usable
+from .. import data_files
+from ..state import known_data_usable, settled_artifact_type
 from .notes import known_data_sources, source_key, string_list
 from .state import PrdState
 
@@ -303,6 +304,22 @@ async def redraw_brief(state: PrdState) -> None:
         if new_type in state.buildable_types:
             state.final_artifact_type = new_type
         state.declared_sources = declared
+        if settled_artifact_type(state) == "html-app":
+            # One call, no tool loop: a file that does not check out cannot be
+            # sent back, so its source goes to the data loop instead. Files
+            # already in hand stay while their sources are still declared, so
+            # a reply that lists none changes nothing.
+            listed = data_files.parse_declared(finish_inp.get("data_files"))
+            new_files, _errors = (data_files.check_declared(
+                state.artifact_path, listed, declared,
+                cell_sandbox=data_files.sandbox_of(state.session), protected=state.data_snapshot,
+            ) if listed else ([], []))
+            still_declared = {source_key(s) for s in declared}
+            new_ids = {f.id for f in new_files}
+            state.data_files = [
+                f for f in state.data_files
+                if f.id not in new_ids and any(source_key(s) in still_declared for s in f.sources)
+            ] + new_files
         # Anything the correction introduced has nothing executed against it,
         # unless its rows are in `known_data` — read after the type change
         # above, so a correction to a fullstack type does not honour the
@@ -311,7 +328,10 @@ async def redraw_brief(state: PrdState) -> None:
         # loop: after a correction the notes are full of the PREVIOUS
         # gathering's cells, and an emptiness check would read that as
         # "everything is covered".
-        covered = known_data_sources(finish_inp, usable=known_data_usable(state))
+        covered = known_data_sources(finish_inp, usable=known_data_usable(state)) | (
+            data_files.covered_sources(state.data_files)
+            if settled_artifact_type(state) == "html-app" else set()
+        )
         still_unverified = set(state.unverified_sources)
         by_known_data = set(state.known_data_verified)
         state.unverified_sources = [

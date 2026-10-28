@@ -148,6 +148,11 @@ def restored_context(state: PrdState) -> str:
             "## Data sources declared earlier\n"
             + "\n".join(f"- {s}" for s in state.declared_sources)
         )
+    from ..data_files import state_files_section
+
+    files = state_files_section(state)
+    if files:
+        parts.append(files)
     if state.data_notes.strip():
         parts.append(f"## Data gathered earlier\n{state.data_notes.strip()}")
     if state.web_notes.strip():
@@ -285,6 +290,9 @@ _REDRAW_RESTATE = (
     "was declared with, whatever language you write in. For a source whose "
     "rows or values are under `" + KNOWN_DATA_HEADER + "`, also pass a "
     "`data_findings` entry with `verified_by: \"known_data\"`."
+    " For an html-app, list in `data_files` only ids shown under `## Data files` "
+    "or `## Saved data files`: this step cannot run code, so it cannot save new "
+    "data, and a source without such a file is fetched before generation."
 )
 
 _REDRAW_CORRECTION_ACT_FIRST = (
