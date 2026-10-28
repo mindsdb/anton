@@ -546,6 +546,7 @@ async def test_a_cell_that_left_out_action_is_recorded_and_verifies_its_source(m
     await engine.run_gathering_loop(state)
     assert [(x["code"], x["output"]) for x in state.scratchpad_execs] == [("print(2)", "[output] 504 rows")]
     assert state.unverified_sources == []
+    assert "save the data the page needs" in state.messages[4]["content"][0]["content"]
 
 
 def _save(tmp_path, file_id="1", rows=None):
@@ -626,6 +627,7 @@ async def test_data_read_by_a_cell_and_not_saved_is_sent_back_once_then_warned(m
         _finish_with_files(),
     ), artifact_path=tmp_path)
     await engine.run_gathering_loop(state)
+    assert "save the data the page needs" in state.messages[4]["content"][0]["content"]
     assert state.unverified_sources == []
     assert any(s.outcome == "data_not_saved" for s in state.trace)
     assert engine.DATA_NOT_SAVED_WARNING in state.verify_warnings
