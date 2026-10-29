@@ -193,14 +193,15 @@
     var fewCats = s.cats.length <= (narrow ? 10 : 16);
     // Horizontal bars wrap a long name onto lines within a share of the width (three at most).
     var labelW = Math.round(narrow ? width * 0.38 : Math.min(260, width * 0.3));
-    var maxChars = horizontal ? Math.floor(labelW / 6.4) * 3 : Math.max(6, Math.floor((width - 80) / Math.max(1, s.cats.length) / 6.2));
+    // Upright bars whose names would touch slant them; a slanted name has room for more characters.
+    var slant = !horizontal && ((narrow && s.cats.length > 5) || longestCat * 6.2 > (width - 70) / Math.max(1, s.cats.length) * 0.95);
+    var maxChars = horizontal ? Math.floor(labelW / 6.4) * 3 : slant ? 18 : Math.max(6, Math.floor((width - 80) / Math.max(1, s.cats.length) / 6.2));
     var catLabel = function (v) { var t = String(v); return fewCats && t.length > maxChars + 1 ? t.slice(0, maxChars) + '\u2026' : t; };
     var catAxis = {
       type: 'category', data: s.cats.map(function (c) { return AK.fmt(c, xfmt); }),
       axisLine: {lineStyle: {color: T.border}}, axisTick: {show: false},
       axisLabel: {color: T.text2, fontSize: 11, hideOverlap: !fewCats, interval: fewCats ? 0 : 'auto', formatter: catLabel,
-        // Upright bars whose names would touch slant them.
-        rotate: (!horizontal && ((narrow && s.cats.length > 5) || longestCat * 6.2 > (width - 70) / Math.max(1, s.cats.length) * 0.95)) ? 35 : 0,
+        rotate: slant ? 35 : 0,
         width: horizontal ? labelW : undefined, overflow: horizontal ? 'break' : undefined, lineHeight: 13},
       name: b.x_label || '', nameLocation: 'middle', nameGap: 28, nameTextStyle: {color: T.text3}
     };
@@ -317,9 +318,13 @@
     var total = data.reduce(function (a, d) { return a + (d.value || 0); }, 0);
     opt.tooltip.trigger = 'item';
     opt.tooltip.formatter = function (p) { return AK.tipRows(p.name, [[AK.label(b, yf), AK.fmt(p.value, fmt)], ['%', AK.fmt(p.percent, 'percent:1')]]); };
-    opt.legend = {orient: narrow ? 'horizontal' : 'vertical', left: narrow ? 'center' : 'right', top: narrow ? 'bottom' : 'middle', type: 'scroll', icon: 'circle', textStyle: {color: T.text2, fontSize: 12}};
+    // On a phone the legend wraps under the chart (pages of a scrolling legend hide categories).
+    var rowsOfLegend = narrow ? Math.ceil(data.length / 3) : 0;
+    opt.legend = {orient: narrow ? 'horizontal' : 'vertical', left: narrow ? 'center' : 'right', top: narrow ? 'bottom' : 'middle',
+      type: narrow && data.length <= 12 ? 'plain' : 'scroll', icon: 'circle', textStyle: {color: T.text2, fontSize: 12}};
     var donut = b.kind === 'donut';
-    opt.series = [{type: 'pie', radius: donut ? ['52%', '76%'] : [0, '74%'], center: narrow ? ['50%', '44%'] : ['40%', '50%'],
+    var cy = narrow ? Math.max(34, 46 - rowsOfLegend * 4) + '%' : '50%';
+    opt.series = [{type: 'pie', radius: donut ? (narrow ? ['46%', '68%'] : ['52%', '76%']) : [0, narrow ? '66%' : '74%'], center: narrow ? ['50%', cy] : ['40%', '50%'],
       data: data, avoidLabelOverlap: true, itemStyle: {borderColor: T.surface, borderWidth: 2, borderRadius: donut ? 6 : 2},
       label: {show: !narrow, color: T.text2, fontSize: 11, formatter: function (p) { return p.name + '\n' + AK.fmt(p.value, fmt) + ' (' + AK.fmt(p.percent, 'percent:0') + ')'; }},
       labelLine: {length: 8, length2: 8}}];

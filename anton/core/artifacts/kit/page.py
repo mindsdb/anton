@@ -850,7 +850,7 @@ class Page:
     _NUM_EN = re.compile(r"(?<![\w.\-/])([$€£¥]?)\s?(\d{1,3}(?:[,\u202f\u00a0]\d{3})+|\d+)(?:\.(\d+))?\s?(%|[KkMmBb]\b|bn\b)?(?![\w\-/])")
     _NUM_EU = re.compile(r"(?<![\w,\-/])([$€£¥]?)\s?(\d{1,3}(?:[. \u202f\u00a0]\d{3})+|\d+)(?:,(\d+))?\s?(%|[KkMmBb]\b|Mio\b|Md\b)?(?![\w\-/])")
     _DATES_IN_TEXT = re.compile(
-        r"\d{4}-\d{2}(-\d{2})?([T ]\d{2}:\d{2}(:\d{2})?)?|\d{1,2}:\d{2}|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:,\s*\d{4})?|"
+        r"\d{4}-\d{2}(-\d{2})?([T ]\d{2}:\d{2}(:\d{2})?)?|\d{1,2}:\d{2}|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?!\d)(?:,\s*\d{4})?|"
         r"\b\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?(?:\s+\d{4})?|\b(?:19|20)\d{2}\b|\b[QH][1-4]\b|\bFY\s?\d{2,4}\b", re.I)
     # A span of time ("13 weeks", "24-hour", "7 días") describes a period, not a figure.
     _SPANS_IN_TEXT = re.compile(
