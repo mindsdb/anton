@@ -22,7 +22,9 @@ manages, read ahead of the person's own and never written.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -33,6 +35,7 @@ from pydantic import BaseModel, Field
 from anton.core.llm.tracing import tagged_trace
 from anton.core.llm.structured import (
     generate_with_truncation_retry,
+    looks_truncated,
     no_preamble_instruction,
 )
 from anton.core.memory.base import (
@@ -69,6 +72,8 @@ logger = logging.getLogger(__name__)
 #     observation to count).
 _RULE_RETRIEVAL_TAG = "rule-retrieval"
 _RULE_RETRIEVAL_MAX_TOKENS = 4096
+# The filter blocks the first reply token; past this, every conditional rule is kept.
+_RULE_RETRIEVAL_TIMEOUT_SECONDS = 3.0
 
 
 def learned_memory_notice(
@@ -133,6 +138,36 @@ def _emit_rule_retrieval(**shape) -> None:
         )
     except Exception:
         logger.debug("rule_retrieval analytics event failed", exc_info=True)
+
+
+# Models often fence JSON even when told not to; one surrounding fence is unwrapped.
+_JSON_FENCE_RE = re.compile(r"\A```(?:json)?[ \t]*\n(.*)\n[ \t]*```\Z", re.DOTALL | re.IGNORECASE)
+
+
+def _parse_rule_selection(text: str, count: int) -> list[int] | None:
+    """Parse the rule filter's `{"keep": [1, 3]}` answer into 0-based indices.
+
+    `count` is how many rules were numbered (from 1). One surrounding code fence
+    is removed first. Returns the sorted, de-duplicated indices, an empty list
+    when the model chose none, or None when the answer is not exactly that shape
+    or names a rule that was not shown.
+    """
+    text = text.strip()
+    fenced = _JSON_FENCE_RE.match(text)
+    if fenced:
+        text = fenced.group(1)
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or set(data) != {"keep"} or not isinstance(data["keep"], list):
+        return None
+    selected: set[int] = set()
+    for item in data["keep"]:
+        if type(item) is not int or not 1 <= item <= count:
+            return None
+        selected.add(item - 1)
+    return sorted(selected)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -355,10 +390,10 @@ class Cortex:
     _LESSONS_BUDGET_TOKENS = 1000
 
     _RULES_RETRIEVAL_PROMPT = """\
-Given the user's current message, select only the conditional (When/If) rules that are \
-relevant. Return the selected rules exactly as they appear, one per line (keep the "- " prefix).
-If all rules are relevant, return them all. If none are relevant, return "NONE".
-Do NOT add, modify, or summarize rules — return them verbatim.
+Given the user's current message, select only the numbered conditional (When/If) rules \
+that are relevant. Answer with JSON only, exactly {"keep": [<numbers>]}, listing the \
+numbers of the relevant rules, for example {"keep": [1, 3]}. If none are relevant, \
+answer {"keep": []}. Do not repeat the rule text.
 """
 
     # Rendering first doesn't tell the model which tier wins, so the first
@@ -545,7 +580,8 @@ Do NOT add, modify, or summarize rules — return them verbatim.
 
         Always/Never rules are behavioral constraints — always loaded in full.
         Only conditional (When/If) rules are filtered by relevance.
-        If rules are under budget or no LLM is available, returns as-is.
+        If rules are under budget or no LLM is available, returns as-is. A slow,
+        malformed, or truncated selection keeps every conditional rule.
         """
         if not user_message or self._llm is None:
             return engrams
@@ -562,15 +598,11 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         when_text = "\n".join(f"- {e.text}" for e in when_engrams)
         if len(when_text) < 1000:
             return engrams
+        numbered_text = "\n".join(f"{i}. {e.text}" for i, e in enumerate(when_engrams, start=1))
 
-        # ENG-1390 instrumentation. Purely observational — every branch below
-        # produces exactly the value it produced before. What is new is that the
-        # branches are now DISTINGUISHABLE: `filtered_when = when_engrams` is
-        # reached three different ways (no exact match, empty response, exception)
-        # and all three are byte-identical in their effect on the prompt, so a
-        # count of invocations could never tell a working filter from a broken one.
-        # Measured shares before this shipped: 55.7% filtered, 30.2% dropped_all,
-        # 14.2% kept_all_no_match, plus an exception rate that was unobservable.
+        # Every keep-all fallback below (unusable answer, empty response, timeout,
+        # exception) is byte-identical in its effect on the prompt, so only
+        # `outcome` tells a working filter from a broken one.
         outcome = "error"
         kept = len(when_engrams)
         stop_reason = ""
@@ -580,36 +612,44 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         try:
             # Isolate this call from every other `llm.code` caller in the trace.
             with tagged_trace(_RULE_RETRIEVAL_TAG):
-                response = await self._llm.code(
-                    system=self._RULES_RETRIEVAL_PROMPT,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": f"User message: {user_message}\n\nRules:\n{when_text}",
-                        }
-                    ],
-                    max_tokens=_RULE_RETRIEVAL_MAX_TOKENS,
+                response = await asyncio.wait_for(
+                    self._llm.code(
+                        system=self._RULES_RETRIEVAL_PROMPT,
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": f"User message: {user_message}\n\nRules:\n{numbered_text}",
+                            }
+                        ],
+                        max_tokens=_RULE_RETRIEVAL_MAX_TOKENS,
+                    ),
+                    timeout=_RULE_RETRIEVAL_TIMEOUT_SECONDS,
                 )
             usage = getattr(response, "usage", None)
             stop_reason = getattr(response, "stop_reason", None) or ""
             result = response.content.strip()
-            if result.upper() == "NONE":
-                # A fourth outcome the ticket did not name: EVERY conditional rule
-                # is discarded. The opposite of the permissive fallback, and ~30%
-                # of calls.
-                outcome, kept, early = "dropped_all", 0, mandatory
-            elif result:
-                returned = {line.lstrip("- ").strip() for line in result.splitlines() if line.strip()}
-                filtered_when = [e for e in when_engrams if e.text in returned]
-                if not filtered_when:
-                    # Exact string equality against the model's echo. Any rewrap,
-                    # added punctuation, or a response truncated at the ceiling
-                    # yields zero matches — and then we silently keep everything.
-                    outcome, filtered_when = "kept_all_no_match", when_engrams
-                else:
-                    outcome, kept = "filtered", len(filtered_when)
-            else:
+            selection = None
+            if result and not looks_truncated(response, _RULE_RETRIEVAL_MAX_TOKENS):
+                selection = _parse_rule_selection(result, len(when_engrams))
+            if not result:
                 outcome, filtered_when = "kept_all_empty", when_engrams
+            elif selection is None:
+                # Malformed, out of range, or cut at the ceiling: a partial list
+                # would silently drop rules, so keep everything instead.
+                outcome, filtered_when = "kept_all_no_match", when_engrams
+            elif not selection:
+                # The opposite of the permissive fallback: EVERY conditional rule
+                # is discarded.
+                outcome, kept, early = "dropped_all", 0, mandatory
+            else:
+                # Original engrams in file order; model text never becomes a rule.
+                filtered_when = [when_engrams[i] for i in selection]
+                outcome, kept = "filtered", len(filtered_when)
+        except TimeoutError:
+            filtered_when = when_engrams
+            # A provider's own timeout is an error, not a deadline hit.
+            reached = time.monotonic() - started >= _RULE_RETRIEVAL_TIMEOUT_SECONDS
+            outcome = "timeout" if reached else "error"
         except asyncio.CancelledError:
             # A user pressing STOP, or an abandoned SSE stream, cancels the turn
             # mid-call. `CancelledError` is a BaseException, so `except Exception`
@@ -630,11 +670,8 @@ Do NOT add, modify, or summarize rules — return them verbatim.
                 when_rules=len(when_engrams),
                 kept_rules=kept,
                 rules_chars=len(when_text),
-                # `stop_reason`, not output_tokens == max_tokens: a truncated
-                # verbatim echo is silently accepted as "the relevant rules", so
-                # this is the difference between a real filter and one that just
-                # ran out of room. The provider reason is authoritative where the
-                # exact-cap heuristic gives false positives.
+                # A cap hit can still report "stop", so `stop_reason` and
+                # `output_tokens` together separate it from a malformed selection.
                 stop_reason=stop_reason,
                 input_tokens=getattr(usage, "input_tokens", 0) or 0,
                 output_tokens=getattr(usage, "output_tokens", 0) or 0,
