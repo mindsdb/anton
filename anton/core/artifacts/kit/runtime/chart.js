@@ -254,8 +254,9 @@
         item.label = {show: true, position: horizontal ? 'right' : 'top', color: T.text2, fontSize: 11, fontWeight: 600,
           formatter: function (p) { return labelFmt(p.value && p.value.value != null ? p.value.value : p.value); }};
         // Dense series keep only the value labels that have room (the rest are in the tooltip and the
-        // data table), unless the page asked for every value.
-        if (b.show_values == null) item.labelLayout = {hideOverlap: true};
+        // data table): labels drawn over each other are read by no one, even when the page asked for
+        // every value.
+        item.labelLayout = {hideOverlap: true};
       }
       if (i === 0) { var ml = refLines(b, T); if (ml) item.markLine = ml; }
       return item;
