@@ -104,9 +104,18 @@ Getting it right:
 nothing else. Take each figure from that scope's own rows; never mix values from different \
 scenarios or versions of the data, and never add up values that should not be summed. With several \
 scenarios, fetch and compute each one separately and label it.
-- Every filter that drops rows needs a reason in the request: print how many rows each filter \
-drops. A period that is the data's whole horizon ("the plan's 13 weeks", "this year" in a one-year \
-dataset) means all rows, not a date filter.
+- Fetch each table for the scope whole (the scenario or source is the scope; no other filters in \
+the query), then filter in pandas and print how many rows each filter drops. Every filter that \
+drops rows needs a reason in the request. A period that is the data's whole horizon ("the plan's 13 \
+weeks", "this year" in a one-year dataset) means all rows: never rebuild it from dates.
+- Scenarios or options compared: compute every measure with one function applied to each \
+scenario's tables, and show them side by side. What an option gains is the change in the outcome \
+measures between the scenario without it and with it (late items, value at risk, delay days: show \
+both values and the difference), not the value of the goods it moves; what it costs is its own cost \
+field. "Which costs less" compares each option's own costs and names the cheaper one.
+- A vague request ("the usual stuff", "key figures", "supply risk") gets one figure per main \
+measure the data holds for that scope: totals of value and quantity, counts and value of late or at \
+risk items, capacity peaks and overload counts, and each cost field.
 - Prefer the data's own facts to re-deriving them: a status field (late, at risk, on time), a \
 recorded delay, a precomputed measure or an exceptions table beats a chain of joins. Use joins only \
 for what the data does not state.
