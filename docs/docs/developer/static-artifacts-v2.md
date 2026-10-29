@@ -122,6 +122,11 @@ enables the full-page HTML tool when the requested whole-page experience needs i
 asking for HTML alone does not require custom mode. Existing custom or legacy
 pages can be edited directly, while saved typed documents retain the compiler as
 their default. Both routes produce portable HTML and pass the same publication checks.
+Composition/schema failures and browser/content-review failures each have a
+separate limit of three failures. A corrected schema does not spend the repairs
+reserved for the rendered presentation. All authoring, inspection, resource, and
+repair calls share an overall sixteen-round limit. Neither budget exhaustion nor
+a failed check publishes the candidate or discards the previous page.
 
 Slides use the same evidence and blocks. Each section is exactly one slide; title and source sections are authored explicitly, and reading metadata adds no slides. Reading mode exposes the whole deck;
 presentation mode shows one slide with controls and keyboard navigation. Escape
