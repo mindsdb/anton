@@ -150,8 +150,8 @@ def render_html(spec: dict, custom: dict | None = None) -> str:
         f'<html lang="{lang}" data-ak-theme="{theme}">\n<head>\n<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         f"<title>{title}</title>\n"
-        f'<script type="application/json" id="ak-spec">{_script_json(spec)}</script>\n'
         f"<style>\n{_asset('ak.css')}</style>\n{custom_css}"
+        f'<script type="application/json" id="ak-spec">{_script_json(spec)}</script>\n'
         "</head>\n<body>\n<div id=\"ak-root\">" + static_html(spec) + "</div>\n"
         f"<script>\n{js}</script>\n{custom_js}<script>AK.boot();</script>\n</body>\n</html>\n"
     )

@@ -150,6 +150,9 @@ a scenario switch, one chart per scenario). A table only when the request asks f
 flows, lanes or supply networks on `page.network` (style "sankey" for volumes); schedules, \
 milestones or Gantt on `page.timeline`; options or scenarios side by side on `page.compare`; trends \
 and breakdowns on `page.chart`; records on `page.table`.
+- What the request says each item shows goes on the item itself: "a map with how many days late \
+each one is" puts the days late in each point's label (`sublabel`), not only in a legend or table; \
+"label each lane with its units" puts the units on each link.
 - Interactions: "switch/toggle between A and B" is `page.tabs([...], style="segmented")` with each \
 option's blocks inside; "filter" is `filters=[...]`/`search=True` on the table; "click a row to see \
 its detail" is `detail="drawer"`; "clicking a row highlights it on the map/globe/chart" is the same \

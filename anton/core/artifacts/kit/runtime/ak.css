@@ -378,6 +378,9 @@ h1, h2, h3, h4 { margin: 0; font-weight: 650; letter-spacing: -0.012em; line-hei
   .ak-cards-mobile .ak-table tfoot { display: block; }
   .ak-cards-mobile .ak-table tfoot td.ak-empty-cell { display: none; }
   .ak-cards-mobile .ak-table tfoot td:first-child::before { content: none; }
+  .ak-cards-mobile .ak-compare td:first-child { justify-content: flex-start; font-weight: 650; text-align: left; }
+  .ak-cards-mobile .ak-compare td:first-child::before { content: none; }
+  .ak-cards-mobile.ak-flush { padding: 0 12px 4px; }
 }
 @media (max-width: 980px) {
   .ak-grid { grid-template-columns: repeat(min(var(--ak-cols, 2), 2), minmax(0, 1fr)); }

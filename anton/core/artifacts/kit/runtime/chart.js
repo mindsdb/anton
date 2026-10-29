@@ -172,10 +172,15 @@
     var showValues = b.show_values != null ? b.show_values : ((kind === 'bar' || kind === 'hbar') && nPoints <= (narrow ? 10 : 24) && !b.stack && fits);
     var opt = baseOption(T);
     opt.color = pal;
+    // Every category keeps its label when there are few of them: long ones are shortened, not dropped.
+    var fewCats = s.cats.length <= (narrow ? 10 : 16);
+    var maxChars = horizontal ? (narrow ? 14 : 24) : Math.max(6, Math.floor((width - 80) / Math.max(1, s.cats.length) / 6.2));
+    var catLabel = function (v) { var t = String(v); return fewCats && t.length > maxChars + 1 ? t.slice(0, maxChars) + '\u2026' : t; };
     var catAxis = {
       type: 'category', data: s.cats.map(function (c) { return AK.fmt(c, xfmt); }),
       axisLine: {lineStyle: {color: T.border}}, axisTick: {show: false},
-      axisLabel: {color: T.text2, fontSize: 11, hideOverlap: true, interval: 'auto', rotate: (!horizontal && narrow && s.cats.length > 6) ? 40 : 0},
+      axisLabel: {color: T.text2, fontSize: 11, hideOverlap: !fewCats, interval: fewCats ? 0 : 'auto', formatter: catLabel,
+        rotate: (!horizontal && narrow && s.cats.length > 5) ? 40 : 0},
       name: b.x_label || '', nameLocation: 'middle', nameGap: 28, nameTextStyle: {color: T.text3}
     };
     var valAxis = {

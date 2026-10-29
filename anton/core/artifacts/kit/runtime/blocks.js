@@ -175,7 +175,8 @@
 
   /* Compare: metrics (rows) across options (columns), with the change from the first column. */
   B.compare = function (b, parent) {
-    var c = AK.card(b, parent, 'ak-flush');
+    // On a narrow screen each metric becomes a card listing its values, change included.
+    var c = AK.card(b, parent, 'ak-flush ak-cards-mobile');
     var wrap = AK.el('div', 'ak-table-wrap');
     wrap.style.border = '0'; wrap.style.borderRadius = '0';
     var t = AK.el('table', 'ak-table ak-compare');
