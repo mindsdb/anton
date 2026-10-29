@@ -31,6 +31,28 @@ REUSE = {'name': 'reuse_static_evidence', 'description': 'Finish with the exact 
     'input_schema': {'type': 'object', 'additionalProperties': False, 'properties': {'reason': {'type': 'string', 'minLength': 1}}, 'required': ['reason']}}
 
 
+# Self-contained because remote scratchpads need not have Anton installed.
+# Keep Decimal numeric rather than forcing a lossy float or a string fallback.
+_EVIDENCE_WRITER = '''def save_static_evidence(payload):
+    import json
+    from decimal import Decimal
+    from pathlib import Path
+    def encode(value):
+        if isinstance(value, Decimal):
+            if not value.is_finite():
+                raise ValueError('Evidence requires finite numbers')
+            return str(value)
+        if isinstance(value, dict):
+            if not all(isinstance(key, str) for key in value):
+                raise TypeError('Evidence object keys must be strings')
+            return '{' + ','.join(json.dumps(key, ensure_ascii=False) + ':' + encode(item) for key, item in value.items()) + '}'
+        if isinstance(value, list):
+            return '[' + ','.join(encode(item) for item in value) + ']'
+        return json.dumps(value, ensure_ascii=False, allow_nan=False)
+    return Path(EVIDENCE_DESTINATION).write_text(encode(payload), encoding='utf-8')
+'''
+
+
 def _bind_evidence_path(code, path):
     # Future imports must remain before executable statements in a Python cell.
     try:
@@ -40,7 +62,8 @@ def _bind_evidence_path(code, path):
     lines = code.splitlines(keepends=True)
     prefix = ''.join(lines[:offset])
     binding = f'STATIC_EVIDENCE_PATH = {str(path)!r}\n__import__("os").environ["STATIC_EVIDENCE_PATH"] = STATIC_EVIDENCE_PATH\n'
-    return prefix + ('\n' if prefix and not prefix.endswith('\n') else '') + binding + ''.join(lines[offset:])
+    writer = _EVIDENCE_WRITER.replace('EVIDENCE_DESTINATION', repr(str(path)))
+    return prefix + ('\n' if prefix and not prefix.endswith('\n') else '') + binding + writer + ''.join(lines[offset:])
 
 
 async def collect(state, *, feedback: str = '') -> Evidence | str:
