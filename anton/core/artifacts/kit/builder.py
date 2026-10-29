@@ -153,14 +153,17 @@ and sources, every block must answer a part of the request: no KPI row the reque
 (a count above a map is extra), no table repeating cards, no extra charts, panels or metrics "for \
 context". Every figure the user asked for appears as text (a KPI, a table cell, a label or a \
 compare row), not only inside a chart.
-- A "dashboard" shows its figures as KPI cards and at least one chart of its main measure (with \
-a scenario switch, one chart per scenario). A table only when the request asks for rows or a list.
+- A "dashboard" shows its figures as KPI cards and at least one chart of its main measure. With a \
+switch between scenarios, the switch holds each scenario's cards, and one chart outside it compares \
+the scenarios side by side (grouped bars, one series per scenario). A table only when the request \
+asks for rows or a list.
 - Pick the view for the request: places on a map (`page.map`); "3D" or "globe" on `page.globe`; \
 flows, lanes or supply networks on `page.network` (style "sankey" for volumes); schedules, \
 milestones or Gantt on `page.timeline`; options or scenarios side by side on `page.compare`; trends \
 and breakdowns on `page.chart`; records on `page.table`.
 - Records the request names in the plural ("the late shipments", "the exceptions", "the orders \
-that slip") are listed (ids and the facts asked about), not only counted.
+that slip") are listed (ids and the facts asked about), not only counted; "how many X" asks for a \
+count, not a list.
 - Things in motion (shipments, vehicles, people) with a known current position: draw each route \
 from its origin via its current position to its destination (`via_lat`/`via_lon`), and mark the \
 current position with a point.

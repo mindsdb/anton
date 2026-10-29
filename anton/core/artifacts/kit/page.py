@@ -753,6 +753,38 @@ class Page:
         return "\n".join([head] + lines)
 
     # ---- output ----
+    def _check_percents(self) -> None:
+        """Warn when values shown as `percent` (percent units, 98.4 -> 98.4%) look like fractions."""
+        data = self.spec.get("data", {})
+
+        def looks_fractional(vals):
+            nums = [v for v in vals if is_number(v)]
+            return len(nums) >= 1 and all(0 <= v <= 1 for v in nums) and any(0 < v < 1 for v in nums)
+
+        def check(where, fmt, vals):
+            if fmt and str(fmt).split(":")[0] == "percent" and looks_fractional(vals):
+                self.warnings.append(f"{where}: values are between 0 and 1 but the format is 'percent' (which "
+                                     "expects 98.4 for 98.4%); use format='fraction' or multiply by 100.")
+        for b in self._walk():
+            t = b.get("type")
+            if t == "kpis":
+                for k in b["items"]:
+                    check(f"kpi {k.get('label')!r}", k.get("format"), [k.get("value")])
+            elif t == "chart":
+                rows = data.get(b["data"], [])
+                for f in ([b["y"]] if isinstance(b.get("y"), str) else list(b.get("y") or [])):
+                    check(f"chart {b.get('title')!r}", (b.get("formats") or {}).get(f) or b.get("format")
+                          or self.spec.get("formats", {}).get(f), [r.get(f) for r in rows])
+            elif t == "table":
+                rows = data.get(b["data"], [])
+                for c in b.get("columns") or []:
+                    check(f"table {b.get('title')!r} column {c['field']!r}", c.get("format")
+                          or (b.get("formats") or {}).get(c["field"]) or self.spec.get("formats", {}).get(c["field"]),
+                          [r.get(c["field"]) for r in rows])
+            elif t == "compare":
+                for r in b["rows"]:
+                    check(f"compare row {r.get('label')!r}", r.get("format"), r.get("values") or [])
+
     def _autolink(self) -> None:
         """Tables and maps, globes or timelines that show the same records (the same ids) are linked:
         clicking a row highlights that record in the other views. Explicit links are left alone."""
@@ -807,6 +839,7 @@ class Page:
     def html_text(self) -> str:
         from .render import render_html
         self._autolink()
+        self._check_percents()
         return render_html(self.spec, self._custom)
 
     def save(self, path: Any, *, quiet: bool = False) -> str:
