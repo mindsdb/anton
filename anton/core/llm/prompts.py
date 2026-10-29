@@ -172,8 +172,11 @@ this down by category if that helps"). Always leave a door open — never dead-e
 But always let the user know the detail is available if they want it.
 - When you discover important information, use the memorize tool to encode it. \
 Use "always"/"never"/"when" for behavioral rules. Use "lesson" for facts. \
-Use "profile" for things about the user. Choose "global" for universal knowledge, \
-"project" for workspace-specific knowledge. \
+Use "profile" only for who the user is (name, role, time zone, expertise), never for \
+an instruction on how to answer or work. Scope is "project" unless the user says a \
+rule applies to all their projects; the memorize tool's Scope note says when to \
+choose "global". Never memorize what the project's own instructions in anton.md \
+already say: they load on every turn in this project. \
 Only encode genuinely reusable knowledge — not transient conversation details.
 """
 
@@ -297,7 +300,8 @@ each value of column `key`, filtering the rows shown in a region named \
 tables and text as shown), `rt.update(path, {element_id: new_content})` \
 (replaces those elements' content in any page; a section keeps its heading) \
 and `rt.insert(path, new_content, before=element_id)` (or `after=`). Write \
-your own HTML for anything they do not cover.
+your own HTML for anything they do not cover, wrapped in `rt.Html` (a plain \
+string shows as text).
 - To change an existing report, edit only what the request asks and keep the \
 rest, including the artifact itself, its look and any file the user asked you \
 not to change. Change the saved page in place with rt.update and rt.insert, \
@@ -320,7 +324,9 @@ technical spec, then the code with static verification, \
 and for fullstack apps launches the backend and health-checks it — so you do \
 NOT call `launch_backend` afterwards. Do NOT write a PRD yourself and do NOT \
 write a generator-built artifact's files yourself in the scratchpad; the \
-pipeline's checks are what keep the result openable and deployable. Every status other than `generated` \
+pipeline's checks are what keep the result openable and deployable. The one \
+exception is `browser_check_failed`: the page failed its browser check, and you \
+repair it in a scratchpad cell as its `instruction` says. Every status other than `generated` \
 carries an `instruction` — follow it. `needs_confirmation` means show \
 `brief_summary` and, if the user agrees, call again with the SAME \
 `user_request`; a correction goes in `agent_understanding` with \
@@ -345,6 +351,61 @@ result. For fullstack apps the entry point is the `url` from the \
 the page and its `/api/*`; `static/index.html` opened from disk cannot reach \
 the API, so never present its path as the way to open the app.
 """
+
+
+def cut_spans(text: str, *cuts: tuple[str, str | None, str]) -> str:
+    """`text` with each `(start, end, replacement)` applied in order: the span
+    from `start` up to the first `end` after it becomes `replacement`. `end`
+    itself is kept, and None runs the span to the end of `text`.
+
+    Each `start` must occur exactly once and its `end` must follow it, so a
+    variant derived from a prompt fails at import, instead of drifting, when
+    the prompt is reworded.
+    """
+    for start, end, replacement in cuts:
+        count = text.count(start)
+        if count != 1:
+            raise ValueError(f"{start[:60]!r} occurs {count} times, not once")
+        begin = text.index(start)
+        stop = len(text) if end is None else text.find(end, begin + len(start))
+        if stop < 0:
+            raise ValueError(f"{end!r} doesn't follow {start[:60]!r}")
+        text = text[:begin] + replacement + text[stop:]
+    return text
+
+
+# Where nothing starts an app backend (`live_app_slots.fullstack_offered` is
+# False): no fullstack type to register, no launch, and no backend URL as the
+# way to open an app.
+STATIC_ARTIFACTS_PROMPT = cut_spans(
+    ARTIFACTS_PROMPT,
+    (
+        "- Fullstack web app (backend + frontend) — the DEFAULT",
+        "\nWHEN NOT TO REGISTER:",
+        "- Interactive apps and demos → `type=\"html-app\"` too. This deployment "
+        "starts no app backends, so there is no fullstack type; an html-app shows "
+        "the data it was built with.\n",
+    ),
+    (", and every `fullstack-stateless-app`", " goes to `generate_artifact(", ""),
+    (", and for fullstack apps launches the backend", " Do NOT write a PRD yourself", "."),
+    (" For fullstack apps the entry point is the `url`", "\n", ""),
+)
+
+
+def _without_direct_reports(text: str) -> str:
+    return cut_spans(
+        text,
+        ("DIRECT REPORTS:\n", "WORKFLOW:", ""),
+        (
+            " A report the user has fully specified you build yourself (DIRECT REPORTS above). Any other",
+            " `html-app`",
+            " Every",
+        ),
+    )
+
+
+NO_DIRECT_REPORTS_ARTIFACTS_PROMPT = _without_direct_reports(ARTIFACTS_PROMPT)
+NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT = _without_direct_reports(STATIC_ARTIFACTS_PROMPT)
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +456,8 @@ code, or `generate_artifact` returned an error and the user asked you to continu
 manually. Only then call `recall_skill("build-html-dashboard")` first and follow \
 the loaded output contract (charting library, theme, file layout, large-dataset \
 handling). Never write dashboard HTML by hand from memory of those rules. \
+Repairing a page that came back as `browser_check_failed` is not building it \
+by hand: follow that result's `instruction`, with no skill call. \
 Changing a report's content or adding sections needs neither: use report_tools \
 (DIRECT REPORTS).\
 """
@@ -418,10 +481,31 @@ has fully specified follows DIRECT REPORTS in the ARTIFACTS section; otherwise \
 up building a generator-made dashboard BY HAND instead \
 (rewriting its code, or the generator failed and the user asked you \
 to continue; not for changing a report's content), call `recall_skill("build-html-dashboard")` first and follow the \
-loaded output contract. \
+loaded output contract. A page that came back as `browser_check_failed` you \
+repair as that result's `instruction` says, with no skill call. \
 Fallback only if `create_artifact` is unavailable: save to `{output_dir}` \
 (create it if needed).\
 """
+
+
+NO_DIRECT_REPORTS_VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT = cut_spans(
+    VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
+    (
+        "A report the user has fully specified follows DIRECT REPORTS in the ARTIFACTS section. Otherwise: ",
+        "`create_artifact(",
+        "",
+    ),
+    (" Changing a report's content or adding sections needs neither", None, ""),
+)
+NO_DIRECT_REPORTS_VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT = cut_spans(
+    VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
+    (
+        ". A report the user has fully specified follows DIRECT REPORTS in the ARTIFACTS section; otherwise",
+        " `create_artifact(",
+        ":",
+    ),
+    ("; not for changing a report's content", ")", ""),
+)
 
 
 BACKEND_GENERATION_PROMPT = """\

@@ -8,6 +8,7 @@ The handler is an async generator, so every case here drains it via
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -57,6 +58,81 @@ def _session(tmp_path: Path):
 def _make_artifact(tmp_path: Path, type: str = "fullstack-stateless-app") -> str:
     store = ArtifactStore(tmp_path / "artifacts")
     return store.create(name="Clock", description="d", type=type).slug
+
+
+async def test_new_page_single_call_registers_then_uses_the_same_generator(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTON_STATIC_SINGLE_CALL", "on")
+    captured = []
+
+    async def generate(**kw):
+        captured.append(kw)
+        return {"status": "generated", "files_written": ["index.html"], "summary": "ok", "trace": []}
+
+    monkeypatch.setattr(gen_pkg, "generate", generate)
+    session = _session(tmp_path)
+    request = {"name": "Regional sales", "user_request": "Show regional sales", "agent_understanding": "A sales report"}
+    _, result = await _collect(session, request)
+    assert captured[0]["artifact_type"] == "html-app"
+    assert captured[0]["primary"] == "index.html"
+    store = ArtifactStore(tmp_path / "artifacts")
+    assert store.open(captured[0]["slug"]).name == "Regional sales"
+    assert '"status": "generated"' in result
+    # A follow-up with the existing slug edits the same resource, even if a
+    # caller also supplies a name. It must not create a duplicate artifact.
+    _, _ = await _collect(session, {**request, "slug": captured[0]["slug"]})
+    assert captured[1]["slug"] == captured[0]["slug"]
+    assert len(list((tmp_path / "artifacts").glob("*/metadata.json"))) == 1
+
+
+async def test_new_page_single_call_validates_before_creating_resource(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTON_STATIC_SINGLE_CALL", "on")
+    _, result = await _collect(_session(tmp_path), {"name": "Sales", "user_request": "Show sales"})
+    assert "agent_understanding" in result
+    assert not list((tmp_path / "artifacts").glob("*/metadata.json"))
+
+
+async def test_new_page_single_call_is_disabled_by_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("ANTON_STATIC_SINGLE_CALL", raising=False)
+    _, result = await _collect(_session(tmp_path), {"name": "Sales", "user_request": "Show sales", "agent_understanding": "Sales"})
+    assert "`slug` is required" in result
+    assert not list((tmp_path / "artifacts").glob("*/metadata.json"))
+
+
+async def test_new_page_failure_keeps_identity_and_authoritative_data_for_retry(tmp_path, monkeypatch):
+    import json
+    monkeypatch.setenv("ANTON_STATIC_SINGLE_CALL", "on")
+    async def generate(**kw):
+        (kw["artifact_path"] / "observed-data.json").write_text('{"revenue":42}')
+        (kw["artifact_path"] / "presentation-program.js").write_text("await CoworkPage({title:'Revenue'});")
+        return "Frontend verification failed: repair the actual page"
+    monkeypatch.setattr(gen_pkg,"generate",generate)
+    session=_session(tmp_path)
+    _,outcome=await _collect_raw(session,{"name":"Revenue","user_request":"Show revenue","agent_understanding":"Revenue report"})
+    result=json.loads(outcome.content)
+    assert not outcome.ok and result["status"]=="failed"
+    store=ArtifactStore(tmp_path/"artifacts")
+    assert store.open(result["slug"]).name=="Revenue"
+    assert Path(result["observed_data_file"]).read_text()=='{"revenue":42}'
+    assert Path(result["last_saved_component_program"]).is_file()
+    assert len(list((tmp_path/"artifacts").glob("*/metadata.json")))==1
+    assert result["message"].count("Error: artifact generation failed") == 1
+    assert "slug" in result["if_the_user_asks_to_retry"]
+
+
+def test_single_call_schema_has_no_top_level_combinator_and_covers_both_deployments(monkeypatch):
+    import importlib
+    import anton.core.tools.tool_defs as tool_defs
+
+    monkeypatch.setenv("ANTON_STATIC_SINGLE_CALL", "on")
+    try:
+        importlib.reload(tool_defs)
+        for tool in (tool_defs.GENERATE_ARTIFACT_TOOL, tool_defs.STATIC_GENERATE_ARTIFACT_TOOL):
+            schema = tool.input_schema
+            assert not {"anyOf", "oneOf", "allOf"} & set(schema)
+            assert "name" in schema["properties"] and "slug" not in schema["required"]
+    finally:
+        monkeypatch.delenv("ANTON_STATIC_SINGLE_CALL")
+        importlib.reload(tool_defs)
 
 
 async def test_fsm_failure_is_wrapped_with_report_instruction(tmp_path: Path, monkeypatch):
@@ -984,3 +1060,106 @@ async def test_act_first_relays_the_brief_between_the_steps_and_reports_it(
     # Already shown: the text is not resent into the agent's history.
     assert "brief_summary" not in payload
     assert "brief_shown" in payload["instruction"]
+
+
+def _browser_check_failed():
+    from anton.core.artifacts.render_check import CheckedView, RenderScreenshot
+    from anton.core.tools.generate_artifact.state import BrowserCheckFailed
+
+    return BrowserCheckFailed(
+        page="dashboard.html",
+        findings=("Loaded in a headless browser, the page logged a console error: "
+                  "console.error: Route network failed: ROUTES is not defined (desktop)",),
+        views=(CheckedView(pressed=None, viewports=["desktop"]), CheckedView(pressed="Routes", viewports=["desktop"])),
+        screenshot=RenderScreenshot(media_type="image/png", data="iVBORw0KGgo="),
+        error="Frontend verification failed after 2 attempt(s): x",
+    )
+
+
+async def test_a_rebuild_that_failed_its_browser_check_names_what_it_broke_and_removed(tmp_path: Path, monkeypatch):
+    """A rebuild of an existing page comes back to repair knowing which views drew before and fail
+    now, and which it dropped: the same comparison a built page's result carries."""
+    from dataclasses import replace
+
+    from anton.core.artifacts.render_check import Comparison
+    from anton.core.tools import tool_handlers
+
+    comparison = Comparison.model_validate({
+        "previous": "complete", "previous_status": "passed", "removal_checked": "all",
+        "compared": [{"pressed": "Routes", "viewports": ["desktop"]}],
+        "broken_views": [{"pressed": "Routes", "reason": "new_problem", "viewports": ["desktop"], "findings": []}],
+        "removed_views": [{"pressed": "Globe"}], "removed_controls": ["Globe"],
+    })
+    slug = _make_artifact(tmp_path, type="html-app")
+
+    async def fake_generate(**kw):
+        return replace(_browser_check_failed(), comparison=comparison)
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    session = _session(tmp_path)
+    session._render_screenshots_refused = True
+    _, result = await _collect_raw(session, {"slug": slug, "user_request": "rebuild it", "agent_understanding": "a page"})
+
+    body = json.loads(result.content)
+    assert body["changes_from_previous"] == {"broke": ["“Routes”"], "blank": [], "removed": ["“Globe”"], "shrank": []}
+    assert body["instruction"].endswith(tool_handlers._CHANGES_INSTRUCTION)
+    assert list(body)[-1] == "instruction"
+
+
+@pytest.mark.parametrize("refused", [False, True])
+async def test_a_page_that_failed_its_browser_check_comes_back_to_repair(tmp_path: Path, monkeypatch, refused):
+    """The result names the page the last build wrote, its findings, the
+    views its check measured and the repair budget, with the check's
+    screenshot unless the model refused one. Nothing in it tells the agent
+    not to repair; it tells the agent how."""
+    slug = _make_artifact(tmp_path, type="html-app")
+
+    async def fake_generate(**kw):
+        return _browser_check_failed()
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    session = _session(tmp_path)
+    session._render_screenshots_refused = refused
+    _, result = await _collect_raw(session, {"slug": slug, "user_request": "build it", "agent_understanding": "a page"})
+
+    assert (result.ok, result.reason) == (True, "")
+    if refused:
+        assert isinstance(result.content, str)
+        text = result.content
+    else:
+        text = result.content[0]["text"]
+        assert any(block.get("type") == "image" for block in result.content[1:])
+    body = json.loads(text)
+    assert body["status"] == "browser_check_failed"
+    assert body["page"] == "dashboard.html"
+    assert body["findings"] == list(_browser_check_failed().findings)
+    assert body["views_measured"] == "at desktop size, as it opens and behind “Routes”"
+    assert body["repair_cells"] == 2
+    # A first build has nothing to compare with.
+    assert "changes_from_previous" not in body
+    instruction = body["instruction"]
+    assert "do NOT build or repair" not in text and "ask how they want to proceed" not in text
+    for step in ("repair it yourself now", "`read_text_file`", "scratchpad cell", "`runView`",
+                 "Do NOT call generate_artifact again", "needs no `recall_skill`"):
+        assert step in instruction, step
+
+
+def test_no_rule_forbids_the_repair_and_each_names_the_one_path():
+    """The rules that send a generator failure back to the user each make
+    one exception: a page that came back as `browser_check_failed`."""
+    from anton.core.llm import prompts
+    from anton.core.tools.tool_defs import GENERATE_ARTIFACT_TOOL
+
+    skill = Path(__file__).resolve().parents[1] / "anton/core/memory/builtin_skills/build-html-dashboard/SKILL.md"
+    frontmatter = skill.read_text(encoding="utf-8").split("---")[1]
+    rules = {
+        "tool": GENERATE_ARTIFACT_TOOL.description,
+        "artifacts": prompts.ARTIFACTS_PROMPT,
+        "html": prompts.VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
+        "markdown": prompts.VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
+        "skill": frontmatter,
+    }
+    for name, text in rules.items():
+        flat = " ".join(text.split())
+        assert "browser_check_failed" in flat, name
+    assert "The one exception is `browser_check_failed`: repair that page in place" in " ".join(rules["tool"].split())

@@ -7,11 +7,15 @@ return the Pydantic verdict models below. Verifiers return `VerifyResult`.
 from __future__ import annotations
 
 import asyncio
+import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
+
+from anton.core.llm.client import ModelRoute
 
 from .debug_trace import NullTrace, GenTrace  # noqa: F401  (GenTrace re-exported for typing)
 from .progress import PEEK_GROUPS, LivePeek, StepCounter, label_for, plan_steps
@@ -20,7 +24,8 @@ from .attachments import Attachment
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
     from anton.core.artifacts.live_app_slots import LiveAppLaunchError, LiveAppLaunchResult
-    from anton.core.artifacts.render_check import RenderScreenshot, RenderStatus, ViewCoverage
+    from anton.core.artifacts.render_check import CheckedView, Comparison, RenderScreenshot, RenderStatus, ViewCoverage
+    from anton.core.tools.tool_handlers import PageKey
     from anton.utils.datasources import DatasourceCatalog
 
 # ── Budgets (see design spec) ────────────────────────────────────────────────
@@ -96,6 +101,25 @@ GEN_WRITE_MAX_TOKENS: int = 20480
 # end marker writes nothing), undershooting costs one extra round.
 REPLY_BODY_CHARS: int = 30_000
 
+# The builder's own model and effort, which the host passes in the process
+# environment.
+ARTIFACT_MODEL_ENV_VAR = "ANTON_ARTIFACT_MODEL"
+ARTIFACT_EFFORT_ENV_VAR = "ANTON_ARTIFACT_REASONING_EFFORT"
+
+
+def artifact_model_route() -> ModelRoute | None:
+    """The model and effort every call of the pipeline asks for, or None to
+    build on the agent's own, as with the variable unset or blank.
+
+    Read from the process environment alone, as the render check's address is
+    (`configured_url` in anton/core/artifacts/render_check.py). A blank effort
+    sends none, so the model runs its own default.
+    """
+    model = os.environ.get(ARTIFACT_MODEL_ENV_VAR, "").strip()
+    if not model:
+        return None
+    return ModelRoute(model=model, effort=os.environ.get(ARTIFACT_EFFORT_ENV_VAR, "").strip() or None)
+
 # Reserved out of MAX_QUESTIONS_PER_TURN for the brief phase: one
 # `show_and_confirm` call plus up to two "revise brief, show again" cycles.
 # Not a separate hard cap — the shared budget itself is what eventually stops
@@ -164,7 +188,11 @@ class BrowserCheck:
     unverified check still found. `screenshot` is the render check's
     desktop view, when it sent one. `coverage` names the views a browser
     that loaded the page measured and the tabs and toggles it left
-    unopened; None when no browser loaded it.
+    unopened; None when no browser loaded it. `views` are those views as
+    the render check listed them, empty from the local browser, which
+    presses nothing and lists none. `comparison` is the render check's
+    comparison with the page as the turn found it, when the check was sent
+    one.
     """
 
     status: "RenderStatus"
@@ -173,8 +201,33 @@ class BrowserCheck:
     findings_listed: bool = False
     screenshot: "RenderScreenshot | None" = None
     coverage: "ViewCoverage | None" = None
-    # Optional final source returned by a renderer that checked these exact bytes.
-    materialized_html: str | None = None
+    views: "tuple[CheckedView, ...]" = ()
+    comparison: "Comparison | None" = None
+
+
+@dataclass(frozen=True)
+class BrowserCheckFailed:
+    """How a run ends when its last build passed the static checks and
+    failed its browser check. The page that build wrote stays on disk, and
+    the agent repairs it in a scratchpad cell instead of the run building
+    it again.
+
+    `page` is the file the check loaded, relative to the artifact folder.
+    `findings` are the check's findings as the build's verdict worded them,
+    `views` the views it measured, `screenshot` its view of the page when it
+    sent one. `error` is the run's terminal message, for the trace. All of
+    it comes from the last build's own check: an earlier build's browser
+    fields on `GenState` can name a page a later build deleted.
+    `comparison` is that check's comparison with the page as the turn found
+    it, when there was one.
+    """
+
+    page: str
+    findings: tuple[str, ...]
+    views: "tuple[CheckedView, ...]"
+    screenshot: "RenderScreenshot | None"
+    error: str
+    comparison: "Comparison | None" = None
 
 
 # ── FSM state ────────────────────────────────────────────────────────────────
@@ -276,6 +329,18 @@ class GenState:
     # folder (`index.html`); it captions the screenshot. The generator may
     # have named it differently from the primary the run started with.
     browser_page: str = ""
+    # The artifact's main page as it was when the turn began, and its key:
+    # each build's browser check is compared with it. None for a new
+    # artifact, a fullstack app, or without the render-check service.
+    previous_page: "tuple[PageKey, str] | None" = None
+    # The latest browser check's comparison with `previous_page`.
+    comparison: "Comparison | None" = None
+    # Held while `_embed_attachments` rewrites the page. The tool handler sets
+    # `abandoned` under it before it puts the page back for a run the turn
+    # gave up on: the embedding thread outlives the cancelled task and must
+    # not write over the restored page.
+    page_lock: threading.Lock = field(default_factory=threading.Lock)
+    abandoned: threading.Event = field(default_factory=threading.Event)
     # Files the user attached to the conversation, as the tool call named
     # them (S-01). Data files are read by the gathering step; assets are
     # copied into the artifact by `orchestrator._stage_attachments`.
@@ -410,6 +475,7 @@ class GenState:
     # change them mid-run has to live in a step message instead.
     _pipeline_system: str = ""
     _pipeline_tools: "list[dict] | None" = None
+    _pipeline_kickoff_evidence: str = ""
 
     @property
     def datasource_context(self) -> str:
@@ -431,8 +497,20 @@ class GenState:
         if self._pipeline_tools is None:
             from .discovery.sub_tools import pipeline_tool_schemas
 
-            self._pipeline_tools = pipeline_tool_schemas()
+            self._pipeline_tools = pipeline_tool_schemas(self.buildable_types)
         return self._pipeline_tools
+
+    @property
+    def buildable_types(self) -> tuple[str, ...]:
+        """The types this run may settle on, in schema order: html-app alone
+        where the session offers no fullstack app, because nothing there
+        starts an app backend (`live_app_slots.fullstack_offered`, read once
+        by the session into `_fullstack_offered` for its tools and prompt)."""
+        from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES_ORDERED
+
+        if getattr(self.session, "_fullstack_offered", True):
+            return GENERATOR_ARTIFACT_TYPES_ORDERED
+        return ("html-app",)
 
     def __post_init__(self) -> None:
         if self.is_fullstack is None:

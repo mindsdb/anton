@@ -11,7 +11,6 @@ import openai
 from contextlib import aclosing
 
 from openai import AsyncAzureOpenAI
-from .reasoning import current_effort
 
 from .effort import LONGEST_SILENCE_S
 from .provider import register_provider, safe_parse_tool_input, unregister_provider
@@ -36,6 +35,7 @@ from .provider import (
     ToolCall,
     TransientProviderError,
     Usage,
+    call_effort,
     classify_404,
     classify_content_rejection,
     classify_markup_bad_request,
@@ -1260,7 +1260,7 @@ class OpenAIProvider(LLMProvider):
             messages=oai_messages,
             max_tokens=max_tokens,
         )
-        effort = current_effort(reasoning_effort or self._reasoning_effort)
+        effort = call_effort(reasoning_effort, self._reasoning_effort)
         if effort:
             kwargs["reasoning_effort"] = effort
         merged_tools: list[dict] = []
@@ -1384,7 +1384,7 @@ class OpenAIProvider(LLMProvider):
             max_tokens=max_tokens,
             stream=True,
         )
-        effort = current_effort(reasoning_effort or self._reasoning_effort)
+        effort = call_effort(reasoning_effort, self._reasoning_effort)
         if effort:
             kwargs["reasoning_effort"] = effort
         merged_tools: list[dict] = []
@@ -1682,7 +1682,7 @@ class OpenAIProvider(LLMProvider):
             kwargs["input"] = _shared_prompt_input(static, SESSION_CONTEXT_MARKER + session) + responses_input
         elif system:
             kwargs["instructions"] = system
-        effort = current_effort(reasoning_effort or self._reasoning_effort)
+        effort = call_effort(reasoning_effort, self._reasoning_effort)
         if effort:
             # "summary": "auto" asks the Responses API to also stream a
             # natural-language summary of the reasoning itself (as

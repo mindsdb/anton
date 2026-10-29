@@ -14,9 +14,11 @@ from anton.core.tools.tool_handlers import (
     handle_update_artifact_metadata,
 )
 from anton.core.artifacts.listing import FIELDS as ARTIFACT_LIST_FIELDS
+from anton.core.llm.prompts import cut_spans
 from anton.core.utils.scratchpad import SCRATCHPAD_ACTIONS
 from anton.core.tools.text_file import DEFAULT_LINE_COUNT, MAX_OUTPUT_CHARS
 
+import os
 from dataclasses import dataclass, replace
 from typing import Callable, Optional
 
@@ -144,7 +146,14 @@ MEMORIZE_TOOL = ToolDef(
         "- never: Something to never do ('Never use time.sleep() in scratchpad')\n"
         "- when: Conditional rule ('If paginated API → use async + progress()')\n"
         "- lesson: Factual knowledge ('CoinGecko rate-limits at 50/min')\n"
-        "- profile: Fact about the user ('Name: Jorge', 'Prefers dark mode')"
+        "- profile: Fact about who the user is ('Name: Jorge', 'Timezone: PST'). "
+        "An instruction on how to answer or work is a rule, not a profile entry.\n\n"
+        "Scope: 'project' by default. A rule or preference the user gives in this "
+        "conversation is 'project', even when it says 'always': 'Always show "
+        "amounts in EUR' is 'project'. Choose 'global' only when the user says it "
+        "applies to all their projects or everywhere ('In every project, answer in "
+        "English'), or for general knowledge that holds in any project, such as a "
+        "library quirk. A profile entry always goes to global."
     ),
     input_schema={
         "type": "object",
@@ -165,6 +174,11 @@ MEMORIZE_TOOL = ToolDef(
                         "scope": {
                             "type": "string",
                             "enum": ["global", "project"],
+                            "description": (
+                                "'project' unless the user says the entry applies to "
+                                "all their projects, or it is general knowledge that "
+                                "holds in any project; the tool's Scope note says when."
+                            ),
                         },
                         "topic": {
                             "type": "string",
@@ -480,12 +494,16 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "SAME `user_request` and `user_language`.\n"
         "- `cancelled` — the user declined. Do not build the artifact by "
         "hand.\n"
+        "- `browser_check_failed` — the page passed the static checks but "
+        "failed its browser check; it is on disk. Repair it yourself in a "
+        "scratchpad cell, as its `instruction` says.\n"
         "- `stopped_over_budget` — the turn ran out of tokens and the "
         "pipeline stopped cleanly; what it finished is on disk.\n\n"
         "Every status but `generated` carries an `instruction` saying what to "
         "do next — follow it. On a technical failure, report it to the user "
         "and ask how to proceed; NEVER fall back to building the artifact "
-        "yourself."
+        "yourself. The one exception is `browser_check_failed`: repair that "
+        "page in place, never rebuild it."
     ),
     input_schema={
         "type": "object",
@@ -595,6 +613,143 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
 )
 
 
+# `create_artifact`, `generate_artifact` and `update_artifact` where nothing
+# starts an app backend (`live_app_slots.fullstack_offered` is False): html-app
+# is the one web type, and no text offers a fullstack app or `launch_backend`.
+STATIC_CREATE_ARTIFACT_TOOL = replace(
+    CREATE_ARTIFACT_TOOL,
+    description=cut_spans(
+        CREATE_ARTIFACT_TOOL.description,
+        (" image, fullstack app,", " etc.)", " image,"),
+        (" (html-app, fullstack-stateless-app,", ": a report the user", " (html-app)"),
+        (" for an html-app or `recall_skill(\"build-fullstack-backend\")`", " before writing", ""),
+        (
+            "- fullstack-stateless-app: fullstack web app",
+            "\n\nPass `primary`",
+            "There is no fullstack type: this deployment starts no app backends, so "
+            "an interactive app or demo is an html-app.",
+        ),
+        (" `\"static/index.html\"` for a fullstack app,", " `\"report.pdf\"`", ""),
+    ),
+    input_schema={
+        **CREATE_ARTIFACT_TOOL.input_schema,
+        "properties": {
+            **CREATE_ARTIFACT_TOOL.input_schema["properties"],
+            "type": {
+                "type": "string",
+                "enum": [
+                    t for t in CREATE_ARTIFACT_TOOL.input_schema["properties"]["type"]["enum"]
+                    if not t.startswith("fullstack-")
+                ],
+            },
+        },
+    },
+)
+
+STATIC_GENERATE_ARTIFACT_TOOL = replace(
+    GENERATE_ARTIFACT_TOOL,
+    description=cut_spans(
+        GENERATE_ARTIFACT_TOOL.description,
+        (" fullstack apps, and dashboards", " or reports whose", " dashboards"),
+        (", `fullstack-stateless-app`, or", ").", ""),
+        (", and for fullstack apps a launch", ". There is no separate PRD", ""),
+        (", and you do NOT call `launch_backend` afterwards", ".", ""),
+    ),
+    prompt=cut_spans(
+        GENERATE_ARTIFACT_TOOL.prompt,
+        (" and (for fullstack) a launch and health check", ". Use it for", ""),
+        (" fullstack apps and for web artifacts", " whose requirements", " web artifacts"),
+        (" and pick the type (one of html-app,", ".\n  2. Call", " with type `html-app`"),
+        ("\nDo NOT call `launch_backend` for a fullstack", None, ""),
+    ),
+)
+
+STATIC_UPDATE_ARTIFACT_METADATA_TOOL = replace(
+    UPDATE_ARTIFACT_METADATA_TOOL,
+    description=cut_spans(
+        UPDATE_ARTIFACT_METADATA_TOOL.description,
+        ("- `port`: port the backend process", "- `datasources`", ""),
+    ),
+    input_schema={
+        **UPDATE_ARTIFACT_METADATA_TOOL.input_schema,
+        "properties": {
+            name: spec for name, spec in UPDATE_ARTIFACT_METADATA_TOOL.input_schema["properties"].items()
+            if name != "port"
+        },
+    },
+)
+
+
+def _without_direct_reports(tool: ToolDef) -> ToolDef:
+    """`tool` with the DIRECT REPORTS routing dropped from its texts."""
+    if tool.name == "create_artifact":
+        return replace(tool, description=cut_spans(
+            tool.description,
+            (
+                ": a report the user has fully specified you build yourself "
+                "(DIRECT REPORTS in the ARTIFACTS section); anything else goes to",
+                " `generate_artifact(",
+                ": it goes to",
+            ),
+        ))
+    return replace(
+        tool,
+        description=cut_spans(
+            tool.description,
+            (
+                " whose requirements still need agreeing (a report the user has fully "
+                "specified is built directly — see DIRECT REPORTS)",
+                ".",
+                "",
+            ),
+        ),
+        prompt=cut_spans(
+            tool.prompt,
+            ("; a report the user has fully specified is built directly (DIRECT REPORTS)", ".\n", ""),
+        ),
+    )
+
+
+CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(CREATE_ARTIFACT_TOOL)
+STATIC_CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(STATIC_CREATE_ARTIFACT_TOOL)
+GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(GENERATE_ARTIFACT_TOOL)
+STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(STATIC_GENERATE_ARTIFACT_TOOL)
+
+
+
+if os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on":
+    _single_call_instructions = (
+        "For a NEW web artifact, call generate_artifact directly with name, user_request, "
+        "user_language and agent_understanding; omit slug. It registers the artifact and "
+        "runs source discovery, generation and the normal verifiers in one operation. "
+        "Do not make a separate create_artifact call or pre-fetch data solely for this "
+        "handoff. Preserve the user's request verbatim. For an EDIT, pass the existing "
+        "slug instead of name so the existing artifact is updated."
+    )
+
+    # No top-level anyOf: providers reject it in tool schemas. The handler requires slug or name.
+    def _single_call(tool: ToolDef) -> ToolDef:
+        return replace(
+            tool,
+            description=_single_call_instructions + "\n\n" + tool.description,
+            input_schema={
+                **tool.input_schema,
+                "properties": {**tool.input_schema["properties"],
+                               "name": {"type": "string", "description": "Name of a NEW artifact; omit for an existing-slug edit."}},
+                "required": [key for key in tool.input_schema["required"] if key != "slug"],
+            },
+            prompt="ARTIFACT GENERATION:\n" + _single_call_instructions +
+                   "\nFollow the returned instruction; the existing approval and verification rules still apply.",
+        )
+
+    def _registration_only(tool: ToolDef) -> ToolDef:
+        return replace(tool, description="For end-to-end generation, prefer generate_artifact(name=...) directly. "
+                                         "Use this registration-only tool when writing the files manually.\n\n" + tool.description)
+
+    GENERATE_ARTIFACT_TOOL = _single_call(GENERATE_ARTIFACT_TOOL)
+    STATIC_GENERATE_ARTIFACT_TOOL = _single_call(STATIC_GENERATE_ARTIFACT_TOOL)
+    CREATE_ARTIFACT_TOOL = _registration_only(CREATE_ARTIFACT_TOOL)
+    STATIC_CREATE_ARTIFACT_TOOL = _registration_only(STATIC_CREATE_ARTIFACT_TOOL)
 
 RECALL_TOOL = ToolDef(
     name="recall",

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from pydantic import PrivateAttr, ValidationInfo, field_validator, model_validator
@@ -30,13 +29,6 @@ def _build_env_files() -> list[str]:
     local_env = Path.cwd() / ".anton" / ".env"
     if local_env.is_file():
         files.append(str(local_env))
-    # Match the host's explicit isolation boundary rather than inheriting the
-    # daily app's settings in a separately configured Cowork instance.
-    if cowork_home := os.environ.get("COWORK_HOME"):
-        isolated_env = Path(cowork_home) / ".env"
-        if isolated_env.is_file():
-            files.append(str(isolated_env))
-        return files
     user_env = Path("~/.anton/.env").expanduser()
     if user_env.is_file():
         files.append(str(user_env))
@@ -162,6 +154,10 @@ class AntonSettings(CoreSettings):
     # "Do first, ask later": act on reasonable defaults and surface assumptions
     # inline instead of stopping to ask. False = cautious ask-first discipline.
     act_first: bool = True
+
+    # False drops the DIRECT REPORTS path from the prompts and tool texts, so
+    # every web artifact goes through `generate_artifact`.
+    direct_reports: bool = True
 
     disable_autoupdates: bool = False
 

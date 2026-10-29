@@ -1,4 +1,3 @@
-import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -15,8 +14,7 @@ from anton.core.tools.registry import ToolOutcome
 
 @pytest.fixture
 def atomic(monkeypatch):
-    for key in ("ATOMIC_GATHER", "DATA_BINDING", "CANONICAL_ONLY"):
-        monkeypatch.setenv("ANTON_STATIC_" + key, "on")
+    monkeypatch.setenv("ANTON_STATIC_FAST_PATH", "direct")
 
 
 def test_identical_fresh_source_data_is_allowed_but_a_stale_file_is_not(tmp_path):

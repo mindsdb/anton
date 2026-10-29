@@ -2400,6 +2400,18 @@ class ProviderConnectionInfo:
     api_version: str | None = None  # Azure api-version query param
 
 
+def call_effort(passed: str | None, own: str | None) -> str | None:
+    """The reasoning effort a call sends: the one it passed, else the provider's own.
+
+    An empty one sends none at all, the provider's own included. That is how a
+    model route with no effort of its own clears the role's (`model_route`
+    in client.py).
+    """
+    if passed is None:
+        return own
+    return passed or None
+
+
 class LLMProvider(ABC):
 
     async def aclose(self) -> None:

@@ -97,7 +97,9 @@ class GenTrace:
         self._emit("protocol_note", {"node": node, "kind": kind})
 
     def llm_call(self, *, node, method, system, messages,
-                 response=None, value=None, attempt=None, round=None) -> None:
+                 response=None, value=None, attempt=None, round=None, model=None) -> None:
+        """One model call: ``model`` is the model it asked for
+        (`anton.core.llm.client.asked_model`), the builder's own when it has one."""
         from anton.core.llm.serialize import serialize_messages, serialize_response
 
         if response is not None:
@@ -107,6 +109,7 @@ class GenTrace:
         self._emit("llm_call", {
             "node": node,
             "method": method,
+            "model": model,
             "attempt": attempt,
             "round": round,
             "system": system,

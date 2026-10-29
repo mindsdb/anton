@@ -1,25 +1,62 @@
 """Embed observed JSON without making a model transcribe the records again.
 
-Only complete JSON objects/arrays printed by source tools are eligible. Values
+Only the artifact's canonical observed-data.json handoff is embedded. Values
 remain data: script delimiters are escaped before insertion into the document.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
+from collections import Counter
 from html.parser import HTMLParser
+from urllib.parse import urlsplit
 
+from anton.utils.datasources import scrub_output
 from anton.utils.nofollow import read_bytes_nofollow
 
 DATA_ID = "cowork-observed-json"
+PLACES_ID = "cowork-places-json"
+CHECKS_ID = "cowork-figure-checks"
 MARKER = "data-cowork-observed"
+MAX_DOUBLE_COUNTS = 200
 def _invalid_constant(value):
     raise ValueError(f"Non-JSON constant: {value}")
 
 
-DECODER = json.JSONDecoder(parse_constant=_invalid_constant)
-CREDENTIAL = re.compile(r"^(access_token|refresh_token|id_token|client_secret|api_key|password|authorization|secret)$", re.I)
+# Compared after lowercasing and dropping "-" and "_", so apiKey, x-api-key and API_KEY all match.
+CREDENTIAL_KEYS = {
+    "accesstoken", "refreshtoken", "idtoken", "token", "bearer", "authorization", "password", "passwd",
+    "secret", "clientsecret", "apikey", "xapikey", "privatekey", "secretkey", "accesskey",
+    "secretaccesskey", "awssecretaccesskey", "sessiontoken", "connectionstring", "dsn",
+}
+_CREDENTIAL_WORDS = {"password", "passwd", "secret", "token", "credential", "credentials",
+                     "authorization", "auth", "bearer", "dsn"}
+_KEY_QUALIFIERS = {"api", "auth", "access", "private", "secret", "client", "session",
+                   "signing", "encryption", "aws", "ssh"}
+_URL = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s<>\"']+", re.I)
+
+
+def _credential_key(key):
+    key = str(key)
+    compact = re.sub(r"[-_]", "", key).lower()
+    if compact in CREDENTIAL_KEYS:
+        return True
+    words = re.findall(r"[a-z0-9]+", re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key).lower())
+    # Only the last word names what the value is: token_count and auth_status are ordinary columns.
+    return bool(words) and (words[-1] in _CREDENTIAL_WORDS or
+                            words[-1] == "key" and len(words) > 1 and words[-2] in _KEY_QUALIFIERS)
+
+
+def _credential_url(text):
+    for match in _URL.finditer(text):
+        try:
+            if urlsplit(match.group().rstrip(".,;)]}")).password is not None:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def read_handoff(folder):
@@ -31,28 +68,25 @@ def read_handoff(folder):
     return value
 
 
-def values(text):
-    """Yield complete JSON printed at the beginning of an output line."""
-    cursor = 0
-    for match in re.finditer(r"(?m)^[ \t]*([\[{])", text):
-        start = match.start(1)
-        if start < cursor:
-            continue
-        try:
-            value, end = DECODER.raw_decode(text, start)
-        except (ValueError, RecursionError):
-            continue
-        if isinstance(value, (dict, list)):
-            cursor = end
-            yield start, end, value
+def _credential_structure(value):
+    if isinstance(value, dict):
+        return any(_credential_key(k) or _credential_structure(v)
+                   for k, v in value.items())
+    if isinstance(value, list):
+        return any(_credential_structure(v) for v in value)
+    if isinstance(value, str):
+        return _credential_url(value)
+    return False
 
 
 def credential_bearing(value):
-    if isinstance(value, dict):
-        return any(CREDENTIAL.fullmatch(k) or credential_bearing(v) for k, v in value.items())
-    if isinstance(value, list):
-        return any(credential_bearing(v) for v in value)
-    return False
+    if _credential_structure(value):
+        return True
+    try:
+        wire = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError):
+        return True
+    return scrub_output(wire) != wire
 
 
 def identity(value):
@@ -89,6 +123,92 @@ def contract(value, depth=0):
     return value
 
 
+def _number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _same(a, b, parts):
+    # Totals may be rounded to two decimals after summing their parts.
+    return math.isclose(a, b, rel_tol=1e-6, abs_tol=0.005 * parts + 1e-9)
+
+
+def total_rows(rows):
+    """Markers of rows that hold the sum of the other rows in their group, such as a
+    subtotal row beside its parts: [{field, value, by, measures}]."""
+    if len(rows) < 3 or not all(isinstance(r, dict) for r in rows):
+        return []
+    keys = list(dict.fromkeys(k for r in rows for k in r))
+    measures = [k for k in keys if any(_number(r.get(k)) for r in rows)
+                and all(_number(r.get(k)) or r.get(k) is None for r in rows)]
+    labels = [k for k in keys if k not in measures and all(isinstance(r.get(k), (str, type(None))) for r in rows)]
+    found = []
+    for field in labels:
+        counts = Counter(r.get(field) for r in rows)
+        candidates = [v for v, n in counts.items() if isinstance(v, str) and v and n <= len(rows) // 2]
+        if len(counts) > 64:
+            # A lone total row among many named rows holds the largest value of a measure.
+            tops = {max(rows, key=lambda r, m=m: r.get(m) if _number(r.get(m)) else -math.inf).get(field) for m in measures}
+            candidates = [v for v in candidates if v in tops]
+        for value in candidates:
+            marked = [r for r in rows if r.get(field) == value]
+            # A label the total rows leave empty spans the whole group.
+            by = [k for k in labels if k != field and all(r.get(k) not in (None, "") for r in marked)]
+            groups = {}
+            for r in rows:
+                if r.get(field) != value:
+                    groups.setdefault(tuple(r.get(k) for k in by), []).append(r)
+            additive, equalities = set(measures), 0
+            for r in marked:
+                group = groups.get(tuple(r.get(k) for k in by), [])
+                if len(group) < (2 if len(marked) > 1 else 3):
+                    additive = set()
+                    break
+                sums = {m: sum(g.get(m) or 0 for g in group) for m in additive}
+                additive = {m for m in additive if _number(r.get(m)) and _same(r[m], sums[m], len(group))}
+                # One nonzero part equals its "sum" trivially; that is no evidence of a total.
+                equalities += sum(1 for m in additive if sum(1 for g in group if g.get(m)) >= 2)
+                if not additive:
+                    break
+            carried = [m for m in measures if all(_number(r.get(m)) for r in marked)]
+            # A real total sums most of what it carries; one matching field, such as a line number, is chance.
+            if additive and equalities >= 3 and 2 * len(additive) >= len(carried):
+                found.append({"field": field, "value": value, "by": by,
+                              "measures": [m for m in measures if m in additive]})
+    return found
+
+
+def _record_arrays(value, path, depth=0):
+    if depth > 6:
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield from _record_arrays(item, path + "[" + json.dumps(key, ensure_ascii=False) + "]", depth + 1)
+    elif isinstance(value, list) and value and all(isinstance(v, dict) for v in value):
+        yield path, value
+
+
+def double_counts(data):
+    """Sums that include total rows beside their parts, for the page to reject when shown."""
+    found, legitimate = {}, set()
+    for key, value in data.items():
+        for path, rows in _record_arrays(value, "window.ARTIFACT_DATA[" + json.dumps(key) + "]"):
+            for marker in total_rows(rows):
+                scopes = [("", rows)] + [(f'{label} = {json.dumps(v, ensure_ascii=False)}', [r for r in rows if r.get(label) == v])
+                                         for label in marker["by"] for v in dict.fromkeys(r.get(label) for r in rows)]
+                for measure in marker["measures"]:
+                    legitimate.update(round(r[measure], 2) for r in rows if _number(r.get(measure)))
+                    for scope, subset in scopes:
+                        every = sum(r.get(measure) or 0 for r in subset)
+                        parts = sum(r.get(measure) or 0 for r in subset if r.get(marker["field"]) != marker["value"])
+                        legitimate.add(round(parts, 2))
+                        # Small sums match unrelated counts too often to reject.
+                        if abs(every) >= 10 and not _same(every, parts, len(subset)):
+                            found.setdefault(round(every, 2), {
+                                "value": every, "parts": parts, "measure": measure, "path": path, "scope": scope,
+                                "field": marker["field"], "marker": marker["value"]})
+    return [item for value, item in found.items() if value not in legitimate][:MAX_DOUBLE_COUNTS]
+
+
 def runtime_contract(value, path, depth=0, *, compact=False):
     """Describe actual access expressions without making arrays look like wrapper objects."""
     if depth > 6:
@@ -117,6 +237,11 @@ def runtime_contract(value, path, depth=0, *, compact=False):
             lines.append("Each object element has source fields " + json.dumps(summary["record_keys"], ensure_ascii=False) + ".")
             if summary.get("distinct_values"):
                 lines.append("Observed low-cardinality field values: " + json.dumps(summary["distinct_values"], ensure_ascii=False))
+        for marker in total_rows(value):
+            group = " with the same " + ", ".join(marker["by"]) if marker["by"] else ""
+            lines.append(f"TOTAL ROWS: elements where {json.dumps(marker['field'], ensure_ascii=False)} = "
+                         f"{json.dumps(marker['value'], ensure_ascii=False)} hold the sum of the other elements{group} "
+                         f"for {', '.join(marker['measures'])}. Count each row once: sum the other elements, or use only these.")
         return lines
     rendered = json.dumps(value, ensure_ascii=False)
     return [f"{path} = {rendered[:1000]}" + (" [value excerpt truncated]" if len(rendered) > 1000 else "")]
@@ -141,42 +266,34 @@ def previous_data(html):
     return {}
 
 
-def collect(observations, existing="", *, compact=False):
-    data = previous_data(existing)
-    notes = []
-    for text in observations:
-        found, cursor, parts = False, 0, []
-        for start, end, value in values(text):
-            if start < cursor:
-                continue
-            found = True
-            if credential_bearing(value):
-                parts += [text[cursor:start], "[Credential-bearing JSON omitted from page data.]"]
-                cursor = end
-                continue
-            key = identity(value)
-            data[key] = value
-            parts += [text[cursor:start], f"[Observed JSON {key}; embedded verbatim at window.ARTIFACT_DATA[{key!r}]]"]
-            cursor = end
-        parts.append(text[cursor:])
-        rendered = "".join(parts) if found else text
-        notes.append(rendered[:2500] + ("\n[Remaining console excerpt omitted.]" if len(rendered) > 2500 else ""))
+def collect(handoff, existing=""):
+    """Bind a fresh handoff; an edit without one keeps only the page's previous data."""
+    data = {identity(handoff): handoff} if handoff is not None else previous_data(existing)
     schemas = []
     for key, value in data.items():
-        schemas.extend(runtime_contract(value, "window.ARTIFACT_DATA[" + json.dumps(key) + "]", compact=compact))
-    return data, ("\n\n".join(notes) + "\n\nEmbedded JSON contracts (actual runtime access paths):\n" +
-                  "\n".join(schemas))
+        schemas.extend(runtime_contract(value, "window.ARTIFACT_DATA[" + json.dumps(key) + "]", compact=True))
+    return data, "Embedded JSON contracts (actual runtime access paths):\n" + "\n".join(schemas)
 
 
-def bind(html, data):
-    if not data:
-        return html
+def _json_script(script_id, name, value):
     # Escaping '<' also protects against </script>, HTML comments and tags in
     # untrusted data. JSON remains lossless when read through textContent.
-    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
+    payload = json.dumps(value, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
+    return (f'<script id="{script_id}" type="application/json" {MARKER}>{payload}</script>'
+            + (f'<script {MARKER}>window.{name}=JSON.parse(document.getElementById("{script_id}").textContent);</script>'
+               if name else ""))
+
+
+def bind(html, data, places=None, *, checks=False):
+    """Insert the observed data before the page's scripts, with the places it names
+    (places.index) and, with `checks`, the figure facts the component runtime reconciles
+    shown figures with."""
+    if not data:
+        return html
     scripts = (f'<meta charset="utf-8" {MARKER}>'
-               f'<script id="{DATA_ID}" type="application/json" {MARKER}>{payload}</script>'
-               f'<script {MARKER}>window.ARTIFACT_DATA=JSON.parse(document.getElementById("{DATA_ID}").textContent);</script>')
+               + (_json_script(CHECKS_ID, None, {"doubleCounts": double_counts(data)}) if checks else "")
+               + _json_script(DATA_ID, "ARTIFACT_DATA", data)
+               + (_json_script(PLACES_ID, "ARTIFACT_PLACES", places) if places else ""))
     html = strip_binding(html)
     line_starts = [0] + [match.end() for match in re.finditer("\n", html)]
     # HTMLParser ignores comments and understands quoted '>' in attributes;

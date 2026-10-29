@@ -7,9 +7,7 @@ from .observed_data import credential_bearing, read_handoff
 
 def enabled(state):
     return (state.act_first and state.artifact_type == "html-app"
-            and os.environ.get("ANTON_STATIC_ATOMIC_GATHER") == "on"
-            and os.environ.get("ANTON_STATIC_DATA_BINDING") == "on"
-            and os.environ.get("ANTON_STATIC_CANONICAL_ONLY") == "on")
+            and os.environ.get("ANTON_STATIC_FAST_PATH") == "direct")
 
 
 def tools(schemas):
@@ -51,4 +49,5 @@ def validate_handoff(folder, before):
         raise ValueError("This execution did not write a fresh observed-data.json.")
     value = read_handoff(folder)
     if credential_bearing(value):
-        raise ValueError("The data handoff contains credentials; save data without credentials.")
+        (folder / "observed-data.json").unlink(missing_ok=True)
+        raise ValueError("The data handoff contains credentials and was deleted; save data without credentials.")

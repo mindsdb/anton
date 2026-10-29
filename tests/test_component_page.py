@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -28,6 +29,7 @@ def test_non_program_or_script_termination_requires_repair(bad):
 
 async def test_unsupported_request_keeps_both_normal_html_repair_attempts(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTON_STATIC_COMPONENT_WRITER", "on")
+    (tmp_path / "observed-data.json").write_text(json.dumps({"revenue": 42}))
     good = '<html><head><meta name="viewport" content="width=device-width"></head><body>Custom UI</body></html>'
     responses = iter([component_page.FALLBACK, good, good])
     calls = []
@@ -38,19 +40,18 @@ async def test_unsupported_request_keeps_both_normal_html_repair_attempts(tmp_pa
     monkeypatch.setattr(fast_static.verifiers,"verify_frontend_live",lambda *a,**kw:next(results))
     state=GenState(session=SimpleNamespace(history=[],_llm=SimpleNamespace(code_stream=stream)),artifact_type="html-app",
                    artifact_path=tmp_path,slug="custom",act_first=True)
-    result=await fast_static.run(state,mode="direct")
+    result=await fast_static.run(state)
     assert result["status"]=="generated"
     assert len(calls)==3
-    assert calls[0]["system"]==component_page.SYSTEM
+    assert calls[0]["system"].startswith(component_page.SYSTEM)
     assert "complete HTML document" in calls[1]["system"]
-    assert (tmp_path/"index.html").read_text()==good
+    assert observed_data.strip_binding((tmp_path/"index.html").read_text())==good
 
 
 async def test_component_repair_receives_the_program_and_retains_bound_data(tmp_path,monkeypatch):
     monkeypatch.setenv("ANTON_STATIC_COMPONENT_WRITER","on")
-    monkeypatch.setenv("ANTON_STATIC_DATA_BINDING","on")
-    monkeypatch.setenv("ANTON_STATIC_CANONICAL_ONLY","on")
-    data={"revenue":42};(tmp_path/"observed-data.json").write_text(json.dumps(data))
+    data={"revenue":42}
+    (tmp_path/"observed-data.json").write_text(json.dumps(data))
     calls=[]
     async def stream(**kwargs):
         calls.append(kwargs)
@@ -58,31 +59,95 @@ async def test_component_repair_receives_the_program_and_retains_bound_data(tmp_
     results=iter([BrowserCheck(status="failed",verdict=VerifyResult(errors=["repair"])),BrowserCheck(status="passed")])
     monkeypatch.setattr(fast_static.verifiers,"verify_frontend_live",lambda *a,**kw:next(results))
     state=GenState(session=SimpleNamespace(history=[],_llm=SimpleNamespace(code_stream=stream)),artifact_type="html-app",artifact_path=tmp_path,slug="page",act_first=True)
-    result=await fast_static.run(state,mode="direct")
+    result=await fast_static.run(state)
     assert result["status"]=="generated"
     assert calls[1]["messages"][1]["content"]==PROGRAM
     assert list(observed_data.previous_data((tmp_path/"index.html").read_text()).values())==[data]
     assert (tmp_path/"presentation-program.js").read_text()==PROGRAM
 
 
-async def test_semantic_html_saves_exact_checked_bytes_without_an_extra_model_call(tmp_path,monkeypatch):
-    monkeypatch.setenv('ANTON_STATIC_COMPONENT_WRITER','on')
-    monkeypatch.setenv('ANTON_STATIC_SEMANTIC_HTML','on')
-    calls=[];checked=[]
+@pytest.mark.parametrize("program,rejected", [
+    ("await CoworkPage({title:'T',controls:[{id:'view',type:'tabs',value:'a',options:[]}],"
+     "render: selection => selection === 'a' ? {sections:[]} : {sections:[]}});", True),
+    ("const render = s => { switch (s) { default: return {sections:[]}; } };\n"
+     "await CoworkPage({title:'T',controls:[],render});", True),
+    ("await CoworkPage({title:'T',controls:[{id:'view',type:'tabs',value:'a',options:[]}],"
+     "render: ({view}) => view === 'a' ? {sections:[]} : {sections:[]}});", False),
+    ("await CoworkPage({title:'T',controls:[],render: selection => selection.view === 'a' ? {sections:[]} : {sections:[]}});", False),
+    ("const open = rows.filter(s => s === 'Open');\n"
+     "await CoworkPage({title:'T',controls:[],render: s => ({sections:[]})});", False),
+])
+def test_a_render_that_treats_the_selection_as_a_string_is_sent_back_for_repair(program, rejected):
+    if rejected:
+        with pytest.raises(ValueError, match="keyed by control ids"):
+            component_page.document(program)
+    else:
+        assert component_page.existing_program(component_page.document(program)) == program
+
+
+async def test_the_component_writer_is_told_how_render_receives_controls(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTON_STATIC_COMPONENT_WRITER", "on")
+    (tmp_path / "observed-data.json").write_text(json.dumps({"revenue": 42}))
+    systems = []
     async def stream(**kwargs):
-        calls.append(kwargs)
+        systems.append(kwargs["system"])
         yield StreamComplete(LLMResponse(content=PROGRAM))
-    def browser(entry,**kwargs):
-        assert kwargs['materialize_main']=='cowork-page'
-        original=entry.read_text()
-        final=original.replace('<main id="cowork-page"></main>','<main id="cowork-page"><table><tr><td>Observed</td></tr></table></main>')
-        checked.append(final)
-        return BrowserCheck(status='passed',materialized_html=final)
-    monkeypatch.setattr(fast_static.verifiers,'verify_frontend_live',browser)
-    state=GenState(session=SimpleNamespace(history=[],_llm=SimpleNamespace(code_stream=stream)),
-        artifact_type='html-app',artifact_path=tmp_path,slug='page',act_first=True)
-    result=await fast_static.run(state,mode='direct')
-    assert result['status']=='generated' and len(calls)==1
-    saved=(tmp_path/'index.html').read_text()
-    assert saved==checked[0] and '<table' in saved
-    assert component_page.existing_program(saved)==PROGRAM
+    monkeypatch.setattr(fast_static.verifiers, "verify_frontend_live", lambda *a, **kw: BrowserCheck(status="passed"))
+    state = GenState(session=SimpleNamespace(history=[], _llm=SimpleNamespace(code_stream=stream)),
+                     artifact_type="html-app", artifact_path=tmp_path, slug="page", act_first=True)
+    assert (await fast_static.run(state))["status"] == "generated"
+    assert "object keyed by control IDs" in systems[0]
+
+
+def test_maps_get_label_placement_and_legends_and_motion_only_on_request():
+    page = component_page.document("await CoworkPage({title:'T',sections:[]});")
+    assert "CoworkMapLabels" in page and "CoworkGeoLegend" in page
+    assert "Only when the user asks for motion" in Path(fast_static.__file__).read_text()
+
+
+@pytest.mark.parametrize("section,bound", [
+    ("{type:'map',title:'M',points:[{name:'a',place:'Lyon'}]}", True),
+    ("{type:'text',title:'T',text:'Lyon'}", False)])
+async def test_places_are_bound_only_for_a_page_with_a_map(tmp_path, monkeypatch, section, bound):
+    monkeypatch.setenv("ANTON_STATIC_COMPONENT_WRITER", "on")
+    (tmp_path / "observed-data.json").write_text(json.dumps({"rows": [{"at": "Lyon"}]}))
+    program = "await CoworkPage({title:'T',lang:'en',sections:[" + section + "]});"
+    async def stream(**kwargs):
+        yield StreamComplete(LLMResponse(content=program))
+    monkeypatch.setattr(fast_static.verifiers, "verify_frontend_live", lambda *a, **kw: BrowserCheck(status="passed"))
+    state = GenState(session=SimpleNamespace(history=[], _llm=SimpleNamespace(code_stream=stream)),
+                     artifact_type="html-app", artifact_path=tmp_path, slug="page", act_first=True)
+    assert (await fast_static.run(state))["status"] == "generated"
+    assert ("window.ARTIFACT_PLACES=" in (tmp_path / "index.html").read_text()) is bound
+
+
+async def test_the_writer_is_told_that_place_names_can_be_mapped(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTON_STATIC_COMPONENT_WRITER", "on")
+    (tmp_path / "observed-data.json").write_text(json.dumps({"rows": [{"at": "Lyon"}]}))
+    prompts = []
+    async def stream(**kwargs):
+        prompts.append(kwargs["messages"][0]["content"])
+        yield StreamComplete(LLMResponse(content=PROGRAM))
+    monkeypatch.setattr(fast_static.verifiers, "verify_frontend_live", lambda *a, **kw: BrowserCheck(status="passed"))
+    state = GenState(session=SimpleNamespace(history=[], _llm=SimpleNamespace(code_stream=stream)),
+                     artifact_type="html-app", artifact_path=tmp_path, slug="page", act_first=True)
+    assert (await fast_static.run(state))["status"] == "generated"
+    assert "{place: name}" in prompts[0] and "Lyon" not in prompts[0].split("Place names")[1]
+
+
+@pytest.mark.parametrize("reply,checked", [(PROGRAM, True), (component_page.FALLBACK, False)])
+async def test_component_pages_carry_the_figure_checks_and_html_pages_do_not(tmp_path, monkeypatch, reply, checked):
+    monkeypatch.setenv("ANTON_STATIC_COMPONENT_WRITER", "on")
+    (tmp_path / "observed-data.json").write_text(json.dumps({"revenue": [{"month": "m1", "amount": 42}]}))
+    html = '<html><head><meta name="viewport" content="width=device-width"></head><body>Revenue</body></html>'
+    replies = iter([reply, html])
+    async def stream(**kwargs):
+        yield StreamComplete(LLMResponse(content=next(replies)))
+    monkeypatch.setattr(fast_static.verifiers, "verify_frontend_live", lambda *a, **kw: BrowserCheck(status="passed"))
+    state = GenState(session=SimpleNamespace(history=[], _llm=SimpleNamespace(code_stream=stream)),
+                     artifact_type="html-app", artifact_path=tmp_path, slug="page", act_first=True)
+    assert (await fast_static.run(state))["status"] == "generated"
+    page = (tmp_path / "index.html").read_text()
+    assert ('id="cowork-figure-checks"' in page) is checked
+    assert ("Figure check: " in page) is checked
+    assert "zeroReason" in component_page.SYSTEM

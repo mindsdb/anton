@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from anton.core.backends.base import Cell
+from anton.core.backends.base import Cell, CompactedCell
 from anton.core.utils import scratchpad
 from anton.core.utils.scratchpad import _card_prompt, _code_span, _fence, _refusal
 from anton.core.utils.write_check import (
@@ -25,6 +25,7 @@ from anton.core.utils.write_check import (
     FileChange,
     HttpWrite,
     HttpWriteRule,
+    ProjectSnapshot,
     find_cell_writes,
     glob_match,
     parse_http_write_rules,
@@ -1146,6 +1147,320 @@ def test_a_write_in_an_earlier_cell_that_stopped_on_an_error_makes_no_file_the_a
     assert [(c.action, c.paths, c.held) for c in writes.files] == [("overwrite", ("stock.csv",), held)]
 
 
+def test_a_name_an_errored_cell_binds_after_its_error_points_no_later_write_at_a_file(office):
+    """The errored cell may have stopped before it bound `out` again, so the
+    later cell's write may have gone to draft.csv: stock.csv isn't the agent's."""
+    earlier = ("out = 'draft.csv'", "x = 1 / 0\nout = 'stock.csv'", "open(out, 'w').write('x')")
+    writes = find_cell_writes(code="open('stock.csv', 'w').write('y')", earlier_code=earlier, snapshots=(office,),
+                              earlier_errored=(False, True, False))
+    assert [(c.action, c.paths, c.held) for c in writes.files] == [("overwrite", ("stock.csv",), True)]
+
+
+def test_a_write_through_a_name_an_errored_cell_binds_makes_no_file_the_agents(office):
+    """The errored cell may have stopped with `p` still on stock.csv, so the
+    later cell's write may have gone there rather than to log.txt."""
+    earlier = ("p = 'log.txt'", "p = 'stock.csv'\nx = 1 / 0\np = 'log.txt'", "open(p, 'w').write('x')")
+    writes = find_cell_writes(code="open('log.txt', 'w').write('y')", earlier_code=earlier, snapshots=(office,),
+                              earlier_errored=(False, True, False))
+    assert [(c.action, c.paths, c.held) for c in writes.files] == [("overwrite", ("log.txt",), True)]
+    built = ("out = 'stock.csv'", "x = 1 / 0\nout += '.bak'", "open(out, 'w').write('x')")
+    writes = find_cell_writes(code="open('stock.csv', 'w').write('y')", earlier_code=built, snapshots=(office,),
+                              earlier_errored=(False, True, False))
+    assert [(c.action, c.paths, c.held) for c in writes.files] == [("overwrite", ("stock.csv",), True)]
+    rebound = (*earlier[:2], "p = 'log.txt'\nopen(p, 'w').write('x')")
+    writes = find_cell_writes(code="open('log.txt', 'w').write('y')", earlier_code=rebound, snapshots=(office,),
+                              earlier_errored=(False, True, False))
+    assert [(c.action, c.paths, c.held) for c in writes.files] == [("overwrite", ("log.txt",), False)]
+
+
+@pytest.mark.parametrize("earlier", [
+    ("out = 'stock.csv'", "out = 'new_out.csv'\nx = 1 / 0\nout = 'stock.csv'",
+     "import os\nos.remove('stock.csv')\nopen(out, 'w').write('x')"),
+    ("from pathlib import Path\np = Path('draft_new.csv')",
+     PD + "p = 'draft_new.csv'\ndf['r'] = df['a'] / df['b']",
+     "target = 'stock.csv'\ntry:\n    p.rename(target)\nexcept Exception:\n    pass"),
+], ids=["delete-then-write", "rename-onto-it"])
+def test_a_file_stays_the_users_when_an_errored_cell_may_have_pointed_the_write_elsewhere(earlier, office):
+    """The errored cell may have stopped with `out` on new_out.csv, so the
+    delete of stock.csv may never have been followed by a write to it; or
+    with `p` still a Path, so the rename may never have replaced it. Either
+    way stock.csv may still be the user's."""
+    writes = find_cell_writes(code="open('stock.csv', 'w').write('y')", earlier_code=earlier, snapshots=(office,),
+                              earlier_errored=(False, True, False))
+    assert [(c.action, c.paths, c.held) for c in writes.files] == [("overwrite", ("stock.csv",), True)]
+
+
+def test_a_chdir_through_a_name_an_errored_cell_binds_makes_only_the_file_it_names_the_agents(
+    tmp_path, monkeypatch,
+):
+    """Read for what an earlier write replaced, the folder the chdir reaches
+    is the one the errored cell names: a folder the check can't place would
+    make every draft.csv in the project the agent's."""
+    for rel in ("draft.csv", "archive/2024/draft.csv"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("x")
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    earlier = ("d = '.'\nx = 1 / 0", "import os\nos.chdir(d)\nopen('draft.csv', 'w').write('x')")
+    for path, held in (("archive/2024/draft.csv", True), ("draft.csv", False)):
+        writes = find_cell_writes(code=f"open({path!r}, 'w').write('y')", earlier_code=earlier, snapshots=(snap,),
+                                  earlier_errored=(True, False))
+        assert [(c.action, c.paths, c.held) for c in writes.files] == [("overwrite", (path,), held)], path
+
+
+def test_a_name_an_errored_cell_binds_may_still_hold_the_value_before_its_error(office):
+    """The errored cell may have stopped before it bound `out` again, so the
+    write may go to the user's stock.csv. A later cell that ran to its end
+    and bound `out` again leaves no doubt."""
+    earlier = ("out = 'stock.csv'\nx = 1 / 0\nout = 'new_out.csv'",)
+    code = "open(out, 'w').write('x')"
+    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(office,), earlier_errored=(True,))
+    assert [(c.action, c.paths) for c in writes.held_files] == [("overwrite", ("stock.csv",))]
+    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(office,), earlier_errored=(False,))
+    assert not writes.needs_approval()
+    writes = find_cell_writes(code=code, earlier_code=(*earlier, "out = 'new_out.csv'"), snapshots=(office,),
+                              earlier_errored=(True, False))
+    assert not writes.needs_approval()
+
+
+@pytest.mark.parametrize("earlier", [
+    ("cfg = {}\nout = cfg['path']", "out = 'stock.csv'\nx = 1 / 0"),
+    ("out = ''", "".join(f"out += {c!r}\n" for c in "stock.csv") + "x = 1 / 0"),
+], ids=["older-value-unreadable", "built-on-past-the-limit"])
+def test_a_name_an_errored_cell_binds_still_names_the_file_it_names_when_run_to_its_end(earlier, office):
+    """What the errored cell may have left in `out` only adds paths: an older
+    value the check can't read, or more candidates than it keeps, still
+    leaves the stock.csv the cell names when read as having run to its end."""
+    writes = find_cell_writes(code="open(out, 'w').write('x')", earlier_code=earlier, snapshots=(office,),
+                              earlier_errored=(False, True))
+    assert [(c.action, c.paths) for c in writes.held_files] == [("overwrite", ("stock.csv",))]
+
+
+@pytest.mark.parametrize("earlier, code, action, paths", [
+    (("out = 'stock.csv'\nx = 1 / 0\nout = 'log.txt'",), "open(out, 'w').write('x')",
+     "overwrite", ("stock.csv", "log.txt")),
+    ((PD + "out = 'stock.csv'\nx = 1 / 0\nout = 'new_out.csv'",), "df.to_csv(out)", "overwrite", ("stock.csv",)),
+    (("out = 'stock.csv'", "x = 1 / 0\nout = 'new_out.csv'"), "open(out, 'w').write('x')",
+     "overwrite", ("stock.csv",)),
+    (("from pathlib import Path\nout = 'stock.csv'\nx = 1 / 0\nout = 'new_out.csv'",), "Path(out).write_text('x')",
+     "overwrite", ("stock.csv",)),
+    (("name = 'stock'\nx = 1 / 0\nname = 'new_out'",), "open(f'{name}.csv', 'w').write('x')",
+     "overwrite", ("stock.csv",)),
+    (("out = 'stock.csv'", "x = 1 / 0\nout += '.bak'"), "open(out, 'w').write('x')", "overwrite", ("stock.csv",)),
+    (("from pathlib import Path\np = Path('stock.csv')\nx = 1 / 0\np = 'notes'",), "p.rename('archive')",
+     "rename", ("stock.csv",)),
+    (("out = 'stock.csv'\ndef save():\n    open(out, 'w').write('x')", "x = 1 / 0\nout = 'new_out.csv'"), "save()",
+     "overwrite", ("stock.csv",)),
+], ids=["to-another-existing-file", "pandas", "bound-in-a-cell-before", "pathlib", "f-string", "built-on",
+        "path-rebound-to-text", "read-in-an-earlier-function"])
+def test_a_write_through_a_name_an_errored_cell_binds_holds_each_file_it_may_name(
+    earlier, code, action, paths, office,
+):
+    errored = (*(False,) * (len(earlier) - 1), True)
+    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(office,), earlier_errored=errored)
+    assert sorted((c.action, p) for c in writes.held_files for p in c.paths) == sorted((action, p) for p in paths)
+    ran = find_cell_writes(code=code, earlier_code=earlier, snapshots=(office,))
+    assert "stock.csv" not in {p for c in ran.held_files for p in c.paths}
+
+
+@pytest.fixture
+def beside_shared(tmp_path: Path, monkeypatch):
+    """A project in `proj`, beside a shared folder."""
+    root = tmp_path / "proj"
+    for rel in ("stock.csv", "draft.csv", "data/stock.csv", "data/q3.csv"):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("x")
+    (tmp_path / "shared").mkdir()
+    (tmp_path / "shared" / "forecast.xlsx").write_text("x")
+    monkeypatch.chdir(root)
+    taken_at = time.time() + 60
+    return (snapshot_project_files(root=root, label="project", taken_at=taken_at),
+            snapshot_project_files(root=tmp_path / "shared", label="shared", taken_at=taken_at))
+
+
+TEMP_THEN_DATA = ("import tempfile\nwork = tempfile.mkdtemp()",
+                  PD + "work = 'data'\ndf['r'] = df['a'] / df['b']")
+CHDIR_PAST_THE_LIMIT = ("".join(f"d = 'f{i}'\n" for i in range(17)) + "x = 1 / 0\nd = '.'", "import os\nos.chdir(d)")
+CHDIR_DOUBLING = ("d = 'raw'\nx = 1 / 0\nd = 'clean'", *["import os\nos.chdir(d)\nos.chdir('..')"] * 4)
+OWNED_THEN_PATH = ("open('stock.csv', 'w').write('z')",
+                   "from pathlib import Path\np = Path('draft_new.csv')\nx = 1 / 0\np = 'draft_new.csv'")
+
+
+@pytest.mark.parametrize("earlier, errored, code, path", [
+    (("out = input('file? ')", PD + "out = 'stock.csv'\ndf['r'] = df['a'] / df['b']"), (False, True),
+     "df.to_csv(out, index=False)", "stock.csv"),
+    (("import sys\nout = sys.argv[1]", "out = 'stock.csv'\nx = 1 / 0"), (False, True),
+     "def save():\n    open(out, 'w').write('x')\nsave()", "stock.csv"),
+    (("cfg = {}\nout = cfg['path']", "out = 'stock.csv'\nx = 1 / 0"), (False, True), "import os\nos.remove(out)",
+     "stock.csv"),
+    (("cfg = {}\nsrc = cfg['path']", "src = 'stock.csv'\nx = 1 / 0"), (False, True),
+     "import shutil\nshutil.copy(src, 'data')", "data/stock.csv"),
+    (("import os\nout = os.environ['OUT']", "from pathlib import Path\nout = Path('stock.csv')\nx = 1 / 0"),
+     (False, True), "out.write_text('x')", "stock.csv"),
+    (TEMP_THEN_DATA, (False, True), "df.to_csv(f'{work}/stock.csv', index=False)", "data/stock.csv"),
+    (TEMP_THEN_DATA, (False, True), "import os\nopen(os.path.join(work, 'stock.csv'), 'w').write('x')",
+     "data/stock.csv"),
+    (TEMP_THEN_DATA, (False, True), "from pathlib import Path\n(Path(work) / 'stock.csv').write_text('x')",
+     "data/stock.csv"),
+    (TEMP_THEN_DATA, (False, True), "from pathlib import Path\nPath(work).joinpath('stock.csv').write_text('x')",
+     "data/stock.csv"),
+    (TEMP_THEN_DATA, (False, True), "open(work + '/stock.csv', 'w').write('x')", "data/stock.csv"),
+    (TEMP_THEN_DATA, (False, True), "import os\nos.remove(os.path.join(work, 'stock.csv'))", "data/stock.csv"),
+    (TEMP_THEN_DATA, (False, True), "import os, shutil\nshutil.copy('draft.csv', os.path.join(work, 'stock.csv'))",
+     "data/stock.csv"),
+    (("import tempfile\nwork = tempfile.mkdtemp()\nwork = 'data'\nx = 1 / 0",), (True,),
+     "open(f'{work}/stock.csv', 'w').write('x')", "data/stock.csv"),
+    (CHDIR_PAST_THE_LIMIT, (True, False), "open('../proj/stock.csv', 'w').write('x')", "stock.csv"),
+    (CHDIR_PAST_THE_LIMIT, (True, False), "open('../shared/forecast.xlsx', 'w').write('x')",
+     "shared folder: forecast.xlsx"),
+    (CHDIR_PAST_THE_LIMIT, (True, False), "import os\nos.remove('../proj/data/q3.csv')", "data/q3.csv"),
+    (CHDIR_PAST_THE_LIMIT, (True, False), "import os\nos.system('rm ../proj/data/q3.csv')", "data/q3.csv"),
+    (CHDIR_DOUBLING, (True, False, False, False, False), "open('../proj/stock.csv', 'w').write('x')", "stock.csv"),
+    (CHDIR_DOUBLING, (True, False, False, False, False), "open('../shared/forecast.xlsx', 'w').write('x')",
+     "shared folder: forecast.xlsx"),
+    (OWNED_THEN_PATH, (False, True), "import os\ntarget = 'stock.csv'\nos.remove('stock.csv')\np.rename(target)",
+     "stock.csv"),
+    (OWNED_THEN_PATH, (False, True), "import os\ntarget = 'stock.csv'\nos.remove('stock.csv')\np.replace(target)",
+     "stock.csv"),
+], ids=["unreadable-input", "unreadable-argv-in-function", "unreadable-delete", "unreadable-copy-into-folder",
+        "unreadable-path-object", "temp-folder-f-string", "temp-folder-join", "temp-folder-path-div",
+        "temp-folder-joinpath", "temp-folder-plus", "temp-folder-delete", "temp-folder-copy-dest",
+        "temp-folder-same-cell", "chdir-past-the-limit-back-in", "chdir-past-the-limit-shared",
+        "chdir-past-the-limit-delete", "chdir-past-the-limit-shell", "chdir-doubling-back-in",
+        "chdir-doubling-shared", "delete-then-maybe-path-rename", "delete-then-maybe-path-replace"])
+def test_what_an_errored_cell_may_have_bound_never_frees_a_file_its_run_to_end_reading_holds(
+    earlier, errored, code, path, beside_shared,
+):
+    """The cell is read as before, every earlier cell run to its end, and
+    read again only for the files that wider reading adds: an older value the
+    check can't read, a temporary folder, more working folders than it keeps
+    or a name that may be a path never drop a file the first reading holds."""
+    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=beside_shared, earlier_errored=errored)
+    assert path in {p for c in writes.held_files for p in c.paths}
+
+
+def test_a_name_read_inside_an_errored_cell_holds_what_that_cell_bound_before_the_read(beside_shared):
+    """The line that builds `out` ran, so the line before it that bound
+    `base` ran too: `out` may name tmp_out/stock.csv, or nothing, but never
+    the data/stock.csv the older `base` would give."""
+    earlier = ("base = 'data'", "base = 'tmp_out'\nout = base + '/stock.csv'\nx = 1 / 0")
+    writes = find_cell_writes(code="open(out, 'w').write('x')", earlier_code=earlier, snapshots=beside_shared,
+                              earlier_errored=(False, True))
+    assert not writes.needs_approval()
+
+
+@pytest.mark.parametrize("stopped, code, expected", [
+    ("out = 'stock.csv'\nx = 1 / 0\nout = 'new_out.csv'", "open(out, 'w').write('x')", [("overwrite", "stock.csv")]),
+    ("out = 'stock.csv'\nx = 1 / 0\nout = 'new_out.csv'", "import os\nos.remove(out)", [("delete", "stock.csv")]),
+    ("out = 'draft.csv'\nx = 1 / 0\nout = 'stock.csv'", "import os\nos.remove(out)",
+     [("delete", "draft.csv"), ("delete", "stock.csv")]),
+], ids=["overwrite", "delete", "delete-the-file-before-the-error"])
+def test_an_older_value_the_check_cant_read_leaves_the_files_an_errored_cell_names(
+    stopped, code, expected, beside_shared,
+):
+    """`out` may still hold the value from `cfg`, which the check can't
+    read, or either value the errored cell gives it: each file those two
+    name is held."""
+    writes = find_cell_writes(code=code, earlier_code=("cfg = {}\nout = cfg['path']", stopped),
+                              snapshots=beside_shared, earlier_errored=(False, True))
+    assert sorted((c.action, p) for c in writes.held_files for p in c.paths) == expected
+
+
+def test_a_folder_the_wide_reading_cant_place_is_held_beside_the_whole_project(beside_shared):
+    """Read run to its end, the errored cell leaves the pad in the project,
+    so rmtree('.') deletes all of it. It may have stopped with `d` naming any
+    of 18 folders, more than the check keeps, so the folder deleted is also
+    one the code picks when it runs."""
+    writes = find_cell_writes(code="import shutil\nshutil.rmtree('.')", earlier_code=CHDIR_PAST_THE_LIMIT,
+                              snapshots=beside_shared, earlier_errored=(True, False))
+    assert sorted((c.whole_project, c.paths) for c in writes.held_files) == [(False, ()), (True, ())]
+
+
+@pytest.mark.parametrize("retry, code, held", [
+    ("folder = 'tmp_{i}'\nname = 'part_{i}'\next = 'tsv{i}'", "df.to_csv(p, index=False)",
+     [("overwrite", ("data/stock.csv",))]),
+    ("folder = 'tmp_{i}'\nname = 'part_{i}'\next = 'tsv{i}'", "import os\nos.remove(p)",
+     [("delete", ("data/stock.csv",))]),
+    ("folder = 'data'\nname = 'q3'\next = 'csv'", "df.to_csv(p, index=False)",
+     [("overwrite", ("data/q3.csv",)), ("overwrite", ("data/stock.csv",))]),
+], ids=["new-values", "new-values-delete", "same-values"])
+def test_a_run_of_failed_retries_is_read_in_well_under_a_second(retry, code, held, beside_shared, monkeypatch):
+    """Each failed retry may have stopped before or after it gave `folder`,
+    `name` and `ext` the values the plain reading reads, so the wide reading
+    gives each name every value. A value counts once, so twelve retries of
+    the same values still hold data/q3.csv too. Twelve new values for each
+    name pass the path limit, and the wide reading gives up: the path the
+    three build is never one path per pick of values, and the plain
+    reading's data/stock.csv stays held, alone."""
+    from anton.core.utils import write_check
+
+    largest = 0
+    paths = write_check._Reader.paths
+
+    def measuring(*args, **kwargs):
+        nonlocal largest
+        got = paths(*args, **kwargs)
+        largest = max(largest, 0 if isinstance(got, write_check._Unknown) else len(got))
+        return got
+
+    monkeypatch.setattr(write_check._Reader, "paths", measuring)
+    plain = "folder = 'data'\nname = 'stock'\next = 'csv'"
+    retries = [PD + retry.format(i=i) + "\ndf['r'] = df['a'] / df['b']\n" + plain for i in range(12)]
+    earlier = (PD + plain, *retries, "p = f'{folder}/{name}.{ext}'")
+    started = time.perf_counter()
+    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=beside_shared,
+                              earlier_errored=(False, *(True,) * len(retries), False))
+    assert time.perf_counter() - started < 1
+    assert sorted((c.action, c.paths) for c in writes.held_files) == held
+    assert largest < 50
+
+
+@pytest.mark.parametrize("c0, step, levels, retries, code", [
+    ("'output'", "c{j} = c{p} + '/x'", 4, 80, "open(c4 + '/old.png', 'w').write('x')"),
+    ("'stock.csv'", "c{j} = c{p}", 6, 12, "open(c6, 'w').write('x')"),
+], ids=["grown", "aliased"])
+def test_a_long_chain_of_failed_retries_is_read_in_well_under_a_second(c0, step, levels, retries, code, snap):
+    """Each failed retry rebinds every name of a chain that builds the path,
+    so the wide reading could read each binding again for every way down the
+    chain. It reads each name once per read site and gives up past its
+    budget, which keeps the plain reading's findings."""
+    earlier = [f"c0 = {c0}"]
+    for _ in range(retries):
+        earlier += [step.format(j=j, p=j - 1) + "\nx = 1 / 0" for j in range(1, levels + 1)]
+    started = time.perf_counter()
+    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,),
+                              earlier_errored=(False, *(True,) * (len(earlier) - 1)))
+    assert time.perf_counter() - started < 1
+    if c0 == "'stock.csv'":
+        assert [c.paths for c in writes.held_files] == [("stock.csv",)]
+
+
+def test_an_errored_history_is_read_again_only_for_a_file_an_earlier_cell_wrote(office, monkeypatch):
+    """With an errored earlier cell, the earlier cells are read a second time,
+    with it as never run, only to confirm a file the first read found written."""
+    from anton.core.utils import write_check
+
+    reads = 0
+    writes_read_from = write_check._OwnedFiles._writes_read_from
+
+    def counting(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        return writes_read_from(*args, **kwargs)
+
+    monkeypatch.setattr(write_check._OwnedFiles, "_writes_read_from", counting)
+    earlier = ("open('log.txt', 'w').write('z')", "x = 1 / 0")
+    writes = find_cell_writes(code="open('stock.csv', 'w').write('y')", earlier_code=earlier, snapshots=(office,),
+                              earlier_errored=(False, True))
+    assert [(c.paths, c.held) for c in writes.files] == [(("stock.csv",), True)]
+    assert reads == 1
+    reads = 0
+    writes = find_cell_writes(code="open('log.txt', 'w').write('y')", earlier_code=earlier, snapshots=(office,),
+                              earlier_errored=(False, True))
+    assert [(c.paths, c.held) for c in writes.files] == [(("log.txt",), False)]
+    assert reads == 2
+
+
 def test_an_errored_cell_lines_up_with_its_code_past_one_that_does_not_parse(office):
     """A cell that doesn't parse is dropped, and the flags still name the right cells."""
     earlier = ("def (", "open('log.txt', 'w').write('z')", "x = 1 / 0\nopen('stock.csv', 'w').write('z')")
@@ -1156,8 +1471,7 @@ def test_an_errored_cell_lines_up_with_its_code_past_one_that_does_not_parse(off
 
 
 async def test_the_gate_passes_each_earlier_cells_error_to_the_check(office, monkeypatch):
-    """`hold_unapproved_write` reads the errors off the pad's cells; a
-    compacted cell kept no error, so it counts as one that ran."""
+    """Compacting a failed cell cannot turn its unexecuted write into ownership."""
     asked: list[CellWrites] = []
 
     async def cancel(_session, writes):
@@ -1169,12 +1483,18 @@ async def test_the_gate_passes_each_earlier_cells_error_to_the_check(office, mon
     wrote = "x = 1 / 0\nopen('stock.csv', 'w').write('z')"
     failed = Cell(code=wrote, stdout="", stderr="", error="ZeroDivisionError: division by zero")
     rewrite = "open('stock.csv', 'w').write('y')"
-    pad = SimpleNamespace(compacted_code=(), cells=[failed])
+    pad = SimpleNamespace(compacted_cells=(), cells=[failed])
     assert await scratchpad.hold_unapproved_write(session, pad=pad, code=rewrite) is not None
     assert [f.paths for f in asked[0].held_files] == [("stock.csv",)]
-    ran = SimpleNamespace(compacted_code=(wrote,), cells=[failed])
+    compacted = SimpleNamespace(compacted_cells=(CompactedCell(code=wrote, errored=True),), cells=[])
+    assert await scratchpad.hold_unapproved_write(session, pad=compacted, code=rewrite) is not None
+    assert [f.paths for f in asked[1].held_files] == [("stock.csv",)]
+    ran = SimpleNamespace(
+        compacted_cells=(CompactedCell(code="open('stock.csv', 'w').write('z')", errored=False),),
+        cells=[failed],
+    )
     assert await scratchpad.hold_unapproved_write(session, pad=ran, code=rewrite) is None
-    assert len(asked) == 1
+    assert len(asked) == 2
 
 
 @pytest.mark.parametrize("earlier", [
@@ -1237,31 +1557,35 @@ def test_a_listing_still_names_files_that_exist_and_a_delete_any_it_could_name(c
 
 # ── SQLite and DuckDB files ───────────────────────────────────────────────
 
-@pytest.mark.parametrize("code, path", [
+@pytest.mark.parametrize("code, path, statements", [
     ("import sqlite3\nc = sqlite3.connect('warehouse.db')\nc.execute('DELETE FROM orders WHERE qty = 0')\nc.commit()",
-     "warehouse.db"),
+     "warehouse.db", [("DELETE FROM orders WHERE qty = 0", "")]),
     ("import sqlite3\nwith sqlite3.connect('warehouse.db') as c:\n    c.cursor().execute('UPDATE t SET a = 1')",
-     "warehouse.db"),
+     "warehouse.db", [("UPDATE t SET a = 1", "")]),
     ("import sqlite3\ncon = sqlite3.connect(database='warehouse.db')\ncur = con.cursor()\n"
-     "cur.executemany('INSERT INTO t VALUES (?)', rows)", "warehouse.db"),
+     "cur.executemany('INSERT INTO t VALUES (?)', rows)", "warehouse.db", [("INSERT INTO t VALUES (?)", "{rows}")]),
     ("import sqlite3\nc = sqlite3.connect('warehouse.db')\nc.executescript('DROP TABLE t; CREATE TABLE t (a int);')",
-     "warehouse.db"),
+     "warehouse.db", [("DROP TABLE t", ""), ("CREATE TABLE t (a int)", "")]),
     ("import duckdb\ncon = duckdb.connect('analytics.duckdb')\ncon.execute(\"CREATE TABLE s AS SELECT * FROM 'stock.csv'\")",
-     "analytics.duckdb"),
+     "analytics.duckdb", [("CREATE TABLE s AS SELECT * FROM 'stock.csv'", "")]),
     ("import duckdb\ncon = duckdb.connect('analytics.duckdb')\ncon.sql('DELETE FROM s WHERE qty < 0')",
-     "analytics.duckdb"),
-    ("import duckdb\nq = 'UPDATE s SET qty = 0'\nduckdb.connect('analytics.duckdb').execute(q)", "analytics.duckdb"),
+     "analytics.duckdb", [("DELETE FROM s WHERE qty < 0", "")]),
+    ("import duckdb\nq = 'UPDATE s SET qty = 0'\nduckdb.connect('analytics.duckdb').execute(q)", "analytics.duckdb",
+     [("UPDATE s SET qty = 0", "")]),
     ("import duckdb\ncon = duckdb.connect('analytics.duckdb')\ndef run(s):\n    con.execute(s)\nrun('DELETE FROM s')",
-     "analytics.duckdb"),
+     "analytics.duckdb", [("DELETE FROM s", "")]),
     ("import pandas as pd, sqlite3\nc = sqlite3.connect('warehouse.db')\ndf.to_sql('stock', c, if_exists='replace')",
-     "warehouse.db"),
+     "warehouse.db", [("to_sql into stock", "")]),
     ("from sqlalchemy import create_engine, text\ne = create_engine('sqlite:///warehouse.db')\n"
-     "with e.begin() as c:\n    c.execute(text('DELETE FROM orders'))", "warehouse.db"),
+     "with e.begin() as c:\n    c.execute(text('DELETE FROM orders'))", "warehouse.db", [("DELETE FROM orders", "")]),
 ], ids=["sqlite-delete", "with-cursor", "keyword-executemany", "executescript", "duckdb-create", "duckdb-sql",
         "statement-in-a-name", "local-helper", "to_sql", "sqlalchemy-sqlite-url"])
-def test_a_write_to_a_database_file_the_turn_began_with_is_held_as_its_overwrite(code, path, office):
+def test_a_write_to_a_database_file_the_turn_began_with_is_held_as_its_overwrite(code, path, statements, office):
+    """The overwrite carries each statement it runs, with its values, so the
+    card can quote them beside the file."""
     writes = find_cell_writes(code=code, earlier_code=(), snapshots=(office,))
     assert [(c.action, c.paths) for c in writes.held_files] == [("overwrite", (path,))]
+    assert [(w.statement, w.values) for w in writes.held_files[0].statements] == statements
     assert writes.sql == (), "the SQL check still lets an in-process handle through"
 
 
@@ -1320,6 +1644,80 @@ def test_a_database_file_no_earlier_cell_wrote_is_still_held(earlier, engine, pa
     waits."""
     cells = (f"import {engine}\n" + earlier.format(engine=engine, path=path),) if earlier else ()
     assert _changes(code, databases, earlier=cells) == [("overwrite", (path,), True)]
+
+
+SHIP = "import sqlite3\ncon = sqlite3.connect('warehouse.db')\n"
+
+
+@pytest.mark.parametrize("code, fenced", [
+    (SHIP + "con.execute(\"UPDATE orders SET status = 'shipped' WHERE id = 42\")",
+     ["warehouse.db", "UPDATE orders SET status = 'shipped' WHERE id = 42"]),
+    (SHIP + "con.executemany('INSERT INTO orders VALUES (?, ?)', [(1, 'a'), (2, 'b')])",
+     ["warehouse.db", "INSERT INTO orders VALUES (?, ?)\nwith values [(1, 'a'), (2, 'b')]"]),
+    ("import duckdb\nduckdb.connect('analytics.duckdb').execute('DELETE FROM sales WHERE qty = 0')",
+     ["analytics.duckdb", "DELETE FROM sales WHERE qty = 0"]),
+    ("import pandas as pd\n" + SHIP + "pd.DataFrame({'a': [1, 2]}).to_sql('orders_copy', con)",
+     ["warehouse.db", "to_sql into orders_copy"]),
+], ids=["update", "executemany", "duckdb-delete", "to_sql"])
+def test_the_card_names_the_database_file_and_quotes_each_statement_with_its_values(code, fenced, office):
+    """The user can tell a one-row fix from an emptied table before pressing
+    Approve: the card shows what runs on the file, not only its name."""
+    card = _card(code, office)
+    assert "This step would change this database file:" in card
+    assert "It would run:" in card
+    assert _fenced(card) == fenced
+
+
+def test_every_write_to_one_database_file_is_on_its_one_change(office):
+    """One Approve runs both statements, so the card quotes both, under the
+    file named once."""
+    code = SHIP + "con.execute('DELETE FROM orders WHERE id = 1')\ncon.execute(\"UPDATE orders SET status = 'x' WHERE id = 2\")"
+    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(office,))
+    assert [(c.paths, len(c.statements)) for c in writes.held_files] == [(("warehouse.db",), 2)]
+    assert _fenced(_card_prompt(writes)) == [
+        "warehouse.db", "DELETE FROM orders WHERE id = 1", "UPDATE orders SET status = 'x' WHERE id = 2",
+    ]
+
+
+@pytest.mark.parametrize("code", [
+    SHIP + "con.execute('DELETE FROM orders')\nimport shutil\nshutil.copy('backup.db', 'warehouse.db')",
+    "import shutil\nshutil.copy('backup.db', 'warehouse.db')\n" + SHIP + "con.execute('DELETE FROM orders')",
+], ids=["copy-after", "copy-before"])
+def test_a_copy_onto_a_database_file_stays_on_the_card_beside_its_statements(code, office):
+    """The copy replaces the whole file, which a DELETE quoted under "would
+    change this database file" doesn't say, so each keeps its own line."""
+    card = _card(code, office)
+    assert "This step would overwrite:\n\n```\nwarehouse.db\n```" in card
+    assert "It would run:\n\n```\nDELETE FROM orders\n```" in card
+
+
+def test_a_database_file_the_agent_made_shows_its_statement_when_another_change_raises_the_card(databases):
+    """A write to a database an earlier turn made raises no card, but the
+    Approve another change asks for runs it too, so the card quotes it."""
+    earlier = "import sqlite3\ncon = sqlite3.connect('scratch.db'); con.execute('CREATE TABLE t (a int)')"
+    card = _card(SQLITE_AGAIN + "\nimport os\nos.remove('stock.csv')", databases, earlier=(earlier,))
+    assert "This step would delete:\n\n```\nstock.csv\n```" in card
+    assert "This step would also change this database file:\n\n```\nscratch.db\n```" in card
+    assert "It would run:\n\n```\nINSERT INTO t VALUES (1)\n```" in card
+
+
+@pytest.mark.parametrize("code, fenced", [
+    (SHIP + "with con:\n    con.execute('INSERT INTO archive SELECT * FROM orders')\ncon.execute('DELETE FROM orders')",
+     ["warehouse.db", "INSERT INTO archive SELECT * FROM orders", "DELETE FROM orders"]),
+    (SHIP + "for r in rows:\n    con.execute('INSERT INTO t VALUES (?)', r)\ncon.execute('UPDATE t SET a = 0')",
+     ["warehouse.db", "INSERT INTO t VALUES (?)\nwith values {r}", "UPDATE t SET a = 0"]),
+], ids=["with-block", "loop"])
+def test_a_database_file_s_statements_are_quoted_in_the_order_they_run(code, fenced, office):
+    """A write in a block runs before a later one outside it, so the card
+    quotes it first: a DELETE shown before the INSERT that archives the rows
+    would misstate the step."""
+    assert _fenced(_card(code, office)) == fenced
+
+
+def test_a_secret_in_a_database_file_s_statement_is_scrubbed_on_the_card(office):
+    token = "ya29." + "a" * 30
+    card = _card(SHIP + f"con.execute(\"UPDATE creds SET note = '{token}' WHERE id = 1\")", office)
+    assert token not in card and "[REDACTED_TOKEN]" in card
 
 
 # ── HTTP ──────────────────────────────────────────────────────────────────
@@ -1625,6 +2023,17 @@ def test_a_delete_counts_as_an_overwrite_only_when_a_write_always_follows(code, 
     writes = find_cell_writes(code=code, earlier_code=(), snapshots=(snap,))
     assert writes.needs_approval()
     assert "delete" in {c.action for c in writes.held_files}
+
+
+def test_a_delete_counts_as_an_overwrite_only_when_a_write_surely_hits_the_file(snap):
+    """A later write through a name an errored cell binds may go to stock.csv
+    or to new_out.csv, so it doesn't make the delete of the agent's own
+    stock.csv an overwrite of it."""
+    earlier = ("open('stock.csv', 'w').write('z')", "out = 'stock.csv'\nx = 1 / 0\nout = 'new_out.csv'")
+    for target, held in (("out", [("delete", ("stock.csv",))]), ("'stock.csv'", [])):
+        writes = find_cell_writes(code=f"import os\nos.remove('stock.csv')\nopen({target}, 'w').write('x')",
+                                  earlier_code=earlier, snapshots=(snap,), earlier_errored=(False, True))
+        assert [(c.action, c.paths) for c in writes.held_files] == held, target
 
 
 def test_cards_name_the_files(snap):
@@ -2510,6 +2919,64 @@ def test_past_the_cap_a_file_a_cell_wrote_under_a_name_picked_at_run_time_is_new
     assert not _held(remove, capped, earlier=(f"open(f'{folder}/{{name}}.csv', 'w').write('x')",))
 
 
+def _capped_with_touched(*, tmp_path: Path, monkeypatch) -> tuple[ProjectSnapshot, str, str]:
+    """A project past the snapshot cap, with a user's file the walk didn't
+    record and a new file beside it, both changed during the turn."""
+    names = [f"d{d}/f{i}.csv" for d in range(6) for i in range(5)]
+    for rel in names:
+        (tmp_path / rel).parent.mkdir(exist_ok=True)
+        (tmp_path / rel).write_text("x")
+    taken_at = time.time()
+    capped = snapshot_project_files(root=tmp_path, label="project", taken_at=taken_at, cap=10)
+    folder = next(rel for rel in names if rel not in capped.files).split("/")[0]
+    touched = next(rel for rel in names if rel.startswith(folder + "/") and rel not in capped.files)
+    new = f"{folder}/new.csv"
+    (tmp_path / new).write_text("x")
+    for rel in (touched, new):
+        os.utime(tmp_path / rel, (taken_at + 5, taken_at + 5))
+    monkeypatch.chdir(tmp_path)
+    return capped, touched, new
+
+
+def test_past_the_cap_a_write_through_a_name_an_errored_cell_binds_makes_only_its_last_file_new(
+    tmp_path, monkeypatch,
+):
+    """The errored cell may have stopped with `out` still on the user's file,
+    but a write that only may have hit a file doesn't make it the turn's:
+    its delete stays held."""
+    capped, touched, new = _capped_with_touched(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    earlier = (f"out = {touched!r}\nx = 1 / 0\nout = {new!r}", "open(out, 'w').write('x')")
+    for path, held in ((touched, [("delete", (touched,))]), (new, [])):
+        writes = find_cell_writes(code=f"import os\nos.remove({path!r})", earlier_code=earlier,
+                                  snapshots=(capped,), earlier_errored=(True, False))
+        assert [(c.action, c.paths) for c in writes.held_files] == held, path
+
+
+@pytest.mark.parametrize("earlier, errored, code", [
+    (("d = '.'", "d = {folder!r}\nx = 1 / 0\nd = '.'", "import os\nos.chdir(d)\nopen({name!r}, 'w').write('x')"),
+     (False, True, False), "import os\nos.remove({touched!r})"),
+    (("out = {touched!r}\nx = 1 / 0\nout = {new!r}", "open(out, 'w').write('x')"), (True, False),
+     "import glob, os\nfor f in glob.glob('{folder}/*.csv'):\n    os.remove(f)"),
+    (("out = {touched!r}\nx = 1 / 0\nout = {new!r}", "open(out, 'w').write('x')"), (True, False),
+     "import shutil\nshutil.move({touched!r}, '/tmp/elsewhere.csv')"),
+    (("from pathlib import Path\np = Path({touched!r})\nx = 1 / 0\np = Path({new!r})", "p.write_text('x')"),
+     (True, False), "from pathlib import Path\nPath({touched!r}).unlink()"),
+], ids=["chdir", "glob-delete", "move", "pathlib-unlink"])
+def test_past_the_cap_a_user_file_an_errored_cell_may_have_pointed_a_write_at_is_not_new(
+    earlier, errored, code, tmp_path, monkeypatch,
+):
+    """A file counts as one the turn made only for a write that surely hit
+    it, read with every earlier cell run to its end, its working folders
+    too: the user's file stays one the turn began with, and its delete or
+    move is held."""
+    capped, touched, new = _capped_with_touched(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    folder, name = touched.split("/")
+    fill = {"folder": folder, "name": name, "touched": touched, "new": new}
+    writes = find_cell_writes(code=code.format(**fill), earlier_code=tuple(c.format(**fill) for c in earlier),
+                              snapshots=(capped,), earlier_errored=errored)
+    assert touched in {p for c in writes.held_files for p in c.paths}
+
+
 def test_past_the_cap_an_overwrite_of_a_file_the_turn_changed_is_held_unless_a_cell_made_it(tmp_path, monkeypatch):
     """The cap rule deletes follow: a file the walk didn't record that the
     turn changed counts as one it began with, unless a cell's write left it
@@ -2693,6 +3160,275 @@ def test_a_write_with_no_sql_text_is_held(code, via, snap):
     writes = find_cell_writes(code=code, earlier_code=(), snapshots=(snap,))
     assert writes.needs_approval()
     assert [c.via for c in writes.calls] == [via]
+
+
+ORA = "import oracledb\nconn = oracledb.connect(dsn='x')\ncur = conn.cursor()\n"
+FUNC = "cur.callfunc('refresh_totals', int, [1, 2])"
+
+
+@pytest.mark.parametrize("code, earlier, call, line, fences", [
+    (FUNC, (), FUNC, 1, [FUNC]),
+    (FUNC, (ORA,), FUNC, 1, [FUNC]),
+    (ORA + FUNC, (), FUNC, 4, [FUNC]),
+    ("refresh()", (ORA + "def refresh():\n    " + FUNC,), "refresh()", 1, ["refresh()", FUNC]),
+    ("result = cur.callfunc(name='refresh_totals', return_type=int, parameters=[1, 2])", (ORA,),
+     "result = cur.callfunc(name='refresh_totals', return_type=int, parameters=[1, 2])", 1,
+     ["result = cur.callfunc(name='refresh_totals', return_type=int, parameters=[1, 2])"]),
+], ids=["direct", "earlier-cursor", "oracle-cursor", "earlier-helper", "keywords"])
+def test_stored_function_calls_are_held_and_quote_the_call(code, earlier, call, line, fences, snap):
+    """The card quotes the call, and for a helper an earlier cell defined,
+    the routine call inside it too."""
+    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,))
+    assert writes.needs_approval()
+    assert [(c.via, c.call, c.line) for c in writes.calls] == [("procedure", call, line)]
+    assert _fenced(_card_prompt(writes)) == fences
+    assert "This step would run a stored procedure or function:" in _card_prompt(writes)
+
+
+KEY = "sk-ant-api03-" + "A" * 40
+
+
+@pytest.mark.parametrize("earlier, code", [
+    ((ORA + f"def refresh():\n    cur.callfunc('refresh_totals', int, ['{KEY}'])",), "refresh()"),
+    ((ORA + f"import functools\nrefresh = functools.partial(cur.callfunc, 'refresh_totals', int, ['{KEY}'])",),
+     "refresh([1])"),
+], ids=["earlier-helper", "earlier-partial"])
+def test_a_secret_in_the_code_a_call_runs_is_scrubbed_on_the_card(earlier, code, snap):
+    """The card's "That call runs:" block quotes an earlier cell's code, so
+    it is scrubbed the same way the call is."""
+    card = _card_prompt(find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,)))
+    assert "That call runs:" in card
+    assert KEY not in card and "[REDACTED_API_KEY]" in card
+
+
+@pytest.mark.parametrize("code, earlier", [
+    (ORA + "run = cur.callfunc\nrun('refresh_totals', int, [1, 2])", ()),
+    ("run('refresh_totals', int, [1, 2])", (ORA + "run = cur.callproc",)),
+    (ORA + "import functools\nrefresh = functools.partial(cur.callfunc, 'refresh_totals', int)\nrefresh([1, 2])", ()),
+    (ORA + "pool.submit(cur.callproc, 'purge_suppliers', [1])", ()),
+    (ORA + "routines = {'purge': cur.callproc}\nroutines['purge']('purge_suppliers', [1])", ()),
+    (ORA + "getattr(cur, 'callfunc')('refresh_totals', int, [1, 2])", ()),
+], ids=["alias", "earlier-alias", "partial", "submitted", "in-a-dict", "getattr"])
+def test_a_routine_call_handed_on_as_a_value_is_held(code, earlier, snap):
+    """A stored procedure or function bound, wrapped or passed on still runs
+    the routine, so the card holds the cell."""
+    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,))
+    assert writes.needs_approval()
+    assert {c.via for c in writes.calls} == {"procedure"}
+
+
+SQLITE = "import sqlite3\nconn = sqlite3.connect(':memory:')\ncur = conn.cursor()\n"
+
+
+@pytest.mark.parametrize("earlier, code, call, runs", [
+    ((ORA + "import functools\npurge = functools.partial(cur.callproc, 'purge_suppliers')",),
+     "for sid in range(100):\n    purge([sid])", "purge([sid])", "purge = functools.partial(cur.callproc, 'purge_suppliers')"),
+    ((ORA + "from functools import partial\nrun = partial(cur.callfunc)",),
+     "run('drop_all_suppliers', int, [])", "run('drop_all_suppliers', int, [])", "run = partial(cur.callfunc)"),
+    ((ORA + "routines = {'purge': cur.callproc}",),
+     "routines['purge']('purge_suppliers', [1])", "routines['purge']('purge_suppliers', [1])",
+     "routines = {'purge': cur.callproc}"),
+    ((ORA + "routines = {}\nroutines['purge'] = cur.callproc",),
+     "routines['purge']('purge_suppliers', [1])", "routines['purge']('purge_suppliers', [1])",
+     "routines['purge'] = cur.callproc"),
+    ((ORA + "steps = [cur.callproc]",),
+     "steps[0]('purge_suppliers', [1])", "steps[0]('purge_suppliers', [1])", "steps = [cur.callproc]"),
+    ((ORA + "run = cur.callfunc", "go = run"),
+     "go('purge_suppliers', int, [1])", "go('purge_suppliers', int, [1])", "run = cur.callfunc\ngo = run"),
+    ((ORA + "run, other = cur.callfunc, 1",),
+     "run('purge_suppliers', int, [1])", "run('purge_suppliers', int, [1])", "run, other = cur.callfunc, 1"),
+    ((ORA + "class Holder:\n    pass\nh = Holder()\nh.run = cur.callfunc",),
+     "h.run('purge_suppliers', int, [1])", "h.run('purge_suppliers', int, [1])", "h.run = cur.callfunc"),
+    ((ORA + "f = getattr(cur, 'callfunc', None)\nprint(f is None)",),
+     "f('purge_suppliers', int, [1])", "f('purge_suppliers', int, [1])", "f = getattr(cur, 'callfunc', None)"),
+    ((ORA + "import functools\npurge = functools.partial(cur.callproc, 'purge_suppliers')",),
+     "pool.submit(purge, [1])", "pool.submit(purge, [1])", "purge = functools.partial(cur.callproc, 'purge_suppliers')"),
+    ((ORA + "run = cur.callfunc",), "def make():\n    return run\npool.submit(make())", "return run",
+     "run = cur.callfunc"),
+    ((ORA + "run = getattr(cur, 'call' 'func')",),
+     "run('purge_suppliers', int, [1])", "run('purge_suppliers', int, [1])", "run = getattr(cur, 'call' 'func')"),
+    ((ORA + "run = getattr(cur, 'call\\x66unc')",),
+     "run('purge_suppliers', int, [1])", "run('purge_suppliers', int, [1])", "run = getattr(cur, 'call\\x66unc')"),
+    ((ORA + "run = cur.\uff43\uff41\uff4c\uff4c\uff46\uff55\uff4e\uff43",),
+     "run('purge_suppliers', int, [1])", "run('purge_suppliers', int, [1])",
+     "run = cur.\uff43\uff41\uff4c\uff4c\uff46\uff55\uff4e\uff43"),
+    ((ORA + "run = cur.callfunc if ok else None",),
+     "run('purge_suppliers', int, [1])", "run('purge_suppliers', int, [1])", "run = cur.callfunc if ok else None"),
+    ((ORA + "run = cur.callfunc or None",),
+     "run('purge_suppliers', int, [1])", "run('purge_suppliers', int, [1])", "run = cur.callfunc or None"),
+    ((ORA + "routines = {'purge': cur.callproc}",),
+     "routines.get('purge')('purge_suppliers', [1])", "routines.get('purge')('purge_suppliers', [1])",
+     "routines = {'purge': cur.callproc}"),
+    ((ORA + "routines = {'purge': cur.callproc}",),
+     "for f in routines.values():\n    f('purge_suppliers', [1])", "f('purge_suppliers', [1])",
+     "routines = {'purge': cur.callproc}\nfor f in routines.values():"),
+    ((ORA + "routines = {'purge': cur.callproc}",),
+     "for name, f in routines.items():\n    f('purge_suppliers', [1])", "f('purge_suppliers', [1])",
+     "routines = {'purge': cur.callproc}\nfor name, f in routines.items():"),
+    ((ORA + "steps = [cur.callproc]",),
+     "steps.pop()('purge_suppliers', [1])", "steps.pop()('purge_suppliers', [1])", "steps = [cur.callproc]"),
+    # The first element reaches `r` only at the depth limit, which counts it.
+    ((ORA + "r = cur.callfunc if ok else None\nb1 = r\nb2 = b1\nb3 = b2\nb4 = b3\ngo = [b4, r]",),
+     "go[1]('purge_suppliers', int, [1])", "go[1]('purge_suppliers', int, [1])",
+     "r = cur.callfunc if ok else None\nb1 = r\nb2 = b1\nb3 = b2\nb4 = b3\ngo = [b4, r]"),
+], ids=["partial-in-a-loop", "from-functools-partial", "dict", "dict-entry-stored", "list", "alias-of-alias",
+        "tuple-unpack", "member-store", "getattr-default", "partial-submitted", "returned-then-submitted",
+        "getattr-concatenated", "getattr-escaped", "attribute-fullwidth", "conditional", "or-default", "dict-get",
+        "dict-values-loop", "dict-items-loop", "list-pop", "reached-again-from-nearer"])
+def test_a_routine_bound_in_an_earlier_cell_is_held_where_it_runs(earlier, code, call, runs, snap):
+    """A stored procedure or function an earlier cell binds runs in the cell
+    that calls it or hands it on: the card holds that cell, quotes the call
+    and shows the code that bound it. On an in-process handle nothing is held."""
+    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,))
+    assert [(c.via, c.call, c.runs) for c in writes.calls] == [("procedure", call, runs)]
+    local = [e.replace(ORA, SQLITE) for e in earlier]
+    assert not _held(code, snap, earlier=local)
+
+
+NESTED = ORA + "r = cur.callfunc\na1 = [r]\na2 = [a1]\na3 = [a2]\na4 = [a3]"
+
+
+@pytest.mark.parametrize("earlier, code, call", [
+    ((ORA + "a0 = cur.callfunc", *(f"a{i} = a{i - 1}" for i in range(1, 11))),
+     "a10('purge_suppliers', int, [1])", "a10('purge_suppliers', int, [1])"),
+    ((ORA + "a0 = cur.callfunc",),
+     "".join(f"a{i} = a{i - 1}\n" for i in range(1, 11)) + "pool.submit(a10, 'purge_suppliers', int, [1])",
+     "pool.submit(a10, 'purge_suppliers', int, [1])"),
+    ((ORA + "a0 = cur.callfunc", *(f"a{i} = a{i - 1}" for i in range(1, 9))),
+     "a8('purge_suppliers', int, [1])", "a8('purge_suppliers', int, [1])"),
+    ((ORA + "a0 = cur.callfunc", *(f"a{i} = a{i - 1}" for i in range(1, 9))),
+     "pool.submit(a8, 'purge_suppliers', int, [1])", "pool.submit(a8, 'purge_suppliers', int, [1])"),
+    ((ORA + "import functools\np0 = cur.callfunc", *(f"p{i} = functools.partial(p{i - 1})" for i in range(1, 9))),
+     "p8('purge_suppliers', int, [1])", "p8('purge_suppliers', int, [1])"),
+    ((NESTED,), "a4[0][0][0][0]('purge_suppliers', int, [1])", "a4[0][0][0][0]('purge_suppliers', int, [1])"),
+    ((NESTED,), "pool.submit(a4)", "pool.submit(a4)"),
+    ((ORA + "a0 = getattr(cur, 'callfunc', fallback)", *(f"a{i} = a{i - 1}" for i in range(1, 9))),
+     "a8('purge_suppliers', int, [1])", "a8('purge_suppliers', int, [1])"),
+], ids=["called", "handed-on", "eight-aliases", "eight-aliases-handed-on", "eight-partials", "nested-four-deep",
+        "nested-four-deep-handed-on", "eight-aliases-of-a-getattr"])
+def test_a_name_that_may_hold_a_routine_past_the_follow_limit_is_held(earlier, code, call, snap):
+    """The check follows a chain of aliases only so far. A name past that
+    limit that may still hold a routine is held where it is called or
+    handed on, even when the chain's last links are in the same cell."""
+    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,))
+    assert [(c.via, c.call) for c in writes.calls] == [("procedure", call)]
+
+
+def test_a_routine_reached_first_past_the_limit_is_held_where_it_is_read_directly(snap):
+    """`g(d4)` reaches `v`'s routine only past the depth limit; the next
+    line reads `v` directly. Each read is held on its own path."""
+    earlier = ORA + "x1 = cur.callfunc\nx2 = x1\nx3 = x2\nv = [x3, 0]\nd1 = v\nd2 = d1\nd3 = d2\nd4 = d3"
+    writes = find_cell_writes(code="g(d4)\nv[0]('purge_suppliers', int, [1])", earlier_code=(earlier,),
+                              snapshots=(snap,))
+    assert ("procedure", "v[0]('purge_suppliers', int, [1])", "x1 = cur.callfunc\nx2 = x1\nx3 = x2\nv = [x3, 0]") in [
+        (c.via, c.call, c.runs) for c in writes.calls
+    ]
+
+
+@pytest.mark.parametrize("code, calls", [
+    (ORA + "run = cur.callfunc\nrun('refresh_totals', int, [1, 2])",
+     [("run('refresh_totals', int, [1, 2])", "run = cur.callfunc")]),
+    (ORA + "import functools\nf = functools.partial(cur.callfunc, 'refresh_totals', int)\nf([1])\nf([2])",
+     [("f([1])", "f = functools.partial(cur.callfunc, 'refresh_totals', int)"),
+      ("f([2])", "f = functools.partial(cur.callfunc, 'refresh_totals', int)")]),
+    (ORA + "routines = {'purge': cur.callproc}\nroutines['purge']('purge_suppliers', [1])",
+     [("routines['purge']('purge_suppliers', [1])", "routines = {'purge': cur.callproc}")]),
+    (ORA + "run = cur.callproc\nrun('purge_suppliers', [1])\npool.submit(run, 'purge_suppliers', [2])",
+     [("run = cur.callproc", ""), ("run('purge_suppliers', [1])", "run = cur.callproc")]),
+    (ORA + "run = cur.callproc\nrun('purge_suppliers', [1])\ndef later():\n    return run",
+     [("run = cur.callproc", ""), ("run('purge_suppliers', [1])", "run = cur.callproc")]),
+], ids=["alias", "partial-called-twice", "dict", "also-submitted", "also-returned"])
+def test_a_routine_bound_and_called_in_one_cell_is_quoted_at_each_call(code, calls, snap):
+    """The card shows each call once, with the binding that says which
+    routine and fixed arguments it runs. The binding keeps its own block
+    when the method is also handed on where the check can't follow it."""
+    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(snap,))
+    assert [(c.call, c.runs) for c in writes.calls] == calls
+
+
+def test_a_routine_name_read_through_nested_lists_is_followed_once_per_binding(snap, monkeypatch):
+    """Every element of each list reads the same binding, so the check
+    follows each binding once: the work grows with the lists' width, not as
+    its power."""
+    from anton.core.utils import write_check
+
+    reads = 0
+    bindings = write_check._Reader.bindings_of
+
+    def counting(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        return bindings(*args, **kwargs)
+
+    monkeypatch.setattr(write_check._Reader, "bindings_of", counting)
+
+    def binding_reads(width: int) -> int:
+        nonlocal reads
+        reads = 0
+        earlier = SQLITE + "r = cur.callfunc if cur else None\n" + "".join(
+            f"a{level} = [{', '.join([f'a{level - 1}' if level > 1 else 'r'] * width)}]\n" for level in range(1, 5)
+        )
+        assert not _held("print(len(a4))", snap, earlier=(earlier,))
+        return reads
+
+    assert binding_reads(24) <= 8 * binding_reads(3)
+    started = time.perf_counter()
+    binding_reads(45)
+    assert time.perf_counter() - started < 5
+
+
+def test_a_long_alias_chain_of_a_routine_is_read_in_well_under_a_second(snap):
+    """The names that may hold a routine grow one link at a time down a
+    chain of aliases, and each link is followed once."""
+    earlier = ORA + "a0 = cur.callfunc\n" + "".join(f"a{i} = a{i - 1}\n" for i in range(1, 6000))
+    started = time.perf_counter()
+    assert not _held("print(len([1, 2]))", snap, earlier=(earlier,))
+    assert time.perf_counter() - started < 1
+    assert _held("a5999('purge_suppliers', int, [1])", snap, earlier=(earlier,))
+
+
+def test_a_stored_function_name_is_not_a_call(snap):
+    assert not _held("print('cur.callfunc(\\'refresh_totals\\', int)')", snap)
+    assert not _held("import sqlite3\nc = sqlite3.connect(':memory:')\nc.callfunc('p', int)", snap)
+
+
+@pytest.mark.parametrize("code", [
+    ORA + "run = cur.callfunc",
+    ORA + "run = cur.callfunc if ok else None",
+], ids=["bound-and-unused", "bound-in-a-conditional"])
+def test_a_routine_bound_and_not_run_here_is_held_where_it_is_bound(code, snap):
+    """A later cell may run the routine where the check can't follow it,
+    so the cell that binds it holds."""
+    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(snap,))
+    assert [(c.via, c.call) for c in writes.calls] == [("procedure", code.removeprefix(ORA))]
+
+
+@pytest.mark.parametrize("code", [
+    ORA + "print(cur.callfunc)",
+    ORA + "ok = callable(cur.callfunc)",
+    ORA + "if cur.callfunc is None:\n    raise SystemExit('no callfunc')",
+], ids=["print", "callable", "is-none"])
+def test_a_driver_routine_looked_at_where_it_stands_is_held(code, snap):
+    """A driver cursor's routine method read anywhere but as the called
+    function is held where it is read."""
+    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(snap,))
+    assert writes.needs_approval() and [c.via for c in writes.calls] == ["procedure"]
+
+
+@pytest.mark.parametrize("code, earlier", [
+    ("ok = callable(f)", ()),
+    ("help(f)", ()),
+    ("print(f)", ()),
+    ("print(sep=f)", ()),
+    ("print([f])", ()),
+    ("callable(f)", ("callable = lambda g: g('purge_suppliers', int, [1])",)),
+    ("def help(g):\n    return g\nhelp(f)('purge_suppliers', int, [1])", ()),
+], ids=["callable", "help", "print", "keyword", "in-a-container", "rebound-builtin", "returned-and-called"])
+def test_a_routine_looked_at_where_it_may_still_run_is_held(code, earlier, snap):
+    """A routine an earlier cell binds, handed to a builtin or any other
+    call, may run there: the cell that hands it on holds."""
+    writes = find_cell_writes(code=code, earlier_code=(ORA + "f = cur.callfunc", *earlier), snapshots=(snap,))
+    assert [(c.via, c.runs) for c in writes.calls] == [("procedure", "f = cur.callfunc")]
 
 
 @pytest.mark.parametrize("code", [

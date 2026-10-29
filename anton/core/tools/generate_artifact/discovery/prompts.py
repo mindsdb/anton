@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 
-from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES_ORDERED
 from anton.core.llm.prompts import ANTON_NOTE
 
 from ..attachments import render_for_gathering
@@ -26,20 +25,24 @@ def build_pipeline_system_prompt(state: PrdState) -> str:
     for the whole shared history. The project's rules qualify: they are read
     once per run, before this is first built.
     """
-    types_list = ", ".join(f"`{t}`" for t in GENERATOR_ARTIFACT_TYPES_ORDERED)
-    snapshot_policy = (
-        "For a report, dashboard, analysis, map or presentation of data available now, "
-        "prefer a self-contained html-app snapshot: fetch the needed records once during "
-        "gathering and embed them. Client-side filters, tabs, charts and calculations do "
-        "not need a backend. Choose fullstack when the original user request requires "
-        "live refresh, ongoing service access, writes, secrets at runtime or durable app "
-        "state. Do not invent a live-data requirement from the mere presence of a connection. "
-        "Gather the complete requested data, calculate aggregates with Python, and print "
-        "the actual values and records needed for the page as compact JSON, keeping "
-        "scenarios and units distinct. A schema sample alone cannot support a data report.\n\n"
-        if os.environ.get("ANTON_STATIC_FAST_PATH") in {"direct", "facts"} else ""
+    types = state.buildable_types
+    types_list = ", ".join(f"`{t}`" for t in types)
+    fullstack_choice = (
+        "\n\nChoosing between the two fullstack types: pick "
+        "`fullstack-stateful-app` ONLY when the app must own durable state "
+        "of its own — data the app itself creates and keeps between "
+        "requests (user-created notes/todos, counters, settings, sessions). "
+        "That state lives in the platform STATE store, a document/key-value "
+        "store suited to LIGHT data keyed by id. An app that only reads "
+        "from or writes to EXTERNAL data sources (databases, APIs) is "
+        "`fullstack-stateless-app` — an external DB is a data source, not "
+        "app-owned state. Heavy or relational data (joins, transactions, "
+        "analytics) always belongs in an external database, which usually "
+        "means stateless. Prefer stateless when in doubt."
+        if "fullstack-stateless-app" in types
+        else ""
     )
-    return with_project_rules(snapshot_policy + (
+    return with_project_rules(
         "You are producing a web artifact end to end, in one pipeline of "
         "steps. Each step has its own output — do not do the next step's "
         "work early:\n"
@@ -62,22 +65,10 @@ def build_pipeline_system_prompt(state: PrdState) -> str:
         "standing orders. The tool list stays the same for the whole "
         "pipeline; a tool being listed does NOT mean it is available on the "
         "current step. Calling one that is not available wastes a round and "
-        "is answered with a refusal naming the step.\n\n"
-        "Choosing between the two fullstack types: pick "
-        "`fullstack-stateful-app` ONLY when the app must own durable state "
-        "of its own — data the app itself creates and keeps between "
-        "requests (user-created notes/todos, counters, settings, sessions). "
-        "That state lives in the platform STATE store, a document/key-value "
-        "store suited to LIGHT data keyed by id. An app that only reads "
-        "from or writes to EXTERNAL data sources (databases, APIs) is "
-        "`fullstack-stateless-app` — an external DB is a data source, not "
-        "app-owned state. Heavy or relational data (joins, transactions, "
-        "analytics) always belongs in an external database, which usually "
-        "means stateless. Prefer stateless when in doubt."
-        + ("\n\nThe snapshot policy above takes precedence for data reports: "
-           "reading an external source at build time does not require a runtime backend."
-           if snapshot_policy else "")
-    ), state.project_rules)
+        "is answered with a refusal naming the step."
+        + fullstack_choice,
+        state.project_rules,
+    )
 
 
 SCRATCHPADS_HEADER = "## Scratchpads already in this session"
@@ -255,26 +246,24 @@ _WHEN_TO_ASK_ACT_FIRST = (
 )
 
 
-def _gathering_instruction(act_first: bool) -> str:
-    if act_first and os.environ.get("ANTON_STATIC_FAST_PATH") in {"direct", "facts"}:
-        handoff = (
-            "Save the complete relevant rows and exact calculated figures as canonical observed-data.json "
-            "in the artifact folder, with units, scenario and time scope; print only a short manifest. "
-            if os.environ.get("ANTON_STATIC_COHERENT_GATHER") == "on" else
-            "Print the complete relevant rows and calculated figures as compact JSON, with units, "
-            "scenario and time scope. "
-        )
+def _gathering_instruction(act_first: bool, *, static_completion: bool = False) -> str:
+    if act_first and os.environ.get("ANTON_STATIC_FAST_PATH") == "direct":
         return (
-            "Gather the evidence needed to build the ORIGINAL user request. Choose html-app for "
-            "a self-contained snapshot unless the user requires ongoing live access or writes. "
-            "Use the connected source's documented API and credentials from the catalog. Reuse "
-            "an existing scratchpad when present. Fetch ALL records/fields needed for the views, "
-            "not just a schema sample or head(). Compute exact requested aggregates with Python. "
-            + handoff + "Do not print credentials. Batch independent queries in one "
-            "cell when practical. A row count or summary does not substitute for records the page "
-            "must display. Check for truncation; retrieve the remaining records or report the gap. "
-            "Once the required data is observed, immediately call finish_gathering and declare the "
-            "type and sources. Do not draft a brief, PRD, design or implementation plan. Do not add "
+            "Gather the evidence needed to build the ORIGINAL user request. Use the connected "
+            "source's documented API and credentials from the catalog. Reuse an existing "
+            "scratchpad when present. Fetch ALL records/fields needed for the views, not just a "
+            "schema sample or head(). Compute exact requested aggregates with Python. Save the "
+            "complete relevant rows and exact calculated figures as canonical observed-data.json "
+            "in the artifact folder, with units, filters and time scope; print only a short "
+            "manifest. Do not print credentials. Batch independent queries in one cell when "
+            "practical. A row count or summary does not substitute for records the page must "
+            "display. Check for truncation; retrieve the remaining records or report the gap. "
+            + ("For a resolved static request, include complete_static_artifact in the scratchpad "
+               "exec; the host completes gathering after validating the fresh handoff. "
+               if static_completion else
+               "Once the required data is observed, immediately call finish_gathering and declare the "
+               "type and sources. ")
+            + "Do not draft a brief, PRD, design or implementation plan. Do not add "
             "requirements or ask for preferences the request does not need. For a backend that "
             "must query data at runtime, verify its access with a real sample and finish."
         )
@@ -318,7 +307,7 @@ def _redraw_suffix(act_first: bool) -> str:
     return (_REDRAW_CORRECTION_ACT_FIRST if act_first else _REDRAW_CORRECTION) + _REDRAW_RESTATE
 
 
-def _step_instructions(act_first: bool = False) -> dict[str, str]:
+def _step_instructions(act_first: bool = False, *, static_completion: bool = False) -> dict[str, str]:
     """Built lazily so the instruction texts stay in the modules that own
     them — brief.py and prd.py — rather than being copied here. `act_first`
     picks the variants for the no-confirmation flow; they live in step
@@ -328,7 +317,7 @@ def _step_instructions(act_first: bool = False) -> dict[str, str]:
     from . import sub_tools
 
     return {
-        sub_tools.STEP_GATHERING: _gathering_instruction(act_first),
+        sub_tools.STEP_GATHERING: _gathering_instruction(act_first, static_completion=static_completion),
         sub_tools.STEP_DRAFT_BRIEF: draft_brief_instruction(act_first),
         sub_tools.STEP_REDRAW_BRIEF: draft_brief_instruction(act_first) + _redraw_suffix(act_first),
         sub_tools.STEP_WRITE_PRD: _WRITE_PRD_INSTRUCTION,
@@ -358,7 +347,8 @@ def step_message(step: str, state: PrdState, *, extra: str = "") -> str:
             "Questions you may still ask the user: "
             f"{gathering_question_budget(state.session, act_first=state.act_first)}\n"
         )
-    body = _step_instructions(state.act_first)[step]
+    from .. import static_gathering
+    body = _step_instructions(state.act_first, static_completion=static_gathering.enabled(state))[step]
     # No history to continue → the step is handed the restored material
     # instead. The redraw suffix in particular refers to a correction that is
     # only "above" when there is a conversation above.

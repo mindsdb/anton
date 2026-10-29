@@ -19,6 +19,8 @@ Each Hippocampus instance manages one scope's files:
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Callable
+from contextlib import contextmanager
 import re
 import sys
 import time
@@ -211,25 +213,29 @@ class Hippocampus:
         return engrams
 
     def del_identity(self, id):
-        entries = self.get_identities()
-        entries_out = []
-        for entry in entries:
-            if entry.id != id:
-                entries_out.append(entry)
+        """Remove the identity fact with `id`, rewriting profile.md under its lock."""
+        with self._file_lock(self._profile_path):
+            entries = self.get_identities()
+            entries_out = []
+            for entry in entries:
+                if entry.id != id:
+                    entries_out.append(entry)
 
-        self.save_identities(entries_out)
+            self._save_identities_unlocked(entries_out)
 
     def update_identity(self, id, text):
-        entries = self.get_identities()
+        """Replace the text of the identity fact with `id`; a no-op for an unknown id."""
+        with self._file_lock(self._profile_path):
+            entries = self.get_identities()
 
-        for entry in entries:
-            if entry.id != id:
-                continue
-            entry.text = text
-            entry.updated_at = dt.datetime.now()
+            for entry in entries:
+                if entry.id != id:
+                    continue
+                entry.text = text
+                entry.updated_at = dt.datetime.now()
 
-            self.save_identities(entries)
-            return
+                self._save_identities_unlocked(entries)
+                return
 
     def rewrite_identity(self, entries: list[str]) -> None:
         """Merge new entries into the identity snapshot (profile.md) and rewrite.
@@ -239,33 +245,41 @@ class Hippocampus:
         a coherent snapshot rather than growing unboundedly.
         """
 
-        existing_entries = [
-            item.text
-            for item in self.get_identities()
-        ]
+        with self._file_lock(self._profile_path):
+            existing_entries = [
+                item.text
+                for item in self.get_identities()
+            ]
 
-        for fact in entries:
-            fact = _entry_text(fact) if isinstance(fact, str) else fact
-            if isinstance(fact, str) and fact and fact not in existing_entries:
-                # Check if this updates an existing fact (same key prefix)
-                key = fact.split(":")[0].strip().lower() if ":" in fact else ""
-                if key:
-                    existing_entries = [
-                        e
-                        for e in existing_entries
-                        if not e.lower().startswith(key + ":")
-                    ]
-                existing_entries.append(fact)
+            for fact in entries:
+                fact = _entry_text(fact) if isinstance(fact, str) else fact
+                if isinstance(fact, str) and fact and fact not in existing_entries:
+                    # Check if this updates an existing fact (same key prefix)
+                    key = fact.split(":")[0].strip().lower() if ":" in fact else ""
+                    if key:
+                        existing_entries = [
+                            e
+                            for e in existing_entries
+                            if not e.lower().startswith(key + ":")
+                        ]
+                    existing_entries.append(fact)
 
-        self.save_identities([
-            Engram(text)
-            for text in existing_entries
-        ])
+            self._save_identities_unlocked([
+                Engram(text)
+                for text in existing_entries
+            ])
 
     def save_identities(self, entries: list[Engram]) -> None:
+        """Rewrite profile.md from `entries` under its writer lock. A caller that
+        already holds the lock uses `_save_identities_unlocked` instead."""
+        with self._file_lock(self._profile_path):
+            self._save_identities_unlocked(entries)
+
+    def _save_identities_unlocked(self, entries: list[Engram]) -> None:
+        """Rewrite profile.md from `entries`; the caller holds its writer lock."""
         self._dir.mkdir(parents=True, exist_ok=True)
         content = "# Profile\n" + "\n".join(f"- {_entry_text(e.text)}" for e in entries) + "\n"
-        self._encode_with_lock(self._profile_path, content, mode="write")
+        self._write_unlocked(self._profile_path, content, mode="write")
 
     def clear_identity(self) -> None:
         if self._profile_path.is_file():
@@ -328,28 +342,36 @@ class Hippocampus:
         return _filter_by_token_budget(entries, token_budget)
 
     def del_lesson(self, id):
-        entries = self.get_lessons()
-        entries_out = []
-        for entry in entries:
-            if entry.id != id:
-                entries_out.append(entry)
+        """Remove the lesson with `id`, rewriting lessons.md under its lock."""
+        with self._file_lock(self._lessons_path):
+            entries = self.get_lessons()
+            entries_out = []
+            for entry in entries:
+                if entry.id != id:
+                    entries_out.append(entry)
 
-        if len(entries_out) != len(entries):
-            self._encode_with_lock(self._lessons_path, self._lessons_to_text(entries_out), mode="write")
+            if len(entries_out) != len(entries):
+                self._write_unlocked(
+                    self._lessons_path, self._lessons_to_text(entries_out), mode="write"
+                )
 
 
     def update_lesson(self, id, text):
-        entries = self.get_lessons()
+        """Replace the text of the lesson with `id`; a no-op for an unknown id."""
+        with self._file_lock(self._lessons_path):
+            entries = self.get_lessons()
 
-        for entry in entries:
-            if entry.id != id:
-                continue
-            entry.text = text
-            entry.updated_at = dt.datetime.now()
+            for entry in entries:
+                if entry.id != id:
+                    continue
+                entry.text = text
+                entry.updated_at = dt.datetime.now()
 
-            self._encode_with_lock(self._lessons_path, self._lessons_to_text(entries), mode="write")
+                self._write_unlocked(
+                    self._lessons_path, self._lessons_to_text(entries), mode="write"
+                )
 
-            break
+                break
 
     @staticmethod
     def _lessons_to_text(entries: list[Engram], header="Lessons") -> str:
@@ -496,27 +518,38 @@ class Hippocampus:
         return entries
 
     def del_rule(self, id):
-        entries = self.get_rules()
-        entries_out = []
-        for entry in entries:
-            if entry.id != id:
-                entries_out.append(entry)
+        """Remove the rule with `id`, rewriting rules.md under its lock."""
+        with self._file_lock(self._rules_path):
+            entries = self.get_rules()
+            entries_out = []
+            for entry in entries:
+                if entry.id != id:
+                    entries_out.append(entry)
 
-        self.save_rules(entries_out)
+            self._save_rules_unlocked(entries_out)
 
     def update_rule(self, id, text):
-        entries = self.get_rules()
+        """Replace the text of the rule with `id`; a no-op for an unknown id."""
+        with self._file_lock(self._rules_path):
+            entries = self.get_rules()
 
-        for entry in entries:
-            if entry.id != id:
-                continue
-            entry.text = text
-            entry.updated_at = dt.datetime.now()
+            for entry in entries:
+                if entry.id != id:
+                    continue
+                entry.text = text
+                entry.updated_at = dt.datetime.now()
 
-            self.save_rules(entries)
-            return
+                self._save_rules_unlocked(entries)
+                return
 
     def save_rules(self, rules: list[Engram]) -> None:
+        """Rewrite rules.md from `rules` under its writer lock. A caller that
+        already holds the lock uses `_save_rules_unlocked` instead."""
+        with self._file_lock(self._rules_path):
+            self._save_rules_unlocked(rules)
+
+    def _save_rules_unlocked(self, rules: list[Engram]) -> None:
+        """Rewrite rules.md from `rules`; the caller holds its writer lock."""
         self._dir.mkdir(parents=True, exist_ok=True)
         sections: dict[str, list[Engram]] = {"always": [], "never": [], "when": []}
         for rule in rules:
@@ -531,7 +564,7 @@ class Hippocampus:
                 meta = f"<!-- confidence:{e.confidence} source:{e.source} ts:{ts} -->"
                 lines.append(f"- {_entry_text(e.text)} {meta}\n")
 
-        self._encode_with_lock(self._rules_path, "".join(lines), mode="write")
+        self._write_unlocked(self._rules_path, "".join(lines), mode="write")
 
     def encode_rule(
         self,
@@ -548,8 +581,6 @@ class Hippocampus:
         """
         self._dir.mkdir(parents=True, exist_ok=True)
 
-        rules = self.get_rules()
-
         # Sanitize at ingest too, not just on write: the dedupe below compares
         # against text parsed back off disk, which is already sanitized.
         new_rule = Engram(
@@ -560,14 +591,19 @@ class Hippocampus:
             source=source,
         )
 
-        # Check for duplicate (exact entry match, ignoring metadata)
-        for rule in rules:
-            if rule.text == new_rule.text:
-                return
+        # The read, the dedupe and the rewrite share one lock, so a rule
+        # another session saves in between is in the file this one rewrites.
+        with self._file_lock(self._rules_path):
+            rules = self.get_rules()
 
-        rules.append(new_rule)
+            # Check for duplicate (exact entry match, ignoring metadata)
+            for rule in rules:
+                if rule.text == new_rule.text:
+                    return
 
-        self.save_rules(rules)
+            rules.append(new_rule)
+
+            self._save_rules_unlocked(rules)
 
     def encode_lesson(
         self,
@@ -589,19 +625,18 @@ class Hippocampus:
         topic_tag = f" topic:{topic}" if topic else ""
         entry = f"- {text} <!--{topic_tag} ts:{ts} -->\n"
 
-        # Append to lessons.md
-        if not self._lessons_path.is_file():
-            self._encode_with_lock(
-                self._lessons_path,
-                f"# Lessons\n{entry}",
-                mode="write",
-            )
-        else:
+        # The existence check and the dedupe read sit under the writer lock,
+        # so two sessions creating the file at once cannot replace each
+        # other's first entry.
+        with self._file_lock(self._lessons_path):
+            if not self._lessons_path.is_file():
+                self._write_unlocked(self._lessons_path, f"# Lessons\n{entry}", mode="write")
+                return
             # Check for duplicate (exact entry match, ignoring metadata)
             existing = self._lessons_path.read_text(encoding="utf-8")
             if text in self._extract_entry_texts(existing):
                 return
-            self._encode_with_lock(self._lessons_path, entry, mode="append")
+            self._write_unlocked(self._lessons_path, entry, mode="append")
 
 
     def entry_count(self) -> int:
@@ -618,47 +653,57 @@ class Hippocampus:
                     continue
         return count
 
-    def _encode_with_lock(self, path: Path, text: str, mode: str = "append") -> None:
-        """Write with file locking (fcntl.flock on Unix, no-op on Windows).
+    @contextmanager
+    def _file_lock(self, path: Path):
+        """Hold the writer lock for `path`: a sibling `.lock` file, flocked.
 
-        Prevents corruption from concurrent Anton sessions writing to
-        global memory — like synaptic tagging ensuring encoding fidelity
-        despite concurrent neural activity.
+        One lock for every writer of the file, append or rewrite, in every
+        process that shares it, so a rewrite's check and replace and another
+        session's append cannot interleave. Readers do not take it: a rewrite
+        is an atomic replace, so a reader always sees one complete version.
+        No-op on Windows, where fcntl is unavailable, as the lock was before.
         """
         path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = path.with_name(path.name + ".lock")
+        with open(lock_path, "a", encoding="utf-8") as lock:
+            if sys.platform != "win32":
+                import fcntl
 
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if sys.platform != "win32":
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def rewrite_if_unchanged(
+        self, path: Path, text: str, *, read: Callable[[Path], object], snapshot: object
+    ) -> bool:
+        """Replace `path` with `text` unless `read(path)` no longer equals `snapshot`.
+
+        The writer lock is held across the check and the replace, so an append
+        from another session waits and lands on the new file instead of being
+        erased by it. Returns whether the file was written.
+        """
+        with self._file_lock(path):
+            if read(path) != snapshot:
+                return False
+            self._write_unlocked(path, text, mode="write")
+            return True
+
+    @staticmethod
+    def _write_unlocked(path: Path, text: str, mode: str) -> None:
+        """Replace the file atomically (temp file + rename) or append; the
+        caller holds the writer lock."""
         if mode == "write":
-            # Atomic write via temp file + rename
             tmp_path = path.with_suffix(path.suffix + ".tmp")
             with open(tmp_path, "w", encoding="utf-8") as f:
-                if sys.platform != "win32":
-                    import fcntl
-
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                try:
-                    f.write(text)
-                    f.flush()
-                finally:
-                    if sys.platform != "win32":
-                        import fcntl
-
-                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                f.write(text)
+                f.flush()
             tmp_path.replace(path)
         else:
-            # Append mode
             with open(path, "a", encoding="utf-8") as f:
-                if sys.platform != "win32":
-                    import fcntl
-
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                try:
-                    f.write(text)
-                    f.flush()
-                finally:
-                    if sys.platform != "win32":
-                        import fcntl
-
-                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                f.write(text)
 
     @staticmethod
     def _extract_entry_texts(content: str) -> set[str]:
