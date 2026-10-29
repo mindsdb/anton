@@ -147,11 +147,18 @@
     if (typeof v === 'string') {
       var m = v.match(DATE_RE);
       if (m) return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], m[4] ? +m[4] : 0, m[5] ? +m[5] : 0));
+      var ym = v.match(/^(\d{4})-(\d{2})$/);  // a month, as "2026-03"
+      if (ym && +ym[2] >= 1 && +ym[2] <= 12) return new Date(Date.UTC(+ym[1], +ym[2] - 1, 1));
     }
     if (isNum(v) && v > 1e11) return new Date(v);
     return null;
   }
   AK.toDate = toDate;
+  /* A value with its unit: "4,812 MW", "38 °C" ("%" and "°" units sit close). */
+  AK.withUnit = function (text, unit) {
+    if (!unit || text === '' || text == null) return text;
+    return text + (/^[%°′″]/.test(unit) ? '' : '\u00a0') + unit;
+  };
   /* The format that shows date-like values whole: times of day are kept when the values have
      them, and one day's times read as times on an axis. */
   AK.dateFormatFor = function (values, axis) {

@@ -56,35 +56,38 @@ def _need(rows: list[dict], names: Iterable[str | None], where: str) -> None:
 
 def kpi(label: str, value: Any, format: str | None = None, *, sub: str | None = None, delta: Any = None,
         delta_format: str | None = None, delta_label: str | None = None, better: str | None = None,
-        tone: str | None = None, spark: list | None = None, color_value: bool = False) -> dict:
-    """One KPI card. `better` ("up"/"down") colours the delta; `tone` marks the card good/bad/warn/accent."""
+        tone: str | None = None, spark: list | None = None, color_value: bool = False, unit: str | None = None) -> dict:
+    """One KPI card. `better` ("up"/"down") colours the delta; `tone` marks the card good/bad/warn/accent;
+    `unit` ("MW", "kg", "hours") follows the value."""
     _check_format(format, f"kpi {label!r}")
     from .data import _scalar
     card = {k: v for k, v in dict(label=label, format=format, sub=sub, delta=_scalar(delta),
                                   delta_format=delta_format, delta_label=delta_label, better=better, tone=tone,
                                   spark=[_scalar(x) for x in spark] if spark is not None else None,
-                                  color_value=color_value or None).items() if v is not None}
+                                  color_value=color_value or None, unit=unit).items() if v is not None}
     # A missing figure (None, NaN) stays on the card as "—"; the page warns about it on save.
     return {"label": label, "value": _scalar(value), **card}
 
 
 def metric(label: str, values: list, format: str | None = None, *, better: str | None = None, note: str | None = None,
-           diff_format: str | None = None, show_pct: bool = False, tones: list | None = None) -> dict:
-    """One row of `compare`: a metric's value in each column, in column order."""
+           diff_format: str | None = None, show_pct: bool = False, tones: list | None = None,
+           unit: str | None = None) -> dict:
+    """One row of `compare`: a metric's value in each column, in column order; `unit` follows its label."""
     _check_format(format, f"metric {label!r}")
     from .data import _scalar
     return {k: v for k, v in dict(label=label, values=[_scalar(x) for x in values], format=format, better=better,
                                    note=note, diff_format=diff_format, show_pct=show_pct or None,
-                                   tones=tones).items() if v is not None}
+                                   tones=tones, unit=unit).items() if v is not None}
 
 
 def col(field: str, label: str | None = None, format: str | None = None, *, pill: bool = False,
-        tones: dict | None = None, bar: Any = False, align: str | None = None, wrap: bool = False) -> dict:
+        tones: dict | None = None, bar: Any = False, align: str | None = None, wrap: bool = False,
+        unit: str | None = None) -> dict:
     """A table column. `pill` shows the value as a status pill (`tones` maps values to good/bad/warn/info);
-    `bar` adds an inline bar for numbers; `wrap` gives long text room."""
+    `bar` adds an inline bar for numbers; `wrap` gives long text room; `unit` goes in the header."""
     _check_format(format, f"column {field!r}")
     return {k: v for k, v in dict(field=field, label=label, format=format, pill=pill or None, tones=tones,
-                                   bar=bar or None, align=align, wrap=wrap or None).items() if v is not None}
+                                   bar=bar or None, align=align, wrap=wrap or None, unit=unit).items() if v is not None}
 
 
 def points(data: Any, lat: str = "lat", lon: str = "lon", *, label: str | None = None, sublabel: str | None = None,
@@ -347,8 +350,11 @@ class Page:
               link: str | None = None, key: str | None = None, size: str | None = None, label: str | None = None,
               value: str | None = None, y_category: str | None = None, totals: list | None = None,
               dashed: Any = None, area: bool | None = None, show_data: bool | None = None,
-              center_label: str | None = None, id: str | None = None) -> dict:
-        """A chart. kind: bar | hbar | line | area | combo (bars y + line y2) | scatter | pie | donut |
+              center_label: str | None = None, unit: str | None = None, y2_unit: str | None = None,
+              id: str | None = None) -> dict:
+        """A chart. `unit` ("MW", "kg", "hours") labels the value axis, values and tooltips; a y2 in
+        another `y2_unit` gets its own axis.
+        kind: bar | hbar | line | area | combo (bars y + line y2) | scatter | pie | donut |
         heatmap (x, y_category, value) | waterfall (x, y, totals=[names of total bars]).
         Wide data: y=["a","b"]; long data: y="value", series="group". Values are drawn as given (pre-aggregate)."""
         if kind not in CHART_KINDS:
@@ -392,7 +398,7 @@ class Page:
                           "x_label": x_label, "y_label": y_label, "smooth": smooth, "legend": legend, "link": link,
                           "key": key, "size": size, "label": label, "value": value, "y_category": y_category,
                           "totals": totals, "dashed": dashed, "area": area, "show_data": show_data,
-                          "center_label": center_label, "id": id})
+                          "center_label": center_label, "unit": unit, "y2_unit": y2_unit, "id": id})
 
     def echarts(self, option: dict, *, title: str | None = None, subtitle: str | None = None, note: str | None = None,
                 height: int | None = None, id: str | None = None) -> dict:
@@ -914,7 +920,8 @@ def _describe(b: dict, spec: dict) -> str:
     data = spec.get("data", {})
     n = lambda name: len(data.get(name, [])) if isinstance(name, str) else 0  # noqa: E731
     if t == "kpis":
-        items = "; ".join(f"{k['label']}={_fmt(k.get('value'), k.get('format'), spec.get('currency', 'USD'))}" for k in b["items"])
+        items = "; ".join(f"{k['label']}={_fmt(k.get('value'), k.get('format'), spec.get('currency', 'USD'))}"
+                          + (f" {k['unit']}" if k.get("unit") else "") for k in b["items"])
         return f"{b['id']} kpis: {items}"
     if t == "compare":
         rows = "; ".join(f"{r['label']}: " + " | ".join(_fmt(v, r.get('format'), spec.get('currency', 'USD')) for v in r["values"]) for r in b["rows"])

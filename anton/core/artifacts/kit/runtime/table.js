@@ -11,11 +11,13 @@
     return rows.length ? Object.keys(rows[0]).map(function (k) { return {field: k}; }) : [];
   }
 
+  var SPEC_LABELS = (AK.spec && AK.spec.labels) || null;
+
   AK.blocks.table = function (b, parent) {
     var rows = AK.data(b.data).slice();
     var cols = colsOf(b, rows);
     cols.forEach(function (c) {
-      c.label = c.label || AK.label(b, c.field);
+      c.label = (c.label || AK.label(b, c.field)) + (c.unit ? ' (' + c.unit + ')' : '');
       c.format = c.format || AK.fieldFormat(b, c.field) || 'auto';
       var sample = rows.map(function (r) { return r[c.field]; }).filter(function (v) { return v != null && v !== ''; });
       // Dates and times in the page's language, times of day kept when the column has them.
@@ -96,6 +98,16 @@
     if (b.totals) { tfoot = AK.el('tfoot'); table.appendChild(tfoot); }
     wrap.appendChild(table);
     c.body.appendChild(wrap);
+    // A table that does not fit a narrow box (long text, wide numbers) becomes cards there too.
+    if (mobile !== 'cards' && b.mobile !== 'scroll') {
+      var fit = function () {
+        var w = wrap.getBoundingClientRect().width;
+        if (!w || w >= 560 || c.card.classList.contains('ak-cards-mobile')) return;
+        if (table.scrollWidth > wrap.clientWidth + 2) c.card.classList.add('ak-cards-mobile');
+      };
+      AK.watchSize(wrap, fit);
+      setTimeout(fit, 0);  // once the rows are in
+    }
     var more = null, limit = b.page_size || 200;
     var inlineBox = null;
     if (detail === 'inline') {
@@ -134,8 +146,25 @@
       return AK.toneOf(v, spec.map || spec.tones || null, spec.field);
     }
     function detailPairs(row) {
-      // Coordinates are for maps, not for people: left out unless asked for.
-      var fields = b.detail_fields || Object.keys(row).filter(function (f) { return !/(^|_|[a-z])(lat|lon|lng|latitude|longitude)$/i.test(f); });
+      // Unless the page names them (detail_fields): the table's columns, then the row's other fields
+      // that add something. Left out: coordinates (for maps, not people), a field repeating a value
+      // already shown (a helper copy), and on a page in another language a field without a label
+      // of its own (its name would show in English).
+      var fields = b.detail_fields;
+      if (!fields) {
+        var shown = cols.map(function (c) { return c.field; });
+        var seen = {};
+        shown.forEach(function (f) { if (row[f] != null && row[f] !== '') seen[String(row[f])] = true; });
+        var labelled = function (f) { return (b.labels && b.labels[f]) || (SPEC_LABELS && SPEC_LABELS[f]); };
+        fields = shown.concat(Object.keys(row).filter(function (f) {
+          if (shown.indexOf(f) >= 0 || /(^|_|[a-z])(lat|lon|lng|latitude|longitude)$/i.test(f)) return false;
+          var v = row[f];
+          if (v == null || v === '' || seen[String(v)]) return false;
+          if (AK.lang !== 'en' && !labelled(f)) return false;
+          seen[String(v)] = true;
+          return true;
+        }));
+      }
       return fields.map(function (f) {
         var col = cols.filter(function (cc) { return cc.field === f; })[0];
         var fmt = (col && col.format) || AK.fieldFormat(b, f) || 'auto';

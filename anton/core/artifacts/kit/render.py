@@ -99,17 +99,20 @@ def static_html(spec: dict, limit: int = 200) -> str:
                 out.append(title + "<ul>" + "".join(f"<li>{esc(i)}</li>" for i in b.get("items") or []) + "</ul>")
             elif t == "kpis":
                 out.append("<ul>" + "".join(
-                    f"<li>{esc(k.get('label'))}: <strong>{esc(k['value'] if isinstance(k.get('value'), str) and not k.get('format') else fmt(k.get('value'), k.get('format'), cur))}</strong></li>"
+                    f"<li>{esc(k.get('label'))}: <strong>{esc(k['value'] if isinstance(k.get('value'), str) and not k.get('format') else fmt(k.get('value'), k.get('format'), cur))}"
+                    f"{(' ' + esc(k['unit'])) if k.get('unit') else ''}</strong></li>"
                     for k in b.get("items") or []) + "</ul>")
             elif t == "compare":
-                rows = [[r.get("label")] + [fmt(v, r.get("format"), cur) if not isinstance(v, str) else v for v in r.get("values") or []]
+                rows = [[str(r.get("label")) + (f" ({r['unit']})" if r.get("unit") else "")]
+                        + [fmt(v, r.get("format"), cur) if not isinstance(v, str) else v for v in r.get("values") or []]
                         for r in b.get("rows") or []]
                 out.append(title + table([b.get("metric_label") or ""] + list(b.get("columns") or []), rows))
             elif t == "table":
                 rws = data.get(b.get("data"), [])
                 cols = [c.get("field") for c in (b.get("columns") or [])] or (list(rws[0].keys()) if rws else [])
                 fmts = {c.get("field"): c.get("format") for c in (b.get("columns") or [])}
-                labels = {c.get("field"): c.get("label") for c in (b.get("columns") or [])}
+                labels = {c.get("field"): (c.get("label") or label(b, c.get("field"))) + (f" ({c['unit']})" if c.get("unit") else "")
+                          for c in (b.get("columns") or [])}
                 rows = [[fmt(r.get(c), fmts.get(c) or form(b, c), cur) if not isinstance(r.get(c), str) else r.get(c) for c in cols] for r in rws]
                 out.append(title + table([labels.get(c) or label(b, c) for c in cols], rows))
             elif t in ("chart", "echarts", "map", "globe", "network", "timeline", "image", "html"):

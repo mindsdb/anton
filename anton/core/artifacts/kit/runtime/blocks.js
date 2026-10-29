@@ -154,7 +154,8 @@
       card.appendChild(AK.el('div', 'ak-kpi-label', k.label));
       var val = AK.el('div', 'ak-kpi-value' + (k.tone && k.color_value ? ' ak-tone-' + k.tone : ''));
       val.textContent = k.value == null ? '\u2014' : typeof k.value === 'string' && !k.format ? k.value : AK.fmt(k.value, k.format || 'auto');
-      if (val.textContent.length > 11) val.classList.add('ak-long');
+      if (val.textContent.length + (k.unit ? k.unit.length + 1 : 0) > 11) val.classList.add('ak-long');
+      if (k.unit && k.value != null) val.appendChild(AK.el('span', 'ak-kpi-unit', (/^[%°]/.test(k.unit) ? '' : '\u00a0') + k.unit));
       card.appendChild(val);
       if (k.delta != null) {
         var dv = k.delta, tone = k.delta_tone || deltaTone(AK.toNum(dv), k.better);
@@ -191,7 +192,7 @@
     (b.rows || []).forEach(function (r) {
       var tr = AK.el('tr');
       var th = AK.el('td');
-      th.textContent = r.label;
+      th.textContent = r.label + (r.unit ? ' (' + r.unit + ')' : '');
       if (r.note) { var n = AK.el('div', 'ak-note', r.note); th.appendChild(n); }
       tr.appendChild(th);
       var vals = r.values || [];

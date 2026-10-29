@@ -229,7 +229,7 @@
         if (!L.overlay) lane++;
       });
       // Milestones
-      var all = [];
+      var all = [], msBoxes = [];
       mss.forEach(function (L) {
         var rows = AK.data(L.data);
         var sc = L.color && rows.length && rows[0][L.color] !== undefined ? AK.colorScale(AK.uniq(rows, L.color), L.colors) : null;
@@ -257,9 +257,20 @@
           node.addEventListener('focus', function () { focus(m); });
           gMs.appendChild(node);
           if (L.show_labels && r[L.label] != null) {
-            var lab = AK.svg('text', {x: x, y: y - 10, 'text-anchor': 'middle', 'class': 'ak-tl-lbl'});
-            lab.textContent = String(r[L.label]);
-            gMs.appendChild(lab);
+            // Above the milestone, else below it, kept inside the chart; a label with no free spot is
+            // left to the milestone's tooltip, detail and list rather than drawn over another.
+            var txt = String(r[L.label]), w = txt.length * 6.2 + 6;
+            var lx = Math.max(labelW + w / 2, Math.min(width - 4 - w / 2, x));
+            var spot = [y - 10, y + 20].map(function (ly) { return {x: lx - w / 2, y: ly - 11, w: w, h: 14, ly: ly}; })
+              .filter(function (bx) {
+                return !msBoxes.some(function (o) { return bx.x < o.x + o.w && bx.x + bx.w > o.x && bx.y < o.y + o.h && bx.y + bx.h > o.y; });
+              })[0];
+            if (spot) {
+              msBoxes.push(spot);
+              var lab = AK.svg('text', {x: lx, y: spot.ly, 'text-anchor': 'middle', 'class': 'ak-tl-lbl'});
+              lab.textContent = txt;
+              gMs.appendChild(lab);
+            }
           }
         });
       });

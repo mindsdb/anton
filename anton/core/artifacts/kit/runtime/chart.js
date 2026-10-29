@@ -167,6 +167,8 @@
     var s0 = AK.uniq(rows, b.x);
     // Years as categories read as years ("2019", not "2,019").
     if (xfmt === 'auto' && s0.length && s0.every(function (c) { var n = AK.toNum(c); return n != null && n % 1 === 0 && n >= 1800 && n <= 2200; })) xfmt = 'text';
+    // Months written "2026-03" read as months in the page's language.
+    if (xfmt === 'auto' && s0.length && s0.every(function (c) { return /^\d{4}-\d{2}$/.test(String(c)) && AK.toDate(String(c)); })) xfmt = 'month';
     var yfmt = AK.fieldFormat(b, ys(b)[0]) || b.format || 'auto';
     var axisY = AK.axisFmt(yfmt);
     var narrow = width < 520;
@@ -179,7 +181,8 @@
     if (!horizontal && kind === 'bar' && !dateX && !ordered && b.horizontal !== false && s.cats.length <= 30 &&
         longestCat * 6.4 > (width - 70) / Math.max(1, s.cats.length) * 1.5) horizontal = true;
     // Value labels only where they fit: a vertical bar's slot must be wider than its label.
-    var labelFmt = function (v) { return AK.fmt(v, (yfmt.indexOf('currency') === 0 || Math.abs(v) >= 1e5) ? (yfmt.indexOf('currency') === 0 ? 'currency_compact' : 'compact') : yfmt); };
+    var unitOf = AK.withUnit;
+    var labelFmt = function (v) { return unitOf(AK.fmt(v, (yfmt.indexOf('currency') === 0 || Math.abs(v) >= 1e5) ? (yfmt.indexOf('currency') === 0 ? 'currency_compact' : 'compact') : yfmt), b.unit); };
     var widest = Math.max.apply(null, s.series.map(function (ser) { return Math.max.apply(null, ser.values.map(function (v) { return v == null ? 0 : labelFmt(v).length; }).concat([0])); }).concat([0]));
     var slot = (width - 70) / Math.max(1, s.cats.length) / (b.stack ? 1 : Math.max(1, s.series.length));
     var fits = horizontal ? true : widest * 6.6 + 4 < slot;
@@ -206,7 +209,7 @@
       type: 'value', min: b.y_min, max: b.y_max, splitLine: {lineStyle: {color: T.grid}}, minInterval: allInts ? 1 : undefined,
       axisLabel: {color: T.text3, fontSize: 11, formatter: axisY, hideOverlap: true},
       splitNumber: horizontal && narrow ? 3 : undefined,
-      name: b.y_label || '', nameTextStyle: {color: T.text3, align: horizontal ? 'center' : 'left'}, nameGap: horizontal ? 26 : 12
+      name: b.y_label || b.unit || '', nameTextStyle: {color: T.text3, align: horizontal ? 'center' : 'left'}, nameGap: horizontal ? 26 : 12
     };
     if (horizontal) { catAxis.inverse = true; catAxis.nameLocation = 'end'; opt.xAxis = valAxis; opt.yAxis = catAxis; }
     else { opt.xAxis = catAxis; opt.yAxis = [valAxis]; }
@@ -214,11 +217,12 @@
     // A second axis only for a measure in other units; the same units share the first axis, so the
     // line and the bars are read against one scale.
     var y2fmt0 = b.y2_format || (y2.length ? AK.fieldFormat(b, y2[0]) : null);
-    var ownAxis = y2.length && !horizontal && (b.y2_axis === true || (b.y2_axis !== false && y2fmt0 && String(y2fmt0).split(':')[0] !== String(yfmt).split(':')[0]));
+    var otherUnit = b.y2_unit && b.y2_unit !== b.unit;
+    var ownAxis = y2.length && !horizontal && (b.y2_axis === true || (b.y2_axis !== false && (otherUnit || (y2fmt0 && String(y2fmt0).split(':')[0] !== String(yfmt).split(':')[0]))));
     if (ownAxis) {
       var y2fmt = b.y2_format || AK.fieldFormat(b, y2[0]) || 'auto';
       opt.yAxis.push({type: 'value', splitLine: {show: false}, axisLabel: {color: T.text3, fontSize: 11, formatter: AK.axisFmt(y2fmt)},
-        name: b.y2_label || '', nameTextStyle: {color: T.text3}, min: b.y2_min, max: b.y2_max});
+        name: b.y2_label || b.y2_unit || '', nameTextStyle: {color: T.text3}, min: b.y2_min, max: b.y2_max});
     }
     var colorsAt = pointColors(b, rows, s.cats, null);
     // Several series take the page's colour for each name, so a category looks the same in every chart.
@@ -273,13 +277,14 @@
         var ser = opt.series[p.seriesIndex];
         var field = p.seriesIndex >= s.series.length ? y2[p.seriesIndex - s.series.length] : (s.series[p.seriesIndex] || {}).field;
         var v = p.value && p.value.value != null ? p.value.value : p.value;
-        return [p.seriesName, AK.fmt(v, allFmt(p.seriesName, field))];
+        return [p.seriesName, unitOf(AK.fmt(v, allFmt(p.seriesName, field)), p.seriesIndex >= s.series.length ? (b.y2_unit || b.unit) : b.unit)];
       }));
     };
     var multi = opt.series.length > 1;
     if (multi && b.legend !== false) {
       opt.legend = {top: 0, left: 0, type: 'scroll', icon: 'roundRect', itemWidth: 12, itemHeight: 8, textStyle: {color: T.text2, fontSize: 12}};
-      opt.grid.top = 40;
+      // Axis names (units) sit between the legend and the plot.
+      opt.grid.top = (b.y_label || b.unit || b.y2_label || b.y2_unit) ? 58 : 40;
     } else opt.grid.top = (b.y_label ? 30 : 16);
     if (b.x_label) opt.grid.bottom = 24;
     if ((b.ref_lines && b.ref_lines.length) || b.threshold) opt.grid.right = 28;
