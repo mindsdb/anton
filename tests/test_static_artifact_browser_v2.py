@@ -191,6 +191,25 @@ def test_custom_render_contract_detects_empty_data_view():
         browser.close()
 
 
+def test_composite_view_uses_lookup_data_without_extra_hidden_records():
+    data=Evidence.model_validate({'datasets':{
+        'items':{'source':{'label':'Synthetic items'},'rows':[{'id':'a','category':'x'},{'id':'b','category':'z'}]},
+        'categories':{'source':{'label':'Synthetic lookup'},'rows':[{'id':'x','label':'North'},{'id':'y','label':'Unused'},{'id':'z','label':'South'}]}}})
+    doc=Document.model_validate({'title':'Composite view','bindings':{
+        'items':{'dataset':'items','columns':['id','category']},'categories':{'dataset':'categories','columns':['id','label']}},
+        'views':[{'selector':'.item','binding':'items','minimum':'rows','inputs':['categories']}],
+        'sections':[{'id':'items','blocks':[{'type':'html','html':'<div id="items-list"></div><script>for(const row of ARTIFACT_DATA.items){const el=document.createElement("p");el.className="item";el.textContent=row.id+": "+ARTIFACT_DATA.categories.find(c=>c.id===row.category).label;document.getElementById("items-list").append(el);}</script>'}]}]})
+    with playwright.sync_playwright() as p:
+        browser=p.chromium.launch();page=browser.new_page();errors=[]
+        page.on('pageerror',lambda error:errors.append(str(error)))
+        page.on('console',lambda message:errors.append(message.text) if message.type=='error' else None)
+        page.set_content(render(doc,data).html);page.wait_for_timeout(450)
+        assert page.locator('.item').all_text_contents()==['a: North','b: South']
+        assert not page.get_by_role('alert').count() and not errors
+        assert 'Unused' not in page.locator('body').inner_text()
+        browser.close()
+
+
 def test_wide_tables_recompose_as_complete_labelled_records_on_phones():
     columns=['Record','Category','Site','Date','Amount','Explanation']
     data=Evidence.model_validate({'datasets':{'records':{'source':{'label':'Synthetic QA'},

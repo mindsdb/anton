@@ -215,6 +215,12 @@ e.g. {"selector":".desk","binding":"desks","minimum":"rows"}. The host derives t
 from the complete bound rows and checks the actual rendered elements. The selector must match
 actual meaningful records/marks, not an empty container. Use minimum="one" for an aggregate
 visual such as a canvas, or a deliberately paginated view; provide a useful empty state for no rows.
+For a composite view, declare lookup bindings in its inputs, e.g.
+{"selector":".item","binding":"items","minimum":"rows","inputs":["categories"]}.
+This checks displayed items without demanding an unrelated visual for every category lookup.
+Every input must name an actual public binding; do not invent hidden marks for lookup rows.
+Use minimum="one" for a view of an interactive filtered subset, and implement the requested
+states completely. A minimum render check does not establish that those interactions are correct.
 For compose_custom_html, views is a top-level argument alongside html and bindings. For custom
 fragments in a structured document, views belongs in document beside document.bindings.
 Read bound rows with window.ARTIFACT_DATA[name], not a guessed JSON wrapper shape.

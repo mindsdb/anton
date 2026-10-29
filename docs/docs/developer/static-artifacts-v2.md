@@ -180,6 +180,12 @@ page. Unselected fields and unused facts stay out. Query definitions can refer
 to private fields to filter/sort without publishing those fields in the result.
 The exported bindings include a canonical evidence digest and source metadata.
 Custom bindings require declared render checks that tie selectors to complete row counts (or one aggregate view). The browser reports an error when those elements do not render, even if the rest of the page loads cleanly. These are minimum checks, not a proof of semantic correctness.
+Composite views can list additional bindings in `inputs` for coordinates, categories,
+or other lookup data. Those names must exist; the mark minimum applies to the primary
+binding, without inventing standalone marks for lookup rows. An interactive filtered
+subset may use a one-view minimum; its full state behavior still needs browser and
+content review. These dependencies do not make the inputs private: all explicitly
+bound fields and rows remain in the saved page.
 
 A binding is an explicit publication decision: every selected row/field is
 public, including content in collapsed tables or inactive slides.
