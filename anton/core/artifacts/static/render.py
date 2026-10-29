@@ -143,7 +143,8 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
     for query in document.bindings.values():
         source(query)
     sections = []
-    for section in document.sections:
+    title_in_first_slide = document.kind == 'slides' and document.sections[0].title == document.title and not (document.subtitle or document.eyebrow)
+    for section_index, section in enumerate(document.sections):
         blocks = []
         adjacent_metrics = []
         def flush_metrics():
@@ -172,12 +173,14 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
                 blocks.append(f'<div class="custom">{block.html}</div>')
         flush_metrics()
         heading = (f'<p class="eyebrow">{text(section.eyebrow)}</p>' if section.eyebrow else '')
-        heading += f'<h2>{text(section.title)}</h2>' if section.title else ''
+        if section.title:
+            heading += f'<h1 id="_artifact-title">{text(section.title)}</h1>' if title_in_first_slide and section_index == 0 else f'<h2>{text(section.title)}</h2>'
         heading += f'<p class="section-summary">{text(section.summary)}</p>' if section.summary else ''
         notes = f'<details class="speaker-notes"><summary>Speaker notes</summary><p>{text(section.notes)}</p></details>' if section.notes else ''
         sections.append(f'<section id="{section.id}" class="section" aria-label="{text(section.title or section.id)}">'
                         f'<header>{heading}</header><div class="blocks {section.layout}">{"".join(blocks)}</div>{notes}</section>')
     title, subtitle, eyebrow = text(document.title), text(document.subtitle), text(document.eyebrow)
+    document_header = '' if title_in_first_slide else f'<header class="document-header" id="_artifact-title"><p class="eyebrow">{eyebrow}</p><h1>{title}</h1><p class="subtitle">{subtitle}</p></header>'
     def fact_sources(name):
         fact = document.facts[name]
         if hasattr(fact, 'query'):
@@ -202,7 +205,7 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
 <button type="button" data-action="outline" aria-expanded="false" aria-controls="_artifact-outline" hidden>Contents</button>
 <button type="button" data-action="present" hidden>Present</button><button type="button" data-action="print" hidden>Print / PDF</button></div></div>
 <div class="reading-layout"><nav id="_artifact-outline" aria-label="Contents"><p class="eyebrow">Contents</p>{outline}</nav>
-<main id="_artifact-content"><header class="document-header" id="_artifact-title"><p class="eyebrow">{eyebrow}</p><h1>{title}</h1><p class="subtitle">{subtitle}</p></header>
+<main id="_artifact-content">{document_header}
 {''.join(sections)}<footer id="_artifact-sources"><h2>Sources</h2>{'<ul>' + source_list + '</ul>' if source_list else '<p>No external data sources.</p>'}</footer></main></div>
 <script>{_asset('runtime.js') + _asset('slides.js') + _asset('check-views.js')}</script></body></html>'''
     validate_ids(html)
