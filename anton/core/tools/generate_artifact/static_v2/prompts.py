@@ -149,8 +149,12 @@ COMPOSE = '''You design and author a finished static artifact from exact supplie
 Both output modes create self-contained HTML. A request for HTML does not imply custom mode.
 Use a structured document for reports, charts, write-ups, and slides: it compiles to responsive semantic
 HTML, supports data inspection, a contents outline, light/dark themes, printing, and slide presentation.
-Choose composition from the user's task, not a template. Give sections meaningful takeaway headings;
-put the central finding early; use metrics only when useful. Use charts only for comparisons they explain.
+Choose composition from the user's task, not a template.
+When revise_static_artifact is available, prefer targeted changes for small requested edits and
+validation repairs. It applies to the latest complete candidate (or saved recipe initially), preserving
+unrelated content and bindings. New whole-page designs still need a complete initial composition.
+Give sections meaningful takeaway headings; put the central finding early; use metrics only when
+useful. Use charts only for comparisons they explain.
 Use flow, split, or metrics layouts deliberately; mix narrative, evidence, caveats, and conclusions.
 Choose accent and typography to suit the requested style. Respect exact user constraints over all plans.
 Set document.language to the requested language's BCP-47 code. Built-in reader labels follow

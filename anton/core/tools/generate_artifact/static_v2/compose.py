@@ -22,7 +22,7 @@ from ..streaming import _call_with_stream_retry
 from .prompts import COMPOSE, context
 from . import resources as reference
 from . import content_review
-from . import snapshots
+from . import snapshots, revisions
 
 
 class Structured(Model):
@@ -101,11 +101,13 @@ async def compose(state, evidence: Evidence):
     if target is None or not primary.lower().endswith('.html'):
         return 'Static artifact primary must be an HTML path inside its artifact folder.'
     previous = _read(state, primary, 8 * 1024 * 1024)
+    draft = None
     custom_allowed = bool(previous)  # Preserve an existing custom or legacy page.
     try:
         saved = json.loads(_read(state, '.static/composition.json'))
         if saved['page_sha256'] == hashlib.sha256(previous.encode()).hexdigest():
             custom_allowed = saved['composition'].get('mode') == 'html'
+            draft = (Custom if custom_allowed else Structured).model_validate(saved['composition'])
             existing = json.dumps(saved['composition']) + '\nReference resources (reload these if still used):\n' + json.dumps(saved.get('resources', {}))
         else:
             existing = previous
@@ -143,7 +145,7 @@ async def compose(state, evidence: Evidence):
             return 'Static artifact stopped before publication; the previous artifact is preserved.'
         state.step_started('generate_frontend', attempt=attempt)
         response, budget = await _call_with_stream_retry(state.session._llm.code_stream,
-            system=COMPOSE, messages=messages, tools=[TOOL, CUSTOM_TOOL if custom_allowed else CUSTOM_SURFACE, INSPECT, reference.TOOL, reference.GEOGRAPHY_TOOL, reference.RELEASE_TOOL], max_tokens=14000, default_cap=None,
+            system=COMPOSE, messages=messages, tools=[TOOL, CUSTOM_TOOL if custom_allowed else CUSTOM_SURFACE, INSPECT, reference.TOOL, reference.GEOGRAPHY_TOOL, reference.RELEASE_TOOL] + ([revisions.TOOL] if draft is not None else []), max_tokens=14000, default_cap=None,
             on_text=state.peek_for('generate_frontend'))
         state.peek_done('generate_frontend')
         state.trace_log.llm_call(node='static_compose', method='code_stream', system=COMPOSE, messages=messages, response=response, attempt=attempt)
@@ -201,13 +203,20 @@ async def compose(state, evidence: Evidence):
         phase = 'composition'
         try:
             if looks_truncated(response, budget) or len(response.tool_calls) != 1:
-                raise ValueError('Return one complete compose_static_artifact call within the output budget')
+                raise ValueError('Return one complete composition or revision call within the output budget')
             call = response.tool_calls[0]
-            if call.name not in (TOOL['name'], CUSTOM_TOOL['name']) or call.parse_error or call.repaired:
+            if call.name not in (TOOL['name'], CUSTOM_TOOL['name'], revisions.TOOL['name']) or call.parse_error or call.repaired:
                 raise ValueError('Return valid, complete structured arguments')
             if call.name == CUSTOM_TOOL['name'] and not custom_allowed:
                 raise ValueError('Use compose_static_artifact for reports/slides, or first call choose_custom_surface with the reason the whole-page experience needs custom HTML')
-            output = Structured(mode='document', document=Composition.model_validate(call.input).document) if call.name == TOOL['name'] else Custom(mode='html', **CustomComposition.model_validate(call.input).model_dump())
+            if call.name == revisions.TOOL['name']:
+                if draft is None:
+                    raise ValueError('No complete composition exists to revise; compose the initial candidate first')
+                revised = revisions.apply(draft.model_dump(), revisions.Revision.model_validate(call.input))
+                output = (Structured if draft.mode == 'document' else Custom).model_validate(revised)
+            else:
+                output = Structured(mode='document', document=Composition.model_validate(call.input).document) if call.name == TOOL['name'] else Custom(mode='html', **CustomComposition.model_validate(call.input).model_dump())
+            draft = output
             html, manifest = compile_output(output, evidence, resource_sources={name: item['source'] for name, item in resources.items()})
             html = reference.embed(html, manifest, resources)
             html = attachments.embed_assets(html, staged, asset_root, cell_sandbox=cell_sandbox_of(getattr(state.session, "_scratchpads", None)))
@@ -255,7 +264,7 @@ async def compose(state, evidence: Evidence):
                     'data_publication': {'evidence_sha256': evidence.digest(), 'bindings': list(manifest['bindings']), 'origin': state.static_evidence_origin,
                         'datasets': {name: {'rows': len(dataset.rows), 'source_label': dataset.source.label[:200], 'kind': dataset.source.kind} for name, dataset in evidence.datasets.items()}}}
         except (ValueError, OSError) as error:
-            feedback = f'Artifact not published: {error}. Correct the complete composition. The prior page is intact.'
+            feedback = f'Artifact not published: {error}. Correct the composition; revise_static_artifact can repair the latest complete candidate when available. The prior page is intact.'
             failures[phase] += 1
             state.record('static_artifact_v2', 'retry', f'{phase} {failures[phase]}/3: {error}'[:500])
             results = [protocol.tool_result(call.id, feedback) for call in response.tool_calls]
