@@ -6,6 +6,7 @@ The acquisition layer owns access; this module never opens a source or network.
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation, localcontext
+from datetime import date, timedelta
 from hashlib import sha256
 import json
 import math
@@ -84,7 +85,7 @@ class QueryCalculation(Model):
 class QueryCast(Model):
     name: Name
     field: str
-    type: Literal['decimal'] = 'decimal'
+    type: Literal['decimal', 'date', 'week_start', 'month_start', 'quarter_start', 'year_start'] = 'decimal'
 
 
 class Query(Model):
@@ -96,6 +97,7 @@ class Query(Model):
     order_by: list[Order] = Field(default_factory=list)
     calculations: list[QueryCalculation] = Field(default_factory=list, max_length=50)
     casts: list[QueryCast] = Field(default_factory=list, max_length=50)
+    limit: StrictInt | None = Field(default=None, ge=1, le=100_000, description='Apply after grouping, calculations, projection and ordering. Omit to keep all selected rows.')
 
     @model_validator(mode="after")
     def shape(self):
@@ -201,6 +203,26 @@ def _cast_rows(source, casts):
             if cast.field not in row:
                 raise DataError(f'Cast row {index}: missing field {cast.field}')
             value = row[cast.field]
+            if value is None:
+                row[cast.name] = None
+                continue
+            if cast.type != 'decimal':
+                if not isinstance(value, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', value):
+                    raise DataError(f'Calendar cast needs an ISO calendar date, without an inferred timezone: {cast.field}')
+                try:
+                    day = date.fromisoformat(value)
+                except ValueError as error:
+                    raise DataError(f'Invalid calendar date in {cast.field}') from error
+                if cast.type == 'week_start':
+                    day -= timedelta(days=day.weekday())
+                elif cast.type == 'month_start':
+                    day = day.replace(day=1)
+                elif cast.type == 'quarter_start':
+                    day = day.replace(month=(day.month-1)//3*3+1, day=1)
+                elif cast.type == 'year_start':
+                    day = day.replace(month=1, day=1)
+                row[cast.name] = day.isoformat()
+                continue
             if isinstance(value, str):
                 value = value.strip()
                 if not re.fullmatch(r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?', value):
@@ -209,7 +231,7 @@ def _cast_rows(source, casts):
                     value = Decimal(value)
                 except InvalidOperation as error:
                     raise DataError(f'Invalid decimal in {cast.field}') from error
-            row[cast.name] = None if value is None else number(value)
+            row[cast.name] = number(value)
         rows.append(row)
     return rows
 
@@ -269,7 +291,7 @@ def execute(evidence: Evidence, query: Query) -> list[dict]:
         except TypeError as exc:
             raise DataError(f"Cannot sort mixed types in {order.field}") from exc
         rows = present + [r for r in rows if r[order.field] is None]
-    return rows
+    return rows[:query.limit] if query.limit is not None else rows
 
 
 def json_value(value):

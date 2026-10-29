@@ -95,6 +95,12 @@ an existing field. Unambiguous numeric text is parsed directly into Decimal, whi
 null stays null and booleans, units and ambiguous separators are rejected. This
 allows exact aggregates over text-source values without weakening ordinary numeric
 type checks or converting identifier strings implicitly.
+Calendar casts validate exact `YYYY-MM-DD` strings and add `date`, `week_start`
+(Monday), `month_start`, `quarter_start` or `year_start` aliases before grouping.
+They preserve the original date and nulls; timestamps require an explicitly
+resolved timezone upstream. Query `limit` is an optional positive integer applied
+after grouping, calculation, projection and sorting, so ordered top-N selections
+remain deterministic and only their selected public fields are emitted.
 
 Facts select one exact query result or calculate over named facts. Division by
 zero and missing inputs produce unavailable values. Text uses `{{fact_name}}`

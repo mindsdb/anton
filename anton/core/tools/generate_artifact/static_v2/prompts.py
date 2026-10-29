@@ -165,6 +165,13 @@ Casts add new fields before filtering and aggregation; they never overwrite the 
 silently convert identifiers. They accept unambiguous decimal strings and numeric values, retain
 nulls, and reject booleans, units and locale-ambiguous separators. Sum the cast output with a host
 measure. Do not copy a computed total from caller notes or inline it in HTML instead of binding it.
+Calendar casts accept exact YYYY-MM-DD source strings: date validates the date, week_start
+returns its Monday, and month_start/quarter_start/year_start return the period's first day.
+They preserve null and the original field, and reject timestamps instead of guessing a timezone.
+Group by the new period alias and sum the measure on the host; retain every relevant source row.
+A query may set limit to a positive row count after ordering, aggregation and calculations.
+Use ordered limits for an explicitly requested top-N or one-row extremum, and label subsets;
+omit limit when the user needs complete records. The selected result still uses exact host values.
 Queries support exact row-wise and grouped-output arithmetic with calculations:
 [{"name":"rate","op":"divide","fields":["completed","planned"]},
  {"name":"variance","op":"subtract","fields":["completed","planned"]}].
