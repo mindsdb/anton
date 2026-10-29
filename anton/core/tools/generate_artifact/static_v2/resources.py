@@ -1,5 +1,6 @@
 """Bounded reference data and pinned display libraries, embedded before author code."""
 import hashlib
+import asyncio
 import json
 import re
 from typing import Literal
@@ -9,6 +10,7 @@ import httpx2 as httpx
 from pydantic import Field
 
 from anton.core.artifacts.static.data import Model, Name
+from anton.core.artifacts.static.geography import world_reference
 from anton.core.artifacts.static.render import _script_json, _inject_head
 from anton.core.artifacts.static.views import validate_ids
 from anton.core.tools.web_tools import _check_url_ssrf, _TransientFetchError
@@ -25,6 +27,21 @@ class Resource(Model):
 
 
 TOOL = {'name': 'load_static_resource', 'description': 'Embed supporting resources offline. kind=json loads authentic public reference data, such as geometry, topology, or diagram structure, as window.ARTIFACT_RESOURCES[name]. kind=script loads a browser-ready library bundle from a pinned npm version on cdn.jsdelivr.net and runs it before author scripts. Downloads use the normal web URL policy, are bounded, and never require a view-time fetch. Use public HTTPS URLs without credentials or query parameters. Never invent real-world geometry or replace the designated business evidence.', 'input_schema': Resource.model_json_schema()}
+
+
+class Geography(Model):
+    name: Name
+    reference: Literal['world-countries-110m']
+
+
+GEOGRAPHY_TOOL = {'name': 'load_static_geography', 'description': 'Embed the built-in pinned Natural Earth country map without network access, as window.ARTIFACT_RESOURCES[name]. reference=world-countries-110m is a GeoJSON FeatureCollection with 177 Polygon/MultiPolygon features; each has id and properties.name / properties.iso_a2. It is GeoJSON, not TopoJSON: no topology decoder is needed. Render with a maintained geographic projection/path library, using the same projection for exact source-coordinate markers. This coarse reference is geographic context, not authoritative borders or business evidence. Libraries can be bundled with load_static_resource.', 'input_schema': Geography.model_json_schema()}
+
+
+async def load_geography(resource: Geography):
+    item = await asyncio.to_thread(world_reference)
+    if item['source']['bytes'] > MAX_BYTES:
+        raise ValueError('Built-in geography exceeds the resource size limit')
+    return item
 
 
 class Release(Model):

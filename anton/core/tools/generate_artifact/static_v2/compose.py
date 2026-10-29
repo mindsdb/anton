@@ -143,12 +143,12 @@ async def compose(state, evidence: Evidence):
             return 'Static artifact stopped before publication; the previous artifact is preserved.'
         state.step_started('generate_frontend', attempt=attempt)
         response, budget = await _call_with_stream_retry(state.session._llm.code_stream,
-            system=COMPOSE, messages=messages, tools=[TOOL, CUSTOM_TOOL if custom_allowed else CUSTOM_SURFACE, INSPECT, reference.TOOL, reference.RELEASE_TOOL], max_tokens=14000, default_cap=None,
+            system=COMPOSE, messages=messages, tools=[TOOL, CUSTOM_TOOL if custom_allowed else CUSTOM_SURFACE, INSPECT, reference.TOOL, reference.GEOGRAPHY_TOOL, reference.RELEASE_TOOL], max_tokens=14000, default_cap=None,
             on_text=state.peek_for('generate_frontend'))
         state.peek_done('generate_frontend')
         state.trace_log.llm_call(node='static_compose', method='code_stream', system=COMPOSE, messages=messages, response=response, attempt=attempt)
         messages.append({'role': 'assistant', 'content': protocol.assistant_blocks(response)})
-        if response.tool_calls and all(call.name in (CUSTOM_SURFACE['name'], INSPECT['name'], reference.TOOL['name'], reference.RELEASE_TOOL['name']) for call in response.tool_calls) and not looks_truncated(response, budget):
+        if response.tool_calls and all(call.name in (CUSTOM_SURFACE['name'], INSPECT['name'], reference.TOOL['name'], reference.GEOGRAPHY_TOOL['name'], reference.RELEASE_TOOL['name']) for call in response.tool_calls) and not looks_truncated(response, budget):
             results = []
             for call in response.tool_calls:
                 if state.winding_down() or state.abandoned.is_set():
@@ -169,11 +169,12 @@ async def compose(state, evidence: Evidence):
                         del resources[name]
                         results.append(protocol.tool_result(call.id, f'Released {name}; it will not be embedded or execute in the next candidate.'))
                         continue
-                    if call.name == reference.TOOL['name']:
-                        resource = reference.Resource.model_validate(call.input)
+                    if call.name in (reference.TOOL['name'], reference.GEOGRAPHY_TOOL['name']):
+                        builtin = call.name == reference.GEOGRAPHY_TOOL['name']
+                        resource = (reference.Geography if builtin else reference.Resource).model_validate(call.input)
                         if resource.name not in resources and len(resources) >= 16:
                             raise ValueError('At most 16 reference resources can be embedded')
-                        item = await reference.load(resource)
+                        item = await reference.load_geography(resource) if builtin else await reference.load(resource)
                         total = sum(value['source']['bytes'] for name, value in resources.items() if name != resource.name) + item['source']['bytes']
                         if total > reference.MAX_TOTAL_BYTES:
                             raise ValueError('Combined reference resources exceed 4 MiB')
@@ -184,6 +185,8 @@ async def compose(state, evidence: Evidence):
                             shape = {'keys': [key[:128] for key in keys], 'keys_are_previews': len(item['data']) > 20 or any(len(key) > 128 for key in keys)}
                         else:
                             shape = {'items': len(item['data'])} if isinstance(item['data'], list) else 'Browser library bundled; its globals initialize before author scripts'
+                        if builtin:
+                            shape.update(type='FeatureCollection', features=len(item['data']['features']), properties=['name', 'iso_a2'], geometry=['Polygon', 'MultiPolygon'])
                         result = json_value({'name': resource.name, **item['source'], 'shape': shape})
                         results.append(protocol.tool_result(call.id, result))
                         continue
