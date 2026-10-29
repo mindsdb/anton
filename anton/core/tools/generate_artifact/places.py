@@ -7,7 +7,6 @@ place: "Stratford, Ontario" picks the Canadian town, a bare "Stratford" stays un
 from __future__ import annotations
 
 import gzip
-import json
 import re
 import unicodedata
 from functools import lru_cache
@@ -80,15 +79,12 @@ def resolve(text):
             "country": countries.get(place["country"], place["country"]), "source": "GeoNames"}
 
 
-def contract(found, limit=80):
-    """What the writer needs to place them: the exact names, and how to use them."""
-    names = [f"{text} ({place['country']})" for text, place in list(found.items())[:limit]]
-    more = f" and {len(found) - limit} more" if len(found) > limit else ""
-    return ("PLACES: these exact source strings name one known place each (GeoNames, offline, town "
-            f"centres): {json.dumps(names, ensure_ascii=False)}{more}. window.ARTIFACT_PLACES[name] is "
-            "{lat, lon, name, country}. In map and globe sections give a point {place: name} instead "
-            "of lat/lon, and a route end as the name; the runtime places them and lists any it can't. "
-            "A record's value combined with its country or region appears as \"value, region\".")
+_GEOGRAPHY = re.compile(r"""\btype\s*:\s*['"](?:map|globe)['"]|ARTIFACT_PLACES""")
+
+
+def needed(code):
+    """Whether the written page draws a map or globe, or reads the places itself."""
+    return bool(_GEOGRAPHY.search(code or ""))
 
 
 def index(data):

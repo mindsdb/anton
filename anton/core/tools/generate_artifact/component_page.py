@@ -33,7 +33,8 @@ sections are any of:
   Keys are literal keys (including dotted field names). All columns remain visible on phones.
 - {type:'map'|'globe',title,caption?,points:[{name,lat,lon,label?,color?} or {name,place,label?,color?}],
   routes?:[{from:[lon,lat] or place,to:[lon,lat] or place,label?,color?}],center?:[lon,lat],library?:'d3'|'echarts'}.
-  A place is an exact name from the PLACES list in the contract; the runtime places it.
+  A place is a place name exactly as in the data ("Hong Kong", or a record's town and region joined
+  as "Stratford, Ontario"); the runtime places names with one known match.
   Map defaults to real D3 world geography with zoom/pan. Globe is actual rotatable globe.gl with
   country polygons and routes; it has no external textures. ECharts is an alternative for maps.
   Use only observed coordinates or listed places; never type coordinates. Unresolved places are listed

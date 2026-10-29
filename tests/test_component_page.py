@@ -103,3 +103,19 @@ def test_maps_get_label_placement_and_legends_and_motion_only_on_request():
     page = component_page.document("await CoworkPage({title:'T',sections:[]});")
     assert "CoworkMapLabels" in page and "CoworkGeoLegend" in page
     assert "Only when the user asks for motion" in Path(fast_static.__file__).read_text()
+
+
+@pytest.mark.parametrize("section,bound", [
+    ("{type:'map',title:'M',points:[{name:'a',place:'Lyon'}]}", True),
+    ("{type:'text',title:'T',text:'Lyon'}", False)])
+async def test_places_are_bound_only_for_a_page_with_a_map(tmp_path, monkeypatch, section, bound):
+    monkeypatch.setenv("ANTON_STATIC_COMPONENT_WRITER", "on")
+    (tmp_path / "observed-data.json").write_text(json.dumps({"rows": [{"at": "Lyon"}]}))
+    program = "await CoworkPage({title:'T',lang:'en',sections:[" + section + "]});"
+    async def stream(**kwargs):
+        yield StreamComplete(LLMResponse(content=program))
+    monkeypatch.setattr(fast_static.verifiers, "verify_frontend_live", lambda *a, **kw: BrowserCheck(status="passed"))
+    state = GenState(session=SimpleNamespace(history=[], _llm=SimpleNamespace(code_stream=stream)),
+                     artifact_type="html-app", artifact_path=tmp_path, slug="page", act_first=True)
+    assert (await fast_static.run(state))["status"] == "generated"
+    assert ("window.ARTIFACT_PLACES=" in (tmp_path / "index.html").read_text()) is bound

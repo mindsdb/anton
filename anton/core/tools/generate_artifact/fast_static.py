@@ -235,9 +235,8 @@ async def run(state):
     except (OSError, ValueError, RecursionError):
         state.verify_warnings.append("The structured source handoff could not be read; only observed tool output was used.")
     bound_data, contract = observed_data.collect(handoff, existing)
-    found_places = places.index(bound_data) if bound_data else {}
     if bound_data:
-        evidence = contract + ("\n" + places.contract(found_places) if found_places else "")
+        evidence = contract
         existing = observed_data.strip_binding(existing)
     # The component program reads window.ARTIFACT_DATA, so it needs bound data.
     components = bool(bound_data) and os.environ.get("ANTON_STATIC_COMPONENT_WRITER") == "on"
@@ -279,7 +278,10 @@ async def run(state):
             "DO NOT transcribe or invent those arrays, include sample rows "
             "as substitutes, or create a script that assigns ARTIFACT_DATA. Generate only "
             "the presentation and interaction code around the host-provided values. "
-            "Use compact CSS and DOM rendering rather than repeated row markup."
+            "Use compact CSS and DOM rendering rather than repeated row markup. "
+            "For a map, window.ARTIFACT_PLACES[name] gives {lat, lon, name, country} for a place "
+            "name exactly as in the data (a record's town and region joined as \"town, region\"), "
+            "when it has one known match; list the names it lacks instead of guessing positions."
         )
     component_system = component_page.SYSTEM + (
         "\nEach chart has a Data button exposing its actual plotted values in a readable "
@@ -317,7 +319,9 @@ async def run(state):
         try:
             html = component_page.document(response.content) if components else document(response.content)
             if bound_data:
-                html = observed_data.bind(html, bound_data, found_places)
+                # Only a page with a map or globe pays for the place lookup
+                found = places.index(bound_data) if places.needed(response.content) else None
+                html = observed_data.bind(html, bound_data, found)
         except ValueError as exc:
             messages += [{"role": "assistant", "content": response.content},
                          {"role": "user", "content": str(exc)}]

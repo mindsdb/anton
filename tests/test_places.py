@@ -33,9 +33,11 @@ def test_a_record_naming_its_region_overrides_the_better_known_town():
     assert "Perth" not in found  # alone it would be the Australian city
 
 
-def test_contract_lists_the_exact_names_and_how_to_use_them():
-    text = places.contract(places.index({"rows": [{"at": "Lyon"}]}))
-    assert '"Lyon (France)"' in text and "{place: name}" in text
+@pytest.mark.parametrize("code,wanted", [
+    ("sections:[{type:'map',points:[]}]", True), ('{type: "globe"}', True),
+    ("const p = window.ARTIFACT_PLACES[name];", True), ("sections:[{type:'chart'}]", False), ("", False)])
+def test_only_a_page_with_a_map_or_globe_needs_the_places(code, wanted):
+    assert places.needed(code) is wanted
 
 
 def test_places_are_bound_beside_the_data_and_stripped_on_the_next_build():
