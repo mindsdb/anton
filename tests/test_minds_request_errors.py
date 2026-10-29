@@ -16,6 +16,7 @@ from unittest import mock
 import pytest
 from rich.console import Console
 
+import anton.chat as chat
 import anton.tools as tools
 from anton.minds_client import (
     describe_minds_request_failure,
@@ -47,7 +48,8 @@ def server():
     routes: dict[str, tuple[int, str, bytes]] = {}
     handler = type("Handler", (_Handler,), {"routes": routes})
     srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    # A short poll keeps shutdown() from waiting half a second per test.
+    thread = threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
 
     def answer(path: str, status: int, body, content_type: str = "application/json"):
@@ -98,7 +100,7 @@ async def test_publish_tool_names_the_request_status_and_server_message(tmp_path
     out = await _tool_publish(tmp_path, base)
 
     assert out.startswith(f"PUBLISH FAILED: POST {base}/upload returned HTTP 401: Invalid token.")
-    assert "credentials" in out
+    assert "ANTON_MINDS_API_KEY" in out
 
 
 @pytest.mark.asyncio
@@ -188,9 +190,90 @@ def test_long_server_text_keeps_its_end(server):
         minds_request(f"{base}/upload", "key", method="POST", payload=b"{}")
 
     line = describe_minds_request_failure(caught.value)
-    assert line.endswith("no matching dist. Common reasons: wrong URL, malformed request, or access restrictions on that endpoint.")
+    assert line.endswith("no matching dist. The server refused the request.")
     assert len(line) < 700
 
 
 def test_a_local_failure_is_not_described_as_a_request():
     assert describe_minds_request_failure(FileNotFoundError("Path not found: x")) is None
+
+
+@pytest.mark.parametrize("status,body", [
+    (500, {"error": "KeyError: 'files'"}),
+    (502, b"<html>Bad gateway</html>"),
+    (503, b""),
+    (504, {"error": "pip install timed out (540s)"}),
+])
+def test_a_server_error_is_reported_without_a_cause(server, status, body):
+    """The agent read "outage" into a bare status once; the line it reads
+    must not hand it that story either."""
+    base, answer = server
+    answer("/upload", status, body, "application/json" if isinstance(body, dict) else "text/html")
+
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        minds_request(f"{base}/upload", "key", method="POST", payload=b"{}")
+
+    line = describe_minds_request_failure(caught.value)
+    assert line.startswith(f"POST {base}/upload returned HTTP {status}")
+    assert "outage" not in line.lower()
+
+
+def test_no_response_is_reported_without_a_cause():
+    base = _closed_port_url()
+
+    with pytest.raises(urllib.error.URLError) as caught:
+        minds_request(f"{base}/list", "key")
+
+    line = describe_minds_request_failure(caught.value)
+    assert line.startswith(f"GET {base}/list got no response.")
+    assert "outage" not in line.lower()
+
+
+def _chat_settings(tmp_path: Path, publish_url: str):
+    return mock.Mock(
+        minds_api_key="key", publish_url=publish_url, minds_ssl_verify=True,
+        artifacts_dir=str(tmp_path / "artifacts"), workspace_path=str(tmp_path),
+    )
+
+
+@pytest.mark.asyncio
+async def test_slash_publish_names_the_request_and_server_message(tmp_path, server):
+    base, answer = server
+    answer("/upload", 400, {"error": "bad [/bold] value"})
+    _artifact(tmp_path)
+    console = Console(record=True, width=300)
+
+    async def public(*args, **kwargs):
+        return {"mode": "public"}
+
+    with mock.patch("anton.publish_access.prompt_access", side_effect=public), \
+         mock.patch("webbrowser.open"):
+        await chat._handle_publish(console, _chat_settings(tmp_path, base), file_arg="sales/report.html")
+
+    assert f"Publish failed: POST {base}/upload returned HTTP 400: bad [/bold] value." in console.export_text()
+
+
+@pytest.mark.asyncio
+async def test_slash_unpublish_names_the_failed_listing(tmp_path, server):
+    base, answer = server
+    answer("/list", 500, {"error": "[/oops] listing broke"})
+    console = Console(record=True, width=300)
+
+    await chat._handle_unpublish(console, _chat_settings(tmp_path, base), mock.Mock())
+
+    assert f"Failed to list reports: GET {base}/list returned HTTP 500: [/oops] listing broke." in console.export_text()
+
+
+@pytest.mark.asyncio
+async def test_slash_unpublish_names_the_failed_delete(tmp_path, server):
+    base, answer = server
+    answer("/list", 200, {"reports": [
+        {"title": "sales", "report_id": "247c4983", "md5": "m", "view_url": "u"},
+    ]})
+    answer("/delete/247c4983", 404, {"error": "Report [/x] not found"})
+    console = Console(record=True, width=300)
+
+    with mock.patch("anton.chat.prompt_or_cancel", new=mock.AsyncMock(side_effect=["1", "y"])):
+        await chat._handle_unpublish(console, _chat_settings(tmp_path, base), mock.Mock())
+
+    assert f"Failed to remove: DELETE {base}/delete/247c4983 returned HTTP 404: Report [/x] not found." in console.export_text()
