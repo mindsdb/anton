@@ -100,6 +100,25 @@ def test_slide_controls_keyboard_exit_and_print_restore_all_content():
         browser.close()
 
 
+def test_slide_reading_has_one_cover_and_no_source_metadata_slide():
+    document=Document.model_validate({'kind':'slides','title':'Workshop','sections':[
+        {'id':'cover','title':'Workshop','blocks':[{'type':'prose','text':'The opening slide'}]},
+        {'id':'close','title':'Conclusion','blocks':[{'type':'prose','text':'The final slide'}]}]})
+    with playwright.sync_playwright() as p:
+        browser=p.chromium.launch();page=browser.new_page(viewport={'width':390,'height':844})
+        page.set_content(render(document,Evidence()).html)
+        assert page.get_by_role('heading',name='Workshop',exact=True).count()==1
+        assert page.locator('#_artifact-content > .section').count()==2
+        assert page.locator('#_artifact-sources').evaluate('(el)=>getComputedStyle(el).borderTopWidth')=='0px'
+        page.get_by_role('button',name='Present',exact=True).click()
+        assert page.get_by_role('status').inner_text()=='1 / 2'
+        assert page.get_by_role('heading',name='Workshop',exact=True).is_visible()
+        page.emulate_media(media='print')
+        assert page.locator('#cover').is_visible() and page.locator('#close').is_visible()
+        assert not page.locator('#_artifact-sources').is_visible()
+        browser.close()
+
+
 def test_zero_and_small_bar_values_keep_their_true_scaled_widths():
     evidence=Evidence.model_validate({'datasets':{'readings':{'source':{'label':'Synthetic scale QA'},'rows':[
         {'label':'Zero','value':0},{'label':'Small','value':0.001},{'label':'Large','value':1000}]}}})

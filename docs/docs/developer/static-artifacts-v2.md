@@ -141,6 +141,9 @@ repair calls share an overall sixteen-round limit. Neither budget exhaustion nor
 a failed check publishes the candidate or discards the previous page.
 
 Slides use the same evidence and blocks. Each section is exactly one slide; title and source sections are authored explicitly, and reading metadata adds no slides. Reading mode exposes the whole deck;
+An exactly matching first-slide title absorbs a duplicate document heading when
+there is no other heading metadata to preserve. Other reader headings stay compact,
+and automatic source attribution is an ordinary footer rather than another slide card.
 presentation mode shows one slide with controls and keyboard navigation. Escape
 exits even when a presentation control has focus; navigation keys otherwise leave
 editable controls alone. Long
