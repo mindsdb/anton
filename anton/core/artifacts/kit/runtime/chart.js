@@ -183,8 +183,10 @@
         rotate: (!horizontal && narrow && s.cats.length > 5) ? 40 : 0},
       name: b.x_label || '', nameLocation: 'middle', nameGap: 28, nameTextStyle: {color: T.text3}
     };
+    // Counts get whole-number ticks only (no "0, 0, 1, 1" axes).
+    var allInts = s.series.every(function (ser) { return ser.values.every(function (v) { return v == null || Math.round(v) === v; }); });
     var valAxis = {
-      type: 'value', min: b.y_min, max: b.y_max, splitLine: {lineStyle: {color: T.grid}},
+      type: 'value', min: b.y_min, max: b.y_max, splitLine: {lineStyle: {color: T.grid}}, minInterval: allInts ? 1 : undefined,
       axisLabel: {color: T.text3, fontSize: 11, formatter: axisY},
       name: b.y_label || '', nameTextStyle: {color: T.text3, align: horizontal ? 'center' : 'left'}, nameGap: horizontal ? 26 : 12
     };
