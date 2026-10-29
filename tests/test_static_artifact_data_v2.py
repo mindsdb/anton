@@ -46,6 +46,16 @@ def test_projection_does_not_export_unselected_fields():
     assert data.datasets["orders"].rows[0]["private"] == "secret"
 
 
+@pytest.mark.parametrize('op,value,expected',[
+    ('eq',.1,['decimal','float']),('ne',.1,['other','text','flag']),
+    ('in',[.1],['decimal','float']),('eq','0.1',['text']),('in',[True],['flag'])])
+def test_numeric_equality_filters_compare_decimal_values_without_string_or_boolean_coercion(op,value,expected):
+    data=evidence([{'id':'decimal','n':Decimal('0.1')},{'id':'float','n':.1},{'id':'other','n':.2},
+        {'id':'text','n':'0.1'},{'id':'flag','n':True}])
+    query=Query(dataset='orders',columns=['id'],where=[{'field':'n','op':op,'value':value}])
+    assert [row['id'] for row in execute(data,query)]==expected
+
+
 def test_query_calculations_resolve_rates_and_variances_before_public_projection():
     data=evidence([{'name':'A','actual':Decimal('0.3'),'private_plan':Decimal('0.2')},
         {'name':'B','actual':4,'private_plan':0}, {'name':'C','actual':None,'private_plan':3}])

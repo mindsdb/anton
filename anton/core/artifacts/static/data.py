@@ -135,15 +135,18 @@ def calculate(op: BinaryOp, a, b):
 
 def _matches(row: dict, condition: Filter) -> bool:
     actual, wanted = row[condition.field], condition.value
+    def equal(left, right):
+        numeric = lambda value: isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)
+        return number(left) == number(right) if numeric(left) and numeric(right) else left == right and (isinstance(left, bool) == isinstance(right, bool))
     if condition.op == "in":
         if not isinstance(wanted, list):
             raise DataError("An in filter requires a list")
-        return any(actual == v and (isinstance(actual, bool) == isinstance(v, bool)) for v in wanted)
+        return any(equal(actual, v) for v in wanted)
     if isinstance(wanted, list):
         raise DataError("Only an in filter accepts a list")
     if condition.op in ("eq", "ne"):
-        equal = actual == wanted and (isinstance(actual, bool) == isinstance(wanted, bool))
-        return equal if condition.op == "eq" else not equal
+        matches = equal(actual, wanted)
+        return matches if condition.op == "eq" else not matches
     if actual is None or wanted is None:
         return False
     if isinstance(actual, str) and isinstance(wanted, str):
