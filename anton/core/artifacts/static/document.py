@@ -17,6 +17,12 @@ class Format(Model):
     percent: Literal['none', 'ratio', 'points'] = Field(default='none', description='ratio scales a fraction by 100; points preserves a value already in percentage points; none is not a percentage.')
     missing: str = "Not available"
 
+    @model_validator(mode='after')
+    def one_percentage_symbol(self):
+        if self.percent != 'none' and '%' in self.prefix + self.suffix:
+            raise ValueError('Percentage formats already append %; remove it from prefix/suffix')
+        return self
+
     def display(self, value) -> str:
         if value is None:
             return self.missing

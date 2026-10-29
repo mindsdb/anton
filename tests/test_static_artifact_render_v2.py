@@ -14,6 +14,24 @@ def document(blocks, **kwargs):
     return Document.model_validate({'title':'A report', 'sections':[{'id':'one', 'blocks':blocks}], **kwargs})
 
 
+@pytest.mark.parametrize('percent',['ratio','points'])
+@pytest.mark.parametrize('extra',[{'prefix':'%'},{'suffix':'%'}])
+def test_percentage_format_cannot_repeat_its_symbol(percent,extra):
+    from anton.core.artifacts.static.document import Format
+    with pytest.raises(ValueError,match='already append'):
+        Format(percent=percent,**extra)
+
+
+def test_percentage_fact_cannot_gain_a_literal_percentage_symbol_in_text():
+    source=Evidence.model_validate({'datasets':{'sample':{'source':{'label':'Synthetic percentage'},'rows':[{'rate':72}]}}})
+    facts={'rate':{'type':'query','query':{'dataset':'sample','columns':['rate']},'field':'rate','format':{'percent':'points'}}}
+    doc=document([{'type':'prose','text':'Observed: {{rate}}%.'}],facts=facts)
+    with pytest.raises(DataError,match='already includes'):
+        render(doc,source)
+    doc.sections[0].blocks[0].text='Observed: {{rate}}; target: 75%.'
+    assert 'Observed: 72%; target: 75%.' in render(doc,source).html
+
+
 @pytest.mark.parametrize('value',[Decimal('1e500'),Decimal('1e-500')])
 def test_chart_rejects_values_the_browser_would_overflow_or_turn_into_zero(value):
     evidence=Evidence.model_validate({'datasets':{'sample':{'source':{'label':'Synthetic numeric QA'},'rows':[{'name':'A','value':value}]}}})

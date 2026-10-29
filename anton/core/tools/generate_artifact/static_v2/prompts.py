@@ -149,8 +149,10 @@ A query fact selects exactly one row; its field names an output column. For tota
 A calculation fact adds, subtracts, multiplies, or divides two named facts. Percent formatting declares
 the input scale: percent="ratio" multiplies a fraction by 100; percent="points" appends % to a value
 already in percentage points. For example 0.72 as ratio and 72 as points both display 72%. Never
-scale a source percentage twice. Queries filter, project explicit columns, group, aggregate,
-and sort exact evidence. They never silently coerce strings, drop incomplete rows, or replace missing
+scale a source percentage twice. Percentage formats already append the % sign: do not repeat it
+in prefix/suffix or after a {{percentage_fact}} placeholder.
+Queries filter, project explicit columns, group, aggregate, and sort exact evidence. They never
+silently coerce strings, drop incomplete rows, or replace missing
 values with zero. Aggregates propagate nulls by default; missing="skip" is an explicit choice
 for observed values only and must be disclosed in the narrative. Don't invent a literal total, category, unit, source, causal explanation, or conclusion.
 Use inspect_static_data for exact exploratory queries when the evidence arrives as a schema catalog.
