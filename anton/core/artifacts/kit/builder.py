@@ -21,6 +21,24 @@ logger = logging.getLogger(__name__)
 
 MAX_ROUNDS = 10
 CALL_TOKENS = 16000
+# Page builds think at least this hard: reading a data source right (scope, joins, periods) is most
+# of the work, and in paired benchmark runs medium built correct pages more often than low at
+# about the same latency.
+PAGE_EFFORT = "medium"
+_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"]
+
+
+def default_route(session: "ChatSession"):
+    """The model route for a page build when none is configured: the agent's planning model at
+    `PAGE_EFFORT`, when the agent's own effort is lower; None to keep the agent's own."""
+    from anton.core.llm.client import ModelRoute
+
+    llm = getattr(session, "_llm", None)
+    model = getattr(llm, "planning_model", None)
+    own = getattr(getattr(llm, "_planning_provider", None), "reasoning_effort", None)
+    if not isinstance(model, str) or own not in _EFFORTS or _EFFORTS.index(own) >= _EFFORTS.index(PAGE_EFFORT):
+        return None
+    return ModelRoute(model=model, effort=PAGE_EFFORT)
 
 KIT_REFERENCE = '''\
 ```

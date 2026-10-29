@@ -2033,6 +2033,8 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     if is_page:
         from anton.core.artifacts.kit import builder as page_builder
 
+        if route is None:
+            route = page_builder.default_route(session)
         _track_artifact(session, store, slug)
         run = page_builder.build_page(
             session, slug=slug, folder=folder, user_request=user_request, user_language=user_language,

@@ -249,6 +249,18 @@ def test_numbers_in_text_are_read_as_the_page_language_writes_them(tmp_path):
     assert page.checks == []
 
 
+@pytest.mark.parametrize(("own", "expected"), [("low", "medium"), ("minimal", "medium"), ("medium", None),
+                                               ("high", None), (None, None)])
+def test_a_page_build_thinks_at_least_at_medium_effort(own, expected):
+    llm = SimpleNamespace(planning_model="model-x", _planning_provider=SimpleNamespace(reasoning_effort=own))
+
+    route = builder.default_route(SimpleNamespace(_llm=llm))
+
+    assert (route.effort if route else None) == expected
+    if route:
+        assert route.model == "model-x"
+
+
 def test_kit_errors_are_value_errors():
     assert issubclass(kit.KitError, ValueError)
 
