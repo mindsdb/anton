@@ -180,6 +180,16 @@ class _Stream:
         return self._items.pop(0)
 
 
+def _one_turn():
+    """A turn's model calls: one tool call, then the answer."""
+    calls = iter([
+        LLMResponse(content="Running.", tool_calls=[ToolCall(id="t1", name="scratchpad", input={"action": "exec", "name": "m", "code": "print(1)"})],
+                    usage=Usage(input_tokens=10, output_tokens=5), stop_reason="tool_use"),
+        LLMResponse(content="Done: 1.", tool_calls=[], usage=Usage(input_tokens=10, output_tokens=5), stop_reason="end_turn"),
+    ])
+    return lambda **kwargs: _Stream([StreamComplete(response=next(calls))])
+
+
 def _session(workspace, *, jev_setting="on", base_url="https://api.mindshub.ai/v1", llm_status="COMPLETE", ssl_verify=None,
              coding_provider=None, harness=None, surface=None):
     from anton.core.tools.registry import ToolOutcome
@@ -193,12 +203,7 @@ def _session(workspace, *, jev_setting="on", base_url="https://api.mindshub.ai/v
             return_value=ProviderConnectionInfo(provider="openai", api_key="k", base_url=base_url, ssl_verify=ssl_verify)
         )
         llm.coding_provider.current_api_key = AsyncMock(return_value="k")
-    calls = iter([
-        LLMResponse(content="Running.", tool_calls=[ToolCall(id="t1", name="scratchpad", input={"action": "exec", "name": "m", "code": "print(1)"})],
-                    usage=Usage(input_tokens=10, output_tokens=5), stop_reason="tool_use"),
-        LLMResponse(content="Done: 1.", tool_calls=[], usage=Usage(input_tokens=10, output_tokens=5), stop_reason="end_turn"),
-    ])
-    llm.plan_stream = lambda **kwargs: _Stream([StreamComplete(response=next(calls))])
+    llm.plan_stream = _one_turn()
     session = ChatSession(ChatSessionConfig(
         llm_client=llm, workspace=workspace, session_id="conv-jev",
         settings=CoreSettings(verifier_jev=jev_setting), harness=harness, surface=surface,
@@ -284,6 +289,31 @@ async def test_the_off_switch_restores_the_llm_verifier(workspace):
     classify.assert_not_called()
     llm.generate_object_code.assert_called_once()
     assert "jev_checks" not in event
+
+
+async def test_a_refusal_stops_jev_for_the_rest_of_the_session(workspace):
+    """MindsHub refuses Jev to an organization with zero data retention on:
+    one refused check, then the LLM verifier alone, without asking again."""
+    session, llm = _session(workspace)
+    refused = jev.JevVerdict(error="http_403", ms=40)
+    classify = AsyncMock(return_value=refused)
+    with patch("anton.core.llm.jev.classify", new=classify), patch("anton.analytics.send_event"):
+        for _turn in range(2):
+            llm.plan_stream = _one_turn()
+            async for _ in session.turn_stream("run it"):
+                pass
+    await session.close()
+
+    classify.assert_awaited_once()
+    assert llm.generate_object_code.await_count == 2
+
+
+@pytest.mark.parametrize("error", ["http_402", "http_500", "timeout"])
+async def test_other_failures_keep_asking_jev(workspace, error):
+    session, _ = _session(workspace)
+    await _run(session, jev.JevVerdict(error=error, ms=40))
+
+    assert session._jev_enabled
 
 
 async def test_a_credentials_failure_falls_back(workspace):
