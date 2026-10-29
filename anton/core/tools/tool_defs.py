@@ -430,14 +430,15 @@ LAUNCH_BACKEND_TOOL = ToolDef(
 GENERATE_ARTIFACT_TOOL = ToolDef(
     name="generate_artifact",
     description=(
-        "Build or edit an already-registered web artifact. Use it INSTEAD OF "
-        "writing the artifact's files yourself in the scratchpad. Reads `type` "
-        "from the artifact's metadata.\n\n"
+        "Build or edit a web artifact. Use it INSTEAD OF writing the artifact's "
+        "files yourself in the scratchpad. Reads `type` from the artifact's "
+        "metadata; a new page needs no `create_artifact` first (pass `name`).\n\n"
         "An `html-app` (reports, dashboards, maps, globes, charts, timelines, "
         "briefs, slide decks): a page builder fetches the data in the "
-        "scratchpad, computes the figures, composes the page with the artifact "
-        "kit and checks it in a browser, in one pass. Call it again with a "
-        "change as `user_request` to edit the page in place.\n\n"
+        "scratchpad, computes the figures and composes the page with the "
+        "artifact kit, in one pass, working alone (it asks nothing). Call it "
+        "again with the page's `slug` and a change as `user_request` to edit "
+        "the page in place.\n\n"
         "A `fullstack-stateless-app` or `fullstack-stateful-app`: "
         "it runs the whole thing itself: gathers the data it needs (it can "
         "use the scratchpad, web search and web fetch), asks the user "
@@ -597,29 +598,22 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
     handler=handle_generate_artifact,
     prompt=(
         "ARTIFACT GENERATION:\n"
-        "`generate_artifact` builds an already-registered web artifact. An "
-        "`html-app` page goes through the page builder (PAGES). A fullstack app "
-        "goes end to end — gathering data, showing the user a brief, writing the "
-        "requirements, the technical spec and the code, with verification, a "
-        "launch and a health check. Use it INSTEAD of writing their files "
+        "`generate_artifact` builds web artifacts; use it INSTEAD of writing their files "
         "yourself in the scratchpad.\n"
-        "  1. Call `create_artifact` to register the slug and pick the type "
-        "(html-app, fullstack-stateless-app or fullstack-stateful-app).\n"
-        "  2. Call `generate_artifact(slug=<slug>, user_request=..., "
-        "user_language=..., agent_understanding=..., known_data?, "
-        "user_preferences?, attachments?)`. It asks "
-        "the user anything it still needs, so do not pre-interview them for "
-        "it. `user_language` is the language the user writes to you in; "
-        "talk to the user in that language while the artifact is built and "
-        "when you report the result.\n"
-        "  3. Follow the `instruction` in the result. `needs_confirmation` "
-        "means show `brief_summary` and, if the user agrees, call again with "
-        "the SAME `user_request` and `user_language` — that repeat call IS "
-        "the confirmation. A "
-        "correction goes in `agent_understanding`, with `user_request` left "
-        "as it was.\n"
-        "Do NOT call `launch_backend` for a fullstack artifact built this "
-        "way — the tool launches and health-checks it itself."
+        "- A page (`html-app`): call it with `name` and `description` for a new page (it "
+        "registers the page) or with the page's `slug` to change it, plus `user_request`, "
+        "`user_language`, `agent_understanding` and any `known_data`. Its page builder works "
+        "alone, in one pass: it fetches and computes the data, composes the page with the "
+        "artifact kit and returns a summary to report.\n"
+        "- A fullstack app: register it with `create_artifact` first, then call "
+        "`generate_artifact(slug=<slug>, ...)`. It gathers data, asks the user anything it "
+        "still needs (do not pre-interview them for it), shows a brief, writes the "
+        "requirements, the technical spec and the code, verifies, launches and health-checks "
+        "the app, so do NOT call `launch_backend` afterwards. `needs_confirmation` means show "
+        "`brief_summary` and, if the user agrees, call again with the SAME `user_request` and "
+        "`user_language`; a correction goes in `agent_understanding`.\n"
+        "`user_language` is the language the user writes to you in; report the result in it, "
+        "and follow the `instruction` in every result."
     ),
 )
 
@@ -665,9 +659,7 @@ STATIC_GENERATE_ARTIFACT_TOOL = replace(
     ),
     prompt=cut_spans(
         GENERATE_ARTIFACT_TOOL.prompt,
-        (" A fullstack app goes end to end", " Use it INSTEAD", ""),
-        (" (html-app, fullstack-stateless-app or fullstack-stateful-app)", ".\n", " (html-app)"),
-        ("\nDo NOT call `launch_backend` for a fullstack", None, ""),
+        ("- A fullstack app: register it", "`user_language` is the language", ""),
     ),
 )
 

@@ -508,7 +508,8 @@ class GenState:
         from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES_ORDERED
 
         if getattr(self.session, "_fullstack_offered", True):
-            return GENERATOR_ARTIFACT_TYPES_ORDERED
+            # Pages are the kit page builder's (`kit.builder`); this pipeline builds apps.
+            return tuple(t for t in GENERATOR_ARTIFACT_TYPES_ORDERED if t != "html-app")
         return ("html-app",)
 
     def __post_init__(self) -> None:

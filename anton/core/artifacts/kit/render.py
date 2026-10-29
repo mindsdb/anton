@@ -46,7 +46,8 @@ def _types(spec: dict) -> set[str]:
 
 def _script_json(value) -> str:
     text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-    return text.replace("</", "<\\/").replace("<!--", "<\\!--")
+    # Valid JSON escapes only: "\/" and "\u0021", so no "</script" or "<!--" appears in the tag.
+    return text.replace("</", "<\\/").replace("<!--", "<\\u0021--")
 
 
 def _md_text(md: str) -> str:

@@ -1928,6 +1928,9 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
 
         _track_artifact(session, store, artifact.slug)
         queue: "asyncio.Queue[str | None]" = asyncio.Queue()
+        # A build that fails puts an existing page back as it was (a new page that failed is left).
+        page_file = store.folder_for(slug) / "index.html"
+        page_before = page_file.read_bytes() if page_file.exists() else None
 
         from anton.core.llm.client import model_route
         from anton.core.tools.generate_artifact.state import artifact_model_route
@@ -1952,6 +1955,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
                 queue.put_nowait(None)
 
         task = asyncio.ensure_future(_build())
+        result = None
         try:
             async for marker in _drain_progress(queue):
                 yield marker
@@ -1959,6 +1963,11 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         finally:
             if not task.done():
                 task.cancel()
+            failed = result is None or result.get("status") != "generated"
+            if failed and page_before is not None and page_file.exists() and page_file.read_bytes() != page_before:
+                page_file.write_bytes(page_before)
+                if result is not None:
+                    result["restored"] = "The page was put back as it was before this build."
         yield result_text(result)
         return
     # Collapsed to one line: the value is quoted into every step header.
