@@ -9,6 +9,7 @@ this module can be replaced with a thin Client wrapper.
 
 from __future__ import annotations
 
+import io
 import json as _json
 import ssl
 import urllib.error
@@ -94,8 +95,48 @@ def minds_request(
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
 
-    with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
-        return resp.read()
+    try:
+        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as err:
+        raise MindsHTTPError(err, method=method) from err
+    except OSError as err:
+        # URLError, timeouts and TLS failures keep their type; they only gain
+        # the request they belong to.
+        err.request_line = f"{method} {url}"
+        raise
+
+
+# Callers in this package and in cowork-server read at most this much of an
+# error body.
+_ERROR_BODY_LIMIT = 65_536
+
+
+class MindsHTTPError(urllib.error.HTTPError):
+    """An HTTP error answer from `minds_request`, with its request and body kept.
+
+    A urllib error body can be read once, and several readers want it: the
+    publisher's 409 check, `test_llm`, cowork-server's upload classification,
+    and the failure message. `body` holds it for all of them, and `read()`
+    still returns it once for readers written against plain `HTTPError`.
+    `str()`, `reason` and `code` are unchanged.
+    """
+
+    def __init__(self, err: urllib.error.HTTPError, *, method: str) -> None:
+        try:
+            body = err.read(_ERROR_BODY_LIMIT) or b""
+        except Exception:
+            body = b""
+        finally:
+            err.close()
+        super().__init__(err.url, err.code, err.msg, err.hdrs, io.BytesIO(body))
+        self.body = body
+        self.request_line = f"{method} {err.url}"
+
+    @property
+    def detail(self) -> str | None:
+        """The server's own error message, if the body carries one."""
+        return _error_body_message(self.body)
 
 
 def normalize_minds_url(url: str) -> str:
@@ -352,19 +393,62 @@ def _http_error_detail(e: urllib.error.HTTPError) -> str:
     "model_not_found", "message": ...}}); surface that instead of a bare
     status so setup can tell the user what actually failed.
     """
+    body = e.body if isinstance(e, MindsHTTPError) else None
+    if body is None:
+        try:
+            body = e.read()
+        except Exception:
+            body = b""
+    return _error_body_message(body) or f"HTTP {e.code}: {e.reason or 'error'}"
+
+
+def _error_body_message(body: bytes) -> str | None:
+    """The message in a JSON error body: the OpenAI-shaped envelope, the
+    upload service's {"error": "..."}, or a bare {"message": "..."}.
+
+    None for an empty or non-JSON body (a proxy's HTML error page, say), so
+    callers fall back to the status line instead of showing markup.
+    """
     try:
-        body = _json.loads(e.read().decode())
-        err = body.get("error", body) if isinstance(body, dict) else None
-        if isinstance(err, dict):
-            message = err.get("message")
-            code = err.get("code")
-            if message:
-                return f"{code}: {message}" if code else str(message)
-        elif isinstance(err, str) and err:
-            return err
+        payload = _json.loads(body.decode("utf-8", "replace"))
     except Exception:
-        pass
-    return f"HTTP {e.code}: {e.reason or 'error'}"
+        return None
+    err = payload.get("error", payload) if isinstance(payload, dict) else None
+    if isinstance(err, dict):
+        message = err.get("message")
+        code = err.get("code")
+        if message:
+            return _clip(f"{code}: {message}" if code else str(message))
+    elif isinstance(err, str) and err:
+        return _clip(err)
+    return None
+
+
+def _clip(text: str, head: int = 100, tail: int = 300) -> str:
+    """Server text short enough to show; keeps the end, where build logs name the cause."""
+    gap = " … "
+    if len(text) <= head + len(gap) + tail:
+        return text
+    return f"{text[:head]}{gap}{text[-tail:]}"
+
+
+def describe_minds_request_failure(err: BaseException) -> str | None:
+    """What a failed `minds_request` asked for and what came back, in one line.
+
+    Names the request, the HTTP status and the server's own message, then the
+    common causes for that status. It states what was observed and does not
+    pick a cause. None when `err` did not come out of `minds_request` (a local
+    failure before any request was sent), so callers show `str(err)` instead.
+    """
+    request_line = getattr(err, "request_line", None)
+    if not request_line or not isinstance(err, Exception):
+        return None
+    headline, advice = describe_minds_connection_error(err)
+    if isinstance(err, urllib.error.HTTPError):
+        detail = err.detail if isinstance(err, MindsHTTPError) else None
+        answer = f"HTTP {err.code}: {detail}" if detail else f"HTTP {err.code} {err.reason or ''}".rstrip()
+        return f"{request_line} returned {answer}. {advice}"
+    return f"{request_line} got no response. {headline} {advice}"
 
 
 def test_llm(

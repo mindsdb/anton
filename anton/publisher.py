@@ -26,7 +26,7 @@ from anton.core.artifacts.internal_files import (
 )
 from anton.core.artifacts.models import Artifact, artifact_key as artifact_key_for
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
-from anton.minds_client import minds_request
+from anton.minds_client import MindsHTTPError, minds_request
 from anton.publish_access import access_from_owner_side
 from anton.utils.datasources import scrub_credentials
 
@@ -94,7 +94,10 @@ def _raise_if_owned_by_other_user(err: urllib.error.HTTPError) -> None:
     if err.code != 409:
         return
     try:
-        code = json.loads(err.read(65_536))["code"]
+        # `body`, not `read()`: a 409 this does not recognise is re-raised, and
+        # the caller's own reader (cowork-server's) still needs the body.
+        body = err.body if isinstance(err, MindsHTTPError) else err.read(65_536)
+        code = json.loads(body)["code"]
     except Exception:
         return
     if code == OWNED_BY_OTHER_USER_CODE:
