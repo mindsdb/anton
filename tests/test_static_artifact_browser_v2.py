@@ -358,3 +358,22 @@ def test_french_reader_keeps_slide_navigation_and_missing_data_localized():
         assert page.get_by_role('button',name='Imprimer / PDF',exact=True).is_visible()
         assert 'Aucune source de données externe.' in page.locator('body').inner_text()
         browser.close()
+
+
+def test_dense_chart_has_one_keyboard_stop_then_exact_data_inspection():
+    data=Evidence.model_validate({'datasets':{'sample':{'source':{'label':'Synthetic keyboard QA'},'rows':[
+        {'name':str(n),'amount':n} for n in range(200)]}}})
+    doc=Document.model_validate({'title':'Dense chart','sections':[{'id':'plot','blocks':[
+        {'type':'chart','kind':'line','title':'Observed amounts','query':'sample','x':'name','series':[{'field':'amount','label':'Amount'}]}]}]})
+    with playwright.sync_playwright() as p:
+        browser=p.chromium.launch();page=browser.new_page(viewport={'width':390,'height':900})
+        page.set_content(render(doc,data).html)
+        assert page.locator('[data-point]').count()==200
+        assert page.locator('.chart [tabindex]').count()==0
+        page.get_by_role('img',name='Observed amounts',exact=True).focus()
+        page.keyboard.press('Tab')
+        assert page.locator('.chart-data summary').evaluate('(el)=>el===document.activeElement')
+        page.keyboard.press('Enter');page.keyboard.press('Tab')
+        assert page.get_by_role('region',name='Data table',exact=True).evaluate('(el)=>el===document.activeElement')
+        assert page.locator('.chart-data tbody tr').count()==200
+        browser.close()
