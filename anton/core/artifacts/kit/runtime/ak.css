@@ -199,6 +199,11 @@ h1, h2, h3, h4 { margin: 0; font-weight: 650; letter-spacing: -0.012em; line-hei
 .ak-flowlist { display: grid; gap: 14px; }
 .ak-fl-node { display: grid; gap: 6px; }
 .ak-kpi-unit { font-size: .55em; font-weight: 600; color: var(--ak-text-3); letter-spacing: 0; }
+.ak-map-key { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; font-size: 12.5px; }
+.ak-map-key li { display: grid; grid-template-columns: 10px auto; column-gap: 8px; align-items: baseline; color: var(--ak-text); }
+.ak-map-key li[role=button] { cursor: pointer; }
+.ak-map-key-dot { width: 9px; height: 9px; border-radius: 50%; align-self: center; }
+.ak-map-key-sub { grid-column: 2; color: var(--ak-text-2); }
 .ak-fl-head { display: flex; align-items: center; gap: 8px; font-weight: 650; font-size: 13.5px; color: var(--ak-text); }
 .ak-fl-dot { width: 9px; height: 9px; border-radius: 3px; flex: none; }
 .ak-fl-total { margin-left: auto; color: var(--ak-text-3); font-weight: 600; font-variant-numeric: tabular-nums; }

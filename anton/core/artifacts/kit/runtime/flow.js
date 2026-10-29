@@ -160,7 +160,7 @@
     var groups = AK.uniq(G.nodes.map(function (n) { return {g: n.group}; }), 'g');
     var gcol = AK.colorScale(groups, N.colors);
     var lcolF = Lk.color || null;
-    var lscale = lcolF ? AK.colorScale(AK.uniq(G.links.map(function (l) { return l.row; }), lcolF), Lk.colors) : null;
+    var lscale = lcolF ? AK.colorScale(AK.uniq(G.links.map(function (l) { return l.row; }), lcolF), Lk.colors, lcolF) : null;
     var linkColor = function (l) { return lscale ? lscale(l.row[lcolF]) : (sankey ? gcol(l.s.group) : AK.css('--ak-border-strong')); };
     var nT = G.tiers.length, maxPer = Math.max.apply(null, G.tiers.map(function (t) { return t.length; }));
     var labelChars = vertical ? Math.max(8, Math.floor((width - 24) / Math.max(1, maxPer) / 6.4)) : 22;
@@ -468,7 +468,7 @@
     groups.forEach(function (g) { items.push({label: g, color: gcol(g)}); });
     if (Lk.color) {
       var vals = AK.uniq(G.links.map(function (l) { return l.row; }), Lk.color);
-      var ls = AK.colorScale(vals, Lk.colors);
+      var ls = AK.colorScale(vals, Lk.colors, Lk.color);
       vals.forEach(function (v) { items.push({label: (Lk.legend_prefix || '') + v, color: ls(v), shape: 'line'}); });
     }
     return items.length ? AK.legend(items) : null;

@@ -314,12 +314,16 @@
   /* Categories keep one colour across the page: a name takes the next palette slot the first time
      any view meets it, and every later view (chart, map, legend) uses the same slot. */
   var slotOf = {}, nextSlot = 0;
-  AK.colorScale = function (values, explicit) {
-    var pal = AK.palette(), map = {}, used = {};
+  AK.colorScale = function (values, explicit, field) {
+    var pal = AK.palette(), map = {}, used = {}, usedColor = {};
     values.forEach(function (v) {
       var k = String(v);
       if (map[k]) return;
       if (explicit && explicit[k]) { map[k] = AK.toneColor(explicit[k]) || explicit[k]; return; }
+      // A status word takes its tone's colour, as its pill does, so a status looks the same in
+      // every view (a second value with the same tone falls back to the palette).
+      var tc = AK.toneColor(AK.toneOf(k, null, field));
+      if (tc && !usedColor[tc]) { map[k] = tc; usedColor[tc] = true; return; }
       if (slotOf[k] == null) slotOf[k] = nextSlot++;
       var slot = slotOf[k] % pal.length;
       // Two names of this view that share a slot elsewhere on the page still differ here.

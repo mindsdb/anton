@@ -100,7 +100,7 @@
   function colorFor(L) {
     var rows = layerRows(L);
     if (L.color && rows.length && rows[0][L.color] !== undefined) {
-      var scale = AK.colorScale(AK.uniq(rows, L.color), L.colors);
+      var scale = AK.colorScale(AK.uniq(rows, L.color), L.colors, L.color);
       return function (r) { return scale(r[L.color]); };
     }
     var fixed = AK.resolveColor(L.color_value || L.color) || (L.type === 'routes' ? AK.css('--ak-accent') : AK.css('--ak-accent'));
@@ -114,7 +114,7 @@
       var rows = layerRows(L);
       var shape = L.type === 'routes' ? 'line' : (L.shape === 'square' ? '' : (L.shape === 'diamond' ? 'diamond' : 'dot'));
       if (L.color && rows.length && rows[0][L.color] !== undefined) {
-        var scale = AK.colorScale(AK.uniq(rows, L.color), L.colors);
+        var scale = AK.colorScale(AK.uniq(rows, L.color), L.colors, L.color);
         scale.domain().forEach(function (v) { items.push({label: v, color: scale(v), shape: shape}); });
       } else if (L.name) {
         items.push({label: L.name, color: AK.resolveColor(L.color_value || L.color) || AK.css('--ak-accent'), shape: shape});
@@ -153,6 +153,13 @@
     return d3.symbol().type(t).size(size)();
   }
 
+  /* A label's x, with its second line (if any) kept under its first. */
+  function setLabelX(text, x) {
+    text.setAttribute('x', x);
+    var l2 = text.querySelector('.ak-lbl-l2');
+    if (l2) l2.setAttribute('x', x);
+  }
+
   /* Greedy label placement around each anchor; never drops a label, picks the least-overlapping spot. */
   function placeLabels(labels, width, height) {
     var placed = [];
@@ -161,7 +168,7 @@
     var cands = base.concat(base.map(function (c) { return [c[0] * 2.4, c[1] * 2.6, c[2]]; }), base.map(function (c) { return [c[0] * 3.8, c[1] * 4.2, c[2]]; }));
     labels.forEach(function (l) { placed.push({x: l.x - 6, y: l.y - 6, w: 12, h: 12}); });
     function boxOf(l, c) {
-      var w = l.w, h = 14;
+      var w = l.w, h = l.h || 14;
       var x = c[2] === 'start' ? l.x + c[0] : (c[2] === 'end' ? l.x + c[0] - w : l.x - w / 2);
       return {x: x, y: l.y + c[1] - 11, w: w, h: h};
     }
@@ -189,7 +196,7 @@
   function columnLabels(labels, width, height) {
     var boxes = labels.map(function (l) {
       var x = l.anchor === 'start' ? l.x + l.dx : (l.anchor === 'end' ? l.x + l.dx - l.w : l.x + l.dx - l.w / 2);
-      return {x: x, y: l.y + l.dy - 11, w: l.w, h: 14};
+      return {x: x, y: l.y + l.dy - 11, w: l.w, h: l.h || 14};
     });
     var clash = false;
     for (var i = 0; i < boxes.length && !clash; i++) for (var j = i + 1; j < boxes.length; j++) {
@@ -202,13 +209,14 @@
     var right = Math.max.apply(null, xs) + 34, left = Math.min.apply(null, xs) - 34;
     var useRight = right + maxW <= width - 6 || left - maxW < 6;
     var colX = useRight ? Math.min(right, width - 6 - maxW) : Math.max(left, 6 + maxW);
-    var step = 17, total = (labels.length - 1) * step;
+    var total = labels.reduce(function (a, l) { return a + (l.h || 14) + 3; }, 0) - 17;
     var mid = (Math.min.apply(null, ys) + Math.max.apply(null, ys)) / 2;
-    var top = Math.max(14, Math.min(height - 8 - total, mid - total / 2));
-    labels.slice().sort(function (a, z) { return a.y - z.y; }).forEach(function (l, k) {
+    var top = Math.max(14, Math.min(height - 8 - total, mid - total / 2)), at = top;
+    labels.slice().sort(function (a, z) { return a.y - z.y; }).forEach(function (l) {
       l.anchor = useRight ? 'start' : 'end';
       l.dx = colX - l.x;
-      l.dy = top + k * step + 4 - l.y;
+      l.dy = at + 4 - l.y;
+      at += (l.h || 14) + 3;
       l.column = true;
     });
     return true;
@@ -364,19 +372,40 @@
       marks.push({el: pt.node, key: pt.key, link: L.link, kind: 'point'});
     });
     var narrow = width < 560;
-    // A label fits beside the zoom buttons: a long sublabel is shortened (the whole text is in its
-    // tooltip and title), then a long name.
+    // A label fits beside the zoom buttons. The sublabel may be the figure the page is about: when
+    // name and sublabel do not fit on one line (and on phones), the sublabel takes a second line;
+    // only a line longer than the map is shortened (the whole text is in the title and tooltip).
     var charW = narrow ? 5.6 : 6.4, maxChars = Math.floor(Math.min(width * (narrow ? 0.86 : 0.55), width - 60) / charW);
     var clip = function (t, n) { return t.length > n ? t.slice(0, Math.max(1, n - 1)) + '\u2026' : t; };
-    var labels = pts.filter(function (p) { return p.label && (showAllLabels || p.L.label_always); }).map(function (p) {
-      // Phones keep the sublabel (it may be the figure the page is about), in a smaller face.
-      // The sublabel may be the figure the page is about: a long name gives way first (to about
-      // 40% of the room), then the sublabel.
-      var subLen = p.sub ? String(p.sub).length : 0;
-      var name = clip(p.label, Math.max(Math.round(maxChars * 0.4), maxChars - subLen - 3));
-      var sub = p.sub ? clip(p.sub, Math.max(4, maxChars - name.length - 3)) : null;
-      var text = name + (sub ? ' \u00b7 ' + sub : '');
-      return {p: p, x: p.x, y: p.y, w: text.length * charW + 6, text: text, name: name, sub: sub,
+    var shown = pts.filter(function (p) { return p.label && (showAllLabels || p.L.label_always); });
+    // A phone map too small for every label's detail keeps the names on the map and lists each
+    // point with its detail in a key under it.
+    var detailArea = shown.reduce(function (a, p) { return a + (p.sub ? (String(p.label).length + String(p.sub).length + 3) * charW * 15 : 0); }, 0);
+    var useKey = narrow && shown.filter(function (p) { return p.sub; }).length >= 3 && detailArea > width * height * 0.12;
+    var oldKey = view.querySelector('.ak-map-key');
+    if (oldKey) oldKey.remove();
+    if (useKey) {
+      var keyList = AK.el('ol', 'ak-map-key');
+      shown.slice().sort(function (a, z) { return a.y - z.y; }).forEach(function (p) {
+        var li = AK.el('li');
+        var dot = AK.el('span', 'ak-map-key-dot'); dot.style.background = p.color;
+        li.appendChild(dot);
+        li.appendChild(AK.el('strong', null, String(p.label)));
+        if (p.sub) li.appendChild(AK.el('span', 'ak-map-key-sub', String(p.sub)));
+        if (p.L.link && p.key) {
+          li.tabIndex = 0; li.setAttribute('role', 'button');
+          li.addEventListener('click', function () { AK.select(p.L.link, p.key, view); });
+        }
+        keyList.appendChild(li);
+      });
+      view.appendChild(keyList);
+    }
+    var labels = shown.map(function (p) {
+      var name = clip(String(p.label), maxChars), sub = p.sub && !useKey ? clip(String(p.sub), maxChars) : null;
+      var two = !!sub && (narrow || name.length + sub.length + 3 > maxChars);
+      var text = two ? null : name + (sub ? ' \u00b7 ' + sub : '');
+      return {p: p, x: p.x, y: p.y, two: two, h: two ? 27 : 14,
+        w: (two ? Math.max(name.length, sub.length) : text.length) * charW + 6, text: text || name + '\n' + sub, name: name, sub: sub,
         full: p.label + (p.sub ? ' \u00b7 ' + p.sub : '')};
     });
     placeLabels(labels, width, height);
@@ -390,8 +419,9 @@
       }
       var t = labelsG.append('text').attr('class', 'ak-lbl').attr('x', l.x + l.dx).attr('y', l.y + l.dy).attr('text-anchor', l.anchor);
       t.append('tspan').text(l.name);
-      if (l.sub) t.append('tspan').attr('class', 'ak-lbl-sub').text(' \u00b7 ' + l.sub);
-      if (l.full !== l.text) t.append('title').text(l.full);
+      if (l.sub && l.two) t.append('tspan').attr('class', 'ak-lbl-sub ak-lbl-l2').attr('x', l.x + l.dx).attr('dy', '1.1em').text(l.sub);
+      else if (l.sub) t.append('tspan').attr('class', 'ak-lbl-sub').text(' \u00b7 ' + l.sub);
+      if (l.full !== l.name + (l.sub ? ' \u00b7 ' + l.sub : '')) t.append('title').text(l.full);
       t.node().__l = l;
       marks.push({el: t.node(), key: l.p.key, link: l.p.L.link, kind: 'label'});
     });
@@ -402,7 +432,7 @@
       if (bb.y < 4) sy = 4 - bb.y; else if (bb.y + bb.height > height - 4) sy = height - 4 - bb.y - bb.height;
       // Clear of the zoom buttons in the top-right corner.
       if (bb.y + sy < 118 && bb.x + sx + bb.width > width - 48) sx = Math.min(sx, width - 48 - bb.x - bb.width);
-      if (sx || sy) { l.dx += sx; l.dy += sy; this.setAttribute('x', l.x + l.dx); this.setAttribute('y', l.y + l.dy); }
+      if (sx || sy) { l.dx += sx; l.dy += sy; setLabelX(this, l.x + l.dx); this.setAttribute('y', l.y + l.dy); }
     });
 
     // Zoom and pan; marks keep their screen size.
@@ -419,7 +449,7 @@
         pointsG.selectAll('path').attr('transform', function () { return 'translate(' + this.__pt.x + ',' + this.__pt.y + ') scale(' + (1 / k) + ')'; });
         ringsG.attr('opacity', k > 1.01 ? 0 : 1);
         labelsG.selectAll('text').attr('font-size', 11.5 / k + 'px').attr('stroke-width', 3.2 / k + 'px')
-          .attr('x', function () { var l = this.__l; return l.x + l.dx / k; })
+          .each(function () { var l = this.__l; setLabelX(this, l.x + l.dx / k); })
           .attr('y', function () { var l = this.__l; return l.y + l.dy / k; });
       });
     // Zoom: buttons, keyboard (+, -, 0, arrows), double-click (shift to zoom out), pinch, or

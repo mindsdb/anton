@@ -47,14 +47,14 @@
     bars.forEach(function (L) {
       var rows = AK.data(L.data);
       if (L.color && rows.length && rows[0][L.color] !== undefined) {
-        var sc = AK.colorScale(AK.uniq(rows, L.color), L.colors);
+        var sc = AK.colorScale(AK.uniq(rows, L.color), L.colors, L.color);
         sc.domain().forEach(function (v) { items.push({label: v, color: sc(v)}); });
       } else if (L.name) items.push({label: L.name, color: AK.resolveColor(L.color_value || L.tone || L.color) || AK.css('--ak-accent')});
     });
     mss.forEach(function (L) {
       var rows = AK.data(L.data);
       if (L.color && rows.length && rows[0][L.color] !== undefined) {
-        var sc = AK.colorScale(AK.uniq(rows, L.color), L.colors);
+        var sc = AK.colorScale(AK.uniq(rows, L.color), L.colors, L.color);
         sc.domain().forEach(function (v) { items.push({label: v, color: sc(v), shape: L.shape === 'diamond' ? 'diamond' : 'dot'}); });
       } else if (L.name) items.push({label: L.name, color: AK.resolveColor(L.color_value || L.tone || L.color) || AK.css('--ak-text-2'), shape: L.shape === 'diamond' ? 'diamond' : 'dot'});
     });
@@ -198,7 +198,7 @@
       var lane = 0;
       bars.forEach(function (L) {
         var rows = AK.data(L.data);
-        var sc = L.color && rows.length && rows[0][L.color] !== undefined ? AK.colorScale(AK.uniq(rows, L.color), L.colors) : null;
+        var sc = L.color && rows.length && rows[0][L.color] !== undefined ? AK.colorScale(AK.uniq(rows, L.color), L.colors, L.color) : null;
         var fixed = AK.resolveColor(L.color_value || L.tone || (sc ? null : L.color)) || AK.palette()[lane % 10];
         var myLane = L.overlay ? Math.max(0, lane - 1) : lane;
         var bh = lanes > 1 ? 12 : 18;
@@ -237,7 +237,7 @@
       var all = [], msBoxes = [], msHidden = 0;
       mss.forEach(function (L) {
         var rows = AK.data(L.data);
-        var sc = L.color && rows.length && rows[0][L.color] !== undefined ? AK.colorScale(AK.uniq(rows, L.color), L.colors) : null;
+        var sc = L.color && rows.length && rows[0][L.color] !== undefined ? AK.colorScale(AK.uniq(rows, L.color), L.colors, L.color) : null;
         var fixed = AK.resolveColor(L.color_value || L.tone || (sc ? null : L.color)) || AK.css('--ak-text-2');
         rows.forEach(function (r) {
           var k = String(r[L.row]), d = t(r[L.date]);

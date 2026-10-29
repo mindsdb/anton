@@ -158,6 +158,9 @@ Designing it:
 - Lead with the answer: a title naming the subject, a subtitle with the main finding in numbers, \
 badges for the scope (scenario, period), a meta line such as "Data as of <date>". Then the elements \
 the request names, in its order, and a short sources note.
+- A page about one view (a map, a diagram, a timeline, a chart) shows that view right after the \
+title, above the fold; figures that support it go in its subtitle, its labels or below it, not in \
+a row of cards above it (cards come first when the request asks for headline figures).
 - Keep to the request: every block answers a part of it. A one-line summary or a count that helps \
 read a view is fine; leave out unrelated panels and content that repeats another block (a table \
 repeating the cards). Every figure the user asked for appears as text (a KPI, a table cell, a label \

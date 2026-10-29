@@ -823,6 +823,94 @@ class Page:
                 for r in b["rows"]:
                     check(f"compare row {r.get('label')!r}", r.get("format"), r.get("values") or [])
 
+    # Numbers as the page's language writes them: "1,570,600.5" (en) or "1.570.600,5" / "1 570 600,5".
+    _NUM_EN = re.compile(r"(?<![\w.\-/])([$€£¥]?)\s?(\d{1,3}(?:[,\u202f\u00a0]\d{3})+|\d+)(?:\.(\d+))?\s?(%|[KkMmBb]\b|bn\b)?(?![\w\-/])")
+    _NUM_EU = re.compile(r"(?<![\w,\-/])([$€£¥]?)\s?(\d{1,3}(?:[. \u202f\u00a0]\d{3})+|\d+)(?:,(\d+))?\s?(%|[KkMmBb]\b|Mio\b|Md\b)?(?![\w\-/])")
+    _DATES_IN_TEXT = re.compile(
+        r"\d{4}-\d{2}(-\d{2})?([T ]\d{2}:\d{2}(:\d{2})?)?|\d{1,2}:\d{2}|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:,\s*\d{4})?|"
+        r"\b\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?(?:\s+\d{4})?|\b(?:19|20)\d{2}\b|\b[QH][1-4]\b|\bFY\s?\d{2,4}\b", re.I)
+    # A span of time ("13 weeks", "24-hour", "7 días") describes a period, not a figure.
+    _SPANS_IN_TEXT = re.compile(
+        r"\b\d+(?:[.,]\d+)?[\s\-]*(?:\w+\s+)?(?:hours?|hourly|hrs?|h|minutes?|mins?|days?|daily|weeks?|weekly|months?|monthly|years?|quarters?|"
+        r"horas?|d[ií]as?|semanas?|meses|mes|a[ñn]os?|heures?|jours?|semaines?|mois|ans?|ann[ée]es?|"
+        r"stunden?|tage?n?|wochen?|monate?n?|jahre?n?|ore|giorni|settimane|mesi|anni)\b", re.I)
+
+    def _check_prose_numbers(self) -> None:
+        """Warn about numbers the page's words state that match nothing among its figures and data
+        (a typo, a stale or invented figure, or one computed and never shown), so they get checked."""
+        data = self.spec.get("data", {})
+        known: list[float] = []
+        for rows in data.values():
+            known.append(float(len(rows)))
+            for f in _fields(rows):
+                vals = [r.get(f) for r in rows if is_number(r.get(f))]
+                if vals:
+                    total = float(sum(vals))
+                    known += [float(v) for v in vals] + [total, total / len(vals), max(vals) - min(vals)]
+                    if total:
+                        known += [float(v) / total * 100 for v in vals]  # each value's share of the total
+                else:
+                    from collections import Counter
+                    counts = Counter(str(r.get(f)) for r in rows if r.get(f) not in (None, ""))
+                    known += [float(c) for c in counts.values()] + [float(len(counts))]
+                    known += [c / len(rows) * 100 for c in counts.values()]  # each category's share of rows
+        texts: list[str] = [str(self.spec.get(k) or "") for k in ("title", "subtitle")]
+        texts += [str(x) for x in (self.spec.get("notes") or []) + (self.spec.get("meta") or [])]
+        for b in self._walk():
+            t = b.get("type")
+            if t == "kpis":
+                for k in b["items"]:
+                    for key in ("value", "delta"):
+                        if is_number(k.get(key)):
+                            known.append(float(k[key]))
+                    if isinstance(k.get("value"), str):
+                        texts.append(k["value"])
+                    texts.append(str(k.get("sub") or ""))
+            elif t == "compare":
+                for r in b.get("rows") or []:
+                    vals = [float(v) for v in r.get("values") or [] if is_number(v)]
+                    known += vals + [b2 - a for a in vals for b2 in vals] + [(b2 - a) / a * 100 for a in vals for b2 in vals if a]
+            if t in ("text", "callout"):
+                texts.append(str(b.get("md") or ""))
+            elif t == "list":
+                texts += [str(i) for i in b.get("items") or []]
+            texts += [str(b.get(k) or "") for k in ("title", "subtitle", "note")]
+        known += [abs(v) for v in known]
+        unsupported: list[str] = []
+
+        def parse(m):
+            whole, dec, suffix = m.group(2), m.group(3) or "", (m.group(4) or "").lower()
+            value = float(re.sub(r"[,. \u202f\u00a0]", "", whole) + ("." + dec if dec else ""))
+            mult = {"k": 1e3, "m": 1e6, "mio": 1e6, "b": 1e9, "bn": 1e9, "md": 1e9}.get(suffix, 1.0)
+            return value, dec, suffix, mult
+
+        def supported(value, dec, suffix, mult):
+            half = 0.5 * 10 ** -len(dec) * mult  # what the text's rounding allows
+            targets = [(value * mult, half)] + ([(value / 100, half / 100)] if suffix == "%" else [])
+            return any(abs(t - k) <= max(tol, abs(k) * 0.002) for t, tol in targets for k in known)
+
+        # The page's language decides how numbers are written; English-style numbers on another
+        # page (and the reverse) are read both ways before they count as unsupported.
+        eu = str(self.spec.get("lang") or "en")[:2] != "en"
+        first, other = (self._NUM_EU, self._NUM_EN) if eu else (self._NUM_EN, self._NUM_EU)
+        for text in texts:
+            clean = self._SPANS_IN_TEXT.sub(" ", self._DATES_IN_TEXT.sub(" ", text))
+            for m in first.finditer(clean):
+                value, dec, suffix, mult = parse(m)
+                if value * mult < 10 and not dec:
+                    continue  # small counts read as words ("3 sites") more than as figures
+                if supported(value, dec, suffix, mult):
+                    continue
+                alt = [parse(a) for a in other.finditer(clean) if a.start() <= m.start() and a.end() >= m.end() - 1]
+                if any(supported(*a) for a in alt):
+                    continue
+                unsupported.append(m.group(0).strip())
+        if unsupported:
+            seen = list(dict.fromkeys(unsupported))
+            self.warnings.append("the page's text states " + ", ".join(seen[:8]) + ", which no figure or data on the page "
+                                 "shows: make sure each comes from a value your code computed (keep it if so; if it was "
+                                 "typed or is stale, use the computed value).")
+
     def _check_details(self) -> None:
         """On a page in another language, row details show fields the table does not under their own
         names: warn about those without a label, so they get one (or detail_fields picks the fields)."""
@@ -930,6 +1018,7 @@ class Page:
         self._check_percents()
         self._check_times()
         self._check_details()
+        self._check_prose_numbers()
         return render_html(self.spec, self._custom)
 
     def save(self, path: Any, *, quiet: bool = False) -> str:

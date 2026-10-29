@@ -210,6 +210,33 @@ def test_a_chart_leaves_its_orientation_to_the_runtime_unless_told():
     assert auto.get("horizontal") is None and upright["horizontal"] is False
 
 
+def test_a_figure_stated_in_text_that_no_figure_shows_is_a_warning(tmp_path):
+    df = pd.DataFrame({"id": ["A", "B", "C", "D"], "status": ["Late", "Late", "On time", "Late"],
+                       "value": [402350.0, 1000000.0, 250000.0, 22.5]})
+    page = kit.Page("Orders", "Three late orders worth $1.4M; 75% of orders are late")
+    page.kpis([kit.kpi("Value at risk", 1402350, "currency_compact")])
+    page.text("Since 2026-03-04 09:30, over 13 weeks (Q4 FY24), order D is 22.5 units; the total is $1.40M.")
+    page.callout("Exposure is $1.8M.")
+    page.table(df, ["id", "status", "value"])
+
+    page.save(tmp_path)
+
+    [warning] = [w for w in page.warnings if "text states" in w]
+    assert "$1.8M" in warning
+    for fine in ("$1.4M", "75%", "22.5", "13", "2026", "09:30"):
+        assert fine not in warning.split("states")[1].split("which")[0]
+
+
+def test_numbers_in_text_are_read_as_the_page_language_writes_them(tmp_path):
+    df = pd.DataFrame({"site": ["Lyon", "Nice"], "droits": [91244.0, 1149.0]})
+    page = kit.Page("Droits", "91 244 $ de droits à Lyon et 1 149 $ à Nice", lang="fr")
+    page.table(df, ["site", "droits"])
+
+    page.save(tmp_path)
+
+    assert not [w for w in page.warnings if "text states" in w]
+
+
 def test_kit_errors_are_value_errors():
     assert issubclass(kit.KitError, ValueError)
 

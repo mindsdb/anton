@@ -199,7 +199,8 @@
       type: 'category', data: s.cats.map(function (c) { return AK.fmt(c, xfmt); }),
       axisLine: {lineStyle: {color: T.border}}, axisTick: {show: false},
       axisLabel: {color: T.text2, fontSize: 11, hideOverlap: !fewCats, interval: fewCats ? 0 : 'auto', formatter: catLabel,
-        rotate: (!horizontal && narrow && s.cats.length > 5) ? 40 : 0,
+        // Upright bars whose names would touch slant them.
+        rotate: (!horizontal && ((narrow && s.cats.length > 5) || longestCat * 6.2 > (width - 70) / Math.max(1, s.cats.length) * 0.95)) ? 35 : 0,
         width: horizontal ? labelW : undefined, overflow: horizontal ? 'break' : undefined, lineHeight: 13},
       name: b.x_label || '', nameLocation: 'middle', nameGap: 28, nameTextStyle: {color: T.text3}
     };
@@ -226,7 +227,7 @@
     }
     var colorsAt = pointColors(b, rows, s.cats, null);
     // Several series take the page's colour for each name, so a category looks the same in every chart.
-    var serColor = s.series.length > 1 ? AK.colorScale(s.series.map(function (ser) { return ser.name; }), null) : null;
+    var serColor = s.series.length > 1 ? AK.colorScale(s.series.map(function (ser) { return ser.name; }), null, b.series) : null;
     opt.series = s.series.map(function (ser, i) {
       var type = (kind === 'line' || kind === 'area') ? 'line' : 'bar';
       var col = AK.resolveColor(colors[ser.name] || colors[ser.field]) || (serColor ? serColor(ser.name) : pal[i % pal.length]);
