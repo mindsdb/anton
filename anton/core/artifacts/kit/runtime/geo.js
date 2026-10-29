@@ -663,7 +663,8 @@
       if (last != null && onScreen && box.offsetParent !== null) {
         moving = now > pausedUntil && !st.tween && mode !== 'off' && !reduced();
         if (moving) {
-          var dt = Math.min(0.1, (now - last) / 1000);
+          // Real elapsed time, so the turn keeps its speed when frames are sparse (slow devices).
+          var dt = Math.min(2.5, (now - last) / 1000);
           if (mode === 'spin') st.rot[0] += speed * dt;
           else st.rot[0] = st.base[0] + Math.sin((now - t0) / 1000 * 0.26) * 22;
         }

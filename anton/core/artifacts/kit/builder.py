@@ -150,6 +150,8 @@ a scenario switch, one chart per scenario). A table only when the request asks f
 flows, lanes or supply networks on `page.network` (style "sankey" for volumes); schedules, \
 milestones or Gantt on `page.timeline`; options or scenarios side by side on `page.compare`; trends \
 and breakdowns on `page.chart`; records on `page.table`.
+- Records the request names in the plural ("the late shipments", "the exceptions", "the orders \
+that slip") are listed (ids and the facts asked about), not only counted.
 - What the request says each item shows goes on the item itself: "a map with how many days late \
 each one is" puts the days late in each point's label (`sublabel`), not only in a legend or table; \
 "label each lane with its units" puts the units on each link.
