@@ -15,6 +15,7 @@ from anton.utils.datasources import scrub_output
 from anton.utils.nofollow import read_bytes_nofollow
 
 DATA_ID = "cowork-observed-json"
+PLACES_ID = "cowork-places-json"
 MARKER = "data-cowork-observed"
 def _invalid_constant(value):
     raise ValueError(f"Non-JSON constant: {value}")
@@ -179,15 +180,20 @@ def collect(handoff, existing=""):
     return data, "Embedded JSON contracts (actual runtime access paths):\n" + "\n".join(schemas)
 
 
-def bind(html, data):
-    if not data:
-        return html
+def _json_script(script_id, name, value):
     # Escaping '<' also protects against </script>, HTML comments and tags in
     # untrusted data. JSON remains lossless when read through textContent.
-    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
-    scripts = (f'<meta charset="utf-8" {MARKER}>'
-               f'<script id="{DATA_ID}" type="application/json" {MARKER}>{payload}</script>'
-               f'<script {MARKER}>window.ARTIFACT_DATA=JSON.parse(document.getElementById("{DATA_ID}").textContent);</script>')
+    payload = json.dumps(value, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
+    return (f'<script id="{script_id}" type="application/json" {MARKER}>{payload}</script>'
+            f'<script {MARKER}>window.{name}=JSON.parse(document.getElementById("{script_id}").textContent);</script>')
+
+
+def bind(html, data, places=None):
+    """Insert the observed data, and the places it names (places.index), before the page's scripts."""
+    if not data:
+        return html
+    scripts = (f'<meta charset="utf-8" {MARKER}>' + _json_script(DATA_ID, "ARTIFACT_DATA", data)
+               + (_json_script(PLACES_ID, "ARTIFACT_PLACES", places) if places else ""))
     html = strip_binding(html)
     line_starts = [0] + [match.end() for match in re.finditer("\n", html)]
     # HTMLParser ignores comments and understands quoted '>' in attributes;

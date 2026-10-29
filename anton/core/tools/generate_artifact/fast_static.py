@@ -209,7 +209,7 @@ async def prepare(state):
 async def run(state):
     from anton.core.tools.tool_handlers import render_screenshots_refused
 
-    from . import component_page, observed_data
+    from . import component_page, observed_data, places
     from .orchestrator import _cell_sandbox
     from .state import BrowserCheckFailed
 
@@ -235,8 +235,9 @@ async def run(state):
     except (OSError, ValueError, RecursionError):
         state.verify_warnings.append("The structured source handoff could not be read; only observed tool output was used.")
     bound_data, contract = observed_data.collect(handoff, existing)
+    found_places = places.index(bound_data) if bound_data else {}
     if bound_data:
-        evidence = contract
+        evidence = contract + ("\n" + places.contract(found_places) if found_places else "")
         existing = observed_data.strip_binding(existing)
     # The component program reads window.ARTIFACT_DATA, so it needs bound data.
     components = bool(bound_data) and os.environ.get("ANTON_STATIC_COMPONENT_WRITER") == "on"
@@ -316,7 +317,7 @@ async def run(state):
         try:
             html = component_page.document(response.content) if components else document(response.content)
             if bound_data:
-                html = observed_data.bind(html, bound_data)
+                html = observed_data.bind(html, bound_data, found_places)
         except ValueError as exc:
             messages += [{"role": "assistant", "content": response.content},
                          {"role": "user", "content": str(exc)}]

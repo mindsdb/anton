@@ -232,16 +232,18 @@
         }
         const view=el('div',null,s.type==='chart'?'view':'view geo-view');section.append(view);
         view.setAttribute('aria-busy','true');view.append(el('p',config.loadingText||'…','loading'));
+        let placed;
         try {
           let chart;
           if(s.type==='chart')chart=await drawChart(view,s,cleanup);
-          else if(s.type==='map'||s.type==='globe')await drawGeography(view,s,cleanup);
+          else if(s.type==='map'||s.type==='globe'){placed=window.CoworkPlaces?CoworkPlaces(s):{section:s,unplaced:[]};await drawGeography(view,placed.section,cleanup);}
           else throw new Error('Unsupported section type: '+s.type);
           if(!view.isConnected||current!==version)return;
           if(!view.querySelector('canvas,svg'))throw new Error('The requested view did not draw.');
           view.setAttribute('aria-busy','false');
           if(chart&&window.CoworkChartData)CoworkChartData(chart,head,section,config,section.id,openData,cleanup);
           if(['map','globe'].includes(s.type)&&window.CoworkGeoLegend)CoworkGeoLegend(section,s);
+          if(placed&&window.CoworkPlaceNotes)CoworkPlaceNotes(section,placed,config);
         } catch(error) {
           if(!view.isConnected||current!==version)return;
           const message=el('p',config.errorText||error.message,'failure');message.setAttribute('role','alert');

@@ -31,11 +31,13 @@ sections are any of:
   Graph/sankey/scatter/line/bar/custom series work. Use proper category/value axes and stable series.
 - {type:'table',title,caption?,columns:[{key,label,unit?,format?:(value,row)=>string}],rows:[objects]}.
   Keys are literal keys (including dotted field names). All columns remain visible on phones.
-- {type:'map'|'globe',title,caption?,points:[{name,lat,lon,label?,color?}],
-  routes?:[{from:[lon,lat],to:[lon,lat],label?,color?}],center?:[lon,lat],library?:'d3'|'echarts'}.
+- {type:'map'|'globe',title,caption?,points:[{name,lat,lon,label?,color?} or {name,place,label?,color?}],
+  routes?:[{from:[lon,lat] or place,to:[lon,lat] or place,label?,color?}],center?:[lon,lat],library?:'d3'|'echarts'}.
+  A place is an exact name from the PLACES list in the contract; the runtime places it.
   Map defaults to real D3 world geography with zoom/pan. Globe is actual rotatable globe.gl with
   country polygons and routes; it has no external textures. ECharts is an alternative for maps.
-  Use only observed or documented/geocoded coordinates. Report unresolved places in text, not fake positions.
+  Use only observed coordinates or listed places; never type coordinates. Unresolved places are listed
+  under the map by the runtime, not given fake positions.
   A point's label is short VISIBLE text.
 - {type:'timeline',title,caption?,items:[{time,label,detail?}]} for actual event milestones.
 - {type:'text',title,text} for concise narrative or an explicit source limitation.

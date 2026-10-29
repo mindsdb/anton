@@ -155,3 +155,31 @@ def test_echarts_map_colors_labels_and_requested_motion(reduced):
             assert lines["effect"]["show"] is not reduced
         finally:
             browser.close()
+
+
+def test_points_and_routes_named_by_place_are_placed_and_unknown_ones_listed():
+    with playwright.sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        try:
+            page = browser.new_page()
+            page.set_content('<html lang="es"><body><section id="geo"></section></body></html>')
+            page.add_script_tag(path=str(JS))
+            result = page.evaluate("""() => {
+              window.ARTIFACT_PLACES = {'Lyon': {lat: 45.75, lon: 4.85}, 'Porto': {lat: 41.15, lon: -8.61}};
+              const placed = CoworkPlaces({points: [{name: 'a', place: 'Lyon'}, {name: 'b', place: 'Nowhere'},
+                                                    {name: 'c', lat: 1, lon: 2}],
+                                           routes: [{from: 'Lyon', to: 'Porto'}, {from: 'Lyon', to: 'Nowhere'},
+                                                    {from: [0, 0], to: 'Porto'}]});
+              CoworkPlaceNotes(document.getElementById('geo'), placed, {});
+              return {points: placed.section.points.map(p => [p.name, p.lon, p.lat]),
+                      routes: placed.section.routes.map(r => [r.from, r.to]),
+                      notes: [...document.querySelectorAll('#geo p')].map(p => p.textContent),
+                      plain: CoworkPlaces({points: [{lat: 1, lon: 2}]}).looked};
+            }""")
+            assert result["points"] == [["a", 4.85, 45.75], ["c", 2, 1]]
+            assert result["routes"] == [[[4.85, 45.75], [-8.61, 41.15]], [[0, 0], [-8.61, 41.15]]]
+            assert result["notes"][0].startswith("Fuera del mapa") and result["notes"][0].endswith(": Nowhere")
+            assert result["notes"][1] == "GeoNames (CC BY 4.0)"
+            assert result["plain"] is False  # coordinates alone: no note, no credit
+        finally:
+            browser.close()

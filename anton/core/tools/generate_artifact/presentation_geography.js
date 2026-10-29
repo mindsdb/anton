@@ -20,6 +20,48 @@
     }
     section.append(legend);
   };
+  const unplacedWords = {
+    en: 'Not on the map (the place name has no single match)',
+    es: 'Fuera del mapa (el nombre del lugar no tiene una única coincidencia)',
+    fr: 'Absents de la carte (aucune correspondance unique pour le nom du lieu)',
+    de: 'Nicht auf der Karte (kein eindeutiger Treffer für den Ortsnamen)',
+    pt: 'Fora do mapa (o nome do local não tem uma única correspondência)',
+    it: 'Fuori dalla mappa (il nome del luogo non ha una corrispondenza univoca)',
+  };
+  // Points and route ends may name a source place; the host resolved the unambiguous ones offline.
+  window.CoworkPlaces = section => {
+    const known = window.ARTIFACT_PLACES || {}, unplaced = [];
+    let looked = false;
+    const where = place => {
+      looked = true;
+      const hit = typeof place === 'string' && Object.hasOwn(known, place) ? known[place] : null;
+      if (!hit) unplaced.push(String(place));
+      return hit && [hit.lon, hit.lat];
+    };
+    const points = [];
+    for (const point of section.points || []) {
+      if (point.place == null || point.lat != null && point.lon != null) {points.push(point); continue;}
+      const pair = where(point.place);
+      if (pair) points.push({...point, lon: pair[0], lat: pair[1]});
+    }
+    const routes = [];
+    for (const route of section.routes || []) {
+      const [from, to] = [route.from, route.to].map(end => typeof end === 'string' ? where(end) : end);
+      if (from && to) routes.push({...route, from, to});
+    }
+    return {section: {...section, points, routes}, unplaced: [...new Set(unplaced)], looked};
+  };
+  window.CoworkPlaceNotes = (section, placed, config) => {
+    if (!placed.looked) return;
+    const lang = (document.documentElement.lang || 'en').split('-')[0];
+    if (placed.unplaced.length) {
+      const note = document.createElement('p'); note.className = 'caption geo-unplaced';
+      note.textContent = (config.unplacedText || unplacedWords[lang] || unplacedWords.en) + ': ' + placed.unplaced.join(', ');
+      section.append(note);
+    }
+    const credit = document.createElement('p'); credit.className = 'caption geo-credit';
+    credit.textContent = 'GeoNames (CC BY 4.0)'; section.append(credit);
+  };
   window.CoworkGeoMotion = (node, source, globe) => {
     for (const name of ['routeMotion', 'autoRotate']) if (source[name] != null && typeof source[name] !== 'boolean') {
       throw new TypeError(name + ' must be a boolean.');
