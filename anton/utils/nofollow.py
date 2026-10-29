@@ -217,7 +217,7 @@ def replace_text_nofollow(
     the write never lands in an existing file. ``mode`` is the new file's
     permission bits (before umask); Windows ignores it.
     """
-    _replace_nofollow(root, path, text, create_parents=create_parents, regular_only=False)
+    _replace_nofollow(root, path, text, create_parents=create_parents, regular_only=False, mode=mode)
 
 
 def replace_bytes_nofollow(root: Path | str, path: Path | str, data: bytes) -> None:
@@ -232,11 +232,18 @@ def replace_bytes_nofollow(root: Path | str, path: Path | str, data: bytes) -> N
 
 
 def _replace_nofollow(
-    root: Path | str, path: Path | str, data: str | bytes, *, create_parents: bool, regular_only: bool
+    root: Path | str,
+    path: Path | str,
+    data: str | bytes,
+    *,
+    create_parents: bool,
+    regular_only: bool,
+    mode: int = 0o666,
 ) -> None:
     """The write behind `replace_text_nofollow` (``str``, as UTF-8) and
     `replace_bytes_nofollow` (``bytes``); ``regular_only`` refuses a
-    ``path`` that holds anything but a regular file."""
+    ``path`` that holds anything but a regular file, and ``mode`` is the
+    new file's permission bits (before umask)."""
     parts = relative_parts(root, path)
     tmp_name = parts[-1] + ".tmp"
     if _IS_WINDOWS:
