@@ -87,7 +87,7 @@
   }
   function isDateField(rows, f) {
     var vals = rows.map(function (r) { return r[f]; }).filter(function (v) { return v != null; });
-    return vals.length && vals.every(function (v) { return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v); });
+    return vals.length && vals.every(AK.isDateString);
   }
 
   /* Rows -> {categories, series:[{name, field, values}]}; long data pivots on `series`. */
@@ -164,6 +164,9 @@
     var colors = b.colors || {};
     var dateX = isDateField(rows, b.x);
     var xfmt = b.x_format || AK.fieldFormat(b, b.x) || (dateX ? AK.dateFormatFor(rows.map(function (r) { return r[b.x]; }), true) : 'auto');
+    var s0 = AK.uniq(rows, b.x);
+    // Years as categories read as years ("2019", not "2,019").
+    if (xfmt === 'auto' && s0.length && s0.every(function (c) { var n = AK.toNum(c); return n != null && n % 1 === 0 && n >= 1800 && n <= 2200; })) xfmt = 'text';
     var yfmt = AK.fieldFormat(b, ys(b)[0]) || b.format || 'auto';
     var axisY = AK.axisFmt(yfmt);
     var narrow = width < 520;
@@ -171,7 +174,9 @@
     // Category names too long to sit under their bars read better as horizontal bars, whole.
     var catTexts = s.cats.map(function (c) { return String(AK.fmt(c, xfmt)); });
     var longestCat = Math.max.apply(null, catTexts.map(function (t) { return t.length; }).concat([1]));
-    if (!horizontal && kind === 'bar' && !dateX && b.horizontal !== false && s.cats.length <= 30 &&
+    // Ordered categories (numbers, years, months, quarters, periods) stay upright: their labels thin out or slant.
+    var ordered = s.cats.every(function (c) { return AK.toNum(c) != null || AK.isPeriodName(c); });
+    if (!horizontal && kind === 'bar' && !dateX && !ordered && b.horizontal !== false && s.cats.length <= 30 &&
         longestCat * 6.4 > (width - 70) / Math.max(1, s.cats.length) * 1.5) horizontal = true;
     // Value labels only where they fit: a vertical bar's slot must be wider than its label.
     var labelFmt = function (v) { return AK.fmt(v, (yfmt.indexOf('currency') === 0 || Math.abs(v) >= 1e5) ? (yfmt.indexOf('currency') === 0 ? 'currency_compact' : 'compact') : yfmt); };
@@ -216,7 +221,7 @@
         name: b.y2_label || '', nameTextStyle: {color: T.text3}, min: b.y2_min, max: b.y2_max});
     }
     var colorsAt = pointColors(b, rows, s.cats, null);
-    // Several series take the page's colour for each name, so a scenario looks the same in every chart.
+    // Several series take the page's colour for each name, so a category looks the same in every chart.
     var serColor = s.series.length > 1 ? AK.colorScale(s.series.map(function (ser) { return ser.name; }), null) : null;
     opt.series = s.series.map(function (ser, i) {
       var type = (kind === 'line' || kind === 'area') ? 'line' : 'bar';
@@ -242,8 +247,9 @@
       if (showValues) {
         item.label = {show: true, position: horizontal ? 'right' : 'top', color: T.text2, fontSize: 11, fontWeight: 600,
           formatter: function (p) { return labelFmt(p.value && p.value.value != null ? p.value.value : p.value); }};
-        // Dense series keep only the value labels that have room; the rest are in the tooltip and the data table.
-        item.labelLayout = {hideOverlap: true};
+        // Dense series keep only the value labels that have room (the rest are in the tooltip and the
+        // data table), unless the page asked for every value.
+        if (b.show_values == null) item.labelLayout = {hideOverlap: true};
       }
       if (i === 0) { var ml = refLines(b, T); if (ml) item.markLine = ml; }
       return item;
@@ -278,6 +284,8 @@
     if (b.x_label) opt.grid.bottom = 24;
     if ((b.ref_lines && b.ref_lines.length) || b.threshold) opt.grid.right = 28;
     if (horizontal && showValues) opt.grid.right = Math.max(opt.grid.right || 16, Math.round(widest * 6.8) + 12);
+    // A slanted first label reaches left of the plot: room for it.
+    if (catAxis.axisLabel.rotate) opt.grid.left = Math.max(opt.grid.left || 8, Math.round(Math.min(longestCat, 12) * 4.2));
     if (horizontal && !b.height) {
       // Room for every bar: the chart grows with its categories.
       var per = (b.stack || s.series.length < 2) ? 30 : 12 * s.series.length + 12;

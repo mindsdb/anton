@@ -132,7 +132,7 @@ to their total) before you build. Figures the request implies are computed and s
 as text with their unit: a duration, a change (the difference, not only both values), a cost, the \
 total of a period. Keep the meaning of the data's own terms for statuses and measures (never turn \
 one into a stronger or weaker word); dates follow the data's calendar, not today's, and keep \
-their times of day when the data has them (an hourly series, the time of an event). Set the page's \
+their times of day when the data has them (a series by hour or minute, an event's time). Set the page's \
 `currency` to the data's currency.
 - A table of records shows the columns a reader needs to recognise each one: its id or name, the \
 parties involved, where and when, and its status. After a merge, check that each column holds what \

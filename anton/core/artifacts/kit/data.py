@@ -56,7 +56,7 @@ def _date_text(v: _dt.datetime) -> str:
 
 
 _DAY_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_WITH_TIME = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+_WITH_TIME = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$")
 
 
 def _same_shape_times(rows: list[dict]) -> list[dict]:
@@ -157,6 +157,9 @@ def profile(data: Any, name: str = "data", max_values: int = 12) -> str:
 
     rows = records(data)
     lines = [f"{name}: {len(rows)} rows"]
+    # Pages show clock times as written; a timezone-aware column says which zone that is.
+    zones = {str(c): str(getattr(t, "tz", None)) for c, t in getattr(data, "dtypes", {}).items()
+             if getattr(t, "tz", None) is not None} if hasattr(data, "dtypes") else {}
     for f in fields(rows):
         vals = [r.get(f) for r in rows]
         present = [v for v in vals if v is not None and v != ""]
@@ -167,9 +170,10 @@ def profile(data: Any, name: str = "data", max_values: int = 12) -> str:
             continue
         texts = [str(v) for v in present]
         if texts and all(len(t) >= 10 and t[:4].isdigit() and t[4] == "-" for t in texts):
-            timed = any(_WITH_TIME.match(t) and not t.endswith(" 00:00:00") for t in texts)
+            timed = any(_WITH_TIME.match(t) and t[11:16] != "00:00" for t in texts)
             kind, cut = ("datetime (with times of day)", 16) if timed else ("date", 10)
-            lines.append(f"  {f}: {kind}, {min(texts)[:cut]} .. {max(texts)[:cut]}, {len(set(texts))} distinct{tail}")
+            zone = f", clock times in {zones[f]}" if f in zones else ""
+            lines.append(f"  {f}: {kind}, {min(texts)[:cut]} .. {max(texts)[:cut]}, {len(set(texts))} distinct{zone}{tail}")
             continue
         counts = Counter(texts)
         if len(counts) <= max_values:

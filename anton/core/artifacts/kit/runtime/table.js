@@ -19,7 +19,7 @@
       c.format = c.format || AK.fieldFormat(b, c.field) || 'auto';
       var sample = rows.map(function (r) { return r[c.field]; }).filter(function (v) { return v != null && v !== ''; });
       // Dates and times in the page's language, times of day kept when the column has them.
-      if (c.format === 'auto' && sample.length && sample.every(function (v) { return typeof v === 'string' && AK.toDate(v); }))
+      if (c.format === 'auto' && sample.length && sample.every(AK.isDateString))
         c.format = AK.dateFormatFor(sample, false) || 'auto';
       c.numeric = c.align ? c.align === 'right' : (sample.length > 0 && sample.every(function (v) { return AK.toNum(v) != null; }) && !/^(date|text)/.test(c.format) && !/(^|_)(id|code|year)$/i.test(c.field));
       if (c.pill && !c.tones) c.tones = {};
