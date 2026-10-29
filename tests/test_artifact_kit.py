@@ -293,6 +293,16 @@ def test_raw_field_names_in_the_text_are_a_warning(tmp_path):
     assert "YouTube" not in warning
 
 
+def test_a_page_with_a_grid_saves(tmp_path):
+    page = kit.Page("Sales")
+    with page.grid(2):
+        page.chart("bar", _revenue(), x="month", y="revenue", title="Revenue")
+        page.table(_revenue(), ["month", kit.col("revenue", "Revenue")], title="By month")
+    page.text("Revenue by month.")
+
+    assert Path(page.save(tmp_path)).exists()
+
+
 def test_kit_errors_are_value_errors():
     assert issubclass(kit.KitError, ValueError)
 

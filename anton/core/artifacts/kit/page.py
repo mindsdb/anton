@@ -953,7 +953,7 @@ class Page:
         labels = dict(self.spec.get("labels") or {})
         for b in self._walk():
             labels.update(b.get("labels") or {})
-            for c in b.get("columns") or []:
+            for c in b.get("columns") or [] if b.get("type") == "table" else []:  # a grid's columns is a count
                 if isinstance(c, dict) and c.get("label"):
                     labels.setdefault(c["field"], c["label"])
         names = {}
