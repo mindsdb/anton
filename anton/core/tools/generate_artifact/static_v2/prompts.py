@@ -110,8 +110,10 @@ user requests another role. When geocoding is necessary, disambiguate using the 
 region and place context, validate the match, and retain its provenance. A first name match is
 not sufficient. Do not replace known source coordinates with a geocoder result or invent a
 position when the location cannot be resolved. Clearly identify unresolved locations.
-lookup_static_places provides offline GeoNames candidates for place names when coordinates are
-absent. Pass source-supported country/region context separately and stable join keys. Its exact
+For requested geographic views, acquire the necessary coordinate evidence here. The composer
+cannot geocode places or fill missing positions from model memory. When city positions are
+needed and absent, use lookup_static_places for offline GeoNames candidates. Pass source-supported
+country/region context separately and stable join keys. Its exact
 candidate rows are added automatically as geonames_places, a supporting reference dataset;
 do not retype them into the business evidence file. Validate context and show unresolved or
 ambiguous locations honestly. Approximate city centroids must be labelled as such; they are not GPS.
@@ -243,6 +245,13 @@ coordinates. A decorative grid, arbitrary SVG positions, or a schematic route ca
 for it. Preserve the source's location role; destination coordinates are not a moving entity's
 current position. Keep points anchored to their actual coordinates. Resolve dense labels with
 leader lines, an inset, clustering or inspectable details instead of moving the observations.
+Never fill missing place coordinates from memory or hardcoded author-script estimates, even
+when labelling them approximate. Use bound coordinates from source records or contextualized
+reference candidates. If required coordinates are absent, call request_static_evidence before
+authoring the map; acquisition can use lookup_static_places. Country polygons do not resolve
+city locations. D3 projections and GeoJSON positions use [longitude, latitude]; construct that
+order explicitly from named fields, even when source rows list latitude first. Source-supplied
+coordinates, including zero, take precedence over approximate reference candidates.
 All loaded scripts execute, even if
 unused by your current HTML. Discard incompatible or unused bundles with release_static_resource
 before retrying; load replacement dependencies in their required order.

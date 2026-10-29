@@ -145,7 +145,7 @@ async def compose(state, evidence: Evidence):
             return 'Static artifact stopped before publication; the previous artifact is preserved.'
         state.step_started('generate_frontend', attempt=attempt)
         response, budget = await _call_with_stream_retry(state.session._llm.code_stream,
-            system=COMPOSE, messages=messages, tools=[TOOL, CUSTOM_TOOL if custom_allowed else CUSTOM_SURFACE, INSPECT, reference.TOOL, reference.GEOGRAPHY_TOOL, reference.RELEASE_TOOL] + ([revisions.TOOL] if draft is not None else []), max_tokens=14000, default_cap=None,
+            system=COMPOSE, messages=messages, tools=[TOOL, CUSTOM_TOOL if custom_allowed else CUSTOM_SURFACE, INSPECT, reference.TOOL, reference.GEOGRAPHY_TOOL, reference.RELEASE_TOOL, content_review.EVIDENCE_TOOL] + ([revisions.TOOL] if draft is not None else []), max_tokens=14000, default_cap=None,
             on_text=state.peek_for('generate_frontend'))
         state.peek_done('generate_frontend')
         state.trace_log.llm_call(node='static_compose', method='code_stream', system=COMPOSE, messages=messages, response=response, attempt=attempt)
@@ -205,6 +205,9 @@ async def compose(state, evidence: Evidence):
             if looks_truncated(response, budget) or len(response.tool_calls) != 1:
                 raise ValueError('Return one complete composition or revision call within the output budget')
             call = response.tool_calls[0]
+            if call.name == content_review.EVIDENCE_TOOL['name'] and not call.parse_error and not call.repaired:
+                request = content_review.MissingEvidence.model_validate(call.input)
+                return content_review.EvidenceRequest(tuple(request.issues))
             if call.name not in (TOOL['name'], CUSTOM_TOOL['name'], revisions.TOOL['name']) or call.parse_error or call.repaired:
                 raise ValueError('Return valid, complete structured arguments')
             if call.name == CUSTOM_TOOL['name'] and not custom_allowed:
