@@ -220,6 +220,39 @@ LibreOffice in this process (`lint_html`, `lint_url`, `check_xlsx_via_office`,
 and return None under a policy before they spawn. The in-process lints still
 run.
 
+When the host sets `ANTON_LIVE_APP_SLOTS`, a fullstack app runs in an app
+slot instead (`anton/core/artifacts/live_app_slots.py`). A slot is a separate
+container that holds one app at a time, restarts empty before it takes
+another, and serves the app at its own address (`ANTON_LIVE_APP_ADDRESS`,
+default `http://app{n}.view.localhost:8080/`), which only the person who
+launched it opens. `launch_artifact_backend` still starts nothing in this
+process; `launch_backend`, `generate_artifact`'s run step, the check after
+each cell and a change to an app's declared connections send the launch to
+a slot, and its result carries the address, never a port or a pid. A
+launch sends `backend.py`, `requirements.txt`, `state_manifest.json` and the
+files under `static/`, read with no-follow opens and only from a folder the
+person's own cells may read (`CellSandbox.allows_read`), and the `DS_*` of
+each declared connection that the operator approved
+(`ANTON_LIVE_APP_CONNECTIONS_FILE`) and the person saved pointing at the
+approved host. An API connection's URLs are rewritten to the stack's relay,
+which enforces what the approval allows. Every other declared connection is
+named in the result, never with a value. The first launch, and any relaunch
+after `backend.py`, `requirements.txt` or the connections change, waits for
+the write gate's card (`scratchpad.ask_approval_card`), which names each
+connection with what it may do; a change to `static/` alone relaunches
+without one, and a cell that leaves every launch file's bytes as they were
+relaunches nothing. A launch takes the slot that still runs the app, else
+the lowest free one, so a relaunch after a stop may get a new address, else
+the launcher's own oldest app, which the card names; it never replaces
+another person's app, and with every slot held by others it names who holds
+what. The host hands the session a `LiveAppHost`
+(`ChatSessionConfig.live_app_host`): who launches, the slots' token, and the
+record of each launch, including a launch that stopped an app and then
+failed. With live apps on, the generator installs nothing for the backend,
+since a slot installs nothing, and its verifier fails a fullstack page that
+loads a script from anywhere but `https://cdn.jsdelivr.net`, the one script
+origin the app's content policy allows.
+
 Pages are still loaded in a browser under a policy when the host sets
 `ANTON_RENDER_CHECK_URL`: the render-check service
 (`anton/core/artifacts/render_check.py`) runs Chromium in its own container
@@ -262,6 +295,35 @@ because the service was busy or the cell's time ran out, leaves the next
 check free to list what it finds. So the agent fixes them once and then
 reports the page as unverified, instead of editing a page that may work
 on every cell.
+
+Each check also compares the page with how it was when the turn began.
+Before the turn's first cell or `generate_artifact` run, anton keeps a copy
+of every artifact's main page but a fullstack app's
+(`page_copies.TurnPages.capture`): newest first, at most 64 MiB a turn,
+read the way the check reads a page. A check of a page with a copy sends it
+as `previous_html`, unless less than a whole check's time
+(`render_check.TIMEOUT_SECONDS`) is left of the cell's budget, and the
+service's `comparison` names the views the turn's edits broke, left without
+a graphic, removed, or left fewer than half the marks of a kind they drew:
+an svg view's markers, bars and other shapes, each kind counted apart, and
+a canvas's marks not at all; the render check's own docs say which table
+rows and HTML map markers count. A view that broke fails the page, so its
+repair cells apply. The others are not failures, and the agent hears about
+each set once a turn.
+When a page the turn's edits made worse fails with no repair cells left,
+anton puts the copy back. A `generate_artifact` run on an existing
+artifact that fails, stops over budget, crashes or is abandoned by the
+turn puts the main page back as it was when the run started: as the turn
+found it, when the run was the first to change it. A build that fails only
+its browser check comes back to repair with the same comparison
+(`changes_from_previous`). A run that never wrote (cancelled, needs
+confirmation) puts nothing back. On a sandboxed
+deployment the turn ends with a line for each page put back as the turn
+found it and for each view broken, blanked, removed or shrunk
+(`TurnPages.end_lines`). The comparison never costs a page its own verdict:
+a copy too large to send goes without it, and when a service that predates
+the comparison answers such a request 400, anton asks once more with the
+page alone.
 
 The service also presses each tab and toggle it finds, and a pass vouches
 only for the views it measured. The cell check's line for a passed page
@@ -382,8 +444,11 @@ inside the subprocess:
 - `generate_object(Model, system=..., messages=[...])` — forced-tool-call
   structured output. It shares `build_structured_tool` /
   `unwrap_structured_response` from `anton/core/llm/structured.py` with the
-  main process's `LLMClient.generate_object`; only the provider invocation
-  differs (sync subprocess vs async planning). See [LLM dispatch](/developer/llm-dispatch).
+  main process's `LLMClient.generate_object`, and `send_structured`, which
+  resends a call whose forced tool choice the model refused. The refusal is
+  remembered in that module, so it outlasts the provider each call builds; only
+  the provider invocation differs (sync subprocess vs async planning). See
+  [LLM dispatch](/developer/llm-dispatch).
 
 The boot script also provides `agentic_loop(...)` (a sync tool-call loop),
 `web_search(query)` (routes through the configured LLM's native web search),

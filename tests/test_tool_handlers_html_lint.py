@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from anton.core.artifacts import report_tools as rt
 from anton.core.tools.tool_handlers import ArtifactFiles, lint_changed_artifact_files, snapshot_existing_artifacts
 
 requires_browser = pytest.mark.skipif(
@@ -123,6 +124,34 @@ def test_a_page_over_the_size_ceiling_says_it_was_not_checked(monkeypatch, store
     assert loaded == []
     assert lint.messages == ["dash-abc12345/dash.html — not checked in a browser: the page is over 1 MB"]
     assert lint.page_checks == {("dash-abc12345", "dash.html"): "unverified"}
+
+
+def test_a_page_the_cell_wrote_with_markup_shown_as_text_fails(monkeypatch, store: _FakeStore):
+    """Escaped markup loads without an error, so no browser check fails the page."""
+    monkeypatch.delenv("ANTON_HTML_LINT_BROWSER", raising=False)
+    monkeypatch.delenv("ANTON_RENDER_CHECK_URL", raising=False)
+    folder = _make_artifact(store, "dash-abc12345")
+    (folder / "dash.html").write_text(rt.page("Exceptions", rt.para("<style>.x{color:red}</style>")))
+
+    lint = lint_changed_artifact_files(store, {"dash-abc12345": ArtifactFiles()})
+
+    assert lint.messages[0].startswith("dash-abc12345/dash.html — the page shows HTML tags as text")
+    assert "['<style>', '</style>']" in lint.messages[0]
+    assert lint.page_checks == {("dash-abc12345", "dash.html"): "failed"}
+
+
+def test_markup_shown_as_text_is_reported_only_on_a_page_the_cell_wrote(monkeypatch, store: _FakeStore):
+    monkeypatch.delenv("ANTON_HTML_LINT_BROWSER", raising=False)
+    monkeypatch.delenv("ANTON_RENDER_CHECK_URL", raising=False)
+    folder = _make_artifact(store, "dash-abc12345")
+    (folder / "index.html").write_text(rt.page("Old", rt.para("<div>escaped before this cell</div>")))
+    before = snapshot_existing_artifacts(store)
+    (folder / "notes.html").write_text(rt.page("Notes", rt.para("Fine.")))
+
+    lint = lint_changed_artifact_files(store, before)
+
+    assert not any("HTML tags as text" in m for m in lint.messages)
+    assert ("dash-abc12345", "index.html") not in lint.page_checks
 
 
 @requires_browser
@@ -237,5 +266,33 @@ def test_a_finding_on_an_edited_page_still_reaches_the_agent(monkeypatch, tmp_pa
 
     lint = tool_handlers.lint_changed_artifact_files(store, before)
 
-    assert lint.messages == [f"{slug}/index.html — console_error: boom"]
+    assert lint.messages == [
+        f"{slug}/index.html — console_error: boom",
+        f"{slug}/index.html — {tool_handlers._repairs_left_line(tool_handlers.REPAIR_CELLS)}",
+    ]
     assert lint.page_checks == {(slug, "index.html"): "failed"}
+
+
+def test_the_local_browser_holds_a_failed_page_to_the_same_repair_budget(monkeypatch, tmp_path: Path):
+    """Without the render-check service the local browser checks the page,
+    and the second failed repair of it lists no findings either."""
+    from anton.core.artifacts.html_lint import HtmlFinding
+    from anton.core.tools import tool_handlers
+
+    monkeypatch.delenv("ANTON_RENDER_CHECK_URL", raising=False)
+    monkeypatch.setattr(
+        "anton.core.artifacts.html_lint.lint_html",
+        lambda path, *, cell_sandbox: [HtmlFinding(kind="console_error", detail="boom")],
+    )
+    store, slug = _dashboard(tmp_path)
+    key = tool_handlers.PageKey(slug, "index.html")
+    for used in range(tool_handlers.REPAIR_CELLS):
+        before = tool_handlers.snapshot_existing_artifacts(store)
+        (store.root / slug / "index.html").write_text(f"<html><body><script>boom({used})</script></body></html>")
+        lint = tool_handlers.lint_changed_artifact_files(
+            store, before, failing=frozenset({key}), repairs_used={key: used},
+        )
+        assert lint.repaired == frozenset({key})
+
+    assert lint.messages == [f"{slug}/index.html — {tool_handlers._NO_REPAIRS_LEFT}"]
+    assert lint.page_checks == {key: "failed"}

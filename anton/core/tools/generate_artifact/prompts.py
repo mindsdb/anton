@@ -31,6 +31,7 @@ from .sub_tools import FILE_BEGIN_MARKER as BEGIN, FILE_END_MARKER as END
 from .state import REPLY_BODY_CHARS, language_name
 
 if TYPE_CHECKING:
+    from anton.core.memory.skills import Skill
     from anton.utils.datasources import CatalogConnection, DatasourceCatalog
 
 
@@ -42,8 +43,8 @@ if TYPE_CHECKING:
 FSM_DIGRAPH = """\
 digraph artifact_generation {
     rankdir=TB;
-    is_data_enough       [shape=diamond, label="Is there enough data to solve the task?"];
-    define_required_data [shape=box,     label="Determine the required data"];
+    data_verified        [shape=diamond, label="Did gathering verify every declared source?"];
+    define_required_data [shape=box,     label="Determine the data still missing"];
     is_possible_to_fetch [shape=diamond, label="Is it possible to fetch the data?"];
     fetch_data_sample    [shape=box,     label="Fetch a data sample"];
     not_enough_data      [shape=ellipse, label="Error: not enough data"];
@@ -57,13 +58,17 @@ digraph artifact_generation {
     run_app              [shape=box,     label="Launch the application"];
     verify_fullstack     [shape=box,     label="Verify the application is running"];
 
-    // entry node = is_data_enough
-    is_data_enough       -> make_tech_spec       [label="yes"];
-    is_data_enough       -> define_required_data [label="no"];
-    define_required_data -> is_possible_to_fetch;
+    // entry node = data_verified
+    data_verified        -> make_tech_spec       [label="yes"];
+    data_verified        -> define_required_data [label="no"];
+    define_required_data -> make_tech_spec       [label="nothing missing"];
+    define_required_data -> is_possible_to_fetch [label="data missing"];
     is_possible_to_fetch -> fetch_data_sample    [label="yes"];
     is_possible_to_fetch -> not_enough_data      [label="no"];
-    fetch_data_sample    -> is_data_enough;
+    is_possible_to_fetch -> fetch_data_sample    [label="no, once, when connections exist"];
+    fetch_data_sample    -> make_tech_spec       [label="data fetched"];
+    fetch_data_sample    -> define_required_data [label="fetch failed, or after the forced fetch"];
+    fetch_data_sample    -> not_enough_data      [label="iterations exhausted"];
     make_tech_spec       -> is_fullstack;
     is_fullstack         -> make_api_spec        [label="yes"];
     is_fullstack         -> generate_frontend    [label="no"];
@@ -212,17 +217,31 @@ VISUAL DESIGN (for every HTML file you produce):
 - Multi-tab dashboards: NEVER call `echarts.init()` on a hidden container.
   Use lazy init — initialise charts only on first tab visibility.
   Pattern: `const _rendered = new Set(['overview']); function showPage(name) { if (!_rendered.has(name)) { _rendered.add(name); initChartsFor(name); } }`
+  `initChartsFor(name)` starts each view on that tab by its title with
+  `runView(title, el)`, the helper in the verifier contract, so a view whose
+  script fails on a tab fails alone and the tab's other views still draw.
 - Layout composition:
   - Hero KPI cards at the top (large numbers, colour-coded ±, delta arrows).
   - Main narrative chart immediately below KPIs.
   - Supporting charts below, each with a subtitle explaining what it reveals.
   - Use ECharts `markLine` for thresholds, `markPoint` for outliers,
     `markArea` for highlighted regions.
-- Responsive:
-  - Multi-card grid: `grid-template-columns: repeat(auto-fit, minmax(360px, 1fr))`
+- Responsive (the page must read well on a 390 px phone, not only fit it):
+  - Multi-card grid: `grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr))`
   - Chart containers: `width: 100%; height: min(420px, 60vh)`
   - Register `window.addEventListener('resize', () => chart.resize())` on every ECharts instance.
-  - Tables wrapped in `<div style="overflow-x: auto;">` — never fixed widths.
+  - A table of more than 4 columns shows each row as a card below 640 px:
+    every `td` carries `data-label="<column name>"`, and a media query hides
+    the `thead` and sets `display: block` on `table`, `tbody`, `tr` and `td`
+    (keep `tr[hidden]` hidden), with `td::before { content: attr(data-label) }`.
+    A narrower table sits in `<div style="overflow-x: auto;">`. Never fixed table widths.
+  - Numbers, ids and dates never break inside a value: `white-space: nowrap` on
+    those cells. Never `overflow-wrap: anywhere` or `word-break: break-all` on
+    table cells: they squeeze every column to a letter or two.
+  - A map fits its projection to the plotted points (with a margin), not the
+    whole world, when they sit in one region. At phone width its labels and
+    legend stay inside the view and no smaller than 11 px: shorten or drop
+    labels that would overlap.
 - SECURITY: NEVER embed API keys, tokens, passwords, or connection strings in HTML/JS.
   Credentials were already used server-side; serialise only the resulting data.\
 """
@@ -244,6 +263,8 @@ step and costs a regeneration, unless the item says it is only a warning:
 - The global name `window.__antonCommentsLayer` is never used; the host app
   reserves it.
 - Every opened `<script>` block must be closed with `</script>`.
+- No HTML tag shown as text: escaped markup such as `&lt;div&gt;` outside
+  `<pre>`, `<code>` or `<textarea>`.
 - No universal `* { ... !important }` rule.
 - Every `z-index` is 1000 or below.
 - Significant block containers (`div`, `section`, `table`, `main`,
@@ -287,19 +308,79 @@ _BROWSER_GATE_SERVED = """\
 """
 
 
+# The one helper every view goes through, here and, word for word, in the
+# build-html-dashboard skill. Each view's own script registers its setup with
+# `defineView`, and the page starts it by name with `runView`. A browser parses
+# each `<script>` element as a whole, so a syntax error in one view's script
+# stops only that script: its `defineView` never runs, and `runView` finds no
+# setup under that name. A missing setup, a throw or a rejected promise stays
+# in its view: the view shows a plain-text message and carries
+# `data-view-failed`, which the render check reports as a blank view whatever
+# the message says. The message names the view first in both channels:
+# `console.error`, which the render check counts, and `reportError`, which
+# fires the window `error` event the app preview's error list is built from.
+# A `Map` keeps a view titled like an `Object` property ("constructor") from
+# finding a setup it never registered. A title two scripts register fails
+# every view under it, instead of drawing the second view's setup in both.
+# `el` may be missing, and `fail` must not throw from inside the `catch`, or
+# the error escapes the view.
+VIEW_HELPER_JS = (
+    "const viewSetups = new Map(); "
+    "function defineView(name, setup) { viewSetups.set(name, viewSetups.has(name) ? () => { throw new Error('two scripts defined this view'); } : setup); } "
+    "function runView(name, el) { const fail = (err) => { "
+    "const why = err && err.message ? err.message : String(err); "
+    "if (el) { el.setAttribute('data-view-failed', name); el.textContent = name + ' could not load.'; } "
+    "console.error(name + ' failed: ' + why); "
+    "if (typeof reportError === 'function') reportError(new Error(name + ': ' + why)); }; "
+    "const setup = viewSetups.get(name); "
+    "if (typeof setup !== 'function') { fail(new Error('no script defined this view')); return; } "
+    "try { const done = setup(el); if (done && typeof done.then === 'function') done.catch(fail); } "
+    "catch (err) { fail(err); } }"
+)
+
+
 # Follows either browser-gate bullet. The browser check counts console errors,
 # so an error a view catches and only writes into the page never reaches it,
 # and an expected failure that logs one fails a page that works.
 _CAUGHT_ERRORS = """\
-- A view you guard with `try`/`catch` logs what it caught as well as writing
-  a short message into the view:
-  `try { drawMap(el); } catch (e) { console.error(e); el.textContent = 'The map could not load.'; }`.
-  A catch that only writes the message hides the error from the browser
-  check: at most the check reports the view as empty, and it cannot say what
-  broke it. Log with `console.error` only a view that failed to draw. An
-  expected failure stays silent or uses `console.warn`: the guarded storage
-  helper the browser storage note below asks for catches a throw on every
-  load in the preview frame, and a `console.error` there fails the check.\
+- Start every view through this one helper: each chart, map, globe or other
+  view that runs setup code, on load or on its tab's first visit. Put the
+  helper alone in the page's first inline `<script>`:
+  `""" + VIEW_HELPER_JS + """`
+  Give each view an inline `<script>` of its own that holds only its setup,
+  registered under the view's title as the page shows it. Give each view a
+  title no other view on the page uses: two scripts that register one title
+  fail both views. The setup takes the view's element and may be `async`:
+  `<script>defineView('Shipment map', (el) => { /* draw the map */ });</script>`.
+  Declare nothing else at a view script's top level: every function and
+  constant the view uses goes inside its setup. A page's scripts share one
+  global scope, so two views' top-level `function render` silently swap, and
+  one view draws the other's chart with no error.
+  Shared code, such as the data and formatters, goes in scripts before the
+  views'. The page's last script starts each view by its title once the
+  page has parsed, on load or on its tab's first visit:
+  `addEventListener('DOMContentLoaded', () => { runView('Shipment map', document.getElementById('world-map')); });`.
+  A `<script type="module">` runs after every classic script, so a view it
+  registers exists only by then. Keep the functions the page's HTML calls,
+  such as a tab's `showPage`, outside that listener, where an `onclick`
+  attribute finds them.
+  The browser parses each `<script>` on its own, so a syntax error in one
+  view's script stops only that view: it shows a plain-text message in its
+  place, and every other view still draws. A view whose setup throws or
+  whose promise rejects fails alone the same way. Never put two views' code
+  in one script, and never pass a setup function to `runView`.
+  Await or return every promise the setup starts, such as the atlas's
+  `d3.json(...)`. Don't end it with a `.catch` of your own: the helper must
+  see the failure to name and mark the view.
+  Keep the helper as written: its `console.error` and `reportError` name the
+  failed view to the browser check and to the preview's error list, and
+  `data-view-failed` lets the check find the failed view whatever its
+  message says. A view's own `try`/`catch` that only writes a message hides
+  the error from the check. Log with `console.error` only a view that failed
+  to draw. An expected failure stays silent or uses `console.warn`: the
+  guarded storage helper the browser storage note below asks for catches a
+  throw on every load in the preview frame, and a `console.error` there
+  fails the check.\
 """
 
 
@@ -576,10 +657,11 @@ tag, one that calls the backend outside `/api/*`, one that calls it with a
 root-relative path instead of `api()`, or one whose `fetch()` names a path
 `openapi.json` does not define, fails the step.
 
-- Single self-contained HTML file: your own CSS in `<style>`, all JS in
-  `<script>`. The only external resources are the CDN scripts named in the
-  design rules (Tailwind, ECharts) and, for a map or globe, the recipe
-  packages and world atlas named there.
+- Single self-contained HTML file: your own CSS in `<style>`, your own JS in
+  inline `<script>` elements, each view's code in a script of its own (see
+  the verifier contract). The only external resources are the CDN scripts
+  named in the design rules (Tailwind, ECharts) and, for a map or globe, the
+  recipe packages and world atlas named there.
 - Include the api-base meta tag in `<head>`:
   ```html
   <meta name="api-base" content="">
@@ -671,7 +753,8 @@ def _gen_html_task(target: str, *, fullstack: bool = False) -> str:
     if fullstack:
         body = f"""\
 Produce ONE self-contained HTML file named exactly `{target}`: the
-complete frontend of a fullstack app. Inline your own CSS and all JS; the
+complete frontend of a fullstack app. Inline your own CSS and all JS, each
+view's code in a `<script>` of its own as the verifier contract says; the
 only external resources allowed are the Tailwind and ECharts `<script>` tags
 from the CDNs named in the design rules and, for a map or globe, the recipe
 packages and world atlas named there. The backend is generated in parallel
@@ -684,7 +767,8 @@ the relative name given there."""
     else:
         body = f"""\
 Produce ONE self-contained HTML file named exactly `{target}`, at the root
-of the artifact folder. Inline your own CSS and all JS and embed all data in
+of the artifact folder. Inline your own CSS and all JS, each view's code in a
+`<script>` of its own as the verifier contract says, and embed all data in
 the file. Do not reference any other file of the artifact, except the assets
 listed under `## Attached files`, by the relative name given there in quotes
 (`<img src="logo.png">`): once you have written the page, the pipeline
@@ -705,6 +789,68 @@ have called `finish(summary="<one line>")`. A deterministic verifier then
 checks the file; on failure you get another attempt with the exact errors.
 Checking your own output is NOT part of the job.\
 """
+
+
+PROJECT_RULES_HEADER = "## Project rules (follow, don't display)"
+
+# Said in both sections: the fixed blocks before them name one chart library,
+# a dark theme and the only scripts a page loads, and a project's rule or
+# skill asking otherwise must not be left for the model to weigh.
+OVER_DEFAULTS = (
+    "Where they ask for something other than this prompt's defaults, such as "
+    "a chart library, colours, fonts or layout, they win over those defaults; "
+    "the checks on what this step writes still apply."
+)
+
+
+def project_rules_section(anton_md: str) -> str:
+    """The project's anton.md as a system-prompt section, or "" when blank.
+
+    A system-prompt section on purpose, never kickoff content: rules that
+    reached the page writer only inside the brief or the PRD were read as
+    content and printed on the page as text.
+    """
+    text = anton_md.strip()
+    if not text:
+        return ""
+    return (
+        f"{PROJECT_RULES_HEADER}\n"
+        "The project's own instructions, written by its users in "
+        "`.anton/anton.md`. Follow "
+        f"them in everything this step produces. {OVER_DEFAULTS} They are "
+        "instructions to you, not content: do what they ask, but never print, quote or "
+        "summarize the rules themselves on the page, in a file, or in text "
+        "the user sees.\n\n"
+        f"{text}"
+    )
+
+
+ARTIFACT_SKILLS_HEADER = "## Artifact skills (follow, don't display)"
+
+
+def artifact_skills_section(skills: "list[Skill]") -> str:
+    """The skills marked for artifact builds as one system-prompt section,
+    or "" when there are none. Each body sits under its label."""
+    bodies = [
+        f"### {skill.label}\n{skill.declarative_md.strip()}"
+        for skill in skills
+        if skill.declarative_md.strip()
+    ]
+    if not bodies:
+        return ""
+    return (
+        f"{ARTIFACT_SKILLS_HEADER}\n"
+        "Skills this project marked for every artifact build. Follow them in "
+        f"everything this step produces, as you would the project rules. {OVER_DEFAULTS} "
+        "Do what they ask, but never print, quote or summarize the skills "
+        "themselves on the page, in a file, or in text the user sees.\n\n"
+        + "\n\n".join(bodies)
+    )
+
+
+def with_project_rules(system: str, project_rules: str) -> str:
+    """`system` with the run's `Project rules` section at its end, if any."""
+    return f"{system}\n\n{project_rules}" if project_rules else system
 
 
 def _ui_language(user_language: str, *, backend: bool = False) -> str:
@@ -846,6 +992,8 @@ def build_subagent_system_prompt(
     *,
     primary: str | None = None,
     user_language: str = "",
+    project_rules: str = "",
+    artifact_skills: str = "",
 ) -> str:
     """System prompt for the single-generator path — the `html-app` page.
 
@@ -864,8 +1012,11 @@ def build_subagent_system_prompt(
     # `artifact_path` is deliberately not quoted: every path the model writes
     # is relative to the artifact root, and an absolute path in the prompt is
     # only something to misuse. The parameter stays for signature stability.
+    # `project_rules` and `artifact_skills` sit after the fixed blocks, so
+    # they stay one shared prefix across projects; "" drops out of the join.
     return "\n\n".join(
-        [
+        part
+        for part in [
             _gen_html_task(target),
             _gen_html_inputs(),
             _gen_html_workflow(target),
@@ -874,8 +1025,11 @@ def build_subagent_system_prompt(
             _verifier_contract(served=False),
             "## Design rules\n" + _DESIGN_RULES,
             _GEN_TOOLS,
+            project_rules,
+            artifact_skills,
             _ui_language(user_language),
         ]
+        if part
     )
 
 
@@ -989,15 +1143,17 @@ def build_api_spec_prompt(
     context: str,
     *,
     stateless: bool = False,
+    project_rules: str = "",
 ) -> tuple[str, str]:
     """Cold-start form: the assembled context plus the same instruction the
     hot path sends, so both paths ask for the same document."""
-    system = (
+    system = with_project_rules(
         _DATA_CONTEXT_HEADER
         + "You are the `make_api_spec` node. Your document is saved to "
         "`openapi.json` and handed to the backend and frontend generators "
         "next to the material below; the instruction at the end of the user "
-        "message says what goes into it."
+        "message says what goes into it.",
+        project_rules,
     )
     user = "## Requirements\n" + context.strip() + "\n\n" + build_api_spec_instruction(
         stateless=stateless
@@ -1136,11 +1292,11 @@ def _datasource_section(
         # Gathered cells that read a `DS_*` variable are evidence of a source
         # the model forgot to declare: keep the catalog then.
         return catalog.render().strip() if "DS_" in data_notes else _NO_DATASOURCES_NOTE
-    kept = [c.slug for c in catalog.connections if _is_declared(c, declared)]
+    kept = [c.slug for c in catalog.connections if is_declared(c, declared)]
     return catalog.render(kept or None).strip()
 
 
-def _is_declared(connection: "CatalogConnection", declared: list[str]) -> bool:
+def is_declared(connection: "CatalogConnection", declared: list[str]) -> bool:
     """Whether a lowercased declared source names `connection`: its slug,
     label, engine id or engine name occurs in it."""
     names = (
@@ -1154,6 +1310,17 @@ def _is_declared(connection: "CatalogConnection", declared: list[str]) -> bool:
     return any(tok in d for d in declared for tok in tokens)
 
 
+# A live app's backend runs in an app slot that installs nothing, so the
+# verifier checks only that each package the file names is installed here.
+_LIVE_APP_PACKAGES = (
+    "## Live app packages\n"
+    "This app runs as a live app, in an app slot that installs nothing: it runs only the "
+    "packages already installed here, `fastapi`, `mangum` and `uvicorn` among them. So "
+    "`requirements.txt` is not installed. A package it names that isn't installed here "
+    "fails the step, and `fastapi`, `mangum` and `uvicorn` need no line."
+)
+
+
 def build_backend_system_prompt(
     artifact_path: Path,
     *,
@@ -1162,6 +1329,9 @@ def build_backend_system_prompt(
     declared_sources: list[str] | tuple[str, ...] = (),
     data_notes: str = "",
     user_language: str = "",
+    live_app: bool = False,
+    project_rules: str = "",
+    artifact_skills: str = "",
 ) -> str:
     """System prompt for `generate_backend`.
 
@@ -1171,20 +1341,26 @@ def build_backend_system_prompt(
     model writes is relative to the artifact root.
     """
     target = "backend.py"
+    contract = _gen_backend_verifier_contract(stateless=stateless)
     parts = [
         _gen_backend_task(stateless=stateless),
         _gen_html_inputs(fullstack=True, backend=True),
         _gen_backend_workflow(stateless=stateless),
         _gen_html_output_protocol(target, example=_PYTHON_BODY_EXAMPLE),
         _GEN_SIZE_RULES_PYTHON,
-        _gen_backend_verifier_contract(stateless=stateless),
+        contract,
         "## Backend rules\n" + _BACKEND_RULES,
         "## State rules\n" + (_STATELESS_RULES if stateless else _STATEFUL_RULES),
     ]
+    if live_app:
+        # Right after the contract, whose requirements line it replaces.
+        # Without live apps the prompt is as it was, byte for byte.
+        parts.insert(parts.index(contract) + 1, _LIVE_APP_PACKAGES)
     section = _datasource_section(datasources, declared_sources, data_notes)
     if section:
         parts.append(section)
     parts.append(_GEN_TOOLS)
+    parts.extend(p for p in (project_rules, artifact_skills) if p)
     parts.append(_ui_language(user_language, backend=True))
     return "\n\n".join(parts)
 
@@ -1234,24 +1410,50 @@ def build_backend_kickoff(
 FULLSTACK_FRONTEND_TARGET = "static/index.html"
 
 
-def build_frontend_system_prompt(artifact_path: Path, *, user_language: str = "") -> str:
+# A live app's page opens at its own address, whose content security policy
+# loads scripts from one host only, so the verifier fails any other script.
+_LIVE_APP_SCRIPTS = (
+    "## Live app scripts\n"
+    "This app runs as a live app, whose content security policy loads scripts and "
+    "stylesheets only from `https://cdn.jsdelivr.net`, and images and fonts only from the "
+    "page itself. A script from any other host, or one written as `//cdn.jsdelivr.net/...`, "
+    "fails the step instead of warning, in a `<script src>`, an import or an import map "
+    "alike: load every library as `https://cdn.jsdelivr.net/npm/<package>@<version>/...`."
+)
+
+
+def build_frontend_system_prompt(
+    artifact_path: Path,
+    *,
+    live_app: bool = False,
+    user_language: str = "",
+    project_rules: str = "",
+    artifact_skills: str = "",
+) -> str:
     # `artifact_path` is not quoted, for the same reason as in the html-app
     # builder: every path the model writes is relative to the artifact root.
     target = FULLSTACK_FRONTEND_TARGET
-    return "\n\n".join(
-        [
-            _gen_html_task(target, fullstack=True),
-            _gen_html_inputs(fullstack=True),
-            _gen_html_workflow(target, fullstack=True),
-            _gen_html_output_protocol(target),
-            _GEN_SIZE_RULES,
-            _verifier_contract(served=True),
-            "## Fullstack rules\n" + _FRONTEND_RULES,
-            "## Design rules\n" + _DESIGN_RULES,
-            _GEN_TOOLS,
-            _ui_language(user_language),
-        ]
-    )
+    contract = _verifier_contract(served=True)
+    sections = [
+        _gen_html_task(target, fullstack=True),
+        _gen_html_inputs(fullstack=True),
+        _gen_html_workflow(target, fullstack=True),
+        _gen_html_output_protocol(target),
+        _GEN_SIZE_RULES,
+        contract,
+        "## Fullstack rules\n" + _FRONTEND_RULES,
+        "## Design rules\n" + _DESIGN_RULES,
+        _GEN_TOOLS,
+        project_rules,
+        artifact_skills,
+        _ui_language(user_language),
+    ]
+    if live_app:
+        # Right after the contract it tightens. Without live apps the prompt
+        # is as it was, byte for byte.
+        sections.insert(sections.index(contract) + 1, _LIVE_APP_SCRIPTS)
+    # "" (no anton.md, no artifact skill) drops out of the join.
+    return "\n\n".join(part for part in sections if part)
 
 
 def build_frontend_kickoff(
@@ -1306,6 +1508,26 @@ def prd_section(state) -> str:
     return f"{PRD_SECTION_HEADER}\n{body}\n{PRD_SECTION_FOOTER}" if body else ""
 
 
+KNOWN_DATA_HEADER = "## Known data (passed in by the calling agent)"
+KNOWN_DATA_FOOTER = "--- end of known data ---"
+
+
+def known_data_section(state) -> str:
+    """`known_data` under its header, or "" when there is none. Passed whole:
+    it is what the calling agent chose to hand over, and a cut snapshot would
+    be built into the page as if it were complete. Closed by a footer for the
+    same reason as the PRD: the agent's markdown may carry `##` headings of
+    its own."""
+    text = (getattr(state, "known_data", "") or "").strip()
+    return f"{KNOWN_DATA_HEADER}\n{text}\n{KNOWN_DATA_FOOTER}" if text else ""
+
+
+def datasources_or_none(state) -> str:
+    """The `## Connected Data Sources` section, or the same header over
+    "(none)" so a step can tell "nothing connected" from a missing section."""
+    return (state.datasource_context or "").strip() or f"{DATASOURCES_HEADER}\n(none)"
+
+
 def _brief_and_notes(state) -> str:
     parts = [f"## Brief\n{state.brief.strip()}"]
     prd = prd_section(state)
@@ -1315,6 +1537,9 @@ def _brief_and_notes(state) -> str:
         parts.append(f"## Data gathered so far\n{state.data_notes.strip()}")
     else:
         parts.append("## Data gathered so far\n(nothing gathered yet)")
+    known = known_data_section(state)
+    if known:
+        parts.append(known)
     if getattr(state, "web_notes", "").strip():
         parts.append(state.web_notes.strip())
     journal = state.journal()
@@ -1323,34 +1548,73 @@ def _brief_and_notes(state) -> str:
     return "\n\n".join(parts)
 
 
+def _data_sources_context(state) -> str:
+    """What the data decisions may draw on: the connections, the public
+    sources and the pads the calling agent already filled."""
+    parts = [datasources_or_none(state)]
+    for extra in (getattr(state, "public_sources", None), getattr(state, "scratchpads_context", "")):
+        if extra and extra.strip():
+            parts.append(extra.strip())
+    return "\n\n".join(parts)
+
+
+def _reasoning_language(user_language: str) -> str:
+    """`reasoning` becomes the "not enough data" text the agent quotes to the
+    user, so it is pinned to the run's language like every other step."""
+    return (
+        "## Language\n"
+        f"Write `reasoning` and any summary in {language_name(user_language)}. "
+        "Keep names of tables, fields, files and APIs as they are."
+    )
+
+
 def build_required_data_prompt(state) -> tuple[str, str]:
-    system = (
+    system = with_project_rules(
         _DATA_CONTEXT_HEADER
         + "You are the `define_required_data` node. List exactly which data is "
-        "missing and where each item can be obtained (user's connected data "
-        "sources or public/documented APIs). Be concrete and minimal."
+        "still missing and where each item can be obtained (user's connected "
+        "data sources, public/documented APIs or the scratchpads listed). Be "
+        "concrete and minimal. Data whose values are already under known data "
+        "or gathered data is not missing; a description of data (where it "
+        "lives, its columns) without the values is not the data. Return an "
+        "empty `items` list when nothing is missing.\n\n"
+        + _reasoning_language(state.user_language),
+        state.project_rules,
     )
-    user = _brief_and_notes(state) + "\n\nList the required data items."
+    user = (
+        _brief_and_notes(state)
+        + "\n\n" + _data_sources_context(state)
+        + "\n\nList the data items still missing (an empty list when nothing is missing)."
+    )
     return system, user
 
 
 def build_can_fetch_prompt(state, required: str) -> tuple[str, str]:
-    system = (
+    system = with_project_rules(
         _DATA_CONTEXT_HEADER
         + "You are the `is_possible_to_fetch` decision node. Given the required "
         "data and the available sources, decide whether the data can actually be "
-        "obtained. If a needed source simply does not exist among the user's "
-        "connections or public sources, it is NOT possible."
+        "obtained. It is possible when a listed connection, public source or "
+        "scratchpad can provide it. It is NOT possible only when none of them can.\n\n"
+        + _reasoning_language(state.user_language),
+        state.project_rules,
     )
     user = (
         _brief_and_notes(state)
+        + "\n\n" + _data_sources_context(state)
         + f"\n\n## Required data\n{required}\n\nIs it possible to fetch this data?"
     )
     return system, user
 
 
 def build_fetch_data_system_prompt(
-    artifact_path, *, datasource_context: str = "", public_sources: str = ""
+    artifact_path,
+    *,
+    datasource_context: str = "",
+    public_sources: str = "",
+    project_rules: str = "",
+    artifact_skills: str = "",
+    user_language: str = "",
 ) -> str:
     parts = [
         _ROLE_COMMON,
@@ -1374,6 +1638,9 @@ def build_fetch_data_system_prompt(
         parts.append(public_sources.strip())
     if datasource_context.strip():
         parts.append(datasource_context.strip())
+    # Before the project rules: a project rule about language comes later and wins.
+    parts.append(_reasoning_language(user_language))
+    parts.extend(p for p in (project_rules, artifact_skills) if p)
     parts.append(
         "## Output folder\n"
         f"(You will NOT write files here in this step.) Artifact folder: `{artifact_path}`"
@@ -1381,13 +1648,23 @@ def build_fetch_data_system_prompt(
     return "\n\n".join(parts)
 
 
-def build_fetch_data_kickoff(state) -> str:
-    return (
-        _brief_and_notes(state)
-        + "\n\nUse the `scratchpad` tool to fetch a data sample, then call "
+def build_fetch_data_kickoff(state, required_text: str = "") -> str:
+    # The list goes here in full: the journal cuts each step to
+    # JOURNAL_DETAIL_MAX characters. The pads go here too, because the
+    # single-scratchpad guard challenges a new name only once per session
+    # and a fetch in a fresh pad would not see the agent's data.
+    parts = [_brief_and_notes(state)]
+    if required_text.strip():
+        parts.append(f"## Data to fetch in this step\n{required_text.strip()}")
+    pads = (getattr(state, "scratchpads_context", "") or "").strip()
+    if pads:
+        parts.append(pads)
+    parts.append(
+        "Use the `scratchpad` tool to fetch a data sample, then call "
         "`finish` with a precise summary of the scratchpads/cells and the "
         "schema/sample you observed."
     )
+    return "\n\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -1541,12 +1818,13 @@ def build_tech_spec_instruction(state) -> str:
 def build_tech_spec_prompt(state) -> tuple[str, str]:
     """Cold-start form: the assembled context plus the same instruction the
     hot path sends, so both paths ask for the same document."""
-    system = (
+    system = with_project_rules(
         _DATA_CONTEXT_HEADER
         + "You are the `make_tech_spec` node. Your document is saved to "
         "`spec.md` and handed to the backend and frontend generators next to "
         "the material below; the instruction at the end of the user message "
-        "says what goes into it."
+        "says what goes into it.",
+        state.project_rules,
     )
     user = _brief_and_notes(state) + (
         f"\n\n## Artifact type\n{state.artifact_type}\n\n"

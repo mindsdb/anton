@@ -12,12 +12,15 @@ import asyncio
 import json
 import os
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from anton.core.artifacts import html_lint, render_check
 from anton.core.artifacts.html_lint import lint_html, lint_url
 from anton.core.artifacts.render_check import RenderFinding
+from anton.core.artifacts.report_tools import shown_markup
 from anton.core.backends.sandbox import CellSandbox, SandboxedSpawn, cell_sandbox_of
 from anton.core.utils.scratchpad import install_call_failed
 from anton.utils.datasources import scrub_output
@@ -264,6 +267,95 @@ def _resources_the_preview_blocks(html: str) -> list[str]:
     return list(dict.fromkeys(url for _, url in sorted(found)))
 
 
+# The one host a live app's content security policy (the edge's
+# `script-src` and `style-src`) lets a page load a script or stylesheet
+# from, over https only. Its `img-src` and `font-src` name no host.
+_LIVE_APP_SCRIPT_HOST = "cdn.jsdelivr.net"
+_HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
+# `<script type="importmap">`: the addresses its `imports` and `scopes` map
+# modules to load under `script-src` too.
+_IMPORT_MAP = re.compile(
+    r"""<script\b[^>]*\btype\s*=\s*['"]?importmap['"]?[^>]*>(?P<body>.*?)</script\s*>""", re.I | re.S
+)
+# `_MODULE_IMPORT`, plus `export ... from` and backtick quotes, which a live
+# app's script rule fails and the preview's advisory warning never needed.
+_LIVE_APP_MODULE_IMPORT = re.compile(
+    r"""\b(?:import|export)\s*(?:\(\s*|[\w*{}\s,$]*?\bfrom\s*|\s)['"`](?P<url>(?:https?:)?//[^'"`]+)['"`]""", re.I
+)
+
+
+def _from_live_app_script_host(url: str) -> bool:
+    """An https URL on `_LIVE_APP_SCRIPT_HOST` at its default port: what a
+    live app's policy loads. A protocol-relative `//cdn.jsdelivr.net` URL
+    isn't, since the app is served over http and it would load over http."""
+    parts = urlsplit(url.strip())
+    try:
+        port = parts.port
+    except ValueError:
+        return False
+    return parts.scheme.lower() == "https" and parts.hostname == _LIVE_APP_SCRIPT_HOST and port in (None, 443)
+
+
+def _import_map_urls(html: str) -> list[tuple[int, str]]:
+    """Each address an import map maps a module to, at the map's position.
+    A map that doesn't parse maps nothing in a browser either."""
+    found: list[tuple[int, str]] = []
+    for m in _IMPORT_MAP.finditer(html):
+        try:
+            data = json.loads(m["body"])
+        except ValueError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        scopes = data.get("scopes")
+        tables = [data.get("imports"), *(scopes.values() if isinstance(scopes, dict) else ())]
+        for table in tables:
+            if isinstance(table, dict):
+                found += [(m.start(), url) for url in table.values() if isinstance(url, str)]
+    return found
+
+
+def _scripts_a_live_app_blocks(html: str) -> list[str]:
+    """External scripts a live app's policy blocks: a `<script src>`, a
+    module import or an import map's address that isn't an https URL on
+    `_LIVE_APP_SCRIPT_HOST`, in page order without repeats. Commented-out
+    markup loads nothing, so it is left out."""
+    html = _HTML_COMMENT.sub("", html)
+    found: list[tuple[int, str]] = []
+    for tag in _SCRIPT_TAG.finditer(html):
+        src = _attr_value(_SRC_ATTR, tag.group())
+        if src and _external_host(src) is not None and not _from_live_app_script_host(src):
+            found.append((tag.start(), src))
+    for m in _LIVE_APP_MODULE_IMPORT.finditer(html):
+        if not _from_live_app_script_host(m["url"]):
+            found.append((m.start(), m["url"]))
+    for start, url in _import_map_urls(html):
+        if _external_host(url) is not None and not _from_live_app_script_host(url):
+            found.append((start, url))
+    return list(dict.fromkeys(url for _, url in sorted(found)))
+
+
+def _resources_a_live_app_blocks(html: str) -> list[str]:
+    """Every external stylesheet not on `_LIVE_APP_SCRIPT_HOST` over https,
+    and every external image, in page order without repeats: what a live
+    app's policy blocks besides scripts."""
+    html = _HTML_COMMENT.sub("", html)
+    found: list[tuple[int, str]] = []
+    for tag in _LINK_TAG.finditer(html):
+        body = _TAG_BODY.match(html, tag.start())
+        text = body.group() if body else ""
+        rel = _LINK_REL.search(text)
+        rels = (rel["quoted"] or rel["bare"] or "").lower().split() if rel else []
+        href = _attr_value(_HREF_ATTR, text)
+        if "stylesheet" in rels and href and _external_host(href) is not None and not _from_live_app_script_host(href):
+            found.append((tag.start(), href))
+    for tag in _IMG_TAG.finditer(html):
+        src = _attr_value(_SRC_ATTR, tag.group())
+        if src and _external_host(src) is not None:
+            found.append((tag.start(), src))
+    return list(dict.fromkeys(url for _, url in sorted(found)))
+
+
 def _root_relative_detail(html: str, *, is_fullstack: bool) -> str | None:
     """The rest of rule 4a's message after its fixed head, or None when the
     page has no root-relative path: every finding in page order without
@@ -309,11 +401,13 @@ def _root_relative_detail(html: str, *, is_fullstack: bool) -> str | None:
 
 
 def verify_frontend(
-    html: str, *, is_fullstack: bool, api_paths: set[str] | None = None
+    html: str, *, is_fullstack: bool, api_paths: set[str] | None = None, live_app: bool = False
 ) -> VerifyResult:
     """Static checks of the page. `api_paths` (from `contract_paths`) is the
     set of normalised `openapi.json` paths a fullstack page may call; None
-    skips that comparison — html-app pages and callers without a contract."""
+    skips that comparison — html-app pages and callers without a contract.
+    `live_app` is set for a fullstack page that runs as a live app, whose
+    content security policy loads scripts from one origin only."""
     errors: list[str] = []
     warnings: list[str] = []
     low = html.lower()
@@ -393,6 +487,15 @@ def verify_frontend(
     if "<script" in low and "</script" not in low:
         errors.append("Frontend opens a <script> block but never closes it with </script>.")
 
+    # 5c. Markup shown as text. Escaped tags load without an error, so the
+    #     browser check passes such a page.
+    shown = shown_markup(html)
+    if shown:
+        errors.append(
+            f"The page shows HTML tags as text, so that markup does not render or run: {shown}. "
+            "Escape only text values, never the page's own markup."
+        )
+
     # 6. Forbidden globals / CSS.
     if "__antonCommentsLayer" in html:
         errors.append("Frontend must not use the global name window.__antonCommentsLayer.")
@@ -407,12 +510,42 @@ def verify_frontend(
             errors.append("Frontend uses an extreme z-index (> 1000); keep it within a sane range.")
             break
 
+    # A live app's page opens at its own address, whose content security
+    # policy loads scripts only from https://cdn.jsdelivr.net: any other
+    # script never runs there, so the page fails rather than warns.
+    if live_app:
+        blocked_scripts = _scripts_a_live_app_blocks(html)
+        if blocked_scripts:
+            listed = ", ".join(_shown_value(url) for url in blocked_scripts[:_EXTERNAL_SHOWN])
+            if len(blocked_scripts) > _EXTERNAL_SHOWN:
+                listed += f" and {len(blocked_scripts) - _EXTERNAL_SHOWN} more"
+            errors.append(
+                f"Script from a host a live app does not load: {listed}. A live app loads scripts "
+                "only from https://cdn.jsdelivr.net/npm/, so load each library from there at the "
+                "version these rules name, or write the code into the page."
+            )
+
     # ── Warnings (advisory) ────────────────────────────────────────────────
     # Block-level containers without any stable id — weak anchors for the
     # comment layer. Advisory only (never fails the step).
     block_tags = re.findall(r"<(?:div|section|table|main|article)\b", low)
     if block_tags and "id=" not in low:
         warnings.append("Significant blocks have no stable `id` attributes.")
+    # A stylesheet or image a live app's own content security policy blocks.
+    # Advisory, as for the preview: the page still works without it. Its
+    # scripts are the error above.
+    if live_app:
+        blocked = _resources_a_live_app_blocks(html)
+        if blocked:
+            listed = ", ".join(_shown_value(url) for url in blocked[:_EXTERNAL_SHOWN])
+            if len(blocked) > _EXTERNAL_SHOWN:
+                listed += f" and {len(blocked) - _EXTERNAL_SHOWN} more"
+            warnings.append(
+                f"External resource a live app does not load: {listed}. A live app loads "
+                "stylesheets only from https://cdn.jsdelivr.net/npm/ and no external image: "
+                "put other styles in a <style> block and embed images as data: URIs."
+            )
+        return VerifyResult(errors=errors, warnings=warnings)
     # A script, stylesheet or image the app preview's content security policy
     # blocks. Advisory: the page works opened from disk or on the desktop,
     # and the browser check reports what the preview really blocks.
@@ -430,7 +563,9 @@ def verify_frontend(
     return VerifyResult(errors=errors, warnings=warnings)
 
 
-def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, screenshot: bool = True) -> BrowserCheck:
+def verify_frontend_live(
+    entry: Path, *, cell_sandbox: CellSandbox | None, screenshot: bool = True, previous_html: str | None = None
+) -> BrowserCheck:
     """Load the written page once in a browser.
 
     The class of defects the text checks above cannot see: a script that
@@ -447,9 +582,12 @@ def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, scree
     runs in its own container and only the page's text leaves this process.
     Otherwise the local Electron browser loads it (`html_lint`), which a
     sandbox policy refuses. `screenshot=False` asks the service for no
-    screenshot. A loaded page's `coverage` names the views the browser
-    measured: the service's, with the tabs and toggles it did not press, or
-    the page as it opens from the local browser, which presses nothing.
+    screenshot. `previous_html`, the page as the turn found it, asks the
+    render-check service to compare the two; a loaded page's `comparison`
+    carries the answer. The local browser compares nothing. A loaded page's
+    `coverage` names the views the browser measured: the service's, with the
+    tabs and toggles it did not press, or the page as it opens from the
+    local browser, which presses nothing.
 
     `unverified` when no browser loaded the page or the check could not
     vouch for it (no browser configured, a timeout, a library the check
@@ -468,7 +606,9 @@ def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, scree
     app directory, not the cwd.
     """
     if render_check.configured_url() is not None:
-        outcome = render_check.check_file(entry.resolve(), cell_sandbox=cell_sandbox, screenshot=screenshot)
+        outcome = render_check.check_file(
+            entry.resolve(), cell_sandbox=cell_sandbox, screenshot=screenshot, previous_html=previous_html
+        )
         if outcome.status == "unverified":
             found = render_check.unverified_findings(outcome)
             return BrowserCheck(
@@ -478,7 +618,7 @@ def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, scree
         verdict = _render_verdict(outcome.findings)
         return BrowserCheck(
             status="passed" if verdict.ok else "failed", verdict=verdict, screenshot=outcome.screenshot,
-            coverage=outcome.coverage,
+            coverage=outcome.coverage, views=tuple(outcome.views), comparison=outcome.comparison,
         )
     findings = lint_html(entry.resolve(), cell_sandbox=cell_sandbox)
     if findings is None:
@@ -676,6 +816,11 @@ def _ds_keys(source: str) -> list[str]:
     return sorted(set(_DS_KEY.findall(source)))
 
 
+def _canonical_name(name: str) -> str:
+    """A package name as PEP 503 normalizes it."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
 def _requirement_names(requirements: str) -> set[str]:
     """PEP 503-normalized package names from requirements.txt lines.
 
@@ -691,7 +836,7 @@ def _requirement_names(requirements: str) -> set[str]:
             continue
         m = _REQ_NAME.match(line)
         if m:
-            names.add(re.sub(r"[-_.]+", "-", m.group(0)).lower())
+            names.add(_canonical_name(m.group(0)))
     return names
 
 
@@ -780,6 +925,7 @@ def evaluate_backend(
     artifact_type: str = "",
     state_manifest: str | None = None,
     api_operations: set[str] | None = None,
+    live_app: bool = False,
 ) -> tuple[VerifyResult, list[str]]:
     """Pure contract evaluation of a generated backend.
 
@@ -788,7 +934,10 @@ def evaluate_backend(
     `state_manifest` is the raw text of `state_manifest.json` (None = the file
     does not exist) — read by the async glue, validated here to stay pure.
     `api_operations` (from `contract_operations`) is what `openapi.json`
-    promises; None skips the comparison.
+    promises; None skips the comparison. `live_app` is set for a backend that
+    runs in an app slot, which installs nothing, so its `requirements.txt`
+    needs no core package line; `verify_backend` has already refused any
+    package it names that isn't installed.
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -854,14 +1003,18 @@ def evaluate_backend(
         )
 
     req_names = _requirement_names(requirements)
-    for core in _CORE_REQS:
-        if core not in req_names:
-            # Self-evidencing message: show what WAS parsed, so a mismatch
-            # between the file and this parser is visible to the retry loop.
-            errors.append(
-                f"requirements.txt must list `{core}`. Parsed package names: "
-                + (", ".join(sorted(req_names)) or "(none)")
-            )
+    # Every other launch installs `requirements.txt`, so it must name the core
+    # packages. An app slot installs nothing and runs the ones in its image,
+    # whatever the file lists.
+    if not live_app:
+        for core in _CORE_REQS:
+            if core not in req_names:
+                # Self-evidencing message: show what WAS parsed, so a mismatch
+                # between the file and this parser is visible to the retry loop.
+                errors.append(
+                    f"requirements.txt must list `{core}`. Parsed package names: "
+                    + (", ".join(sorted(req_names)) or "(none)")
+                )
     if "anton-state" in req_names:
         # Applies to every type: the package is not on any registry, so pip
         # fails on the line. The install step filters it defensively, but the
@@ -1094,6 +1247,30 @@ async def _check_backend_syntax(
     return err.decode(errors="replace")
 
 
+# A requirement line's distribution name.
+_REQUIREMENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def _missing_here(packages: Sequence[str]) -> list[str]:
+    """The requirements a live app's slot lacks, by name. The slot runs this
+    same image with nothing installed, and imports from the base interpreter's
+    packages and this process's, as the scratchpad venv does (system site
+    packages, and its `.pth`). This process's own environment alone misses
+    what only the base interpreter holds, such as `mangum`."""
+    import site
+    import sys
+    from importlib.metadata import distributions
+
+    paths = [*sys.path, *site.getsitepackages([sys.base_prefix])]
+    installed = {_canonical_name(d.metadata["Name"]) for d in distributions(path=paths) if d.metadata["Name"]}
+    missing: list[str] = []
+    for line in packages:
+        match = _REQUIREMENT_NAME.match(line.strip())
+        if match is not None and _canonical_name(match.group()) not in installed:
+            missing.append(match.group())
+    return missing
+
+
 async def verify_backend(
     *,
     scratchpad_pool,
@@ -1103,12 +1280,16 @@ async def verify_backend(
     artifact_type: str = "",
     api_operations: set[str] | None = None,
     ds_env: dict[str, str] | None = None,
+    live_app: bool = False,
 ) -> tuple[VerifyResult, list[str]]:
     """Install the backend's requirements, compile it, then import it in its venv.
 
-    Under the pool's sandbox policy both checks run through the launcher, and
-    the import sees `ds_env` (the artifact's own `DS_*`) instead of the
-    server's.
+    Under the pool's sandbox policy both checks run through the launcher.
+    With or without one, a given `ds_env` (the artifact's own `DS_*`)
+    replaces the server's `DS_*` for the import, as it does for the launch;
+    with none, the import inherits them. For a live app nothing is
+    installed, since its app slot installs nothing: a requirement the
+    slot lacks fails the check instead, before any launch card.
     """
     backend_py = artifact_path / "backend.py"
     if not backend_py.is_file():
@@ -1132,7 +1313,15 @@ async def verify_backend(
 
     pad = await scratchpad_pool.get_or_create(slug)
     pkgs = parse_requirements(req_text)
-    if pkgs:
+    if live_app:
+        missing = _missing_here(pkgs)
+        if missing:
+            named = ", ".join(f"`{name}`" for name in missing)
+            return VerifyResult(errors=[
+                f"requirements.txt names a package a live app can't have: {named}. A live app's slot "
+                "installs nothing and runs only the packages installed here, so use those or none."
+            ]), _ds_keys(source)
+    elif pkgs:
         install = await pad.install_packages(pkgs)
         if isinstance(install, str) and install_call_failed(install):
             return VerifyResult(errors=[f"Dependency install failed:\n{install}"]), []
@@ -1162,7 +1351,7 @@ async def verify_backend(
         policy=policy,
         argv=[venv_python, "-B", "-c", _INTROSPECT_SCRIPT],
         cwd=artifact_path,
-        env=build_backend_env(None) if policy is None else _sandboxed_check_env(ds_env),
+        env=build_backend_env(None, ds_env) if policy is None else _sandboxed_check_env(ds_env),
     )
     finished = await _finish_check(check, timeout=import_timeout)
     if finished is None:
@@ -1181,5 +1370,5 @@ async def verify_backend(
     return evaluate_backend(
         introspection, source, req_text,
         artifact_type=artifact_type, state_manifest=state_manifest,
-        api_operations=api_operations,
+        api_operations=api_operations, live_app=live_app,
     )

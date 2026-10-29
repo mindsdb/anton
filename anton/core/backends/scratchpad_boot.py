@@ -701,8 +701,10 @@ if _scratchpad_model:
                 """
                 from anton.core.llm.structured import (
                     build_structured_tool,
+                    forced_choice_key,
                     looks_truncated,
                     raise_unusable_tool_call,
+                    send_structured,
                     unwrap_structured_response,
                 )
 
@@ -710,13 +712,29 @@ if _scratchpad_model:
                     schema_class
                 )
 
-                response = self.complete(
-                    system=system,
-                    messages=messages,
-                    tools=[tool],
-                    tool_choice={"type": "tool", "name": tool["name"]},
-                    max_tokens=max_tokens,
-                )
+                async def structured(provider):
+                    # Every attempt on this call's provider. The refusal memory
+                    # lives in the structured module, so it outlasts the
+                    # provider each call builds.
+                    async def send(tool_choice, prompt):
+                        return await provider.complete(
+                            model=_llm_model,
+                            system=prompt,
+                            messages=messages,
+                            tools=[tool],
+                            tool_choice=tool_choice,
+                            max_tokens=max_tokens,
+                        )
+
+                    return await send_structured(
+                        send,
+                        key=forced_choice_key(provider, _llm_model),
+                        tool=tool,
+                        system=system,
+                        budget=max_tokens,
+                    )
+
+                response = _llm_asyncio.run(_with_fresh_provider(structured))
 
                 if not response.tool_calls or any(
                     tc.repaired for tc in response.tool_calls

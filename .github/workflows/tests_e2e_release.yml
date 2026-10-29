@@ -32,6 +32,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.30"
 
       - name: Set up Python
         run: uv python install 3.12
@@ -40,12 +42,17 @@ jobs:
         env:
           # Match the publish job: build exactly the version that was minted.
           SETUPTOOLS_SCM_PRETEND_VERSION: ${{ inputs.version }}
-        run: uv build
+        run: |
+          python scripts/release_contract.py --check
+          uv build
+          python scripts/release_contract.py --check --dist-dir dist
 
       - name: Install the wheel into a clean venv
         run: |
           uv venv --python 3.12 "$WHEEL_VENV"
-          uv pip install --python "$WHEEL_VENV/bin/python" dist/*.whl
+          uv pip install --python "$WHEEL_VENV/bin/python" --require-hashes --no-deps --only-binary :all: -r anton/release-requirements.txt
+          uv pip install --python "$WHEEL_VENV/bin/python" --no-deps dist/*.whl
+          uv pip check --python "$WHEEL_VENV/bin/python"
 
       - name: Wheel must not resolve to the source tree
         # A green run that imported anton/ from the repo would prove nothing.
@@ -83,7 +90,9 @@ jobs:
         # both must be verified.
         run: |
           uv venv --python 3.12 /tmp/sdistenv
-          uv pip install --no-cache --python /tmp/sdistenv/bin/python dist/*.tar.gz
+          uv pip install --no-cache --python /tmp/sdistenv/bin/python --require-hashes --no-deps --only-binary :all: -r anton/release-requirements.txt
+          uv pip install --no-cache --python /tmp/sdistenv/bin/python --no-deps dist/*.tar.gz
+          uv pip check --python /tmp/sdistenv/bin/python
           cd /tmp && /tmp/sdistenv/bin/anton --help > /dev/null
 
       - name: Installer path resolves and runs on a cold cache
@@ -91,8 +100,10 @@ jobs:
         # env can hide a dependency that is no longer pulled in transitively.
         run: |
           uv venv --python 3.12 /tmp/gitenv
-          uv pip install --no-cache --python /tmp/gitenv/bin/python \
+          uv pip install --no-cache --python /tmp/gitenv/bin/python --require-hashes --no-deps --only-binary :all: -r anton/release-requirements.txt
+          uv pip install --no-cache --python /tmp/gitenv/bin/python --no-deps \
             "git+https://github.com/${{ github.repository }}.git@${{ inputs.tag }}"
+          uv pip check --python /tmp/gitenv/bin/python
           cd /tmp && /tmp/gitenv/bin/anton --help > /dev/null
 
       - name: Run E2E scenarios against the installed wheel (live)
@@ -103,7 +114,7 @@ jobs:
           ANTON_CODING_PROVIDER: openai
           ANTON_PLANNING_MODEL: gpt-4.1-mini
           ANTON_CODING_MODEL: gpt-4.1-mini
-        run: uv run --group dev pytest tests/e2e/ --live -v
+        run: uv run --locked --group dev pytest tests/e2e/ --live -v
 
       # Hand the publish job these exact bytes. Last step, so a failed
       # verification never leaves a publishable artifact behind.

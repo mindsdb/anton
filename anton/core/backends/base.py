@@ -38,6 +38,14 @@ class Cell:
     logs: str = ""
 
 
+@dataclass(frozen=True)
+class CompactedCell:
+    """The execution evidence the write check needs after outputs are folded."""
+
+    code: str
+    errored: bool
+
+
 def scrub_cell(cell: Cell) -> Cell:
     """Return a copy of ``cell`` with credentials scrubbed from its output.
 
@@ -61,10 +69,10 @@ class ScratchpadRuntime(ABC):
     and timeout logic lives here so all backends benefit automatically.
     """
 
-    # The code of every cell `_compact_cells` folded into its summary cell, in
+    # The code and outcome of every cell `_compact_cells` folded away, in
     # the order they ran. The process still holds what those cells imported
     # and bound, so the write check reads them too (`hold_unapproved_write`).
-    compacted_code: tuple[str, ...] = ()
+    compacted_cells: tuple[CompactedCell, ...] = ()
 
     def __init__(
         self,
@@ -302,9 +310,10 @@ class ScratchpadRuntime(ABC):
         summary_text = f"# Compacted {len(to_compact)} earlier cells:\n" + "\n".join(
             summary_lines
         )
-        self.compacted_code = (
-            *self.compacted_code,
-            *(cell.code for cell in to_compact if cell.code != _COMPACTED_CELL_CODE),
+        self.compacted_cells = (
+            *self.compacted_cells,
+            *(CompactedCell(code=cell.code, errored=bool(cell.error))
+              for cell in to_compact if cell.code != _COMPACTED_CELL_CODE),
         )
         summary_cell = Cell(
             code=_COMPACTED_CELL_CODE,

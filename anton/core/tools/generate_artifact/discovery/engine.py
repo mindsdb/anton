@@ -11,12 +11,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
 from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS, scratchpad_action
 
 from .. import sub_tools as protocol
+from ..state import known_data_usable
 from . import prompts, sub_tools
-from .notes import render_gathering_notes, string_list
+from .notes import known_data_sources, render_gathering_notes, source_key, string_list
 from .state import PrdState, gathering_question_budget
 
 if TYPE_CHECKING:
@@ -171,8 +171,10 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 # `document` or `dataset` is valid metadata but has no
                 # generator, and settling on one would build a fullstack
                 # app for it and lock the slug out of any repeat call.
+                # Where nothing starts an app backend, html-app is the only
+                # buildable type (`GenState.buildable_types`).
                 state.final_artifact_type = (
-                    claimed_type if claimed_type in GENERATOR_ARTIFACT_TYPES
+                    claimed_type if claimed_type in state.buildable_types
                     else state.artifact_type
                 )
                 state.gathering_notes = render_gathering_notes(inp)
@@ -185,13 +187,22 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 # that IS a web page is verified by having been fetched, and
                 # demanding a scratchpad cell for it would send every
                 # web-sourced request through the emergency data loop to
-                # re-download an article that was already read. The unverified
-                # list is what that loop reads, and after a correction it is
-                # filled by `redraw_brief`, not here.
+                # re-download an article that was already read. An html-app
+                # source whose rows the calling agent passed in is verified
+                # by the `known_data` mark (`known_data_usable`). The
+                # unverified list is what that loop reads, and after a
+                # correction it is filled by `redraw_brief`, not here.
+                covered = known_data_sources(inp, usable=known_data_usable(state))
+                executed = bool(state.scratchpad_execs or state.web_calls)
                 state.unverified_sources = (
                     []
-                    if (state.scratchpad_execs or state.web_calls)
-                    else list(state.declared_sources)
+                    if executed
+                    else [s for s in state.declared_sources if source_key(s) not in covered]
+                )
+                state.known_data_verified = (
+                    []
+                    if executed
+                    else [s for s in state.declared_sources if source_key(s) in covered]
                 )
                 state.gathering_complete = True
                 result_blocks.append(protocol.tool_result(tc.id, "ok"))

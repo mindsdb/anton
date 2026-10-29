@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from anton.core.llm.anthropic import _SDK_TIMEOUT as anthropic_sdk_timeout
 from anton.core.llm.anthropic import AnthropicProvider
 from anton.core.llm.openai import _parse_response_object
 from anton.core.llm.provider import (
@@ -331,7 +332,7 @@ class TestAnthropicProvider:
         with patch("anton.core.llm.anthropic.anthropic") as mock_anthropic:
             mock_anthropic.AsyncAnthropic.return_value = AsyncMock()
             provider = AnthropicProvider()
-            mock_anthropic.AsyncAnthropic.assert_called_once_with()
+            mock_anthropic.AsyncAnthropic.assert_called_once_with(timeout=anthropic_sdk_timeout)
 
 
 class _FakeAnthropicStream:

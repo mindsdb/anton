@@ -20,6 +20,7 @@ from anton.core.utils.write_check import (
     HttpWrite,
     HttpWriteRule,
     ProjectSnapshot,
+    SqlWrite,
     find_cell_writes,
     snapshot_project_files,
 )
@@ -77,6 +78,12 @@ _WHY = {
     "error": "the approval request failed",
     "unanswered_earlier": "an earlier approval request in this turn went unanswered",
 }
+
+
+def refusal_why(cause: RefusalCause) -> str:
+    """Why a card didn't approve, in the words the gate's refusal uses."""
+    return _WHY[cause]
+
 # What the refusal names of one list: a file change's paths, the requests,
 # or the data changes with no SQL text. The card names every one.
 _REFUSAL_PATHS = 20
@@ -179,7 +186,7 @@ def _wholes(change: FileChange) -> str:
 
 # How each call-write reads on the card and in the refusal.
 _CALL_VIA = {
-    "procedure": "run a stored procedure",
+    "procedure": "run a stored procedure or function",
     "sqlalchemy": "change data through SQLAlchemy",
     "mongodb": "change data in MongoDB",
     "dynamodb": "change data in DynamoDB",
@@ -227,18 +234,21 @@ def _request_summary(write: HttpWrite) -> str:
 
 def _describe_files(writes: CellWrites) -> list[str]:
     """Each held file change for the refusal: the first paths it names, or
-    the code that picks the path when it runs. The card names every path."""
+    the code that picks the path when it runs. The card names every path.
+    A change to a SQLite or DuckDB file reads as a change, as the card says,
+    not an overwrite."""
     out = []
     for change in writes.held_files:
+        action = "change" if change.statements else change.action
         wholes = _wholes(change)
         if wholes:
-            out.append(f"{change.action} {wholes}")
+            out.append(f"{action} {wholes}")
         if change.paths:
             named = ", ".join(_code_span(_shown_path(p)) for p in change.paths[:_REFUSAL_PATHS])
             more = len(change.paths) - _REFUSAL_PATHS
-            out.append(f"{change.action} {named}" + (f" and {more} more" if more > 0 else ""))
+            out.append(f"{action} {named}" + (f" and {more} more" if more > 0 else ""))
         if not (wholes or change.paths):
-            out.append(f"{change.action} a file or folder it picks when it runs, in {_code_span(change.call)}")
+            out.append(f"{action} a file or folder it picks when it runs, in {_code_span(change.call)}")
     return out
 
 
@@ -254,9 +264,26 @@ def _summary(writes: CellWrites) -> str:
     return "; ".join(parts)
 
 
-def _file_lines(change: FileChange, *, lead: str) -> list[str]:
+def _statement_text(write: SqlWrite) -> str:
+    """One statement as the card fences it, with the values it passes."""
+    return write.statement + (f"\nwith values {write.values}" if write.values else "")
+
+
+def _file_lines(change: FileChange, *, also: bool = False) -> list[str]:
     """One file change on the card: the root folders it takes whole, every
-    path it names, or the code that picks the path when it runs."""
+    path it names, or the code that picks the path when it runs. With
+    `also`, the change raises no card on its own, but the Approve runs it
+    too. A change to a SQLite or DuckDB file names the file and quotes each
+    statement it runs, as a SQL write's statements are quoted."""
+    would = "This step would also" if also else "This step would"
+    if change.statements:
+        files = "this database file" if len(change.paths) == 1 else "these database files"
+        lines = [f"{would} change {files}:", "", _fence("\n".join(_shown_path(p) for p in change.paths)), "",
+                 "It would run:", ""]
+        for write in change.statements:
+            lines += [_fence(_statement_text(write)), ""]
+        return lines
+    lead = f"{would} {'append to' if change.action == 'append' else change.action}"
     lines: list[str] = []
     wholes = _wholes(change)
     if wholes:
@@ -299,22 +326,23 @@ def _card_prompt(writes: CellWrites) -> str:
     if writes.sql:
         lines += ["This step would change data in a connected source:", ""]
         for write in writes.sql:
-            text = write.statement + (f"\nwith values {write.values}" if write.values else "")
-            lines += [_fence(text), ""]
+            lines += [_fence(_statement_text(write)), ""]
         if any(write.run_time_parts for write in writes.sql):
             lines += ["A part in braces, `{...}`, is the code that fills in that value when the step runs.", ""]
     for call in writes.calls:
         lines += [f"This step would {_CALL_VIA[call.via]}:", "", _fence(call.call), ""]
+        if call.runs and call.runs != call.call:
+            lines += ["That call runs:", "", _fence(call.runs), ""]
     for change in writes.held_files:
-        lines += _file_lines(change, lead=f"This step would {change.action}")
+        lines += _file_lines(change)
     # An append, or an overwrite of a file the agent owns, raises no card on
     # its own, but the Approve runs it too.
     for change in writes.not_held_files:
-        also = "append to" if change.action == "append" else change.action
-        lines += _file_lines(change, lead=f"This step would also {also}")
+        lines += _file_lines(change, also=True)
     for request in writes.http:
         lines += _request_lines(request)
-    if any(r.run_time_parts for r in writes.http) and not any(w.run_time_parts for w in writes.sql):
+    later = [*writes.http, *(w for change in writes.files for w in change.statements)]
+    if any(w.run_time_parts for w in later) and not any(w.run_time_parts for w in writes.sql):
         lines += ["A part in braces, `{...}`, is the code that fills in that value when the step runs.", ""]
     shown = [*(p for change in writes.files for p in change.paths), *(r.url for r in writes.http)]
     if any(_shown_path(p) != p for p in shown):
@@ -344,16 +372,40 @@ def _refusal(writes: CellWrites, cause: RefusalCause) -> ToolOutcome:
 
 
 async def _ask_approval(session: ChatSession, writes: CellWrites) -> RefusalCause | None:
-    """Ask Approve or Cancel. None when the user picks Approve, else why not."""
+    """Ask Approve or Cancel for a held cell. None when the user picks Approve, else why not."""
+    return await ask_approval_card(
+        session, _card_prompt(writes),
+        approve_detail="Run this step once", cancel_detail="Leave the data and files as they are",
+    )
+
+
+async def ask_approval_card(
+    session: ChatSession,
+    prompt: str,
+    *,
+    approve_detail: str,
+    cancel_detail: str,
+    log_label: str = "write approval",
+) -> RefusalCause | None:
+    """Ask the gate's Approve or Cancel card with `prompt`. None when the user
+    picks Approve, else why not. The live-app launch card asks through it too.
+
+    One unanswered card per turn: after a card times out, every later card in
+    the turn is refused without asking, so an unattended turn doesn't wait
+    out the timeout once per card. Sessions without a `WriteGate` keep no
+    such memory."""
     from anton.core.interaction.elicit import AskOption, AskRequest, elicit
 
+    gate = getattr(session, "_write_gate", None)
+    if isinstance(gate, WriteGate) and gate.unanswered:
+        return "unanswered_earlier"
     request = AskRequest(
-        prompt=_card_prompt(writes),
+        prompt=prompt,
         options=(
-            AskOption(value="approve", label="Approve", detail="Run this step once"),
-            AskOption(value="cancel", label="Cancel", detail="Leave the data and files as they are"),
+            AskOption(value="approve", label="Approve", detail=approve_detail),
+            AskOption(value="cancel", label="Cancel", detail=cancel_detail),
         ),
-        # No typed answer and no default: only a picked Approve runs the cell.
+        # No typed answer and no default: only a picked Approve clears the card.
         allow_custom=False,
         timeout_s=getattr(session.elicitor, "timeout_s", None),
     )
@@ -364,12 +416,14 @@ async def _ask_approval(session: ChatSession, writes: CellWrites) -> RefusalCaus
     except Exception as exc:
         # The type only: a traceback's frames would print the card and the
         # statement under a host that logs local variables.
-        logger.warning("write approval: the question failed (%s)", type(exc).__name__)
+        logger.warning("%s: the question failed (%s)", log_label, type(exc).__name__)
         return "error"
     if answer.status == "answered" and answer.values == ("approve",):
         return None
     if answer.status in ("answered", "cancelled"):
         return "cancelled"
+    if answer.status == "timeout" and isinstance(gate, WriteGate):
+        gate.unanswered = True
     if answer.status in ("timeout", "unavailable"):
         return answer.status
     return "error"
@@ -402,11 +456,12 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
     if not isinstance(gate, WriteGate):
         return None
     # The cells compaction folded away come first: the pad's process still
-    # holds what they imported and bound. Compaction keeps no cell's error.
-    compacted = tuple(getattr(pad, "compacted_code", ()))
+    # holds what they imported and bound. Their outcomes still decide whether
+    # the check can count a write as one that ran.
+    compacted = tuple(getattr(pad, "compacted_cells", ()))
     cells = tuple(getattr(pad, "cells", ()) or ())
-    earlier = (*compacted, *(cell.code for cell in cells))
-    errored = (*(False for _ in compacted), *(bool(getattr(cell, "error", None)) for cell in cells))
+    earlier = (*(cell.code for cell in compacted), *(cell.code for cell in cells))
+    errored = (*(cell.errored for cell in compacted), *(bool(getattr(cell, "error", None)) for cell in cells))
     try:
         writes = await asyncio.to_thread(
             find_cell_writes,
@@ -422,7 +477,7 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
             _log_decision(writes=writes, status="not_held")
         return None
     try:
-        cause = "unanswered_earlier" if gate.unanswered else await _ask_approval(session, writes)
+        cause = await _ask_approval(session, writes)
     except asyncio.CancelledError:
         # Stop, or the host ending the turn, while the card waited.
         _log_decision(writes=writes, status="stopped")
@@ -430,8 +485,6 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
     _log_decision(writes=writes, status=cause or "approved")
     if cause is None:
         return None
-    if cause == "timeout":
-        gate.unanswered = True
     return _refusal(writes, cause)
 
 

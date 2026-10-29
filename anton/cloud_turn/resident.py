@@ -55,8 +55,10 @@ PRELOAD_MODULES = (
     # Running it: memory, tools, artifact checks, analytics.
     "anton.analytics",
     "anton.core.artifacts.html_lint",
+    "anton.core.artifacts.live_app_slots",
     "anton.core.artifacts.office_open_check",
     "anton.core.artifacts.ooxml_lint",
+    "anton.core.artifacts.report_tools",
     "anton.core.artifacts.snapshot",
     "anton.core.artifacts.store",
     "anton.core.artifacts.xlsx_lint",
