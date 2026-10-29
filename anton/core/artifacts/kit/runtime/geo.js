@@ -76,8 +76,10 @@
     // Data within a region (a city, a country) gets the finer outlines.
     var detail = b.detail;
     if (!detail && mode === 'map') {
-      var cs = allCoords(layers);
-      var ext = function (i) { return cs.length ? Math.max.apply(null, cs.map(function (c) { return c[i]; })) - Math.min.apply(null, cs.map(function (c) { return c[i]; })) : 360; };
+      var cs = allCoords(layers), mid = meanLon(cs);
+      // Longitudes around the data's centre, so a region across the date line measures small.
+      var vals = function (i) { return cs.map(function (c) { return i ? c[1] : wrapLon(c[0] - mid); }); };
+      var ext = function (i) { var v = vals(i); return v.length ? Math.max.apply(null, v) - Math.min.apply(null, v) : 360; };
       if (Math.max(ext(0), ext(1)) < 12) detail = '50m';
     }
     Promise.all([AK.lib('d3'), AK.world(detail)]).then(function (res) {
@@ -368,8 +370,11 @@
     var clip = function (t, n) { return t.length > n ? t.slice(0, Math.max(1, n - 1)) + '\u2026' : t; };
     var labels = pts.filter(function (p) { return p.label && (showAllLabels || p.L.label_always); }).map(function (p) {
       // Phones keep the sublabel (it may be the figure the page is about), in a smaller face.
-      var name = clip(p.label, maxChars), sub = p.sub ? clip(p.sub, maxChars - name.length - 3) : null;
-      if (sub === '\u2026') sub = null;
+      // The sublabel may be the figure the page is about: a long name gives way first (to about
+      // 40% of the room), then the sublabel.
+      var subLen = p.sub ? String(p.sub).length : 0;
+      var name = clip(p.label, Math.max(Math.round(maxChars * 0.4), maxChars - subLen - 3));
+      var sub = p.sub ? clip(p.sub, Math.max(4, maxChars - name.length - 3)) : null;
       var text = name + (sub ? ' \u00b7 ' + sub : '');
       return {p: p, x: p.x, y: p.y, w: text.length * charW + 6, text: text, name: name, sub: sub,
         full: p.label + (p.sub ? ' \u00b7 ' + p.sub : '')};

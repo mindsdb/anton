@@ -73,7 +73,7 @@ kit.profile(df, "name")                  # prints rows, columns, distinct values
 Colours: tones good/bad/warn/info/accent/neutral or any CSS colour; categories get a consistent palette.
 Values must be numbers (not formatted strings); dates as "YYYY-MM-DD" strings or datetimes.
 Units: money and shares come from the format (currency, percent); any other measure names its unit with
-`unit=` ("MW", "kg", "hours", "patients"), on charts, KPIs, columns and compare rows.'''
+`unit=` ("km", "kg", "hours", "patients"), on charts, KPIs, columns and compare rows.'''
 
 BUILDER_PROMPT = f'''\
 You build one web page for the user, end to end, then call `finish`. The page is an artifact \

@@ -11,8 +11,6 @@
     return rows.length ? Object.keys(rows[0]).map(function (k) { return {field: k}; }) : [];
   }
 
-  var SPEC_LABELS = (AK.spec && AK.spec.labels) || null;
-
   AK.blocks.table = function (b, parent) {
     var rows = AK.data(b.data).slice();
     var cols = colsOf(b, rows);
@@ -146,23 +144,32 @@
       return AK.toneOf(v, spec.map || spec.tones || null, spec.field);
     }
     function detailPairs(row) {
-      // Unless the page names them (detail_fields): the table's columns, then the row's other fields
-      // that add something. Left out: coordinates (for maps, not people), a field repeating a value
-      // already shown (a helper copy), and on a page in another language a field without a label
-      // of its own (its name would show in English).
+      // Unless the page names them (detail_fields): the table's columns, then the row's other
+      // fields, leaving out coordinates (for maps, not people) and helper copies of a shown field
+      // (a field named after it, such as "Status label" or status_display, holding its value).
       var fields = b.detail_fields;
       if (!fields) {
         var shown = cols.map(function (c) { return c.field; });
-        var seen = {};
-        shown.forEach(function (f) { if (row[f] != null && row[f] !== '') seen[String(row[f])] = true; });
-        var labelled = function (f) { return (b.labels && b.labels[f]) || (SPEC_LABELS && SPEC_LABELS[f]); };
+        var squash = function (x) { return String(x).toLowerCase().replace(/[^a-z0-9]/g, ''); };
+        var helper = function (f) {
+          var sf = squash(f), vf = squash(row[f]);
+          return shown.some(function (g) {
+            var sg = squash(g), vg = squash(row[g]);
+            if (!sg || sf === sg) return false;
+            // A translation of a shown field, or the original a shown translation came from
+            // (status / status_es).
+            if ((sf.indexOf(sg) === 0 && /^[a-z]{2}$/.test(sf.slice(sg.length))) ||
+                (sg.indexOf(sf) === 0 && /^[a-z]{2}$/.test(sg.slice(sf.length)))) return true;
+            // A display copy of a shown field: named after it (or a label/display field) and
+            // holding its value, formatted or not.
+            var named = (sf.indexOf(sg) === 0 && /^(label|display|fmt|formatted|text|str|txt)$/.test(sf.slice(sg.length))) ||
+              /(label|display|formatted|fmt)$/.test(sf);
+            return named && vg !== '' && vf.indexOf(vg) >= 0;
+          });
+        };
         fields = shown.concat(Object.keys(row).filter(function (f) {
           if (shown.indexOf(f) >= 0 || /(^|_|[a-z])(lat|lon|lng|latitude|longitude)$/i.test(f)) return false;
-          var v = row[f];
-          if (v == null || v === '' || seen[String(v)]) return false;
-          if (AK.lang !== 'en' && !labelled(f)) return false;
-          seen[String(v)] = true;
-          return true;
+          return row[f] != null && row[f] !== '' && !helper(f);
         }));
       }
       return fields.map(function (f) {

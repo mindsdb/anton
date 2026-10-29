@@ -85,7 +85,12 @@
     }
     var selected = null;
     AK.watchSize(view, function (w) {
-      try { view.innerHTML = ''; view.appendChild(draw(w)); } catch (e) { AK.fail(view, e); }
+      try {
+        view.innerHTML = '';
+        var drawn = draw(w);
+        view.appendChild(drawn);
+        if (drawn.__hiddenLabels) view.appendChild(AK.el('div', 'ak-note', AK.t('moreLabels', {n: drawn.__hiddenLabels})));
+      } catch (e) { AK.fail(view, e); }
     });
 
     function rowKeys() {
@@ -229,7 +234,7 @@
         if (!L.overlay) lane++;
       });
       // Milestones
-      var all = [], msBoxes = [];
+      var all = [], msBoxes = [], msHidden = 0;
       mss.forEach(function (L) {
         var rows = AK.data(L.data);
         var sc = L.color && rows.length && rows[0][L.color] !== undefined ? AK.colorScale(AK.uniq(rows, L.color), L.colors) : null;
@@ -265,6 +270,7 @@
               .filter(function (bx) {
                 return !msBoxes.some(function (o) { return bx.x < o.x + o.w && bx.x + bx.w > o.x && bx.y < o.y + o.h && bx.y + bx.h > o.y; });
               })[0];
+            if (!spot) msHidden++;
             if (spot) {
               msBoxes.push(spot);
               var lab = AK.svg('text', {x: lx, y: spot.ly, 'text-anchor': 'middle', 'class': 'ak-tl-lbl'});
@@ -358,6 +364,7 @@
         var latest = all.slice().sort(function (a, z) { return t(z.r[z.L.date]) - t(a.r[a.L.date]); })[0];
         focus(keep || latest);
       }
+      svg.__hiddenLabels = msHidden;
       return svg;
     }
     return c.card;

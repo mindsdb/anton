@@ -54,17 +54,26 @@ def _need(rows: list[dict], names: Iterable[str | None], where: str) -> None:
 # Item helpers (plain dicts the blocks take)
 # ---------------------------------------------------------------------------------------------
 
+def _unit_clash(unit: str | None, format: str | None) -> str | None:
+    """A unit the format already writes ("%" with percent, "$" with currency) is dropped."""
+    f = str(format or "").split(":")[0]
+    if unit and ((f in ("percent", "fraction") and unit.strip() == "%") or
+                 (f.startswith("currency") and unit.strip() in ("$", "€", "£", "¥", "USD", "EUR", "GBP", "JPY"))):
+        return None
+    return unit
+
+
 def kpi(label: str, value: Any, format: str | None = None, *, sub: str | None = None, delta: Any = None,
         delta_format: str | None = None, delta_label: str | None = None, better: str | None = None,
         tone: str | None = None, spark: list | None = None, color_value: bool = False, unit: str | None = None) -> dict:
     """One KPI card. `better` ("up"/"down") colours the delta; `tone` marks the card good/bad/warn/accent;
-    `unit` ("MW", "kg", "hours") follows the value."""
+    `unit` ("km", "kg", "hours") follows the value."""
     _check_format(format, f"kpi {label!r}")
     from .data import _scalar
     card = {k: v for k, v in dict(label=label, format=format, sub=sub, delta=_scalar(delta),
                                   delta_format=delta_format, delta_label=delta_label, better=better, tone=tone,
                                   spark=[_scalar(x) for x in spark] if spark is not None else None,
-                                  color_value=color_value or None, unit=unit).items() if v is not None}
+                                  color_value=color_value or None, unit=_unit_clash(unit, format)).items() if v is not None}
     # A missing figure (None, NaN) stays on the card as "—"; the page warns about it on save.
     return {"label": label, "value": _scalar(value), **card}
 
@@ -77,7 +86,7 @@ def metric(label: str, values: list, format: str | None = None, *, better: str |
     from .data import _scalar
     return {k: v for k, v in dict(label=label, values=[_scalar(x) for x in values], format=format, better=better,
                                    note=note, diff_format=diff_format, show_pct=show_pct or None,
-                                   tones=tones, unit=unit).items() if v is not None}
+                                   tones=tones, unit=_unit_clash(unit, format)).items() if v is not None}
 
 
 def col(field: str, label: str | None = None, format: str | None = None, *, pill: bool = False,
@@ -87,7 +96,8 @@ def col(field: str, label: str | None = None, format: str | None = None, *, pill
     `bar` adds an inline bar for numbers; `wrap` gives long text room; `unit` goes in the header."""
     _check_format(format, f"column {field!r}")
     return {k: v for k, v in dict(field=field, label=label, format=format, pill=pill or None, tones=tones,
-                                   bar=bar or None, align=align, wrap=wrap or None, unit=unit).items() if v is not None}
+                                   bar=bar or None, align=align, wrap=wrap or None,
+                                   unit=_unit_clash(unit, format)).items() if v is not None}
 
 
 def points(data: Any, lat: str = "lat", lon: str = "lon", *, label: str | None = None, sublabel: str | None = None,
@@ -352,7 +362,7 @@ class Page:
               dashed: Any = None, area: bool | None = None, show_data: bool | None = None,
               center_label: str | None = None, unit: str | None = None, y2_unit: str | None = None,
               id: str | None = None) -> dict:
-        """A chart. `unit` ("MW", "kg", "hours") labels the value axis, values and tooltips; a y2 in
+        """A chart. `unit` ("km", "kg", "hours") labels the value axis, values and tooltips; a y2 in
         another `y2_unit` gets its own axis.
         kind: bar | hbar | line | area | combo (bars y + line y2) | scatter | pie | donut |
         heatmap (x, y_category, value) | waterfall (x, y, totals=[names of total bars]).
@@ -398,7 +408,8 @@ class Page:
                           "x_label": x_label, "y_label": y_label, "smooth": smooth, "legend": legend, "link": link,
                           "key": key, "size": size, "label": label, "value": value, "y_category": y_category,
                           "totals": totals, "dashed": dashed, "area": area, "show_data": show_data,
-                          "center_label": center_label, "unit": unit, "y2_unit": y2_unit, "id": id})
+                          "center_label": center_label, "unit": _unit_clash(unit, format),
+                          "y2_unit": _unit_clash(y2_unit, y2_format), "id": id})
 
     def echarts(self, option: dict, *, title: str | None = None, subtitle: str | None = None, note: str | None = None,
                 height: int | None = None, id: str | None = None) -> dict:
@@ -497,13 +508,18 @@ class Page:
                 if missing:
                     self.warnings.append(f"{where}: {len(missing)} row(s) without coordinates are not drawn: {', '.join(missing[:8])}")
                 if L["type"] == "points" and len(fixed) >= 3:
-                    # Different items on one spot draw on top of each other, and usually mean the wrong
-                    # coordinates were joined (a shared destination or site instead of each one's own).
+                    # Different items on one spot draw on top of each other: either they really share a
+                    # place, or shared coordinates (a destination, a site) were joined instead of each
+                    # row's own.
                     from collections import Counter
                     spot, n = Counter((p["lat"], p["lon"]) for p in fixed).most_common(1)[0]
-                    if n >= 3 and n > len(fixed) / 2:
-                        self.warnings.append(f"{where}: {n} of {len(fixed)} points sit on the same spot {spot} and hide "
-                                             "each other; check that each row has its own coordinates.")
+                    ident = label  # the layer's label field, else its key
+                    names = {p.get(ident) for p in fixed if (p["lat"], p["lon"]) == spot} if ident else set()
+                    if n >= 3 and n > len(fixed) / 2 and (not ident or len(names) > 1):
+                        self.warnings.append(f"{where}: {n} of {len(fixed)} points are at the same spot {spot} and hide "
+                                             "each other. If they really share a place, show one point per place with "
+                                             "the count (and the items in its tooltip or a table); otherwise use each "
+                                             "row's own coordinates.")
                 if L["type"] == "points":
                     L["lat"], L["lon"] = "lat", "lon"
                 else:
@@ -807,6 +823,25 @@ class Page:
                 for r in b["rows"]:
                     check(f"compare row {r.get('label')!r}", r.get("format"), r.get("values") or [])
 
+    def _check_details(self) -> None:
+        """On a page in another language, row details show fields the table does not under their own
+        names: warn about those without a label, so they get one (or detail_fields picks the fields)."""
+        lang = str(self.spec.get("lang") or "en")[:2]
+        if lang == "en":
+            return
+        data, page_labels = self.spec.get("data", {}), self.spec.get("labels") or {}
+        for b in self._walk():
+            if b.get("type") != "table" or b.get("detail") in (None, False) or b.get("detail_fields"):
+                continue
+            rows = data.get(b["data"], [])
+            shown = {c["field"] for c in b.get("columns") or []}
+            labels = {**page_labels, **(b.get("labels") or {})}
+            bare = [f for f in _fields(rows) if f not in shown and f not in labels and not _is_coord_field(f)]
+            if bare:
+                self.warnings.append(f"table {b.get('title')!r}: its row detail also shows {', '.join(bare[:8])} under these "
+                                     f"field names on a '{lang}' page; give them labels (labels={{field: label}}, "
+                                     "values translated in pandas) or choose detail_fields=[...].")
+
     def _check_times(self) -> None:
         """Warn when a date-only format would hide the times of day the values have."""
         data = self.spec.get("data", {})
@@ -894,6 +929,7 @@ class Page:
         self._autolink()
         self._check_percents()
         self._check_times()
+        self._check_details()
         return render_html(self.spec, self._custom)
 
     def save(self, path: Any, *, quiet: bool = False) -> str:
