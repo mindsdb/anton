@@ -183,6 +183,13 @@ Do not invent interactions to justify a custom page. A dashboard of ordinary met
 can use the compiled document; a calling agent's preference for interactivity does not add a
 user requirement. Custom charts still need legible axes, units, exact inspectable values and
 all requested periods. A set of metric cards cannot replace a requested comparison chart.
+Use a native tabs block for a finite scenario/category switch: it contains labelled panes of
+ordinary metrics, tables, charts and prose, all compiled from exact host queries. It supports
+keyboard navigation, phone reflow, printing all panes and a complete no-JavaScript reading view.
+Tabs do not recalculate data or need a backend; give each condition its own facts and queries.
+Example: {"type":"tabs","title":"Conditions","panes":[{"label":"Observed","blocks":[<blocks>]},
+{"label":"Alternative","blocks":[<blocks>]}]}. Each pane may set layout (flow/split/metrics).
+A required switch between finite compiled views is not by itself a reason for a full custom page.
 A custom full page supplies bindings as named queries and reads those records from window.ARTIFACT_DATA[name].
 The host resolves and embeds these exact projected rows before the page's scripts execute. Never
 retype the evidence into code. Use host query measures for custom-page aggregates. Decimal values

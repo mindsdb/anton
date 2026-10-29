@@ -299,3 +299,45 @@ def test_time_axis_endpoint_labels_do_not_overlap_on_phones(long_labels):
         boxes=page.locator('.x-tick').evaluate_all('(nodes)=>nodes.map(node=>{const r=node.getBoundingClientRect();return {left:r.left,right:r.right};})')
         assert all(right['left']-left['right']>=5 for left,right in zip(boxes,boxes[1:]))
         browser.close()
+
+
+@pytest.mark.parametrize('width',[390,641,1440])
+def test_tabs_switch_exact_compiled_views_with_keyboard_and_print_all_panes(width):
+    from tests.test_static_artifact_render_v2 import tab_specimen
+    doc,data=tab_specimen();html=render(doc,data).html
+    with playwright.sync_playwright() as p:
+        browser=p.chromium.launch();page=browser.new_page(viewport={'width':width,'height':900})
+        errors=[];requests=[];page.on('pageerror',lambda error:errors.append(str(error)))
+        page.route('**/*',lambda route:(requests.append(route.request.url),route.abort()))
+        page.set_content(html)
+        assert page.get_by_role('tabpanel').count()==1
+        assert page.get_by_role('tab',name='Alternative',exact=True).get_attribute('aria-selected')=='true'
+        assert page.locator('.tab-panel:visible .metric-value').inner_text()=='9'
+        page.get_by_role('tab',name='Observed',exact=True).click()
+        assert page.locator('.tab-panel:visible .metric-value').inner_text()=='3'
+        page.keyboard.press('End')
+        assert page.get_by_role('tab',name='Alternative',exact=True).evaluate('(el)=>el===document.activeElement')
+        assert page.locator('.tab-panel:visible .chart rect').count()==2
+        page.keyboard.press('ArrowRight')
+        assert page.locator('.tab-panel:visible .metric-value').inner_text()=='3'
+        assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
+        page.emulate_media(media='print')
+        assert page.locator('.tab-panel:visible').count()==2
+        assert page.locator('.tab-heading:visible').count()==2
+        assert not page.get_by_role('tablist').is_visible()
+        assert not errors and not requests
+        browser.close()
+
+
+def test_tabs_without_javascript_expose_every_compiled_pane_and_no_inert_controls():
+    from tests.test_static_artifact_render_v2 import tab_specimen
+    doc,data=tab_specimen()
+    with playwright.sync_playwright() as p:
+        browser=p.chromium.launch();page=browser.new_page(java_script_enabled=False,viewport={'width':390,'height':900})
+        page.set_content(render(doc,data).html)
+        assert page.locator('.tab-panel:visible').count()==2
+        assert page.locator('.tab-heading:visible').count()==2
+        assert not page.locator('.tab-list').is_visible()
+        assert page.locator('.chart rect').count()==4
+        assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
+        browser.close()

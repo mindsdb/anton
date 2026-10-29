@@ -133,6 +133,12 @@ keep a constant physical size. JavaScript enhances the contents, presentation an
 print controls and closes the initially open data inspectors; it does not redraw
 the chart or recompute its values. Controls needing JavaScript stay hidden until
 their handlers are bound.
+A `tabs` block contains 2–12 labelled panes of ordinary blocks, each with its own
+flow/split/metrics layout. All facts and queries resolve on the host, including
+inactive panes; switching changes presentation only. Native buttons support
+arrow/Home/End keyboard navigation and tab-panel semantics. All panes remain
+readable without JavaScript and in print. Nesting tab groups inside panes is not
+part of the contract. Every pane's selected data is public even while inactive.
 Tables with more than three columns recompose into labelled records on phones; every field
 stays visible, while desktop retains the comparison table. Missing line
 values remain gaps. Large value labels are formatted on the host, before browser
