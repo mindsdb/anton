@@ -4916,7 +4916,7 @@ class ChatSession:
         if self._jev_http is None:
             # Same TLS setting as the provider, e.g. behind an intercepting proxy.
             self._jev_http = httpx.AsyncClient(timeout=self._jev_timeout_s, verify=info.ssl_verify is not False)
-        return await _jev.classify(
+        result = await _jev.classify(
             base_url=base_url,
             api_key=api_key,
             headers=headers,
@@ -4929,6 +4929,13 @@ class ChatSession:
             timeout_s=self._jev_timeout_s,
             client=self._jev_http,
         )
+        if result.error == "http_403":
+            # MindsHub refuses Jev to this organization, for zero data retention
+            # or an admin's model rule, and will refuse every later check too:
+            # the rest of the session uses the LLM verifier alone.
+            self._jev_enabled = False
+            logger.info("Jev refused (HTTP 403); verifying with the LLM for the rest of the session")
+        return result
 
     def _jev_decides(self, result: "_jev.JevVerdict | None") -> bool:
         """Jev settles only a confident COMPLETE or WAITING; the rest needs the LLM's reason."""
