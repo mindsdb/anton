@@ -199,6 +199,106 @@ class TestEncodeRule:
         assert content.count("Use httpx") == 2  # both present
 
 
+class TestEditsKeepHandWrittenText:
+    """rules.md and lessons.md are files people edit by hand. Saving, editing
+    or deleting one entry must leave every other line as it was."""
+
+    RULES = (
+        "# Rules\n"
+        "Notes for the agent, typed by hand.\n"
+        "- a rule above the first heading\n"
+        "\n"
+        "## Always\n"
+        "- use tabs <!-- confidence:high source:user ts:2026-01-02 -->\n"
+        "  a note under use tabs\n"
+        "\n"
+        "## Style\n"
+        "- prefer short names\n"
+    )
+
+    LESSONS = (
+        "# Lessons\n"
+        "Typed above the entries.\n"
+        "- first lesson\n"
+        "## Billing\n"
+        "- second lesson <!-- topic:billing ts:2026-01-02 -->\n"
+        "- third lesson\n"
+    )
+
+    def _lines(self, path):
+        return path.read_text().splitlines()
+
+    def test_saving_a_rule_keeps_every_existing_line(self, hc, mem_dir):
+        path = mem_dir / "rules.md"
+        path.write_text(self.RULES)
+        hc.encode_rule("new rule", kind="never")
+        lines = self._lines(path)
+        assert lines[: len(self.RULES.splitlines())] == self.RULES.splitlines()
+        assert lines[-2] == "## Never"
+        assert lines[-1].startswith("- new rule <!-- ")
+
+    def test_a_rule_lands_at_the_end_of_its_own_section(self, hc, mem_dir):
+        path = mem_dir / "rules.md"
+        path.write_text(self.RULES)
+        hc.encode_rule("also always", kind="always")
+        lines = self._lines(path)
+        assert lines.index("  a note under use tabs") == lines.index("## Style") - 3
+        assert lines[lines.index("## Style") - 2].startswith("- also always ")
+        assert {(r.kind, r.text) for r in hc.get_rules()} >= {("always", "also always")}
+
+    def test_editing_a_rule_under_an_unknown_heading_keeps_it(self, hc, mem_dir):
+        path = mem_dir / "rules.md"
+        path.write_text(self.RULES)
+        target = next(r for r in hc.get_rules() if r.text == "prefer short names")
+        hc.update_rule(target.id, "prefer descriptive names")
+        lines = self._lines(path)
+        assert lines[:-1] == self.RULES.splitlines()[:-1]
+        assert lines[-1].startswith("- prefer descriptive names <!-- ts:")
+        assert "style" in {r.kind for r in hc.get_rules()}
+
+    def test_deleting_a_rule_removes_only_that_line(self, hc, mem_dir):
+        path = mem_dir / "rules.md"
+        path.write_text(self.RULES)
+        target = next(r for r in hc.get_rules() if r.text == "use tabs")
+        hc.del_rule(target.id)
+        expected = [ln for ln in self.RULES.splitlines() if not ln.startswith("- use tabs")]
+        assert self._lines(path) == expected
+
+    def test_a_rule_without_metadata_does_not_gain_none(self, hc, mem_dir):
+        path = mem_dir / "rules.md"
+        path.write_text("# Rules\n\n## When\n- bare rule\n")
+        target = hc.get_rules()[0]
+        hc.update_rule(target.id, "edited rule")
+        assert "None" not in path.read_text()
+        assert hc.get_rules()[0].confidence is None
+
+    def test_editing_a_lesson_keeps_every_other_line(self, hc, mem_dir):
+        path = mem_dir / "lessons.md"
+        path.write_text(self.LESSONS)
+        target = next(e for e in hc.get_lessons() if e.text == "second lesson")
+        hc.update_lesson(target.id, "second lesson, reworded")
+        lines = self._lines(path)
+        original = self.LESSONS.splitlines()
+        assert lines[:4] + lines[5:] == original[:4] + original[5:]
+        assert lines[4].startswith("- second lesson, reworded <!-- topic:billing ts:")
+
+    def test_deleting_a_lesson_removes_only_that_line(self, hc, mem_dir):
+        path = mem_dir / "lessons.md"
+        path.write_text(self.LESSONS)
+        target = next(e for e in hc.get_lessons() if e.text == "first lesson")
+        hc.del_lesson(target.id)
+        assert self._lines(path) == [
+            ln for ln in self.LESSONS.splitlines() if ln != "- first lesson"
+        ]
+
+    def test_an_edited_lesson_with_a_newline_stays_one_entry(self, hc, mem_dir):
+        path = mem_dir / "lessons.md"
+        path.write_text(self.LESSONS)
+        target = next(e for e in hc.get_lessons() if e.text == "third lesson")
+        hc.update_lesson(target.id, "line one\n- forged entry")
+        assert len(hc.get_lessons()) == 3
+
+
 class TestEncodeLesson:
     def test_creates_lessons_file(self, hc, mem_dir):
         hc.encode_lesson("CoinGecko limits at 50/min", topic="api-coingecko")
