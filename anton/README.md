@@ -717,7 +717,7 @@ This pattern is what every extraction call site uses. Adding a new one is mechan
 | `connect_collector.py::extract_variables` | `_ExtractionResult` | planning | Parse free-form credential input into structured fields |
 | `commands/skills.py::handle_skill_save` | `_SkillDraft` | planning | LLM drafts a skill from recent scratchpad work |
 | `commands/datasource.py::handle_add_custom_datasource` | `_CustomDatasourceSpec` | planning | LLM identifies a custom datasource's auth fields |
-| `cortex.py::_compact_file` | `_CompactionResult` | **coding** | Memory deduplication during synaptic homeostasis |
+| `cortex.py::plan_compaction` | `_CompactionResult` | **coding** | Memory deduplication during synaptic homeostasis |
 | `cortex.py::maybe_update_identity` | `_IdentityFacts` | **coding** | Default-mode identity extraction every 5 turns |
 | `consolidator.py::replay_and_extract` | `_ConsolidatedLessons` | **coding** | Sleep-replay extraction of lessons from scratchpad sessions |
 | `cerebellum.py::_run_diff` | `_DiffPassResult` | **coding** | Post-mortem error learning from cell failures |
