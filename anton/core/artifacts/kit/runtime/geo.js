@@ -1,7 +1,8 @@
 /* Artifact Kit runtime: maps and globes on d3-geo with world-atlas country shapes.
    Layers: points (markers with labels), routes (great-circle lines, optional via point and flow
-   animation) and regions (countries shaded by a value). Maps rotate to the data's longitude so
-   routes never break at the date line; globes are orthographic, turn slowly and can be dragged. */
+   animation) and regions (countries shaded by a value). Maps centre on the arc of longitude the data
+   occupies, so their edge falls where there is no data; globes are orthographic, turn slowly and can
+   be dragged. */
 (function () {
   'use strict';
   var AK = window.AK;
@@ -47,6 +48,27 @@
     return coords.reduce(function (a, c) { return a + c[1]; }, 0) / coords.length;
   }
   function wrapLon(l) { while (l > 180) l -= 360; while (l < -180) l += 360; return l; }
+  /* The middle of the arc of longitude the data occupies. A flat map centred there has its edge (the
+     opposite meridian) in the widest stretch with no data, so places that belong together are not
+     split across its two sides; the mean can put the edge through East Asia when data rings the world. */
+  function centerLon(coords) {
+    if (!coords.length) return 0;
+    var ls = coords.map(function (c) { return wrapLon(c[0]); }).sort(function (a, z) { return a - z; });
+    var gap = 360 - (ls[ls.length - 1] - ls[0]), from = ls[ls.length - 1];
+    for (var i = 1; i < ls.length; i++) if (ls[i] - ls[i - 1] > gap) { gap = ls[i] - ls[i - 1]; from = ls[i - 1]; }
+    return wrapLon(from + gap / 2 + 180);
+  }
+  /* A route on a flat map: the great circle, unless it climbs toward a pole far from both ends (places on
+     opposite sides of the world), where it would run along the map's top or bottom edge; then a direct
+     line across the map. */
+  function routeLine(a, z) {
+    var ip = window.d3.geoInterpolate(a, z), top = 0;
+    for (var i = 1; i < 16; i++) top = Math.max(top, Math.abs(ip(i / 16)[1]));
+    if (top < 72 || top - Math.max(Math.abs(a[1]), Math.abs(z[1])) < 25) return {type: 'LineString', coordinates: [a, z]};
+    var dl = wrapLon(z[0] - a[0]), pts = [];
+    for (var k = 0; k <= 48; k++) pts.push([a[0] + dl * k / 48, a[1] + (z[1] - a[1]) * k / 48]);
+    return {type: 'LineString', coordinates: pts};
+  }
 
   var ALIASES = {
     'united states': 'united states of america', usa: 'united states of america', us: 'united states of america', 'u.s.': 'united states of america',
@@ -76,7 +98,7 @@
     // Data within a region (a city, a country) gets the finer outlines.
     var detail = b.detail;
     if (!detail && mode === 'map') {
-      var cs = allCoords(layers), mid = meanLon(cs);
+      var cs = allCoords(layers), mid = centerLon(cs);
       // Longitudes around the data's centre, so a region across the date line measures small.
       var vals = function (i) { return cs.map(function (c) { return i ? c[1] : wrapLon(c[0] - mid); }); };
       var ext = function (i) { var v = vals(i); return v.length ? Math.max.apply(null, v) - Math.min.apply(null, v) : 360; };
@@ -241,7 +263,7 @@
     var d3 = window.d3;
     var width = Math.round(view.getBoundingClientRect().width) || 800;
     var coords = allCoords(layers);
-    var lon0 = b.center_lon != null ? b.center_lon : meanLon(coords);
+    var lon0 = b.center_lon != null ? b.center_lon : centerLon(coords);
     var projName = b.projection || 'natural';
     var proj = (projName === 'mercator' ? d3.geoMercator() : projName === 'equal_earth' ? d3.geoEqualEarth() : d3.geoNaturalEarth1()).rotate([-lon0, 0]);
     // Extent: the data's box, padded in proportion to its spread (at least a few degrees, so a city's
@@ -319,7 +341,7 @@
         var segs = v ? [[a, v, false], [v, z, true]] : [[a, z, false]];
         var w = L.width ? Math.max(1.5, Math.min(7, num(r[L.width]) || 2)) : 2;
         segs.forEach(function (sg) {
-          var p = routesG.append('path').datum({type: 'LineString', coordinates: [sg[0], sg[1]]})
+          var p = routesG.append('path').datum(routeLine(sg[0], sg[1]))
             .attr('class', 'ak-route')
             .attr('d', path).attr('stroke', col(r))
             .attr('stroke-dasharray', sg[2] ? '3 5' : null).attr('opacity', sg[2] ? 0.55 : null)
