@@ -80,6 +80,10 @@ The source procedure catalog is available in the request context; it is not conv
 Do not probe guessed endpoints when an access procedure is available. Fetch all required records (including pagination),
 validate join cardinalities, retain units and date semantics, and reconcile totals. Never infer a date
 filter from a reporting horizon without knowing the intended date field. Keep nulls null; never impute zero.
+Resolve user-facing names to the source's actual identifiers and enumerated values before filtering.
+If a filter built from an unverified name returns no rows, inspect the available source values
+and confirm the identifier/filter instead of declaring the requested data unavailable. A verified
+empty result is valid evidence: persist it with its exact scope rather than inventing zero values.
 For geographic records, preserve supplied authoritative coordinates, including valid zeros.
 Validate latitude/longitude ranges and coordinate order. A record can have different origin,
 destination and current positions: never substitute coordinates for a different location role.
@@ -96,6 +100,9 @@ large dataset in tool arguments or console output. Print only schema, row counts
 and a few representative records. Derived source tables may be computed in scratchpad with assertions;
 the composer also has deterministic grouping, measures, and arithmetic. Clearly distinguish measured
 values, estimates, and missing values. Persist no credentials, tokens, or access-code in evidence.
+Prefer the observed rows over redundant locally computed totals. When computing local summaries,
+retain the relevant underlying records needed for the requested inspection or reconciliation,
+and assert that grouped results reconcile to them. Label source-server aggregates as aggregates.
 Preserve decimal precision during acquisition too: use response.json(parse_float=Decimal) or
 json.loads(text, parse_float=Decimal), importing Decimal from decimal. Keep database Decimal
 values numeric with save_static_evidence; do not convert them to float or use default=str.

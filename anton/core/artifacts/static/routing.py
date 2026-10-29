@@ -19,6 +19,9 @@ When using an existing computation, pass its complete records or export the comp
 records to a private file and pass that path. The builder uses a separate Python
 scratchpad and cannot access variables left in the parent notebook.
 The engine gathers evidence, composes the artifact, and checks the actual page.
+It has its own source readers. Call it even when the parent has not queried the
+source or lacks a direct query tool; do not require a parent read or manual export
+before building an artifact from an available connected source.
 It can acquire source records during the build even when an earlier parent read
 failed. Its result's data_publication lists the evidence origin and dataset row
 counts. Use that current result; an earlier absence of parent records does not
