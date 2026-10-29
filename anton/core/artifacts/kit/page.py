@@ -946,11 +946,24 @@ class Page:
             self.checks.append(f"{num} in \"{sentence}\"")
 
     def _check_field_names_in_text(self) -> None:
-        """Warn when the page's words use a data field's raw name (DelayDays, order_status) instead of
-        words a reader knows."""
+        """Warn when the page's words use a data field's raw name (signup_date, order.total) instead of
+        words a reader knows. A CamelCase name counts only when the page gives that field a label (so
+        brand-like names such as YouTube stay alone); names in backticks are meant as written."""
         data = self.spec.get("data", {})
-        names = {f for rows in data.values() for f in _fields(rows)
-                 if len(f) >= 5 and (re.search(r"[a-z][A-Z]", f) or "_" in f or "." in f)}
+        labels = dict(self.spec.get("labels") or {})
+        for b in self._walk():
+            labels.update(b.get("labels") or {})
+            for c in b.get("columns") or []:
+                if isinstance(c, dict) and c.get("label"):
+                    labels.setdefault(c["field"], c["label"])
+        names = {}
+        for f in {f for rows in data.values() for f in _fields(rows)}:
+            if len(f) < 5:
+                continue
+            if "_" in f or "." in f:
+                names[f] = labels.get(f)
+            elif re.search(r"[a-z][A-Z]", f) and f in labels:
+                names[f] = labels[f]
         if not names:
             return
         texts = [str(self.spec.get("subtitle") or "")]
@@ -959,10 +972,12 @@ class Page:
                 texts.append(str(b.get("md") or ""))
             elif b.get("type") == "list":
                 texts += [str(i) for i in b.get("items") or []]
+        texts = [re.sub(r"`[^`]*`", " ", t) for t in texts]
         found = sorted({n for n in names for t in texts if re.search(r"(?<![\w.])" + re.escape(n) + r"(?![\w])", t)})
         if found:
-            self.warnings.append(f"the page's text uses data field names ({', '.join(found[:6])}): write them as "
-                                 "words in the page's language.")
+            said = ", ".join(f"{n} (\"{names[n]}\")" if names[n] else n for n in found[:6])
+            self.warnings.append(f"the page's text uses data field names: {said}; write them as words in the page's "
+                                 "language.")
 
     def _check_details(self) -> None:
         """On a page in another language, row details show fields the table does not under their own

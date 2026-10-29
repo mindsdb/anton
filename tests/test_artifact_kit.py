@@ -262,28 +262,35 @@ def test_a_page_build_thinks_at_least_at_medium_effort(own, expected):
 
 
 def test_diff_prints_what_changes_between_two_scenarios(capsys):
-    plan = {"orders": pd.DataFrame({"id": ["O1", "O2", "O3"], "status": ["On time"] * 3, "value": [100.0, 250.0, 80.0]}),
-            "trips": pd.DataFrame({"id": ["T1"], "delay": [0]})}
-    strike = {"orders": pd.DataFrame({"id": ["O1", "O2", "O3"], "status": ["Late", "Late", "On time"], "value": [100.0, 250.0, 80.0]}),
-              "trips": pd.DataFrame({"id": ["T1"], "delay": [0]})}
+    q1 = {"invoices": pd.DataFrame({"invoice_id": [1, 1, 2, 3], "line": [1, 2, 1, 1], "status": ["Open"] * 4,
+                                    "amount": [100.0, 50.0, 80.0, 40.0], "collection_rate": [50, 60, 70, 80]}),
+          "staff": pd.DataFrame({"staff_id": [7], "hours": [38.0]})}
+    q2 = {"invoices": pd.DataFrame({"invoice_id": [1, 1, 2, 4], "line": [1, 2, 1, 1], "status": ["Overdue", "Open", "Overdue", "Open"],
+                                    "amount": [100.0, 50.0, 80.0 + 1e-12, 40.0], "collection_rate": [55, 60, 70, 95]}),
+          "staff": pd.DataFrame({"staff_id": [7], "hours": [38.0]})}
 
-    out = kit.diff(plan, strike, names=("Plan", "Strike"))
+    out = kit.diff(q1, q2, names=("Q1", "Q2"))
 
-    assert "status = 'Late': rows 0 -> 2 (+2)" in out
-    assert "value where status = 'Late': 0 -> 350 (+350)" in out
-    assert "2 of 3 rows changed (by id): status 2" in out
-    assert "trips: no changes" in out
+    assert "status = 'Overdue': rows 0 -> 2 (+2)" in out
+    assert "amount where status = 'Overdue': 0 -> 180 (+180)" in out
+    assert "collection_rate mean: 65 -> 70 (+5), max 80 -> 95" in out  # a rate is averaged, not added up
+    assert "line" not in out.replace("by invoice_id+line", "")  # line numbers are ids, not amounts
+    assert "2 of 4 rows changed (by invoice_id+line)" in out  # float noise is not a change
+    assert "1 rows only in Q1 (by invoice_id+line): 3/1" in out
+    assert "staff: no changes" in out
 
 
 def test_raw_field_names_in_the_text_are_a_warning(tmp_path):
-    df = pd.DataFrame({"Id": ["A"], "DelayDays": [3], "Status": ["Late"]})
-    page = kit.Page("Delays")
-    page.table(df, ["Id", "DelayDays"])
-    page.text("Rows with DelayDays above zero; Status is shown as recorded.")
+    df = pd.DataFrame({"id": ["A"], "signup_date": ["2026-03-01"], "YouTube": [3], "RenewalDate": ["2026-04-01"]})
+    page = kit.Page("Signups")
+    page.table(df, ["id", kit.col("signup_date", "Signup date"), "YouTube", kit.col("RenewalDate", "Renewal date")])
+    page.text("Each signup_date and RenewalDate is as recorded; YouTube counts views; `signup_date` is the field.")
 
     page.save(tmp_path)
 
-    assert any("field names (DelayDays)" in w for w in page.warnings)
+    [warning] = [w for w in page.warnings if "field names" in w]
+    assert 'RenewalDate ("Renewal date")' in warning and 'signup_date ("Signup date")' in warning
+    assert "YouTube" not in warning
 
 
 def test_kit_errors_are_value_errors():

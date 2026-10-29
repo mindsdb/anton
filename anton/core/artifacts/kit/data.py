@@ -196,15 +196,28 @@ def _delta(a: float, b: float) -> str:
     return f"{_num(a)} -> {_num(b)} ({'+' if d > 0 else ''}{_num(d)})"
 
 
-def diff(before: Any, after: Any, names: tuple[str, str] = ("before", "after"), *, max_values: int = 12) -> str:
+_ID_NAME = re.compile(r"(^|[_\s.])(id|code|key|no|number|line|seq|row|rank|index)$|[a-z](Id|ID|Code|Key|Line|Seq)$", re.I)
+_RATE_NAME = re.compile(r"pct|percent|rate|ratio|share|util|margin", re.I)
+_COORD_NAME = re.compile(r"(^|[_\s.])(lat|lon|lng|latitude|longitude)$|[a-z0-9](Lat|Lon|Lng|Latitude|Longitude)$", re.I)
+
+
+def _same(a: Any, b: Any) -> bool:
+    if is_number(a) and is_number(b):
+        return math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-9)
+    return a == b
+
+
+def diff(before: Any, after: Any, names: tuple[str, str] = ("before", "after"), *, max_values: int = 12,
+         max_lines: int = 40) -> str:
     """What changes between two versions of the same data: two scenarios, two periods, a plan with
     and without an option. Pass two tables, or two dicts of tables {name: table} with the same names.
-    For each table it prints only what differs: the row count; each number column's total; for each
-    few-valued column, the count of each value that changed and, for that value, the totals of the
-    number columns (e.g. Status 'Late': 0 -> 40 rows, Value 0 -> 1,570,600); and, when the tables share
-    an id column, how many rows changed in which columns. Printed and returned. Use it to find what an
-    option or scenario changes before choosing the figures; the effect is often in a table downstream
-    of the one the request names."""
+    For each table it prints only what differs, largest changes first: the row count; each amount
+    column's total (rates and percentages: mean and max; ids, codes, years and coordinates are not
+    added up); for each few-valued column, the count of each value that changed and, for that value,
+    the totals of the amount columns (e.g. Status 'Overdue': 3 -> 11 rows, Amount 2,400 -> 9,150); and,
+    when rows share an id (or a pair of ids), how many changed in which columns and how many are only
+    on one side. Printed and returned. On a large source, diff aggregates from queries (counts and
+    totals by status) rather than whole tables."""
     from collections import Counter, defaultdict
 
     a_tabs = before if isinstance(before, dict) and not hasattr(before, "columns") else {"data": before}
@@ -212,55 +225,98 @@ def diff(before: Any, after: Any, names: tuple[str, str] = ("before", "after"), 
     lines = [f"diff {names[0]} -> {names[1]}"]
     for name in list(dict.fromkeys(list(a_tabs) + list(b_tabs))):
         ra, rb = records(a_tabs.get(name)), records(b_tabs.get(name))
-        out = []
-        if len(ra) != len(rb):
-            out.append(f"  rows: {_delta(len(ra), len(rb))}")
+        both = ra + rb
         cols = list(dict.fromkeys(fields(ra) + fields(rb)))
-        numeric = [f for f in cols if any(is_number(r.get(f)) for r in ra + rb)
-                   and all(is_number(r.get(f)) or r.get(f) in (None, "") for r in ra + rb)]
-        for f in numeric:
-            sa = sum(r.get(f) or 0 for r in ra)
-            sb = sum(r.get(f) or 0 for r in rb)
-            if abs(sa - sb) > 1e-9 * max(1.0, abs(sa)):
-                out.append(f"  {f} total: {_delta(sa, sb)}")
+        out: list[tuple[float, str]] = []  # (size of change, line)
+        skipped: list[str] = []
+        if len(ra) != len(rb):
+            out.append((float("inf"), f"  rows: {_delta(len(ra), len(rb))}"))
+        nums = [f for f in cols if any(is_number(r.get(f)) for r in both)
+                and all(is_number(r.get(f)) or r.get(f) in (None, "") for r in both)]
+
+        def id_like(f):
+            vals = [r.get(f) for r in both if r.get(f) not in (None, "")]
+            years = vals and all(isinstance(v, int) and 1900 <= v <= 2100 for v in vals)
+            return bool(_ID_NAME.search(f) or _COORD_NAME.search(f) or years)
+        amounts = [f for f in nums if not id_like(f)]
+
+        def rate(f):
+            vals = [r.get(f) for r in both if is_number(r.get(f))]
+            return bool(_RATE_NAME.search(f)) and vals and min(vals) >= 0 and max(vals) <= 100
+        for f in amounts:
+            va = [r.get(f) for r in ra if is_number(r.get(f))]
+            vb = [r.get(f) for r in rb if is_number(r.get(f))]
+            if rate(f):
+                ma = sum(va) / len(va) if va else 0.0
+                mb = sum(vb) / len(vb) if vb else 0.0
+                if not math.isclose(ma, mb, rel_tol=1e-9, abs_tol=1e-9) or (va and vb and max(va) != max(vb)):
+                    out.append((abs(mb - ma), f"  {f} mean: {_delta(ma, mb)}, max {_num(max(va or [0]))} -> {_num(max(vb or [0]))}"))
+                continue
+            sa, sb = float(sum(va)), float(sum(vb))
+            if not math.isclose(sa, sb, rel_tol=1e-9, abs_tol=1e-9):
+                out.append((abs(sb - sa) / (abs(sa) or 1.0), f"  {f} total: {_delta(sa, sb)}"))
         for f in cols:
-            if f in numeric:
+            if f in nums:
                 continue
             ca = Counter(str(r.get(f)) for r in ra if r.get(f) not in (None, ""))
             cb = Counter(str(r.get(f)) for r in rb if r.get(f) not in (None, ""))
-            if len(set(ca) | set(cb)) > max_values:
+            values = set(ca) | set(cb)
+            if len(values) > max_values:
+                if any(ca[v] != cb[v] for v in values):
+                    skipped.append(f"{f} ({len(values)} values)")
                 continue
-            for v in sorted(set(ca) | set(cb), key=lambda x: -(ca[x] + cb[x])):
+            for v in sorted(values, key=lambda x: -abs(cb[x] - ca[x])):
                 if ca[v] == cb[v]:
                     continue
-                out.append(f"  {f} = {v!r}: rows {_delta(ca[v], cb[v])}")
-                for g in numeric:
-                    sa = sum(r.get(g) or 0 for r in ra if str(r.get(f)) == v)
-                    sb = sum(r.get(g) or 0 for r in rb if str(r.get(f)) == v)
-                    if abs(sa - sb) > 1e-9 * max(1.0, abs(sa)):
-                        out.append(f"    {g} where {f} = {v!r}: {_delta(sa, sb)}")
-        # Rows matched by a shared id: which columns changed, and how many rows.
-        ids = [f for f in cols if (f.lower() == "id" or f.lower().endswith(("_id", ".id")) or f.endswith("Id"))
-               and len({r.get(f) for r in ra}) == len(ra) and len({r.get(f) for r in rb}) == len(rb) and ra and rb]
-        if ids:
-            key = ids[0]
-            by_b = {r.get(key): r for r in rb}
-            changed: dict[str, int] = defaultdict(int)
-            n_rows = 0
-            for r in ra:
-                other = by_b.get(r.get(key))
-                if other is None:
-                    continue
-                diffs = [f for f in cols if f != key and r.get(f) != other.get(f)]
-                if diffs:
-                    n_rows += 1
-                    for f in diffs:
-                        changed[f] += 1
-            if n_rows:
-                detail = ", ".join(f"{f} {n}" for f, n in sorted(changed.items(), key=lambda x: -x[1])[:8])
-                out.append(f"  {n_rows} of {len(ra)} rows changed (by {key}): {detail}")
-        lines.append(f"{name}: " + ("no changes" if not out else ""))
-        lines += out
+                block = [f"  {f} = {v!r}: rows {_delta(ca[v], cb[v])}"]
+                for g in amounts:
+                    if rate(g):
+                        continue
+                    sa = float(sum(r.get(g) or 0 for r in ra if str(r.get(f)) == v))
+                    sb = float(sum(r.get(g) or 0 for r in rb if str(r.get(f)) == v))
+                    if not math.isclose(sa, sb, rel_tol=1e-9, abs_tol=1e-9):
+                        block.append(f"    {g} where {f} = {v!r}: {_delta(sa, sb)}")
+                out.append((abs(cb[v] - ca[v]) / max(1, ca[v]) + 1, "\n".join(block)))
+        # Rows matched by an id (or a pair of ids): which columns changed, which rows are on one side.
+        idcols = [f for f in cols if _ID_NAME.search(f)]
+        keys = [(f,) for f in idcols] + [(f, g) for i, f in enumerate(idcols) for g in idcols[i + 1:]] + \
+               [(f, g) for f in idcols for g in cols if g not in idcols and g.lower() in ("version", "period")]
+        for key in keys:
+            ka = [tuple(r.get(k) for k in key) for r in ra]
+            kb = [tuple(r.get(k) for k in key) for r in rb]
+            if ra and rb and len(set(ka)) == len(ka) and len(set(kb)) == len(kb):
+                by_b = dict(zip(kb, rb))
+                changed: dict[str, int] = defaultdict(int)
+                n_rows = 0
+                for k, r in zip(ka, ra):
+                    other = by_b.get(k)
+                    if other is None:
+                        continue
+                    diffs = [f for f in cols if f not in key and not _same(r.get(f), other.get(f))]
+                    if diffs:
+                        n_rows += 1
+                        for f in diffs:
+                            changed[f] += 1
+                only_a, only_b = set(ka) - set(kb), set(kb) - set(ka)
+                label = "+".join(key)
+                if n_rows:
+                    detail = ", ".join(f"{f} {n}" for f, n in sorted(changed.items(), key=lambda x: -x[1])[:8])
+                    out.append((0.5, f"  {n_rows} of {len(ra)} rows changed (by {label}): {detail}"))
+                for side, ks in ((names[0], only_a), (names[1], only_b)):
+                    if ks:
+                        some = ", ".join("/".join(str(x) for x in k) for k in sorted(ks, key=str)[:5])
+                        out.append((0.5, f"  {len(ks)} rows only in {side} (by {label}): {some}"))
+                break
+        out.sort(key=lambda x: -x[0])
+        shown = [line for _, line in out]
+        text_lines = "\n".join(shown).split("\n")
+        if len(text_lines) > max_lines:
+            skipped.append(f"{len(text_lines) - max_lines} more lines")
+            text_lines = text_lines[:max_lines]
+        lines.append(f"{name}:" + ("" if shown else " no changes"))
+        lines += [ln for ln in text_lines if ln]
+        if skipped:
+            lines.append("  not shown: " + "; ".join(skipped))
     text = "\n".join(lines)
     print(text)
     return text

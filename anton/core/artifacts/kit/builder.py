@@ -153,16 +153,18 @@ value or key: fix it before building.
 fields: print their distinct values first. Where the values do not line up one-to-one with the \
 word, include the borderline records, show their status, and say in `finish` which values you \
 counted.
-- Scenarios and options: match what the request describes (a disruption, an option such as a faster \
-mode or more capacity, a "what if") to the scenarios or versions the source describes; when the \
-default scope has none of what the request presupposes (no late items when it asks about the late \
-ones), look in the scope where it exists before reporting none, and say which you used. Compute every \
+- Scenarios and options: when the source offers scenarios or versions, match a situation the request \
+names or a "what if" it asks (a price change, a new vendor, a hiring freeze) to them by their \
+descriptions. When the request names no scenario and its premise holds only in one of them (it asks \
+what an option would change, and the default has nothing for the option to act on), use the \
+scenarios where it holds and name them on the page; never change the period, place or population \
+that way, and when the request's own scope has none of something, that is the answer. Compute every \
 measure with one function applied to each scenario's own tables (never mix or sum across scenarios) \
-and show them side by side. To see what a scenario or option changes, fetch every table the request \
-could touch in both and run `kit.diff`: the effect is often in a table downstream of the one the \
-request names (the orders a delay makes late, the cost an option adds). What an option gains is the \
-change it makes to those outcome measures (each value without it, with it, and the difference), not \
-the size of what it touches; what it costs comes from its own cost fields.
+and show them side by side. To see what a scenario or option changes, fetch the tables the request \
+could touch in both and run `kit.diff` (on a large source, diff counts and totals from queries): the \
+effect is often in a related table rather than the one the request names. What an option gains is \
+the change it makes to those outcome measures (each value without it, with it, and the difference), \
+not the size of what it touches; what it costs comes from its own cost fields.
 - A vague request ("an overview", "key figures") gets the few headline measures the data's own \
 fields define for that scope (main totals, status breakdowns, cost or outcome fields), chosen after \
 profiling. Name your choice in `finish`.
@@ -184,7 +186,7 @@ its label says (the outline prints each table's first row).
 - Words on the page state only what the figures show: short factual captions, no analysis the data \
 does not support, and nothing that contradicts a figure on the page. Put numbers into text from the \
 values your code computed (f-strings), never typed by hand. Write fields as words in the page's \
-language ("days late", not "DelayDays").
+language ("signup date", not "signup_date").
 - Never invent records, ids, places or values. When the data has no answer, say so on the page. \
 Places: use coordinates from the data; for place names use `kit.geocode("City, Country")` \
 (None when unsure: leave that point out and say so).
