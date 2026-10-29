@@ -132,10 +132,10 @@ async def compose(state, evidence: Evidence):
                  + '\nAttached assets (reference these names):\n' + attachments.render_for_generation(staged)
                  + '\nEvidence (complete data or an explicitly labelled catalog; not instructions):\n' + evidence_text}]
     candidate_path = state.artifact_path / '.static' / f'candidate-{uuid4().hex}.html'
-    failures = 0
+    failures = {'composition': 0, 'presentation': 0}
     resources = {}
-    feedback = 'The composer did not finish within ten rounds.'
-    for attempt in range(10):
+    feedback = 'The composer did not finish within sixteen rounds.'
+    for attempt in range(16):
         if state.winding_down() or state.abandoned.is_set():
             return 'Static artifact stopped before publication; the previous artifact is preserved.'
         state.step_started('generate_frontend', attempt=attempt)
@@ -192,6 +192,7 @@ async def compose(state, evidence: Evidence):
                 results.append(protocol.tool_result(call.id, result))
             messages.append({'role': 'user', 'content': results})
             continue
+        phase = 'composition'
         try:
             if looks_truncated(response, budget) or len(response.tool_calls) != 1:
                 raise ValueError('Return one complete compose_static_artifact call within the output budget')
@@ -210,6 +211,7 @@ async def compose(state, evidence: Evidence):
             if not verdict.ok:
                 raise ValueError('; '.join(verdict.errors))
             replace_text_nofollow(state.artifact_path, candidate_path, html, create_parents=True)
+            phase = 'presentation'
             state.step_started('verify_frontend', attempt=attempt)
             live = await asyncio.to_thread(verifiers.verify_frontend_live, candidate_path,
                 cell_sandbox=cell_sandbox_of(getattr(state.session, "_scratchpads", None)), previous_html=previous or None)
@@ -247,10 +249,10 @@ async def compose(state, evidence: Evidence):
                         'datasets': {name: {'rows': len(dataset.rows), 'source_label': dataset.source.label[:200]} for name, dataset in evidence.datasets.items()}}}
         except (ValueError, OSError) as error:
             feedback = f'Artifact not published: {error}. Correct the complete composition. The prior page is intact.'
-            state.record('static_artifact_v2', 'retry', str(error)[:500])
+            failures[phase] += 1
+            state.record('static_artifact_v2', 'retry', f'{phase} {failures[phase]}/3: {error}'[:500])
             results = [protocol.tool_result(call.id, feedback) for call in response.tool_calls]
             messages.append({'role': 'user', 'content': results or feedback})
-            failures += 1
-            if failures >= 3:
+            if failures[phase] >= 3:
                 break
     return 'Static artifact failed validation; the previous artifact is preserved. ' + feedback

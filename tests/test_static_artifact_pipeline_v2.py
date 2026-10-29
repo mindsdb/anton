@@ -70,6 +70,37 @@ async def test_failed_composition_preserves_prior_page_and_recipe(tmp_path,monke
     assert old.read_text()=='OLD PAGE' and recipe.read_text()=='OLD RECIPE'
 
 
+@pytest.mark.parametrize('failure_stage',['browser','review'])
+async def test_schema_errors_do_not_spend_presentation_repairs(tmp_path,monkeypatch,failure_stage):
+    old=tmp_path/'index.html';old.write_text('OLD PAGE');calls=[];reviews=[];checks=[]
+    async def stream(**kwargs):
+        calls.append(1)
+        payload={'document':{'title':'Invalid','sections':[]}} if len(calls)<3 else VALID
+        yield StreamComplete(response=LLMResponse(content='',tool_calls=[ToolCall('compose','compose_static_artifact',payload)]))
+    def check(*args,**kwargs):
+        assert old.read_text()=='OLD PAGE';checks.append(1)
+        return BrowserCheck(status='failed',reason='Labels overlap') if failure_stage=='browser' and len(checks)<3 else BrowserCheck(status='passed')
+    async def review(*args,**kwargs):
+        assert old.read_text()=='OLD PAGE';reviews.append(1)
+        if failure_stage=='review' and len(reviews)<3:raise ValueError('Labels overlap')
+        return {'status':'no_issues_found'}
+    monkeypatch.setattr('anton.core.tools.generate_artifact.verifiers.verify_frontend_live',check)
+    monkeypatch.setattr('anton.core.tools.generate_artifact.static_v2.content_review.check',review)
+    st=state(tmp_path,VALID);st.session._llm.code_stream=stream
+    assert (await compose(st,Evidence()))['status']=='generated'
+    assert len(calls)==5 and 'A result.' in old.read_text()
+
+
+async def test_presentation_repair_exhaustion_keeps_the_previous_page(tmp_path,monkeypatch):
+    old=tmp_path/'index.html';old.write_text('OLD PAGE');checks=[]
+    def check(*args,**kwargs):
+        checks.append(1);return BrowserCheck(status='failed',reason='Unreadable plot')
+    monkeypatch.setattr('anton.core.tools.generate_artifact.verifiers.verify_frontend_live',check)
+    result=await compose(state(tmp_path,VALID),Evidence())
+    assert isinstance(result,str) and 'Unreadable plot' in result
+    assert len(checks)==3 and old.read_text()=='OLD PAGE'
+
+
 async def test_cancel_during_browser_check_prevents_late_publish(tmp_path,monkeypatch):
     old=tmp_path/'index.html';old.write_text('OLD PAGE');st=state(tmp_path,VALID)
     def check(*args,**kwargs):
