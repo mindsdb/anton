@@ -102,7 +102,7 @@ def routes(data: Any, from_lat: str, from_lon: str, to_lat: str, to_lon: str, *,
            width: str | None = None, animate: bool = False, key: str | None = None, link: str | None = None,
            tooltip: list | None = None, name: str | None = None, remaining_label: str | None = None,
            labels: dict | None = None, formats: dict | None = None) -> dict:
-    """A layer of great-circle routes from one point to another. With `via_*` (e.g. where a shipment is
+    """A layer of great-circle routes from one point to another. With `via_*` (e.g. where a vehicle is
     now) the leg before it is solid and the leg after it dashed."""
     return {"type": "routes", "data": data, "from_lat": from_lat, "from_lon": from_lon, "to_lat": to_lat,
             "to_lon": to_lon, "via_lat": via_lat, "via_lon": via_lon, "color": color, "colors": colors,
@@ -460,9 +460,9 @@ class Page:
             elif L.get("color") and L["type"] != "regions":
                 L["color_value"] = L.pop("color")
             if coords:
-                # Each place is its own {lat, lon} object (a point's first, a route's from/via/to), so
-                # every coordinate in the page reads unambiguously as the place it is. Other
-                # coordinate columns are dropped: a layer draws only the places it names.
+                # One shape for every layer whatever the source columns are called: a point's
+                # {lat, lon}, a route's from/via/to objects. Coordinate columns the layer does not
+                # draw are dropped (a smaller page).
                 fixed, missing = [], []
                 for r in rws:
                     vals = {}
@@ -529,12 +529,12 @@ class Page:
                 controls: bool | None = None, labels: dict | None = None, formats: dict | None = None,
                 id: str | None = None) -> dict:
         """A network diagram from link rows (source, target, value). `nodes` (optional) gives node rows with
-        `id_field`, `label`, `group`; `tiers` orders groups left to right (e.g. ["Supplier","Plant","DC"]).
+        `id_field`, `label`, `group`; `tiers` orders groups left to right (e.g. ["Source","Hub","Destination"]).
         style "graph" (boxes and arrows, value labels on links) or "sankey" (bands sized by value).
-        `link_color` colours links by a field (e.g. lane kind) with `link_colors` {value: colour/tone};
+        `link_color` colours links by a field (e.g. link type) with `link_colors` {value: colour/tone};
         `dashed` True or a field marking dashed links; `link_label` a field to label links with (False: none).
-        Clicking a node highlights its links; `controls` adds buttons that do the same (default: on for small
-        graphs, off for sankeys)."""
+        Clicking (or Enter on) a node highlights its links; `controls=True` adds a row of buttons that do the
+        same, for pages where highlighting is a main use."""
         if style not in ("graph", "sankey"):
             raise KitError("network style is 'graph' or 'sankey'")
         _check_format(value_format, f"network {title!r}")
@@ -571,9 +571,11 @@ class Page:
                  markers: list | None = None, rows: dict | None = None, title: str | None = None,
                  subtitle: str | None = None, note: str | None = None, link: str | None = None,
                  range: list | None = None, row_height: int | None = None, detail: bool = True,
-                 legend: bool | None = None, id: str | None = None) -> dict:
+                 legend: bool | None = None, milestone_list: bool | None = None, id: str | None = None) -> dict:
         """A timeline / Gantt chart. bars: kit.bars(...) layers (one lane each, so plans compare);
-        milestones: kit.milestones(...) layers; markers: kit.marker(date, label, tone); rows: kit.rows(...)."""
+        milestones: kit.milestones(...) layers; markers: kit.marker(date, label, tone); rows: kit.rows(...).
+        Milestones are also listed as text under the chart: collapsed by default, open with
+        milestone_list=True (when the request asks to see every date), none with milestone_list=False."""
         def prep(layer, kind):
             layer = {k: v for k, v in layer.items() if v is not None}
             name, rws = self._dataset(layer["data"], f"timeline {title!r} {kind}")
@@ -597,7 +599,7 @@ class Page:
             raise KitError("timeline needs bars or milestones")
         return self._add({"type": "timeline", "bars": bl or None, "milestones": ml or None, "markers": markers,
                           "rows": rs, "title": title, "subtitle": subtitle, "note": note, "link": link,
-                          "range": range, "row_height": row_height, "detail": None if detail else False,
+                          "range": range, "row_height": row_height, "detail": None if detail else False, "list": milestone_list,
                           "legend": legend, "id": id})
 
     def image(self, src: Any, *, title: str | None = None, subtitle: str | None = None, alt: str | None = None,
@@ -754,7 +756,7 @@ class Page:
 
     # ---- output ----
     def _check_percents(self) -> None:
-        """Warn when values shown as `percent` (percent units, 98.4 -> 98.4%) look like fractions."""
+        """Warn when values shown as `percent` (percent units, 12.5 -> 12.5%) look like fractions."""
         data = self.spec.get("data", {})
 
         def looks_fractional(vals):
@@ -764,7 +766,7 @@ class Page:
         def check(where, fmt, vals):
             if fmt and str(fmt).split(":")[0] == "percent" and looks_fractional(vals):
                 self.warnings.append(f"{where}: values are between 0 and 1 but the format is 'percent' (which "
-                                     "expects 98.4 for 98.4%); use format='fraction' or multiply by 100.")
+                                     "expects 12.5 for 12.5%); use format='fraction' or multiply by 100.")
         for b in self._walk():
             t = b.get("type")
             if t == "kpis":

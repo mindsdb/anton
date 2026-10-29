@@ -1,5 +1,6 @@
-"""Assemble a page: the spec (with its data) first, then the stylesheet and only the runtime
-modules the page uses. One file, no build step; libraries load from cdn.jsdelivr.net at view time."""
+"""Assemble a page: the stylesheet, the spec (with its data), a static rendition, then only the
+runtime modules the page uses. One file, no build step; libraries load from cdn.jsdelivr.net at
+view time."""
 
 from __future__ import annotations
 

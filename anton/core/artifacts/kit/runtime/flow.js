@@ -84,7 +84,64 @@
     return lines.map(function (l) { return l.length > maxChars + 3 ? l.slice(0, maxChars + 1) + '…' : l; });
   }
 
+  /* Narrow screens where a tier's nodes cannot sit side by side with readable labels: the same
+     flows as a list, each node with its outgoing links as value bars. */
+  function fitsSideBySide(G, width) {
+    var maxPer = Math.max.apply(null, G.tiers.map(function (t) { return t.length; }));
+    var slot = (width - 24) / Math.max(1, maxPer);
+    var word = Math.max.apply(null, G.nodes.map(function (n) {
+      return Math.max.apply(null, String(n.label).split(/\s+/).map(function (w) { return w.length; }));
+    }).concat([1]));
+    return slot >= 84 && word * 6.6 + 18 <= slot;
+  }
+
+  function flowList(b, view, G) {
+    var Lk = b.links || {}, N = b.nodes || {};
+    var vfmt = b.value_format || AK.fieldFormat(Lk, G.valF) || 'auto';
+    var gcol = AK.colorScale(AK.uniq(G.nodes.map(function (n) { return {g: n.group}; }), 'g'), N.colors);
+    var maxV = Math.max.apply(null, G.links.map(function (l) { return l.v || 0; }).concat([1]));
+    var box = AK.el('div', 'ak-flowlist');
+    var rows = [];
+    G.tiers.forEach(function (t) {
+      t.forEach(function (n) {
+        var outs = G.links.filter(function (l) { return l.s === n; }).sort(function (a, z) { return (z.v || 0) - (a.v || 0); });
+        if (!outs.length) return;
+        var item = AK.el('div', 'ak-fl-node');
+        var head = AK.el('div', 'ak-fl-head');
+        var dot = AK.el('span', 'ak-fl-dot'); dot.style.background = gcol(n.group);
+        head.appendChild(dot);
+        head.appendChild(AK.el('span', 'ak-fl-name', n.label));
+        if (G.valF && n.vout) head.appendChild(AK.el('span', 'ak-fl-total', AK.fmt(n.vout, vfmt)));
+        item.appendChild(head);
+        outs.forEach(function (l) {
+          var r = AK.el('div', 'ak-fl-row');
+          r.appendChild(AK.el('span', 'ak-fl-to', '\u2192 ' + l.t.label));
+          if (G.valF && l.v != null) {
+            var bar = AK.el('span', 'ak-fl-bar'), fill = AK.el('i');
+            fill.style.width = Math.max(2, 100 * l.v / maxV) + '%';
+            fill.style.background = gcol(n.group);
+            bar.appendChild(fill); r.appendChild(bar);
+            r.appendChild(AK.el('span', 'ak-fl-val', AK.fmt(l.v, vfmt)));
+          }
+          item.appendChild(r);
+          rows.push({el: r, l: l});
+        });
+        item.__node = n;
+        box.appendChild(item);
+      });
+    });
+    view._akFocus = function (id) {
+      view.__sel = view.__sel === id ? null : id;
+      if (view._akChips) view._akChips(view.__sel);
+      rows.forEach(function (x) {
+        x.el.classList.toggle('ak-dim', view.__sel != null && x.l.s.id !== view.__sel && x.l.t.id !== view.__sel);
+      });
+    };
+    return box;
+  }
+
   function draw(b, view, G, width) {
+    if (width < 600 && !fitsSideBySide(G, width)) return flowList(b, view, G);
     var svgNS = 'http://www.w3.org/2000/svg';
     var sankey = b.style === 'sankey';
     var vertical = width < 600;
@@ -130,9 +187,10 @@
         var colH = G.tiers.map(function (t) { return t.reduce(function (a, n) { return a + n.h; }, 0) + (t.length - 1) * gapCross; });
         H = Math.max(b.height || 0, Math.max.apply(null, colH) + M.t + M.b + 10, 240);
         var maxW = Math.max.apply(null, G.nodes.map(function (n) { return n.w; }));
+        // Boxes spread over the height, one slot each, so links have room between them.
         G.tiers.forEach(function (t, ti) {
-          var y = M.t + (H - M.t - M.b - colH[ti]) / 2;
-          t.forEach(function (n) { n.x = M.l + ti * colGap + (maxW - n.w) / 2; n.y = y; y += n.h + gapCross; });
+          var slot = (H - M.t - M.b) / t.length;
+          t.forEach(function (n, k) { n.x = M.l + ti * colGap + (maxW - n.w) / 2; n.y = M.t + slot * (k + 0.5) - n.h / 2; });
         });
       }
     } else {
@@ -151,7 +209,13 @@
       G.tiers.forEach(function (t, ti) {
         var total = t.reduce(function (a, n) { return a + n.w; }, 0) + (t.length - 1) * (sankey ? 10 : 8);
         var x = (W - total) / 2;
-        t.forEach(function (n) { n.x = x; n.y = M.t + (sankey ? 30 : 0) + ti * (rowH + gapMain); x += n.w + (sankey ? 10 : 8); });
+        // Boxes spread over the width, one slot each, so links have room between them.
+        var slot = (W - M.l - M.r) / Math.max(1, t.length);
+        t.forEach(function (n, k) {
+          n.x = sankey ? x : M.l + slot * (k + 0.5) - n.w / 2;
+          n.y = M.t + (sankey ? 30 : 0) + ti * (rowH + gapMain);
+          x += n.w + (sankey ? 10 : 8);
+        });
       });
     }
     var svg = document.createElementNS(svgNS, 'svg');
@@ -189,7 +253,20 @@
       }
     });
     var els = [];
-    var labelBoxes = [];
+    // Link labels keep clear of node boxes and of each other.
+    var labelBoxes = G.nodes.map(function (n) {
+      if (!sankey) return {x: n.x - 4, y: n.y - 4, w: n.w + 8, h: n.h + 8};
+      var text = n.label + (b.show_totals !== false && n.flow ? '  ' + AK.fmt(n.flow, vfmt) : '');
+      var tw = text.length * 6.9 + 8;
+      if (vertical) return {x: n.x, y: n.y - 12 * Math.ceil(n.label.length * 6 / Math.max(n.w, 54)) - 10, w: Math.max(n.w, 54), h: 12 * 2 + 10};
+      return {x: n.tier === 0 ? n.x - 8 - tw : n.x, y: n.y + n.h / 2 - 11, w: tw + 22, h: 22};
+    });
+    var overlap = function (a) {
+      return labelBoxes.reduce(function (sum, o) {
+        var w = Math.min(a.x + a.w, o.x + o.w) - Math.max(a.x, o.x), h = Math.min(a.y + a.h, o.y + o.h) - Math.max(a.y, o.y);
+        return sum + (w > 0 && h > 0 ? w * h : 0);
+      }, 0);
+    };
     G.links.forEach(function (l) {
       var x0, y0, x1, y1;
       if (!vertical) {
@@ -227,13 +304,20 @@
         var len = p.getTotalLength ? p.getTotalLength() : 0;
         var mid = len ? p.getPointAtLength(len * 0.5) : {x: (x0 + x1) / 2, y: (y0 + y1) / 2};
         var tw = lab.length * 6.4 + 10, th = 17;
-        var bx = {x: mid.x - tw / 2, y: mid.y - th / 2, w: tw, h: th};
-        for (var tries = 0; tries < 8; tries++) {
-          var hit = labelBoxes.filter(function (o) { return bx.x < o.x + o.w && bx.x + bx.w > o.x && bx.y < o.y + o.h && bx.y + bx.h > o.y; })[0];
-          if (!hit) break;
-          var pt = len ? p.getPointAtLength(len * (0.5 + (tries % 2 ? -1 : 1) * 0.1 * Math.ceil((tries + 1) / 2))) : mid;
-          bx.x = pt.x - tw / 2; bx.y = pt.y - th / 2;
-        }
+        // Along the curve from its middle outwards; the first spot with no overlap, else the least.
+        var bx = {x: mid.x - tw / 2, y: mid.y - th / 2, w: tw, h: th}, best = null;
+        [0.5, 0.42, 0.58, 0.34, 0.66, 0.27, 0.73, 0.2, 0.8].some(function (f) {
+          var pt = len ? p.getPointAtLength(len * f) : mid;
+          var cand = {x: Math.max(0, Math.min(W - tw, pt.x - tw / 2)), y: Math.max(0, Math.min(H - th, pt.y - th / 2)), w: tw, h: th};
+          cand.o = overlap(cand);
+          if (!best || cand.o < best.o) best = cand;
+          return cand.o === 0;
+        });
+        bx = best || bx;
+        // A label that cannot be placed clear of others is left to the link's tooltip.
+        if (bx.o > 0.35 * tw * th) lab = null;
+      }
+      if (lab) {
         labelBoxes.push(bx);
         var gtag = AK.svg('g', {'class': 'ak-link-label'});
         gtag.appendChild(AK.svg('rect', {x: bx.x, y: bx.y, width: bx.w, height: bx.h, rx: 8, fill: AK.css('--ak-surface'), stroke: lscale ? col : AK.css('--ak-border'), 'stroke-width': 1}));
@@ -259,10 +343,29 @@
         if (!vertical) { var first = n.tier === 0; tx = first ? n.x - 8 : n.x + 22; ty = n.y + n.h / 2 + 4; anchor = first ? 'end' : 'start'; }
         else { tx = n.x + n.w / 2; ty = n.y - 8; anchor = 'middle'; }
         if (!vertical) {
-          var t = AK.svg('text', {x: tx, y: ty, 'text-anchor': anchor, 'font-size': 12, 'font-weight': 650, fill: AK.css('--ak-text')});
-          t.textContent = n.label;
-          if (b.show_totals !== false && n.flow) { var ts = AK.svg('tspan', {fill: AK.css('--ak-text-3'), 'font-weight': 500}); ts.textContent = '  ' + AK.fmt(n.flow, vfmt); t.appendChild(ts); }
-          g.appendChild(t);
+          // A halo in the card's colour keeps the label readable over the bands it crosses. A label
+          // wider than the room before the next column wraps onto two lines.
+          var total = b.show_totals !== false && n.flow ? AK.fmt(n.flow, vfmt) : '';
+          var room = n.tier === 0 ? M.l - 12 : (n.tier === nT - 1 ? W - n.x - 26 : colGap - 34);
+          var one = (n.label + (total ? '  ' + total : '')).length * 6.9 <= room;
+          var lines = one ? [n.label] : wrap(n.label, Math.max(8, Math.floor(room / 6.9))).slice(0, 2);
+          lines.forEach(function (ln, k) {
+            var t = AK.svg('text', {x: tx, y: ty + (k - (lines.length - 1) / 2) * 14, 'text-anchor': anchor, 'font-size': 12, 'font-weight': 650,
+              fill: AK.css('--ak-text'), stroke: AK.css('--ak-surface'), 'stroke-width': 4, 'stroke-linejoin': 'round', 'paint-order': 'stroke'});
+            t.textContent = ln;
+            if (total && k === lines.length - 1) {
+              var ts = AK.svg('tspan', {fill: AK.css('--ak-text-3'), 'font-weight': 500});
+              ts.textContent = (one || (ln.length + total.length + 2) * 6.9 <= room) ? '  ' + total : '';
+              t.appendChild(ts);
+            }
+            g.appendChild(t);
+          });
+          if (!one && total && (lines[lines.length - 1].length + total.length + 2) * 6.9 > room) {
+            var t2 = AK.svg('text', {x: tx, y: ty + (lines.length + 1) / 2 * 14, 'text-anchor': anchor, 'font-size': 11.5, fill: AK.css('--ak-text-3'),
+              stroke: AK.css('--ak-surface'), 'stroke-width': 4, 'stroke-linejoin': 'round', 'paint-order': 'stroke'});
+            t2.textContent = total;
+            g.appendChild(t2);
+          }
         } else {
           // Phones: the label wraps above its node, within the node's width.
           var lines = wrap(n.label, Math.max(6, Math.floor(Math.max(n.w, 54) / 6)));
@@ -349,8 +452,8 @@
     var view = AK.el('div', 'ak-view ak-svgview ' + (b.style === 'sankey' ? 'ak-sankey' : 'ak-network'));
     c.body.appendChild(view);
     var G = build(b);
-    // Buttons that highlight one node's links: the same as clicking a node, for touch and keyboard.
-    var withChips = b.controls === true || (b.controls !== false && b.style !== 'sankey' && G.nodes.length <= 14);
+    // Buttons that highlight one node's links (the same as clicking a node), when the page asks for them.
+    var withChips = b.controls === true;
     if (withChips) {
       var bar = AK.el('div', 'ak-chips');
       bar.setAttribute('role', 'group');

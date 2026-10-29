@@ -13,12 +13,12 @@
   AK.lang = LANG;
 
   var STRINGS = {
-    en: {search: 'Search', all: 'All', rows: '{n} rows', rowsOf: '{n} of {m} rows', none: 'No matching rows', details: 'Details', close: 'Close', source: 'Source', notes: 'Notes', total: 'Total', loading: 'Loading', failed: 'This view could not be drawn', zoomIn: 'Zoom in', zoomOut: 'Zoom out', prev: 'Previous', next: 'Next', slide: 'Slide', data: 'View data', more: 'Show more', select: 'Select an item to see its details', diff: 'Change', highlight: 'Highlight', pts: 'pts'},
-    es: {search: 'Buscar', all: 'Todos', rows: '{n} filas', rowsOf: '{n} de {m} filas', none: 'No hay filas que coincidan', details: 'Detalles', close: 'Cerrar', source: 'Fuente', notes: 'Notas', total: 'Total', loading: 'Cargando', failed: 'No se pudo dibujar esta vista', zoomIn: 'Acercar', zoomOut: 'Alejar', prev: 'Anterior', next: 'Siguiente', slide: 'Diapositiva', data: 'Ver datos', more: 'Mostrar más', select: 'Selecciona un elemento para ver sus detalles', diff: 'Cambio', highlight: 'Resaltar', pts: 'p. p.'},
-    fr: {search: 'Rechercher', all: 'Tous', rows: '{n} lignes', rowsOf: '{n} sur {m} lignes', none: 'Aucune ligne ne correspond', details: 'Détails', close: 'Fermer', source: 'Source', notes: 'Notes', total: 'Total', loading: 'Chargement', failed: "Cette vue n'a pas pu être affichée", zoomIn: 'Zoom avant', zoomOut: 'Zoom arrière', prev: 'Précédent', next: 'Suivant', slide: 'Diapositive', data: 'Voir les données', more: 'Afficher plus', select: 'Sélectionnez un élément pour voir ses détails', diff: 'Écart', highlight: 'Mettre en évidence', pts: 'pts'},
-    de: {search: 'Suchen', all: 'Alle', rows: '{n} Zeilen', rowsOf: '{n} von {m} Zeilen', none: 'Keine passenden Zeilen', details: 'Details', close: 'Schließen', source: 'Quelle', notes: 'Hinweise', total: 'Summe', loading: 'Wird geladen', failed: 'Diese Ansicht konnte nicht gezeichnet werden', zoomIn: 'Vergrößern', zoomOut: 'Verkleinern', prev: 'Zurück', next: 'Weiter', slide: 'Folie', data: 'Daten anzeigen', more: 'Mehr anzeigen', select: 'Wählen Sie ein Element, um Details zu sehen', diff: 'Änderung', highlight: 'Hervorheben', pts: 'Pp.'},
-    pt: {search: 'Pesquisar', all: 'Todos', rows: '{n} linhas', rowsOf: '{n} de {m} linhas', none: 'Nenhuma linha corresponde', details: 'Detalhes', close: 'Fechar', source: 'Fonte', notes: 'Notas', total: 'Total', loading: 'Carregando', failed: 'Não foi possível desenhar esta vista', zoomIn: 'Aproximar', zoomOut: 'Afastar', prev: 'Anterior', next: 'Próximo', slide: 'Slide', data: 'Ver dados', more: 'Mostrar mais', select: 'Selecione um item para ver os detalhes', diff: 'Variação', highlight: 'Destacar', pts: 'p.p.'},
-    it: {search: 'Cerca', all: 'Tutti', rows: '{n} righe', rowsOf: '{n} di {m} righe', none: 'Nessuna riga corrispondente', details: 'Dettagli', close: 'Chiudi', source: 'Fonte', notes: 'Note', total: 'Totale', loading: 'Caricamento', failed: 'Impossibile disegnare questa vista', zoomIn: 'Ingrandisci', zoomOut: 'Riduci', prev: 'Precedente', next: 'Successivo', slide: 'Diapositiva', data: 'Mostra dati', more: 'Mostra altro', select: 'Seleziona un elemento per vederne i dettagli', diff: 'Variazione', highlight: 'Evidenzia', pts: 'p.p.'}
+    en: {search: 'Search', all: 'All', rows: '{n} rows', rowsOf: '{n} of {m} rows', none: 'No matching rows', details: 'Details', close: 'Close', source: 'Source', notes: 'Notes', total: 'Total', loading: 'Loading', failed: 'This view could not be drawn', zoomIn: 'Zoom in', zoomOut: 'Zoom out', resetView: 'Reset view', milestones: 'Milestones ({n})', prev: 'Previous', next: 'Next', slide: 'Slide', data: 'View data', more: 'Show more', select: 'Select an item to see its details', diff: 'Change', highlight: 'Highlight', pts: 'pts'},
+    es: {search: 'Buscar', all: 'Todos', rows: '{n} filas', rowsOf: '{n} de {m} filas', none: 'No hay filas que coincidan', details: 'Detalles', close: 'Cerrar', source: 'Fuente', notes: 'Notas', total: 'Total', loading: 'Cargando', failed: 'No se pudo dibujar esta vista', zoomIn: 'Acercar', zoomOut: 'Alejar', resetView: 'Restablecer vista', milestones: 'Hitos ({n})', prev: 'Anterior', next: 'Siguiente', slide: 'Diapositiva', data: 'Ver datos', more: 'Mostrar más', select: 'Selecciona un elemento para ver sus detalles', diff: 'Cambio', highlight: 'Resaltar', pts: 'p. p.'},
+    fr: {search: 'Rechercher', all: 'Tous', rows: '{n} lignes', rowsOf: '{n} sur {m} lignes', none: 'Aucune ligne ne correspond', details: 'Détails', close: 'Fermer', source: 'Source', notes: 'Notes', total: 'Total', loading: 'Chargement', failed: "Cette vue n'a pas pu être affichée", zoomIn: 'Zoom avant', zoomOut: 'Zoom arrière', resetView: 'Réinitialiser la vue', milestones: 'Jalons ({n})', prev: 'Précédent', next: 'Suivant', slide: 'Diapositive', data: 'Voir les données', more: 'Afficher plus', select: 'Sélectionnez un élément pour voir ses détails', diff: 'Écart', highlight: 'Mettre en évidence', pts: 'pts'},
+    de: {search: 'Suchen', all: 'Alle', rows: '{n} Zeilen', rowsOf: '{n} von {m} Zeilen', none: 'Keine passenden Zeilen', details: 'Details', close: 'Schließen', source: 'Quelle', notes: 'Hinweise', total: 'Summe', loading: 'Wird geladen', failed: 'Diese Ansicht konnte nicht gezeichnet werden', zoomIn: 'Vergrößern', zoomOut: 'Verkleinern', resetView: 'Ansicht zurücksetzen', milestones: 'Meilensteine ({n})', prev: 'Zurück', next: 'Weiter', slide: 'Folie', data: 'Daten anzeigen', more: 'Mehr anzeigen', select: 'Wählen Sie ein Element, um Details zu sehen', diff: 'Änderung', highlight: 'Hervorheben', pts: 'Pp.'},
+    pt: {search: 'Pesquisar', all: 'Todos', rows: '{n} linhas', rowsOf: '{n} de {m} linhas', none: 'Nenhuma linha corresponde', details: 'Detalhes', close: 'Fechar', source: 'Fonte', notes: 'Notas', total: 'Total', loading: 'Carregando', failed: 'Não foi possível desenhar esta vista', zoomIn: 'Aproximar', zoomOut: 'Afastar', resetView: 'Repor a vista', milestones: 'Marcos ({n})', prev: 'Anterior', next: 'Próximo', slide: 'Slide', data: 'Ver dados', more: 'Mostrar mais', select: 'Selecione um item para ver os detalhes', diff: 'Variação', highlight: 'Destacar', pts: 'p.p.'},
+    it: {search: 'Cerca', all: 'Tutti', rows: '{n} righe', rowsOf: '{n} di {m} righe', none: 'Nessuna riga corrispondente', details: 'Dettagli', close: 'Chiudi', source: 'Fonte', notes: 'Note', total: 'Totale', loading: 'Caricamento', failed: 'Impossibile disegnare questa vista', zoomIn: 'Ingrandisci', zoomOut: 'Riduci', resetView: 'Ripristina vista', milestones: 'Traguardi ({n})', prev: 'Precedente', next: 'Successivo', slide: 'Diapositiva', data: 'Mostra dati', more: 'Mostra altro', select: 'Seleziona un elemento per vederne i dettagli', diff: 'Variazione', highlight: 'Evidenzia', pts: 'p.p.'}
   };
   AK.t = function (key, vars) {
     var s = (STRINGS[LANG] || STRINGS.en)[key] || STRINGS.en[key] || key;
@@ -179,18 +179,54 @@
   };
 
   /* ---------- Tones and palette ---------- */
+  /* Status words that get a tone by themselves (a pill column with no explicit tones), in the
+     kit's languages, compared without accents, case, hyphens or underscores. Ambiguous words
+     (active, new, open) stay neutral or informational. */
   var TONE_WORDS = {
-    bad: /^(late|delayed|overdue|critical|high|at risk|risk|blocked|failed|error|overload(ed)?|over capacity|short|shortage|breach|retrasad[oa]s?|tard[ií]o|en retard|retard|cr[ií]tic[oa]|alto|haute?|élevée?)$/i,
-    warn: /^(medium|warning|watch|pending|moderate|delayed risk|minor|amber|media|moyenne?|en attente|pendiente)$/i,
-    good: /^(on time|on-time|ok|delivered|complete(d)?|healthy|low|resolved|green|a tiempo|entregad[oa]|à l'heure|livrée?|bajo|basse?)$/i,
-    info: /^(in transit|planned|scheduled|open|en tr[aá]nsito|en transit|prévue?|planificad[oa])$/i
+    bad: ['late', 'delayed', 'overdue', 'past due', 'critical', 'severe', 'urgent', 'high', 'very high', 'at risk', 'risk',
+      'blocked', 'failed', 'failure', 'fail', 'error', 'down', 'offline', 'outage', 'overloaded', 'overload', 'over capacity',
+      'over budget', 'short', 'shortage', 'out of stock', 'stockout', 'breach', 'breached', 'rejected', 'denied', 'declined',
+      'cancelled', 'canceled', 'lost', 'churned', 'expired', 'defaulted', 'unpaid', 'missed', 'stalled', 'escalated', 'red', 'poor',
+      'retrasado', 'retrasada', 'retrasados', 'retrasadas', 'atrasado', 'atrasada', 'vencido', 'vencida', 'critico', 'critica', 'alto', 'alta',
+      'fallido', 'fallida', 'rechazado', 'rechazada', 'cancelado', 'cancelada', 'perdido', 'perdida', 'bloqueado', 'bloqueada', 'caido',
+      'en retard', 'retard', 'critique', 'eleve', 'elevee', 'haut', 'haute', 'echoue', 'echouee', 'erreur', 'rejete', 'rejetee',
+      'annule', 'annulee', 'perdu', 'perdue', 'bloque', 'bloquee', 'en panne',
+      'verspatet', 'uberfallig', 'kritisch', 'hoch', 'fehlgeschlagen', 'fehler', 'abgelehnt', 'storniert', 'blockiert', 'ausgefallen',
+      'falhou', 'erro', 'rejeitado', 'rejeitada', 'em atraso',
+      'in ritardo', 'ritardo', 'critico', 'fallito', 'errore', 'rifiutato', 'annullato', 'perso', 'bloccato'],
+    warn: ['medium', 'moderate', 'warning', 'watch', 'pending', 'on hold', 'waiting', 'minor', 'amber', 'yellow', 'due soon', 'partial',
+      'degraded', 'needs review', 'under review', 'limited', 'low stock', 'fair',
+      'medio', 'media', 'moderado', 'moderada', 'pendiente', 'en espera', 'advertencia', 'parcial',
+      'moyen', 'moyenne', 'modere', 'moderee', 'en attente', 'avertissement', 'partiel', 'partielle',
+      'mittel', 'ausstehend', 'warnung', 'wartend', 'teilweise',
+      'pendente', 'em espera', 'aviso',
+      'in attesa', 'avviso', 'moderato', 'parziale'],
+    good: ['on time', 'on track', 'ok', 'done', 'delivered', 'complete', 'completed', 'healthy', 'low', 'resolved', 'closed', 'paid',
+      'approved', 'online', 'up', 'available', 'passed', 'pass', 'success', 'successful', 'green', 'good', 'met', 'achieved', 'in stock',
+      'fulfilled',
+      'a tiempo', 'en plazo', 'entregado', 'entregada', 'completado', 'completada', 'resuelto', 'resuelta', 'cerrado', 'cerrada',
+      'pagado', 'pagada', 'aprobado', 'aprobada', 'bajo', 'baja',
+      'a l\'heure', 'livre', 'livree', 'termine', 'terminee', 'resolu', 'resolue', 'ferme', 'fermee', 'paye', 'payee', 'approuve',
+      'approuvee', 'bas', 'basse', 'faible',
+      'punktlich', 'geliefert', 'erledigt', 'abgeschlossen', 'gelost', 'bezahlt', 'genehmigt', 'niedrig',
+      'no prazo', 'entregue', 'concluido', 'concluida', 'resolvido', 'fechado', 'pago', 'aprovado', 'baixo',
+      'puntuale', 'in orario', 'consegnato', 'completato', 'risolto', 'chiuso', 'pagato', 'approvato', 'basso'],
+    info: ['in transit', 'in progress', 'planned', 'scheduled', 'ongoing', 'running', 'started', 'open',
+      'en transito', 'en curso', 'en progreso', 'planificado', 'planificada', 'programado', 'programada', 'abierto', 'abierta',
+      'en cours', 'prevu', 'prevue', 'planifie', 'planifiee', 'ouvert', 'ouverte',
+      'unterwegs', 'in bearbeitung', 'geplant', 'offen', 'laufend',
+      'em transito', 'em andamento', 'planejado', 'agendado', 'aberto',
+      'in transito', 'in corso', 'pianificato', 'programmato', 'aperto']
+  };
+  var toneIndex = {};
+  ['good', 'info', 'warn', 'bad'].forEach(function (t) { TONE_WORDS[t].forEach(function (w) { toneIndex[w] = t; }); });
+  var plain = function (v) {
+    return String(v).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[-_\s]+/g, ' ').trim();
   };
   AK.toneOf = function (value, map) {
     if (value == null) return null;
     if (map && map[value] != null) return map[value];
-    var s = String(value).trim();
-    for (var t in TONE_WORDS) if (TONE_WORDS[t].test(s)) return t;
-    return null;
+    return toneIndex[plain(value)] || null;
   };
   AK.palette = function () {
     var dark = document.documentElement.getAttribute('data-ak-theme') === 'dark';

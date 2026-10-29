@@ -54,13 +54,23 @@
       panel = AK.el('div', 'ak-detail-inline');
       c.body.appendChild(panel);
     }
-    // Every milestone as text too (date, event, details): readable without hovering, by screen
-    // readers and on paper. A click on an entry focuses that milestone above.
-    var listHost = null;
+    // Every milestone as text too (date, event, details), readable without hovering and by screen
+    // readers: a collapsed "Milestones (n)" list, open when the page asks for it (milestone_list=True).
+    // A click on an entry focuses that milestone above.
+    var listHost = null, listBox = null, drawList = null;
     var nMs = mss.reduce(function (a, L) { return a + AK.data(L.data).length; }, 0);
-    if (mss.length && b.list !== false && nMs <= 80) {
+    if (mss.length && b.list !== false && nMs <= 200) {
       listHost = AK.el('div', 'ak-tl-list');
-      c.body.appendChild(listHost);
+      if (b.list === true) c.body.appendChild(listHost);
+      else {
+        listBox = AK.el('details', 'ak-data');
+        listBox.style.marginTop = '8px';
+        var sum = AK.el('summary', 'ak-note', AK.t('milestones', {n: nMs}));
+        sum.style.cursor = 'pointer';
+        listBox.appendChild(sum); listBox.appendChild(listHost);
+        listBox.addEventListener('toggle', function () { if (listBox.open && drawList) drawList(); });
+        c.body.appendChild(listBox);
+      }
     }
     var selected = null;
     AK.watchSize(view, function (w) {
@@ -266,7 +276,7 @@
         mark(AK.selected(b.link));
       }
       // Start with the latest milestone shown in the panel, so the detail view is never empty.
-      if (listHost) {
+      drawList = listHost && function () {
         listHost.innerHTML = '';
         var wrapL = AK.el('div', 'ak-table-wrap');
         var tbl = AK.el('table', 'ak-table');
@@ -285,10 +295,14 @@
           extra.forEach(function (f) { tr.appendChild(AK.el('td', null, AK.fmt(m.r[f], AK.fieldFormat(m.L, f) || 'auto'))); });
           tr.addEventListener('click', function () { focus(m); });
           m.listRow = tr;
+          var key = m.k + '|' + m.r[m.L.date] + '|' + (m.L.label ? m.r[m.L.label] : '');
+          if (key === selected) tr.classList.add('ak-selected');
           tbd.appendChild(tr);
         });
         tbl.appendChild(tbd); wrapL.appendChild(tbl); listHost.appendChild(wrapL);
-      }
+      };
+      // A closed list is built when opened: it adds nothing to the page until asked for.
+      if (drawList && (!listBox || listBox.open)) drawList();
       if (all.length) {
         var keep = all.filter(function (m) { return (m.k + '|' + m.r[m.L.date] + '|' + (m.L.label ? m.r[m.L.label] : '')) === selected; })[0];
         var latest = all.slice().sort(function (a, z) { return t(z.r[z.L.date]) - t(a.r[a.L.date]); })[0];

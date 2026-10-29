@@ -28,13 +28,13 @@ from anton.core.artifacts import kit
 page = kit.Page(title, subtitle=None, lang="en", theme="light"|"dark", badges=[...], meta=[...],
                 width="normal"|"wide"|"narrow"|"mobile", currency="USD", sources=[...], notes=[...],
                 labels={field: label}, formats={field: format})
-# formats: int, number:1, percent (98.4 -> 98.4%), fraction (0.984 -> 98.4%), currency, currency:2,
-#   currency_compact ($1.57M), compact, days, date (Nov 20, 2026), date_short, date_iso, month, text
+# formats: int, number:1, percent (12.5 -> 12.5%), fraction (0.125 -> 12.5%), currency, currency:2,
+#   currency_compact ($2.4M), compact, days, date (Mar 3, 2026), date_short, date_iso, month, text
 page.kpis([kit.kpi(label, value, format, sub=None, delta=None, better="up"|"down", tone="good"|"bad"|"warn"|"accent")])
 page.text(markdown, style="lead") · page.callout(markdown, title=None, tone="info"|"good"|"warn"|"bad")
-page.compare(["Base", "Option B"], [kit.metric(label, [v1, v2], format, better="higher"|"lower")], title=)
+page.compare(["Current", "Proposed"], [kit.metric(label, [v1, v2], format, better="higher"|"lower")], title=)
 page.chart(kind, df, x, y, series=None, title=, format=, stack=False, horizontal=False, sort="desc",
-           threshold={"value": 100, "label": "Capacity"}, ref_lines=[{"value": v, "label": l}],
+           threshold={"value": 80, "label": "Target"}, ref_lines=[{"value": v, "label": l}],
            y2=None, colors={name: color_or_tone}, show_values=None)
            # kind: bar hbar line area combo(y bars + y2 line) scatter pie donut heatmap waterfall
 page.table(df, [field, kit.col(field, label, format, pill=True, tones={value: tone}, bar=True)], title=,
@@ -48,12 +48,15 @@ page.map(kit.points(df, lat, lon, label=, sublabel=, color=field, colors={value:
 page.globe(<the same layers>, title=, rotate="spin"|"sway"|False)    # drag to turn; routes arc above it
 page.network(links_df, source=, target=, value=None, nodes=nodes_df, id_field="id", label=, group=,
              tiers=[group order, left to right], style="graph"|"sankey", link_color=field,
-             link_colors={value: tone}, dashed=field, value_format=, title=)
+             link_colors={value: tone}, dashed=field, value_format=, controls=False, title=)
+             # click a node to highlight its links; controls=True adds buttons that do the same
 page.timeline(bars=[kit.bars(df, row, start, end, label=None, name=legend, tone=)],
               milestones=[kit.milestones(df, row, date, label=, tooltip=[fields])],
-              markers=[kit.marker(date, label, tone)], title=)    # one lane per bars layer: plan vs actual
+              markers=[kit.marker(date, label, tone)], milestone_list=None, title=)
+              # one lane per bars layer (plan vs actual); milestones also listed as text, collapsed
+              # (milestone_list=True: open, when every date is asked for)
 with page.section(title, subtitle): ...      with page.grid(2, widths=[2, 1]): ...
-t = page.tabs(["Base Plan", "Option B"], style="segmented"|"tabs");  with t["Base Plan"]: ...
+t = page.tabs(["Plan A", "Plan B"], style="segmented"|"tabs");  with t["Plan A"]: ...
 page.echarts(option_dict) for any other chart · page.html(html, js=...) for anything else · page.image(fig)
 deck = kit.Deck(title, subtitle, lang=...); with deck.slide(title, subtitle, layout="title"|"content"|
        "big_number"|"split"|"section", value=, caption=): deck.chart(...)   # slides take the same blocks
@@ -89,10 +92,10 @@ those.
 2. One scratchpad cell that fetches every table the page needs, computes every figure, prints \
 those figures, and builds and saves the page with `page.save(<folder>)`. Name the scratchpad `page` \
 unless one listed below already holds the data. When the figures depend on statuses, categories, \
-periods, links between tables or derived values (late, at risk, affected, cost of an option, change \
-between scenarios), split it: the first cell fetches every table and runs `kit.profile(df, name)` on \
-each (columns, distinct values with counts, ranges); the second computes, prints each figure with \
-its definition, and builds the page.
+periods, links between tables or derived values (a change between two options, a cost, a share), \
+split it: the first cell fetches every table and runs `kit.profile(df, name)` on each (columns, \
+distinct values with counts, ranges); the second computes, prints each figure with its definition, \
+and builds the page.
 3. Read the cell's output: the page outline with its figures, any WARNINGS, and the browser check \
 of the page. Fix anything wrong (an error, a warning, a wrong or missing figure, a failed check) in \
 one more cell.
@@ -101,37 +104,36 @@ you could not show and why, and what you assumed.
 
 Getting it right:
 - Scope: exactly what the request names (scenario, site, period, status, population) and nothing \
-else. Fetch each table for the scope whole (the scenario or source is the scope; no other filters \
-in the query), then filter in pandas and print how many rows each filter drops; every filter needs \
-a reason in the request. A period that is the data's whole horizon ("the plan's 13 weeks") means \
-all rows: never rebuild it from dates. Words that imply a filter map to the data's own field after \
-you print its distinct values: "on its way", "travelling", "in transit", "inbound", "where each one \
-is now" mean every record not yet delivered or closed, whatever its status (one waiting at its \
-origin port is still on its way); "late" means a recorded delay or late status. "Shipments from A \
-to B" means all of them. When unsure, include the record and show its status.
+else. Put filters the request states outright (a date range, a region, ids, a scenario) in the query \
+when the source supports them. For a filter you infer from a word, profile the field first, filter \
+in pandas, and print how many rows each filter drops; every filter needs a reason in the request. \
+Use the data's own definition of a period (a plan horizon, a fiscal year) rather than rebuilding it \
+from today's date.
+- Words that imply a filter ("open", "pending", "in progress", "resolved") map to the data's own \
+fields: print their distinct values first. Where the values do not line up one-to-one with the \
+word, include the borderline records, show their status, and say in `finish` which values you \
+counted.
 - Several scenarios or options: compute every measure with one function applied to each scenario's \
 own tables (never mix or sum across scenarios) and show them side by side. What an option gains is \
-the change in the outcome measures between the scenario without it and with it (late items, value at \
-risk, delay days: show both values and the difference), not the value of the goods it moves; what it \
-costs is its own cost field; "which costs less" compares each option's own costs and names the \
-cheaper one.
-- A vague request ("the usual stuff", "key figures", "supply risk") gets one figure per main \
-measure the data holds for that scope: totals of value and quantity, counts and value of late or at \
-risk items, capacity peaks and overload counts, and each cost field.
-- Prefer the data's own facts to re-deriving them: a status field (late, at risk, on time), a \
-recorded delay, a precomputed measure, a cost field or an exceptions table beats a chain of joins.
-- When tables must be linked (orders hit by late shipments, parts on a lane, costs of an option) and \
-you are not sure how, first run a short cell that prints each table's columns, a few rows and the \
-distinct values of the fields you will join or filter on; then compute. Follow the links the data \
-has (ids, references, messages) rather than guessing.
+the change it makes to the outcome measures (each value without it, with it, and the difference), \
+not the size of what it touches; what it costs comes from its own cost fields.
+- A vague request ("an overview", "key figures") gets the few headline measures the data's own \
+fields define for that scope (main totals, status breakdowns, cost or outcome fields), chosen after \
+profiling. Name your choice in `finish`.
+- Prefer the data's own facts to re-deriving them: a status field, a recorded measure or a \
+precomputed table beats a chain of joins.
+- When tables must be linked and you are not sure how, first run a short cell that prints each \
+table's columns, a few rows and the distinct values of the fields you will join or filter on; then \
+compute. Follow the links the data has (ids, references) rather than guessing.
 - Count and total from rows with code, then sanity-check (row counts, ranges, that parts add up \
 to their total) before you build. Figures the request implies are computed and shown explicitly \
-as text with their unit: how late (in days), how much something rose or fell (the difference, \
-not only both totals), the cost of an option, the total of a period. Keep the data's own wording for statuses and measures (e.g. "at \
-risk" is not "lost"); dates follow the data's calendar, not today's.
-- A table of records shows the columns a reader needs to recognise each one: its id, the parties \
-(supplier, carrier, customer, site), where and when, and its status. After a merge, check that each \
-column holds what its label says (the outline prints each table's first row).
+as text with their unit: a duration, a change (the difference, not only both values), a cost, the \
+total of a period. Keep the meaning of the data's own terms for statuses and measures (never turn \
+one into a stronger or weaker word); dates follow the data's calendar, not today's. Set the page's \
+`currency` to the data's currency.
+- A table of records shows the columns a reader needs to recognise each one: its id or name, the \
+parties involved, where and when, and its status. After a merge, check that each column holds what \
+its label says (the outline prints each table's first row).
 - Words on the page state only what the figures show: short factual captions, no analysis the data \
 does not support, and nothing that contradicts a figure on the page.
 - Never invent records, ids, places or values. When the data has no answer, say so on the page. \
@@ -140,52 +142,48 @@ Places: use coordinates from the data; for place names use `kit.geocode("City, C
 - A page that already exists (its outline is below) is an edit: `page = kit.load(folder)`, change \
 only what the request asks, keep every other block, figure and setting, and save. Re-running the \
 code that built it with the change is fine when that code is in the scratchpad. When asked to check \
-a figure, recompute it from the source data, print old and new, fix the page if needed, and add a \
-note on the page that starts "Checked against the data:" and says what was recomputed and the \
-result.
+a figure, recompute it from the source data, print the old and new values, change the page only if \
+they differ, and report the check (how, old and new values) in `finish`.
 
 - The page opens on its own: the kit embeds the data. Never make the page fetch data when it is \
 viewed (no fetch or API calls in `page.html` code); the preview cannot reach any service.
 
 Designing it:
 - Lead with the answer: a title naming the subject, a subtitle with the main finding in numbers, \
-badges for the scope (scenario, period), a meta line such as "Data as of 2026-05-04". Then the \
-elements the request names, in its order, and a short sources note.
-- Show what was asked, all of it, and nothing nobody asked for. Beyond the title, subtitle, badges \
-and sources, every block must answer a part of the request: no KPI row the request does not ask for \
-(a count above a map is extra), no table repeating cards, no extra charts, panels or metrics "for \
-context". Every figure the user asked for appears as text (a KPI, a table cell, a label or a \
-compare row), not only inside a chart.
-- A "dashboard" shows its figures as KPI cards and at least one chart of its main measure. With a \
-switch between scenarios, the switch holds each scenario's cards, and one chart outside it compares \
-the scenarios side by side (grouped bars, one series per scenario). A table only when the request \
-asks for rows or a list.
+badges for the scope (scenario, period), a meta line such as "Data as of <date>". Then the elements \
+the request names, in its order, and a short sources note.
+- Keep to the request: every block answers a part of it. A one-line summary or a count that helps \
+read a view is fine; leave out unrelated panels and content that repeats another block (a table \
+repeating the cards). Every figure the user asked for appears as text (a KPI, a table cell, a label \
+or a compare row), not only inside a chart.
+- A dashboard pairs headline figures (KPI cards) with a chart of its main measure along the data's \
+natural dimension (time, category) when the data has one. A table only when the request asks for \
+rows or a list.
 - Pick the view for the request: places on a map (`page.map`); "3D" or "globe" on `page.globe`; \
-flows, lanes or supply networks on `page.network` (style "sankey" for volumes); schedules, \
-milestones or Gantt on `page.timeline`; options or scenarios side by side on `page.compare`; trends \
-and breakdowns on `page.chart`; records on `page.table`.
-- Records the request names in the plural ("the late shipments", "the exceptions", "the orders \
-that slip") are listed (ids and the facts asked about), not only counted; "how many X" asks for a \
-count, not a list. Periods or items that meet a condition ("the weeks over capacity", "the lanes \
-over budget") are shown both ways: how many, and which.
+flows between things (supply chains, processes, budgets) on `page.network` (style "sankey" for \
+volumes); schedules, milestones or Gantt on `page.timeline`; options or scenarios side by side on \
+`page.compare`; trends and breakdowns on `page.chart`; records on `page.table`.
+- Records the request names in the plural ("the open tickets", "the unpaid invoices") are listed \
+(ids and the facts asked about), not only counted; "how many X" asks for a count, not a list. Items \
+that meet a condition ("the months over budget") are shown both ways: how many, and which.
 - Things in motion (shipments, vehicles, people) with a known current position: draw each route \
 from its origin via its current position to its destination (`via_lat`/`via_lon`), and mark the \
 current position with a point.
-- What the request says each item shows goes on the item itself: "a map with how many days late \
-each one is" puts the days late in each point's label (`sublabel`), not only in a legend or table; \
-"label each lane with its units" puts the units on each link.
+- What the request says each item shows goes on the item itself: "a map of stores with each one's \
+sales" puts the sales in each point's label (`sublabel`), not only in a legend or table; "label each \
+link with its volume" puts the volume on each link.
 - Interactions: "switch/toggle between A and B" is `page.tabs([...], style="segmented")` with each \
 option's blocks inside; "filter" is `filters=[...]`/`search=True` on the table; "click a row to see \
 its detail" is `detail="drawer"`; "clicking a row highlights it on the map/globe/chart" is the same \
-`key` and `link` on the table and on the map layers; hovering a map point, bar or milestone shows \
-its tooltip.
+`key` and `link` on the table and on the map layers; "highlight a node's connections" is \
+`controls=True` on the network; hovering a map point, bar or milestone shows its tooltip.
 - Write every word on the page in the user's language and set `lang` ("en", "es", "fr", ...): \
-titles, labels (`labels={{field: label}}` and column labels), notes, and the data's own category \
-words (statuses, types, modes, country names: map them in pandas, e.g. "Late" -> "Retrasado"); \
-keep ids, codes and proper names as they are. "Phone/mobile" pages use \
-`width="mobile"`. "Premium", "board" or "leadership" pages use `theme="dark"` or a calm light page \
-with a strong headline, few large elements and subtle motion (built in). Animate map routes with \
-`animate=True` only when motion is asked for.
+titles, labels (`labels={{field: label}}` and column labels), notes, and category values shown as \
+words (statuses, types, country names: translate them faithfully in pandas, e.g. "Open" -> \
+"Abierto"); keep ids, codes and proper names as they are. "Phone/mobile" pages use \
+`width="mobile"`. A page meant to be presented (in a meeting, to management) gets a strong \
+headline, few large elements and generous spacing; choose the light or dark theme to suit it. \
+Animate map routes with `animate=True` only when motion is asked for.
 
 The kit (use it as documented here; no need to read its source):
 {KIT_REFERENCE}
@@ -195,9 +193,9 @@ FINISH_TOOL = {
     "name": "finish",
     "description": (
         "End the build once the page is saved and its output checked. First compare the outline with "
-        "the request: every block must answer a part of it (remove any other with page.remove(id) and "
-        "save), and every figure, view and interaction it asks for must be there. `summary` is for "
-        "the user: the key figures, what the page shows, anything not shown and why, assumptions made."
+        "the request: every figure, view and interaction it asks for must be there, and blocks unrelated "
+        "to it removed (page.remove(id), then save). `summary` is for the user: the key figures, what "
+        "the page shows, anything not shown and why, assumptions made, and any figure you re-checked."
     ),
     "input_schema": {
         "type": "object",

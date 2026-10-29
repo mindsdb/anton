@@ -383,7 +383,7 @@
       if (sx || sy) { l.dx += sx; l.dy += sy; this.setAttribute('x', l.x + l.dx); this.setAttribute('y', l.y + l.dy); }
     });
 
-    // Zoom and pan (buttons, drag, pinch, ctrl+wheel); marks keep their screen size.
+    // Zoom and pan; marks keep their screen size.
     var zoom = d3.zoom().scaleExtent([1, 14]).translateExtent([[-width * 0.25, -height * 0.25], [width * 1.25, height * 1.25]])
       .filter(function (e) { return (e.type === 'wheel' ? e.ctrlKey || e.metaKey : (e.touches ? e.touches.length > 1 : true)) && !e.button; })
       .on('zoom', function (e) {
@@ -400,21 +400,43 @@
           .attr('x', function () { var l = this.__l; return l.x + l.dx / k; })
           .attr('y', function () { var l = this.__l; return l.y + l.dy / k; });
       });
-    // Zoom: double-click (shift to zoom out), pinch, or ctrl/cmd + wheel; drag pans. Buttons would
-    // leave the map zoomed in for whoever clicks through the page's controls.
+    // Zoom: buttons, keyboard (+, -, 0, arrows), double-click (shift to zoom out), pinch, or
+    // ctrl/cmd + wheel; drag pans. Reset returns to the whole map.
     svg.call(zoom).on('dblclick.zoom', null);
     svg.on('dblclick', function (e) {
       var p = d3.pointer(e, svg.node());
       svg.transition().duration(250).call(zoom.scaleBy, e.shiftKey ? 1 / 1.8 : 1.8, p);
     });
     svg.style('touch-action', 'pan-y');
+    var zoomBy = function (f) { svg.transition().duration(250).call(zoom.scaleBy, f); };
+    var reset = function () { svg.transition().duration(300).call(zoom.transform, d3.zoomIdentity); };
+    var tools = AK.el('div', 'ak-geo-tools');
+    [['+', function () { zoomBy(1.6); }, AK.t('zoomIn')], ['\u2212', function () { zoomBy(1 / 1.6); }, AK.t('zoomOut')],
+     ['\u21ba', reset, AK.t('resetView')]].forEach(function (z) {
+      var btn = AK.el('button', null, z[0]);
+      btn.type = 'button'; btn.setAttribute('aria-label', z[2]); btn.title = z[2];
+      btn.addEventListener('click', z[1]);
+      tools.appendChild(btn);
+    });
+    box.appendChild(tools);
+    svg.attr('tabindex', 0).on('keydown', function (e) {
+      var k = e.key, step = 40;
+      if (k === '+' || k === '=') zoomBy(1.6);
+      else if (k === '-' || k === '_') zoomBy(1 / 1.6);
+      else if (k === '0') reset();
+      else if (k.indexOf('Arrow') === 0) {
+        svg.transition().duration(150).call(zoom.translateBy, k === 'ArrowLeft' ? step / transform.k : k === 'ArrowRight' ? -step / transform.k : 0,
+          k === 'ArrowUp' ? step / transform.k : k === 'ArrowDown' ? -step / transform.k : 0);
+      } else return;
+      e.preventDefault();
+    });
     // Flow dots ride on a canvas above the map: it repaints alone, so motion stays cheap.
     if (flows.length) {
       var dpr = Math.min(2, window.devicePixelRatio || 1);
       var fx = document.createElement('canvas');
       fx.width = Math.round(width * dpr); fx.height = Math.round(height * dpr);
       fx.style.cssText = 'position:absolute;left:0;top:0;width:' + width + 'px;height:' + height + 'px;pointer-events:none';
-      box.appendChild(fx);
+      box.insertBefore(fx, tools);
       flows.forEach(function (f) { f.len = f.path.getTotalLength(); });
       animateFlows(box, fx, dpr, flows, st, function () { return transform; }, view);
     }

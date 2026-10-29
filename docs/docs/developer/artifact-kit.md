@@ -48,14 +48,14 @@ parts into tested code:
 | `compare(columns, [kit.metric(...)])` | metrics side by side across options/scenarios, with the change |
 | `chart(kind, df, x, y, ...)` | bar, hbar, line, area, combo, scatter, pie, donut, heatmap, waterfall; thresholds, reference lines |
 | `table(df, columns, ...)` | sort, search, select filters, status pills, inline bars, totals, row detail, linked selection; one card per row on narrow screens |
-| `map(*layers)` / `globe(*layers)` | `kit.points`, `kit.routes` (great circles, optional via point), `kit.regions` (choropleth); maps re-center on the data's longitude so routes never break at the date line; globes are canvas-drawn, turn slowly and can be dragged |
-| `network(links, nodes=..., style=)` | layered node-link diagram or sankey; tiers from a group order or longest path; vertical layout on phones; highlight chips |
-| `timeline(bars=[...], milestones=[...], markers=[...])` | Gantt lanes per layer (plan vs actual), milestones with a detail panel and stepper, dashed markers |
+| `map(*layers)` / `globe(*layers)` | `kit.points`, `kit.routes` (great circles, optional via point), `kit.regions` (choropleth); maps re-center on the data's longitude so routes never break at the date line, and zoom with buttons, keys, double-click or pinch; globes are canvas-drawn, turn slowly and can be dragged |
+| `network(links, nodes=..., style=)` | layered node-link diagram or sankey; tiers from a group order or longest path; vertical layout on phones; click or Enter on a node highlights its links (`controls=True` adds buttons for it) |
+| `timeline(bars=[...], milestones=[...], markers=[...])` | Gantt lanes per layer (plan vs actual), milestones with a detail panel and stepper, dashed markers, a collapsed list of milestones (`milestone_list=True` opens it) |
 | `text`, `callout`, `list`, `image`, `section`, `grid`, `tabs` | layout and narrative; `tabs(style="segmented")` is a scenario switch |
 | `Deck` + `slide(...)` | 16:9 slides with title, content, big-number, split and section layouts |
 
-Formats (`format=`): `int`, `number:1`, `percent` (98.4 → 98.4%), `fraction` (0.984 → 98.4%),
-`currency`, `currency_compact` ($1.57M), `compact`, `days`, `date`, `date_short`, `date_iso`,
+Formats (`format=`): `int`, `number:1`, `percent` (12.5 → 12.5%), `fraction` (0.125 → 12.5%),
+`currency`, `currency_compact` ($2.4M), `compact`, `days`, `date`, `date_short`, `date_iso`,
 `month`, `text`.
 
 Linked views: give a table and map/globe/chart layers the same `key` and `link`; selecting a row
@@ -74,16 +74,17 @@ before it finishes.
 
 ## The page file
 
-`render.render_html(spec)` writes, in order: the spec as JSON (data first, so it is the first thing a
-reader of the source sees), the stylesheet, a static rendition of the page (headings, text, KPI
-values, tables) for readers without JavaScript, then only the runtime modules the page's blocks use
+`render.render_html(spec)` writes, in order: the stylesheet (in the head, so nothing flashes
+unstyled), the spec as JSON with its data, a static rendition of the page (headings, text, KPI
+values, tables) for readers without JavaScript (the runtime replaces it when it boots), then only
+the runtime modules the page's blocks use
 (`core.js` and `blocks.js` always; `table.js`, `chart.js`, `geo.js`, `flow.js`, `timeline.js`,
 `deck.js` on demand). Custom block scripts are emitted as their own `<script>` tags because the
 preview's policy forbids `eval`.
 
-Places are stored as `{"lat": …, "lon": …}` objects (a route's `from`/`via`/`to` each its own), so
-every coordinate in the source reads unambiguously as the place it is; coordinate columns a block does
-not draw are not embedded.
+Places are stored in one shape whatever the source columns are called (`{"lat": …, "lon": …}`, a
+route's `from`/`via`/`to` each its own), so the runtime reads every layer the same way; coordinate
+columns a block does not draw are not embedded, which keeps pages small.
 
 ## Runtime rules worth knowing
 
@@ -112,5 +113,5 @@ not draw are not embedded.
 - `tests/test_artifact_kit.py` covers the builder API, page assembly and editing.
 - `tests/test_pages_prompt.py` keeps the documented API in `KIT_REFERENCE` in step with the code.
 - To see a page the way the Cowork preview shows it, render it in a sandboxed `srcdoc` iframe under
-  the preview CSP at 1440×900 and 390×844 and look for console errors, blank views and horizontal
-  overflow.
+  the preview CSP across widths (320, 390, 768, 1024, 1440 and 1920 px) and look for console errors,
+  blank views, clipped labels and horizontal overflow.
