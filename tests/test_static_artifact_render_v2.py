@@ -162,3 +162,13 @@ def test_custom_views_default_to_one_component_and_can_require_all_records():
     rows={'observations':[{'id':'a'},{'id':'b'}]}
     assert checks(rows,[View(selector='.chart',binding='observations')])[0]['minimum']==1
     assert checks(rows,[View(selector='.record',binding='observations',minimum='rows')])[0]['minimum']==2
+
+
+def test_composite_views_check_observations_without_inventing_lookup_marks():
+    from anton.core.artifacts.static.views import View, checks
+    rows={'items':[{'id':'a'},{'id':'b'}],'categories':[{'id':n} for n in range(10)]}
+    assert checks(rows,[View(selector='.item',binding='items',minimum='rows',inputs=['categories'])])==[{'selector':'.item','minimum':2}]
+    with pytest.raises(DataError,match='Unknown view inputs'):
+        checks(rows,[View(selector='.item',binding='items',inputs=['categories','missing'])])
+    with pytest.raises(DataError,match='Custom bindings need a render check'):
+        checks({**rows,'unused':[]},[View(selector='.item',binding='items',inputs=['categories'])])

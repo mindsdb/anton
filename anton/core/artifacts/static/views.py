@@ -10,16 +10,20 @@ class View(Model):
     selector: str = Field(min_length=1, max_length=240)
     binding: Name
     minimum: Literal['rows', 'one'] = 'one'
+    inputs: list[Name] = Field(default_factory=list, max_length=100,
+        description='Additional bindings used as lookups or other inputs to this view, not independently displayed records. The minimum applies to the primary binding only.')
 
 
 def checks(bindings, views, *, covered=()):
-    missing = bindings.keys() - {v.binding for v in views} - set(covered)
+    missing = bindings.keys() - {name for view in views for name in [view.binding, *view.inputs]} - set(covered)
     if missing:
         raise DataError(f'Custom bindings need a render check: {sorted(missing)}')
     result = []
     for view in views:
         if view.binding not in bindings:
             raise DataError(f'Unknown view binding: {view.binding}')
+        if unknown := set(view.inputs) - bindings.keys():
+            raise DataError(f'Unknown view inputs: {sorted(unknown)}')
         result.append({'selector': view.selector, 'minimum': len(bindings[view.binding]) if view.minimum == 'rows' else 1})
     return result
 
