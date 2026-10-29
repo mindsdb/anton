@@ -120,7 +120,7 @@ keep a constant physical size. JavaScript enhances the contents, presentation an
 print controls and closes the initially open data inspectors; it does not redraw
 the chart or recompute its values. Controls needing JavaScript stay hidden until
 their handlers are bound.
-Tables with more than four columns recompose into labelled records on phones; every field
+Tables with more than three columns recompose into labelled records on phones; every field
 stays visible, while desktop retains the comparison table. Missing line
 values remain gaps. Large value labels are formatted on the host, before browser
 number conversion can lose integer precision.

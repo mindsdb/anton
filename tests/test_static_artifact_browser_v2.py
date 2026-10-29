@@ -229,8 +229,9 @@ def test_composite_view_uses_lookup_data_without_extra_hidden_records():
         browser.close()
 
 
-def test_wide_tables_recompose_as_complete_labelled_records_on_phones():
-    columns=['Record','Category','Site','Date','Amount','Explanation']
+@pytest.mark.parametrize('field_count',[4,6])
+def test_wide_tables_recompose_as_complete_labelled_records_on_phones(field_count):
+    columns=['Record','Category','Site','Date','Amount','Explanation'][:field_count]
     data=Evidence.model_validate({'datasets':{'records':{'source':{'label':'Synthetic QA'},
         'rows':[dict(zip(columns,['A','Inspection','A long site name','2026-10-01',12,'A complete observation that should wrap without losing any words.']))]}}})
     doc=Document.model_validate({'title':'Wide data','sections':[{'id':'records','blocks':[{'type':'table','title':'Every field',

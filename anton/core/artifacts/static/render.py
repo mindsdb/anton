@@ -83,7 +83,7 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
                 cells.append(f'<td{numeric} data-label="{escape(c.label)}">{shown}</td>')
             body.append('<tr>' + ''.join(cells) + '</tr>')
         empty = f'<tr><td colspan="{len(columns)}">No records match this selection.</td></tr>'
-        wide = ' wide-table' if len(columns) > 4 else ''
+        wide = ' wide-table' if len(columns) > 3 else ''
         return f'<div class="table-scroll{wide}" tabindex="0" role="region" aria-label="Data table"><table role="table"><thead><tr>{heads}</tr></thead><tbody>{"".join(body) or empty}</tbody></table></div>'
 
     def queried(block, index):
