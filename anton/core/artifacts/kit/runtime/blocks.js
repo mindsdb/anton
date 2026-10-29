@@ -153,7 +153,7 @@
       var card = AK.el('div', 'ak-card ak-kpi' + (k.tone ? ' ak-tone-' + k.tone : ''));
       card.appendChild(AK.el('div', 'ak-kpi-label', k.label));
       var val = AK.el('div', 'ak-kpi-value' + (k.tone && k.color_value ? ' ak-tone-' + k.tone : ''));
-      val.textContent = typeof k.value === 'string' && !k.format ? k.value : AK.fmt(k.value, k.format || 'auto');
+      val.textContent = k.value == null ? '\u2014' : typeof k.value === 'string' && !k.format ? k.value : AK.fmt(k.value, k.format || 'auto');
       if (val.textContent.length > 11) val.classList.add('ak-long');
       card.appendChild(val);
       if (k.delta != null) {

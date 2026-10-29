@@ -60,10 +60,12 @@ def kpi(label: str, value: Any, format: str | None = None, *, sub: str | None = 
     """One KPI card. `better` ("up"/"down") colours the delta; `tone` marks the card good/bad/warn/accent."""
     _check_format(format, f"kpi {label!r}")
     from .data import _scalar
-    return {k: v for k, v in dict(label=label, value=_scalar(value), format=format, sub=sub, delta=_scalar(delta),
-                                   delta_format=delta_format, delta_label=delta_label, better=better, tone=tone,
-                                   spark=[_scalar(x) for x in spark] if spark is not None else None,
-                                   color_value=color_value or None).items() if v is not None}
+    card = {k: v for k, v in dict(label=label, format=format, sub=sub, delta=_scalar(delta),
+                                  delta_format=delta_format, delta_label=delta_label, better=better, tone=tone,
+                                  spark=[_scalar(x) for x in spark] if spark is not None else None,
+                                  color_value=color_value or None).items() if v is not None}
+    # A missing figure (None, NaN) stays on the card as "—"; the page warns about it on save.
+    return {"label": label, "value": _scalar(value), **card}
 
 
 def metric(label: str, values: list, format: str | None = None, *, better: str | None = None, note: str | None = None,
@@ -313,8 +315,11 @@ class Page:
     def kpis(self, items: list[dict], *, columns: int | None = None, id: str | None = None) -> dict:
         """A row of KPI cards (use kit.kpi for each)."""
         for it in items:
-            if "label" not in it or "value" not in it:
+            if not isinstance(it, dict) or "label" not in it:
                 raise KitError("kpis: each item needs a label and a value (use kit.kpi(label, value, format))")
+            if it.get("value") is None:
+                self.warnings.append(f"kpi {it['label']!r} has no value (None or NaN), shown as '—': compute it, "
+                                     "or leave the card out and say why.")
         return self._add({"type": "kpis", "items": list(items), "columns": columns, "id": id})
 
     def compare(self, columns: list[str], rows: list[dict], *, title: str | None = None, subtitle: str | None = None,
@@ -485,6 +490,14 @@ class Page:
                         fixed.append({**ends, **rest})
                 if missing:
                     self.warnings.append(f"{where}: {len(missing)} row(s) without coordinates are not drawn: {', '.join(missing[:8])}")
+                if L["type"] == "points" and len(fixed) >= 3:
+                    # Different items on one spot draw on top of each other, and usually mean the wrong
+                    # coordinates were joined (a shared destination or site instead of each one's own).
+                    from collections import Counter
+                    spot, n = Counter((p["lat"], p["lon"]) for p in fixed).most_common(1)[0]
+                    if n >= 3 and n > len(fixed) / 2:
+                        self.warnings.append(f"{where}: {n} of {len(fixed)} points sit on the same spot {spot} and hide "
+                                             "each other; check that each row has its own coordinates.")
                 if L["type"] == "points":
                     L["lat"], L["lon"] = "lat", "lon"
                 else:
