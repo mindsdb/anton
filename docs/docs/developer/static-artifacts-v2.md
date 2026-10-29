@@ -48,6 +48,12 @@ Bodies read during acquisition travel to composition and content review, so fiel
 units, scenario definitions and date semantics are not lost at the handoff. That
 context is bounded at 64,000 characters with explicitly labelled omissions. These
 private contracts do not enter the published data manifest or page.
+Composition and content review also receive a private, scrubbed receipt of actual
+source operations and bounded result previews. Its 32,000-character handoff keeps
+complete recent operations with labelled omissions; it is diagnostic evidence,
+not source authority. This lets review inspect actual filters and condition
+selection rather than trusting a dataset's description of completeness. Receipts
+never enter the public manifest or saved evidence snapshot.
 
 Source selection remains an agent responsibility: acquisition success and a
 source label are **not proof** that the agent selected the authorized source.

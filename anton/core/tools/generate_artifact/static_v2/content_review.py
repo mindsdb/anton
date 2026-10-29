@@ -52,6 +52,17 @@ over inferred matches; an unqualified same-name geocoder result is not sufficien
 Label decluttering must preserve actual point anchors. A screenshot ending mid-view does not
 establish clipping inside that view; distinguish normal page scrolling from a broken viewport.
 Use the exact evidence and composition, resolved facts, row counts, and the screenshot if provided.
+Check the actual source-operation receipt against the original task and read source contract.
+Look for guessed filters, lost condition identity, partial-period cutoffs, dropped join records,
+or a saved subset labelled as a complete reporting partition. Source-defined period labels do
+not by themselves authorize filtering another transaction-date field; the final weekly/monthly
+bucket includes its remaining days. Request missing evidence when those operations demonstrably
+exclude requested records. An omitted operation in the bounded receipt is not proof of failure,
+and a successful read alone does not prove the right source or scope was selected.
+Audit displayed units column by column, including reused format suffixes: a percentage cannot
+be labelled as hours or money, and an already formatted percentage must not gain another % sign.
+Require each explicitly requested chart/diagram, comparison, and interaction to be present;
+metric cards and ordinary tables do not substitute for a requested visual comparison.
 Displayed record values and computed claims must use resolved facts, native data blocks or declared
 custom bindings, including inside HTML fragments. Reject transcribed data tables or totals copied
 into raw HTML as a substitute for those bindings. Ordinary design numbers are not record values.

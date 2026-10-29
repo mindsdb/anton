@@ -174,6 +174,10 @@ async def collect(state, *, feedback: str = '') -> Evidence | str:
                 if call.name == RECALL_SKILL_TOOL.name:
                     source_lookup_failed = getattr(outcome, 'ok', None) is False
                 result = protocol.unwrap_outcome(outcome)
+                if call.name != RECALL_SKILL_TOOL.name:
+                    receipt = {'acquisition': nonce, 'tool': call.name, 'arguments': call.input,
+                               'result': scrub_output(str(result))[:2000]}
+                    state.static_source_reads.append(scrub_output(json.dumps(receipt, ensure_ascii=False)))
                 if call.name == RECALL_SKILL_TOOL.name and not source_lookup_failed and isinstance(result, str):
                     state.static_source_contracts[call.input['label'].strip()] = scrub_output(result)
                 state.trace_log.scratchpad(node='static_evidence', input=arguments, output=result)
