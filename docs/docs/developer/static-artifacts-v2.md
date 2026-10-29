@@ -131,7 +131,9 @@ dark mode, accent, typography, and density. Reports have an outline, inspectable
 chart data, and print styles. Consecutive metrics in a flow section form a responsive
 row, without requiring the author to create artificial sections just to group KPIs.
 Standard bar/line/scatter charts use container-sized
-SVG, readable labels, units, focusable marks, and full data tables.
+SVG, readable labels, units, and full data tables. Each chart has one keyboard
+stop; individual non-interactive marks do not create thousands of tab stops.
+The adjacent data inspector exposes the exact values through an accessible table.
 The compiler emits the real chart geometry into the saved HTML; initial rendering,
 responsive labels and data tables do not require JavaScript. HTML labels retain
 their font size while SVG geometry scales with the plot. Point marks and strokes

@@ -59,7 +59,7 @@ def markup(spec, plotted, *, low, high, tick, label, labels):
                 else:
                     grid = ''.join(f'<line x1="{_n(x(v))}" x2="{_n(x(v))}" y1="0" y2="14" class="grid" vector-effect="non-scaling-stroke"/>' for v, _ in ticks)
                     start, end = x(min(0,value)), x(max(0,value))
-                    plot = f'<svg viewBox="0 0 1000 14" preserveAspectRatio="none" role="img" tabindex="0" aria-label="{description}"><title>{description}</title>{grid}<rect x="{_n(start)}" y="0" width="{_n(max(0,end-start))}" height="14" fill="{COLORS[i]}"/></svg>'
+                    plot = f'<svg viewBox="0 0 1000 14" preserveAspectRatio="none" role="img" aria-label="{description}"><title>{description}</title>{grid}<rect x="{_n(start)}" y="0" width="{_n(max(0,end-start))}" height="14" fill="{COLORS[i]}"/></svg>'
                 cells.extend([plot, f'<span class="bar-value">{escape(shown)}</span>'])
             groups.append('<div class="bar-category">' + ''.join(cells) + '</div>')
         value_chars = max(len(shown) for values in spec['display'] for shown in values)
@@ -86,7 +86,7 @@ def markup(spec, plotted, *, low, high, tick, label, labels):
             description = escape(f'{category}, {s["label"]}: {spec["display"][n][i]}')
             # A round-capped zero-length line keeps circular marks a constant
             # physical size when the responsive plot scales non-uniformly.
-            marks.append(f'<line data-point x1="{_n(px)}" x2="{_n(px)}" y1="{_n(py)}" y2="{_n(py)}" stroke="{COLORS[i]}" stroke-width="{8 if scatter else 6}" stroke-linecap="round" vector-effect="non-scaling-stroke" role="img" tabindex="0" aria-label="{description}"><title>{description}</title></line>')
+            marks.append(f'<line data-point x1="{_n(px)}" x2="{_n(px)}" y1="{_n(py)}" y2="{_n(py)}" stroke="{COLORS[i]}" stroke-width="{8 if scatter else 6}" stroke-linecap="round" vector-effect="non-scaling-stroke" role="img" aria-label="{description}"><title>{description}</title></line>')
         if not scatter:
             paths.append(f'<path d="{"".join(path)}" fill="none" stroke="{COLORS[i]}" stroke-width="2" vector-effect="non-scaling-stroke"/>')
     if scatter:

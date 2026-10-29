@@ -145,7 +145,7 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
                     raise DataError(f'{block.title}: rescale {block.x}; the browser cannot represent the scatter extent')
             chart = {"id": index, "kind": block.kind, "x": block.x, "xLabel": block.x_label,
                      "yLabel": block.y_label, "display": [[display(s.format,row[s.field]) for s in block.series] for row in public_rows], "series": [s.model_dump() for s in block.series], "rows": public_rows}
-            content = f'<div class="chart" data-chart="{index}" aria-label="{text(block.title)}">' + chart_markup(chart, plotted, low=limits[0], high=limits[1], tick=tick, label=plain_text(block.title), labels=labels) + '</div>'
+            content = f'<div class="chart" data-chart="{index}" role="img" tabindex="0" aria-label="{text(block.title)}">' + chart_markup(chart, plotted, low=limits[0], high=limits[1], tick=tick, label=plain_text(block.title), labels=labels) + '</div>'
             content += f'<script type="application/json" class="chart-spec">{_script_json(chart)}</script>'
             content += f'<details open class="chart-data"><summary>{escape(labels["view_data"])}</summary>' + table(public_rows, columns) + '</details>'
         return '<figure>' + title + content + source(query) + '</figure>'
