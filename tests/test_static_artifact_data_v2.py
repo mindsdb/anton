@@ -1,0 +1,82 @@
+from decimal import Decimal
+
+import pytest
+from pydantic import ValidationError
+
+from anton.core.artifacts.static.data import DataError, Evidence, Query, execute
+
+
+def evidence(rows):
+    return Evidence.model_validate({"datasets": {"orders": {"source": {"label": "Uploaded orders"}, "rows": rows}}})
+
+
+def test_decimal_arithmetic_and_grouping_preserve_missing_values():
+    data = evidence([{"region": "a", "net": .1}, {"region": "a", "net": .2}, {"region": "b", "net": None}])
+    q = Query.model_validate({"dataset": "orders", "group_by": ["region"],
+                             "measures": [{"name": "net", "field": "net", "op": "sum"}]})
+    assert execute(data, q) == [{"region": "a", "net": Decimal("0.3")}, {"region": "b", "net": None}]
+
+
+def test_field_validation_precedes_filter_and_never_drops_incomplete_rows():
+    data = evidence([{"region": "a", "net": 2}, {"region": "b"}])
+    q = Query.model_validate({"dataset": "orders", "columns": ["net"], "where": [{"field": "region", "value": "a"}]})
+    with pytest.raises(DataError, match="missing fields"):
+        execute(data, q)
+
+
+def test_projection_does_not_export_unselected_fields():
+    data = evidence([{"name": "one", "private": "secret", "amount": 3}])
+    q = Query(dataset="orders", columns=["name", "amount"])
+    assert execute(data, q) == [{"name": "one", "amount": 3}]
+    assert data.datasets["orders"].rows[0]["private"] == "secret"
+
+
+@pytest.mark.parametrize("value", ["12", True])
+def test_numeric_fields_are_not_silently_coerced(value):
+    q = Query.model_validate({"dataset": "orders", "measures": [{"name": "n", "op": "sum", "field": "net"}]})
+    with pytest.raises(DataError, match="Expected a number"):
+        execute(evidence([{"net": value}]), q)
+
+
+def test_empty_sum_is_missing_but_count_is_zero():
+    q = Query.model_validate({"dataset": "orders", "measures": [
+        {"name": "net", "op": "sum", "field": "net"}, {"name": "rows", "op": "count"}]})
+    assert execute(evidence([]), q) == [{"net": None, "rows": 0}]
+
+
+def test_group_keys_do_not_merge_boolean_and_number():
+    q = Query.model_validate({"dataset": "orders", "group_by": ["key"], "measures": [{"name": "n", "op": "count"}]})
+    assert len(execute(evidence([{"key": True}, {"key": 1}]), q)) == 2
+
+
+def test_nonfinite_evidence_rejected():
+    with pytest.raises(ValidationError, match="non-finite"):
+        evidence([{"net": float("nan")}])
+
+
+def test_sorted_projection_filters_and_nulls():
+    q = Query.model_validate({"dataset": "orders", "columns": ["net"], "where": [{"field": "region", "value": ["a"], "op": "in"}],
+                             "order_by": [{"field": "net", "descending": True}]})
+    assert execute(evidence([{"region": "a", "net": None}, {"region": "a", "net": 3}, {"region": "b", "net": 9}]), q) == [{"net": 3}, {"net": None}]
+
+
+def test_fact_graph_formats_ratios_without_model_arithmetic():
+    from anton.core.artifacts.static.document import Document, resolve_facts
+    doc = Document.model_validate({"title": "Orders", "facts": {
+        "total": {"type": "query", "query": {"dataset": "orders", "measures": [{"name": "n", "op": "sum", "field": "net"}]}, "field": "n"},
+        "count": {"type": "query", "query": {"dataset": "orders", "measures": [{"name": "n", "op": "count"}]}, "field": "n"},
+        "average": {"type": "calculation", "op": "divide", "inputs": ["total", "count"], "format": {"decimals": 2}}},
+        "sections": [{"id": "summary", "blocks": [{"type": "metric", "label": "Average", "fact": "average"}]}]})
+    values = resolve_facts(doc, evidence([{"net": .1}, {"net": .2}]))
+    assert values["average"] == Decimal("0.15")
+    assert doc.facts["average"].format.display(values["average"]) == "0.15"
+    assert resolve_facts(doc, evidence([]))["average"] is None
+
+
+def test_fact_cycles_and_unknown_references_fail_explicitly():
+    from anton.core.artifacts.static.document import Document, resolve_facts
+    doc = Document.model_validate({"title": "Test", "facts": {
+        "a": {"type": "calculation", "op": "add", "inputs": ["a", "a"]}},
+        "sections": [{"id": "one", "blocks": [{"type": "prose", "text": "Test"}]}]})
+    with pytest.raises(DataError, match="Cyclic fact"):
+        resolve_facts(doc, evidence([]))
