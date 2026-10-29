@@ -190,3 +190,36 @@ def test_composite_views_check_observations_without_inventing_lookup_marks():
         checks(rows,[View(selector='.item',binding='items',inputs=['categories','missing'])])
     with pytest.raises(DataError,match='Custom bindings need a render check'):
         checks({**rows,'unused':[]},[View(selector='.item',binding='items',inputs=['categories'])])
+
+
+def tab_specimen():
+    data=Evidence.model_validate({'datasets':{'observations':{'source':{'label':'Synthetic tab QA'},'rows':[
+        {'condition':'Observed','name':'A','amount':1,'private':'KEEP_PRIVATE'},
+        {'condition':'Observed','name':'B','amount':2,'private':'KEEP_PRIVATE'},
+        {'condition':'Alternative','name':'A','amount':4,'private':'KEEP_PRIVATE'},
+        {'condition':'Alternative','name':'B','amount':5,'private':'KEEP_PRIVATE'}]}}})
+    bindings={key:{'dataset':'observations','columns':['name','amount'],'where':[{'field':'condition','value':label}]} for key,label in [('observed','Observed'),('alternative','Alternative')]}
+    facts={key:{'type':'query','query':{'dataset':'observations','where':[{'field':'condition','value':label}],'measures':[{'name':'total','op':'sum','field':'amount'}]},'field':'total'} for key,label in [('observed','Observed'),('alternative','Alternative')]}
+    panes=[{'label':label,'blocks':[{'type':'metric','label':'Total','fact':key},
+        {'type':'chart','title':label+' amounts','query':key,'x':'name','series':[{'field':'amount','label':'Amount'}]},
+        {'type':'table','title':label+' records','query':key,'columns':[{'field':'name','label':'Name'},{'field':'amount','label':'Amount'}]}]} for key,label in [('observed','Observed'),('alternative','Alternative')]]
+    doc=document([{'type':'tabs','title':'Compare conditions','initial':1,'panes':panes}],bindings=bindings,facts=facts)
+    return doc,data
+
+
+def test_tabs_publish_exact_filtered_views_and_project_private_input_fields():
+    doc,data=tab_specimen();result=render(doc,data)
+    assert result.manifest['facts']=={'observed':Decimal(3),'alternative':Decimal(9)}
+    assert result.manifest['bindings']['alternative']==[{'name':'A','amount':4},{'name':'B','amount':5}]
+    assert not result.manifest['view_checks']  # Native blocks cover their named bindings.
+    assert 'KEEP_PRIVATE' not in result.html
+    assert result.html.count('class="tab-panel"')==2
+    assert not re.search(r'class="tab-panel"[^>]*hidden',result.html)
+    assert re.search(r'class="tab-list"[^>]*hidden',result.html)
+    assert verify_frontend(result.html,is_fullstack=False).ok
+
+
+@pytest.mark.parametrize('change',[{'initial':2},{'panes':[{'label':'Duplicate','blocks':[{'type':'prose','text':'One'}]},{'label':'Duplicate','blocks':[{'type':'prose','text':'Two'}]}]}])
+def test_tabs_reject_missing_initial_pane_or_ambiguous_labels(change):
+    doc,data=tab_specimen();payload=doc.model_dump();payload['sections'][0]['blocks'][0].update(change)
+    with pytest.raises(ValueError):Document.model_validate(payload)

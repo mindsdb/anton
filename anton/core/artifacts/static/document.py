@@ -122,7 +122,31 @@ class Html(Model):
     html: str
 
 
-Block = Annotated[Prose | Callout | Metric | Table | Chart | Html, Field(discriminator="type")]
+SimpleBlock = Annotated[Prose | Callout | Metric | Table | Chart | Html, Field(discriminator="type")]
+
+
+class TabPane(Model):
+    label: str = Field(min_length=1, max_length=120)
+    layout: Literal['flow', 'split', 'metrics'] = 'flow'
+    blocks: list[SimpleBlock] = Field(min_length=1, max_length=40)
+
+
+class Tabs(Model):
+    type: Literal['tabs']
+    title: str = Field(min_length=1, max_length=200)
+    panes: list[TabPane] = Field(min_length=2, max_length=12)
+    initial: int = Field(default=0, ge=0)
+
+    @model_validator(mode='after')
+    def choices(self):
+        if self.initial >= len(self.panes):
+            raise ValueError('Initial tab must name an existing pane')
+        if len({pane.label for pane in self.panes}) != len(self.panes):
+            raise ValueError('Tab labels must be distinct')
+        return self
+
+
+Block = Annotated[Prose | Callout | Metric | Table | Chart | Html | Tabs, Field(discriminator="type")]
 
 
 class Section(Model):

@@ -10,7 +10,7 @@ import re
 from .views import checks, validate_ids
 from .charts import markup as chart_markup
 from .data import DataError, Evidence, calculate, execute, json_value, number
-from .document import Callout, Chart, Document, Html, Metric, Prose, Table, resolve_facts, resolve_query
+from .document import Callout, Chart, Document, Html, Metric, Prose, Table, Tabs, resolve_facts, resolve_query
 
 
 @dataclass(frozen=True)
@@ -43,7 +43,8 @@ def _inject_head(html, payload):
 def render(document: Document, evidence: Evidence, *, resource_sources: dict | None = None) -> Rendered:
     values = resolve_facts(document, evidence)
     bindings = {name: execute(evidence, query) for name, query in document.bindings.items()}
-    sources, published_facts = {}, {}
+    sources, published_facts, covered = {}, {}, set()
+    tab_count = 0
     for name, metadata in (resource_sources or {}).items():
         sources[f'reference:{name}'] = {'label': metadata['label'], 'url': metadata['url'], 'scope': 'Supporting visual resource'}
 
@@ -89,6 +90,8 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
         return f'<div class="table-scroll{wide}" tabindex="0" role="region" aria-label="Data table"><table role="table"><thead><tr>{heads}</tr></thead><tbody>{"".join(body) or empty}</tbody></table></div>'
 
     def queried(block, index):
+        if isinstance(block.query, str):
+            covered.add(block.query)
         fields = [c.field for c in block.columns] if isinstance(block, Table) else [block.x, *(s.field for s in block.series)]
         query = resolve_query(document, evidence, block.query, fields)
         rows = execute(evidence, query)
@@ -144,9 +147,8 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
 
     for query in document.bindings.values():
         source(query)
-    sections = []
-    title_in_first_slide = document.kind == 'slides' and document.sections[0].title == document.title and not (document.subtitle or document.eyebrow)
-    for section_index, section in enumerate(document.sections):
+    def blocks_html(items, layout):
+        nonlocal tab_count
         blocks = []
         adjacent_metrics = []
         def flush_metrics():
@@ -154,7 +156,7 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
                 content = ''.join(adjacent_metrics)
                 blocks.append(f'<div class="metric-row">{content}</div>' if len(adjacent_metrics)>1 else content)
                 adjacent_metrics.clear()
-        for block in section.blocks:
+        for block in items:
             if not isinstance(block, Metric):
                 flush_metrics()
             index = f'_view{len(bindings)}'
@@ -167,20 +169,34 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
                     raise DataError(f"Unknown metric fact: {block.fact}")
                 published_facts[block.fact] = values[block.fact]
                 value = document.facts[block.fact].format.display(values[block.fact])
-                destination = adjacent_metrics if section.layout == 'flow' else blocks
+                destination = adjacent_metrics if layout == 'flow' else blocks
                 destination.append(f'<div class="metric"><h3>{text(block.label)}</h3><p class="metric-value">{escape(value)}</p><p class="metric-detail">{text(block.detail)}</p></div>')
             elif isinstance(block, (Table, Chart)):
                 blocks.append(queried(block, index))
+            elif isinstance(block, Tabs):
+                group = f'_tabs{tab_count}'
+                tab_count += 1
+                buttons, panes = [], []
+                for n, pane in enumerate(block.panes):
+                    buttons.append(f'<button type="button" id="{group}-tab{n}" aria-controls="{group}-pane{n}">{text(pane.label)}</button>')
+                    panes.append(f'<section class="tab-panel" id="{group}-pane{n}"><h3 class="tab-heading">{text(pane.label)}</h3><div class="blocks {pane.layout}">{blocks_html(pane.blocks, pane.layout)}</div></section>')
+                blocks.append(f'<div class="artifact-tabs" data-initial="{block.initial}"><h3>{text(block.title)}</h3><div class="tab-list" aria-label="{text(block.title)}" hidden>{"".join(buttons)}</div><div class="tab-panels">{"".join(panes)}</div></div>')
             elif isinstance(block, Html):
                 blocks.append(f'<div class="custom">{block.html}</div>')
         flush_metrics()
+        return ''.join(blocks)
+
+    sections = []
+    title_in_first_slide = document.kind == 'slides' and document.sections[0].title == document.title and not (document.subtitle or document.eyebrow)
+    for section_index, section in enumerate(document.sections):
+        content = blocks_html(section.blocks, section.layout)
         heading = (f'<p class="eyebrow">{text(section.eyebrow)}</p>' if section.eyebrow else '')
         if section.title:
             heading += f'<h1 id="_artifact-title">{text(section.title)}</h1>' if title_in_first_slide and section_index == 0 else f'<h2>{text(section.title)}</h2>'
         heading += f'<p class="section-summary">{text(section.summary)}</p>' if section.summary else ''
         notes = f'<details class="speaker-notes"><summary>Speaker notes</summary><p>{text(section.notes)}</p></details>' if section.notes else ''
         sections.append(f'<section id="{section.id}" class="section" aria-label="{text(section.title or section.id)}">'
-                        f'<header>{heading}</header><div class="blocks {section.layout}">{"".join(blocks)}</div>{notes}</section>')
+                        f'<header>{heading}</header><div class="blocks {section.layout}">{content}</div>{notes}</section>')
     title, subtitle, eyebrow = text(document.title), text(document.subtitle), text(document.eyebrow)
     document_header = '' if title_in_first_slide else f'<header class="document-header" id="_artifact-title"><p class="eyebrow">{eyebrow}</p><h1>{title}</h1><p class="subtitle">{subtitle}</p></header>'
     def fact_sources(name):
@@ -195,7 +211,7 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
     outline = ''.join(f'<a href="#{s.id}">{text(s.title or s.id)}</a>' for s in document.sections)
     source_list = ''.join('<li>' + source_name(s) + (f' — {escape(s["scope"])}' if s['scope'] else '') + '</li>' for s in sources.values())
     manifest = {"version": 1, "evidence_sha256": evidence.digest(), "sources": sources,
-                "facts": published_facts, "bindings": bindings, "view_checks": checks({name: bindings[name] for name in document.bindings}, document.views, covered={block.query for section in document.sections for block in section.blocks if isinstance(block, (Table, Chart)) and isinstance(block.query, str)})}
+                "facts": published_facts, "bindings": bindings, "view_checks": checks({name: bindings[name] for name in document.bindings}, document.views, covered=covered)}
     theme = document.theme
     accent = "#75d1b2" if theme.mode == "dark" and theme.accent == "#12685c" else theme.accent
     classes = f'{document.kind} {theme.mode} {theme.typography} {theme.density}'
