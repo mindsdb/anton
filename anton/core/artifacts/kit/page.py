@@ -945,6 +945,25 @@ class Page:
         for num, sentence in dict.fromkeys(unsupported):
             self.checks.append(f"{num} in \"{sentence}\"")
 
+    def _check_field_names_in_text(self) -> None:
+        """Warn when the page's words use a data field's raw name (DelayDays, order_status) instead of
+        words a reader knows."""
+        data = self.spec.get("data", {})
+        names = {f for rows in data.values() for f in _fields(rows)
+                 if len(f) >= 5 and (re.search(r"[a-z][A-Z]", f) or "_" in f or "." in f)}
+        if not names:
+            return
+        texts = [str(self.spec.get("subtitle") or "")]
+        for b in self._walk():
+            if b.get("type") in ("text", "callout"):
+                texts.append(str(b.get("md") or ""))
+            elif b.get("type") == "list":
+                texts += [str(i) for i in b.get("items") or []]
+        found = sorted({n for n in names for t in texts if re.search(r"(?<![\w.])" + re.escape(n) + r"(?![\w])", t)})
+        if found:
+            self.warnings.append(f"the page's text uses data field names ({', '.join(found[:6])}): write them as "
+                                 "words in the page's language.")
+
     def _check_details(self) -> None:
         """On a page in another language, row details show fields the table does not under their own
         names: warn about those without a label, so they get one (or detail_fields picks the fields)."""
@@ -1058,6 +1077,7 @@ class Page:
         self._check_percents()
         self._check_times()
         self._check_details()
+        self._check_field_names_in_text()
         self._check_prose_numbers()
         self._save_warnings = self.warnings[start:]
         return render_html(self.spec, self._custom)

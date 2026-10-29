@@ -89,6 +89,8 @@ with page.after("b3"): page.table(...)   # page.update("b2", title=...), page.se
 with page.beside("b2"): page.globe(...)  # next to block b2, in one row (b2 unchanged)
 kit.geocode("City, Country") -> (lat, lon) or None   # offline gazetteer of towns
 kit.profile(df, "name")                  # prints rows, columns, distinct values with counts, ranges
+kit.diff({"t": df_a, ...}, {"t": df_b, ...}, names=("A", "B"))   # what changes between two scenarios:
+                                         # totals, counts per status and the totals behind them, rows changed
 ```
 Colours: tones good/bad/warn/info/accent/neutral or any CSS colour; categories get a consistent palette.
 Values must be numbers (not formatted strings); dates as "YYYY-MM-DD" strings or datetimes.
@@ -151,10 +153,16 @@ value or key: fix it before building.
 fields: print their distinct values first. Where the values do not line up one-to-one with the \
 word, include the borderline records, show their status, and say in `finish` which values you \
 counted.
-- Several scenarios or options: compute every measure with one function applied to each scenario's \
-own tables (never mix or sum across scenarios) and show them side by side. What an option gains is \
-the change it makes to the outcome measures (each value without it, with it, and the difference), \
-not the size of what it touches; what it costs comes from its own cost fields.
+- Scenarios and options: match what the request describes (a disruption, an option such as a faster \
+mode or more capacity, a "what if") to the scenarios or versions the source describes; when the \
+default scope has none of what the request presupposes (no late items when it asks about the late \
+ones), look in the scope where it exists before reporting none, and say which you used. Compute every \
+measure with one function applied to each scenario's own tables (never mix or sum across scenarios) \
+and show them side by side. To see what a scenario or option changes, fetch every table the request \
+could touch in both and run `kit.diff`: the effect is often in a table downstream of the one the \
+request names (the orders a delay makes late, the cost an option adds). What an option gains is the \
+change it makes to those outcome measures (each value without it, with it, and the difference), not \
+the size of what it touches; what it costs comes from its own cost fields.
 - A vague request ("an overview", "key figures") gets the few headline measures the data's own \
 fields define for that scope (main totals, status breakdowns, cost or outcome fields), chosen after \
 profiling. Name your choice in `finish`.
@@ -175,7 +183,8 @@ parties involved, where and when, and its status. After a merge, check that each
 its label says (the outline prints each table's first row).
 - Words on the page state only what the figures show: short factual captions, no analysis the data \
 does not support, and nothing that contradicts a figure on the page. Put numbers into text from the \
-values your code computed (f-strings), never typed by hand.
+values your code computed (f-strings), never typed by hand. Write fields as words in the page's \
+language ("days late", not "DelayDays").
 - Never invent records, ids, places or values. When the data has no answer, say so on the page. \
 Places: use coordinates from the data; for place names use `kit.geocode("City, Country")` \
 (None when unsure: leave that point out and say so).

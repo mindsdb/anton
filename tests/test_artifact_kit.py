@@ -261,6 +261,31 @@ def test_a_page_build_thinks_at_least_at_medium_effort(own, expected):
         assert route.model == "model-x"
 
 
+def test_diff_prints_what_changes_between_two_scenarios(capsys):
+    plan = {"orders": pd.DataFrame({"id": ["O1", "O2", "O3"], "status": ["On time"] * 3, "value": [100.0, 250.0, 80.0]}),
+            "trips": pd.DataFrame({"id": ["T1"], "delay": [0]})}
+    strike = {"orders": pd.DataFrame({"id": ["O1", "O2", "O3"], "status": ["Late", "Late", "On time"], "value": [100.0, 250.0, 80.0]}),
+              "trips": pd.DataFrame({"id": ["T1"], "delay": [0]})}
+
+    out = kit.diff(plan, strike, names=("Plan", "Strike"))
+
+    assert "status = 'Late': rows 0 -> 2 (+2)" in out
+    assert "value where status = 'Late': 0 -> 350 (+350)" in out
+    assert "2 of 3 rows changed (by id): status 2" in out
+    assert "trips: no changes" in out
+
+
+def test_raw_field_names_in_the_text_are_a_warning(tmp_path):
+    df = pd.DataFrame({"Id": ["A"], "DelayDays": [3], "Status": ["Late"]})
+    page = kit.Page("Delays")
+    page.table(df, ["Id", "DelayDays"])
+    page.text("Rows with DelayDays above zero; Status is shown as recorded.")
+
+    page.save(tmp_path)
+
+    assert any("field names (DelayDays)" in w for w in page.warnings)
+
+
 def test_kit_errors_are_value_errors():
     assert issubclass(kit.KitError, ValueError)
 

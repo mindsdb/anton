@@ -185,3 +185,82 @@ def profile(data: Any, name: str = "data", max_values: int = 12) -> str:
     out = "\n".join(lines)
     print(out)
     return out
+
+
+def _num(v: float) -> str:
+    return f"{v:,.6g}" if abs(v) < 1e6 else f"{v:,.0f}"
+
+
+def _delta(a: float, b: float) -> str:
+    d = b - a
+    return f"{_num(a)} -> {_num(b)} ({'+' if d > 0 else ''}{_num(d)})"
+
+
+def diff(before: Any, after: Any, names: tuple[str, str] = ("before", "after"), *, max_values: int = 12) -> str:
+    """What changes between two versions of the same data: two scenarios, two periods, a plan with
+    and without an option. Pass two tables, or two dicts of tables {name: table} with the same names.
+    For each table it prints only what differs: the row count; each number column's total; for each
+    few-valued column, the count of each value that changed and, for that value, the totals of the
+    number columns (e.g. Status 'Late': 0 -> 40 rows, Value 0 -> 1,570,600); and, when the tables share
+    an id column, how many rows changed in which columns. Printed and returned. Use it to find what an
+    option or scenario changes before choosing the figures; the effect is often in a table downstream
+    of the one the request names."""
+    from collections import Counter, defaultdict
+
+    a_tabs = before if isinstance(before, dict) and not hasattr(before, "columns") else {"data": before}
+    b_tabs = after if isinstance(after, dict) and not hasattr(after, "columns") else {"data": after}
+    lines = [f"diff {names[0]} -> {names[1]}"]
+    for name in list(dict.fromkeys(list(a_tabs) + list(b_tabs))):
+        ra, rb = records(a_tabs.get(name)), records(b_tabs.get(name))
+        out = []
+        if len(ra) != len(rb):
+            out.append(f"  rows: {_delta(len(ra), len(rb))}")
+        cols = list(dict.fromkeys(fields(ra) + fields(rb)))
+        numeric = [f for f in cols if any(is_number(r.get(f)) for r in ra + rb)
+                   and all(is_number(r.get(f)) or r.get(f) in (None, "") for r in ra + rb)]
+        for f in numeric:
+            sa = sum(r.get(f) or 0 for r in ra)
+            sb = sum(r.get(f) or 0 for r in rb)
+            if abs(sa - sb) > 1e-9 * max(1.0, abs(sa)):
+                out.append(f"  {f} total: {_delta(sa, sb)}")
+        for f in cols:
+            if f in numeric:
+                continue
+            ca = Counter(str(r.get(f)) for r in ra if r.get(f) not in (None, ""))
+            cb = Counter(str(r.get(f)) for r in rb if r.get(f) not in (None, ""))
+            if len(set(ca) | set(cb)) > max_values:
+                continue
+            for v in sorted(set(ca) | set(cb), key=lambda x: -(ca[x] + cb[x])):
+                if ca[v] == cb[v]:
+                    continue
+                out.append(f"  {f} = {v!r}: rows {_delta(ca[v], cb[v])}")
+                for g in numeric:
+                    sa = sum(r.get(g) or 0 for r in ra if str(r.get(f)) == v)
+                    sb = sum(r.get(g) or 0 for r in rb if str(r.get(f)) == v)
+                    if abs(sa - sb) > 1e-9 * max(1.0, abs(sa)):
+                        out.append(f"    {g} where {f} = {v!r}: {_delta(sa, sb)}")
+        # Rows matched by a shared id: which columns changed, and how many rows.
+        ids = [f for f in cols if (f.lower() == "id" or f.lower().endswith(("_id", ".id")) or f.endswith("Id"))
+               and len({r.get(f) for r in ra}) == len(ra) and len({r.get(f) for r in rb}) == len(rb) and ra and rb]
+        if ids:
+            key = ids[0]
+            by_b = {r.get(key): r for r in rb}
+            changed: dict[str, int] = defaultdict(int)
+            n_rows = 0
+            for r in ra:
+                other = by_b.get(r.get(key))
+                if other is None:
+                    continue
+                diffs = [f for f in cols if f != key and r.get(f) != other.get(f)]
+                if diffs:
+                    n_rows += 1
+                    for f in diffs:
+                        changed[f] += 1
+            if n_rows:
+                detail = ", ".join(f"{f} {n}" for f, n in sorted(changed.items(), key=lambda x: -x[1])[:8])
+                out.append(f"  {n_rows} of {len(ra)} rows changed (by {key}): {detail}")
+        lines.append(f"{name}: " + ("no changes" if not out else ""))
+        lines += out
+    text = "\n".join(lines)
+    print(text)
+    return text
