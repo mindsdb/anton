@@ -5,14 +5,19 @@
 (function () {
   'use strict';
   var AK = window.AK;
-  var DAY = 86400000;
+  var DAY = 86400000, HOUR = 3600000;
 
   function t(v) { var d = AK.toDate(v); return d ? d.getTime() : null; }
 
   function ticks(t0, t1, width) {
     var span = (t1 - t0) / DAY, out = [], d = new Date(t0), step, fmt;
     var maxTicks = Math.max(3, Math.floor(width / 78));
-    if (span <= maxTicks * 2) { step = Math.max(1, Math.ceil(span / maxTicks)); fmt = 'date_short'; d = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())); while (d.getTime() <= t1) { if (d.getTime() >= t0) out.push(d.getTime()); d = new Date(d.getTime() + step * DAY); } }
+    if (span <= 2) { // hours
+      var hs = [1, 2, 3, 4, 6, 12].filter(function (h) { return span * 24 / h <= maxTicks; })[0] || 24;
+      fmt = new Date(t0).getUTCDate() === new Date(t1).getUTCDate() ? 'time' : 'datetime_short';
+      d = new Date(Math.ceil(t0 / (hs * HOUR)) * hs * HOUR);
+      while (d.getTime() <= t1) { out.push(d.getTime()); d = new Date(d.getTime() + hs * HOUR); }
+    } else if (span <= maxTicks * 2) { step = Math.max(1, Math.ceil(span / maxTicks)); fmt = 'date_short'; d = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())); while (d.getTime() <= t1) { if (d.getTime() >= t0) out.push(d.getTime()); d = new Date(d.getTime() + step * DAY); } }
     else if (span <= maxTicks * 7 * 1.2) { // weeks, on Mondays
       var wk = Math.max(1, Math.ceil(span / 7 / maxTicks)); fmt = 'date_short';
       d = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
@@ -31,6 +36,12 @@
     var view = AK.el('div', 'ak-view ak-svgview ak-timeline');
     c.body.appendChild(view);
     var bars = [].concat(b.bars || []), mss = [].concat(b.milestones || []), markers = [].concat(b.markers || []);
+    // Dates in details and lists, with their times of day when the data has them.
+    var allWhen = [];
+    bars.forEach(function (L) { AK.data(L.data).forEach(function (r) { allWhen.push(r[L.start], r[L.end]); }); });
+    mss.forEach(function (L) { AK.data(L.data).forEach(function (r) { allWhen.push(r[L.date]); }); });
+    var whenFmt = AK.dateFormatFor(allWhen, false) || 'date';
+    var markFmt = AK.dateFormatFor(allWhen.concat(markers.map(function (m) { return m.date; })), true) || 'date_short';
     // Legend: one item per named layer, or per colour category.
     var items = [];
     bars.forEach(function (L) {
@@ -113,10 +124,27 @@
       times = times.filter(function (x) { return x != null; });
       if (!times.length) throw new Error('timeline has no dates');
       var t0 = Math.min.apply(null, times), t1 = Math.max.apply(null, times);
-      var padT = Math.max(DAY * 1.5, (t1 - t0) * 0.04);
+      // Room around the data: hours for timed events within a couple of days, days otherwise.
+      var timed = times.some(function (x) { return x % DAY !== 0; });
+      var padT = timed && t1 - t0 < 2 * DAY ? Math.max(HOUR / 2, (t1 - t0) * 0.05) : Math.max(DAY * 1.5, (t1 - t0) * 0.04);
       if (!b.range) { t0 -= padT; t1 += padT; } else { t0 = t(b.range[0]); t1 = t(b.range[1]); }
       var plotW = width - labelW - right;
       var X = function (v) { return labelW + (v - t0) / (t1 - t0) * plotW; };
+      // Marker labels sit above the chart, a row each until they no longer overlap.
+      var mkLabels = [], mkRows = 0;
+      markers.forEach(function (mk) {
+        var d = t(mk.date);
+        if (d == null) return;
+        var x = X(d), text = (mk.label ? mk.label + ' · ' : '') + AK.fmt(mk.date, markFmt);
+        var w = text.length * 6.2 + 4;
+        var anchor = x > width - w / 2 - 4 ? 'end' : (x < labelW + w / 2 ? 'start' : 'middle');
+        var x0 = anchor === 'end' ? x - w : anchor === 'start' ? x : x - w / 2, row = 0;
+        while (mkLabels.some(function (o) { return o.row === row && x0 < o.x0 + o.w + 8 && x0 + w + 8 > o.x0; })) row++;
+        mkLabels.push({mk: mk, x: x, x0: x0, w: w, row: row, anchor: anchor, text: text});
+        mkRows = Math.max(mkRows, row + 1);
+      });
+      top = 34 + (mkRows ? 4 + mkRows * 14 : 0);
+      H = top + R.keys.length * rowH + 10;
       var svg = AK.svg('svg', {viewBox: '0 0 ' + width + ' ' + H, width: width, height: H, role: 'img', 'aria-label': b.title || 'Timeline'});
       var gGrid = AK.svg('g'), gRows = AK.svg('g'), gBars = AK.svg('g'), gMs = AK.svg('g'), gMark = AK.svg('g');
       [gGrid, gRows, gMark, gBars, gMs].forEach(function (g) { svg.appendChild(g); });
@@ -125,7 +153,7 @@
         var x = X(v);
         gGrid.appendChild(AK.svg('line', {x1: x, x2: x, y1: top - 6, y2: H - 6, 'class': 'ak-tl-grid'}));
         var tx = AK.svg('text', {x: x, y: top - 12, 'text-anchor': 'middle', 'class': 'ak-tl-axis'});
-        tx.textContent = AK.fmt(new Date(v).toISOString().slice(0, 10), tk.fmt);
+        tx.textContent = AK.fmt(new Date(v).toISOString().slice(0, 16), tk.fmt);
         gGrid.appendChild(tx);
       });
       var rowY = {};
@@ -135,10 +163,23 @@
         var g = AK.svg('g', {'class': 'ak-tl-row'});
         g.setAttribute('data-key', k);
         if (i % 2 === 0) g.appendChild(AK.svg('rect', {x: 0, y: y + 2, width: width, height: rowH - 4, rx: 8, 'class': 'ak-tl-row-bg'}));
-        var lt = AK.svg('text', {x: 8, y: y + rowH / 2 + (R.subs[k] ? -1 : 4), 'class': 'ak-tl-row-label'});
         var label = String(R.labels[k]);
         var maxC = Math.floor((labelW - 12) / 6.8);
-        lt.textContent = label.length > maxC ? label.slice(0, maxC - 1) + '…' : label;
+        // A long name wraps onto a second line (when the row has no sub-label), then shortens.
+        var lines = [label];
+        if (label.length > maxC) {
+          var cut = label.lastIndexOf(' ', maxC);
+          if (cut < maxC * 0.4) cut = maxC;
+          var rest = label.slice(cut).trim();
+          lines = R.subs[k] || rowH < 40 ? [label.slice(0, maxC - 1) + '…']
+            : [label.slice(0, cut).trim(), rest.length > maxC ? rest.slice(0, maxC - 1) + '…' : rest];
+        }
+        var lt = AK.svg('text', {x: 8, y: y + rowH / 2 + (R.subs[k] ? -1 : 4) - (lines.length - 1) * 6.5, 'class': 'ak-tl-row-label'});
+        lines.forEach(function (ln, j) {
+          var span = AK.svg('tspan', {x: 8, dy: j ? 13 : 0});
+          span.textContent = ln;
+          lt.appendChild(span);
+        });
         var full = AK.svg('title'); full.textContent = label; lt.appendChild(full);
         g.appendChild(lt);
         if (R.subs[k]) { var st = AK.svg('text', {x: 8, y: y + rowH / 2 + 13, 'class': 'ak-tl-row-sub'}); st.textContent = R.subs[k]; g.appendChild(st); }
@@ -165,7 +206,7 @@
           var rect = AK.svg('rect', {x: x0, y: y, width: Math.max(3, x1 - x0), height: bh, rx: Math.min(6, bh / 2), fill: col, 'class': 'ak-tl-bar', opacity: L.opacity || (L.overlay ? 0.45 : 0.92)});
           if (L.dashed) { rect.setAttribute('fill-opacity', 0.15); rect.setAttribute('stroke', col); rect.setAttribute('stroke-dasharray', '4 3'); }
           rect.addEventListener('mousemove', function (e) {
-            var pairs = [[AK.label(L, L.start), AK.fmt(r[L.start], 'date')], [AK.label(L, L.end), AK.fmt(r[L.end], 'date')]];
+            var pairs = [[AK.label(L, L.start), AK.fmt(r[L.start], whenFmt)], [AK.label(L, L.end), AK.fmt(r[L.end], whenFmt)]];
             (L.tooltip || []).forEach(function (f) { pairs.push([AK.label(L, f), AK.fmt(r[f], AK.fieldFormat(L, f) || 'auto')]); });
             AK.tip(AK.tipRows((L.name ? L.name + ' · ' : '') + R.labels[k], pairs), e);
           });
@@ -223,18 +264,16 @@
         });
       });
       // Markers
-      markers.forEach(function (mk, i) {
-        var d = t(mk.date);
-        if (d == null) return;
-        var x = X(d), col = AK.resolveColor(mk.tone || 'neutral');
-        gMark.appendChild(AK.svg('line', {x1: x, x2: x, y1: top - 4 - (markers.length ? 14 : 0), y2: H - 6, stroke: col, 'class': 'ak-tl-marker'}));
-        var lt = AK.svg('text', {x: x, y: 12 + (i % 2) * 0, 'text-anchor': x > width - 90 ? 'end' : (x < labelW + 60 ? 'start' : 'middle'), fill: col, 'class': 'ak-tl-marker-lbl'});
-        lt.textContent = (mk.label ? mk.label + ' · ' : '') + AK.fmt(mk.date, 'date_short');
+      mkLabels.forEach(function (m) {
+        var col = AK.resolveColor(m.mk.tone || 'neutral'), ly = 12 + m.row * 14;
+        gMark.appendChild(AK.svg('line', {x1: m.x, x2: m.x, y1: ly + 4, y2: H - 6, stroke: col, 'class': 'ak-tl-marker'}));
+        var lt = AK.svg('text', {x: m.x, y: ly, 'text-anchor': m.anchor, fill: col, 'class': 'ak-tl-marker-lbl'});
+        lt.textContent = m.text;
         gMark.appendChild(lt);
       });
       function tipOf(m) {
         var L = m.L;
-        var pairs = [[AK.label(L, L.date), AK.fmt(m.r[L.date], 'date')]];
+        var pairs = [[AK.label(L, L.date), AK.fmt(m.r[L.date], whenFmt)]];
         (L.tooltip || []).forEach(function (f) { pairs.push([AK.label(L, f), AK.fmt(m.r[f], AK.fieldFormat(L, f) || 'auto')]); });
         return AK.tipRows((L.label ? String(m.r[L.label]) + ' · ' : '') + R.labels[m.k], pairs);
       }
@@ -266,7 +305,7 @@
         panel.appendChild(head);
         panel.appendChild(AK.el('div', 'ak-card-title', (L.label ? String(m.r[L.label]) + ' · ' : '') + R.labels[m.k]));
         var fields = (L.detail_fields || [L.date].concat(L.tooltip || []));
-        panel.appendChild(AK.detailList(fields.map(function (f) { return [AK.label(L, f), AK.fmt(m.r[f], f === L.date ? 'date' : (AK.fieldFormat(L, f) || 'auto'))]; })));
+        panel.appendChild(AK.detailList(fields.map(function (f) { return [AK.label(L, f), AK.fmt(m.r[f], f === L.date ? whenFmt : (AK.fieldFormat(L, f) || 'auto'))]; })));
       }
       if (b.link) {
         var mark = function (sel) {
@@ -290,7 +329,7 @@
         ordered.forEach(function (m) {
           var tr = AK.el('tr', 'ak-clickable');
           if (R.keys.length > 1) tr.appendChild(AK.el('td', null, R.labels[m.k]));
-          tr.appendChild(AK.el('td', null, AK.fmt(m.r[m.L.date], 'date')));
+          tr.appendChild(AK.el('td', null, AK.fmt(m.r[m.L.date], whenFmt)));
           if (m.L.label) tr.appendChild(AK.el('td', null, m.r[m.L.label] == null ? '' : String(m.r[m.L.label])));
           extra.forEach(function (f) { tr.appendChild(AK.el('td', null, AK.fmt(m.r[f], AK.fieldFormat(m.L, f) || 'auto'))); });
           tr.addEventListener('click', function () { focus(m); });

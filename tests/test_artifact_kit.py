@@ -162,6 +162,54 @@ def test_a_latitude_out_of_range_is_refused():
 # ── Mistakes come back as KitError with what to change ───────────────────────
 
 
+def test_a_column_of_timestamps_keeps_its_times_of_day():
+    """Midnight is written with its time when the rest of the column has times, so the column
+    reads as times throughout (not one bare date among hours)."""
+    df = pd.DataFrame({"at": pd.date_range("2026-03-14", periods=3, freq="h"), "n": [1, 2, 3]})
+
+    from anton.core.artifacts.kit.data import records
+
+    rows = records(df)
+
+    assert [r["at"] for r in rows] == ["2026-03-14 00:00:00", "2026-03-14 01:00:00", "2026-03-14 02:00:00"]
+
+
+def test_a_column_of_dates_stays_dates():
+    from anton.core.artifacts.kit.data import records
+
+    rows = records(pd.DataFrame({"day": pd.date_range("2026-03-14", periods=2, freq="D")}))
+
+    assert [r["day"] for r in rows] == ["2026-03-14", "2026-03-15"]
+
+
+def test_profile_shows_times_of_day(capsys):
+    df = pd.DataFrame({"opened": [pd.Timestamp("2026-03-14 06:40"), pd.Timestamp("2026-03-14 19:20")]})
+
+    kit.profile(df, "incidents")
+
+    assert "opened: datetime (with times of day), 2026-03-14 06:40 .. 2026-03-14 19:20" in capsys.readouterr().out
+
+
+def test_a_date_format_over_timed_values_is_a_warning(tmp_path):
+    df = pd.DataFrame({"opened": [pd.Timestamp("2026-03-14 06:40")], "id": ["INC-1"]})
+    page = kit.Page("Incidents")
+    page.table(df, ["id", kit.col("opened", "Opened", "date")], title="Open")
+
+    page.save(tmp_path)
+
+    assert any("times of day" in w and "'opened'" in w for w in page.warnings)
+
+
+def test_a_chart_leaves_its_orientation_to_the_runtime_unless_told():
+    df = pd.DataFrame({"team": ["A", "B"], "n": [1, 2]})
+    page = kit.Page("t")
+
+    auto = page.chart("bar", df, x="team", y="n")
+    upright = page.chart("bar", df, x="team", y="n", horizontal=False)
+
+    assert auto.get("horizontal") is None and upright["horizontal"] is False
+
+
 def test_kit_errors_are_value_errors():
     assert issubclass(kit.KitError, ValueError)
 

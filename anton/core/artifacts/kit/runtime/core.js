@@ -123,6 +123,21 @@
     return null;
   }
   AK.toDate = toDate;
+  /* The format that shows date-like values whole: times of day are kept when the values have
+     them, and one day's times read as times on an axis. */
+  AK.dateFormatFor = function (values, axis) {
+    var withTime = false, days = {}, any = false;
+    values.forEach(function (v) {
+      var m = typeof v === 'string' ? v.match(DATE_RE) : null;
+      if (!m) return;
+      any = true;
+      days[m[1] + m[2] + m[3]] = 1;
+      if (m[4] && (+m[4] || +m[5])) withTime = true;
+    });
+    if (!any) return null;
+    if (!withTime) return axis ? 'date_short' : 'date';
+    return axis && Object.keys(days).length === 1 ? 'time' : 'datetime_short';
+  };
   var dfCache = {};
   function df(opts) {
     var key = JSON.stringify(opts);
@@ -141,6 +156,8 @@
       if (!dt) return String(v);
       if (f === 'date_iso') return dt.toISOString().slice(0, 10);
       if (f === 'date_short') return df({month: 'short', day: 'numeric'}).format(dt);
+      if (f === 'time') return df({hour: '2-digit', minute: '2-digit'}).format(dt);
+      if (f === 'datetime_short') return df({month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'}).format(dt);
       if (f === 'month') return df({month: 'short', year: 'numeric'}).format(dt);
       if (f === 'datetime') return df({month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit'}).format(dt);
       if (f === 'weekday') return df({weekday: 'short', month: 'short', day: 'numeric'}).format(dt);
@@ -148,7 +165,9 @@
     }
     var n = toNum(v);
     if (n == null) {
-      if (f === 'auto' && typeof v === 'string' && DATE_RE.test(v) && v.length <= 10) return v;
+      // A whole date or timestamp reads in the page's language, with its time of day when it has one.
+      var whole = f === 'auto' && typeof v === 'string' && v.match(/^\d{4}-\d{2}-\d{2}(?:[T ](\d{2}):(\d{2})(?::\d{2}(?:\.\d+)?)?)?$/);
+      if (whole) return AK.fmt(v, whole[1] && (+whole[1] || +whole[2]) ? 'datetime' : 'date');
       return String(v);
     }
     switch (f) {
@@ -173,9 +192,15 @@
   AK.axisFmt = function (format) {
     var f = String(format || 'auto').split(':')[0];
     if (f === 'currency' || f === 'currency_compact') return function (v) { return AK.fmt(v, 'currency_compact'); };
-    if (f === 'percent' || f === 'fraction') return function (v) { return AK.fmt(v, f + ':0'); };
+    // Ticks show the decimals they need: "20", not "20.0"; "2.5%", not "3%".
+    var whole = function (v) { return isNum(v) && Math.abs(v - Math.round(v)) < 1e-9; };
+    if (f === 'percent') return function (v) { return AK.fmt(v, whole(v) ? 'percent:0' : 'percent:1'); };
+    if (f === 'fraction') return function (v) { return AK.fmt(v, whole(v * 100) ? 'fraction:0' : 'fraction:1'); };
     if (/^date|^month/.test(f)) return function (v) { return AK.fmt(v, f === 'month' ? 'month' : 'date_short'); };
-    return function (v) { return isNum(v) && Math.abs(v) >= 1e4 ? compact(v) : AK.fmt(v, f === 'auto' ? 'number' : format); };
+    return function (v) {
+      if (isNum(v) && Math.abs(v) >= 1e4) return compact(v);
+      return AK.fmt(v, (f === 'auto' || f === 'number') && whole(v) ? 'number:0' : (f === 'auto' ? 'number' : format));
+    };
   };
 
   /* ---------- Tones and palette ---------- */
@@ -250,13 +275,21 @@
     return map[tone] ? AK.css(map[tone]) : null;
   };
   /* Stable category -> colour: explicit colours first, then tones for status words, then the palette. */
+  /* Categories keep one colour across the page: a name takes the next palette slot the first time
+     any view meets it, and every later view (chart, map, legend) uses the same slot. */
+  var slotOf = {}, nextSlot = 0;
   AK.colorScale = function (values, explicit) {
-    var pal = AK.palette(), map = {}, i = 0;
+    var pal = AK.palette(), map = {}, used = {};
     values.forEach(function (v) {
       var k = String(v);
       if (map[k]) return;
       if (explicit && explicit[k]) { map[k] = AK.toneColor(explicit[k]) || explicit[k]; return; }
-      map[k] = pal[i % pal.length]; i++;
+      if (slotOf[k] == null) slotOf[k] = nextSlot++;
+      var slot = slotOf[k] % pal.length;
+      // Two names of this view that share a slot elsewhere on the page still differ here.
+      for (var n = 0; used[slot] && n < pal.length; n++) slot = (slot + 1) % pal.length;
+      used[slot] = true;
+      map[k] = pal[slot];
     });
     var f = function (v) { return map[String(v)] || pal[0]; };
     f.domain = function () { return Object.keys(map); };

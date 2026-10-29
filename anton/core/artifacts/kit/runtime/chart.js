@@ -35,6 +35,10 @@
       if (!chart) chart = window.echarts.init(box, null, {renderer: 'svg'});
       else chart.resize();
       var opt = build(view.getBoundingClientRect().width, chart);
+      if (opt._akHeight) {
+        if (Math.abs(opt._akHeight - box.getBoundingClientRect().height) > 2) { box.style.height = opt._akHeight + 'px'; chart.resize(); }
+        delete opt._akHeight;
+      }
       chart.setOption(opt, true);
       if (b.link && chart._akBind !== true) { chart._akBind = true; bindSelection(b, chart); }
     };
@@ -154,16 +158,21 @@
     var T = theme();
     var rows = AK.data(b.data);
     var kind = b.kind || 'bar';
-    var horizontal = kind === 'hbar' || b.horizontal;
+    var horizontal = kind === 'hbar' || b.horizontal === true;
     var s = shape(b, rows);
     var pal = AK.palette();
     var colors = b.colors || {};
     var dateX = isDateField(rows, b.x);
-    var xfmt = b.x_format || AK.fieldFormat(b, b.x) || (dateX ? 'date_short' : 'auto');
+    var xfmt = b.x_format || AK.fieldFormat(b, b.x) || (dateX ? AK.dateFormatFor(rows.map(function (r) { return r[b.x]; }), true) : 'auto');
     var yfmt = AK.fieldFormat(b, ys(b)[0]) || b.format || 'auto';
     var axisY = AK.axisFmt(yfmt);
     var narrow = width < 520;
     var nPoints = s.cats.length * s.series.length;
+    // Category names too long to sit under their bars read better as horizontal bars, whole.
+    var catTexts = s.cats.map(function (c) { return String(AK.fmt(c, xfmt)); });
+    var longestCat = Math.max.apply(null, catTexts.map(function (t) { return t.length; }).concat([1]));
+    if (!horizontal && kind === 'bar' && !dateX && b.horizontal !== false && s.cats.length <= 30 &&
+        longestCat * 6.4 > (width - 70) / Math.max(1, s.cats.length) * 1.5) horizontal = true;
     // Value labels only where they fit: a vertical bar's slot must be wider than its label.
     var labelFmt = function (v) { return AK.fmt(v, (yfmt.indexOf('currency') === 0 || Math.abs(v) >= 1e5) ? (yfmt.indexOf('currency') === 0 ? 'currency_compact' : 'compact') : yfmt); };
     var widest = Math.max.apply(null, s.series.map(function (ser) { return Math.max.apply(null, ser.values.map(function (v) { return v == null ? 0 : labelFmt(v).length; }).concat([0])); }).concat([0]));
@@ -174,20 +183,24 @@
     opt.color = pal;
     // Every category keeps its label when there are few of them: long ones are shortened, not dropped.
     var fewCats = s.cats.length <= (narrow ? 10 : 16);
-    var maxChars = horizontal ? (narrow ? 14 : 24) : Math.max(6, Math.floor((width - 80) / Math.max(1, s.cats.length) / 6.2));
+    // Horizontal bars wrap a long name onto lines within a share of the width (three at most).
+    var labelW = Math.round(narrow ? width * 0.38 : Math.min(260, width * 0.3));
+    var maxChars = horizontal ? Math.floor(labelW / 6.4) * 3 : Math.max(6, Math.floor((width - 80) / Math.max(1, s.cats.length) / 6.2));
     var catLabel = function (v) { var t = String(v); return fewCats && t.length > maxChars + 1 ? t.slice(0, maxChars) + '\u2026' : t; };
     var catAxis = {
       type: 'category', data: s.cats.map(function (c) { return AK.fmt(c, xfmt); }),
       axisLine: {lineStyle: {color: T.border}}, axisTick: {show: false},
       axisLabel: {color: T.text2, fontSize: 11, hideOverlap: !fewCats, interval: fewCats ? 0 : 'auto', formatter: catLabel,
-        rotate: (!horizontal && narrow && s.cats.length > 5) ? 40 : 0},
+        rotate: (!horizontal && narrow && s.cats.length > 5) ? 40 : 0,
+        width: horizontal ? labelW : undefined, overflow: horizontal ? 'break' : undefined, lineHeight: 13},
       name: b.x_label || '', nameLocation: 'middle', nameGap: 28, nameTextStyle: {color: T.text3}
     };
     // Counts get whole-number ticks only (no "0, 0, 1, 1" axes).
     var allInts = s.series.every(function (ser) { return ser.values.every(function (v) { return v == null || Math.round(v) === v; }); });
     var valAxis = {
       type: 'value', min: b.y_min, max: b.y_max, splitLine: {lineStyle: {color: T.grid}}, minInterval: allInts ? 1 : undefined,
-      axisLabel: {color: T.text3, fontSize: 11, formatter: axisY},
+      axisLabel: {color: T.text3, fontSize: 11, formatter: axisY, hideOverlap: true},
+      splitNumber: horizontal && narrow ? 3 : undefined,
       name: b.y_label || '', nameTextStyle: {color: T.text3, align: horizontal ? 'center' : 'left'}, nameGap: horizontal ? 26 : 12
     };
     if (horizontal) { catAxis.inverse = true; catAxis.nameLocation = 'end'; opt.xAxis = valAxis; opt.yAxis = catAxis; }
@@ -203,9 +216,11 @@
         name: b.y2_label || '', nameTextStyle: {color: T.text3}, min: b.y2_min, max: b.y2_max});
     }
     var colorsAt = pointColors(b, rows, s.cats, null);
+    // Several series take the page's colour for each name, so a scenario looks the same in every chart.
+    var serColor = s.series.length > 1 ? AK.colorScale(s.series.map(function (ser) { return ser.name; }), null) : null;
     opt.series = s.series.map(function (ser, i) {
       var type = (kind === 'line' || kind === 'area') ? 'line' : 'bar';
-      var col = AK.resolveColor(colors[ser.name] || colors[ser.field]) || pal[i % pal.length];
+      var col = AK.resolveColor(colors[ser.name] || colors[ser.field]) || (serColor ? serColor(ser.name) : pal[i % pal.length]);
       var item = {
         name: ser.name, type: type,
         data: ser.values.map(function (v, j) {
@@ -227,6 +242,8 @@
       if (showValues) {
         item.label = {show: true, position: horizontal ? 'right' : 'top', color: T.text2, fontSize: 11, fontWeight: 600,
           formatter: function (p) { return labelFmt(p.value && p.value.value != null ? p.value.value : p.value); }};
+        // Dense series keep only the value labels that have room; the rest are in the tooltip and the data table.
+        item.labelLayout = {hideOverlap: true};
       }
       if (i === 0) { var ml = refLines(b, T); if (ml) item.markLine = ml; }
       return item;
@@ -260,6 +277,12 @@
     } else opt.grid.top = (b.y_label ? 30 : 16);
     if (b.x_label) opt.grid.bottom = 24;
     if ((b.ref_lines && b.ref_lines.length) || b.threshold) opt.grid.right = 28;
+    if (horizontal && showValues) opt.grid.right = Math.max(opt.grid.right || 16, Math.round(widest * 6.8) + 12);
+    if (horizontal && !b.height) {
+      // Room for every bar: the chart grows with its categories.
+      var per = (b.stack || s.series.length < 2) ? 30 : 12 * s.series.length + 12;
+      opt._akHeight = Math.max(chart ? chart.getHeight() : 0, 70 + s.cats.length * per + (multi ? 24 : 0));
+    }
     return opt;
   }
 
@@ -332,7 +355,8 @@
     var fmt = AK.fieldFormat(b, vf) || b.format || 'auto';
     var opt = baseOption(T);
     var dateX = isDateField(rows, b.x);
-    opt.xAxis = {type: 'category', data: xs.map(function (x) { return AK.fmt(x, b.x_format || (dateX ? 'date_short' : 'auto')); }), splitArea: {show: false}, axisLabel: {color: T.text2, fontSize: 11, hideOverlap: true}, axisLine: {lineStyle: {color: T.border}}};
+    var hxfmt = b.x_format || (dateX ? AK.dateFormatFor(xs, true) : 'auto');
+    opt.xAxis = {type: 'category', data: xs.map(function (x) { return AK.fmt(x, hxfmt); }), splitArea: {show: false}, axisLabel: {color: T.text2, fontSize: 11, hideOverlap: true}, axisLine: {lineStyle: {color: T.border}}};
     opt.yAxis = {type: 'category', data: yv.map(String), axisLabel: {color: T.text2, fontSize: 11}, axisLine: {lineStyle: {color: T.border}}};
     var lo = b.min != null ? b.min : Math.min.apply(null, vals), hi = b.max != null ? b.max : Math.max.apply(null, vals);
     opt.visualMap = {min: lo, max: hi, calculable: false, orient: 'horizontal', left: 'center', bottom: 0, itemWidth: 12, itemHeight: 120, textStyle: {color: T.text3, fontSize: 11},

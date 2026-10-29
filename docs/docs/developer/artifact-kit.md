@@ -56,7 +56,8 @@ parts into tested code:
 
 Formats (`format=`): `int`, `number:1`, `percent` (12.5 → 12.5%), `fraction` (0.125 → 12.5%),
 `currency`, `currency_compact` ($2.4M), `compact`, `days`, `date`, `date_short`, `date_iso`,
-`month`, `text`.
+`month`, `datetime`, `datetime_short`, `time`, `text`. Timestamps keep their times of day unless a
+date format is chosen (the page warns when that would hide them).
 
 Linked views: give a table and map/globe/chart layers the same `key` and `link`; selecting a row
 highlights the same key everywhere (the globe turns to it).

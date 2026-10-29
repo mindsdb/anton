@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as _dt
 import decimal
 import math
+import re
 from typing import Any
 
 
@@ -54,8 +55,31 @@ def _date_text(v: _dt.datetime) -> str:
     return v.replace(microsecond=0, tzinfo=None).isoformat(sep=" ")
 
 
+_DAY_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_WITH_TIME = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+
+
+def _same_shape_times(rows: list[dict]) -> list[dict]:
+    """A column of timestamps keeps one shape: when some have a time of day, the midnight ones
+    (written as a bare date) get theirs too, so the column reads as times throughout."""
+    if not rows:
+        return rows
+    for f in fields(rows):
+        vals = [r.get(f) for r in rows if isinstance(r.get(f), str)]
+        if vals and any(_WITH_TIME.match(v) for v in vals) and any(_DAY_ONLY.match(v) for v in vals):
+            for r in rows:
+                v = r.get(f)
+                if isinstance(v, str) and _DAY_ONLY.match(v):
+                    r[f] = v + " 00:00:00"
+    return rows
+
+
 def records(data: Any) -> list[dict]:
     """Rows as a list of dicts from a DataFrame, a list of dicts/tuples, or a dict of columns."""
+    return _same_shape_times(_records(data))
+
+
+def _records(data: Any) -> list[dict]:
     if data is None:
         return []
     if hasattr(data, "to_dict") and hasattr(data, "columns"):  # DataFrame
@@ -143,7 +167,9 @@ def profile(data: Any, name: str = "data", max_values: int = 12) -> str:
             continue
         texts = [str(v) for v in present]
         if texts and all(len(t) >= 10 and t[:4].isdigit() and t[4] == "-" for t in texts):
-            lines.append(f"  {f}: date, {min(texts)[:10]} .. {max(texts)[:10]}, {len(set(texts))} distinct{tail}")
+            timed = any(_WITH_TIME.match(t) and not t.endswith(" 00:00:00") for t in texts)
+            kind, cut = ("datetime (with times of day)", 16) if timed else ("date", 10)
+            lines.append(f"  {f}: {kind}, {min(texts)[:cut]} .. {max(texts)[:cut]}, {len(set(texts))} distinct{tail}")
             continue
         counts = Counter(texts)
         if len(counts) <= max_values:

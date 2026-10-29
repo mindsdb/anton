@@ -20,7 +20,8 @@ WIDTHS = ("narrow", "normal", "wide", "full", "mobile")
 CHART_KINDS = ("bar", "hbar", "line", "area", "combo", "scatter", "pie", "donut", "heatmap", "waterfall")
 TONES = ("good", "bad", "warn", "info", "accent", "neutral")
 FORMATS = ("auto", "text", "int", "number", "percent", "fraction", "currency", "currency_compact", "compact",
-           "signed", "days", "hours", "date", "date_short", "date_iso", "month", "datetime", "weekday")
+           "signed", "days", "hours", "date", "date_short", "date_iso", "month", "datetime", "datetime_short",
+           "time", "weekday")
 
 
 _COORD_FIELD = re.compile(r"(^|[_\s.])(lat|lon|lng|latitude|longitude)$|[a-z0-9](Lat|Lon|Lng|Latitude|Longitude)$", re.I)
@@ -332,7 +333,7 @@ class Page:
               series: str | None = None, title: str | None = None, subtitle: str | None = None,
               note: str | None = None, format: str | None = None, x_format: str | None = None,
               labels: dict | None = None, formats: dict | None = None, stack: bool = False,
-              horizontal: bool = False, sort: str | None = None, show_values: bool | None = None,
+              horizontal: bool | None = None, sort: str | None = None, show_values: bool | None = None,
               ref_lines: list | None = None, threshold: dict | None = None, point_tones: Any = None,
               y2: str | list | None = None, y2_format: str | None = None, y2_kind: str | None = None,
               y2_label: str | None = None, colors: dict | None = None, height: int | None = None,
@@ -379,7 +380,7 @@ class Page:
                 seen.add(k)
         return self._add({"type": "chart", "kind": kind, "data": name, "x": x, "y": y, "series": series,
                           "title": title, "subtitle": subtitle, "note": note, "format": format, "x_format": x_format,
-                          "labels": labels, "formats": formats, "stack": stack or None, "horizontal": horizontal or None,
+                          "labels": labels, "formats": formats, "stack": stack or None, "horizontal": horizontal,
                           "sort": sort, "show_values": show_values, "ref_lines": ref_lines, "threshold": threshold,
                           "point_tones": point_tones, "y2": y2, "y2_format": y2_format, "y2_kind": y2_kind,
                           "y2_label": y2_label, "colors": colors, "height": height, "y_min": y_min, "y_max": y_max,
@@ -787,6 +788,37 @@ class Page:
                 for r in b["rows"]:
                     check(f"compare row {r.get('label')!r}", r.get("format"), r.get("values") or [])
 
+    def _check_times(self) -> None:
+        """Warn when a date-only format would hide the times of day the values have."""
+        data = self.spec.get("data", {})
+        date_only = ("date", "date_short", "date_iso", "month", "weekday")
+        timed = re.compile(r"^\d{4}-\d{2}-\d{2}[T ](\d{2}):(\d{2})")
+
+        def check(where, fmt, vals):
+            if not fmt or str(fmt).split(":")[0] not in date_only:
+                return
+            for v in vals:
+                m = timed.match(str(v)) if isinstance(v, str) else None
+                if m and (m.group(1) != "00" or m.group(2) != "00"):
+                    self.warnings.append(f"{where}: the values have times of day but format={fmt!r} shows only the "
+                                         "date; use 'datetime', 'datetime_short' or 'time' (or no format).")
+                    return
+        for b in self._walk():
+            t = b.get("type")
+            if t == "kpis":
+                for k in b["items"]:
+                    check(f"kpi {k.get('label')!r}", k.get("format"), [k.get("value")])
+            elif t == "chart":
+                rows = data.get(b["data"], [])
+                check(f"chart {b.get('title')!r} x", b.get("x_format") or (b.get("formats") or {}).get(b.get("x"))
+                      or self.spec.get("formats", {}).get(b.get("x")), [r.get(b.get("x")) for r in rows])
+            elif t == "table":
+                rows = data.get(b["data"], [])
+                for c in b.get("columns") or []:
+                    check(f"table {b.get('title')!r} column {c['field']!r}", c.get("format")
+                          or (b.get("formats") or {}).get(c["field"]) or self.spec.get("formats", {}).get(c["field"]),
+                          [r.get(c["field"]) for r in rows])
+
     def _autolink(self) -> None:
         """Tables and maps, globes or timelines that show the same records (the same ids) are linked:
         clicking a row highlights that record in the other views. Explicit links are left alone."""
@@ -842,6 +874,7 @@ class Page:
         from .render import render_html
         self._autolink()
         self._check_percents()
+        self._check_times()
         return render_html(self.spec, self._custom)
 
     def save(self, path: Any, *, quiet: bool = False) -> str:
@@ -881,7 +914,10 @@ def _describe(b: dict, spec: dict) -> str:
             if vals:
                 fm = (b.get("formats") or {}).get(f) or b.get("format")
                 cur = spec.get("currency", "USD")
-                stats.append(f"{f}: sum {_fmt(sum(vals), fm, cur)}, min {_fmt(min(vals), fm, cur)}, max {_fmt(max(vals), fm, cur)}")
+                # Rates and shares do not add up: their mean says more than a sum.
+                rate = str(fm or "").split(":")[0] in ("percent", "fraction")
+                agg = f"mean {_fmt(sum(vals) / len(vals), fm, cur)}" if rate else f"sum {_fmt(sum(vals), fm, cur)}"
+                stats.append(f"{f}: {agg}, min {_fmt(min(vals), fm, cur)}, max {_fmt(max(vals), fm, cur)}")
         return (f"{b['id']} chart {b['kind']}{title}: {n(b['data'])} rows, x={b.get('x')}, y={b.get('y')}"
                 + (f", series={b['series']}" if b.get("series") else "") + (" [" + "; ".join(stats) + "]" if stats else ""))
     if t == "table":

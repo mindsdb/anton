@@ -29,14 +29,16 @@ page = kit.Page(title, subtitle=None, lang="en", theme="light"|"dark", badges=[.
                 width="normal"|"wide"|"narrow"|"mobile", currency="USD", sources=[...], notes=[...],
                 labels={field: label}, formats={field: format})
 # formats: int, number:1, percent (12.5 -> 12.5%), fraction (0.125 -> 12.5%), currency, currency:2,
-#   currency_compact ($2.4M), compact, days, date (Mar 3, 2026), date_short, date_iso, month, text
+#   currency_compact ($2.4M), compact, days, date (Mar 3, 2026), date_short, date_iso, month, text,
+#   datetime_short (Mar 3, 09:00), time (09:00); timestamps keep their times of day unless formatted as dates
 page.kpis([kit.kpi(label, value, format, sub=None, delta=None, better="up"|"down", tone="good"|"bad"|"warn"|"accent")])
 page.text(markdown, style="lead") · page.callout(markdown, title=None, tone="info"|"good"|"warn"|"bad")
 page.compare(["Current", "Proposed"], [kit.metric(label, [v1, v2], format, better="higher"|"lower")], title=)
-page.chart(kind, df, x, y, series=None, title=, format=, stack=False, horizontal=False, sort="desc",
+page.chart(kind, df, x, y, series=None, title=, format=, stack=False, horizontal=None, sort="desc",
            threshold={"value": 80, "label": "Target"}, ref_lines=[{"value": v, "label": l}],
            y2=None, colors={name: color_or_tone}, show_values=None)
            # kind: bar hbar line area combo(y bars + y2 line) scatter pie donut heatmap waterfall
+           # bars turn horizontal by themselves when category names are too long to sit under them
 page.table(df, [field, kit.col(field, label, format, pill=True, tones={value: tone}, bar=True)], title=,
            search=None, filters=[fields], sort={"field": f, "desc": True}, totals={field: "sum"},
            key=None, link=None, detail="drawer"|"inline"|False, row_tone={"field": f, "map": {value: tone}})
@@ -129,7 +131,8 @@ compute. Follow the links the data has (ids, references) rather than guessing.
 to their total) before you build. Figures the request implies are computed and shown explicitly \
 as text with their unit: a duration, a change (the difference, not only both values), a cost, the \
 total of a period. Keep the meaning of the data's own terms for statuses and measures (never turn \
-one into a stronger or weaker word); dates follow the data's calendar, not today's. Set the page's \
+one into a stronger or weaker word); dates follow the data's calendar, not today's, and keep \
+their times of day when the data has them (an hourly series, the time of an event). Set the page's \
 `currency` to the data's currency.
 - A table of records shows the columns a reader needs to recognise each one: its id or name, the \
 parties involved, where and when, and its status. After a merge, check that each column holds what \
