@@ -323,7 +323,13 @@
       // A status word takes its tone's colour, as its pill does, so a status looks the same in
       // every view (a second value with the same tone falls back to the palette).
       var tc = AK.toneColor(AK.toneOf(k, null, field));
-      if (tc && !usedColor[tc]) { map[k] = tc; usedColor[tc] = true; return; }
+      if (tc) {
+        // A second value with the same tone takes a shade of it, never an unrelated hue.
+        var n = usedColor[tc] || 0;
+        usedColor[tc] = n + 1;
+        map[k] = n ? AK.shade(tc, n) : tc;
+        return;
+      }
       if (slotOf[k] == null) slotOf[k] = nextSlot++;
       var slot = slotOf[k] % pal.length;
       // Two names of this view that share a slot elsewhere on the page still differ here.
@@ -336,6 +342,14 @@
     return f;
   };
   AK.resolveColor = function (c) { return AK.toneColor(c) || c; };
+  /* A shade of a #rrggbb colour: n = 1 darker, 2 lighter, 3 darker still, ... */
+  AK.shade = function (hex, n) {
+    var m = /^#?([0-9a-f]{6})$/i.exec(String(hex).trim());
+    if (!m) return hex;
+    var v = parseInt(m[1], 16), rgb = [v >> 16 & 255, v >> 8 & 255, v & 255];
+    var k = 0.3 * Math.ceil(n / 2), to = n % 2 ? 0 : 255;
+    return 'rgb(' + rgb.map(function (c) { return Math.round(c + (to - c) * k); }).join(',') + ')';
+  };
 
   /* ---------- Data ---------- */
   AK.data = function (ref) {

@@ -94,16 +94,21 @@ How to work (fast: every round costs the user time):
 recall it first (nothing else in that reply). In your first reply, before the tool call, list in \
 one line each the elements the request asks for (views, figures, interactions, look); build exactly \
 those.
-2. First cell: fetch every table the page needs with only the scope the request states outright \
-in the query (a scenario, a date range, a place or id you have seen in the data), with no filters on \
-status, type or category fields, and run `kit.profile(df, name)` on each (columns, distinct values \
-with counts, ranges). Name the scratchpad `page` unless one listed below already holds the data.
-Second cell: apply in pandas the filters the request implies, using the values the profile showed, \
-compute and print each figure with its definition, and build and save the page with \
-`page.save(<folder>)`. (An edit whose data is already in the scratchpad goes straight to the change.)
-3. Read the cell's output: the page outline with its figures, any WARNINGS, and the browser check \
-of the page. Fix anything wrong (an error, a warning, a wrong or missing figure, a failed check) in \
-one more cell.
+2. A request whose figures depend on statuses, categories, periods, links between tables, or things \
+named in words rather than ids (a place, a product, "the late ones") takes two cells. First cell: \
+fetch each table the page needs with the scope the request states outright (a scenario, a date \
+range, ids or values typed exactly) and run `kit.profile(df, name)` on each (columns, distinct values \
+with counts, ranges); on a large source, profile with a query of distinct values and counts, then \
+fetch the slice you need. Check each fetch is complete (row count, a truncation flag, paging). \
+Second cell: apply the filters the request implies with the values the profile showed (look up the \
+ids of things named in words), compute and print each figure with its definition, and build and \
+save the page with `page.save(<folder>)`. A simple request (named fields, a plain total or listing) \
+does all of it in one cell. Name the scratchpad `page` unless one listed below already holds the \
+data; an edit whose data is already in the scratchpad goes straight to the change.
+3. Read the cell's output: the page outline with its figures, any WARNINGS, any CHECK items and the \
+browser check of the page. Fix anything wrong (an error, a warning, a wrong or missing figure, a \
+failed check) in one more cell. CHECK items are numbers to confirm: change one only if it differs \
+from what your code computed.
 4. Call `finish` with a short summary for the user: the key figures, what the page shows, anything \
 you could not show and why, and what you assumed.
 
@@ -115,13 +120,13 @@ in pandas, and print how many rows each filter drops; every filter needs a reaso
 Use the data's own definition of a period (a plan horizon, a fiscal year) rather than rebuilding it \
 from today's date.
 - Periods: compare the data's date range (the profile prints it) with the period asked for; when it \
-is the same, no date filter is needed. Otherwise filter with a half-open range (start <= date < the \
-day after the period ends), never by matching dates to a list of period starts or with <= the last \
-period's start (rows fall on any day of a week or month). To total by week or month, give each row \
-its period (e.g. `df[d].dt.to_period("W").dt.start_time`) and group.
-- Filter on values the data holds (printed first), never on a guessed spelling ("Yes" where the data \
-says "Y"). A filter or join that leaves no rows, or far fewer than expected, has a wrong value or \
-key: fix it before building.
+is the same, no date filter is needed. Otherwise filter with a half-open range: the period's start \
+included, its end excluded, so every day of its last week or month is in (rows fall on any day, not \
+only on period starts). To total by period, group by the data's own period field when it has one; \
+otherwise give each row its period, anchored on the weekday or day the data's periods start on.
+- Filter on values the data holds (printed first), never on a guessed spelling ("Canceled" where the \
+data says "CANCELLED"). A filter or join that leaves no rows, or far fewer than expected, has a wrong \
+value or key: fix it before building.
 - Words that imply a filter ("open", "pending", "in progress", "resolved") map to the data's own \
 fields: print their distinct values first. Where the values do not line up one-to-one with the \
 word, include the borderline records, show their status, and say in `finish` which values you \
@@ -149,7 +154,8 @@ their times of day when the data has them (a series by hour or minute, an event'
 parties involved, where and when, and its status. After a merge, check that each column holds what \
 its label says (the outline prints each table's first row).
 - Words on the page state only what the figures show: short factual captions, no analysis the data \
-does not support, and nothing that contradicts a figure on the page.
+does not support, and nothing that contradicts a figure on the page. Put numbers into text from the \
+values your code computed (f-strings), never typed by hand.
 - Never invent records, ids, places or values. When the data has no answer, say so on the page. \
 Places: use coordinates from the data; for place names use `kit.geocode("City, Country")` \
 (None when unsure: leave that point out and say so).

@@ -210,7 +210,7 @@ def test_a_chart_leaves_its_orientation_to_the_runtime_unless_told():
     assert auto.get("horizontal") is None and upright["horizontal"] is False
 
 
-def test_a_figure_stated_in_text_that_no_figure_shows_is_a_warning(tmp_path):
+def test_a_figure_stated_in_text_that_no_figure_shows_is_a_check(tmp_path):
     df = pd.DataFrame({"id": ["A", "B", "C", "D"], "status": ["Late", "Late", "On time", "Late"],
                        "value": [402350.0, 1000000.0, 250000.0, 22.5]})
     page = kit.Page("Orders", "Three late orders worth $1.4M; 75% of orders are late")
@@ -221,10 +221,22 @@ def test_a_figure_stated_in_text_that_no_figure_shows_is_a_warning(tmp_path):
 
     page.save(tmp_path)
 
-    [warning] = [w for w in page.warnings if "text states" in w]
-    assert "$1.8M" in warning
-    for fine in ("$1.4M", "75%", "22.5", "13", "2026", "09:30"):
-        assert fine not in warning.split("states")[1].split("which")[0]
+    # A check to confirm, with the sentence it stands in; not a warning.
+    assert page.checks == ['$1.8M in "Exposure is $1.8M."']
+    assert not [w for w in page.warnings if "1.8M" in w]
+
+
+def test_a_page_saved_again_after_a_fix_drops_what_the_last_save_found(tmp_path):
+    page = kit.Page("Orders")
+    page.kpis([kit.kpi("Value", 1402350, "currency_compact")])
+    block = page.callout("Exposure is $1.8M.")
+    page.save(tmp_path)
+    assert page.checks
+
+    page.update(block["id"], md="Exposure is $1.4M.")
+    page.save(tmp_path)
+
+    assert page.checks == []
 
 
 def test_numbers_in_text_are_read_as_the_page_language_writes_them(tmp_path):
@@ -234,7 +246,7 @@ def test_numbers_in_text_are_read_as_the_page_language_writes_them(tmp_path):
 
     page.save(tmp_path)
 
-    assert not [w for w in page.warnings if "text states" in w]
+    assert page.checks == []
 
 
 def test_kit_errors_are_value_errors():

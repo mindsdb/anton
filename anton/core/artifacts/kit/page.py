@@ -217,6 +217,7 @@ class Page:
         self._targets: list[list] = [self.spec["blocks"]]
         self._cursor: list | None = None  # [container, index] while inserting after/before a block
         self.warnings: list[str] = []
+        self.checks: list[str] = []  # things to confirm, not errors
 
     # ---- internals ----
     def _next_id(self) -> str:
@@ -809,8 +810,9 @@ class Page:
                 if rows and vf and all(is_number(r.get(vf)) for r in rows):
                     zero = [r for r in rows if not r.get(vf)]
                     if len(zero) > len(rows) / 2:
-                        self.warnings.append(f"{where}: {len(zero)} of {len(rows)} links have a value of 0; check the filter "
-                                             "or join that produced them.")
+                        self.warnings.append(f"{where}: {len(zero)} of {len(rows)} links have a value of 0. If they "
+                                             "really carry nothing, leave them out or say so on the page; otherwise "
+                                             "check the filter or join that produced them.")
 
     def _check_percents(self) -> None:
         """Warn when values shown as `percent` (percent units, 12.5 -> 12.5%) look like fractions."""
@@ -877,10 +879,17 @@ class Page:
                     known += [c / len(rows) * 100 for c in counts.values()]  # each category's share of rows
         texts: list[str] = [str(self.spec.get(k) or "") for k in ("title", "subtitle")]
         texts += [str(x) for x in (self.spec.get("notes") or []) + (self.spec.get("meta") or [])]
+        kpi_values: list[float] = []
         for b in self._walk():
             t = b.get("type")
+            if t == "chart":
+                for line in ([b["threshold"]] if isinstance(b.get("threshold"), dict) else []) + list(b.get("ref_lines") or []):
+                    if isinstance(line, dict) and is_number(line.get("value")):
+                        known.append(float(line["value"]))
             if t == "kpis":
                 for k in b["items"]:
+                    if is_number(k.get("value")):
+                        kpi_values.append(float(k["value"]))
                     for key in ("value", "delta"):
                         if is_number(k.get(key)):
                             known.append(float(k[key]))
@@ -896,8 +905,10 @@ class Page:
             elif t == "list":
                 texts += [str(i) for i in b.get("items") or []]
             texts += [str(b.get(k) or "") for k in ("title", "subtitle", "note")]
+        # Changes between headline figures ("saves 13 lines", "falls 32%")
+        known += [b2 - a for a in kpi_values for b2 in kpi_values] + [(b2 - a) / a * 100 for a in kpi_values for b2 in kpi_values if a]
         known += [abs(v) for v in known]
-        unsupported: list[str] = []
+        unsupported: list[tuple[str, str]] = []
 
         def parse(m):
             whole, dec, suffix = m.group(2), m.group(3) or "", (m.group(4) or "").lower()
@@ -915,7 +926,8 @@ class Page:
         eu = str(self.spec.get("lang") or "en")[:2] != "en"
         first, other = (self._NUM_EU, self._NUM_EN) if eu else (self._NUM_EN, self._NUM_EU)
         for text in texts:
-            clean = self._SPANS_IN_TEXT.sub(" ", self._DATES_IN_TEXT.sub(" ", text))
+            blank = lambda m: " " * len(m.group(0))  # noqa: E731  (keeps positions, to quote the sentence)
+            clean = self._SPANS_IN_TEXT.sub(blank, self._DATES_IN_TEXT.sub(blank, text))
             for m in first.finditer(clean):
                 value, dec, suffix, mult = parse(m)
                 if value * mult < 10 and not dec:
@@ -925,12 +937,13 @@ class Page:
                 alt = [parse(a) for a in other.finditer(clean) if a.start() <= m.start() and a.end() >= m.end() - 1]
                 if any(supported(*a) for a in alt):
                     continue
-                unsupported.append(m.group(0).strip())
-        if unsupported:
-            seen = list(dict.fromkeys(unsupported))
-            self.warnings.append("the page's text states " + ", ".join(seen[:8]) + ", which no figure or data on the page "
-                                 "shows: make sure each comes from a value your code computed (keep it if so; if it was "
-                                 "typed or is stale, use the computed value).")
+                # The sentence it stands in, so it can be checked where it is.
+                dot, line = text.rfind(". ", 0, m.start()), text.rfind("\n", 0, m.start())
+                start = max(dot + 2 if dot >= 0 else 0, line + 1 if line >= 0 else 0)
+                end = min([i for i in (text.find(". ", m.end()), text.find("\n", m.end())) if i >= 0] or [len(text)])
+                unsupported.append((m.group(0).strip(), re.sub(r"\*\*|`", "", text[start:end + 1]).strip()[:160]))
+        for num, sentence in dict.fromkeys(unsupported):
+            self.checks.append(f"{num} in \"{sentence}\"")
 
     def _check_details(self) -> None:
         """On a page in another language, row details show fields the table does not under their own
@@ -1036,11 +1049,17 @@ class Page:
     def html_text(self) -> str:
         from .render import render_html
         self._autolink()
+        # The checks below describe the page as it is now: a page saved again after a fix drops what
+        # the last save found (warnings from building blocks stay).
+        last = getattr(self, "_save_warnings", [])
+        self.warnings = [w for w in self.warnings if w not in last]
+        start, self.checks = len(self.warnings), []
         self._check_empty()
         self._check_percents()
         self._check_times()
         self._check_details()
         self._check_prose_numbers()
+        self._save_warnings = self.warnings[start:]
         return render_html(self.spec, self._custom)
 
     def save(self, path: Any, *, quiet: bool = False) -> str:
@@ -1058,6 +1077,12 @@ class Page:
                 print("WARNINGS (fix these before you answer):")
                 for w in dict.fromkeys(self.warnings):
                     print("  - " + w)
+            if self.checks:
+                print("CHECK (not an error): numbers in the text that no figure or data on the page shows. Confirm "
+                      "each against the value your code computed and change the text only where it differs; "
+                      "numbers the user gave (a target, a limit) are fine:")
+                for c in dict.fromkeys(self.checks):
+                    print("  - " + c)
         return str(p)
 
 
@@ -1222,6 +1247,7 @@ def load(path: Any) -> Page:
     page.spec = spec
     page._custom = {}
     page.warnings = []
+    page.checks = []
     page._cursor = None
     page._targets = [] if cls is Deck else [spec["blocks"]]
     if cls is Deck:
