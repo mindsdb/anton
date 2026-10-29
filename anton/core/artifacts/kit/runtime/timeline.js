@@ -155,10 +155,15 @@
           gBars.appendChild(rect);
           var text = L.label ? (r[L.label] == null ? '' : AK.fmt(r[L.label], AK.fieldFormat(L, L.label) || 'auto')) : '';
           if (text) {
-            var inside = (x1 - x0) > text.length * 6.4 + 12;
-            var lt = AK.svg('text', {x: inside ? x0 + 6 : x1 + 5, y: y + bh / 2 + 4, 'font-size': 11, 'font-weight': 600,
-              fill: inside ? '#fff' : AK.css('--ak-text-2')});
-            lt.textContent = text;
+            var tw = text.length * 6.4 + 12;
+            var inside = (x1 - x0) > tw;
+            // Outside the bar: after it when there is room, else before it, else trimmed to fit.
+            var after = x1 + 5 + tw <= width - 4, before = x0 - 5 - tw >= labelW;
+            var lt = AK.svg('text', {x: inside ? x0 + 6 : (after ? x1 + 5 : (before ? x0 - 5 : x0 + 6)), y: y + bh / 2 + 4,
+              'font-size': 11, 'font-weight': 600, 'text-anchor': inside || after || !before ? 'start' : 'end',
+              fill: inside || (!after && !before) ? '#fff' : AK.css('--ak-text-2')});
+            var room = Math.floor(((x1 - x0) - 12) / 6.4);
+            lt.textContent = inside || after || before || text.length <= room ? text : text.slice(0, Math.max(1, room - 1)) + '\u2026';
             gBars.appendChild(lt);
           }
         });

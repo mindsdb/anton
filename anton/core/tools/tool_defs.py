@@ -446,7 +446,9 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "and a health check on `/api/health`. There is no separate PRD step "
         "to call first, and you do NOT call `launch_backend` afterwards.\n\n"
         "Inputs:\n"
-        "- `slug`: the artifact slug from a prior `create_artifact` call.\n"
+        "- `slug`: the artifact slug from a prior `create_artifact` call, or an "
+        "existing page to edit. For a NEW page leave it out and pass `name` and "
+        "`description` instead: the page is registered in the same call.\n"
         "- `user_request`: the user's request, as close to their original "
         "wording as possible.\n"
         "- `user_language`: the language the user writes to you in, by its "
@@ -508,6 +510,14 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
     input_schema={
         "type": "object",
         "properties": {
+            "name": {
+                "type": "string",
+                "description": "For a NEW page (html-app) only: its human-readable name. The page is registered in this call; leave `slug` out.",
+            },
+            "description": {
+                "type": "string",
+                "description": "For a NEW page only: a one-line description shown in the UI.",
+            },
             "slug": {
                 "type": "string",
                 "description": "Slug of an already-registered artifact.",
@@ -580,7 +590,7 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
                 ),
             },
         },
-        "required": ["slug", "user_request", "user_language", "agent_understanding"],
+        "required": ["user_request", "user_language", "agent_understanding"],
     },
     handler=handle_generate_artifact,
     prompt=(

@@ -605,7 +605,9 @@
           ctx.globalAlpha = 1;
         }
         if (p.lbl && p.vis) {
-          var bx = {x: p.x + 8, y: p.y - 8, w: ctx.measureText(p.lbl).width, h: 14};
+          var tw = ctx.measureText(p.lbl).width;
+          // Right of the point unless that runs off the canvas; then left of it.
+          var bx = {x: p.x + 8 + tw > width - 6 ? p.x - 8 - tw : p.x + 8, y: p.y - 8, w: tw, h: 14};
           placed.forEach(function (o) { if (bx.x < o.x + o.w && bx.x + bx.w > o.x && bx.y < o.y + o.h && bx.y + bx.h > o.y) bx.y = o.y + o.h + 1; });
           placed.push(bx);
           ctx.globalAlpha = dim ? 0.3 : 1;

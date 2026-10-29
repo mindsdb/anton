@@ -278,13 +278,14 @@ page builder fetches the data in the scratchpad, computes the figures, composes 
 the page with the artifact kit (designed, responsive, tested charts, maps, \
 globes, networks, timelines and tables) and checks it in a browser, in one pass. \
 Do not fetch the data or write a page's files yourself.
-1. One response: a one-line plan and `create_artifact(name, description, \
-type="html-app", primary="index.html")`.
-2. Then `generate_artifact(slug, user_request=<the user's own words>, \
-user_language, agent_understanding=<what they asked for: scope, figures, views, \
+1. One response: a one-line plan and `generate_artifact(name=<page name>, \
+description=<one line>, user_request=<the user's own words>, user_language, \
+agent_understanding=<what they asked for: scope, figures, views, \
 interactions, look, language>, known_data=<figures or rows already computed in \
-this conversation, if any>)`.
-3. Reply briefly from its result, in the user's language: the key figures, \
+this conversation, if any>)`. Given `name`, it registers the page itself: no \
+`create_artifact` call first. Do not recall skills or query data before it; \
+the builder does that.
+2. Reply briefly from its result, in the user's language: the key figures, \
 anything not shown and why, and the page's name.
 To change a page, call `generate_artifact` again with its slug and the change \
 as `user_request`: it edits the page in place and keeps everything else. A \
@@ -292,7 +293,8 @@ request to check a figure goes the same way.
 
 WORKFLOW:
 1. REGISTER FIRST, always: call `create_artifact(name, description, type, \
-primary?)`. It claims the folder and returns `<artifact_path>`.
+primary?)`. It claims the folder and returns `<artifact_path>`. (A new page is \
+the exception: `generate_artifact(name=...)` registers it, see PAGES.)
 2. THEN build it with `generate_artifact(slug, user_request, user_language, \
 agent_understanding, known_data?, user_preferences?, attachments?)`. For an \
 `html-app` it runs the page builder (PAGES above). Every \

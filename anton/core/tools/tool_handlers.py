@@ -1868,8 +1868,19 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         return
 
     slug = (tc_input.get("slug") or "").strip()
+    new_name = (tc_input.get("name") or "").strip()
+    if not slug and new_name:
+        # A new page in one call: register it here, as create_artifact would.
+        created = store.create(  # type: ignore[arg-type]
+            name=new_name,
+            description=(tc_input.get("description") or "").strip() or str(tc_input.get("user_request") or "")[:240],
+            type="html-app",
+            primary="index.html",
+        )
+        slug = created.slug
+        _track_artifact(session, store, slug, summary=f"Created artifact: {new_name}")
     if not slug:
-        yield "Error: `slug` is required."
+        yield "Error: `slug` (an artifact from create_artifact) or `name` (a new page) is required."
         return
     artifact = store.open(slug)
     if artifact is None:

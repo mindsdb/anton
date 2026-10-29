@@ -610,6 +610,9 @@ class Page:
         this block's element; AK gives AK.data(name), AK.fmt(v, format), AK.palette(), AK.css('--ak-accent'),
         AK.select(link, key), AK.onSelect(link, fn), AK.tip(html, event). `libs`: ["echarts","d3","topojson"]
         are loaded first. `view` names what it draws (map, chart, globe, network, timeline)."""
+        if re.search(r"\bfetch\s*\(|XMLHttpRequest|WebSocket\s*\(|EventSource\s*\(", (js or "") + (html or "")):
+            raise KitError("page.html: a page must not load data when it is viewed (the preview cannot reach any "
+                           "service). Fetch in the scratchpad and embed: page.dataset(rows, 'name') + AK.data('name').")
         block = self._add({"type": "html", "html": html, "title": title, "subtitle": subtitle, "note": note,
                            "libs": libs, "view": view, "card": None if card else False, "id": id})
         self._custom[block["id"]] = {"js": js, "css": css}

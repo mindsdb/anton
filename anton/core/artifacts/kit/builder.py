@@ -96,6 +96,14 @@ Getting it right:
 nothing else. Take each figure from that scope's own rows; never mix values from different \
 scenarios or versions of the data, and never add up values that should not be summed. With several \
 scenarios, fetch and compute each one separately and label it.
+- Add no filter the request does not state. "Shipments from A to B" means all of them, whatever \
+their status; a word that implies a filter ("on their way", "late", "not delivered", "open") maps to \
+the data's own field: print that field's distinct values in scope and keep every record the words \
+cover. When unsure, include the record and show its status.
+- When tables must be linked (orders hit by late shipments, parts on a lane, costs of an option) and \
+you are not sure how, first run a short cell that prints each table's columns, a few rows and the \
+distinct values of the fields you will join or filter on; then compute. Follow the links the data \
+has (ids, references, messages) rather than guessing.
 - Count and total from rows with code, then sanity-check (row counts, ranges, that parts add up \
 to their total) before you build. Keep the data's own wording for statuses and measures (e.g. "at \
 risk" is not "lost"); dates follow the data's calendar, not today's.
@@ -108,14 +116,18 @@ code that built it with the change is fine when that code is in the scratchpad. 
 a figure, recompute it from the source data, print old and new, fix the page if needed, and add a \
 short note on the page saying what was checked.
 
+- The page opens on its own: the kit embeds the data. Never make the page fetch data when it is \
+viewed (no fetch or API calls in `page.html` code); the preview cannot reach any service.
+
 Designing it:
 - Lead with the answer: a title naming the subject, a subtitle with the main finding in numbers, \
 badges for the scope (scenario, period), a meta line such as "Data as of 2026-05-04". Then the \
 elements the request names, in its order, and a short sources note.
-- Show what was asked, all of it, and nothing nobody asked for: a KPI row only when the request \
-asks for figures, totals, a dashboard or a brief; no extra charts, panels or metrics "for context". \
-Every figure the user asked for appears as text (a KPI, a table cell, a label or a compare row), \
-not only inside a chart.
+- Show what was asked, all of it, and nothing nobody asked for. Beyond the title, subtitle, badges \
+and sources, every block must answer a part of the request: no KPI row the request does not ask for \
+(a count above a map is extra), no table repeating cards, no extra charts, panels or metrics "for \
+context". Every figure the user asked for appears as text (a KPI, a table cell, a label or a \
+compare row), not only inside a chart.
 - Pick the view for the request: places on a map (`page.map`); "3D" or "globe" on `page.globe`; \
 flows, lanes or supply networks on `page.network` (style "sankey" for volumes); schedules, \
 milestones or Gantt on `page.timeline`; options or scenarios side by side on `page.compare`; trends \
@@ -126,7 +138,9 @@ its detail" is `detail="drawer"`; "clicking a row highlights it on the map/globe
 `key` and `link` on the table and on the map layers; hovering a map point, bar or milestone shows \
 its tooltip.
 - Write every word on the page in the user's language and set `lang` ("en", "es", "fr", ...): \
-titles, labels (`labels={{field: label}}` and column labels), notes. "Phone/mobile" pages use \
+titles, labels (`labels={{field: label}}` and column labels), notes, and the data's own category \
+words (statuses, types, modes, country names: map them in pandas, e.g. "Late" -> "Retrasado"); \
+keep ids, codes and proper names as they are. "Phone/mobile" pages use \
 `width="mobile"`. "Premium", "board" or "leadership" pages use `theme="dark"` or a calm light page \
 with a strong headline, few large elements and subtle motion (built in). Animate map routes with \
 `animate=True` only when motion is asked for.
@@ -202,6 +216,31 @@ def _recalled_labels(session: "ChatSession") -> list[str]:
     return labels
 
 
+PRELOAD_CHARS = 16000
+
+
+def _preload_labels(session: "ChatSession") -> list[str]:
+    """Skills worth handing the builder up front (saves it a round): those the conversation
+    already recalled, then the user's own skills (data sources, house style), which are short.
+    Built-in product skills are left to `recall_skill`."""
+    labels = [x for x in _recalled_labels(session) if not x.startswith("build-")]
+    store = getattr(session, "_skill_store", None)
+    try:
+        summaries = store.list_summaries() if store is not None else []
+    except Exception:
+        summaries = []
+    for s in summaries:
+        label = s.get("label") or ""
+        builtin = str(s.get("provenance") or s.get("source") or "").lower() == "builtin" or label in BUILTIN_SKILLS
+        if label and not builtin and label not in labels:
+            labels.append(label)
+    return labels
+
+
+BUILTIN_SKILLS = {p.name for p in (Path(__file__).resolve().parents[2] / "memory" / "builtin_skills").iterdir()
+                  if p.is_dir()} | {"skill-creator", "connect-datasource"}
+
+
 def _skill_text(session: "ChatSession", label: str) -> str | None:
     """A skill's full procedure, always (the main agent's recall_skill sends a stub once it is in
     the main history, and the builder has its own history)."""
@@ -267,11 +306,11 @@ def kickoff(*, folder: Path, user_request: str, user_language: str, agent_unders
     pads = _pads(session)
     if pads:
         sections.append(pads)
-    for label in _recalled_labels(session):
-        if label.startswith("build-"):
-            continue
+    loaded = 0
+    for label in _preload_labels(session):
         body = _skill_text(session, label)
-        if body:
+        if body and loaded + len(body) <= PRELOAD_CHARS:
+            loaded += len(body)
             sections.append(f"## Skill already loaded: `{label}` (no need to recall it)\n{body}")
     return "\n\n".join(sections)
 

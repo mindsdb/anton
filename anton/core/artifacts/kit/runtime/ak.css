@@ -151,7 +151,8 @@ h1, h2, h3, h4 { margin: 0; font-weight: 650; letter-spacing: -0.012em; line-hei
 .ak-kpis { display: grid; gap: var(--ak-gap); grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
 .ak-kpi { display: flex; flex-direction: column; gap: 6px; padding: 18px 20px 16px; }
 .ak-kpi-label { font-size: 12.5px; font-weight: 600; color: var(--ak-text-2); letter-spacing: .01em; }
-.ak-kpi-value { font-size: clamp(25px, 2.6vw, 32px); font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; overflow-wrap: anywhere; }
+.ak-kpi-value { font-size: clamp(25px, 2.6vw, 32px); font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; overflow-wrap: break-word; }
+.ak-kpi-value.ak-long { font-size: clamp(20px, 2vw, 26px); }
 .ak-kpi-value.ak-tone-good { color: var(--ak-good); } .ak-kpi-value.ak-tone-bad { color: var(--ak-bad); } .ak-kpi-value.ak-tone-warn { color: var(--ak-warn); } .ak-kpi-value.ak-tone-accent { color: var(--ak-accent); }
 .ak-kpi-sub { font-size: 12.5px; color: var(--ak-text-3); }
 .ak-kpi::before { content: ""; position: absolute; left: 0; top: 14px; bottom: 14px; width: 3px; border-radius: 0 3px 3px 0; background: var(--ak-kpi-bar, transparent); }
@@ -352,9 +353,9 @@ h1, h2, h3, h4 { margin: 0; font-weight: 650; letter-spacing: -0.012em; line-hei
   body { font-size: 15px; }
   .ak-page { padding: 22px 16px 40px; }
   .ak-grid { grid-template-columns: minmax(0, 1fr); }
-  .ak-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-  .ak-kpi { padding: 14px 14px 12px; }
-  .ak-kpi-value { font-size: 23px; }
+  .ak-kpis { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .ak-kpi { padding: 13px 15px 12px; }
+  .ak-kpi-value, .ak-kpi-value.ak-long { font-size: 24px; }
   .ak-card { padding: 15px 15px; }
   .ak-subtitle { font-size: 15px; }
   .ak-section-title { font-size: 17.5px; }
