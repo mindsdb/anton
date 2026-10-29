@@ -18,7 +18,7 @@ from ..discovery.sub_tools import dispatch_ask_user, _ask_user_schema
 from ..discovery.state import gathering_question_budget
 from ..streaming import _call_with_stream_retry
 from .prompts import COLLECT, context
-from . import snapshots
+from . import snapshots, places
 
 FINISH = {"name": "finish_static_evidence", "description": "Finish only after source tools succeed and evidence is saved, or report a blocker.",
           "input_schema": {"type": "object", "additionalProperties": False, "properties": {
@@ -79,7 +79,8 @@ async def collect(state, *, feedback: str = '') -> Evidence | str:
     make_dirs_nofollow(state.artifact_path, path.parent)
     system = COLLECT.replace('SOURCE_SCRATCHPAD', repr(pad_name))
     definitions = [SCRATCHPAD_TOOL, READ_TEXT_FILE_TOOL, RECALL_SKILL_TOOL, WEB_FETCH_FALLBACK_TOOL, WEB_SEARCH_FALLBACK_TOOL]
-    tools = [protocol.tool_schema(t) for t in definitions] + [_ask_user_schema(), FINISH]
+    tools = [protocol.tool_schema(t) for t in definitions] + [_ask_user_schema(), places.TOOL, FINISH]
+    place_references = places.Places()
     tools[0] = copy.deepcopy(tools[0])
     tools[0]['description'] += f' This evidence pass owns the fresh scratchpad {pad_name}; named operations are bound to it. Parent notebook variables are not available.'
     tools[0]['input_schema']['properties']['name']['enum'] = [pad_name]
@@ -123,9 +124,24 @@ async def collect(state, *, feedback: str = '') -> Evidence | str:
                 elif set(call.input) != {'reason'} or not isinstance(call.input['reason'], str) or not call.input['reason'].strip():
                     result = 'Give the reason this edit preserves the published data.'
                 else:
-                    finished, state.static_evidence_origin = saved
-                    state.record('static_evidence', 'reused', json.dumps(state.static_evidence_origin))
-                    result = 'Published snapshot accepted for a data-preserving edit; this is not a fresh source read.'
+                    try:
+                        finished = place_references.enrich(saved[0], reused=True)
+                        state.static_evidence_origin = {**saved[1]}
+                        if place_references.requests:
+                            state.static_evidence_origin['reference_enriched'] = True
+                        state.record('static_evidence', 'reused', json.dumps(state.static_evidence_origin))
+                        result = 'Published snapshot accepted for a data-preserving edit; this is not a fresh source read.'
+                    except ValueError as error:
+                        result = str(error)
+                results.append(protocol.tool_result(call.id, result))
+            elif call.name == places.TOOL['name']:
+                try:
+                    result = await place_references.lookup(call.input)
+                    state.record('static_place_reference', 'done', f'{len(place_references.requests)} lookup keys; offline snapshot')
+                except ValueError as error:
+                    result = str(error)
+                # Supporting references never satisfy or clear a business-source read.
+                state.trace_log.scratchpad(node='static_place_reference', input=call.input, output=result)
                 results.append(protocol.tool_result(call.id, result))
             elif call.name == FINISH['name']:
                 inp = call.input
@@ -140,9 +156,10 @@ async def collect(state, *, feedback: str = '') -> Evidence | str:
                     result = 'A source tool failed. Resolve it before finishing; do not substitute an unauthorized source.'
                 else:
                     try:
-                        finished = Evidence.model_validate(json.loads(read_bytes_nofollow(state.artifact_path, path, limit=16 * 1024 * 1024), parse_float=Decimal)) if inp['has_records'] else Evidence()
-                        if inp['has_records'] and not finished.datasets:
+                        evidence = Evidence.model_validate(json.loads(read_bytes_nofollow(state.artifact_path, path, limit=16 * 1024 * 1024), parse_float=Decimal)) if inp['has_records'] else Evidence()
+                        if inp['has_records'] and not evidence.datasets:
                             raise ValueError('has_records=true requires at least one dataset')
+                        finished = place_references.enrich(evidence)
                         state.static_evidence_origin = {'mode': 'acquired', 'acquired_at': snapshots.now()}
                         result = 'Evidence accepted.'
                     except (OSError, ValueError) as error:

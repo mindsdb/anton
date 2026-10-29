@@ -110,6 +110,13 @@ user requests another role. When geocoding is necessary, disambiguate using the 
 region and place context, validate the match, and retain its provenance. A first name match is
 not sufficient. Do not replace known source coordinates with a geocoder result or invent a
 position when the location cannot be resolved. Clearly identify unresolved locations.
+lookup_static_places provides offline GeoNames candidates for place names when coordinates are
+absent. Pass source-supported country/region context separately and stable join keys. Its exact
+candidate rows are added automatically as geonames_places, a supporting reference dataset;
+do not retype them into the business evidence file. Validate context and show unresolved or
+ambiguous locations honestly. Approximate city centroids must be labelled as such; they are not GPS.
+The reference is incomplete and includes historical aliases. Candidate population ordering is
+not a resolution rule. A place lookup never replaces the designated business-source read.
 For every record-based task, use scratchpad to save the complete observed relevant records with
 save_static_evidence(payload). The exact payload shape is:
 {"datasets":{"short_id":{"source":{"label":"source name","url":"optional URL","scope":"filters, time range, units, and caveats"},"rows":[{"field":123,"other_field":"value"}]}}}
