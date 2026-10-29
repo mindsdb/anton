@@ -27,20 +27,54 @@ def test_charts_reflow_without_overflow_or_errors(width,height):
         page=browser.new_page(viewport={'width':width,'height':height})
         errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
         page.set_content(specimen())
-        page.wait_for_function('document.querySelectorAll(".chart svg").length === 2')
+        assert page.locator('.chart rect').count()==5
+        assert page.locator('.chart [data-point]').count()==5
         assert not errors
         assert not page.evaluate('document.documentElement.scrollWidth > innerWidth')
         assert page.locator('.chart-data[open]').count()==0
         page.locator('.chart-data summary').first.click()
         assert page.locator('.chart-data[open]').count()==1
         if width==390:
-            label=page.locator('.chart svg text').filter(has_text='A very long category name').first
-            assert label.locator('tspan').count()>=1
+            label=page.locator('.chart .category').filter(has_text='A very long category name').first
+            assert label.evaluate('(el)=>el.scrollWidth<=el.clientWidth')
             assert 'A very long category name' in label.text_content()
         if width>=641:
-            label=page.locator('.chart svg text').filter(has_text='A very long category name').first
-            assert label.locator('tspan').count()>=2
+            label=page.locator('.chart .category').filter(has_text='A very long category name').first
+            assert label.evaluate('(el)=>el.getBoundingClientRect().height>parseFloat(getComputedStyle(el).lineHeight)*1.5')
             assert label.bounding_box()['x']>=page.locator('.chart').first.bounding_box()['x']-1
+        browser.close()
+
+
+@pytest.mark.parametrize('width',[390,640,641,1024,1100,1101,1440])
+def test_compiled_charts_and_complete_data_render_without_javascript(width):
+    html=specimen()
+    assert html.count('<rect ')==5 and html.count('data-point ')==5
+    with playwright.sync_playwright() as p:
+        browser=p.chromium.launch();context=browser.new_context(java_script_enabled=False,viewport={'width':width,'height':900})
+        page=context.new_page();requests=[]
+        page.route('**/*',lambda route:(requests.append(route.request.url),route.abort()))
+        page.set_content(html)
+        assert page.locator('.chart rect').count()==5
+        assert page.locator('.chart [data-point]').count()==5
+        assert page.locator('.chart-data[open]').count()==2
+        assert not page.locator('[data-action=outline]').is_visible()
+        assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
+        assert not requests
+        browser.close()
+
+
+def test_static_point_marks_are_actually_painted_without_javascript():
+    from io import BytesIO
+    from PIL import Image
+    data=Evidence.model_validate({'datasets':{'point':{'source':{'label':'Synthetic mark QA'},'rows':[{'x':1,'y':1}]}}})
+    doc=Document.model_validate({'title':'A point','sections':[{'id':'plot','blocks':[
+        {'type':'chart','title':'Observed point','kind':'scatter','query':'point','x':'x','series':[{'field':'y','label':'Amount'}]}]}]})
+    with playwright.sync_playwright() as p:
+        browser=p.chromium.launch();page=browser.new_page(java_script_enabled=False,viewport={'width':390,'height':900})
+        page.set_content(render(doc,data).html)
+        center=page.locator('[data-point]').evaluate('(el)=>{const p=new DOMPoint(Number(el.getAttribute("x1")),Number(el.getAttribute("y1"))).matrixTransform(el.getScreenCTM());return {x:p.x,y:p.y};}')
+        pixels=Image.open(BytesIO(page.screenshot(full_page=True))).convert('RGB')
+        assert pixels.getpixel((round(center['x']),round(center['y'])))==(18,104,92)
         browser.close()
 
 
@@ -52,7 +86,7 @@ def test_slide_controls_keyboard_exit_and_print_restore_all_content():
         page.get_by_role('button',name='Present',exact=True).click()
         assert page.locator('.presenting').count()==1
         assert page.locator('#comparison:visible').count()==1
-        page.wait_for_function('document.querySelectorAll(".chart svg").length===2')
+        assert page.locator('.chart [data-point]').count()==5
         page.get_by_role('button',name='Next slide').click()
         assert page.locator('#conclusion:visible').count()==1
         page.emulate_media(media='print')
@@ -116,10 +150,9 @@ def test_percentage_geometry_and_axis_use_the_same_units(kind):
         browser=p.chromium.launch();page=browser.new_page(viewport={'width':390,'height':844});errors=[]
         page.on('pageerror',lambda error:errors.append(str(error)))
         page.set_content(render(doc,data).html)
-        page.wait_for_function('document.querySelectorAll(".chart svg").length===1')
-        assert any('%' in text for text in page.locator('.chart svg text').all_text_contents())
-        marks=page.locator('.chart rect' if kind=='bar' else '.chart circle')
-        dimensions=marks.evaluate_all('(els)=>els.map(el=>el.getAttribute("width") || el.getAttribute("cy"))')
+        assert any('%' in text for text in page.locator('.chart .x-ticks span' if kind=='bar' else '.chart .y-ticks span').all_text_contents())
+        marks=page.locator('.chart rect' if kind=='bar' else '.chart [data-point]')
+        dimensions=marks.evaluate_all('(els)=>els.map(el=>el.getAttribute("width") || el.getAttribute("y1"))')
         if kind=='bar':
             assert dimensions[0]==dimensions[1] and dimensions[2]==dimensions[3]
         else:
@@ -135,7 +168,7 @@ def test_dark_report_prints_with_legible_text_and_chart_colors():
     with playwright.sync_playwright() as p:
         browser=p.chromium.launch();page=browser.new_page(viewport={'width':1440,'height':900})
         page.set_content(specimen(dark=True))
-        page.wait_for_function('document.querySelectorAll(".chart svg").length===2')
+        assert page.locator('.chart rect').count()==5
         page.emulate_media(media='print')
         color=page.locator('.source').first.evaluate('(el)=>getComputedStyle(el).color')
         assert 1.05/(luminance(color)+.05)>=4.5
