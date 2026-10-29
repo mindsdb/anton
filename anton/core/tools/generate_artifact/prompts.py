@@ -320,11 +320,13 @@ _BROWSER_GATE_SERVED = """\
 # `console.error`, which the render check counts, and `reportError`, which
 # fires the window `error` event the app preview's error list is built from.
 # A `Map` keeps a view titled like an `Object` property ("constructor") from
-# finding a setup it never registered. `el` may be missing, and `fail` must
-# not throw from inside the `catch`, or the error escapes the view.
+# finding a setup it never registered. A title two scripts register fails
+# every view under it, instead of drawing the second view's setup in both.
+# `el` may be missing, and `fail` must not throw from inside the `catch`, or
+# the error escapes the view.
 VIEW_HELPER_JS = (
     "const viewSetups = new Map(); "
-    "function defineView(name, setup) { viewSetups.set(name, setup); } "
+    "function defineView(name, setup) { viewSetups.set(name, viewSetups.has(name) ? () => { throw new Error('two scripts defined this view'); } : setup); } "
     "function runView(name, el) { const fail = (err) => { "
     "const why = err && err.message ? err.message : String(err); "
     "if (el) { el.setAttribute('data-view-failed', name); el.textContent = name + ' could not load.'; } "
@@ -346,13 +348,22 @@ _CAUGHT_ERRORS = """\
   helper alone in the page's first inline `<script>`:
   `""" + VIEW_HELPER_JS + """`
   Give each view an inline `<script>` of its own that holds only its setup,
-  registered under the view's title as the page shows it. The setup takes
-  the view's element and may be `async`:
+  registered under the view's title as the page shows it. Give each view a
+  title no other view on the page uses: two scripts that register one title
+  fail both views. The setup takes the view's element and may be `async`:
   `<script>defineView('Shipment map', (el) => { /* draw the map */ });</script>`.
+  Declare nothing else at a view script's top level: every function and
+  constant the view uses goes inside its setup. A page's scripts share one
+  global scope, so two views' top-level `function render` silently swap, and
+  one view draws the other's chart with no error.
   Shared code, such as the data and formatters, goes in scripts before the
-  views'. The page's last script starts each view by its title, on load or
-  on its tab's first visit:
-  `runView('Shipment map', document.getElementById('world-map'));`.
+  views'. The page's last script starts each view by its title once the
+  page has parsed, on load or on its tab's first visit:
+  `addEventListener('DOMContentLoaded', () => { runView('Shipment map', document.getElementById('world-map')); });`.
+  A `<script type="module">` runs after every classic script, so a view it
+  registers exists only by then. Keep the functions the page's HTML calls,
+  such as a tab's `showPage`, outside that listener, where an `onclick`
+  attribute finds them.
   The browser parses each `<script>` on its own, so a syntax error in one
   view's script stops only that view: it shows a plain-text message in its
   place, and every other view still draws. A view whose setup throws or

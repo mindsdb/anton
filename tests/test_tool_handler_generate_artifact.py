@@ -1100,6 +1100,7 @@ async def test_a_view_whose_script_did_not_parse_comes_back_to_repair_in_its_own
     instruction = " ".join(body["instruction"].split())
     for step in ('When a view failed with "no script defined this view", its own script did not parse',
                  "fix that view's script",
+                 'When views failed with "two scripts defined this view", two views share that title',
                  "keep each view's code in a `<script>` of its own",
                  "never merges views' scripts"):
         assert step in instruction, step

@@ -87,8 +87,12 @@ def test_each_views_code_goes_in_a_script_of_its_own_and_starts_by_name():
             "Put the helper alone in the page's first inline `<script>`",
             "Give each view an inline `<script>` of its own that holds only its setup",
             "`<script>defineView('Shipment map', (el) => { /* draw the map */ });</script>`",
-            "The page's last script starts each view by its title",
-            "`runView('Shipment map', document.getElementById('world-map'));`",
+            "The page's last script starts each view by its title once the page has parsed",
+            "`addEventListener('DOMContentLoaded', () => { runView('Shipment map', document.getElementById('world-map')); });`",
+            "A `<script type=\"module\">` runs after every classic script, so a view it registers exists only by then",
+            "Give each view a title no other view on the page uses",
+            "Keep the functions the page's HTML calls, such as a tab's `showPage`, outside that listener",
+            "Declare nothing else at a view script's top level: every function and constant the view uses goes inside its setup",
             "a syntax error in one view's script stops only that view",
             "Never put two views' code in one script, and never pass a setup function to `runView`",
             "Inline your own CSS and all JS, each view's code in a `<script>` of its own",
@@ -220,6 +224,11 @@ def test_the_skill_carries_the_builders_helper_word_for_word():
         "Write each view's setup as its own string, one `defineView(...)` call per view",
         "for js in [js_helper, data_js, js_shared, *view_js, js_start]",
         "Never join two views' code into one `<script>`",
+        "the `runView` calls for the views shown on load go inside `addEventListener('DOMContentLoaded', ...)`, and the tab functions stay outside it",
+        "A `<script type=\"module\">` runs after every classic script, so a view it registers exists only by then",
+        "Keep the functions the page's HTML calls, such as a tab's `showPage`, outside that listener",
+        "Give each view a title no other view on the page uses",
+        "Declare nothing else at a view script's top level: every function and constant the view uses goes inside its setup",
         "`initChartsFor(name)` starts each view on that tab by its title with `runView(title, el)` (item 10)",
     ):
         assert rule in flat, rule
@@ -237,7 +246,8 @@ const errors = [], reported = [], unparsed = [];
 const element = (id) => ({id, attrs: {}, textContent: 'chart',
   setAttribute(k, v) { this.attrs[k] = v; }});
 const elements = {map: element('world-map'), globe: element('globe'), chart: element('trend-chart'),
-  atlas: element('atlas'), odd: element('odd')};
+  atlas: element('atlas'), odd: element('odd'), sales: element('sales-trend'), ops: element('ops-trend'),
+  lanes: element('lanes'), ports: element('ports')};
 const page = vm.createContext({
   elements,
   console: {error: (...args) => errors.push(args)},
@@ -250,9 +260,15 @@ const scripts = [
   "defineView('Trend chart', (el) => { el.textContent = 'drawn'; });",
   "defineView('Atlas', async () => { await null; throw new Error('atlas fetch failed'); });",
   "defineView('Missing panel', (el) => { el.textContent = 'x'; });",
+  "defineView('Trend', (el) => { el.textContent = 'sales trend'; });",
+  "defineView('Trend', (el) => { el.textContent = 'ops trend'; });",
+  "defineView('Lanes', (el) => { function render(e) { e.textContent = 'lanes drawn'; } render(el); });",
+  "defineView('Ports', (el) => { function render(e) { e.textContent = 'ports drawn'; } render(el); });",
   "runView('Shipment map', elements.map); runView('Globe', elements.globe);" +
   " runView('Trend chart', elements.chart); runView('Atlas', elements.atlas);" +
-  " runView('Missing panel', null); runView('constructor', elements.odd); after = 'script went on';",
+  " runView('Missing panel', null); runView('constructor', elements.odd);" +
+  " runView('Trend', elements.sales); runView('Trend', elements.ops);" +
+  " runView('Lanes', elements.lanes); runView('Ports', elements.ports); after = 'script went on';",
 ];
 for (const source of scripts) {
   try { vm.runInContext(source, page); } catch (err) { unparsed.push(err.name); }
@@ -261,7 +277,8 @@ const state = (el) => [el.attrs['data-view-failed'] || null, el.textContent];
 setTimeout(() => process.stdout.write(JSON.stringify({
   errors, reported, unparsed, after: page.after,
   map: state(elements.map), globe: state(elements.globe), chart: state(elements.chart),
-  atlas: state(elements.atlas), odd: state(elements.odd),
+  atlas: state(elements.atlas), odd: state(elements.odd), sales: state(elements.sales), ops: state(elements.ops),
+  lanes: state(elements.lanes), ports: state(elements.ports),
 })), 20);
 """
 
@@ -287,10 +304,18 @@ def test_the_helper_keeps_a_failed_view_to_itself():
     # A title that names an `Object` property finds no setup it never registered.
     assert out["odd"] == ["constructor", "constructor could not load."]
     assert [args[0].split(":")[0] for args in out["errors"]] == [
-        "Shipment map failed", "Globe failed", "Missing panel failed", "constructor failed", "Atlas failed",
+        "Shipment map failed", "Globe failed", "Missing panel failed", "constructor failed",
+        "Trend failed", "Trend failed", "Atlas failed",
     ]
+    # Two scripts registered "Trend": both views fail by name, neither draws the other's chart.
+    assert out["sales"] == ["Trend", "Trend could not load."]
+    assert out["ops"] == ["Trend", "Trend could not load."]
+    assert out["errors"][4] == ["Trend failed: two scripts defined this view"]
+    # Each setup keeps its own `render` inside it, so neither view draws the other's chart.
+    assert out["lanes"] == [None, "lanes drawn"]
+    assert out["ports"] == [None, "ports drawn"]
     assert out["errors"][1] == ["Globe failed: no script defined this view"]
     assert all(len(args) == 1 for args in out["errors"])
     assert out["reported"][0].startswith("Shipment map: ")
     assert out["reported"][1] == "Globe: no script defined this view"
-    assert out["reported"][4] == "Atlas: atlas fetch failed"
+    assert out["reported"][6] == "Atlas: atlas fetch failed"
