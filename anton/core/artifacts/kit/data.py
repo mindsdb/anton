@@ -123,3 +123,35 @@ def fmt(v: Any, format: str | None = None, currency: str = "USD") -> str:
     if isinstance(v, float) and not v.is_integer():
         return f"{v:,.2f}".rstrip("0").rstrip(".")
     return f"{int(v):,}"
+
+
+def profile(data: Any, name: str = "data", max_values: int = 12) -> str:
+    """A compact profile of a table: row count, then per column its type, distinct values with counts
+    (for few-valued columns) or range and total (for numbers) and span (for dates). Printed and returned.
+    Use it before computing, to see which statuses, categories and periods the data really holds."""
+    from collections import Counter
+
+    rows = records(data)
+    lines = [f"{name}: {len(rows)} rows"]
+    for f in fields(rows):
+        vals = [r.get(f) for r in rows]
+        present = [v for v in vals if v is not None and v != ""]
+        missing = len(vals) - len(present)
+        tail = f", {missing} empty" if missing else ""
+        if present and all(is_number(v) for v in present):
+            lines.append(f"  {f}: number, min {min(present):,.6g}, max {max(present):,.6g}, sum {sum(present):,.6g}{tail}")
+            continue
+        texts = [str(v) for v in present]
+        if texts and all(len(t) >= 10 and t[:4].isdigit() and t[4] == "-" for t in texts):
+            lines.append(f"  {f}: date, {min(texts)[:10]} .. {max(texts)[:10]}, {len(set(texts))} distinct{tail}")
+            continue
+        counts = Counter(texts)
+        if len(counts) <= max_values:
+            shown = ", ".join(f"{k!r} x{n}" for k, n in counts.most_common())
+            lines.append(f"  {f}: {len(counts)} values: {shown}{tail}")
+        else:
+            sample = ", ".join(repr(k) for k, _ in counts.most_common(4))
+            lines.append(f"  {f}: {len(counts)} distinct, e.g. {sample}{tail}")
+    out = "\n".join(lines)
+    print(out)
+    return out

@@ -680,6 +680,22 @@ class Page:
             self._cursor = saved
 
     @contextmanager
+    def beside(self, id: str, *, widths: list | None = None):
+        """New blocks go next to block `id`: it and they share a row (a grid), the block itself
+        unchanged. On phones they stack."""
+        container, i = self._locate(id)
+        block = container[i]
+        grid = {"type": "grid", "columns": 2, "children": [block], "id": self._next_id()}
+        if widths:
+            grid["widths"] = widths
+        container[i] = grid
+        with self._into(grid["children"]):
+            yield self
+        grid["columns"] = max(1, len(grid["children"]))
+        if widths and len(widths) != grid["columns"]:
+            grid.pop("widths")
+
+    @contextmanager
     def inside(self, id: str):
         """New blocks go at the end of container block `id` (a section, grid or slide)."""
         b = self.block(id)

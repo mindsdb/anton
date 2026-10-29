@@ -399,23 +399,21 @@
           .attr('x', function () { var l = this.__l; return l.x + l.dx / k; })
           .attr('y', function () { var l = this.__l; return l.y + l.dy / k; });
       });
+    // Zoom: double-click (shift to zoom out), pinch, or ctrl/cmd + wheel; drag pans. Buttons would
+    // leave the map zoomed in for whoever clicks through the page's controls.
     svg.call(zoom).on('dblclick.zoom', null);
-    svg.style('touch-action', 'pan-y');
-    var tools = AK.el('div', 'ak-geo-tools');
-    [['+', 1.6, AK.t('zoomIn')], ['−', 1 / 1.6, AK.t('zoomOut')]].forEach(function (z) {
-      var btn = AK.el('button', null, z[0]);
-      btn.type = 'button'; btn.setAttribute('aria-label', z[2]); btn.title = z[2];
-      btn.addEventListener('click', function () { svg.transition().duration(250).call(zoom.scaleBy, z[1]); });
-      tools.appendChild(btn);
+    svg.on('dblclick', function (e) {
+      var p = d3.pointer(e, svg.node());
+      svg.transition().duration(250).call(zoom.scaleBy, e.shiftKey ? 1 / 1.8 : 1.8, p);
     });
-    box.appendChild(tools);
+    svg.style('touch-action', 'pan-y');
     // Flow dots ride on a canvas above the map: it repaints alone, so motion stays cheap.
     if (flows.length) {
       var dpr = Math.min(2, window.devicePixelRatio || 1);
       var fx = document.createElement('canvas');
       fx.width = Math.round(width * dpr); fx.height = Math.round(height * dpr);
       fx.style.cssText = 'position:absolute;left:0;top:0;width:' + width + 'px;height:' + height + 'px;pointer-events:none';
-      box.insertBefore(fx, tools);
+      box.appendChild(fx);
       flows.forEach(function (f) { f.len = f.path.getTotalLength(); });
       animateFlows(box, fx, dpr, flows, st, function () { return transform; }, view);
     }

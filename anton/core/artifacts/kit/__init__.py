@@ -16,11 +16,12 @@ Values are drawn from the data you pass in; nothing is re-typed. `kit.load(path)
 page for edits (`outline()`, `after(id)`, `update(id, ...)`, `remove(id)`).
 """
 
+from .data import profile
 from .geocode import geocode, geocode_many
 from .page import (Deck, KitError, Page, bars, col, kpi, load, marker, metric, milestones, points, regions,
                    routes, rows)
 
 __all__ = [
     "Page", "Deck", "load", "KitError", "kpi", "metric", "col", "points", "routes", "regions", "bars",
-    "milestones", "marker", "rows", "geocode", "geocode_many",
+    "milestones", "marker", "rows", "geocode", "geocode_many", "profile",
 ]

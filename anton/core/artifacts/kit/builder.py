@@ -60,7 +60,9 @@ deck = kit.Deck(title, subtitle, lang=...); with deck.slide(title, subtitle, lay
 page.save(folder)                        # prints the outline (with its figures) and WARNINGS
 page = kit.load(folder); print(page.outline())   # edit a saved page:
 with page.after("b3"): page.table(...)   # page.update("b2", title=...), page.set(theme="dark"), page.remove(id)
+with page.beside("b2"): page.globe(...)  # next to block b2, in one row (b2 unchanged)
 kit.geocode("City, Country") -> (lat, lon) or None   # offline gazetteer of towns
+kit.profile(df, "name")                  # prints rows, columns, distinct values with counts, ranges
 ```
 Colours: tones good/bad/warn/info/accent/neutral or any CSS colour; categories get a consistent palette.
 Values must be numbers (not formatted strings); dates as "YYYY-MM-DD" strings or datetimes.'''
@@ -86,7 +88,11 @@ one line each the elements the request asks for (views, figures, interactions, l
 those.
 2. One scratchpad cell that fetches every table the page needs, computes every figure, prints \
 those figures, and builds and saves the page with `page.save(<folder>)`. Name the scratchpad `page` \
-unless one listed below already holds the data.
+unless one listed below already holds the data. When the figures depend on statuses, categories, \
+periods, links between tables or derived values (late, at risk, affected, cost of an option, change \
+between scenarios), split it: the first cell fetches every table and runs `kit.profile(df, name)` on \
+each (columns, distinct values with counts, ranges); the second computes, prints each figure with \
+its definition, and builds the page.
 3. Read the cell's output: the page outline with its figures, any WARNINGS, and the browser check \
 of the page. Fix anything wrong (an error, a warning, a wrong or missing figure, a failed check) in \
 one more cell.
