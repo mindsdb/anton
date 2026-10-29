@@ -267,6 +267,36 @@ def _stage_skills(skills: dict | None) -> Path:
     return dest
 
 
+def _always_on_skills(skills: dict | None) -> list[dict]:
+    """``[{"name", "body"}]`` for the request's skills marked ``always_on``.
+
+    Same untrusted wire data as _stage_skills, which still stages these for
+    recall: an entry with a bad slug or a SKILL.md that does not parse is
+    skipped, never fails the turn. Read from the wire even when the org tree is
+    mounted, since only the request says which skills apply to this user.
+    """
+    from anton.core.tools.skill_format import parse_skill_text, validate_name
+
+    out: list[dict] = []
+    entries = skills if isinstance(skills, dict) else {}
+    for slug, entry in entries.items():
+        if not isinstance(entry, dict) or entry.get("always_on") is not True:
+            continue
+        files = entry.get("files")
+        text = files.get("SKILL.md") if isinstance(files, dict) else None
+        try:
+            validate_name(str(slug))
+        except ValueError:
+            continue
+        parsed = parse_skill_text(text, str(slug)) if isinstance(text, str) else None
+        body = parsed.instructions.strip() if parsed is not None else ""
+        if not body:
+            logger.warning("skills: always-on %r has no readable SKILL.md body", slug)
+            continue
+        out.append({"name": parsed.name or str(slug), "body": body})
+    return out
+
+
 #: Per-file cap on a reported draft. Skills are small text, so the cap only
 #: catches a mispackaged blob before it reaches the reply stream. An oversized
 #: SKILL.md drops the whole draft: a truncated procedure is worse than none.
@@ -711,6 +741,7 @@ def build_cloud_chat_session(
     from anton.core.backends.local import local_scratchpad_runtime_factory
     from anton.core.llm.client import LLMClient
     from anton.core.llm.identity import build_runtime_context
+    from anton.core.memory.always_on_skills import render_always_on_skills
     from anton.core.session import ChatSession, ChatSessionConfig, SystemPromptContext
     from anton.workspace import Workspace
 
@@ -865,7 +896,9 @@ def build_cloud_chat_session(
             runtime_context=build_runtime_context(settings, cloud_datasource=request.datasource),
             # The delivery half and the credential half of the prompt context;
             # the desktop harness injects its own via `_turn_style_context`.
-            suffix=_POD_PROMPT_SUFFIX,
+            # Org and team skills cowork marks always-on follow, so they hold
+            # on every turn rather than only when recalled (ENG-3787).
+            suffix=_POD_PROMPT_SUFFIX + render_always_on_skills(_always_on_skills(request.skills)),
         ),
         # WHERE the user was, which this pod cannot know on its own — only the
         # deployment does, so cowork sends it (ENG-1459). Absent when the pod is
