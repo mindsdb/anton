@@ -23,6 +23,7 @@ async def test_fresh_review_sees_request_evidence_previous_page_and_screenshot(t
         seen.append(kwargs)
         yield response(True,[])
     st=state(tmp_path,VALID);st.session._llm.code_stream=stream
+    st.static_source_reads=['SCRUBBED READ: partition=Current; timestamp < final_bucket_start']
     recorded=[]
     st.trace_log=SimpleNamespace(llm_call=lambda **kwargs:recorded.append(kwargs),node=lambda *a,**k:None)
     image=RenderScreenshot(media_type='image/png',data=base64.b64encode(b'synthetic image bytes').decode()) if with_screenshot else None
@@ -32,6 +33,7 @@ async def test_fresh_review_sees_request_evidence_previous_page_and_screenshot(t
     messages=seen[0]['messages'][0]['content']
     assert 'Make a report' in messages[0]['text'] and 'EXACT EVIDENCE' in messages[0]['text']
     assert 'PREVIOUS COMPOSITION' in messages[0]['text']
+    assert st.static_source_reads[0] in messages[0]['text']
     assert '"browser_check":{"status":"passed"}' in messages[0]['text']
     if with_screenshot:
         assert messages[1]['type']=='image'

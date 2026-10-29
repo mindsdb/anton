@@ -202,6 +202,7 @@ async def test_collector_rejects_failed_source_and_does_not_accept_stale_evidenc
     st=state(tmp_path,VALID);st.session._llm.plan_stream=stream;st.session._llm.code_stream=stream
     result=await module.collect(st)
     assert 'designated source is missing' in result
+    assert json.loads(st.static_source_reads[0])['result']=='Error: source missing'
     assert not (tmp_path/'index.html').exists()
 
 
@@ -335,6 +336,16 @@ def test_source_contract_context_is_bounded_and_labels_omissions(tmp_path):
     assert '1 read procedures omitted' in handoff
 
 
+def test_source_receipt_keeps_complete_recent_operations_and_labels_omissions(tmp_path):
+    from anton.core.tools.generate_artifact.static_v2.prompts import context
+    st=state(tmp_path,VALID)
+    st.static_source_reads=['older '+ 'A'*20_000,'recent '+ 'B'*20_000,'latest operation']
+    handoff=context(st).split('Actual source operations',1)[1].split('Attached files:',1)[0]
+    assert len(handoff)<32_256 and 'A'*20_000 not in handoff
+    assert handoff.index('recent ')<handoff.index('latest operation')
+    assert '1 operations omitted' in handoff
+
+
 async def test_provided_records_use_the_bound_path_and_preserve_scalar_types(tmp_path,monkeypatch):
     import importlib
     from decimal import Decimal
@@ -362,6 +373,10 @@ async def test_provided_records_use_the_bound_path_and_preserve_scalar_types(tmp
     evidence=await module.collect(st)
     assert evidence.datasets['provided'].rows==[{'id':'001','value':Decimal('0.1234567890123456789'),'active':True}]
     assert len(paths)==2 and paths[0]==paths[1]
+    reads=[json.loads(r) for r in st.static_source_reads]
+    assert len(reads)==2 and reads[0]['arguments']['code']==code
+    assert reads[0]['acquisition']==reads[1]['acquisition']
+    assert 'save_static_evidence' not in reads[0]['arguments']['code']  # No injected host helper.
     assert len(list((folder/'.static').glob('evidence-*.json')))==1
     import os
     assert Path(os.environ['STATIC_EVIDENCE_PATH']).read_text()==payload
