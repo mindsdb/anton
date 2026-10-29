@@ -321,7 +321,7 @@ async def run(state):
             if bound_data:
                 # Only a page with a map or globe pays for the place lookup
                 found = places.index(bound_data) if places.needed(response.content) else None
-                html = observed_data.bind(html, bound_data, found)
+                html = observed_data.bind(html, bound_data, found, checks=components)
         except ValueError as exc:
             messages += [{"role": "assistant", "content": response.content},
                          {"role": "user", "content": str(exc)}]

@@ -119,3 +119,21 @@ async def test_places_are_bound_only_for_a_page_with_a_map(tmp_path, monkeypatch
                      artifact_type="html-app", artifact_path=tmp_path, slug="page", act_first=True)
     assert (await fast_static.run(state))["status"] == "generated"
     assert ("window.ARTIFACT_PLACES=" in (tmp_path / "index.html").read_text()) is bound
+
+
+@pytest.mark.parametrize("reply,checked", [(PROGRAM, True), (component_page.FALLBACK, False)])
+async def test_component_pages_carry_the_figure_checks_and_html_pages_do_not(tmp_path, monkeypatch, reply, checked):
+    monkeypatch.setenv("ANTON_STATIC_COMPONENT_WRITER", "on")
+    (tmp_path / "observed-data.json").write_text(json.dumps({"revenue": [{"month": "m1", "amount": 42}]}))
+    html = '<html><head><meta name="viewport" content="width=device-width"></head><body>Revenue</body></html>'
+    replies = iter([reply, html])
+    async def stream(**kwargs):
+        yield StreamComplete(LLMResponse(content=next(replies)))
+    monkeypatch.setattr(fast_static.verifiers, "verify_frontend_live", lambda *a, **kw: BrowserCheck(status="passed"))
+    state = GenState(session=SimpleNamespace(history=[], _llm=SimpleNamespace(code_stream=stream)),
+                     artifact_type="html-app", artifact_path=tmp_path, slug="page", act_first=True)
+    assert (await fast_static.run(state))["status"] == "generated"
+    page = (tmp_path / "index.html").read_text()
+    assert ('id="cowork-figure-checks"' in page) is checked
+    assert ("Figure check: " in page) is checked
+    assert "zeroReason" in component_page.SYSTEM

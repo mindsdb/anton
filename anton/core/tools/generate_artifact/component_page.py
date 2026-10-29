@@ -43,6 +43,11 @@ sections are any of:
 - {type:'timeline',title,caption?,items:[{time,label,detail?}]} for actual event milestones.
 - {type:'text',title,text} for concise narrative or an explicit source limitation.
 
+The host reconciles shown figures with the data: a metric, lead value, table column, chart, map or
+timeline that shows only 0 or nothing is returned for repair, and so is a sum that counts a source's
+TOTAL ROWS beside their parts. When zero or empty is the true answer, give that metric, lead, table
+column or section zeroReason: a short reason in the user's language, shown only when it applies.
+
 Use normal JavaScript to select, join, group, sort and transform the complete bound data into
 these views. A filter's render callback must update the requested views consistently. For edits,
 preserve existing correct content and interactions. No DOM manipulation, CSS, HTML, imports,
@@ -85,7 +90,8 @@ def document(program):
             "render receives an object keyed by control ids, never a string. Read the control's value by "
             "its id, for example render: ({view}) => view === 'orders' ? ... or selection.view === 'orders'."
         )
-    runtime = "\n".join((HERE / name).read_text() for name in ("presentation_contract.js", "presentation.js", "presentation_data.js", "presentation_geography.js"))
+    runtime = "\n".join((HERE / name).read_text() for name in ("presentation_contract.js", "presentation.js", "presentation_data.js", "presentation_geography.js",
+                                                     "presentation_reconcile.js"))
     return ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
             '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
             "<title>Artifact</title><style>" + css + "</style></head><body>"

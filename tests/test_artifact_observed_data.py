@@ -100,3 +100,61 @@ def test_ordinary_data_columns_are_not_credentials(key):
 @pytest.mark.parametrize("key", ["supply_api_key", "MY_API_TOKEN", "X-Auth-Token", "db_password", "clientSecret"])
 def test_credential_names_are_recognized_in_common_spellings(key):
     assert observed_data.credential_bearing({"source": {key: "value"}})
+
+
+def _sales_with_totals():
+    rows = []
+    for month in ["2030-01", "2030-02", "2030-03"]:
+        for store in ["North", "South"]:
+            parts = [{"month": month, "store": store, "category": name, "sales": sales, "returns": returns, "margin_pct": 31.5}
+                     for name, sales, returns in [("Books", 120, 4), ("Games", 75, 2), ("Music", 40, 1)]]
+            rows += parts + [{"month": month, "store": store, "category": "Total", "sales": 235, "returns": 7, "margin_pct": 30.0}]
+    return rows
+
+
+def test_rows_that_sum_their_group_are_marked_in_the_contract():
+    rows = _sales_with_totals()
+    assert observed_data.total_rows(rows) == [
+        {"field": "category", "value": "Total", "by": ["month", "store"], "measures": ["sales", "returns"]}]
+    _, text = observed_data.collect({"sales": rows})
+    assert 'TOTAL ROWS: elements where "category" = "Total" hold the sum of the other elements with the same month, store for sales, returns.' in text
+
+
+def test_ordinary_rows_and_a_lone_nonzero_part_are_not_totals():
+    plain = [r for r in _sales_with_totals() if r["category"] != "Total"]
+    assert observed_data.total_rows(plain) == []
+    # Only one category has returns, so its row equals "the sum" of the others without being a total.
+    lone = [dict(r, returns=4 if r["category"] in {"Books", "Total"} else 0) for r in _sales_with_totals()]
+    assert [m["value"] for m in observed_data.total_rows(lone)] == ["Total"]
+    _, text = observed_data.collect({"sales": plain})
+    assert "TOTAL ROWS" not in text
+    # The third line number equals 1 + 2 in every order, but quantities and amounts do not add up.
+    lines = [{"order": order, "line": line, "item": item, "quantity": quantity, "amount": quantity * 4.5}
+             for order in ["A-1", "A-2", "A-3"]
+             for line, item, quantity in [(1, "bolt", 30), (2, "nut", 12), (3, "washer", 50)]]
+    assert observed_data.total_rows(lines) == []
+
+
+def test_a_sum_that_includes_total_rows_is_reported_with_its_parts():
+    data = {"key": {"sales": _sales_with_totals()}}
+    found = {item["value"]: item for item in observed_data.double_counts(data)}
+    whole = found[2 * 6 * 235]
+    assert whole["parts"] == 6 * 235 and whole["measure"] == "sales" and whole["scope"] == ""
+    assert whole["path"] == 'window.ARTIFACT_DATA["key"]["sales"]'
+    assert (whole["field"], whole["marker"]) == ("category", "Total")
+    assert found[2 * 2 * 235]["scope"] == 'month = "2030-01"'
+    # Correct sums, and sums too small to tell apart from other counts, are never reported.
+    assert 6 * 235 not in found and all(abs(value) >= 10 for value in found)
+    assert observed_data.double_counts({"key": {"sales": [r for r in _sales_with_totals() if r["category"] != "Total"]}}) == []
+
+
+def test_figure_facts_are_embedded_only_when_asked_and_stripped_with_the_data():
+    value = {"sales": _sales_with_totals()}
+    data = {observed_data.identity(value): value}
+    page = "<!doctype html><html><head></head><body></body></html>"
+    assert 'id="cowork-figure-checks"' not in observed_data.bind(page, data)
+    checked = observed_data.bind(page, data, checks=True)
+    facts = json.loads(checked.split('id="cowork-figure-checks" type="application/json" data-cowork-observed>')[1].split("</script>")[0])
+    assert 2 * 6 * 235 in [item["value"] for item in facts["doubleCounts"]]
+    assert observed_data.previous_data(checked) == data
+    assert observed_data.strip_binding(checked) == page
