@@ -54,6 +54,14 @@
       panel = AK.el('div', 'ak-detail-inline');
       c.body.appendChild(panel);
     }
+    // Every milestone as text too (date, event, details): readable without hovering, by screen
+    // readers and on paper. A click on an entry focuses that milestone above.
+    var listHost = null;
+    var nMs = mss.reduce(function (a, L) { return a + AK.data(L.data).length; }, 0);
+    if (mss.length && b.list !== false && nMs <= 80) {
+      listHost = AK.el('div', 'ak-tl-list');
+      c.body.appendChild(listHost);
+    }
     var selected = null;
     AK.watchSize(view, function (w) {
       try { view.innerHTML = ''; view.appendChild(draw(w)); } catch (e) { AK.fail(view, e); }
@@ -226,6 +234,7 @@
         all.forEach(function (x) {
           x.node.setAttribute('stroke', x === m ? AK.css('--ak-text') : AK.css('--ak-surface'));
           x.node.setAttribute('stroke-width', x === m ? 3 : 2);
+          if (x.listRow) x.listRow.classList.toggle('ak-selected', x === m);
         });
         if (!panel || !m) return;
         panel.innerHTML = '';
@@ -257,6 +266,29 @@
         mark(AK.selected(b.link));
       }
       // Start with the latest milestone shown in the panel, so the detail view is never empty.
+      if (listHost) {
+        listHost.innerHTML = '';
+        var wrapL = AK.el('div', 'ak-table-wrap');
+        var tbl = AK.el('table', 'ak-table');
+        var L0 = mss[0];
+        var extra = (L0.tooltip || []).filter(function (f) { return f !== L0.label && f !== L0.date; }).slice(0, 2);
+        var hr = AK.el('tr');
+        [R.keys.length > 1 ? (b.row_label || AK.prettify(L0.row)) : null, AK.label(L0, L0.date), L0.label ? AK.label(L0, L0.label) : null]
+          .concat(extra.map(function (f) { return AK.label(L0, f); })).forEach(function (h) { if (h != null) hr.appendChild(AK.el('th', null, h)); });
+        var thd = AK.el('thead'); thd.appendChild(hr); tbl.appendChild(thd);
+        var tbd = AK.el('tbody');
+        ordered.forEach(function (m) {
+          var tr = AK.el('tr', 'ak-clickable');
+          if (R.keys.length > 1) tr.appendChild(AK.el('td', null, R.labels[m.k]));
+          tr.appendChild(AK.el('td', null, AK.fmt(m.r[m.L.date], 'date')));
+          if (m.L.label) tr.appendChild(AK.el('td', null, m.r[m.L.label] == null ? '' : String(m.r[m.L.label])));
+          extra.forEach(function (f) { tr.appendChild(AK.el('td', null, AK.fmt(m.r[f], AK.fieldFormat(m.L, f) || 'auto'))); });
+          tr.addEventListener('click', function () { focus(m); });
+          m.listRow = tr;
+          tbd.appendChild(tr);
+        });
+        tbl.appendChild(tbd); wrapL.appendChild(tbl); listHost.appendChild(wrapL);
+      }
       if (all.length) {
         var keep = all.filter(function (m) { return (m.k + '|' + m.r[m.L.date] + '|' + (m.L.label ? m.r[m.L.label] : '')) === selected; })[0];
         var latest = all.slice().sort(function (a, z) { return t(z.r[z.L.date]) - t(a.r[a.L.date]); })[0];

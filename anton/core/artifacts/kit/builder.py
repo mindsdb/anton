@@ -163,7 +163,8 @@ milestones or Gantt on `page.timeline`; options or scenarios side by side on `pa
 and breakdowns on `page.chart`; records on `page.table`.
 - Records the request names in the plural ("the late shipments", "the exceptions", "the orders \
 that slip") are listed (ids and the facts asked about), not only counted; "how many X" asks for a \
-count, not a list.
+count, not a list. Periods or items that meet a condition ("the weeks over capacity", "the lanes \
+over budget") are shown both ways: how many, and which.
 - Things in motion (shipments, vehicles, people) with a known current position: draw each route \
 from its origin via its current position to its destination (`via_lat`/`via_lon`), and mark the \
 current position with a point.
