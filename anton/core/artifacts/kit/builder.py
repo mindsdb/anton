@@ -80,7 +80,8 @@ loads a skill's instructions (for example how to query a data source); `finish` 
 You work alone: nobody answers questions, so decide sensibly and say what you assumed in `finish`.
 
 How to work (fast: every round costs the user time):
-1. If a skill below describes the data source you need, recall it first (nothing else in that reply).
+1. If a skill describes the data source you need and it is not already loaded in the brief below, \
+recall it first (nothing else in that reply).
 2. One scratchpad cell that fetches every table the page needs, computes every figure, prints \
 those figures, and builds and saves the page with `page.save(<folder>)`. Name the scratchpad `page` \
 unless one listed below already holds the data.
@@ -185,6 +186,46 @@ def _context_sections(session: "ChatSession") -> str:
     return "\n\n".join(parts)
 
 
+def _recalled_labels(session: "ChatSession") -> list[str]:
+    """Skills the conversation recalled so far (their bodies live in the main history, which the
+    builder does not see)."""
+    labels: list[str] = []
+    for msg in getattr(session, "history", None) or []:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "recall_skill":
+                label = str((block.get("input") or {}).get("label") or "").strip()
+                if label and label not in labels:
+                    labels.append(label)
+    return labels
+
+
+def _skill_text(session: "ChatSession", label: str) -> str | None:
+    """A skill's full procedure, always (the main agent's recall_skill sends a stub once it is in
+    the main history, and the builder has its own history)."""
+    store = getattr(session, "_skill_store", None)
+    if store is None:
+        return None
+    try:
+        skill = store.load(label)
+        if skill is None:
+            from difflib import get_close_matches
+
+            labels = [s.get("label") for s in store.list_summaries() if s.get("label")]
+            close = get_close_matches(label, labels, n=1)
+            skill = store.load(close[0]) if close else None
+        if skill is None:
+            return None
+        from anton.core.tools.recall_skill import _format_skill_response
+
+        return _format_skill_response(skill)
+    except Exception:
+        logger.debug("page builder: could not load skill %s", label, exc_info=True)
+        return None
+
+
 def _existing_page(folder: Path) -> str:
     page = folder / "index.html"
     if not page.exists():
@@ -226,6 +267,12 @@ def kickoff(*, folder: Path, user_request: str, user_language: str, agent_unders
     pads = _pads(session)
     if pads:
         sections.append(pads)
+    for label in _recalled_labels(session):
+        if label.startswith("build-"):
+            continue
+        body = _skill_text(session, label)
+        if body:
+            sections.append(f"## Skill already loaded: `{label}` (no need to recall it)\n{body}")
     return "\n\n".join(sections)
 
 
@@ -285,8 +332,12 @@ async def build_page(session: "ChatSession", *, slug: str, folder: Path, user_re
                 out = unwrap_outcome(await handle_scratchpad(session, tc.input or {}))
                 results.append(tool_result(tc.id, out))
             elif tc.name == "recall_skill":
-                say("Reading " + str((tc.input or {}).get("label") or "a skill"))
-                results.append(tool_result(tc.id, unwrap_outcome(await handle_recall_skill(session, tc.input or {}))))
+                label = str((tc.input or {}).get("label") or "")
+                say("Reading " + (label or "a skill"))
+                body = _skill_text(session, label)
+                if body is None:
+                    body = unwrap_outcome(await handle_recall_skill(session, tc.input or {}))
+                results.append(tool_result(tc.id, body))
             elif tc.name == "finish":
                 saved = page_path.exists() and (before is None or page_path.stat().st_mtime != before)
                 if saved:

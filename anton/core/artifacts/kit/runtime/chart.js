@@ -159,7 +159,12 @@
     var axisY = AK.axisFmt(yfmt);
     var narrow = width < 520;
     var nPoints = s.cats.length * s.series.length;
-    var showValues = b.show_values != null ? b.show_values : ((kind === 'bar' || kind === 'hbar') && nPoints <= (narrow ? 8 : 16) && !b.stack);
+    // Value labels only where they fit: a vertical bar's slot must be wider than its label.
+    var labelFmt = function (v) { return AK.fmt(v, (yfmt.indexOf('currency') === 0 || Math.abs(v) >= 1e5) ? (yfmt.indexOf('currency') === 0 ? 'currency_compact' : 'compact') : yfmt); };
+    var widest = Math.max.apply(null, s.series.map(function (ser) { return Math.max.apply(null, ser.values.map(function (v) { return v == null ? 0 : labelFmt(v).length; }).concat([0])); }).concat([0]));
+    var slot = (width - 70) / Math.max(1, s.cats.length) / (b.stack ? 1 : Math.max(1, s.series.length));
+    var fits = horizontal ? true : widest * 6.6 + 4 < slot;
+    var showValues = b.show_values != null ? b.show_values : ((kind === 'bar' || kind === 'hbar') && nPoints <= (narrow ? 10 : 24) && !b.stack && fits);
     var opt = baseOption(T);
     opt.color = pal;
     var catAxis = {
@@ -205,7 +210,7 @@
       }
       if (showValues) {
         item.label = {show: true, position: horizontal ? 'right' : 'top', color: T.text2, fontSize: 11, fontWeight: 600,
-          formatter: function (p) { return AK.fmt(p.value && p.value.value != null ? p.value.value : p.value, yfmt.indexOf('currency') === 0 && Math.abs(p.value) >= 1e5 ? 'currency_compact' : yfmt); }};
+          formatter: function (p) { return labelFmt(p.value && p.value.value != null ? p.value.value : p.value); }};
       }
       if (i === 0) { var ml = refLines(b, T); if (ml) item.markLine = ml; }
       return item;

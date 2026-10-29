@@ -13,6 +13,16 @@
     var la = num(row[latF]), lo = num(row[lonF]);
     return la == null || lo == null ? null : [lo, la];
   }
+  /* A route's end: a nested {lat, lon} (kit pages) or a pair of flat fields. */
+  function end(L, row, which) {
+    if (L.ends) {
+      var p = row[which];
+      return p && L.ends.indexOf(which) >= 0 ? coord(p, 'lat', 'lon') : null;
+    }
+    var la = L[which + '_lat'], lo = L[which + '_lon'];
+    return la && lo ? coord(row, la, lo) : null;
+  }
+  function hasVia(L) { return L.ends ? L.ends.indexOf('via') >= 0 : !!L.via_lat; }
   /* Every [lon, lat] the layers draw. */
   function allCoords(layers) {
     var out = [];
@@ -20,9 +30,7 @@
       layerRows(L).forEach(function (r) {
         if (L.type === 'points') { var c = coord(r, L.lat || 'lat', L.lon || 'lon'); if (c) out.push(c); }
         if (L.type === 'routes') {
-          [[L.from_lat, L.from_lon], [L.via_lat, L.via_lon], [L.to_lat, L.to_lon]].forEach(function (p) {
-            if (p[0] && p[1]) { var c = coord(r, p[0], p[1]); if (c) out.push(c); }
-          });
+          ['from', 'via', 'to'].forEach(function (w) { var c = end(L, r, w); if (c) out.push(c); });
         }
       });
     });
@@ -102,7 +110,7 @@
       } else if (L.name) {
         items.push({label: L.name, color: AK.resolveColor(L.color_value || L.color) || AK.css('--ak-accent'), shape: shape});
       }
-      if (L.type === 'routes' && L.via_lat && L.remaining_label) items.push({label: L.remaining_label, color: AK.css('--ak-text-3'), shape: 'dash'});
+      if (L.type === 'routes' && hasVia(L) && L.remaining_label) items.push({label: L.remaining_label, color: AK.css('--ak-text-3'), shape: 'dash'});
     });
     var seen = {};
     items = items.filter(function (it) { var k = it.label + '|' + it.color; if (seen[k]) return false; seen[k] = 1; return true; });
@@ -139,7 +147,10 @@
   /* Greedy label placement around each anchor; never drops a label, picks the least-overlapping spot. */
   function placeLabels(labels, width, height) {
     var placed = [];
-    var cands = [[10, 4, 'start'], [-10, 4, 'end'], [0, -12, 'middle'], [0, 18, 'middle'], [10, -9, 'start'], [10, 16, 'start'], [-10, -9, 'end'], [-10, 16, 'end']];
+    var base = [[10, 4, 'start'], [-10, 4, 'end'], [0, -12, 'middle'], [0, 18, 'middle'], [10, -9, 'start'], [10, 16, 'start'], [-10, -9, 'end'], [-10, 16, 'end']];
+    // Nearer spots first; farther ones (drawn with a leader line) when the near ones are taken.
+    var cands = base.concat(base.map(function (c) { return [c[0] * 2.4, c[1] * 2.6, c[2]]; }), base.map(function (c) { return [c[0] * 3.8, c[1] * 4.2, c[2]]; }));
+    labels.forEach(function (l) { placed.push({x: l.x - 6, y: l.y - 6, w: 12, h: 12}); });
     function boxOf(l, c) {
       var w = l.w, h = 14;
       var x = c[2] === 'start' ? l.x + c[0] : (c[2] === 'end' ? l.x + c[0] - w : l.x - w / 2);
@@ -154,8 +165,8 @@
       var best = null, bestScore = Infinity;
       cands.forEach(function (c, i) {
         var bx = boxOf(l, c);
-        var score = i * 2;
-        if (bx.x < 2 || bx.x + bx.w > width - 2 || bx.y < 2 || bx.y + bx.h > height - 2) score += 4000;
+        var score = i * 3;
+        if (bx.x < 2 || bx.x + bx.w > width - 2 || bx.y < 2 || bx.y + bx.h > height - 2) score += 2500;
         placed.forEach(function (p) { score += overlap(bx, p) * 10; });
         if (score < bestScore) { bestScore = score; best = {c: c, box: bx}; }
       });
@@ -192,16 +203,19 @@
     var spanLat = lats.length ? Math.max.apply(null, lats) - Math.min.apply(null, lats) : 180;
     var whole = b.fit === 'world' || !coords.length || spanLon > 200 || (b.fit !== 'data' && spanLon > 150);
     var fitShape;
+    var hasRoutes = layers.some(function (L) { return L.type === 'routes'; });
     if (whole) {
-      fitShape = {type: 'MultiPoint', coordinates: [[lon0 - 179, 0], [lon0 + 179, 0], [lon0, 76], [lon0, -55], [lon0 - 179, 60], [lon0 + 179, -45]]};
+      // Routes may arc over the poles, so a world view with routes shows the whole sphere.
+      fitShape = hasRoutes ? {type: 'Sphere'}
+        : {type: 'MultiPoint', coordinates: [[lon0 - 179, 0], [lon0 + 179, 0], [lon0, 76], [lon0, -55], [lon0 - 179, 60], [lon0 + 179, -45]]};
     } else {
       var padLon = Math.max(8, (30 - spanLon) / 2, spanLon * 0.12), padLat = Math.max(6, (20 - spanLat) / 2, spanLat * 0.15);
       var lo1 = Math.min.apply(null, lons) - padLon, lo2 = Math.max.apply(null, lons) + padLon;
       var la1 = Math.max(-70, Math.min.apply(null, lats) - padLat), la2 = Math.min(82, Math.max.apply(null, lats) + padLat);
       fitShape = {type: 'MultiPoint', coordinates: [[lo1 + lon0, la1], [lo2 + lon0, la2], [lo1 + lon0, la2], [lo2 + lon0, la1]]};
     }
-    var aspect = whole ? 0.5 : Math.min(0.85, Math.max(0.45, (spanLat + 20) / (spanLon + 30)));
-    var height = b.height ? AK.viewHeight(b, view, b.height) : Math.round(Math.max(width < 520 ? 240 : 320, Math.min(560, width * aspect)));
+    var aspect = whole ? (hasRoutes ? 0.52 : 0.5) : Math.min(0.85, Math.max(0.45, (spanLat + 20) / (spanLon + 30)));
+    var height = b.height ? AK.viewHeight(b, view, b.height) : Math.round(Math.max(width < 520 ? 220 : 320, Math.min(620, width * aspect)));
     box.style.height = height + 'px';
     var pad = width < 520 ? 10 : 18;
     proj.fitExtent([[pad, pad], [width - pad, height - pad]], fitShape);
@@ -250,8 +264,8 @@
       if (L.type !== 'routes') return;
       var col = colorFor(L);
       layerRows(L).forEach(function (r) {
-        var a = coord(r, L.from_lat, L.from_lon), z = coord(r, L.to_lat, L.to_lon);
-        var v = L.via_lat ? coord(r, L.via_lat, L.via_lon) : null;
+        var a = end(L, r, 'from'), z = end(L, r, 'to');
+        var v = hasVia(L) ? end(L, r, 'via') : null;
         if (!a || !z) return;
         var k = L.key ? String(r[L.key]) : null;
         var segs = v ? [[a, v, false], [v, z, true]] : [[a, z, false]];
@@ -309,17 +323,31 @@
       pt.node.__pt = pt;
       marks.push({el: pt.node, key: pt.key, link: L.link, kind: 'point'});
     });
+    var narrow = width < 560;
     var labels = pts.filter(function (p) { return p.label && (showAllLabels || p.L.label_always); }).map(function (p) {
-      var text = p.label + (p.sub ? ' · ' + p.sub : '');
-      return {p: p, x: p.x, y: p.y, w: text.length * 6.6 + 6, text: text};
+      var sub = narrow ? null : p.sub;
+      var text = p.label + (sub ? ' \u00b7 ' + sub : '');
+      return {p: p, x: p.x, y: p.y, w: text.length * (narrow ? 6.2 : 6.4) + 6, text: text, sub: sub};
     });
     placeLabels(labels, width, height);
+    var leadG = labelsG.append('g');
     labels.forEach(function (l) {
+      if (Math.abs(l.dx) > 14 || Math.abs(l.dy) > 20) {
+        leadG.append('line').attr('x1', l.x).attr('y1', l.y).attr('x2', l.x + l.dx * 0.82).attr('y2', l.y + l.dy * 0.82 - 4)
+          .attr('stroke', AK.css('--ak-text-3')).attr('stroke-width', 0.8).attr('opacity', 0.7);
+      }
       var t = labelsG.append('text').attr('class', 'ak-lbl').attr('x', l.x + l.dx).attr('y', l.y + l.dy).attr('text-anchor', l.anchor);
       t.append('tspan').text(l.p.label);
-      if (l.p.sub) t.append('tspan').attr('class', 'ak-lbl-sub').text(' · ' + l.p.sub);
+      if (l.sub) t.append('tspan').attr('class', 'ak-lbl-sub').text(' \u00b7 ' + l.sub);
       t.node().__l = l;
       marks.push({el: t.node(), key: l.p.key, link: l.p.L.link, kind: 'label'});
+    });
+    // Keep every label inside the map: measure the drawn text and nudge it in.
+    labelsG.selectAll('text').each(function () {
+      var bb = this.getBBox(), l = this.__l, sx = 0, sy = 0;
+      if (bb.x < 4) sx = 4 - bb.x; else if (bb.x + bb.width > width - 4) sx = width - 4 - bb.x - bb.width;
+      if (bb.y < 4) sy = 4 - bb.y; else if (bb.y + bb.height > height - 4) sy = height - 4 - bb.y - bb.height;
+      if (sx || sy) { l.dx += sx; l.dy += sy; this.setAttribute('x', l.x + l.dx); this.setAttribute('y', l.y + l.dy); }
     });
 
     // Zoom and pan (buttons, drag, pinch, ctrl+wheel); marks keep their screen size.
@@ -467,8 +495,8 @@
       if (L.type !== 'routes') return;
       var col = colorFor(L);
       layerRows(L).forEach(function (r) {
-        var a = coord(r, L.from_lat, L.from_lon), z = coord(r, L.to_lat, L.to_lon);
-        var v = L.via_lat ? coord(r, L.via_lat, L.via_lon) : null;
+        var a = end(L, r, 'from'), z = end(L, r, 'to');
+        var v = hasVia(L) ? end(L, r, 'via') : null;
         if (!a || !z) return;
         var k = L.key ? String(r[L.key]) : null;
         (v ? [[a, v, false], [v, z, true]] : [[a, z, false]]).forEach(function (s) {

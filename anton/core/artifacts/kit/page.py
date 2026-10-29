@@ -23,6 +23,13 @@ FORMATS = ("auto", "text", "int", "number", "percent", "fraction", "currency", "
            "signed", "days", "hours", "date", "date_short", "date_iso", "month", "datetime", "weekday")
 
 
+_COORD_FIELD = re.compile(r"(^|[_\s.])(lat|lon|lng|latitude|longitude)$|[a-z0-9](Lat|Lon|Lng|Latitude|Longitude)$", re.I)
+
+
+def _is_coord_field(name: str) -> bool:
+    return bool(_COORD_FIELD.search(str(name)))
+
+
 class KitError(ValueError):
     """A mistake in how a page is put together, with what to change."""
 
@@ -404,8 +411,13 @@ class Page:
         ("field" or {"field","desc"}), detail ("drawer" | "inline" | False: what a row click opens), key+link
         (row click selects that key in every block sharing the link), totals {"field": "sum"|"mean"|"count"},
         row_tone {"field": f, "map": {value: tone}}."""
-        name, rws = self._dataset(data, f"table {title!r}")
+        rws0 = records(data) if not (isinstance(data, str) and data in self.spec["data"]) else self.spec["data"][data]
         cols = [c if isinstance(c, dict) else {"field": c} for c in (columns or [])]
+        wanted = {c["field"] for c in cols} | set(detail_fields or [])
+        if cols and any(_is_coord_field(k) and k not in wanted for k in _fields(rws0)):
+            # Coordinates are for maps: a table embeds only those it shows.
+            rws0 = [{k: v for k, v in r.items() if k in wanted or not _is_coord_field(k)} for r in rws0]
+        name, rws = self._dataset(rws0, f"table {title!r}")
         flt = [f if isinstance(f, str) else f.get("field") for f in (filters or [])]
         _need(rws, [c["field"] for c in cols] + flt + [key] + list(detail_fields or []) + list((totals or {}).keys()),
               f"table {title!r}")
@@ -448,7 +460,9 @@ class Page:
             elif L.get("color") and L["type"] != "regions":
                 L["color_value"] = L.pop("color")
             if coords:
-                # Coordinates go first in each row as named lat/lon pairs, so they read as places.
+                # Each place is its own {lat, lon} object (a point's first, a route's from/via/to), so
+                # every coordinate in the page reads unambiguously as the place it is. Other
+                # coordinate columns are dropped: a layer draws only the places it names.
                 fixed, missing = [], []
                 for r in rws:
                     vals = {}
@@ -461,12 +475,22 @@ class Page:
                     bad = [k for k, v in vals.items() if (k.endswith("lat") and abs(v) > 90) or (k.endswith("lon") and abs(v) > 180)]
                     if bad:
                         raise KitError(f"{where}: {bad[0]} out of range in row {r.get(label, r)} (latitude ±90, longitude ±180); lat/lon swapped?")
-                    rest = {k: v for k, v in r.items() if k not in {s for _, s in coords}}
-                    fixed.append({**vals, **rest})
+                    rest = {k: v for k, v in r.items() if k not in {s for _, s in coords} and not _is_coord_field(k)}
+                    if L["type"] == "points":
+                        fixed.append({"lat": vals["lat"], "lon": vals["lon"], **rest})
+                    else:
+                        ends = {e: {"lat": vals[e + "_lat"], "lon": vals[e + "_lon"]}
+                                for e in ("from", "via", "to") if e + "_lat" in vals}
+                        fixed.append({**ends, **rest})
                 if missing:
                     self.warnings.append(f"{where}: {len(missing)} row(s) without coordinates are not drawn: {', '.join(missing[:8])}")
-                for std, src in coords:
-                    L[std] = std
+                if L["type"] == "points":
+                    L["lat"], L["lon"] = "lat", "lon"
+                else:
+                    for e in ("from", "via", "to"):
+                        L.pop(e + "_lat", None)
+                        L.pop(e + "_lon", None)
+                    L["ends"] = [e for e in ("from", "via", "to") if any(k.startswith(e + "_") for k, _ in coords)]
                 rws = fixed
             name, _ = self._dataset(rws, where)
             L["data"] = name
@@ -740,7 +764,16 @@ def _describe(b: dict, spec: dict) -> str:
         rows = "; ".join(f"{r['label']}: " + " | ".join(_fmt(v, r.get('format'), spec.get('currency', 'USD')) for v in r["values"]) for r in b["rows"])
         return f"{b['id']} compare{title} [{' | '.join(b['columns'])}] {rows}"
     if t == "chart":
-        return f"{b['id']} chart {b['kind']}{title}: {n(b['data'])} rows, x={b.get('x')}, y={b.get('y')}" + (f", series={b['series']}" if b.get("series") else "")
+        rows = data.get(b["data"], [])
+        stats = []
+        for f in ([b["y"]] if isinstance(b.get("y"), str) else list(b.get("y") or [])):
+            vals = [r.get(f) for r in rows if is_number(r.get(f))]
+            if vals:
+                fm = (b.get("formats") or {}).get(f) or b.get("format")
+                cur = spec.get("currency", "USD")
+                stats.append(f"{f}: sum {_fmt(sum(vals), fm, cur)}, min {_fmt(min(vals), fm, cur)}, max {_fmt(max(vals), fm, cur)}")
+        return (f"{b['id']} chart {b['kind']}{title}: {n(b['data'])} rows, x={b.get('x')}, y={b.get('y')}"
+                + (f", series={b['series']}" if b.get("series") else "") + (" [" + "; ".join(stats) + "]" if stats else ""))
     if t == "table":
         cols = [c["field"] for c in (b.get("columns") or [])] or _fields(data.get(b["data"], []))
         return f"{b['id']} table{title}: {n(b['data'])} rows x {len(cols)} columns ({', '.join(cols)})"
