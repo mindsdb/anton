@@ -212,7 +212,11 @@
         if (AK.isNum(nums[0]) && AK.isNum(nums[1])) {
           var d = nums[1] - nums[0];
           var tone = !r.better || d === 0 ? 'neutral' : (((r.better === 'higher' || r.better === 'up') === d > 0) ? 'good' : 'bad');
-          var txt = d === 0 ? '0' : (d > 0 ? '+' : '−') + AK.fmt(Math.abs(d), r.diff_format || r.format || 'auto');
+          // A change between percentages is in points, not percent.
+          var pct = !r.diff_format && /^(percent|fraction)/.test(String(r.format || ''));
+          var mag = pct ? AK.fmt(Math.abs(String(r.format).indexOf('fraction') === 0 ? d * 100 : d), 'number:1') + '\u00a0' + AK.t('pts')
+            : AK.fmt(Math.abs(d), r.diff_format || r.format || 'auto');
+          var txt = d === 0 ? '0' : (d > 0 ? '+' : '\u2212') + mag;
           if (r.show_pct && nums[0]) txt += ' (' + (d > 0 ? '+' : '−') + AK.fmt(Math.abs(d / nums[0] * 100), 'percent:1') + ')';
           td.appendChild(AK.el('span', 'ak-delta ak-tone-' + tone, txt));
         } else td.textContent = '—';

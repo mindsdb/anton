@@ -351,7 +351,9 @@ h1, h2, h3, h4 { margin: 0; font-weight: 650; letter-spacing: -0.012em; line-hei
 .ak-slide-head { display: flex; flex-direction: column; gap: 6px; }
 .ak-slide-head h2 { font-size: clamp(20px, 2.6vw, 32px); }
 .ak-slide-head p { margin: 0; color: var(--ak-text-2); font-size: clamp(13px, 1.4vw, 17px); }
-.ak-slide-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 16px; }
+.ak-slide-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; justify-content: center; gap: 16px; }
+.ak-slide .ak-text, .ak-slide .ak-text li, .ak-slide ul.ak-text li { font-size: clamp(15px, 1.7vw, 21px); line-height: 1.5; }
+.ak-slide .ak-card { box-shadow: none; }
 .ak-slide-num { position: absolute; right: 22px; bottom: 14px; font-size: 12px; color: var(--ak-text-3); }
 .ak-slide.ak-slide-title .ak-slide-num { color: rgba(255, 255, 255, .6); }
 .ak-big-number { font-size: clamp(48px, 9vw, 112px); font-weight: 750; letter-spacing: -0.035em; line-height: 1; color: var(--ak-accent); }

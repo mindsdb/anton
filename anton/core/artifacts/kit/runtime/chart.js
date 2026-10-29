@@ -186,7 +186,11 @@
     if (horizontal) { catAxis.inverse = true; catAxis.nameLocation = 'end'; opt.xAxis = valAxis; opt.yAxis = catAxis; }
     else { opt.xAxis = catAxis; opt.yAxis = [valAxis]; }
     var y2 = b.y2 ? [].concat(b.y2) : [];
-    if (y2.length && !horizontal) {
+    // A second axis only for a measure in other units; the same units share the first axis, so the
+    // line and the bars are read against one scale.
+    var y2fmt0 = b.y2_format || (y2.length ? AK.fieldFormat(b, y2[0]) : null);
+    var ownAxis = y2.length && !horizontal && (b.y2_axis === true || (b.y2_axis !== false && y2fmt0 && String(y2fmt0).split(':')[0] !== String(yfmt).split(':')[0]));
+    if (ownAxis) {
       var y2fmt = b.y2_format || AK.fieldFormat(b, y2[0]) || 'auto';
       opt.yAxis.push({type: 'value', splitLine: {show: false}, axisLabel: {color: T.text3, fontSize: 11, formatter: AK.axisFmt(y2fmt)},
         name: b.y2_label || '', nameTextStyle: {color: T.text3}, min: b.y2_min, max: b.y2_max});
@@ -227,7 +231,7 @@
       });
       var col = AK.resolveColor(colors[f]) || pal[(s.series.length + k) % pal.length];
       var y2kind = b.y2_kind || 'line';
-      opt.series.push({name: AK.label(b, f), type: y2kind, yAxisIndex: 1, data: vals, smooth: 0.25, symbol: 'circle', symbolSize: 6,
+      opt.series.push({name: AK.label(b, f), type: y2kind, yAxisIndex: ownAxis ? 1 : 0, data: vals, smooth: 0.25, symbol: 'circle', symbolSize: 6,
         lineStyle: {width: 2.4, color: col}, itemStyle: {color: col}});
     });
     var allFmt = function (name, field) { return fmtOf(b, field); };
@@ -237,7 +241,7 @@
       var head = ps.length ? ps[0].axisValueLabel || ps[0].name : '';
       return AK.tipRows(head, ps.map(function (p) {
         var ser = opt.series[p.seriesIndex];
-        var field = ser.yAxisIndex ? y2[p.seriesIndex - s.series.length] : (s.series[p.seriesIndex] || {}).field;
+        var field = p.seriesIndex >= s.series.length ? y2[p.seriesIndex - s.series.length] : (s.series[p.seriesIndex] || {}).field;
         var v = p.value && p.value.value != null ? p.value.value : p.value;
         return [p.seriesName, AK.fmt(v, allFmt(p.seriesName, field))];
       }));
