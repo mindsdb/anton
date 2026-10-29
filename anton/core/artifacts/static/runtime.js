@@ -11,10 +11,10 @@
   document.querySelectorAll('#_artifact-content > .section').forEach(section=>outlineObserver.observe(section));
   document.querySelector('[data-action="print"]').addEventListener('click', () => window.print());
   document.querySelectorAll('[data-action="outline"],[data-action="print"]').forEach(button=>button.hidden=false);
-  // Charts and their labels are already rendered in the saved HTML.
+  // Charts, maps and their labels are already rendered in the saved HTML.
   // JavaScript only enhances the complete, open-by-default data inspector.
-  document.querySelectorAll('.chart[data-chart]').forEach(container=>{
-    if(!container.nextElementSibling?.matches('script.chart-spec'))return;
+  document.querySelectorAll('.chart[data-chart],.geo-map[data-native-map]').forEach(container=>{
+    if(container.matches('.chart')&&!container.nextElementSibling?.matches('script.chart-spec'))return;
     const details=container.parentElement.querySelector('.chart-data');
     if(details)details.open=false;
   });

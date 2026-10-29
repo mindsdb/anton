@@ -123,7 +123,28 @@ class Html(Model):
     html: str
 
 
-SimpleBlock = Annotated[Prose | Callout | Metric | Table | Chart | Html, Field(discriminator="type")]
+class MapLayer(Model):
+    label: str = Field(min_length=1, max_length=120)
+    query: Query | Name
+    latitude: str = 'latitude'
+    longitude: str = 'longitude'
+    label_field: str = ''
+
+    @model_validator(mode='after')
+    def distinct_coordinates(self):
+        if self.latitude == self.longitude:
+            raise ValueError('Latitude and longitude need distinct fields')
+        return self
+
+
+class PointMap(Model):
+    type: Literal['map']
+    title: str
+    layers: list[MapLayer] = Field(min_length=1, max_length=6)
+    caption: str = ''
+
+
+SimpleBlock = Annotated[Prose | Callout | Metric | Table | Chart | PointMap | Html, Field(discriminator="type")]
 
 
 class TabPane(Model):
@@ -147,7 +168,7 @@ class Tabs(Model):
         return self
 
 
-Block = Annotated[Prose | Callout | Metric | Table | Chart | Html | Tabs, Field(discriminator="type")]
+Block = Annotated[Prose | Callout | Metric | Table | Chart | PointMap | Html | Tabs, Field(discriminator="type")]
 
 
 class Section(Model):
