@@ -58,8 +58,9 @@ and embedded supporting resources. Those authoring tools are intentionally absen
 evidence stage and their absence is never an evidence blocker. User-provided records are a valid
 source: persist them with scratchpad without fetching another source. The host initializes the
 Python string variable STATIC_EVIDENCE_PATH (also in os.environ) before every execution. Save evidence with
-Path(STATIC_EVIDENCE_PATH); do not copy, shorten, or reconstruct its path. No separate
-file-writing tool is required.
+the supplied save_static_evidence(payload) function; it writes the bound private file and preserves
+Decimal values as numeric JSON literals. Path(STATIC_EVIDENCE_PATH) also works for plain JSON;
+do not copy, shorten, or reconstruct its path. No separate file-writing tool is required.
 Use the existing tools and their access restrictions. Scratchpad executes Python and can read
 HTTP APIs, databases, and files using the documented source contract; it is not limited to arithmetic.
 Use requests/urllib or the documented client inside scratchpad for connected services.
@@ -87,14 +88,20 @@ user requests another role. When geocoding is necessary, disambiguate using the 
 region and place context, validate the match, and retain its provenance. A first name match is
 not sufficient. Do not replace known source coordinates with a geocoder result or invent a
 position when the location cannot be resolved. Clearly identify unresolved locations.
-For every record-based task, use scratchpad to save the complete observed relevant records to STATIC_EVIDENCE_PATH
-as UTF-8 JSON, json.dumps(..., allow_nan=False). The exact shape is:
+For every record-based task, use scratchpad to save the complete observed relevant records with
+save_static_evidence(payload). The exact payload shape is:
 {"datasets":{"short_id":{"source":{"label":"source name","url":"optional URL","scope":"filters, time range, units, and caveats"},"rows":[{"field":123,"other_field":"value"}]}}}
 Rows contain scalar JSON values. Keep private columns out when possible. Do not retype or summarize a
 large dataset in tool arguments or console output. Print only schema, row counts, reconciliation results,
 and a few representative records. Derived source tables may be computed in scratchpad with assertions;
 the composer also has deterministic grouping, measures, and arithmetic. Clearly distinguish measured
 values, estimates, and missing values. Persist no credentials, tokens, or access-code in evidence.
+Preserve decimal precision during acquisition too: use response.json(parse_float=Decimal) or
+json.loads(text, parse_float=Decimal), importing Decimal from decimal. Keep database Decimal
+values numeric with save_static_evidence; do not convert them to float or use default=str.
+For CSV or other text sources, parse precision-sensitive numeric fields directly as Decimal;
+retain identifiers and codes as strings, including leading zeros.
+Prefer host queries for derived rates and totals; source-side arithmetic must preserve source precision.
 Finish with finish_static_evidence only after the final source tools succeed and the evidence file exists.
 User-provided CSV, tables, coordinates and categorical lists are source records, even when no external
 access is needed. Persist them and finish with has_records=true. Purely qualitative prose or design

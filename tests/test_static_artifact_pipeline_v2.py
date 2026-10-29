@@ -378,6 +378,35 @@ def test_bound_evidence_path_preserves_future_imports_and_code(tmp_path,monkeypa
     assert namespace['__doc__']=='Reader module'
 
 
+def test_supplied_writer_preserves_decimal_source_numbers_and_scalar_types(tmp_path,monkeypatch):
+    import importlib
+    from decimal import Decimal
+    from anton.core.artifacts.static.data import exact_json
+    module=importlib.import_module('anton.core.tools.generate_artifact.static_v2.collect')
+    monkeypatch.setenv('STATIC_EVIDENCE_PATH','stale')
+    raw='{"datasets":{"readings":{"source":{"label":"Decimal source"},"rows":[{"id":"001","amount":1234567890.1234567890123456789,"active":true,"missing":null,"text":"字\\\"<&"}]}}}'
+    payload=json.loads(raw,parse_float=Decimal)
+    path=tmp_path/"Exact source's evidence.json"
+    namespace={'payload':payload}
+    exec(module._bind_evidence_path('save_static_evidence(payload)',path),namespace)
+    saved=path.read_text()
+    assert saved==exact_json(payload)
+    assert '"amount":1234567890.1234567890123456789' in saved
+    evidence=Evidence.model_validate(json.loads(saved,parse_float=Decimal))
+    assert evidence.datasets['readings'].rows[0]==payload['datasets']['readings']['rows'][0]
+
+
+@pytest.mark.parametrize('invalid',[float('nan'),float('inf')])
+def test_supplied_writer_rejects_nonfinite_numbers_before_replacing_evidence(tmp_path,monkeypatch,invalid):
+    import importlib
+    module=importlib.import_module('anton.core.tools.generate_artifact.static_v2.collect')
+    monkeypatch.setenv('STATIC_EVIDENCE_PATH','stale')
+    path=tmp_path/'evidence.json';path.write_text('PRIOR EVIDENCE')
+    with pytest.raises(ValueError):
+        exec(module._bind_evidence_path('save_static_evidence(payload)',path),{'payload':{'value':invalid}})
+    assert path.read_text()=='PRIOR EVIDENCE'
+
+
 async def test_loaded_source_cannot_be_declared_unavailable_without_a_read_attempt(tmp_path,monkeypatch):
     import importlib
     from anton.core.tools.registry import ToolOutcome

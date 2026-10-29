@@ -35,6 +35,11 @@ from parent notebook variables, live clients and restored namespace state. It
 initializes `STATIC_EVIDENCE_PATH` as a Python variable and environment entry before each execution so source code can save
 the complete records without copying an absolute host path. The host reads only
 that bound private file when collection finishes.
+The runtime also supplies `save_static_evidence(payload)`, a standard-library-only
+writer usable in remote scratchpads without Anton installed. It serializes Decimal
+values as finite numeric JSON literals, preserving database decimals and HTTP JSON
+parsed with `parse_float=Decimal`. Float conversion and `default=str` must not
+silently change source precision or numeric types.
 Multiple calls in that acquisition share the same pad. Existing computations must arrive as
 complete records or an actual private data file. Edits preserving data may still
 explicitly reuse the verified published evidence snapshot.
