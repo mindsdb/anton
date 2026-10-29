@@ -392,6 +392,29 @@ STATIC_ARTIFACTS_PROMPT = cut_spans(
 )
 
 
+# Where the deployment turns web search off (`wire.web_search_off`): the
+# base prompt's "full internet access, try 2-3 sources" sends the agent
+# after workarounds that all fail.
+NO_WEB_CHAT_SYSTEM_PROMPT = cut_spans(
+    CHAT_SYSTEM_PROMPT,
+    ("- **Internet access**:", "- **Scratchpad execution**", ""),
+    (
+        "INTERNET & LIVE INFORMATION:",
+        "PROACTIVE FOLLOW-UP SUGGESTIONS:",
+        "NO WEB ACCESS:\n"
+        "- Web access is turned off on this install: web search is off, and the \
+scratchpad cannot reach the internet, apart from the data sources connected here. \
+Do not try to reach the web in any way (requests, urllib, RSS feeds, DNS over HTTPS, \
+public APIs, web_search()).\n"
+        "- When a question needs the web or live information, say plainly that web access \
+is off on this install, then answer from the user's files, connected data and your own \
+knowledge, and say where that knowledge may be out of date.\n\n",
+    ),
+    ("web scraping, ", "plotting", ""),
+    ("- web_search(query) answers", "- get_llm, agentic_loop, and web_search", ""),
+)
+
+
 # ---------------------------------------------------------------------------
 # Visualization prompt variants — selected by ANTON_PROACTIVE_DASHBOARDS flag
 # ---------------------------------------------------------------------------

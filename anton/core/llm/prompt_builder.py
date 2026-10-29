@@ -11,6 +11,7 @@ from .prompts import (
     CHAT_SYSTEM_PROMPT,
     CONVERSATION_DISCIPLINE_ACT_FIRST,
     CONVERSATION_DISCIPLINE_ASK_FIRST,
+    NO_WEB_CHAT_SYSTEM_PROMPT,
     STATIC_ARTIFACTS_PROMPT,
     VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
     VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
@@ -156,11 +157,13 @@ class ChatSystemPromptBuilder:
         product_lines: list[str] | None = None,
         deployment_identity: DeploymentIdentity | None = None,
         fullstack_offered: bool = True,
+        web_offered: bool = True,
     ) -> str:
         """``fullstack_offered`` False (`live_app_slots.fullstack_offered`)
         leaves out the fullstack types, the backend section and the backend
         skill's line: nothing on this deployment would start the app's
-        backend."""
+        backend. ``web_offered`` False (`wire.web_search_off`) swaps the
+        internet sections for one that says the web is out of reach."""
         visualizations_section = self._build_visualizations_section(
             proactive_dashboards=proactive_dashboards,
             output_dir=output_dir,
@@ -186,7 +189,8 @@ class ChatSystemPromptBuilder:
             configured_block=system_prompt_context.runtime_context,
             product_block=list(product_lines) if product_lines else None,
         )
-        prompt += CHAT_SYSTEM_PROMPT.format(
+        template = CHAT_SYSTEM_PROMPT if web_offered else NO_WEB_CHAT_SYSTEM_PROMPT
+        prompt += template.format(
             # PRODUCT carries the configured name. An explicit deployment must
             # not also introduce itself as Anton in the prompt's opening line.
             identity_lead="You are an AI coworker" if deployment_identity is not None else "You are Anton",

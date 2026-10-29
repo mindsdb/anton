@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field, field_validator
 from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
+from anton.core.backends.wire import web_search_off
 from anton.core.datasources.data_vault import DataVault
 from anton.core.llm import jev as _jev
 from anton.core.llm.effort import (
@@ -108,6 +109,7 @@ from anton.core.tools.tool_defs import (
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
+    NO_WEB_SCRATCHPAD_TOOL,
     READ_IMAGE_TOOL,
     READ_TEXT_FILE_TOOL,
     RECALL_TOOL,
@@ -2307,10 +2309,13 @@ class ChatSession:
         # through every ``plan*`` call); ``_fallback_web_tools`` is the set
         # we run ourselves via handler-dispatched ToolDefs (registered in
         # ``_build_core_tools``). The two sets are disjoint by construction.
+        # A deployment that turns web search off also blocks the hosts a
+        # fetch would need, so it gets neither.
+        self._web_offered = not web_search_off()
         desired_web: set[str] = set()
-        if config.web_search_enabled:
+        if config.web_search_enabled and self._web_offered:
             desired_web.add("web_search")
-        if config.web_fetch_enabled:
+        if config.web_fetch_enabled and self._web_offered:
             desired_web.add("web_fetch")
         provider_native = self._llm.planning_provider.native_web_tools()
         self._native_web_tools: set[str] = desired_web & provider_native
@@ -3020,6 +3025,7 @@ class ChatSession:
             ),
             deployment_identity=getattr(self, "_deployment_identity", None),
             fullstack_offered=getattr(self, "_fullstack_offered", True),
+            web_offered=getattr(self, "_web_offered", True),
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
             output_dir=self._output_dir,
@@ -3168,7 +3174,9 @@ class ChatSession:
         # Copy — SCRATCHPAD_TOOL is a module-level singleton; mutating its
         # .description in place would leak across every session/user sharing
         # this process instead of resetting per session.
-        scratchpad_tool = replace(SCRATCHPAD_TOOL)
+        scratchpad_tool = replace(
+            SCRATCHPAD_TOOL if getattr(self, "_web_offered", True) else NO_WEB_SCRATCHPAD_TOOL
+        )
         pkg_list = self._scratchpads.available_packages
         if pkg_list:
             notable = sorted(p for p in pkg_list if p.lower() in self._NOTABLE_PACKAGES)

@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx2 as httpx
 import pytest
 
+from anton.core.backends.wire import WEB_SEARCH_ENV
 from anton.core.tools.web_tools import (
     WEB_FETCH_FALLBACK_TOOL,
     WEB_SEARCH_FALLBACK_TOOL,
@@ -618,6 +619,19 @@ class TestSessionWebToolResolution:
         assert "web_search" not in session._native_web_tools
         assert "web_search" not in session._fallback_web_tools
         assert "web_fetch" in session._native_web_tools
+
+    @pytest.mark.parametrize("provider_native", [{"web_search", "web_fetch"}, set()], ids=["native", "fallback"])
+    def test_an_install_with_web_search_off_gets_no_web_tool(self, monkeypatch, provider_native):
+        monkeypatch.setenv(WEB_SEARCH_ENV, "off")
+        session = self._build_session(
+            provider_native=provider_native,
+            cfg_kwargs={"settings": self._settings_with_credential()},
+        )
+        assert session._native_web_tools == set()
+        assert session._fallback_web_tools == set()
+        names = {t["name"] for t in session._build_tools()}
+        assert "web_search" not in names
+        assert "web_fetch" not in names
 
     def test_fallback_toolDefs_registered_when_provider_lacks_native(self):
         # web_search additionally needs a usable Exa/Brave credential; without
