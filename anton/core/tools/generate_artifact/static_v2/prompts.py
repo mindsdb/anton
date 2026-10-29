@@ -246,7 +246,10 @@ Honor explicit library requirements. Source links are fine.
 On phones, recompose wide tables as labelled records or show a focused summary with an accessible
 detail view. Keep essential fields and actions available; do not leave them beyond a clipped panel.
 For authentic supporting reference data, load_static_resource downloads bounded public JSON once
-and embeds it as window.ARTIFACT_RESOURCES[name]. The tool returns its shape and source hash;
+and embeds it as window.ARTIFACT_RESOURCES[name]. load_static_geography supplies a built-in
+offline country map (world-countries-110m) through the same global. The built-in map is standard
+GeoJSON: render its FeatureCollection directly with d3.geoPath; do not pass it through a TopoJSON
+decoder. Its coarse boundaries are context, not a border authority. Both tools return shape and source hash;
 the complete data stays on the host and is embedded without model transcription. Use this for
 geographic geometry, topology, or diagram data rather than inventing real-world shapes. Use a
 pinned public resource URL, include visible attribution in custom pages, and reload saved resource references when editing.

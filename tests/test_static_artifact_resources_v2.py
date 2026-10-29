@@ -18,6 +18,47 @@ def transport(monkeypatch,handler,guard=lambda url:None):
     monkeypatch.setattr(resources,'_check_url_ssrf',guard)
 
 
+async def test_builtin_country_resource_is_offline_and_bounded(monkeypatch):
+    def no_network(*args, **kwargs):
+        raise AssertionError('Built-in geography must not fetch')
+    monkeypatch.setattr(resources.httpx, 'AsyncClient', no_network)
+    item = await resources.load_geography(resources.Geography(name='world', reference='world-countries-110m'))
+    assert item['source']['builtin'] == 'world-countries-110m'
+    assert item['data']['type'] == 'FeatureCollection' and len(item['data']['features']) == 177
+    assert all(set(feature['properties']) == {'name', 'iso_a2'} for feature in item['data']['features'])
+    monkeypatch.setattr(resources, 'MAX_BYTES', 10)
+    with pytest.raises(ValueError, match='size limit'):
+        await resources.load_geography(resources.Geography(name='world', reference='world-countries-110m'))
+
+
+async def test_builtin_country_tool_embeds_exact_geometry_and_saves_reload_identity(tmp_path, monkeypatch):
+    calls = []
+    async def stream(**kwargs):
+        if kwargs['system'] == REVIEW_SYSTEM:
+            yield review_response(); return
+        calls.append(kwargs)
+        if len(calls) == 1:
+            tool_calls = [ToolCall('surface', 'choose_custom_surface', {'reason': 'An interactive country map'}),
+                ToolCall('geography', 'load_static_geography', {'name': 'countries', 'reference': 'world-countries-110m'})]
+        else:
+            assert 'FeatureCollection' in str(kwargs['messages']) and 'iso_a2' in str(kwargs['messages'])
+            tool_calls = [ToolCall('compose', 'compose_custom_html', {'html': '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><h1>Map</h1><script>window.countryCount=window.ARTIFACT_RESOURCES.countries.features.length;</script></body></html>'})]
+        yield StreamComplete(response=LLMResponse(content='', tool_calls=tool_calls))
+    def check(path, **kwargs):
+        from bs4 import BeautifulSoup
+        html = path.read_text()
+        embedded = json.loads(BeautifulSoup(html, 'html.parser').select_one('#_artifact-resources').string)
+        assert len(embedded['data']['countries']['features']) == 177
+        assert html.index('window.ARTIFACT_RESOURCES=') < html.index('window.countryCount=')
+        return BrowserCheck(status='passed')
+    monkeypatch.setattr('anton.core.tools.generate_artifact.verifiers.verify_frontend_live', check)
+    st = state(tmp_path, {}); st.session._llm.code_stream = stream
+    assert (await compose(st, Evidence()))['status'] == 'generated'
+    recipe = json.loads((tmp_path/'.static/composition.json').read_text())
+    assert recipe['resources']['countries']['builtin'] == 'world-countries-110m'
+    assert 'features' not in recipe['resources']['countries']
+
+
 async def test_resource_is_exact_script_safe_and_available_before_author_scripts(monkeypatch):
     raw=b'{"nodes":[{"label":"</script><script>bad()</script>"}],"edges":[]}'
     transport(monkeypatch,lambda request:httpx.Response(200,content=raw))
