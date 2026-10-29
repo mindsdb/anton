@@ -68,6 +68,9 @@ custom bindings, including inside HTML fragments. Reject transcribed data tables
 into raw HTML as a substitute for those bindings. Ordinary design numbers are not record values.
 Caller notes are not proof that a computed value came from the user or a source. Numeric source
 text can be cast explicitly in a query before host aggregation; this does not require a new source.
+Supporting datasets with source.kind="reference" are not the user's business observations.
+Do not confuse lookup-candidate counts with business record counts or reference place centroids
+with observed GPS positions. Attribution credits are host-rendered from source metadata.
 User-provided tables, CSV, coordinates and categorical lists are source records too. If the task
 uses such records but the evidence has no corresponding dataset, reject with needs_evidence=true
 so they are collected and bound rather than transcribed into HTML. Recompute stated comparisons

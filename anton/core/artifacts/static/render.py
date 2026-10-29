@@ -41,6 +41,12 @@ def _inject_head(html, payload):
     return html[:position] + prefix + payload + html[position:]
 
 
+def source_credit(source):
+    credit = escape(source.get('attribution', ''))
+    url = source.get('url', '')
+    return f'<a href="{escape(url)}" target="_blank" rel="noopener noreferrer">{credit}</a>' if credit and re.match(r'^https?://', url) else credit
+
+
 def render(document: Document, evidence: Evidence, *, resource_sources: dict | None = None) -> Rendered:
     labels = reader_labels(document.language, document.labels)
     values = resolve_facts(document, evidence)
@@ -214,7 +220,7 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
     for name in published_facts:
         fact_sources(name)
     outline = ''.join(f'<a href="#{s.id}">{text(s.title or s.id)}</a>' for s in document.sections)
-    source_list = ''.join('<li>' + source_name(s) + (f' — {escape(s["scope"])}' if s['scope'] else '') + '</li>' for s in sources.values())
+    source_list = ''.join('<li>' + source_name(s) + (f' — {escape(s["scope"])}' if s['scope'] else '') + (f' · {source_credit(s)}' if s.get('attribution') else '') + '</li>' for s in sources.values())
     manifest = {"version": 1, "evidence_sha256": evidence.digest(), "sources": sources,
                 "facts": published_facts, "bindings": bindings, "view_checks": checks({name: bindings[name] for name in document.bindings}, document.views, covered=covered)}
     theme = document.theme

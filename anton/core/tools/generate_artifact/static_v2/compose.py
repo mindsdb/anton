@@ -12,7 +12,7 @@ from pydantic import Field
 
 from anton.core.artifacts.static.data import Evidence, Model, Name, Query, execute, json_value, exact_json
 from anton.core.artifacts.static.document import Document
-from anton.core.artifacts.static.render import render, _script_json, _asset, _inject_head
+from anton.core.artifacts.static.render import render, _script_json, _asset, _inject_head, source_credit
 from anton.core.artifacts.static.views import View, checks, validate_ids
 from anton.core.backends.sandbox import cell_sandbox_of
 from anton.core.llm.structured import looks_truncated
@@ -68,7 +68,8 @@ def compile_output(output, evidence, *, resource_sources=None):
     if evidence.datasets and not output.bindings:
         raise ValueError('Custom HTML must bind the supplied evidence instead of retyping its values')
     bindings = {name: execute(evidence, query) for name, query in output.bindings.items()}
-    manifest = {'version': 1, 'evidence_sha256': evidence.digest(), 'bindings': bindings, 'view_checks': checks(bindings, output.views)}
+    sources = {query.dataset: evidence.datasets[query.dataset].source.model_dump() for query in output.bindings.values()}
+    manifest = {'version': 1, 'evidence_sha256': evidence.digest(), 'sources': sources, 'bindings': bindings, 'view_checks': checks(bindings, output.views)}
     payload = f'<script id="_artifact-bindings" type="application/json">{_script_json(manifest)}</script>'
     payload += '<script>window.ARTIFACT_DATA=JSON.parse(document.getElementById("_artifact-bindings").textContent).bindings;</script>'
     # Before any author script, even one in <head>. JSON text is script-safe.
@@ -76,7 +77,9 @@ def compile_output(output, evidence, *, resource_sources=None):
     body_end = re.search(r'</body\s*>', html, re.I)
     if body_end is None:
         raise ValueError('Custom HTML requires a closing body tag')
-    html = html[:body_end.start()] + '<script>' + _asset('check-views.js') + '</script>' + html[body_end.start():]
+    credits = list(dict.fromkeys(source_credit(source) for source in sources.values() if source.get('attribution')))
+    attribution = '<footer class="artifact-data-attribution" style="padding:12px 20px;font-size:12px;line-height:1.5">' + ' · '.join(credits) + '</footer>' if credits else ''
+    html = html[:body_end.start()] + attribution + '<script>' + _asset('check-views.js') + '</script>' + html[body_end.start():]
     validate_ids(html)
     return html, manifest
 
@@ -241,12 +244,13 @@ async def compose(state, evidence: Evidence):
             state.files_written.append(primary)
             state.record('static_artifact_v2', 'done', f'{output.mode}; evidence={evidence.digest()}; browser={live.status}')
             origin = state.static_evidence_origin.get('mode', 'unknown')
-            row_count = sum(len(dataset.rows) for dataset in evidence.datasets.values())
-            outcome = f'generated; evidence origin={origin}, {len(evidence.datasets)} datasets / {row_count} rows; browser={live.status}'
+            row_count = sum(len(dataset.rows) for dataset in evidence.datasets.values() if dataset.source.kind == 'records')
+            reference_count = sum(len(dataset.rows) for dataset in evidence.datasets.values() if dataset.source.kind == 'reference')
+            outcome = f'generated; evidence origin={origin}, {len(evidence.datasets)} datasets / {row_count} record rows + {reference_count} reference rows; browser={live.status}'
             return {'status': 'generated', **_result_shell(state), 'static_artifact_version': 2, 'outcome': outcome,
                     'content_review': review,
                     'data_publication': {'evidence_sha256': evidence.digest(), 'bindings': list(manifest['bindings']), 'origin': state.static_evidence_origin,
-                        'datasets': {name: {'rows': len(dataset.rows), 'source_label': dataset.source.label[:200]} for name, dataset in evidence.datasets.items()}}}
+                        'datasets': {name: {'rows': len(dataset.rows), 'source_label': dataset.source.label[:200], 'kind': dataset.source.kind} for name, dataset in evidence.datasets.items()}}}
         except (ValueError, OSError) as error:
             feedback = f'Artifact not published: {error}. Correct the complete composition. The prior page is intact.'
             failures[phase] += 1

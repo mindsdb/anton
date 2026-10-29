@@ -66,6 +66,12 @@ listing and publication. No acquisition code, credentials, private working
 columns, candidate pages, or recipes should ship as separate artifact files.
 
 Each dataset has a source label, optional URL, scope/caveats, and scalar records.
+Source `kind` distinguishes ordinary records from supporting reference data; it does
+not establish authority. Optional `attribution` credits are escaped and retained in
+compiled source lists and custom-page footers. Custom manifests include metadata
+for their explicitly bound sources. Generation results report record and reference
+row counts separately. Empty/default metadata preserves prior evidence digests,
+so published snapshots remain reusable across this additive schema change.
 User-provided CSV, tables, coordinates, and categorical records use the same snapshot
 and binding path as connected data. The collector's `has_records` field distinguishes
 record-based tasks from purely qualitative artifacts; it does not mean external access.

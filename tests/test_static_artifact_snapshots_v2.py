@@ -88,3 +88,18 @@ async def test_evidence_refresh_does_not_offer_or_accept_snapshot_reuse(tmp_path
     st.session._llm.plan_stream=stream;st.session._llm.code_stream=stream
     assert 'Cannot satisfy refresh' in await module.collect(st,feedback='The user requested current values')
     assert 'Snapshot reuse is unavailable' in str(seen[-1]['messages'])
+
+
+def test_pre_metadata_snapshot_still_reuses_its_exact_legacy_digest(tmp_path):
+    from hashlib import sha256
+    from anton.core.artifacts.static.data import exact_json
+    st=state(tmp_path,VALID);page='LEGACY PUBLISHED PAGE';page_hash=sha256(page.encode()).hexdigest()
+    payload=exact_json({'datasets':{'items':{'source':{'label':'Legacy source','url':'','scope':''},'rows':[{'amount':2}]}}})
+    record={'page_sha256':page_hash,'payload_sha256':sha256(payload.encode()).hexdigest(),
+        'evidence_sha256':sha256(payload.encode()).hexdigest(),'float_fields':[],
+        'acquired_at':'2026-10-28T10:00:00+00:00','evidence_json':payload}
+    folder=tmp_path/'.static';folder.mkdir();(folder/f'published-{page_hash}.json').write_text(json.dumps(record))
+    (tmp_path/'index.html').write_text(page)
+    recovered,origin=snapshots.load(st)
+    assert recovered.digest()==record['evidence_sha256']
+    assert recovered.datasets['items'].source.kind=='records' and origin['mode']=='reused'
