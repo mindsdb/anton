@@ -131,10 +131,10 @@ def _serving() -> Iterator[_Gateway]:
 class _Credential:
     """What the host's key supplier returns: the test swaps it like a desktop refresh."""
 
-    def __init__(self) -> None:
-        self.value = "token-a"
+    def __init__(self, value: str | None = "token-a") -> None:
+        self.value = value
 
-    async def supply(self) -> str:
+    async def supply(self) -> str | None:
         return self.value
 
 
@@ -153,10 +153,29 @@ def _pad(gateway: _Gateway, credential: _Credential) -> LocalScratchpadRuntime:
         name="fresh-token",
         coding_provider="openai",
         coding_model="stub-model",
-        coding_api_key=credential.value,
+        coding_api_key="token-a",
         coding_base_url=gateway.url,
         coding_api_key_supplier=credential.supply,
     )
+
+
+async def test_a_key_that_arrives_after_start_reaches_the_pad():
+    """With no key at start (signed out), the pad still reads one written later."""
+    credential = _Credential(value=None)
+    with _serving() as gateway:
+        pad = _pad(gateway, credential)
+        await pad.start()
+        try:
+            first = await pad.execute(_HELPERS_CELL + "print(ask('one'))\n")
+            assert first.error is None, first.error
+            assert gateway.bearers == ["token-a"]
+
+            credential.value = gateway.accepted = "token-b"
+            second = await pad.execute("print(ask('two'))\n")
+            assert second.error is None, second.error
+            assert gateway.bearers == ["token-a", "token-b"]
+        finally:
+            await pad.close()
 
 
 async def test_next_cell_uses_the_renewed_credential():
@@ -206,6 +225,38 @@ async def test_running_cell_picks_up_the_renewed_credential(monkeypatch):
             # Renew once the first call has gone out, however long the pad
             # took to start; the cell's sleep leaves time for the heartbeat
             # refresh before its second call.
+            for _ in range(600):
+                if gateway.bearers:
+                    break
+                await asyncio.sleep(0.05)
+            assert gateway.bearers == ["token-a"]
+            credential.value = gateway.accepted = "token-b"
+            cell = await running
+            assert cell.error is None, cell.error
+            assert gateway.bearers == ["token-a", "token-b"]
+        finally:
+            await pad.close()
+
+
+async def test_a_cell_that_keeps_printing_picks_up_the_renewed_credential(monkeypatch):
+    """A cell with output on every tick sends chunks instead of bare heartbeats."""
+    monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.1")
+    credential = _Credential()
+    with _serving() as gateway:
+        pad = _pad(gateway, credential)
+        await pad.start()
+        try:
+            running = asyncio.ensure_future(
+                pad.execute(
+                    _HELPERS_CELL + "import time\n"
+                    "print(ask('before'))\n"
+                    "end = time.time() + 3\n"
+                    "while time.time() < end:\n"
+                    "    print('still here')\n"
+                    "    time.sleep(0.02)\n"
+                    "print(ask('after'))\n"
+                )
+            )
             for _ in range(600):
                 if gateway.bearers:
                     break

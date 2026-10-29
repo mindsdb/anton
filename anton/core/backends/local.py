@@ -1135,8 +1135,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         if self._coding_api_key_supplier is not None and self._venv_dir:
             self._credential_path = Path(self._venv_dir) / _CREDENTIAL_FILE
             await self._refresh_credential()
-            if self._credential_written is not None:
-                env["ANTON_SCRATCHPAD_CREDENTIAL_FILE"] = str(self._credential_path)
+            # Set even when nothing was written yet (no key while signed
+            # out): the pad keeps its boot key until the file appears.
+            env["ANTON_SCRATCHPAD_CREDENTIAL_FILE"] = str(self._credential_path)
         if self._coding_provider in ("openai", "openai-compatible"):
             base_url = (
                 self._coding_base_url
@@ -1778,10 +1779,13 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
             line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
 
+            # On every line the pad sends, not only bare heartbeats: a cell
+            # that prints each tick sends output chunks instead. The pad's
+            # model calls read the credential file, so a key renewed during
+            # a long cell reaches its later calls.
+            await self._refresh_credential()
+
             if line.startswith(HEARTBEAT_MARKER):
-                # A cell's model calls read the credential file, so a key
-                # renewed during a long cell reaches its later calls.
-                await self._refresh_credential()
                 # Liveness only: arrival already re-armed the readline timer.
                 # Do NOT extend current_inactivity here — a bare heartbeat is
                 # a machine signal, not evidence of progress; only an
