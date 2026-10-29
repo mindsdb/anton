@@ -197,7 +197,10 @@ def _delta(a: float, b: float) -> str:
 
 
 _ID_NAME = re.compile(r"(^|[_\s.])(id|code|key|no|number|line|seq|row|rank|index)$|[a-z](Id|ID|Code|Key|Line|Seq)$", re.I)
-_RATE_NAME = re.compile(r"pct|percent|rate|ratio|share|util|margin", re.I)
+# Ids that identify a record on their own; row numbers (line, seq, row, rank, index) only pair with one.
+_KEY_NAME = re.compile(r"(^|[_\s.])(id|code|key|no|number)$|[a-z](Id|ID|Code|Key)$", re.I)
+_RATE_NAME = re.compile(r"(?i:(^|[_\s.])(pct|percent|rate|ratio|share|util|utili[sz]ation|margin)($|[_\s.]))"
+                        r"|[a-z](Pct|Percent|Rate|Ratio|Share|Util|Utili[sz]ation|Margin)|^(Pct|Percent|Rate|Ratio|Share|Util|Utili[sz]ation|Margin)")
 _COORD_NAME = re.compile(r"(^|[_\s.])(lat|lon|lng|latitude|longitude)$|[a-z0-9](Lat|Lon|Lng|Latitude|Longitude)$", re.I)
 
 
@@ -278,9 +281,11 @@ def diff(before: Any, after: Any, names: tuple[str, str] = ("before", "after"), 
                         block.append(f"    {g} where {f} = {v!r}: {_delta(sa, sb)}")
                 out.append((abs(cb[v] - ca[v]) / max(1, ca[v]) + 1, "\n".join(block)))
         # Rows matched by an id (or a pair of ids): which columns changed, which rows are on one side.
-        idcols = [f for f in cols if _ID_NAME.search(f)]
+        idcols = [f for f in cols if _KEY_NAME.search(f)]
+        rownums = [f for f in cols if _ID_NAME.search(f) and f not in idcols]
         keys = [(f,) for f in idcols] + [(f, g) for i, f in enumerate(idcols) for g in idcols[i + 1:]] + \
-               [(f, g) for f in idcols for g in cols if g not in idcols and g.lower() in ("version", "period")]
+               [(f, g) for f in idcols for g in rownums] + \
+               [(f, g) for f in idcols for g in cols if g.lower() in ("version", "period")]
         for key in keys:
             ka = [tuple(r.get(k) for k in key) for r in ra]
             kb = [tuple(r.get(k) for k in key) for r in rb]
@@ -292,7 +297,7 @@ def diff(before: Any, after: Any, names: tuple[str, str] = ("before", "after"), 
                     other = by_b.get(k)
                     if other is None:
                         continue
-                    diffs = [f for f in cols if f not in key and not _same(r.get(f), other.get(f))]
+                    diffs = [f for f in cols if f not in key and f not in rownums and not _same(r.get(f), other.get(f))]
                     if diffs:
                         n_rows += 1
                         for f in diffs:
