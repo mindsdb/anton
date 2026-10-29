@@ -52,6 +52,8 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
             name = match.group(1)
             if name not in values:
                 raise DataError(f"Unknown fact in text: {name}")
+            if document.facts[name].format.percent != 'none' and value[match.end():].lstrip().startswith('%'):
+                raise DataError(f'Fact {name} already includes %; remove the percentage symbol after its placeholder')
             published_facts[name] = values[name]
             return document.facts[name].format.display(values[name])
         return re.sub(r"\{\{([A-Za-z][A-Za-z0-9_-]*)\}\}", substitute, value)
