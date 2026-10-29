@@ -114,6 +114,14 @@ when the source supports them. For a filter you infer from a word, profile the f
 in pandas, and print how many rows each filter drops; every filter needs a reason in the request. \
 Use the data's own definition of a period (a plan horizon, a fiscal year) rather than rebuilding it \
 from today's date.
+- Periods: compare the data's date range (the profile prints it) with the period asked for; when it \
+is the same, no date filter is needed. Otherwise filter with a half-open range (start <= date < the \
+day after the period ends), never by matching dates to a list of period starts or with <= the last \
+period's start (rows fall on any day of a week or month). To total by week or month, give each row \
+its period (e.g. `df[d].dt.to_period("W").dt.start_time`) and group.
+- Filter on values the data holds (printed first), never on a guessed spelling ("Yes" where the data \
+says "Y"). A filter or join that leaves no rows, or far fewer than expected, has a wrong value or \
+key: fix it before building.
 - Words that imply a filter ("open", "pending", "in progress", "resolved") map to the data's own \
 fields: print their distinct values first. Where the values do not line up one-to-one with the \
 word, include the borderline records, show their status, and say in `finish` which values you \

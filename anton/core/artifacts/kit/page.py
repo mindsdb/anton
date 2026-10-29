@@ -265,7 +265,8 @@ class Page:
             return data, self.spec["data"][data]
         rows = records(data)
         if not rows:
-            self.warnings.append(f"{where}: the data is empty, so this block shows nothing.")
+            self.warnings.append(f"{where}: the data is empty, so this block shows nothing; a filter or join may have "
+                                 "matched nothing (check its values against the data).")
         blob = json.dumps(rows, sort_keys=True, default=str).encode()
         digest = hashlib.sha1(blob).hexdigest()[:8]
         for name, existing in self.spec["data"].items():
@@ -791,6 +792,26 @@ class Page:
         return "\n".join([head] + lines)
 
     # ---- output ----
+    def _check_empty(self) -> None:
+        """Warn about a chart whose values are all zero, or a network whose links are mostly zero: almost
+        always a filter or join that matched nothing (empty data is warned about when it is added)."""
+        data = self.spec.get("data", {})
+        for b in self._walk():
+            t, name = b.get("type"), b.get("data")
+            where = f"{b.get('id')} {t} {b.get('title')!r}"
+            if t == "chart" and isinstance(name, str) and data.get(name):
+                ys = [b["y"]] if isinstance(b.get("y"), str) else list(b.get("y") or [])
+                vals = [r.get(f) for r in data[name] for f in ys if is_number(r.get(f))]
+                if vals and not any(vals):
+                    self.warnings.append(f"{where}: every value is 0; check the filter or join that produced it.")
+            if t == "network" and isinstance((b.get("links") or {}).get("data"), str):
+                rows, vf = data.get(b["links"]["data"], []), b["links"].get("value")
+                if rows and vf and all(is_number(r.get(vf)) for r in rows):
+                    zero = [r for r in rows if not r.get(vf)]
+                    if len(zero) > len(rows) / 2:
+                        self.warnings.append(f"{where}: {len(zero)} of {len(rows)} links have a value of 0; check the filter "
+                                             "or join that produced them.")
+
     def _check_percents(self) -> None:
         """Warn when values shown as `percent` (percent units, 12.5 -> 12.5%) look like fractions."""
         data = self.spec.get("data", {})
@@ -1015,6 +1036,7 @@ class Page:
     def html_text(self) -> str:
         from .render import render_html
         self._autolink()
+        self._check_empty()
         self._check_percents()
         self._check_times()
         self._check_details()
