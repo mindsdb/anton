@@ -116,6 +116,28 @@ TOOL_ACCESS: dict[str, dict[str, str]] = {
         # partly read ("assess... and guide"); fail closed to write.
         "manage_onboarding": "write",
     },
+    # Notion lists only its read tools here; everything else (page/database
+    # writes, agent sessions, skills) is write-tier by the fail-closed default.
+    # Every registered tool's schema is resent on every LLM call, and all 49
+    # Notion tools came to ~57k tokens, enough to stall smaller models when
+    # another connector was connected too; these come to ~5k.
+    # `notion-query-data-sources` is a read but is left out on size alone (an
+    # 83k-character schema); `notion-query-multiple-data-sources` covers it.
+    "notion": {
+        "notion-search": "read",
+        "notion-fetch": "read",
+        "notion-get-comments": "read",
+        "notion-get-users": "read",
+        "notion-get-teams": "read",
+        "notion-get-self": "read",
+        "notion-list-private-pages": "read",
+        "notion-list-shared-pages": "read",
+        "notion-list-favorite-pages": "read",
+        "notion-list-recent-pages": "read",
+        "notion-query-multiple-data-sources": "read",
+        "notion-memory-search": "read",
+        "notion-get-file-download-urls": "read",
+    },
 }
 
 
@@ -146,6 +168,23 @@ TOOL_OUTPUT: dict[str, dict[str, ToolOutput]] = {
         "get_organization_details": "metadata",  # the HubSpot account itself
         "search_owners": "metadata",  # the portal's users (owner ids, names)
         "get_conversation_channel_metadata": "metadata",  # inbox channel config
+    },
+    "notion": {
+        # RECORDS
+        "notion-search": "records",  # matching pages with content snippets
+        "notion-fetch": "records",  # a page's or database's full content
+        "notion-get-comments": "records",  # comments on a page
+        "notion-query-multiple-data-sources": "records",  # database rows
+        "notion-memory-search": "records",  # workspace content matches
+        # METADATA
+        "notion-get-users": "metadata",  # workspace members
+        "notion-get-teams": "metadata",  # teamspaces
+        "notion-get-self": "metadata",  # the connected bot user
+        "notion-list-private-pages": "metadata",  # page titles and ids
+        "notion-list-shared-pages": "metadata",  # page titles and ids
+        "notion-list-favorite-pages": "metadata",  # page titles and ids
+        "notion-list-recent-pages": "metadata",  # page titles and ids
+        "notion-get-file-download-urls": "metadata",  # signed file links
     },
 }
 

@@ -24,6 +24,12 @@ from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
 from anton.core.datasources.data_vault import DataVault
+from anton.core.idle_scratchpad import (
+    IDLE_ROUNDS_BEFORE_WITHHOLD,
+    IDLE_SCRATCHPAD_NOTICE,
+    round_is_idle,
+    without_scratchpad,
+)
 from anton.core.llm import jev as _jev
 from anton.core.llm.effort import (
     TRUNCATION_RETRY_NOTE,
@@ -6611,6 +6617,7 @@ class ChatSession:
             tool_round = 0
             error_streak: dict[str, int] = {}
             resilience_nudged: set[str] = set()
+            idle_scratchpad_rounds = 0
             # Per-continuation, unlike `_round_cap_grace_used`: only the
             # continuation that actually earns the grant (the first ever
             # breach this turn) gets the wider cap. Without this,
@@ -7343,6 +7350,17 @@ class ChatSession:
                 # so the LLM sees the alarm before its next decision.
                 self._acc_maybe_nudge(tool_results)
 
+                idle_scratchpad_rounds = (
+                    idle_scratchpad_rounds + 1 if round_is_idle(llm_response.tool_calls) else 0
+                )
+                withhold_scratchpad = idle_scratchpad_rounds >= IDLE_ROUNDS_BEFORE_WITHHOLD
+                if withhold_scratchpad:
+                    logger.info(
+                        "idle scratchpad loop: %d rounds — withholding scratchpad for the next round",
+                        idle_scratchpad_rounds,
+                    )
+                    tool_results.append({"type": "text", "text": IDLE_SCRATCHPAD_NOTICE})
+
                 self._append_history({"role": "user", "content": tool_results})
                 # Every model call resends the whole history: one render
                 # screenshot in it, the newest, is enough.
@@ -7360,6 +7378,8 @@ class ChatSession:
                 # Rebuild: a tool this round (e.g. recall_skill) may have
                 # registered new tools the follow-up must see.
                 tools = self._build_tools()
+                if withhold_scratchpad:
+                    tools = without_scratchpad(tools)
 
                 # Signal that tools are done and LLM is now reasoning
                 _reasoning_t0 = _time.monotonic()

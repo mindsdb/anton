@@ -62,6 +62,16 @@ def test_tools_no_longer_seen_live_are_not_in_the_table():
         assert allowed_for_mode("hubspot", removed_tool, "read") is False
 
 
+def test_notion_read_mode_allows_only_its_read_tools():
+    assert allowed_for_mode("notion", "notion-fetch", "read") is True
+    assert allowed_for_mode("notion", "notion-search", "read") is True
+    assert allowed_for_mode("notion", "notion-update-page", "read") is False
+    assert allowed_for_mode("notion", "notion-query-data-sources", "read") is False
+    assert allowed_for_mode("notion", "a_tool_added_later", "read") is False
+    assert allowed_for_mode("notion", "notion-update-page", "write") is True
+    assert allowed_for_mode("notion", "notion-search", "none") is False
+
+
 def test_a_tool_that_returns_the_customers_records_returns_records():
     for data_tool in (
         "search_crm_objects",
