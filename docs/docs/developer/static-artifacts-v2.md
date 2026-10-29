@@ -83,6 +83,13 @@ fields stay private. Arithmetic shares the scalar-fact implementation and precis
 null inputs or division by zero produce null. This covers row rates/variances and
 ratios of grouped totals without requiring custom HTML.
 
+Queries can explicitly add decimal `casts` with `name`, `field` and `type="decimal"`.
+They run before filtering and grouping, preserve source text, and never overwrite
+an existing field. Unambiguous numeric text is parsed directly into Decimal, while
+null stays null and booleans, units and ambiguous separators are rejected. This
+allows exact aggregates over text-source values without weakening ordinary numeric
+type checks or converting identifier strings implicitly.
+
 Facts select one exact query result or calculate over named facts. Division by
 zero and missing inputs produce unavailable values. Text uses `{{fact_name}}`
 and metrics bind to facts, so changing layout does not retype a total. The

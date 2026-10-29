@@ -5,10 +5,11 @@ The acquisition layer owns access; this module never opens a source or network.
 """
 from __future__ import annotations
 
-from decimal import Decimal, localcontext
+from decimal import Decimal, InvalidOperation, localcontext
 from hashlib import sha256
 import json
 import math
+import re
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt, StrictStr, model_validator
@@ -80,6 +81,12 @@ class QueryCalculation(Model):
     fields: list[str] = Field(min_length=2, max_length=2)
 
 
+class QueryCast(Model):
+    name: Name
+    field: str
+    type: Literal['decimal'] = 'decimal'
+
+
 class Query(Model):
     dataset: Name
     columns: list[str] = Field(default_factory=list)
@@ -88,12 +95,15 @@ class Query(Model):
     measures: list[Measure] = Field(default_factory=list)
     order_by: list[Order] = Field(default_factory=list)
     calculations: list[QueryCalculation] = Field(default_factory=list, max_length=50)
+    casts: list[QueryCast] = Field(default_factory=list, max_length=50)
 
     @model_validator(mode="after")
     def shape(self):
         names = self.group_by + [m.name for m in self.measures] + [c.name for c in self.calculations]
         if len(names) != len(set(names)):
             raise ValueError("Query output names must be unique")
+        if len(self.casts) != len({cast.name for cast in self.casts}):
+            raise ValueError('Cast output names must be unique')
         if self.measures and self.columns:
             raise ValueError("Use group_by and measures, or columns")
         if self.group_by and not self.measures:
@@ -173,11 +183,42 @@ def _aggregate(rows: list[dict], measure: Measure):
     return min(values) if measure.op == "min" else max(values)
 
 
+def _cast_rows(source, casts):
+    if not casts:
+        return source
+    available = {key for row in source for key in row}
+    names = {cast.name for cast in casts}
+    for cast in casts:
+        if cast.name in available or cast.name == cast.field:
+            raise DataError(f'Cast would overwrite field: {cast.name}')
+        if cast.field not in available and (source or cast.field in names):
+            raise DataError(f'Cast needs a source field or earlier cast: {cast.field}')
+        available.add(cast.name)
+    rows = []
+    for index, original in enumerate(source):
+        row = dict(original)
+        for cast in casts:
+            if cast.field not in row:
+                raise DataError(f'Cast row {index}: missing field {cast.field}')
+            value = row[cast.field]
+            if isinstance(value, str):
+                value = value.strip()
+                if not re.fullmatch(r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?', value):
+                    raise DataError(f'Decimal cast needs an unambiguous numeric string: {cast.field}')
+                try:
+                    value = Decimal(value)
+                except InvalidOperation as error:
+                    raise DataError(f'Invalid decimal in {cast.field}') from error
+            row[cast.name] = None if value is None else number(value)
+        rows.append(row)
+    return rows
+
+
 def execute(evidence: Evidence, query: Query) -> list[dict]:
     """Resolve all rows, validating field coverage before applying any filter."""
     if query.dataset not in evidence.datasets:
         raise DataError(f"Unknown dataset: {query.dataset}")
-    source = evidence.datasets[query.dataset].rows
+    source = _cast_rows(evidence.datasets[query.dataset].rows, query.casts)
     calculated = {c.name for c in query.calculations}
     required = set(query.columns) - calculated
     required.update(query.group_by + [w.field for w in query.where])

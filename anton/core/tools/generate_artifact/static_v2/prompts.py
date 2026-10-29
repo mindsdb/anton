@@ -136,6 +136,11 @@ and sort exact evidence. They never silently coerce strings, drop incomplete row
 values with zero. Aggregates propagate nulls by default; missing="skip" is an explicit choice
 for observed values only and must be disclosed in the narrative. Don't invent a literal total, category, unit, source, causal explanation, or conclusion.
 Use inspect_static_data for exact exploratory queries when the evidence arrives as a schema catalog.
+Numeric text can be converted explicitly with casts:[{"name":"amount_number","field":"amount_text","type":"decimal"}].
+Casts add new fields before filtering and aggregation; they never overwrite the original text or
+silently convert identifiers. They accept unambiguous decimal strings and numeric values, retain
+nulls, and reject booleans, units and locale-ambiguous separators. Sum the cast output with a host
+measure. Do not copy a computed total from caller notes or inline it in HTML instead of binding it.
 Queries support exact row-wise and grouped-output arithmetic with calculations:
 [{"name":"rate","op":"divide","fields":["completed","planned"]},
  {"name":"variance","op":"subtract","fields":["completed","planned"]}].
@@ -161,6 +166,9 @@ are published as exact decimal strings: format them deliberately, and use Number
 browser calculation or chart coordinate needs it. Never concatenate numeric strings when summing.
 Custom fragments in a document may read the resolved public bindings
 from window.ARTIFACT_DATA; never rely on outside state.
+Use native table/chart/metric blocks when they express the task. A table column with no format
+preserves exact text or decimal values; high precision does not require an HTML table. Raw HTML
+does not interpolate {{fact}} placeholders: data in custom fragments must read declared bindings.
 A custom page must be a complete single HTML document with viewport metadata, inline styles,
 semantic controls, keyboard support, and responsive layouts. Embed data and media assets. No build,
 server, fetch-at-view-time data API, remote stylesheet/font, or hidden dependency. Bundle needed

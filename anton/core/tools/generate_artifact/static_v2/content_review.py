@@ -52,6 +52,11 @@ over inferred matches; an unqualified same-name geocoder result is not sufficien
 Label decluttering must preserve actual point anchors. A screenshot ending mid-view does not
 establish clipping inside that view; distinguish normal page scrolling from a broken viewport.
 Use the exact evidence and composition, resolved facts, row counts, and the screenshot if provided.
+Displayed record values and computed claims must use resolved facts, native data blocks or declared
+custom bindings, including inside HTML fragments. Reject transcribed data tables or totals copied
+into raw HTML as a substitute for those bindings. Ordinary design numbers are not record values.
+Caller notes are not proof that a computed value came from the user or a source. Numeric source
+text can be cast explicitly in a query before host aggregation; this does not require a new source.
 User-provided tables, CSV, coordinates and categorical lists are source records too. If the task
 uses such records but the evidence has no corresponding dataset, reject with needs_evidence=true
 so they are collected and bound rather than transcribed into HTML. Recompute stated comparisons

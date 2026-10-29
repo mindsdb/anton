@@ -56,6 +56,52 @@ def test_numeric_equality_filters_compare_decimal_values_without_string_or_boole
     assert [row['id'] for row in execute(data,query)]==expected
 
 
+def test_explicit_decimal_casts_preserve_source_text_and_exact_aggregate_precision():
+    data=evidence([{'id':'0007','reading':'1234567890.1234567890123456789'},
+        {'id':'0012','reading':'0.0000000000000000001'}]);before=data.digest()
+    casts=[{'name':'numeric_reading','field':'reading','type':'decimal'}]
+    rows=execute(data,Query(dataset='orders',columns=['id','reading','numeric_reading'],casts=casts))
+    assert rows[0]=={'id':'0007','reading':'1234567890.1234567890123456789','numeric_reading':Decimal('1234567890.1234567890123456789')}
+    assert execute(data,Query(dataset='orders',casts=casts,measures=[{'name':'total','op':'sum','field':'numeric_reading'}]))==[{'total':Decimal('1234567890.1234567890123456790')}]
+    assert data.digest()==before
+
+
+def test_casts_run_before_numeric_filters_and_keep_unselected_fields_private():
+    data=evidence([{'id':'a','raw':'.10'},{'id':'b','raw':'0.2'}])
+    query=Query(dataset='orders',columns=['id'],casts=[{'name':'n','field':'raw'}],where=[{'field':'n','value':.1}])
+    assert execute(data,query)==[{'id':'a'}]
+    query=Query(dataset='orders',casts=[{'name':'n','field':'raw'}],group_by=['n'],measures=[{'name':'count','op':'count'}])
+    assert execute(data,query)==[{'n':Decimal('.1'),'count':1},{'n':Decimal('.2'),'count':1}]
+
+
+@pytest.mark.parametrize('value',['12,5','$12','NaN','Infinity','not measured',True])
+def test_explicit_cast_rejects_ambiguous_text_and_booleans(value):
+    with pytest.raises(DataError):
+        execute(evidence([{'raw':value}]),Query(dataset='orders',columns=['n'],casts=[{'name':'n','field':'raw'}]))
+
+
+def test_cast_nulls_and_empty_results_keep_existing_missingness_semantics():
+    query=Query(dataset='orders',casts=[{'name':'n','field':'raw'}],measures=[{'name':'total','op':'sum','field':'n'}])
+    assert execute(evidence([{'raw':None},{'raw':'2'}]),query)==[{'total':None}]
+    assert execute(evidence([]),query)==[{'total':None}]
+
+
+@pytest.mark.parametrize('casts',[
+    [{'name':'raw','field':'raw'}],
+    [{'name':'other','field':'raw'}],
+    [{'name':'first','field':'later'},{'name':'later','field':'raw'}],
+])
+def test_casts_do_not_overwrite_source_fields_or_read_future_casts(casts):
+    with pytest.raises(DataError):
+        execute(evidence([{'raw':'1','other':'2'}]),Query(dataset='orders',columns=['raw'],casts=casts))
+
+
+def test_cast_field_coverage_is_checked_before_filtering():
+    query=Query(dataset='orders',columns=['id'],casts=[{'name':'n','field':'raw'}],where=[{'field':'id','value':'a'}])
+    with pytest.raises(DataError,match='missing field'):
+        execute(evidence([{'id':'a','raw':'1'},{'id':'b'}]),query)
+
+
 def test_query_calculations_resolve_rates_and_variances_before_public_projection():
     data=evidence([{'name':'A','actual':Decimal('0.3'),'private_plan':Decimal('0.2')},
         {'name':'B','actual':4,'private_plan':0}, {'name':'C','actual':None,'private_plan':3}])
