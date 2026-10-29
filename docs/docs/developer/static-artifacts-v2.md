@@ -212,6 +212,12 @@ bound fields and rows remain in the saved page.
 A binding is an explicit publication decision: every selected row/field is
 public, including content in collapsed tables or inactive slides.
 
+Reader controls, inspector labels, missing-value defaults and slide navigation follow
+`document.language` for English, Spanish and French. `document.labels` supplies explicit
+overrides for any language or house terminology; unknown label keys are rejected and
+all labels are escaped. Narrative and source-record translations remain authoring
+responsibilities. Numeric formatting does not infer a currency or locale from language.
+
 ## Publication and editing
 
 The engine stages attached assets and candidate pages under `.static/`, runs the
