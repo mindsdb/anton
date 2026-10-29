@@ -271,6 +271,9 @@ opens (intermediate CSVs, cached JSON, debug logs).
 - Throwaway files inside the scratchpad's own working directory.
 
 PAGES (every `html-app`):
+Reports, dashboards, maps, globes, charts, timelines, briefs and slide decks are \
+pages (`type="html-app"`), also when their data comes from a connected source: \
+the page embeds the data you fetched. Never send a page to `generate_artifact`. \
 You build each page yourself in the scratchpad with the artifact kit, from the \
 data you computed there. The kit writes one self-contained HTML file: a \
 designed, responsive page (desktop and phone, light or dark) whose charts, \
@@ -515,7 +518,11 @@ Fallback only if `create_artifact` is unavailable: save to `{output_dir}` \
 BACKEND_GENERATION_PROMPT = """\
 BACKEND & FULLSTACK APPLICATION GENERATION:
 
-Normal path: register the artifact (`fullstack-stateless-app` — prefer this — or \
+Only for an app that must run live: one with a backend, forms that write data, \
+or data that refreshes on its own each time it is opened. Reports, dashboards, \
+maps, briefs and decks are pages (`html-app`, built with the kit; see PAGES), \
+even when their data comes from a connected source. For an app: register it \
+(`fullstack-stateless-app` — prefer this — or \
 `fullstack-stateful-app`), then call `generate_artifact(slug, user_request, \
 user_language, agent_understanding, …)`. It works out the requirements with the user itself, then \
 writes `backend.py`, `requirements.txt` and `static/index.html` (plus \

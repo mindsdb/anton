@@ -1878,11 +1878,14 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
 
     if artifact.type == "html-app":
         # Pages are built with the artifact kit, not the generator.
+        path = store.folder_for(slug)
         yield (
-            f"`{slug}` is an html-app page: build it yourself in a scratchpad cell with the "
-            "artifact kit (`from anton.core.artifacts import kit`, PAGES in the ARTIFACTS "
-            "section) and save it with `page.save(<artifact_path>)`. generate_artifact builds "
-            "fullstack apps only."
+            f"Not run: `{slug}` is an html-app page, and pages are not built by generate_artifact "
+            "(it builds fullstack apps only). Build it now yourself: in a scratchpad cell, fetch "
+            "the data, compute the figures, then `from anton.core.artifacts import kit`, compose "
+            "the page as PAGES in the ARTIFACTS section describes, and call "
+            f"`page.save({str(path)!r})`. The kit is installed "
+            "and importable in every scratchpad."
         )
         return
     if artifact.type not in GENERATOR_ARTIFACT_TYPES:
