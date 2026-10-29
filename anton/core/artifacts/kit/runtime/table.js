@@ -23,7 +23,9 @@
     });
     var key = b.key || null;
     var link = b.link || null;
-    var detail = b.detail === undefined ? (link ? 'inline' : (cols.length < Object.keys(rows[0] || {}).length ? 'drawer' : null)) : b.detail;
+    // Rows open a detail view only when asked for (detail="drawer"/"inline"); a linked row click
+    // selects (highlights the same key in the linked views) without opening anything.
+    var detail = b.detail === undefined || b.detail === null ? null : b.detail;
     if (detail === true) detail = link ? 'inline' : 'drawer';
     var c = AK.card(b, parent);
     var mobile = b.mobile || (cols.length >= 4 ? 'cards' : 'scroll');

@@ -175,6 +175,36 @@
     });
   }
 
+  /* When labels still collide (a tight cluster), list them in a column beside the cluster, each
+     joined to its point by a leader line. */
+  function columnLabels(labels, width, height) {
+    var boxes = labels.map(function (l) {
+      var x = l.anchor === 'start' ? l.x + l.dx : (l.anchor === 'end' ? l.x + l.dx - l.w : l.x + l.dx - l.w / 2);
+      return {x: x, y: l.y + l.dy - 11, w: l.w, h: 14};
+    });
+    var clash = false;
+    for (var i = 0; i < boxes.length && !clash; i++) for (var j = i + 1; j < boxes.length; j++) {
+      var a = boxes[i], z = boxes[j];
+      if (Math.min(a.x + a.w, z.x + z.w) - Math.max(a.x, z.x) > 4 && Math.min(a.y + a.h, z.y + z.h) - Math.max(a.y, z.y) > 3) { clash = true; break; }
+    }
+    if (!clash || labels.length < 2) return false;
+    var xs = labels.map(function (l) { return l.x; }), ys = labels.map(function (l) { return l.y; });
+    var maxW = Math.max.apply(null, labels.map(function (l) { return l.w; }));
+    var right = Math.max.apply(null, xs) + 34, left = Math.min.apply(null, xs) - 34;
+    var useRight = right + maxW <= width - 6 || left - maxW < 6;
+    var colX = useRight ? Math.min(right, width - 6 - maxW) : Math.max(left, 6 + maxW);
+    var step = 17, total = (labels.length - 1) * step;
+    var mid = (Math.min.apply(null, ys) + Math.max.apply(null, ys)) / 2;
+    var top = Math.max(14, Math.min(height - 8 - total, mid - total / 2));
+    labels.slice().sort(function (a, z) { return a.y - z.y; }).forEach(function (l, k) {
+      l.anchor = useRight ? 'start' : 'end';
+      l.dx = colX - l.x;
+      l.dy = top + k * step + 4 - l.y;
+      l.column = true;
+    });
+    return true;
+  }
+
   /* Points that share a place are fanned out on screen so each stays visible. */
   function spread(items) {
     var groups = {};
@@ -330,11 +360,13 @@
       return {p: p, x: p.x, y: p.y, w: text.length * (narrow ? 6.2 : 6.4) + 6, text: text, sub: sub};
     });
     placeLabels(labels, width, height);
+    columnLabels(labels, width, height);
     var leadG = labelsG.append('g');
     labels.forEach(function (l) {
-      if (Math.abs(l.dx) > 14 || Math.abs(l.dy) > 20) {
-        leadG.append('line').attr('x1', l.x).attr('y1', l.y).attr('x2', l.x + l.dx * 0.82).attr('y2', l.y + l.dy * 0.82 - 4)
-          .attr('stroke', AK.css('--ak-text-3')).attr('stroke-width', 0.8).attr('opacity', 0.7);
+      if (l.column || Math.abs(l.dx) > 14 || Math.abs(l.dy) > 20) {
+        var ex = l.x + l.dx + (l.anchor === 'end' ? 3 : (l.anchor === 'start' ? -3 : 0)), ey = l.y + l.dy - 4;
+        leadG.append('line').attr('x1', l.x).attr('y1', l.y).attr('x2', ex).attr('y2', ey)
+          .attr('stroke', AK.css('--ak-text-3')).attr('stroke-width', 0.8).attr('opacity', 0.75);
       }
       var t = labelsG.append('text').attr('class', 'ak-lbl').attr('x', l.x + l.dx).attr('y', l.y + l.dy).attr('text-anchor', l.anchor);
       t.append('tspan').text(l.p.label);

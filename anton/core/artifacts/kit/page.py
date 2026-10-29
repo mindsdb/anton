@@ -526,12 +526,15 @@ class Page:
                 node_colors: dict | None = None, dashed: Any = None, tooltip: list | None = None,
                 node_tooltip: list | None = None, link: str | None = None, highlight: str | None = None,
                 height: int | None = None, arrows: bool = True, show_totals: bool = True,
-                labels: dict | None = None, formats: dict | None = None, id: str | None = None) -> dict:
+                controls: bool | None = None, labels: dict | None = None, formats: dict | None = None,
+                id: str | None = None) -> dict:
         """A network diagram from link rows (source, target, value). `nodes` (optional) gives node rows with
         `id_field`, `label`, `group`; `tiers` orders groups left to right (e.g. ["Supplier","Plant","DC"]).
         style "graph" (boxes and arrows, value labels on links) or "sankey" (bands sized by value).
         `link_color` colours links by a field (e.g. lane kind) with `link_colors` {value: colour/tone};
-        `dashed` True or a field marking dashed links; `link_label` a field to label links with (False: none)."""
+        `dashed` True or a field marking dashed links; `link_label` a field to label links with (False: none).
+        Clicking a node highlights its links; `controls` adds buttons that do the same (default: on for small
+        graphs, off for sankeys)."""
         if style not in ("graph", "sankey"):
             raise KitError("network style is 'graph' or 'sankey'")
         _check_format(value_format, f"network {title!r}")
@@ -556,6 +559,7 @@ class Page:
                           "links": {k: v for k, v in lspec.items() if v is not None}, "tiers": tiers, "title": title,
                           "subtitle": subtitle, "note": note, "value_format": value_format, "link": link,
                           "highlight": highlight, "height": height, "arrows": None if arrows else False,
+                          "controls": controls,
                           "show_totals": None if show_totals else False, "labels": labels, "id": id})
 
     def flow(self, links: Any, **kw) -> dict:

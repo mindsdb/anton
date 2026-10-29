@@ -105,7 +105,9 @@ you are not sure how, first run a short cell that prints each table's columns, a
 distinct values of the fields you will join or filter on; then compute. Follow the links the data \
 has (ids, references, messages) rather than guessing.
 - Count and total from rows with code, then sanity-check (row counts, ranges, that parts add up \
-to their total) before you build. Keep the data's own wording for statuses and measures (e.g. "at \
+to their total) before you build. Figures the request implies are computed and shown explicitly \
+as text with their unit: how late (in days), how much something rose or fell (the difference, \
+not only both totals), the cost of an option, the total of a period. Keep the data's own wording for statuses and measures (e.g. "at \
 risk" is not "lost"); dates follow the data's calendar, not today's.
 - Never invent records, ids, places or values. When the data has no answer, say so on the page. \
 Places: use coordinates from the data; for place names use `kit.geocode("City, Country")` \
@@ -128,6 +130,8 @@ and sources, every block must answer a part of the request: no KPI row the reque
 (a count above a map is extra), no table repeating cards, no extra charts, panels or metrics "for \
 context". Every figure the user asked for appears as text (a KPI, a table cell, a label or a \
 compare row), not only inside a chart.
+- A "dashboard" shows its figures as KPI cards and at least one chart of its main measure (with \
+a scenario switch, one chart per scenario). A table only when the request asks for rows or a list.
 - Pick the view for the request: places on a map (`page.map`); "3D" or "globe" on `page.globe`; \
 flows, lanes or supply networks on `page.network` (style "sankey" for volumes); schedules, \
 milestones or Gantt on `page.timeline`; options or scenarios side by side on `page.compare`; trends \

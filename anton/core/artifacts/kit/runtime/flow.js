@@ -297,13 +297,16 @@
       n.el = g;
     });
     svg.addEventListener('click', function () { toggle(null); });
-    var current = null;
+    var current = view.__sel ? G.nodes.filter(function (n) { return n.id === view.__sel; })[0] || null : null;
     function toggle(n) {
       current = n && current !== n ? n : null;
-      if (b.link) AK.select(b.link, current ? current.id : null, view);
+      view.__sel = current ? current.id : null;
+      if (b.link) AK.select(b.link, view.__sel, view);
       paint();
     }
+    view._akFocus = function (id) { toggle(id == null ? null : G.nodes.filter(function (n) { return n.id === id; })[0] || null); };
     function paint() {
+      if (view._akChips) view._akChips(view.__sel);
       var on = {}, lon = {};
       if (current) {
         on[current.id] = 1;
@@ -322,7 +325,8 @@
       current = sel == null ? null : G.nodes.filter(function (n) { return n.id === sel; })[0] || null;
       paint();
     });
-    if (b.highlight) { current = G.nodes.filter(function (n) { return n.id === String(b.highlight); })[0] || null; paint(); }
+    if (b.highlight && view.__sel === undefined) { current = G.nodes.filter(function (n) { return n.id === String(b.highlight); })[0] || null; view.__sel = current ? current.id : null; }
+    paint();
     return svg;
   }
 
@@ -345,6 +349,23 @@
     var view = AK.el('div', 'ak-view ak-svgview ' + (b.style === 'sankey' ? 'ak-sankey' : 'ak-network'));
     c.body.appendChild(view);
     var G = build(b);
+    // Buttons that highlight one node's links: the same as clicking a node, for touch and keyboard.
+    var withChips = b.controls === true || (b.controls !== false && b.style !== 'sankey' && G.nodes.length <= 14);
+    if (withChips) {
+      var bar = AK.el('div', 'ak-chips');
+      bar.setAttribute('role', 'group');
+      bar.appendChild(AK.el('span', 'ak-control-label', AK.t('highlight')));
+      var chips = [];
+      [{id: null, label: AK.t('all')}].concat(G.nodes.map(function (n) { return {id: n.id, label: n.label}; })).forEach(function (it) {
+        var btn = AK.el('button', 'ak-chipbtn', it.label);
+        btn.type = 'button';
+        btn.addEventListener('click', function () { if (view._akFocus) view._akFocus(it.id); });
+        bar.appendChild(btn);
+        chips.push({id: it.id, el: btn});
+      });
+      view._akChips = function (sel) { chips.forEach(function (c) { c.el.setAttribute('aria-pressed', String((sel || null) === c.id)); }); };
+      c.body.insertBefore(bar, view);
+    }
     var lg = legendFor(b, G);
     if (lg) c.body.appendChild(lg);
     AK.watchSize(view, function (w) {

@@ -220,13 +220,31 @@
         (L.tooltip || []).forEach(function (f) { pairs.push([AK.label(L, f), AK.fmt(m.r[f], AK.fieldFormat(L, f) || 'auto')]); });
         return AK.tipRows((L.label ? String(m.r[L.label]) + ' · ' : '') + R.labels[m.k], pairs);
       }
+      var ordered = all.slice().sort(function (a, z) { return (t(a.r[a.L.date]) - t(z.r[z.L.date])) || (R.keys.indexOf(a.k) - R.keys.indexOf(z.k)); });
       function focus(m) {
         selected = m ? (m.k + '|' + m.r[m.L.date] + '|' + (m.L.label ? m.r[m.L.label] : '')) : null;
-        all.forEach(function (x) { x.node.setAttribute('stroke', x === m ? AK.css('--ak-text') : AK.css('--ak-surface')); });
+        all.forEach(function (x) {
+          x.node.setAttribute('stroke', x === m ? AK.css('--ak-text') : AK.css('--ak-surface'));
+          x.node.setAttribute('stroke-width', x === m ? 3 : 2);
+        });
         if (!panel || !m) return;
         panel.innerHTML = '';
         var L = m.L;
-        panel.appendChild(AK.el('div', 'ak-kpi-label', AK.t('details')));
+        // Step through milestones in date order: the hover detail, for touch and keyboard too.
+        var head = AK.el('div', 'ak-step');
+        head.appendChild(AK.el('div', 'ak-kpi-label', AK.t('details')));
+        var at = ordered.indexOf(m);
+        var nav = AK.el('div', 'ak-step-nav');
+        [['\u2039', -1, AK.t('prev')], ['\u203a', 1, AK.t('next')]].forEach(function (d) {
+          var btn = AK.el('button', 'ak-chipbtn', d[0]);
+          btn.type = 'button'; btn.setAttribute('aria-label', d[2]); btn.title = d[2];
+          btn.disabled = at + d[1] < 0 || at + d[1] >= ordered.length;
+          btn.addEventListener('click', function () { focus(ordered[at + d[1]]); });
+          nav.appendChild(btn);
+        });
+        nav.insertBefore(AK.el('span', 'ak-note', (at + 1) + ' / ' + ordered.length), nav.lastChild);
+        head.appendChild(nav);
+        panel.appendChild(head);
         panel.appendChild(AK.el('div', 'ak-card-title', (L.label ? String(m.r[L.label]) + ' · ' : '') + R.labels[m.k]));
         var fields = (L.detail_fields || [L.date].concat(L.tooltip || []));
         panel.appendChild(AK.detailList(fields.map(function (f) { return [AK.label(L, f), AK.fmt(m.r[f], f === L.date ? 'date' : (AK.fieldFormat(L, f) || 'auto'))]; })));

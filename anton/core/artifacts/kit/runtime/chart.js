@@ -54,6 +54,10 @@
     var s = AK.el('summary', 'ak-note', AK.t('data'));
     s.style.cursor = 'pointer';
     d.appendChild(s);
+    // Built when opened: a closed chart's numbers add nothing to the page until asked for.
+    d.addEventListener('toggle', function () { if (d.open && !d._built) { d._built = true; d.appendChild(build()); } });
+    return d;
+    function build() {
     var wrap = AK.el('div', 'ak-table-wrap');
     wrap.style.marginTop = '8px';
     var t = AK.el('table', 'ak-table');
@@ -66,8 +70,9 @@
       fields.forEach(function (f) { tr.appendChild(AK.el('td', null, AK.fmt(r[f], fmtOf(b, f)))); });
       tb.appendChild(tr);
     });
-    t.appendChild(tb); wrap.appendChild(t); d.appendChild(wrap);
-    return d;
+    t.appendChild(tb); wrap.appendChild(t);
+    return wrap;
+    }
   }
 
   function ys(b) { return b.y == null ? [] : [].concat(b.y); }

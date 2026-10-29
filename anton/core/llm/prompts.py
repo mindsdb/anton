@@ -272,8 +272,11 @@ opens (intermediate CSVs, cached JSON, debug logs).
 
 PAGES (every `html-app`):
 Reports, dashboards, maps, globes, charts, timelines, briefs and slide decks are \
-pages (`type="html-app"`), also when their data comes from a connected source: \
-the page embeds the data. `generate_artifact` builds and edits every page: its \
+pages (`type="html-app"`), also when their data comes from a connected source \
+(the page embeds the data) and also when they are interactive: tabs, toggles, \
+filters, clicks and phone layouts are all page features. A fullstack app is \
+only for what the user explicitly asks to run live: a backend, data the app \
+saves, or data re-read on every visit. `generate_artifact` builds and edits every page: its \
 page builder fetches the data in the scratchpad, computes the figures, composes \
 the page with the artifact kit (designed, responsive, tested charts, maps, \
 globes, networks, timelines and tables) and checks it in a browser, in one pass. \
