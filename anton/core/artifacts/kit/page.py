@@ -753,8 +753,60 @@ class Page:
         return "\n".join([head] + lines)
 
     # ---- output ----
+    def _autolink(self) -> None:
+        """Tables and maps, globes or timelines that show the same records (the same ids) are linked:
+        clicking a row highlights that record in the other views. Explicit links are left alone."""
+        data = self.spec.get("data", {})
+
+        def ids(rows, field):
+            vals = [r.get(field) for r in rows]
+            return {str(v) for v in vals if isinstance(v, str) and v.strip()}
+
+        tables = [b for b in self._walk() if b.get("type") == "table" and not b.get("link")]
+        views = []
+        for b in self._walk():
+            if b.get("type") in ("map", "globe"):
+                for L in b.get("layers") or []:
+                    if L.get("type") in ("points", "routes") and not L.get("link"):
+                        views.append(("layer", L, data.get(L["data"], [])))
+            elif b.get("type") == "timeline" and not b.get("link"):
+                rows = [r for layer in (b.get("bars") or []) + (b.get("milestones") or []) for r in data.get(layer["data"], [])]
+                field = next((layer["row"] for layer in (b.get("bars") or []) + (b.get("milestones") or [])), None)
+                if field:
+                    views.append(("timeline", b, [{"__row": r.get(field)} for r in rows]))
+        n = 0
+        for t in tables:
+            rows = data.get(t["data"], [])
+            if not rows:
+                continue
+            fields = t.get("key") and [t["key"]] or [c["field"] for c in (t.get("columns") or [])] or _fields(rows)
+            for f in fields:
+                keys = ids(rows, f)
+                if len(keys) < 2 or len(keys) != len(rows):
+                    continue
+                matched = []
+                for kind, target, vrows in views:
+                    cand = ["__row"] if kind == "timeline" else _fields(vrows)
+                    for g in cand:
+                        vals = ids(vrows, g)
+                        if vals and len(vals & keys) >= max(2, 0.8 * len(vals)):
+                            matched.append((kind, target, g))
+                            break
+                if matched:
+                    n += 1
+                    name = f"auto{n}"
+                    t["key"], t["link"] = f, name
+                    for kind, target, g in matched:
+                        if kind == "timeline":
+                            target["link"] = name
+                        else:
+                            target["key"], target["link"] = g, name
+                    views = [v for v in views if all(v[1] is not m[1] for m in matched)]
+                    break
+
     def html_text(self) -> str:
         from .render import render_html
+        self._autolink()
         return render_html(self.spec, self._custom)
 
     def save(self, path: Any, *, quiet: bool = False) -> str:
