@@ -129,3 +129,31 @@ async def test_source_refresh_is_bounded_and_never_replaces_a_page_when_still_in
     monkeypatch.setattr(pipeline,'collect',gather);monkeypatch.setattr(pipeline,'compose',missing)
     assert 'still needs source evidence' in await pipeline.run(state(tmp_path,VALID))
     assert len(gathers)==2 and prior.read_text()=='PRIOR PAGE'
+
+
+async def test_composer_can_request_missing_evidence_without_publishing_a_guess(tmp_path, monkeypatch):
+    import importlib
+    pipeline = importlib.import_module('anton.core.tools.generate_artifact.static_v2')
+    prior = tmp_path/'index.html'; prior.write_text('PRIOR PAGE')
+    gathered = []
+    async def gather(st, *, feedback=''):
+        gathered.append(feedback)
+        assert prior.read_text() == 'PRIOR PAGE'
+        return Evidence()
+    author_calls = []
+    async def stream(**kwargs):
+        if kwargs['system'] == content_review.SYSTEM:
+            yield response(True, []); return
+        author_calls.append(kwargs)
+        assert 'request_static_evidence' in {tool['name'] for tool in kwargs['tools']}
+        if len(author_calls) == 1:
+            call = ToolCall('evidence', 'request_static_evidence', {'issues': ['City-coordinate references are absent; acquire contextual candidates instead of guessing.']})
+        else:
+            call = ToolCall('compose', 'compose_static_artifact', VALID)
+        yield StreamComplete(response=LLMResponse(content='', tool_calls=[call]))
+    st = state(tmp_path, VALID); st.session._llm.code_stream = stream
+    monkeypatch.setattr(pipeline, 'collect', gather)
+    monkeypatch.setattr('anton.core.tools.generate_artifact.verifiers.verify_frontend_live', lambda *a, **k: BrowserCheck(status='passed'))
+    assert (await pipeline.run(st))['status'] == 'generated'
+    assert len(gathered) == 2 and 'City-coordinate references are absent' in gathered[1]
+    assert st.user_request == 'Make a report' and 'A result.' in prior.read_text()

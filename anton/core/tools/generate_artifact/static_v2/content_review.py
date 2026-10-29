@@ -14,7 +14,7 @@ from .prompts import context
 class Review(Model):
     approved: StrictBool
     issues: list[Annotated[str, Field(min_length=1, max_length=600)]] = Field(max_length=8)
-    needs_evidence: StrictBool = Field(default=False, description='True only when requested source records, fields, or conditions are missing. Ordinary filtering, arithmetic, formatting and visual assets do not need new evidence.')
+    needs_evidence: StrictBool = Field(default=False, description='True only when requested source records, fields, conditions, or necessary place-coordinate references are missing. Ordinary filtering, arithmetic, formatting and display assets do not need new evidence.')
 
     @model_validator(mode='after')
     def consistent(self):
@@ -28,6 +28,13 @@ class Review(Model):
 @dataclass(frozen=True)
 class EvidenceRequest:
     issues: tuple[str, ...]
+
+
+class MissingEvidence(Model):
+    issues: list[Annotated[str, Field(min_length=1, max_length=600)]] = Field(min_length=1, max_length=8)
+
+
+EVIDENCE_TOOL = {'name': 'request_static_evidence', 'description': 'Return to evidence acquisition when required source records, fields, conditions, or necessary place-coordinate references are absent. Explain concrete gaps against the original request. This does not publish a page, expand source access, or change user constraints. Do not use for arithmetic, filtering, layout, libraries, or display geometry that the composer can obtain itself. The host permits one evidence backedge.', 'input_schema': MissingEvidence.model_json_schema()}
 
 
 TOOL = {'name':'review_static_artifact','description':'Approve only when no concrete issue was found, or list specific corrections needed before publication.',
@@ -49,6 +56,14 @@ geographic context. Reject arbitrary SVG positions or a decorative grid presente
 Check that the selected location role matches the request: origin, destination and current
 position are different observations. Prefer supplied authoritative coordinates, including zero,
 over inferred matches; an unqualified same-name geocoder result is not sufficient evidence.
+Check coordinate provenance and order explicitly. City positions typed into author scripts from
+memory are unsupported even when labelled approximate. Missing required place coordinates need
+evidence acquisition, where lookup_static_places is available; country polygons are not a place
+lookup. D3 projections and GeoJSON positions take [longitude, latitude], while many source tables
+list latitude first. Trace the actual coordinate construction into the projection; labels alone
+do not prove correct order. Use needs_evidence=true for absent coordinate references, and an
+ordinary correction for reversed present coordinates. Never require an authoritative GPS source
+when the request permits contextual city-centroid approximations with reference provenance.
 Label decluttering must preserve actual point anchors. A screenshot ending mid-view does not
 establish clipping inside that view; distinguish normal page scrolling from a broken viewport.
 Use the exact evidence and composition, resolved facts, row counts, and the screenshot if provided.
@@ -90,10 +105,12 @@ catalog is not the full dataset. Approval means no concrete issue found, not pro
 Return exactly one review_static_artifact call: approved=true with issues=[], or approved=false
 with actionable issues tied to the user's requirements. Do not rewrite the artifact yourself.'''
 
-SYSTEM += ''' Set needs_evidence=true only when actual requested source observations or fields are
+SYSTEM += ''' Set needs_evidence=true only when actual requested source observations, fields, or
+necessary place-coordinate references are
 absent and cannot be recovered by querying the supplied evidence. A missing aggregate can be
 computed from present rows. Formatting, layout, scripts, and supporting reference assets are
-composer corrections, not reasons to acquire new business evidence.'''
+composer corrections, not reasons to acquire new business evidence. Place coordinates are evidence;
+country boundary display assets are presentation resources.'''
 
 SYSTEM += ''' Evidence origin is explicit: reused means the private snapshot from the previous
 published page, with its original acquisition time. It is valid for an edit preserving that data.
