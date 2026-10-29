@@ -110,6 +110,9 @@ dataset) means all rows, not a date filter.
 - Prefer the data's own facts to re-deriving them: a status field (late, at risk, on time), a \
 recorded delay, a precomputed measure or an exceptions table beats a chain of joins. Use joins only \
 for what the data does not state.
+- "On its way", "travelling", "in transit", "inbound", "coming in", "where each one is now" mean \
+every record not yet delivered or closed, whatever its status (one waiting at its origin port is \
+still on its way); "late" means a recorded delay or a late status, not a guess from dates.
 - Add no filter the request does not state. "Shipments from A to B" means all of them, whatever \
 their status; a word that implies a filter ("on their way", "late", "not delivered", "open") maps to \
 the data's own field: print that field's distinct values in scope and keep every record the words \
@@ -123,6 +126,11 @@ to their total) before you build. Figures the request implies are computed and s
 as text with their unit: how late (in days), how much something rose or fell (the difference, \
 not only both totals), the cost of an option, the total of a period. Keep the data's own wording for statuses and measures (e.g. "at \
 risk" is not "lost"); dates follow the data's calendar, not today's.
+- A table of records shows the columns a reader needs to recognise each one: its id, the parties \
+(supplier, carrier, customer, site), where and when, and its status. After a merge, check that each \
+column holds what its label says (the outline prints each table's first row).
+- Words on the page state only what the figures show: short factual captions, no analysis the data \
+does not support, and nothing that contradicts a figure on the page.
 - Never invent records, ids, places or values. When the data has no answer, say so on the page. \
 Places: use coordinates from the data; for place names use `kit.geocode("City, Country")` \
 (None when unsure: leave that point out and say so).
@@ -175,8 +183,10 @@ The kit (use it as documented here; no need to read its source):
 FINISH_TOOL = {
     "name": "finish",
     "description": (
-        "End the build once the page is saved and its output checked. `summary` is for the user: "
-        "the key figures, what the page shows, anything not shown and why, assumptions made."
+        "End the build once the page is saved and its output checked. First compare the outline with "
+        "the request: every block must answer a part of it (remove any other with page.remove(id) and "
+        "save), and every figure, view and interaction it asks for must be there. `summary` is for "
+        "the user: the key figures, what the page shows, anything not shown and why, assumptions made."
     ),
     "input_schema": {
         "type": "object",

@@ -798,11 +798,20 @@ def _describe(b: dict, spec: dict) -> str:
         return (f"{b['id']} chart {b['kind']}{title}: {n(b['data'])} rows, x={b.get('x')}, y={b.get('y')}"
                 + (f", series={b['series']}" if b.get("series") else "") + (" [" + "; ".join(stats) + "]" if stats else ""))
     if t == "table":
-        cols = [c["field"] for c in (b.get("columns") or [])] or _fields(data.get(b["data"], []))
-        return f"{b['id']} table{title}: {n(b['data'])} rows x {len(cols)} columns ({', '.join(cols)})"
+        rows = data.get(b["data"], [])
+        cols = [c["field"] for c in (b.get("columns") or [])] or _fields(rows)
+        first = ("; first row: " + ", ".join(f"{c}={rows[0].get(c)!r}" for c in cols[:8])) if rows else ""
+        return f"{b['id']} table{title}: {n(b['data'])} rows x {len(cols)} columns ({', '.join(cols)}){first}"
     if t in ("map", "globe"):
-        parts = [f"{L['type']} {n(L['data'])}" + (f" labelled by {L['label']}" if L.get("label") else "") for L in b["layers"]]
-        return f"{b['id']} {t}{title}: " + ", ".join(parts)
+        parts = []
+        for L in b["layers"]:
+            rows = data.get(L["data"], [])
+            part = f"{L['type']} {len(rows)}"
+            if L.get("label") and rows:
+                sample = ", ".join(str(r.get(L["label"])) + (f" ({r.get(L['sublabel'])})" if L.get("sublabel") else "") for r in rows[:6])
+                part += f" labelled {sample}{' ...' if len(rows) > 6 else ''}"
+            parts.append(part)
+        return f"{b['id']} {t}{title}: " + "; ".join(parts)
     if t == "network":
         return f"{b['id']} network ({b.get('style')}){title}: {n(b['links']['data'])} links"
     if t == "timeline":
