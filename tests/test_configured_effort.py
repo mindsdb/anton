@@ -164,8 +164,9 @@ async def test_a_cut_verdict_retries_once_with_more_room_at_any_effort(effort, b
     ("effort", "budget"), [("max", 65536), ("xhigh", 32768), ("high", 16384), ("medium", 8192)]
 )
 async def test_the_builders_first_call_sends_the_configured_effort_and_its_budget(effort, budget, tmp_path):
+    # The generator pipeline's first call: it runs for fullstack apps (a page goes to the kit builder).
     artifacts = tmp_path / "artifacts"
-    slug = ArtifactStore(artifacts).create(name="Clock", description="d", type="html-app").slug
+    slug = ArtifactStore(artifacts).create(name="Clock", description="d", type="fullstack-stateless-app").slug
     build = _tool_response(ToolCall(
         id="ga1", name="generate_artifact",
         input={"slug": slug, "user_request": "build a clock", "agent_understanding": "an analog clock",

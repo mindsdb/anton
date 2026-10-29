@@ -17,6 +17,7 @@ session without the tracker fails these on behavior.
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -274,16 +275,26 @@ async def test_a_tool_waiting_on_the_model_reports_a_wait():
     assert snap is not None, "a tool's own model call reported no wait"
 
 
-async def test_the_real_generate_artifact_tool_reports_a_wait(tmp_path):
-    """The stand-in above pins the rule; this pins the real tool. Its model
-    calls tick only because they go through the session's client, so a
-    rewrite that gives it its own client or provider fails here."""
+@pytest.mark.parametrize(
+    ("artifact_type", "runner"),
+    [
+        # A page: the kit's page builder, whose calls are plain `plan` calls.
+        ("html-app", os.path.join("kit", "builder.py")),
+        # A fullstack app: the generator pipeline, whose calls stream.
+        ("fullstack-stateless-app", "generate_artifact"),
+    ],
+)
+async def test_the_real_generate_artifact_tool_reports_a_wait(tmp_path, artifact_type, runner):
+    """The stand-in above pins the rule; this pins the real tool, down both
+    of its paths. Its model calls tick only because they go through the
+    session's client, so a rewrite that gives either path its own client or
+    provider fails here."""
     import traceback
 
     from anton.core.artifacts import ArtifactStore
 
     artifacts = tmp_path / "artifacts"
-    slug = ArtifactStore(artifacts).create(name="Clock", description="d", type="html-app").slug
+    slug = ArtifactStore(artifacts).create(name="Clock", description="d", type=artifact_type).slug
     build = LLMResponse(
         content="",
         tool_calls=[ToolCall(
@@ -305,9 +316,20 @@ async def test_the_real_generate_artifact_tool_reports_a_wait(tmp_path):
 
         return _events()
 
-    provider = _ScriptedProvider(
-        streams=[_stream_of(build), _held_tool_call, _stream_of(_text_response("done"))],
-    )
+    async def _held_builder_call():
+        callers.extend(frame.filename for frame in traceback.extract_stack())
+        await gate.hold()
+        return _text_response("no page yet")
+
+    if artifact_type == "html-app":
+        provider = _ScriptedProvider(
+            streams=[_stream_of(build), _stream_of(_text_response("done"))],
+            completes=[_held_builder_call],
+        )
+    else:
+        provider = _ScriptedProvider(
+            streams=[_stream_of(build), _held_tool_call, _stream_of(_text_response("done"))],
+        )
     client = LLMClient(
         planning_provider=provider, planning_model="planner",
         coding_provider=provider, coding_model="coder",
@@ -325,7 +347,7 @@ async def test_the_real_generate_artifact_tool_reports_a_wait(tmp_path):
         await asyncio.gather(turn, return_exceptions=True)
         await _close(session)
 
-    assert any("generate_artifact" in name for name in callers), "the held call did not come from the tool"
+    assert any(runner in name for name in callers), "the held call did not come from the tool"
     assert snap is not None, "the real generate_artifact model call reported no wait"
 
 

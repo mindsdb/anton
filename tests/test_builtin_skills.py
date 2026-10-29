@@ -324,11 +324,17 @@ class TestNoPathStillNamesASeparatePrdStep:
 
     def test_the_artifacts_block_says_the_tool_handles_the_brief_itself(self):
         """The agent must not pre-interview the user for something the tool
-        will ask about anyway, nor write a PRD by hand."""
-        from anton.core.llm.prompts import ARTIFACTS_PROMPT
+        will ask about anyway, nor write a PRD by hand. Only the fullstack
+        generator has a brief and a PRD: a page's builder asks nothing, so
+        none of it is left where no fullstack app is offered."""
+        import re
 
-        assert "shows them a short brief" in ARTIFACTS_PROMPT
-        assert "Do NOT write a PRD yourself" in ARTIFACTS_PROMPT
+        from anton.core.llm.prompts import ARTIFACTS_PROMPT, STATIC_ARTIFACTS_PROMPT
+
+        for phrase in ("short brief", "`prd.md`", "needs_confirmation"):
+            assert phrase in ARTIFACTS_PROMPT, phrase
+            assert phrase not in STATIC_ARTIFACTS_PROMPT, phrase
+        assert re.search(r"Do NOT write [^.]*yourself", " ".join(ARTIFACTS_PROMPT.split()))
 
 
 class TestNoTextPromisesABriefAgreement:
@@ -410,11 +416,16 @@ class TestRecallIsConditionalNow:
             assert "generate_artifact" in text, name
 
     def test_recall_is_tied_to_the_manual_path(self):
-        """The skill is not discarded — manual edits and unsupported types need it."""
-        for name, text in self._texts().items():
-            assert "recall_skill" in text, name
-            low = text.lower()
-            assert "by hand" in low or "yourself" in low, name
+        """The backend skill is not discarded — manual edits need it. A page
+        has no manual path left to recall a skill for: the visualization
+        blocks send it to `generate_artifact`, whose builder recalls what it
+        needs itself."""
+        texts = self._texts()
+        backend = texts.pop("backend")
+        assert "recall_skill" in backend
+        assert "by hand" in backend.lower() or "yourself" in backend.lower()
+        for name, text in texts.items():
+            assert "recall_skill" not in text, name
 
     def test_hints_still_point_at_shipped_skills(self, store):
         """The rewording must not leave a pointer to a non-existent skill."""
@@ -481,10 +492,15 @@ class TestSkillDescriptionsSteerAway:
         matching, while the catalog's framing text reads "When the user's request
         matches one of them, call recall_skill(label)". So we pin the prefix.
         """
-        for label in self.LABELS:
-            d = store.load(label).description
-            assert d.startswith("ONLY "), f"{label}: {d[:50]!r}"
-            assert "by hand" in d[:55].lower(), f"{label}: {d[:55]!r}"
+        backend = store.load("build-fullstack-backend").description
+        assert backend.startswith("ONLY "), backend[:50]
+        assert "by hand" in backend[:55].lower(), backend[:55]
+        # Pages have no manual path by default: the description opens by
+        # saying so, and only then names the one case it is for.
+        html = store.load("build-html-dashboard").description
+        first = html.split(":", 1)[0]
+        assert html.startswith("NOT needed") and "pages" in first, html[:50]
+        assert "hand-write" in html.lower() or "by hand" in html.lower()
 
     def test_normal_path_disclaimer_precedes_the_contents(self, store):
         """"NOT needed on the normal path" must come ABOVE the contents listing.
@@ -500,9 +516,12 @@ class TestSkillDescriptionsSteerAway:
             d = store.load(label).description
             assert d.index("NOT needed") < d.index(content_marker), label
 
-    def test_description_points_at_the_generator(self, store):
-        for label in self.LABELS:
-            assert "generate_artifact" in store.load(label).description, label
+    def test_description_points_at_the_normal_path(self, store):
+        """The backend skill names the fullstack generator; the dashboard
+        skill names the kit pages are built with (PAGES)."""
+        assert "generate_artifact" in store.load("build-fullstack-backend").description
+        html = store.load("build-html-dashboard").description
+        assert "artifact kit" in html and "PAGES" in html
 
     def test_description_stays_findable_for_the_fallback(self, store):
         """Steering away is not hiding: the contents must stay recognisable."""

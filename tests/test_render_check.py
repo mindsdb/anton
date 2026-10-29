@@ -1473,10 +1473,16 @@ async def test_generate_records_how_it_left_the_page(tmp_path, monkeypatch):
 async def _handler_result(
     tmp_path: Path, monkeypatch, result: dict, *, screenshots_refused: bool = False, images_refused: bool = False
 ):
+    """What `generate_artifact` returns for a generator-pipeline `result`.
+
+    The pipeline runs for fullstack-registered artifacts only (an `html-app`
+    goes to the kit's page builder), so the artifact is registered as one;
+    its result may still carry a page's check and screenshot, since the
+    gathering step can settle a request on a single-file page."""
     from anton.core.tools import generate_artifact as gen_pkg
 
     store = ArtifactStore(tmp_path / "artifacts")
-    slug = store.create(name="Map", description="d", type="html-app", primary="index.html").slug
+    slug = store.create(name="Map", description="d", type="fullstack-stateless-app", primary="index.html").slug
 
     async def fake_generate(**kw):
         return dict(result)

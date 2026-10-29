@@ -158,9 +158,10 @@ def test_the_gathering_step_offers_html_app_only_where_the_session_offers_no_ful
     assert "fullstack" not in state.pipeline_system
 
 
-def test_the_gathering_step_offers_every_buildable_type_where_the_session_offers_fullstack(tmp_path):
+def test_the_gathering_step_offers_every_app_type_where_the_session_offers_fullstack(tmp_path):
+    """Pages are the kit page builder's, so the app pipeline settles only on app types."""
     state = _gen_state(tmp_path, fullstack_offered=True)
     finish = next(tool for tool in state.pipeline_tools if tool["name"] == "finish_gathering")
 
-    assert finish["input_schema"]["properties"]["artifact_type"]["enum"] == ["html-app", *_FULLSTACK_TYPES]
+    assert finish["input_schema"]["properties"]["artifact_type"]["enum"] == [*_FULLSTACK_TYPES]
     assert "Choosing between the two fullstack types" in state.pipeline_system
