@@ -467,6 +467,18 @@ def _comparison_lines(label: str, notes: "ComparisonNotes") -> list[str]:
     return lines
 
 
+def _kit_page_without_custom_code(path) -> bool:
+    """A page written by the artifact kit whose blocks are all the kit's own (no custom HTML/JS or
+    raw ECharts options), so the kit's tested runtime is all that draws it."""
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    if 'id="ak-spec"' not in text or "data-ak-custom=" in text:
+        return False
+    return '"type":"echarts"' not in text and '"type":"html"' not in text
+
+
 def _check_pages(
     store,
     pages: list[_ChangedPage],
@@ -598,6 +610,13 @@ def _check_pages(
             and page == main_page[page.slug]
         )
     ), key=_order)
+
+    # A page the artifact kit wrote with only its own blocks renders through the kit's tested
+    # runtime; loading it in a browser after every cell only costs the build time.
+    kit_pages = [page for page in to_check if _kit_page_without_custom_code(page.path)]
+    for page in kit_pages:
+        messages.append(f"{page.slug}/{page.path.name} — built with the artifact kit's tested runtime; no browser check needed")
+    to_check = [page for page in to_check if page not in kit_pages]
 
     if render_check.configured_url() is None:
         for page in to_check:
@@ -1910,16 +1929,25 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         _track_artifact(session, store, artifact.slug)
         queue: "asyncio.Queue[str | None]" = asyncio.Queue()
 
+        from anton.core.llm.client import model_route
+        from anton.core.tools.generate_artifact.state import artifact_model_route
+
         async def _build():
+            kwargs = dict(
+                slug=slug, folder=store.folder_for(slug),
+                user_request=str(tc_input.get("user_request") or ""),
+                user_language=str(tc_input.get("user_language") or ""),
+                agent_understanding=str(tc_input.get("agent_understanding") or ""),
+                known_data=str(tc_input.get("known_data") or ""),
+                progress=queue,
+            )
             try:
-                return await build_page(
-                    session, slug=slug, folder=store.folder_for(slug),
-                    user_request=str(tc_input.get("user_request") or ""),
-                    user_language=str(tc_input.get("user_language") or ""),
-                    agent_understanding=str(tc_input.get("agent_understanding") or ""),
-                    known_data=str(tc_input.get("known_data") or ""),
-                    progress=queue,
-                )
+                # The builder-model setting the app pipeline honours too (ANTON_ARTIFACT_MODEL/_EFFORT).
+                route = artifact_model_route()
+                if route is None:
+                    return await build_page(session, **kwargs)
+                with model_route(route):
+                    return await build_page(session, **kwargs)
             finally:
                 queue.put_nowait(None)
 

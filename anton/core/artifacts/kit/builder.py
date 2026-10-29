@@ -81,7 +81,9 @@ You work alone: nobody answers questions, so decide sensibly and say what you as
 
 How to work (fast: every round costs the user time):
 1. If a skill describes the data source you need and it is not already loaded in the brief below, \
-recall it first (nothing else in that reply).
+recall it first (nothing else in that reply). In your first reply, before the tool call, list in \
+one line each the elements the request asks for (views, figures, interactions, look); build exactly \
+those.
 2. One scratchpad cell that fetches every table the page needs, computes every figure, prints \
 those figures, and builds and saves the page with `page.save(<folder>)`. Name the scratchpad `page` \
 unless one listed below already holds the data.
@@ -96,6 +98,12 @@ Getting it right:
 nothing else. Take each figure from that scope's own rows; never mix values from different \
 scenarios or versions of the data, and never add up values that should not be summed. With several \
 scenarios, fetch and compute each one separately and label it.
+- Every filter that drops rows needs a reason in the request: print how many rows each filter \
+drops. A period that is the data's whole horizon ("the plan's 13 weeks", "this year" in a one-year \
+dataset) means all rows, not a date filter.
+- Prefer the data's own facts to re-deriving them: a status field (late, at risk, on time), a \
+recorded delay, a precomputed measure or an exceptions table beats a chain of joins. Use joins only \
+for what the data does not state.
 - Add no filter the request does not state. "Shipments from A to B" means all of them, whatever \
 their status; a word that implies a filter ("on their way", "late", "not delivered", "open") maps to \
 the data's own field: print that field's distinct values in scope and keep every record the words \
