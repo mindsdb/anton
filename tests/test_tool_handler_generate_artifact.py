@@ -1069,6 +1069,43 @@ async def test_a_page_that_failed_its_browser_check_comes_back_to_repair(tmp_pat
         assert step in instruction, step
 
 
+async def test_a_view_whose_script_did_not_parse_comes_back_to_repair_in_its_own_script(tmp_path: Path, monkeypatch):
+    """One view's script holds a syntax error: the browser skips that script, so its `defineView`
+    never runs and the helper fails the view by name. The repair is told what that message means,
+    to fix that view's script, and to keep each view's code in a script of its own, since merging the
+    scripts would let the next syntax error blank every view again."""
+    from dataclasses import replace
+
+    findings = (
+        "Loaded in a headless browser, the page threw an uncaught exception: "
+        "SyntaxError: missing ) after argument list (index.html line 41) (desktop, phone)",
+        "Loaded in a headless browser, the page logged a console error: "
+        "console.error: Globe failed: no script defined this view (desktop, phone)",
+        "Loaded in a headless browser, a chart, map or canvas stayed blank: "
+        "Globe failed to draw: the page marked div#globe data-view-failed (desktop, phone)",
+    )
+    slug = _make_artifact(tmp_path, type="html-app")
+
+    async def fake_generate(**kw):
+        return replace(_browser_check_failed(), findings=findings)
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    session = _session(tmp_path)
+    session._render_screenshots_refused = True
+    _, result = await _collect_raw(session, {"slug": slug, "user_request": "build it", "agent_understanding": "a page"})
+
+    body = json.loads(result.content)
+    assert body["status"] == "browser_check_failed"
+    assert body["findings"] == list(findings)
+    instruction = " ".join(body["instruction"].split())
+    for step in ('When a view failed with "no script defined this view", its own script did not parse',
+                 "fix that view's script",
+                 'When views failed with "two scripts defined this view", two views share that title',
+                 "keep each view's code in a `<script>` of its own",
+                 "never merges views' scripts"):
+        assert step in instruction, step
+
+
 def test_no_rule_forbids_the_repair_and_each_names_the_one_path():
     """The rules that send a generator failure back to the user each make
     one exception: a page that came back as `browser_check_failed`."""

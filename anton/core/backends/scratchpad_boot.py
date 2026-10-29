@@ -530,9 +530,29 @@ if _scratchpad_model:
                 _real_stdout.write(USAGE_MARKER + " " + json.dumps(record, default=str) + "\n")
                 _real_stdout.flush()
 
+        # The host rewrites this file whenever its credential is renewed (a
+        # desktop token refresh). Read on every call, not at boot, so a long
+        # batch keeps working past the boot-time token's expiry.
+        _llm_credential_file = os.environ.get("ANTON_SCRATCHPAD_CREDENTIAL_FILE", "")
+
+        def _current_llm_api_key():
+            """The host's current key, or None to keep the boot-time one."""
+            if not _llm_credential_file:
+                return None
+            try:
+                with open(_llm_credential_file, encoding="utf-8") as handle:
+                    return handle.read().strip() or None
+            except OSError:
+                return None
+
         def _new_llm_provider():
             """Build a provider from the pad's model settings. The only place one is built."""
-            provider = _ProviderClass(**_llm_provider_kwargs)
+            kwargs = _llm_provider_kwargs
+            if "api_key" in kwargs:
+                key = _current_llm_api_key()
+                if key:
+                    kwargs = {**kwargs, "api_key": key}
+            provider = _ProviderClass(**kwargs)
             if _send_usage:
                 provider.usage_sink = _send_usage_to_host
             return provider
