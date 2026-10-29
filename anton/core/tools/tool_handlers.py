@@ -1876,18 +1876,6 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         yield f"Error: no artifact found for slug `{slug}`."
         return
 
-    if artifact.type == "html-app":
-        # Pages are built with the artifact kit, not the generator.
-        path = store.folder_for(slug)
-        yield (
-            f"Not run: `{slug}` is an html-app page, and pages are not built by generate_artifact "
-            "(it builds fullstack apps only). Build it now yourself: in a scratchpad cell, fetch "
-            "the data, compute the figures, then `from anton.core.artifacts import kit`, compose "
-            "the page as PAGES in the ARTIFACTS section describes, and call "
-            f"`page.save({str(path)!r})`. The kit is installed "
-            "and importable in every scratchpad."
-        )
-        return
     if artifact.type not in GENERATOR_ARTIFACT_TYPES:
         yield (
             "Error: generate_artifact only supports html-app / "
@@ -1903,6 +1891,36 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     agent_understanding = (tc_input.get("agent_understanding") or "").strip()
     if not agent_understanding:
         yield "Error: `agent_understanding` is required."
+        return
+    if artifact.type == "html-app":
+        # Pages: the kit's page builder, one focused loop (anton.core.artifacts.kit.builder).
+        from anton.core.artifacts.kit.builder import build_page, result_text
+
+        _track_artifact(session, store, artifact.slug)
+        queue: "asyncio.Queue[str | None]" = asyncio.Queue()
+
+        async def _build():
+            try:
+                return await build_page(
+                    session, slug=slug, folder=store.folder_for(slug),
+                    user_request=str(tc_input.get("user_request") or ""),
+                    user_language=str(tc_input.get("user_language") or ""),
+                    agent_understanding=str(tc_input.get("agent_understanding") or ""),
+                    known_data=str(tc_input.get("known_data") or ""),
+                    progress=queue,
+                )
+            finally:
+                queue.put_nowait(None)
+
+        task = asyncio.ensure_future(_build())
+        try:
+            async for marker in _drain_progress(queue):
+                yield marker
+            result = await task
+        finally:
+            if not task.done():
+                task.cancel()
+        yield result_text(result)
         return
     # Collapsed to one line: the value is quoted into every step header.
     from anton.core.tools.generate_artifact.state import MAX_USER_LANGUAGE_CHARS

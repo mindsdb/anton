@@ -273,123 +273,35 @@ opens (intermediate CSVs, cached JSON, debug logs).
 PAGES (every `html-app`):
 Reports, dashboards, maps, globes, charts, timelines, briefs and slide decks are \
 pages (`type="html-app"`), also when their data comes from a connected source: \
-the page embeds the data you fetched. Never send a page to `generate_artifact`. \
-You build each page yourself in the scratchpad with the artifact kit, from the \
-data you computed there. The kit writes one self-contained HTML file: a \
-designed, responsive page (desktop and phone, light or dark) whose charts, \
-maps, globes, networks, timelines, tables and KPIs are pre-built and tested, \
-with the data embedded straight from your DataFrames. Never write a page's \
-HTML, CSS or JavaScript by hand, and never re-type numbers into it.
-
-Workflow, in as few rounds as the work allows:
-1. One response: a one-line plan, `create_artifact(name, description, \
-type="html-app", primary="index.html")`, and whatever you need to read the \
-data (recall the data source's skill, inspect the schema).
-2. One scratchpad cell that fetches every table the page needs, computes \
-every figure with code, prints those figures, and builds and saves the page \
-(`page.save(artifact_path)`). Read what `save` prints (the page outline with \
-its figures, and any WARNINGS) and the page check that follows the cell; fix \
-anything wrong in one more cell.
-3. Reply briefly: the key figures, anything you could not show and why, and \
-the page's name, slug and path.
-
-Getting it right:
-- Use exactly the scope asked for: the named scenario, period, site, status or \
-population, and nothing else. Take each figure from that scope's own rows; \
-never mix values from different scenarios or versions of the data, and never \
-add up values that should not be summed. With several scenarios, compute each \
-one separately and label it.
-- Count and total from rows with code, then sanity-check (row counts, ranges, \
-that parts add up to their total) before you build. Keep the data's own \
-wording for statuses and measures (e.g. "at risk" is not "lost"); dates follow \
-the data's calendar, not today's.
-- Never invent records, ids, places or values. When the data has no answer, \
-say so on the page. Places: use coordinates from the data; for place names \
-use `kit.geocode("City, Country")` (offline; None when unsure: leave that \
-point out and say so).
-- An edit changes only what was asked and keeps the rest of the page as it \
-was. When asked to check a figure, recompute it from the source data, fix the \
-page if needed, and say on the page or in the reply what you checked.
-
-Designing it:
-- Lead with the answer: a title naming the subject, a subtitle with the main \
-finding in numbers, badges for the scope (scenario, period), a meta line such \
-as "Data as of 2026-05-04". Then 3-5 KPIs, then the main view, then detail \
-(a table), then notes and sources.
-- Show what was asked, all of it, and little else. Every figure the user asked \
-for appears as text (a KPI, a table cell, a label or a compare row), not only \
-inside a chart.
-- Pick the view for the request: places on a map (`page.map`); "3D" or \
-"globe" on `page.globe`; flows, lanes or supply networks on `page.network` \
-(style "sankey" for volumes); schedules, milestones or Gantt on \
-`page.timeline`; options or scenarios side by side on `page.compare`; trends \
-and breakdowns on `page.chart`; records on `page.table`.
-- Interactions: "switch/toggle between A and B" is `page.tabs([...], \
-style="segmented")` with each option's blocks inside; "filter" is \
-`filters=[...]`/`search=True` on the table; "click a row to see its detail" \
-is `detail="drawer"`; "clicking a row highlights it on the map/globe/chart" \
-is the same `key` and `link` on the table and on the map layers; hovering a \
-map point, bar or milestone shows its tooltip.
-- Write every word on the page in the user's language and set `lang` \
-("en", "es", "fr", ...): titles, labels (`labels={field: label}` and column \
-labels), notes. "Phone/mobile" pages use `width="mobile"`. "Premium", "board" \
-or "leadership" pages use `theme="dark"` or a calm light page with a strong \
-headline, few large elements and subtle motion (built in). Animate map routes \
-with `animate=True` only when motion is asked for.
-
-The kit (`from anton.core.artifacts import kit`; use it as documented here, \
-no need to read its source):
-```
-page = kit.Page(title, subtitle=None, lang="en", theme="light"|"dark", badges=[...], meta=[...],
-                width="normal"|"wide"|"narrow"|"mobile", currency="USD", sources=[...], notes=[...],
-                labels={field: label}, formats={field: format})
-# formats: int, number:1, percent (98.4 -> 98.4%), fraction (0.984 -> 98.4%), currency, currency:2,
-#   currency_compact ($1.57M), compact, days, date (Nov 20, 2026), date_short, date_iso, month, text
-page.kpis([kit.kpi(label, value, format, sub=None, delta=None, better="up"|"down", tone="good"|"bad"|"warn"|"accent")])
-page.text(markdown, style="lead") · page.callout(markdown, title=None, tone="info"|"good"|"warn"|"bad")
-page.compare(["Base", "Option B"], [kit.metric(label, [v1, v2], format, better="higher"|"lower")], title=)
-page.chart(kind, df, x, y, series=None, title=, format=, stack=False, horizontal=False, sort="desc",
-           threshold={"value": 100, "label": "Capacity"}, ref_lines=[{"value": v, "label": l}],
-           y2=None, colors={name: color_or_tone}, show_values=None)
-           # kind: bar hbar line area combo(y bars + y2 line) scatter pie donut heatmap waterfall
-page.table(df, [field, kit.col(field, label, format, pill=True, tones={value: tone}, bar=True)], title=,
-           search=None, filters=[fields], sort={"field": f, "desc": True}, totals={field: "sum"},
-           key=None, link=None, detail="drawer"|"inline"|False, row_tone={"field": f, "map": {value: tone}})
-page.map(kit.points(df, lat, lon, label=, sublabel=, color=field, colors={value: tone}, shape="circle"|
-           "square"|"diamond", tooltip=[fields], key=, link=, pulse=False, name=legend_name),
-         kit.routes(df, from_lat, from_lon, to_lat, to_lon, via_lat=None, via_lon=None, color=, colors=,
-           animate=False, key=, link=, tooltip=[...]),
-         kit.regions(df, country, value, format=), title=, fit="data"|"world")
-page.globe(<the same layers>, title=, rotate="spin"|"sway"|False)    # drag to turn; routes arc above it
-page.network(links_df, source=, target=, value=None, nodes=nodes_df, id_field="id", label=, group=,
-             tiers=[group order, left to right], style="graph"|"sankey", link_color=field,
-             link_colors={value: tone}, dashed=field, value_format=, title=)
-page.timeline(bars=[kit.bars(df, row, start, end, label=None, name=legend, tone=)],
-              milestones=[kit.milestones(df, row, date, label=, tooltip=[fields])],
-              markers=[kit.marker(date, label, tone)], title=)    # one lane per bars layer: plan vs actual
-with page.section(title, subtitle): ...      with page.grid(2, widths=[2, 1]): ...
-t = page.tabs(["Base Plan", "Option B"], style="segmented"|"tabs");  with t["Base Plan"]: ...
-page.echarts(option_dict) for any other chart · page.html(html, js=...) for anything else · page.image(fig)
-deck = kit.Deck(title, subtitle, lang=...); with deck.slide(title, subtitle, layout="title"|"content"|
-       "big_number"|"split"|"section", value=, caption=): deck.chart(...)   # slides take the same blocks
-page.save(artifact_path)                 # prints the outline and WARNINGS
-page = kit.load(artifact_path); print(page.outline())   # edit a saved page:
-with page.after("b3"): page.table(...)   # page.update("b2", title=...), page.set(theme="dark"), page.remove(id)
-```
-Colours: tones good/bad/warn/info/accent/neutral or any CSS colour; categories get a consistent palette.
+the page embeds the data. `generate_artifact` builds and edits every page: its \
+page builder fetches the data in the scratchpad, computes the figures, composes \
+the page with the artifact kit (designed, responsive, tested charts, maps, \
+globes, networks, timelines and tables) and checks it in a browser, in one pass. \
+Do not fetch the data or write a page's files yourself.
+1. One response: a one-line plan and `create_artifact(name, description, \
+type="html-app", primary="index.html")`.
+2. Then `generate_artifact(slug, user_request=<the user's own words>, \
+user_language, agent_understanding=<what they asked for: scope, figures, views, \
+interactions, look, language>, known_data=<figures or rows already computed in \
+this conversation, if any>)`.
+3. Reply briefly from its result, in the user's language: the key figures, \
+anything not shown and why, and the page's name.
+To change a page, call `generate_artifact` again with its slug and the change \
+as `user_request`: it edits the page in place and keeps everything else. A \
+request to check a figure goes the same way.
 
 WORKFLOW:
 1. REGISTER FIRST, always: call `create_artifact(name, description, type, \
 primary?)`. It claims the folder and returns `<artifact_path>`.
-2. THEN build it. Every `html-app` you build yourself with the kit (PAGES \
-above). Every `fullstack-stateless-app` and `fullstack-stateful-app` goes to \
-`generate_artifact(slug, user_request, user_language, agent_understanding, \
-known_data?, user_preferences?, attachments?)`, which produces every file: it \
+2. THEN build it with `generate_artifact(slug, user_request, user_language, \
+agent_understanding, known_data?, user_preferences?, attachments?)`. For an \
+`html-app` it runs the page builder (PAGES above). Every \
+`fullstack-stateless-app` and `fullstack-stateful-app` it builds end to end: it \
 gathers what it needs, asks the user whatever is still unclear, shows them a \
 short brief, writes the requirements down as `prd.md`, then a technical spec, \
 then the code with static verification, and launches the backend and \
 health-checks it, so you do NOT call `launch_backend` afterwards. Do NOT write \
-a generator-built app's files yourself in the scratchpad. Every status other \
+a generated artifact's files yourself in the scratchpad. Every status other \
 than `generated` carries an `instruction`: follow it. `needs_confirmation` \
 means show `brief_summary` and, if the user agrees, call again with the SAME \
 `user_request`; a correction goes in `agent_understanding` with \
@@ -398,10 +310,9 @@ means show `brief_summary` and, if the user agrees, call again with the SAME \
 generator: write the files yourself into `<artifact_path>`.
 4. EDITING an existing artifact: call `list_artifacts` to find it; if you have \
 its id, pass the id in `match`. Its folder is `<root>/<slug>`, and the summary \
-names its `primary` file. A page made with the kit you change with \
-`kit.load(path)` (PAGES above), or by re-running the code that built it with \
-the change. Other files: read the ones you will change with `read_text_file`, \
-then edit them in the scratchpad. Pass `match=[slug]` when you need the full \
+names its `primary` file. A page (`html-app`) you change with \
+`generate_artifact` (PAGES above). Other files: read the ones you will change \
+with `read_text_file`, then edit them in the scratchpad. Pass `match=[slug]` when you need the full \
 file list. Do NOT call `create_artifact` again — that creates a duplicate.
 5. If you discover the entry-point filename only later (or change it), call \
 `update_artifact(slug, primary=...)` so the renderer opens the right file. \
@@ -450,7 +361,7 @@ STATIC_ARTIFACTS_PROMPT = cut_spans(
         "starts no app backends, so there is no fullstack type; an html-app shows "
         "the data it was built with.\n",
     ),
-    (" Every `fullstack-stateless-app` and `fullstack-stateful-app` goes to", "3. For the other types", "\n"),
+    (" Every `fullstack-stateless-app` and `fullstack-stateful-app` it builds", "3. For the other types", "\n"),
     (" (`generate_artifact` does this for you.)", "\n", ""),
     (" For fullstack apps the entry point is the `url`", "\n", ""),
 )
@@ -491,7 +402,7 @@ VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT = """\
 Present analysis results as HTML dashboards/reports — the user has proactive \
 dashboards enabled. Narrate the key insights in chat (per the workflow above) \
 and produce the visualization as an artifact: `create_artifact(type="html-app", \
-…)`, then build the page yourself with the artifact kit (PAGES in the \
+…)`, then `generate_artifact(...)`, which builds the page (PAGES in the \
 ARTIFACTS section).\
 """
 
@@ -508,8 +419,8 @@ inline numbers. The terminal is the primary display — make it look great there
 - For large datasets, summarize the top N and offer to show more.
 - When the user EXPLICITLY asks for a chart, dashboard, plot, map, HTML \
 visualization, report page or slides, THEN produce it as an artifact: \
-`create_artifact(type="html-app", primary="index.html", ...)`, then build the \
-page with the artifact kit (PAGES in the ARTIFACTS section). \
+`create_artifact(type="html-app", primary="index.html", ...)`, then \
+`generate_artifact(...)`, which builds the page (PAGES in the ARTIFACTS section). \
 Fallback only if `create_artifact` is unavailable: save to `{output_dir}` \
 (create it if needed).\
 """

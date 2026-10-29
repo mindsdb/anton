@@ -115,6 +115,7 @@ from anton.core.tools.tool_defs import (
     SELECT_PATH_TOOL,
     SELECT_PATH_TOOL_PICK_ONLY,
     STATIC_CREATE_ARTIFACT_TOOL,
+    STATIC_GENERATE_ARTIFACT_TOOL,
     STATIC_UPDATE_ARTIFACT_METADATA_TOOL,
     UPDATE_ARTIFACT_METADATA_TOOL,
     ToolDef,
@@ -3285,8 +3286,7 @@ class ChatSession:
             )
             if fullstack:
                 self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
-                # Pages are built with the artifact kit; the generator builds apps.
-                self.tool_registry.register_tool(GENERATE_ARTIFACT_TOOL)
+            self.tool_registry.register_tool(GENERATE_ARTIFACT_TOOL if fullstack else STATIC_GENERATE_ARTIFACT_TOOL)
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""
