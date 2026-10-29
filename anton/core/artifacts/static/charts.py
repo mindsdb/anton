@@ -1,5 +1,6 @@
 """Static chart geometry with responsive HTML labels; no browser computation."""
 from html import escape
+from datetime import date
 
 COLORS = ['var(--accent)', '#4787a8', '#a16d39', '#8d6e9d', '#7d8f46', '#bb6e71', '#6f839a', '#a18b64']
 
@@ -24,11 +25,22 @@ def _ticks(low, high, step, percent):
     return result
 
 
-def _x_ticks(items):
+def _iso_day(value):
+    try:
+        return date.fromisoformat(value).isoformat() == value
+    except (TypeError, ValueError):
+        return False
+
+
+def _tick_label(label, calendar):
+    return escape(label.replace("-", "\n", 1) if calendar else label)
+
+
+def _x_ticks(items, calendar=False):
     positions = sorted(position for position, _ in items)
     gap = min((b-a for a, b in zip(positions,positions[1:])), default=100)
-    return f'<div class="x-ticks" style="--tick-width:{_n(gap*.8)}%;--edge-width:{_n(gap*.45)}%">' + ''.join(
-        f'<span class="x-tick {"first" if position == 0 else "last" if position == 100 else ""}" style="left:{_n(position)}%" title="{escape(label)}">{escape(label)}</span>'
+    return f'<div class="x-ticks{" date-ticks" if calendar else ""}" style="--tick-width:{_n(gap*.8)}%;--edge-width:{_n(gap*.45)}%">' + ''.join(
+        f'<span class="x-tick {"first" if position == 0 else "last" if position == 100 else ""}" style="left:{_n(position)}%" title="{escape(label)}">{_tick_label(label, calendar)}</span>'
         for position, label in items) + '</div>'
 
 
@@ -90,11 +102,14 @@ def markup(spec, plotted, *, low, high, tick, label, labels):
         if not scatter:
             paths.append(f'<path d="{"".join(path)}" fill="none" stroke="{COLORS[i]}" stroke-width="2" vector-effect="non-scaling-stroke"/>')
     if scatter:
+        calendar = False
         x_ticks = [(50, f'{min_x:.6g}')] if min_x == max_x else [(n*25, f'{min_x+(max_x-min_x)*n/4:.6g}') for n in range(5)]
     else:
-        indices = sorted({round(n*(len(rows)-1)/min(4,len(rows)-1)) for n in range(min(5,len(rows)))}) if len(rows)>1 else [0]
+        calendar = all(_iso_day(row[spec['x']]) for row in rows)
+        maximum = 3 if calendar else 5
+        indices = sorted({round(n*(len(rows)-1)/min(maximum-1,len(rows)-1)) for n in range(min(maximum,len(rows)))}) if len(rows)>1 else [0]
         x_ticks = [(x_at(xs[n])/10, str(rows[n][spec['x']]) if rows[n][spec['x']] is not None else labels['missing']) for n in indices]
     y_labels = ''.join(f'<span style="top:{_n(y(v)/3)}%">{escape(shown)}</span>' for v, shown in ticks)
     return (legend + f'<p class="y-title">{escape(spec["yLabel"])}</p><div class="xy-chart"><div class="y-ticks">{y_labels}</div>'
         f'<div class="plot"><svg viewBox="0 0 1000 300" preserveAspectRatio="none" role="group" aria-label="{escape(label)}">{grid}{"".join(paths)}{"".join(marks)}</svg></div>'
-        '<span></span>' + _x_ticks(x_ticks) + f'</div><p class="axis-title">{escape(spec["xLabel"])}</p>')
+        '<span></span>' + _x_ticks(x_ticks, calendar) + f'</div><p class="axis-title">{escape(spec["xLabel"])}</p>')

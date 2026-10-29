@@ -377,3 +377,27 @@ def test_dense_chart_has_one_keyboard_stop_then_exact_data_inspection():
         assert page.get_by_role('region',name='Data table',exact=True).evaluate('(el)=>el===document.activeElement')
         assert page.locator('.chart-data tbody tr').count()==200
         browser.close()
+
+
+@pytest.mark.parametrize('width',[390,641,1440])
+def test_calendar_line_axes_keep_complete_date_labels_in_narrow_split_panels(width):
+    from datetime import date,timedelta
+    rows=[{'day':(date(2024,12,2)+timedelta(days=7*n)).isoformat(),'value':n+1} for n in range(13)]
+    data=Evidence.model_validate({'datasets':{'sample':{'source':{'label':'Synthetic calendar-axis QA'},'rows':rows}}})
+    chart={'type':'chart','kind':'line','title':'Weekly observations','query':'sample','x':'day','series':[{'field':'value','label':'Value'}]}
+    doc=Document.model_validate({'title':'Calendar axes','sections':[{'id':'comparison','layout':'split','blocks':[chart,chart]}]})
+    with playwright.sync_playwright() as p:
+        browser=p.chromium.launch();page=browser.new_page(viewport={'width':width,'height':900})
+        page.set_content(render(doc,data).html)
+        assert page.locator('[data-point]').count()==26
+        axes=page.locator('.date-ticks').all();assert len(axes)==2
+        for axis in axes:
+            ticks=axis.locator('.x-tick').all();assert len(ticks)==3
+            assert [t.get_attribute('title') for t in ticks]==[rows[i]['day'] for i in [0,6,12]]
+            for tick in ticks:
+                assert tick.inner_text().replace('\n','-')==tick.get_attribute('title')
+                assert tick.evaluate('(el)=>el.scrollWidth<=el.clientWidth+1 && el.scrollHeight<=el.clientHeight+1')
+                assert tick.bounding_box()['y']+tick.bounding_box()['height']<=axis.bounding_box()['y']+axis.bounding_box()['height']+1
+        assert page.locator('.chart-data tbody tr').count()==26
+        assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
+        browser.close()

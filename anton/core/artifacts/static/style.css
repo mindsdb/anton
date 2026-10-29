@@ -70,6 +70,8 @@ tr:last-child td{border-bottom:0}
 .x-ticks>span{position:absolute;top:9px;max-width:var(--tick-width);transform:translateX(-50%);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.3;text-align:center}
 .x-ticks>span.first{transform:none;max-width:var(--edge-width);text-align:left}
 .x-ticks>span.last{transform:translateX(-100%);max-width:var(--edge-width);text-align:right}
+.x-ticks.date-ticks{height:44px}
+.x-ticks.date-ticks>span{width:var(--tick-width);white-space:pre-line;text-overflow:clip}
 .xy-chart{display:grid;grid-template-columns:64px minmax(0,1fr);padding:12px 8px 0 0;--plot-height:clamp(220px,30vw,360px)}
 .xy-chart .plot,.xy-chart .y-ticks{height:var(--plot-height);min-width:0}
 .xy-chart .plot svg{height:100%}

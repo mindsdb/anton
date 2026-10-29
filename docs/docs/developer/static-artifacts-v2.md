@@ -148,7 +148,9 @@ arrow/Home/End keyboard navigation and tab-panel semantics. All panes remain
 readable without JavaScript and in print. Nesting tab groups inside panes is not
 part of the contract. Every pane's selected data is public even while inactive.
 Tables with more than three columns recompose into labelled records on phones; every field
-stays visible, while desktop retains the comparison table. Missing line
+stays visible, while desktop retains the comparison table. Calendar-date line axes show up to three complete ISO dates on two lines
+(year, then month-day), keeping phone labels readable while every observation
+and full date remains in the plot and data inspector. Missing line
 values remain gaps. Large value labels are formatted on the host, before browser
 number conversion can lose integer precision.
 Percentage series normalize ratio/point inputs to the same percentage axis units,
