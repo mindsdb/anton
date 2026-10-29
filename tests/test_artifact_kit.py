@@ -394,9 +394,9 @@ async def test_an_html_app_is_built_by_the_page_builder(tmp_path, fake_builder):
     assert (call["user_request"], call["user_language"]) == ("a revenue page", "English")
     assert (call["agent_understanding"], call["known_data"]) == ("Q1 revenue by month", "Jan 1200, Feb 1500.5")
     assert progress == ["Reading the request", "Building the page"]
-    # The builder's result, as `result_text` words it for the agent.
-    assert result == builder.result_text(call["returned"])
-    payload = json.loads(result)
+    # The builder's result, as `result_text` words it for the agent, with a success verdict.
+    assert result.ok is True and result.content == builder.result_text(call["returned"])
+    payload = json.loads(result.content)
     assert payload["status"] == "generated" and payload["summary"] == "Revenue was $3.6K in Q1."
     assert payload["instruction"]
 
@@ -416,7 +416,7 @@ async def test_a_name_without_a_slug_registers_a_new_page(tmp_path, fake_builder
     [call] = fake_builder
     assert call["slug"] == artifact.slug
     assert Path(call["folder"]) == store.folder_for(artifact.slug)
-    assert json.loads(result)["slug"] == artifact.slug
+    assert json.loads(result.content)["slug"] == artifact.slug
 
 
 async def test_a_failed_page_build_tells_the_agent_not_to_claim_a_page(tmp_path, monkeypatch):
@@ -430,7 +430,8 @@ async def test_a_failed_page_build_tells_the_agent_not_to_claim_a_page(tmp_path,
         "agent_understanding": "Q1 revenue",
     })
 
-    payload = json.loads(result)
+    assert result.ok is False
+    payload = json.loads(result.content)
     assert payload["status"] == "failed" and payload["page"] is None
     assert "do not claim a page was built" in payload["instruction"]
 

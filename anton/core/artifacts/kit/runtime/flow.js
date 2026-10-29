@@ -108,6 +108,9 @@
         if (!outs.length) return;
         var item = AK.el('div', 'ak-fl-node');
         var head = AK.el('div', 'ak-fl-head');
+        head.setAttribute('role', 'button'); head.tabIndex = 0;
+        head.addEventListener('click', function () { view._akFocus(n.id); });
+        head.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); view._akFocus(n.id); } });
         var dot = AK.el('span', 'ak-fl-dot'); dot.style.background = gcol(n.group);
         head.appendChild(dot);
         head.appendChild(AK.el('span', 'ak-fl-name', n.label));
@@ -135,6 +138,12 @@
       if (view._akChips) view._akChips(view.__sel);
       rows.forEach(function (x) {
         x.el.classList.toggle('ak-dim', view.__sel != null && x.l.s.id !== view.__sel && x.l.t.id !== view.__sel);
+      });
+      Array.prototype.forEach.call(box.children, function (item) {
+        var on = view.__sel != null && item.__node.id === view.__sel;
+        item.firstChild.setAttribute('aria-pressed', String(on));
+        item.classList.toggle('ak-dim', view.__sel != null && !on && !rows.some(function (x) {
+          return x.el.parentNode === item && !x.el.classList.contains('ak-dim'); }));
       });
     };
     return box;
@@ -261,6 +270,7 @@
       if (vertical) return {x: n.x, y: n.y - 12 * Math.ceil(n.label.length * 6 / Math.max(n.w, 54)) - 10, w: Math.max(n.w, 54), h: 12 * 2 + 10};
       return {x: n.tier === 0 ? n.x - 8 - tw : n.x, y: n.y + n.h / 2 - 11, w: tw + 22, h: 22};
     });
+    var hiddenLabels = 0;
     var overlap = function (a) {
       return labelBoxes.reduce(function (sum, o) {
         var w = Math.min(a.x + a.w, o.x + o.w) - Math.max(a.x, o.x), h = Math.min(a.y + a.h, o.y + o.h) - Math.max(a.y, o.y);
@@ -304,22 +314,38 @@
         var len = p.getTotalLength ? p.getTotalLength() : 0;
         var mid = len ? p.getPointAtLength(len * 0.5) : {x: (x0 + x1) / 2, y: (y0 + y1) / 2};
         var tw = lab.length * 6.4 + 10, th = 17;
-        // Along the curve from its middle outwards; the first spot with no overlap, else the least.
+        // Along the curve from its middle outwards, then beside it (with a leader line): the first
+        // spot with no overlap, else the least.
         var bx = {x: mid.x - tw / 2, y: mid.y - th / 2, w: tw, h: th}, best = null;
-        [0.5, 0.42, 0.58, 0.34, 0.66, 0.27, 0.73, 0.2, 0.8].some(function (f) {
-          var pt = len ? p.getPointAtLength(len * f) : mid;
-          var cand = {x: Math.max(0, Math.min(W - tw, pt.x - tw / 2)), y: Math.max(0, Math.min(H - th, pt.y - th / 2)), w: tw, h: th};
-          cand.o = overlap(cand);
-          if (!best || cand.o < best.o) best = cand;
-          return cand.o === 0;
+        var spots = [0.5, 0.42, 0.58, 0.34, 0.66, 0.27, 0.73, 0.2, 0.8];
+        [0].concat([1, -1]).some(function (side) {
+          return spots.some(function (f) {
+            var pt = len ? p.getPointAtLength(len * f) : mid, nx = 0, ny = 0;
+            if (side && len) {
+              var a = p.getPointAtLength(Math.max(0, len * f - 2)), z = p.getPointAtLength(Math.min(len, len * f + 2));
+              var dx = z.x - a.x, dy = z.y - a.y, d = Math.sqrt(dx * dx + dy * dy) || 1;
+              var off = (Math.abs(dx) > Math.abs(dy) ? th : tw) / 2 + 6;
+              nx = -dy / d * off * side; ny = dx / d * off * side;
+            }
+            var cand = {x: Math.max(0, Math.min(W - tw, pt.x + nx - tw / 2)), y: Math.max(0, Math.min(H - th, pt.y + ny - th / 2)), w: tw, h: th,
+              anchor: side ? pt : null};
+            cand.o = overlap(cand);
+            if (!best || cand.o < best.o - 1) best = cand;
+            return cand.o === 0;
+          });
         });
         bx = best || bx;
-        // A label that cannot be placed clear of others is left to the link's tooltip.
-        if (bx.o > 0.35 * tw * th) lab = null;
+        // A label that cannot be placed clear of others is left to the link's tooltip, and the
+        // diagram says how many values are only there.
+        if (bx.o > 0.35 * tw * th) { lab = null; hiddenLabels++; }
       }
       if (lab) {
         labelBoxes.push(bx);
         var gtag = AK.svg('g', {'class': 'ak-link-label'});
+        if (bx.anchor) {
+          var cx = Math.max(bx.x, Math.min(bx.x + bx.w, bx.anchor.x)), cy = Math.max(bx.y, Math.min(bx.y + bx.h, bx.anchor.y));
+          gtag.appendChild(AK.svg('line', {x1: bx.anchor.x, y1: bx.anchor.y, x2: cx, y2: cy, stroke: AK.css('--ak-border-strong'), 'stroke-width': 1}));
+        }
         gtag.appendChild(AK.svg('rect', {x: bx.x, y: bx.y, width: bx.w, height: bx.h, rx: 8, fill: AK.css('--ak-surface'), stroke: lscale ? col : AK.css('--ak-border'), 'stroke-width': 1}));
         var tt = AK.svg('text', {x: bx.x + bx.w / 2, y: bx.y + 12.5, 'text-anchor': 'middle', 'font-size': 11, 'font-weight': 650, fill: AK.css('--ak-text')});
         tt.textContent = lab;
@@ -430,6 +456,7 @@
     });
     if (b.highlight && view.__sel === undefined) { current = G.nodes.filter(function (n) { return n.id === String(b.highlight); })[0] || null; view.__sel = current ? current.id : null; }
     paint();
+    svg.__hiddenLabels = hiddenLabels;
     return svg;
   }
 
@@ -472,7 +499,13 @@
     var lg = legendFor(b, G);
     if (lg) c.body.appendChild(lg);
     AK.watchSize(view, function (w) {
-      try { view.innerHTML = ''; view.appendChild(draw(b, view, build(b), w)); } catch (e) { AK.fail(view, e); }
+      try {
+        view.innerHTML = '';
+        var drawn = draw(b, view, build(b), w);
+        view.appendChild(drawn);
+        var n = drawn.__hiddenLabels || 0;
+        if (n) view.appendChild(AK.el('div', 'ak-note', AK.t('hoverValues', {n: n})));
+      } catch (e) { AK.fail(view, e); }
     });
     return c.card;
   }

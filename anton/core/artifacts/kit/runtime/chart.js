@@ -140,7 +140,7 @@
     return cats.map(function (c) {
       var r = rows.filter(function (x) { return String(x[b.x]) === String(c); })[0] || {};
       if (b.point_tones) {
-        var tone = AK.toneOf(r[b.point_tones.field || b.point_tones], b.point_tones.map || b.point_tones.tones);
+        var tone = AK.toneOf(r[b.point_tones.field || b.point_tones], b.point_tones.map || b.point_tones.tones, b.point_tones.field || b.point_tones);
         return tone ? AK.toneColor(tone) : base;
       }
       var v = AK.toNum(r[yf]);

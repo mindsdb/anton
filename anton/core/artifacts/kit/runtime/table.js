@@ -109,7 +109,7 @@
     function cellContent(td, col, row) {
       var v = row[col.field];
       var text = AK.fmt(v, col.format);
-      var tone = col.tones ? AK.toneOf(v, col.tones) : null;
+      var tone = col.tones ? AK.toneOf(v, col.tones, col.field + ' ' + (col.label || '')) : null;
       if (col.pill || (col.tones && tone)) {
         td.appendChild(AK.el('span', 'ak-pill' + (tone ? ' ak-tone-' + tone : ''), text));
       } else if (col.bar && AK.toNum(v) != null) {
@@ -128,7 +128,7 @@
       if (!b.row_tone) return null;
       var spec = b.row_tone;
       var v = row[spec.field];
-      return AK.toneOf(v, spec.map || spec.tones || null);
+      return AK.toneOf(v, spec.map || spec.tones || null, spec.field);
     }
     function detailPairs(row) {
       // Coordinates are for maps, not for people: left out unless asked for.
@@ -136,7 +136,7 @@
       return fields.map(function (f) {
         var col = cols.filter(function (cc) { return cc.field === f; })[0];
         var fmt = (col && col.format) || AK.fieldFormat(b, f) || 'auto';
-        var tone = col && col.tones ? AK.toneOf(row[f], col.tones) : null;
+        var tone = col && col.tones ? AK.toneOf(row[f], col.tones, f + ' ' + (col.label || '')) : null;
         return [(col && col.label) || AK.label(b, f), AK.fmt(row[f], fmt), tone];
       });
     }

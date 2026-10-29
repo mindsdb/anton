@@ -13,12 +13,12 @@
   AK.lang = LANG;
 
   var STRINGS = {
-    en: {search: 'Search', all: 'All', rows: '{n} rows', rowsOf: '{n} of {m} rows', none: 'No matching rows', details: 'Details', close: 'Close', source: 'Source', notes: 'Notes', total: 'Total', loading: 'Loading', failed: 'This view could not be drawn', zoomIn: 'Zoom in', zoomOut: 'Zoom out', resetView: 'Reset view', milestones: 'Milestones ({n})', prev: 'Previous', next: 'Next', slide: 'Slide', data: 'View data', more: 'Show more', select: 'Select an item to see its details', diff: 'Change', highlight: 'Highlight', pts: 'pts'},
-    es: {search: 'Buscar', all: 'Todos', rows: '{n} filas', rowsOf: '{n} de {m} filas', none: 'No hay filas que coincidan', details: 'Detalles', close: 'Cerrar', source: 'Fuente', notes: 'Notas', total: 'Total', loading: 'Cargando', failed: 'No se pudo dibujar esta vista', zoomIn: 'Acercar', zoomOut: 'Alejar', resetView: 'Restablecer vista', milestones: 'Hitos ({n})', prev: 'Anterior', next: 'Siguiente', slide: 'Diapositiva', data: 'Ver datos', more: 'Mostrar más', select: 'Selecciona un elemento para ver sus detalles', diff: 'Cambio', highlight: 'Resaltar', pts: 'p. p.'},
-    fr: {search: 'Rechercher', all: 'Tous', rows: '{n} lignes', rowsOf: '{n} sur {m} lignes', none: 'Aucune ligne ne correspond', details: 'Détails', close: 'Fermer', source: 'Source', notes: 'Notes', total: 'Total', loading: 'Chargement', failed: "Cette vue n'a pas pu être affichée", zoomIn: 'Zoom avant', zoomOut: 'Zoom arrière', resetView: 'Réinitialiser la vue', milestones: 'Jalons ({n})', prev: 'Précédent', next: 'Suivant', slide: 'Diapositive', data: 'Voir les données', more: 'Afficher plus', select: 'Sélectionnez un élément pour voir ses détails', diff: 'Écart', highlight: 'Mettre en évidence', pts: 'pts'},
-    de: {search: 'Suchen', all: 'Alle', rows: '{n} Zeilen', rowsOf: '{n} von {m} Zeilen', none: 'Keine passenden Zeilen', details: 'Details', close: 'Schließen', source: 'Quelle', notes: 'Hinweise', total: 'Summe', loading: 'Wird geladen', failed: 'Diese Ansicht konnte nicht gezeichnet werden', zoomIn: 'Vergrößern', zoomOut: 'Verkleinern', resetView: 'Ansicht zurücksetzen', milestones: 'Meilensteine ({n})', prev: 'Zurück', next: 'Weiter', slide: 'Folie', data: 'Daten anzeigen', more: 'Mehr anzeigen', select: 'Wählen Sie ein Element, um Details zu sehen', diff: 'Änderung', highlight: 'Hervorheben', pts: 'Pp.'},
-    pt: {search: 'Pesquisar', all: 'Todos', rows: '{n} linhas', rowsOf: '{n} de {m} linhas', none: 'Nenhuma linha corresponde', details: 'Detalhes', close: 'Fechar', source: 'Fonte', notes: 'Notas', total: 'Total', loading: 'Carregando', failed: 'Não foi possível desenhar esta vista', zoomIn: 'Aproximar', zoomOut: 'Afastar', resetView: 'Repor a vista', milestones: 'Marcos ({n})', prev: 'Anterior', next: 'Próximo', slide: 'Slide', data: 'Ver dados', more: 'Mostrar mais', select: 'Selecione um item para ver os detalhes', diff: 'Variação', highlight: 'Destacar', pts: 'p.p.'},
-    it: {search: 'Cerca', all: 'Tutti', rows: '{n} righe', rowsOf: '{n} di {m} righe', none: 'Nessuna riga corrispondente', details: 'Dettagli', close: 'Chiudi', source: 'Fonte', notes: 'Note', total: 'Totale', loading: 'Caricamento', failed: 'Impossibile disegnare questa vista', zoomIn: 'Ingrandisci', zoomOut: 'Riduci', resetView: 'Ripristina vista', milestones: 'Traguardi ({n})', prev: 'Precedente', next: 'Successivo', slide: 'Diapositiva', data: 'Mostra dati', more: 'Mostra altro', select: 'Seleziona un elemento per vederne i dettagli', diff: 'Variazione', highlight: 'Evidenzia', pts: 'p.p.'}
+    en: {search: 'Search', all: 'All', rows: '{n} rows', rowsOf: '{n} of {m} rows', none: 'No matching rows', details: 'Details', close: 'Close', source: 'Source', notes: 'Notes', total: 'Total', loading: 'Loading', failed: 'This view could not be drawn', zoomIn: 'Zoom in', zoomOut: 'Zoom out', resetView: 'Reset view', milestones: 'Milestones ({n})', hoverValues: '{n} link values are shown on hover', prev: 'Previous', next: 'Next', slide: 'Slide', data: 'View data', more: 'Show more', select: 'Select an item to see its details', diff: 'Change', highlight: 'Highlight', pts: 'pts'},
+    es: {search: 'Buscar', all: 'Todos', rows: '{n} filas', rowsOf: '{n} de {m} filas', none: 'No hay filas que coincidan', details: 'Detalles', close: 'Cerrar', source: 'Fuente', notes: 'Notas', total: 'Total', loading: 'Cargando', failed: 'No se pudo dibujar esta vista', zoomIn: 'Acercar', zoomOut: 'Alejar', resetView: 'Restablecer vista', milestones: 'Hitos ({n})', hoverValues: '{n} valores de enlaces se muestran al pasar el cursor', prev: 'Anterior', next: 'Siguiente', slide: 'Diapositiva', data: 'Ver datos', more: 'Mostrar más', select: 'Selecciona un elemento para ver sus detalles', diff: 'Cambio', highlight: 'Resaltar', pts: 'p. p.'},
+    fr: {search: 'Rechercher', all: 'Tous', rows: '{n} lignes', rowsOf: '{n} sur {m} lignes', none: 'Aucune ligne ne correspond', details: 'Détails', close: 'Fermer', source: 'Source', notes: 'Notes', total: 'Total', loading: 'Chargement', failed: "Cette vue n'a pas pu être affichée", zoomIn: 'Zoom avant', zoomOut: 'Zoom arrière', resetView: 'Réinitialiser la vue', milestones: 'Jalons ({n})', hoverValues: '{n} valeurs de liens s’affichent au survol', prev: 'Précédent', next: 'Suivant', slide: 'Diapositive', data: 'Voir les données', more: 'Afficher plus', select: 'Sélectionnez un élément pour voir ses détails', diff: 'Écart', highlight: 'Mettre en évidence', pts: 'pts'},
+    de: {search: 'Suchen', all: 'Alle', rows: '{n} Zeilen', rowsOf: '{n} von {m} Zeilen', none: 'Keine passenden Zeilen', details: 'Details', close: 'Schließen', source: 'Quelle', notes: 'Hinweise', total: 'Summe', loading: 'Wird geladen', failed: 'Diese Ansicht konnte nicht gezeichnet werden', zoomIn: 'Vergrößern', zoomOut: 'Verkleinern', resetView: 'Ansicht zurücksetzen', milestones: 'Meilensteine ({n})', hoverValues: '{n} Verbindungswerte erscheinen beim Darüberfahren', prev: 'Zurück', next: 'Weiter', slide: 'Folie', data: 'Daten anzeigen', more: 'Mehr anzeigen', select: 'Wählen Sie ein Element, um Details zu sehen', diff: 'Änderung', highlight: 'Hervorheben', pts: 'Pp.'},
+    pt: {search: 'Pesquisar', all: 'Todos', rows: '{n} linhas', rowsOf: '{n} de {m} linhas', none: 'Nenhuma linha corresponde', details: 'Detalhes', close: 'Fechar', source: 'Fonte', notes: 'Notas', total: 'Total', loading: 'Carregando', failed: 'Não foi possível desenhar esta vista', zoomIn: 'Aproximar', zoomOut: 'Afastar', resetView: 'Repor a vista', milestones: 'Marcos ({n})', hoverValues: '{n} valores de ligações aparecem ao passar o cursor', prev: 'Anterior', next: 'Próximo', slide: 'Slide', data: 'Ver dados', more: 'Mostrar mais', select: 'Selecione um item para ver os detalhes', diff: 'Variação', highlight: 'Destacar', pts: 'p.p.'},
+    it: {search: 'Cerca', all: 'Tutti', rows: '{n} righe', rowsOf: '{n} di {m} righe', none: 'Nessuna riga corrispondente', details: 'Dettagli', close: 'Chiudi', source: 'Fonte', notes: 'Note', total: 'Totale', loading: 'Caricamento', failed: 'Impossibile disegnare questa vista', zoomIn: 'Ingrandisci', zoomOut: 'Riduci', resetView: 'Ripristina vista', milestones: 'Traguardi ({n})', hoverValues: '{n} valori dei collegamenti compaiono al passaggio del mouse', prev: 'Precedente', next: 'Successivo', slide: 'Diapositiva', data: 'Mostra dati', more: 'Mostra altro', select: 'Seleziona un elemento per vederne i dettagli', diff: 'Variazione', highlight: 'Evidenzia', pts: 'p.p.'}
   };
   AK.t = function (key, vars) {
     var s = (STRINGS[LANG] || STRINGS.en)[key] || STRINGS.en[key] || key;
@@ -181,7 +181,8 @@
   /* ---------- Tones and palette ---------- */
   /* Status words that get a tone by themselves (a pill column with no explicit tones), in the
      kit's languages, compared without accents, case, hyphens or underscores. Ambiguous words
-     (active, new, open) stay neutral or informational. */
+     (active, new, open) stay neutral or informational; scale words (high, low, ...) get a tone
+     only in a severity-like field, up/down only in a status-like one. */
   var TONE_WORDS = {
     bad: ['late', 'delayed', 'overdue', 'past due', 'critical', 'severe', 'urgent', 'high', 'very high', 'at risk', 'risk',
       'blocked', 'failed', 'failure', 'fail', 'error', 'down', 'offline', 'outage', 'overloaded', 'overload', 'over capacity',
@@ -223,10 +224,19 @@
   var plain = function (v) {
     return String(v).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[-_\s]+/g, ' ').trim();
   };
-  AK.toneOf = function (value, map) {
+  var SCALE = {'high': 1, 'very high': 1, 'low': 1, 'medium': 1, 'moderate': 1, 'alto': 1, 'alta': 1, 'bajo': 1, 'baja': 1, 'medio': 1,
+    'media': 1, 'moderado': 1, 'moderada': 1, 'haut': 1, 'haute': 1, 'eleve': 1, 'elevee': 1, 'bas': 1, 'basse': 1, 'faible': 1,
+    'moyen': 1, 'moyenne': 1, 'modere': 1, 'moderee': 1, 'hoch': 1, 'niedrig': 1, 'mittel': 1, 'baixo': 1, 'basso': 1, 'moderato': 1};
+  var UPDOWN = {'up': 1, 'down': 1};
+  var SEVERITY_FIELD = /sever|priori|risk|impact|urgen|critical|level|grav|riesgo|risque|risiko|rischio|dringl/i;
+  var STATUS_FIELD = /status|state|health|availab|uptime|estado|etat|zustand|stato/i;
+  AK.toneOf = function (value, map, field) {
     if (value == null) return null;
     if (map && map[value] != null) return map[value];
-    return toneIndex[plain(value)] || null;
+    var w = plain(value), f = plain(field || '');
+    if (SCALE[w] && !SEVERITY_FIELD.test(f)) return null;
+    if (UPDOWN[w] && !STATUS_FIELD.test(f)) return null;
+    return toneIndex[w] || null;
   };
   AK.palette = function () {
     var dark = document.documentElement.getAttribute('data-ak-theme') === 'dark';

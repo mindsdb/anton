@@ -74,8 +74,8 @@ before it finishes.
 
 ## The page file
 
-`render.render_html(spec)` writes, in order: the stylesheet (in the head, so nothing flashes
-unstyled), the spec as JSON with its data, a static rendition of the page (headings, text, KPI
+`render.render_html(spec)` writes, in order: the stylesheet and the spec as JSON with its data (both
+in the head), a static rendition of the page (headings, text, KPI
 values, tables) for readers without JavaScript (the runtime replaces it when it boots), then only
 the runtime modules the page's blocks use
 (`core.js` and `blocks.js` always; `table.js`, `chart.js`, `geo.js`, `flow.js`, `timeline.js`,

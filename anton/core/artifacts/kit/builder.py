@@ -49,7 +49,7 @@ page.globe(<the same layers>, title=, rotate="spin"|"sway"|False)    # drag to t
 page.network(links_df, source=, target=, value=None, nodes=nodes_df, id_field="id", label=, group=,
              tiers=[group order, left to right], style="graph"|"sankey", link_color=field,
              link_colors={value: tone}, dashed=field, value_format=, controls=False, title=)
-             # click a node to highlight its links; controls=True adds buttons that do the same
+             # nodes highlight their links on click or Enter (built in); controls=True adds a row of buttons
 page.timeline(bars=[kit.bars(df, row, start, end, label=None, name=legend, tone=)],
               milestones=[kit.milestones(df, row, date, label=, tooltip=[fields])],
               markers=[kit.marker(date, label, tone)], milestone_list=None, title=)
@@ -103,7 +103,7 @@ one more cell.
 you could not show and why, and what you assumed.
 
 Getting it right:
-- Scope: exactly what the request names (scenario, site, period, status, population) and nothing \
+- Scope: exactly what the request names (scenario or version, place, period, status, group) and nothing \
 else. Put filters the request states outright (a date range, a region, ids, a scenario) in the query \
 when the source supports them. For a filter you infer from a word, profile the field first, filter \
 in pandas, and print how many rows each filter drops; every filter needs a reason in the request. \
@@ -175,8 +175,9 @@ link with its volume" puts the volume on each link.
 - Interactions: "switch/toggle between A and B" is `page.tabs([...], style="segmented")` with each \
 option's blocks inside; "filter" is `filters=[...]`/`search=True` on the table; "click a row to see \
 its detail" is `detail="drawer"`; "clicking a row highlights it on the map/globe/chart" is the same \
-`key` and `link` on the table and on the map layers; "highlight a node's connections" is \
-`controls=True` on the network; hovering a map point, bar or milestone shows its tooltip.
+`key` and `link` on the table and on the map layers; highlighting a network node's links on click \
+is built in (`controls=True` only when the user asks for buttons or a list to pick from); hovering \
+a map point, bar or milestone shows its tooltip.
 - Write every word on the page in the user's language and set `lang` ("en", "es", "fr", ...): \
 titles, labels (`labels={{field: label}}` and column labels), notes, and category values shown as \
 words (statuses, types, country names: translate them faithfully in pandas, e.g. "Open" -> \

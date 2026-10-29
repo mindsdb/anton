@@ -11,14 +11,13 @@ import asyncio
 import inspect
 import json
 import os
-import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-import anton.core.tools.generate_artifact as gen_pkg
 from anton.core.artifacts import ArtifactStore
+from anton.core.artifacts.kit import builder as page_builder
 from anton.core.artifacts.page_copies import TurnPages
 from anton.core.artifacts.render_check import Comparison
 from anton.core.session import ChatSession
@@ -510,9 +509,10 @@ def test_a_build_left_to_repairs_comparison_reaches_the_turns_record(tmp_path):
 # ── generate_artifact puts the page back ─────────────────────────────────────
 
 _HALF = "<p>half written</p>"
-_GENERATED = {"status": "generated", "files_written": ["index.html"], "summary": "s", "trace": []}
-_OVER_BUDGET = {"status": "stopped_over_budget", "files_written": [], "summary": "s", "trace": []}
-_LEFT_TO_REPAIR = BrowserCheckFailed(page="index.html", findings=("x",), views=(), screenshot=None, error="e")
+# What the page builder (`kit.builder.build_page`) returns.
+_GENERATED = {"status": "generated", "slug": "s", "page": "index.html", "summary": "s", "rounds": 2}
+_FAILED = {"status": "failed", "slug": "s", "page": None, "summary": "the cell raised", "rounds": 3}
+_OUT_OF_ROUNDS = {"status": "failed", "slug": "s", "page": None, "summary": "", "rounds": 10}
 
 
 @pytest.fixture
@@ -530,15 +530,15 @@ def _gen_session(store: ArtifactStore) -> SimpleNamespace:
 
 
 def _run(outcome):
-    """A run that half-writes the page, then ends with OUTCOME (raised when it is an exception)."""
-    async def fake_generate(**kw):
-        (kw["artifact_path"] / "index.html").write_text(_HALF)
+    """A build that half-writes the page, then ends with OUTCOME (raised when it is an exception)."""
+    async def fake_build(session, **kw):
+        (kw["folder"] / "index.html").write_text(_HALF)
         if isinstance(outcome, BaseException):
             raise outcome
         # A copy: the handler adds keys to a dict result.
         return dict(outcome) if isinstance(outcome, dict) else outcome
 
-    return fake_generate
+    return fake_build
 
 
 async def _result(session, slug: str) -> ToolOutcome:
@@ -557,11 +557,11 @@ async def _until(condition, timeout: float = 2.0) -> None:
         await asyncio.sleep(0.01)
 
 
-@pytest.mark.parametrize("outcome", ["Frontend verification failed after 2 attempt(s): x", _OVER_BUDGET])
+@pytest.mark.parametrize("outcome", [_FAILED, _OUT_OF_ROUNDS])
 async def test_a_run_that_did_not_build_the_page_puts_it_back(configured, tmp_path, monkeypatch, outcome):
     store, slug = _artifact(tmp_path)
     session = _gen_session(store)
-    monkeypatch.setattr(gen_pkg, "generate", _run(outcome))
+    monkeypatch.setattr(page_builder, "build_page", _run(outcome))
 
     result = await _result(session, slug)
 
@@ -573,7 +573,7 @@ async def test_a_run_that_did_not_build_the_page_puts_it_back(configured, tmp_pa
 
 async def test_a_crashed_run_puts_the_page_back_before_it_says_so(configured, tmp_path, monkeypatch):
     store, slug = _artifact(tmp_path)
-    monkeypatch.setattr(gen_pkg, "generate", _run(RuntimeError("kaput")))
+    monkeypatch.setattr(page_builder, "build_page", _run(RuntimeError("kaput")))
     outcomes = 0
 
     async for item in handle_generate_artifact(_gen_session(store), _tc(slug)):
@@ -586,36 +586,21 @@ async def test_a_crashed_run_puts_the_page_back_before_it_says_so(configured, tm
     assert outcomes == 1
 
 
-@pytest.mark.parametrize("outcome", [_GENERATED, _LEFT_TO_REPAIR])
-async def test_a_built_page_or_one_left_to_repair_stays(configured, tmp_path, monkeypatch, outcome):
+
+async def test_a_built_page_stays(configured, tmp_path, monkeypatch):
+    outcome = _GENERATED
     store, slug = _artifact(tmp_path)
-    monkeypatch.setattr(gen_pkg, "generate", _run(outcome))
+    monkeypatch.setattr(page_builder, "build_page", _run(outcome))
 
     await _result(_gen_session(store), slug)
 
     assert (store.root / slug / "index.html").read_text() == _HALF
 
 
-@pytest.mark.parametrize("status", ["needs_confirmation", "cancelled"])
-async def test_a_run_that_never_touched_the_page_writes_nothing(configured, tmp_path, monkeypatch, status):
-    store, slug = _artifact(tmp_path)
-    page = store.root / slug / "index.html"
-    inode = page.stat().st_ino
-
-    async def fake_generate(**kw):
-        return {"status": status, "files_written": [], "summary": "s", "trace": []}
-
-    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
-    result = await _result(_gen_session(store), slug)
-
-    assert page.stat().st_ino == inode
-    assert "restored" not in json.loads(result.content)
-
-
 async def test_a_new_artifact_has_nothing_to_put_back(configured, tmp_path, monkeypatch):
     store = ArtifactStore(tmp_path / "artifacts")
     slug = store.create(name="New", description="d", type="html-app", primary="index.html").slug
-    monkeypatch.setattr(gen_pkg, "generate", _run("Frontend verification failed after 2 attempt(s): x"))
+    monkeypatch.setattr(page_builder, "build_page", _run(_FAILED))
 
     await _result(_gen_session(store), slug)
 
@@ -625,12 +610,12 @@ async def test_a_new_artifact_has_nothing_to_put_back(configured, tmp_path, monk
 async def test_a_run_the_turn_abandoned_puts_the_page_back_once_it_stops(configured, tmp_path, monkeypatch):
     store, slug = _artifact(tmp_path)
 
-    async def fake_generate(**kw):
-        (kw["artifact_path"] / "index.html").write_text(_HALF)
+    async def fake_build(session, **kw):
+        (kw["folder"] / "index.html").write_text(_HALF)
         kw["progress"].put_nowait("Writing the page")
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    monkeypatch.setattr(page_builder, "build_page", fake_build)
     agen = handle_generate_artifact(_gen_session(store), _tc(slug))
     assert await agen.__anext__() == ToolProgress("Writing the page")
 
@@ -644,15 +629,15 @@ async def test_a_run_the_turn_abandoned_puts_the_page_back_when_the_executor_ref
 ):
     store, slug = _artifact(tmp_path)
 
-    async def fake_generate(**kw):
-        (kw["artifact_path"] / "index.html").write_text(_HALF)
+    async def fake_build(session, **kw):
+        (kw["folder"] / "index.html").write_text(_HALF)
         kw["progress"].put_nowait("Writing the page")
         await asyncio.Event().wait()
 
     def refuse(self, executor, func, *args):
         raise RuntimeError("cannot schedule new futures after shutdown")
 
-    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    monkeypatch.setattr(page_builder, "build_page", fake_build)
     agen = handle_generate_artifact(_gen_session(store), _tc(slug))
     assert await agen.__anext__() == ToolProgress("Writing the page")
     monkeypatch.setattr(asyncio.BaseEventLoop, "run_in_executor", refuse)
@@ -662,19 +647,19 @@ async def test_a_run_the_turn_abandoned_puts_the_page_back_when_the_executor_ref
     await _until(lambda: (store.root / slug / "index.html").read_text() == _BEFORE)
 
 
-@pytest.mark.parametrize(("outcome", "put_back"), [(_GENERATED, False), (_LEFT_TO_REPAIR, False), (_OVER_BUDGET, True)])
+@pytest.mark.parametrize(("outcome", "put_back"), [(_GENERATED, False), (_FAILED, True)])
 async def test_closing_the_handler_after_the_run_ended_follows_the_runs_outcome(
     configured, tmp_path, monkeypatch, outcome, put_back
 ):
     store, slug = _artifact(tmp_path)
     page = store.root / slug / "index.html"
 
-    async def fake_generate(**kw):
+    async def fake_build(session, **kw):
         page.write_text(_HALF)
         kw["progress"].put_nowait("Wrote the page")
         return dict(outcome) if isinstance(outcome, dict) else outcome
 
-    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    monkeypatch.setattr(page_builder, "build_page", fake_build)
     agen = handle_generate_artifact(_gen_session(store), _tc(slug))
     assert await agen.__anext__() == ToolProgress("Wrote the page")
 
@@ -687,45 +672,9 @@ async def test_closing_the_handler_after_the_run_ended_follows_the_runs_outcome(
         assert page.read_text() == _HALF
 
 
-async def test_an_embed_still_running_when_the_turn_ends_writes_nothing_over_the_restored_page(
-    configured, tmp_path, monkeypatch
-):
-    store, slug = _artifact(tmp_path)
-    page = store.root / slug / "index.html"
-    started, release, done = threading.Event(), threading.Event(), threading.Event()
-
-    async def fake_generate(**kw):
-        page.write_text(_HALF)
-
-        def embed():
-            # Stands in for `_embed_attachments`, whose thread outlives the cancelled run.
-            started.set()
-            release.wait(5)
-            with kw["page_lock"]:
-                if not kw["abandoned"].is_set():
-                    page.write_text("<p>embedded</p>")
-            done.set()
-
-        kw["progress"].put_nowait("Embedding")
-        await asyncio.to_thread(embed)
-
-    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
-    agen = handle_generate_artifact(_gen_session(store), _tc(slug))
-    assert await agen.__anext__() == ToolProgress("Embedding")
-    # Cancelling the run before a thread picks up `embed` would drop it unrun.
-    await _until(started.is_set)
-
-    await agen.aclose()
-    await _until(lambda: page.read_text() == _BEFORE)
-    release.set()
-    await _until(done.is_set)
-
-    assert page.read_text() == _BEFORE
-
-
 async def test_a_put_back_that_raises_is_logged_not_raised(configured, tmp_path, monkeypatch, caplog):
     store, slug = _artifact(tmp_path)
-    monkeypatch.setattr(gen_pkg, "generate", _run("Frontend verification failed after 2 attempt(s): x"))
+    monkeypatch.setattr(page_builder, "build_page", _run(_FAILED))
 
     def boom(self, key, store):
         raise RuntimeError("disk")
@@ -736,32 +685,6 @@ async def test_a_put_back_that_raises_is_logged_not_raised(configured, tmp_path,
 
     assert "The page is back" not in result.content
     assert "could not put" in caplog.text
-
-
-async def test_a_rebuild_that_removed_views_tells_the_agent_to_name_them(configured, tmp_path, monkeypatch):
-    store, slug = _artifact(tmp_path)
-    outcome = {**_GENERATED, "verified_in_browser": True,
-               "changes_from_previous": {"broke": [], "blank": [], "removed": ["“Globe”"]}}
-    monkeypatch.setattr(gen_pkg, "generate", _run(outcome))
-
-    result = await _result(_gen_session(store), slug)
-
-    data = json.loads(result.content)
-    assert data["changes_from_previous"]["removed"] == ["“Globe”"]
-    assert tool_handlers._CHANGES_INSTRUCTION in data["instruction"]
-
-
-async def test_a_page_put_back_drops_what_the_replaced_build_changed(configured, tmp_path, monkeypatch):
-    store, slug = _artifact(tmp_path)
-    outcome = {**_OVER_BUDGET, "changes_from_previous": {"broke": ["“Map”"], "blank": [], "removed": []}}
-    monkeypatch.setattr(gen_pkg, "generate", _run(outcome))
-
-    result = await _result(_gen_session(store), slug)
-
-    data = json.loads(result.content)
-    assert data["restored"] == "The page is back as it was before this run."
-    assert "changes_from_previous" not in data
-    assert tool_handlers._CHANGES_INSTRUCTION not in data["instruction"]
 
 
 async def _edited_this_turn(session, store, slug: str, *, status=None) -> Path:
@@ -775,14 +698,14 @@ async def _edited_this_turn(session, store, slug: str, *, status=None) -> Path:
     return page
 
 
-@pytest.mark.parametrize("outcome", ["Frontend verification failed after 2 attempt(s): x", _OVER_BUDGET])
+@pytest.mark.parametrize("outcome", [_FAILED, _OUT_OF_ROUNDS])
 async def test_a_run_after_an_edit_this_turn_goes_back_to_that_edit(configured, tmp_path, monkeypatch, outcome):
     """The page goes back as the run found it, which is not how the turn
     found it: the run says so, the turn's last lines do not."""
     store, slug = _artifact(tmp_path)
     session = _gen_session(store)
     page = await _edited_this_turn(session, store, slug)
-    monkeypatch.setattr(gen_pkg, "generate", _run(outcome))
+    monkeypatch.setattr(page_builder, "build_page", _run(outcome))
 
     result = await _result(session, slug)
 
@@ -794,35 +717,19 @@ async def test_a_run_after_an_edit_this_turn_goes_back_to_that_edit(configured, 
     assert session._turn_pages.end_lines(store, checks=session._page_checks) == []
 
 
-async def test_a_run_after_an_edit_this_turn_that_wrote_nothing_leaves_it(configured, tmp_path, monkeypatch):
-    store, slug = _artifact(tmp_path)
-    session = _gen_session(store)
-    page = await _edited_this_turn(session, store, slug)
-    inode = page.stat().st_ino
-
-    async def fake_generate(**kw):
-        return {"status": "needs_confirmation", "files_written": [], "summary": "s", "trace": []}
-
-    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
-    result = await _result(session, slug)
-
-    assert page.stat().st_ino == inode
-    assert "restored" not in json.loads(result.content)
-
-
 async def test_a_page_put_back_to_an_edit_this_turn_keeps_how_that_edit_fared(configured, tmp_path, monkeypatch):
     store, slug = _artifact(tmp_path)
     session = _gen_session(store)
     key = PageKey(slug, "index.html")
     page = await _edited_this_turn(session, store, slug, status="passed")
 
-    async def fake_generate(**kw):
+    async def fake_build(session, **kw):
         page.write_text(_HALF)
         # As `engine._record_page_check` records a run that wrote a page no browser loaded.
-        tool_handlers.record_page_checks(kw["session"], checks={key: "unverified"})
-        return "Frontend verification failed after 2 attempt(s): x"
+        tool_handlers.record_page_checks(session, checks={key: "unverified"})
+        return dict(_FAILED)
 
-    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    monkeypatch.setattr(page_builder, "build_page", fake_build)
     await _result(session, slug)
 
     assert page.read_text() == "<p>the edit the user asked for</p>"
@@ -841,12 +748,12 @@ async def test_a_page_put_back_to_a_failed_edit_keeps_the_views_its_repair_is_he
     page = await _edited_this_turn(session, store, slug, status="failed")
     session._failed_views[key] = views
 
-    async def fake_generate(**kw):
+    async def fake_build(session, **kw):
         page.write_text(_HALF)
-        tool_handlers.record_page_checks(kw["session"], checks={key: "passed"})
-        return dict(_OVER_BUDGET)
+        tool_handlers.record_page_checks(session, checks={key: "passed"})
+        return dict(_FAILED)
 
-    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    monkeypatch.setattr(page_builder, "build_page", fake_build)
     await _result(session, slug)
 
     assert page.read_text() == "<p>the edit the user asked for</p>"
@@ -861,7 +768,7 @@ async def test_a_handler_that_crashed_mid_run_stops_the_run_before_it_puts_the_p
     page = store.root / slug / "index.html"
     tasks: list[asyncio.Task] = []
 
-    async def fake_generate(**kw):
+    async def fake_build(session, **kw):
         tasks.append(asyncio.current_task())
         page.write_text(_HALF)
         kw["progress"].put_nowait("Writing the page")
@@ -872,7 +779,7 @@ async def test_a_handler_that_crashed_mid_run_stops_the_run_before_it_puts_the_p
         yield ToolProgress(await queue.get())
         raise RuntimeError("progress broke")
 
-    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    monkeypatch.setattr(page_builder, "build_page", fake_build)
     monkeypatch.setattr(tool_handlers, "_drain_progress", broken_drain)
     outcomes = 0
 
@@ -893,7 +800,7 @@ async def test_a_page_put_back_keeps_how_it_last_fared(configured, tmp_path, mon
     key = PageKey(slug, "index.html")
     # An earlier check this turn found the page as the turn found it passing.
     session._turn_pages.record({key: Comparison.model_validate(_comparison())})
-    monkeypatch.setattr(gen_pkg, "generate", _run(_OVER_BUDGET))
+    monkeypatch.setattr(page_builder, "build_page", _run(_FAILED))
 
     await _result(session, slug)
 
@@ -901,18 +808,3 @@ async def test_a_page_put_back_keeps_how_it_last_fared(configured, tmp_path, mon
     assert session._page_checks[key] == "passed"
 
 
-async def test_a_page_put_back_drops_the_replaced_builds_screenshot_and_browser_fields(
-    configured, tmp_path, monkeypatch
-):
-    store, slug = _artifact(tmp_path)
-    outcome = {**_OVER_BUDGET, "screenshot": object(), "screenshot_page": "index.html", "verified_in_browser": True,
-               "browser_checked": ["the page as it opens"], "browser_unchecked": []}
-    monkeypatch.setattr(gen_pkg, "generate", _run(outcome))
-
-    result = await _result(_gen_session(store), slug)
-
-    assert isinstance(result.content, str)
-    data = json.loads(result.content)
-    for name in ("screenshot", "screenshot_page", "verified_in_browser", "browser_checked", "browser_unchecked"):
-        assert name not in data
-    assert data["instruction"].endswith(tool_handlers._RESTORED_INSTRUCTION)

@@ -202,7 +202,8 @@ h1, h2, h3, h4 { margin: 0; font-weight: 650; letter-spacing: -0.012em; line-hei
 .ak-fl-dot { width: 9px; height: 9px; border-radius: 3px; flex: none; }
 .ak-fl-total { margin-left: auto; color: var(--ak-text-3); font-weight: 600; font-variant-numeric: tabular-nums; }
 .ak-fl-row { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(40px, 1fr) auto; align-items: center; gap: 8px; padding-left: 17px; font-size: 12.5px; color: var(--ak-text-2); transition: opacity .2s ease; }
-.ak-fl-row.ak-dim { opacity: .25; }
+.ak-fl-row.ak-dim, .ak-fl-node.ak-dim .ak-fl-head { opacity: .25; }
+.ak-fl-head { cursor: pointer; border-radius: 6px; }
 .ak-fl-to { overflow-wrap: anywhere; }
 .ak-fl-bar { height: 8px; border-radius: 4px; background: var(--ak-surface-2); overflow: hidden; }
 .ak-fl-bar i { display: block; height: 100%; border-radius: 4px; opacity: .75; }

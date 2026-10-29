@@ -1844,11 +1844,12 @@ _STATUS_INSTRUCTIONS = {
 
 
 async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
-    """Build an already-registered artifact end to end.
+    """Build an already-registered artifact end to end (or register a new page from `name`).
 
     The handler validates input and reads the artifact's `type` (rejecting
-    types outside {html-app, fullstack-stateless-app, fullstack-stateful-app}),
-    then hands off to `generate_artifact.generate`, which runs all five
+    types outside {html-app, fullstack-stateless-app, fullstack-stateful-app}).
+    A page (`html-app`) goes to the kit's page builder (`kit.builder.build_page`);
+    an app to `generate_artifact.generate`, which runs all five
     phases — gather, brief, PRD, spec, code — and writes into the artifact
     folder. Pipeline failures come back wrapped by `_generation_failed` so
     the agent surfaces them instead of hand-building the artifact, except a
@@ -1922,60 +1923,16 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     if not agent_understanding:
         yield "Error: `agent_understanding` is required."
         return
-    if artifact.type == "html-app":
-        # Pages: the kit's page builder, one focused loop (anton.core.artifacts.kit.builder).
-        from anton.core.artifacts.kit.builder import build_page, result_text
-
-        _track_artifact(session, store, artifact.slug)
-        queue: "asyncio.Queue[str | None]" = asyncio.Queue()
-        # A build that fails puts an existing page back as it was (a new page that failed is left).
-        page_file = store.folder_for(slug) / "index.html"
-        page_before = page_file.read_bytes() if page_file.exists() else None
-
-        from anton.core.llm.client import model_route
-        from anton.core.tools.generate_artifact.state import artifact_model_route
-
-        async def _build():
-            kwargs = dict(
-                slug=slug, folder=store.folder_for(slug),
-                user_request=str(tc_input.get("user_request") or ""),
-                user_language=str(tc_input.get("user_language") or ""),
-                agent_understanding=str(tc_input.get("agent_understanding") or ""),
-                known_data=str(tc_input.get("known_data") or ""),
-                progress=queue,
-            )
-            try:
-                # The builder-model setting the app pipeline honours too (ANTON_ARTIFACT_MODEL/_EFFORT).
-                route = artifact_model_route()
-                if route is None:
-                    return await build_page(session, **kwargs)
-                with model_route(route):
-                    return await build_page(session, **kwargs)
-            finally:
-                queue.put_nowait(None)
-
-        task = asyncio.ensure_future(_build())
-        result = None
-        try:
-            async for marker in _drain_progress(queue):
-                yield marker
-            result = await task
-        finally:
-            if not task.done():
-                task.cancel()
-            failed = result is None or result.get("status") != "generated"
-            if failed and page_before is not None and page_file.exists() and page_file.read_bytes() != page_before:
-                page_file.write_bytes(page_before)
-                if result is not None:
-                    result["restored"] = "The page was put back as it was before this build."
-        yield result_text(result)
-        return
+    # Pages are built by the kit's page builder (one focused loop); apps by the generator
+    # pipeline. Both share the run handling below: progress, the model route, and putting the
+    # page back when a run fails, crashes or is abandoned.
+    is_page = artifact.type == "html-app"
     # Collapsed to one line: the value is quoted into every step header.
     from anton.core.tools.generate_artifact.state import MAX_USER_LANGUAGE_CHARS
 
     raw_language = tc_input.get("user_language")
     user_language = " ".join(raw_language.split()) if isinstance(raw_language, str) else ""
-    if not user_language:
+    if not user_language and not is_page:  # a page builder infers it from the request
         yield (
             "Error: `user_language` is required: the English name of the "
             "language the user writes to you in, e.g. \"English\"."
@@ -2073,30 +2030,34 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
             return await coro
 
     queue: "asyncio.Queue[str | None]" = asyncio.Queue()
-    task = asyncio.create_task(
-        _at_artifact_model(
-            _generate_with_progress_close(
-                generate(
-                    session=session,
-                    slug=slug,
-                    artifact_path=folder,
-                    artifact_type=artifact.type,
-                    user_request=user_request,
-                    agent_understanding=agent_understanding,
-                    known_data=(tc_input.get("known_data") or "").strip(),
-                    user_preferences=(tc_input.get("user_preferences") or "").strip(),
-                    user_language=user_language,
-                    primary=artifact.primary,
-                    progress=queue,
-                    attachments=attachments,
-                    previous_page=previous_page,
-                    page_lock=page_lock,
-                    abandoned=abandoned,
-                ),
-                queue,
-            )
+    if is_page:
+        from anton.core.artifacts.kit import builder as page_builder
+
+        _track_artifact(session, store, slug)
+        run = page_builder.build_page(
+            session, slug=slug, folder=folder, user_request=user_request, user_language=user_language,
+            agent_understanding=agent_understanding, known_data=(tc_input.get("known_data") or "").strip(),
+            progress=queue,
         )
-    )
+    else:
+        run = generate(
+            session=session,
+            slug=slug,
+            artifact_path=folder,
+            artifact_type=artifact.type,
+            user_request=user_request,
+            agent_understanding=agent_understanding,
+            known_data=(tc_input.get("known_data") or "").strip(),
+            user_preferences=(tc_input.get("user_preferences") or "").strip(),
+            user_language=user_language,
+            primary=artifact.primary,
+            progress=queue,
+            attachments=attachments,
+            previous_page=previous_page,
+            page_lock=page_lock,
+            abandoned=abandoned,
+        )
+    task = asyncio.create_task(_at_artifact_model(_generate_with_progress_close(run, queue)))
     restored: _PageBack | None = None
     handled = False
     try:
@@ -2134,6 +2095,13 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     if restored is not None:
         # Over the run's own record of its page (`engine._record_page_check`).
         _record_put_back(session, previous_page[0], restored)
+
+    if is_page:
+        built = isinstance(result, dict) and result.get("status") == "generated"
+        if restored is not None:
+            result["restored"] = _PAGE_PUT_BACK
+        yield ToolOutcome(content=page_builder.result_text(result), ok=built, reason=None if built else "page_builder")
+        return
 
     from anton.core.tools.generate_artifact.state import BrowserCheckFailed
 
