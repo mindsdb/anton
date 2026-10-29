@@ -33,7 +33,9 @@ page = kit.Page(title, subtitle=None, lang="en", theme="light"|"dark", badges=[.
 #   datetime_short (Mar 3, 09:00), time (09:00); timestamps keep their times of day unless formatted as dates
 page.kpis([kit.kpi(label, value, format, unit=None, sub=None, delta=None, better="up"|"down", tone="good"|"bad"|"warn"|"accent")])
 page.text(markdown, style="lead") · page.callout(markdown, title=None, tone="info"|"good"|"warn"|"bad")
-page.compare(["Current", "Proposed"], [kit.metric(label, [v1, v2], format, unit=None, better="higher"|"lower")], title=)
+page.compare(["Current", "Proposed"], [kit.metric(label, [v1, v2], format, unit=None, better="higher"|"lower",
+             show_pct=False)], title=)   # two columns: a change column (second minus first) in each
+             # metric's own format and unit; show_pct=True adds the % change; no separate differences table
 page.chart(kind, df, x, y, series=None, title=, format=, stack=False, horizontal=None, sort="desc",
            threshold={"value": 80, "label": "Target"}, ref_lines=[{"value": v, "label": l}],
            y2=None, unit=None, y2_unit=None, colors={name: color_or_tone}, show_values=None)
