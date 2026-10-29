@@ -20,6 +20,33 @@ def specimen(kind='report',dark=False):
     return render(Document.model_validate({'kind':kind,'theme':{'mode':'dark' if dark else 'light'},'title':'A report with long labels','sections':sections}),evidence).html
 
 
+@pytest.mark.parametrize('width,js', [(390, True), (390, False), (1440, False)])
+def test_native_map_is_offline_static_and_responsive(width, js):
+    from tests.test_static_artifact_maps_v2 import specimen as map_specimen
+    document, evidence = map_specimen()
+    html = render(document, evidence).html
+    with playwright.sync_playwright() as p:
+        browser = p.chromium.launch()
+        context = browser.new_context(java_script_enabled=js, viewport={'width': width, 'height': 900})
+        page = context.new_page(); requests = []; errors = []
+        page.route('**/*', lambda route: (requests.append(route.request.url), route.abort()))
+        page.on('pageerror', lambda error: errors.append(str(error)))
+        page.set_content(html)
+        assert page.locator('.geo-land').count() == 177 and page.locator('.geo-point').count() == 3
+        assert not page.evaluate('document.documentElement.scrollWidth > innerWidth')
+        assert not errors and not requests
+        box = page.locator('.geo-map svg').bounding_box()
+        point = page.locator('.geo-point').first.bounding_box()
+        assert abs((point['x'] + point['width']/2) - (box['x'] + box['width']/2)) < 1
+        assert abs((point['y'] + point['height']/2) - (box['y'] + box['height']/2)) < 1
+        if js:
+            page.locator('.chart-data summary').click()
+        assert page.locator('.chart-data').get_attribute('open') is not None
+        assert page.locator('.chart-data tbody tr').count() == 4
+        assert page.locator('.geo-map [tabindex]').count() == 0
+        browser.close()
+
+
 @pytest.mark.parametrize('width,height',[(1440,900),(390,844),(640,900),(641,900),(1100,900),(1101,900),(1024,600)])
 def test_charts_reflow_without_overflow_or_errors(width,height):
     with playwright.sync_playwright() as p:

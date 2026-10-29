@@ -151,6 +151,14 @@ COMPOSE = '''You design and author a finished static artifact from exact supplie
 Both output modes create self-contained HTML. A request for HTML does not imply custom mode.
 Use a structured document for reports, charts, write-ups, and slides: it compiles to responsive semantic
 HTML, supports data inspection, a contents outline, light/dark themes, printing, and slide presentation.
+For ordinary point-location reports, use the native map block: type="map", title, caption,
+and layers with label, query, latitude/longitude field names, and optional label_field. The host
+renders authentic country geometry and exact coordinate anchors without JavaScript or downloads.
+Each layer has its own exact data inspector; combine source-supplied positions and validated
+approximate reference centroids as separately labelled layers. Queries must select the named
+coordinate/label fields. Null coordinates stay unplotted and visible in the inspector. Do not
+map every ambiguous reference candidate as if each were an observed location. Use custom HTML
+when the request requires routes, a globe, or interactions beyond the native point map.
 Choose composition from the user's task, not a template.
 When revise_static_artifact is available, prefer targeted changes for small requested edits and
 validation repairs. It applies to the latest complete candidate (or saved recipe initially), preserving

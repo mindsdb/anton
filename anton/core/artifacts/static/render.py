@@ -10,8 +10,10 @@ import re
 from .views import checks, validate_ids
 from .labels import reader_labels
 from .charts import markup as chart_markup
+from .maps import markup as map_markup
+from .geography import manifest as geography_manifest
 from .data import DataError, Evidence, calculate, execute, json_value, number
-from .document import Callout, Chart, Document, Html, Metric, Prose, Table, Tabs, resolve_facts, resolve_query
+from .document import Callout, Chart, Column, Document, Html, Metric, PointMap, Prose, Table, Tabs, resolve_facts, resolve_query
 
 
 @dataclass(frozen=True)
@@ -156,6 +158,32 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
             content += f'<details open class="chart-data"><summary>{escape(labels["view_data"])}</summary>' + table(public_rows, columns) + '</details>'
         return '<figure>' + title + content + source(query) + '</figure>'
 
+    def mapped(block):
+        layers, inspectors = [], []
+        for layer in block.layers:
+            if isinstance(layer.query, str):
+                covered.add(layer.query)
+            fields = list(dict.fromkeys([layer.latitude, layer.longitude, *([layer.label_field] if layer.label_field else [])]))
+            query = resolve_query(document, evidence, layer.query, fields)
+            rows = execute(evidence, query)
+            if len(rows) > 5000:
+                raise DataError(f'{block.title}: narrow more than 5000 map rows per layer; complete records can remain in a table')
+            available = set(query.columns or query.group_by + [m.name for m in query.measures] + [c.name for c in query.calculations])
+            if set(fields) - available:
+                raise DataError(f'{block.title}: map fields are not selected by the query: {sorted(set(fields) - available)}')
+            public_rows = [{field: row[field] for field in fields} for row in rows]
+            bindings[f'_view{len(bindings)}'] = public_rows
+            layers.append((layer.model_copy(update={'label': plain_text(layer.label)}), public_rows))
+            columns = [Column(field=field, label=field) for field in fields]
+            inspectors.append(f'<h3>{text(layer.label)}</h3>' + table(public_rows, columns) + source(query))
+        reference = geography_manifest()
+        sources['reference:world-countries-110m'] = {'label': 'Natural Earth country boundaries (1:110m)',
+            'url': 'https://www.naturalearthdata.com/', 'kind': 'reference', 'snapshot': reference['snapshot'],
+            'sha256_compressed': reference['outputs']['world-countries.geojson.gz']['sha256'],
+            'scope': 'Public domain; coarse geographic context, equirectangular projection.'}
+        caption = f'<figcaption><h3>{text(block.title)}</h3>' + (f'<p>{text(block.caption)}</p>' if block.caption else '') + '</figcaption>'
+        return '<figure>' + caption + map_markup(layers, plain_text(block.title)) + f'<details open class="chart-data"><summary>{escape(labels["view_data"])}</summary>{"".join(inspectors)}</details></figure>'
+
     for query in document.bindings.values():
         source(query)
     def blocks_html(items, layout):
@@ -184,6 +212,8 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
                 destination.append(f'<div class="metric"><h3>{text(block.label)}</h3><p class="metric-value">{escape(value)}</p><p class="metric-detail">{text(block.detail)}</p></div>')
             elif isinstance(block, (Table, Chart)):
                 blocks.append(queried(block, index))
+            elif isinstance(block, PointMap):
+                blocks.append(mapped(block))
             elif isinstance(block, Tabs):
                 group = f'_tabs{tab_count}'
                 tab_count += 1
