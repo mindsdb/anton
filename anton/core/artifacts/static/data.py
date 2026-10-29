@@ -27,6 +27,8 @@ class Source(Model):
     label: str = Field(min_length=1)
     url: str = ""
     scope: str = ""
+    kind: Literal['records', 'reference'] = 'records'
+    attribution: str = Field(default='', max_length=600)
 
 
 class Dataset(Model):
@@ -46,7 +48,16 @@ class Evidence(Model):
     datasets: dict[Name, Dataset] = Field(default_factory=dict, max_length=100)
 
     def digest(self) -> str:
-        return sha256(exact_json(self.model_dump()).encode()).hexdigest()
+        payload = self.model_dump()
+        # Preserve the canonical hash of snapshots created before optional
+        # source classification and credits were added.
+        for dataset in payload['datasets'].values():
+            source = dataset['source']
+            if source['kind'] == 'records':
+                del source['kind']
+            if not source['attribution']:
+                del source['attribution']
+        return sha256(exact_json(payload).encode()).hexdigest()
 
 
 class Filter(Model):

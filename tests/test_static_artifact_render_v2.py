@@ -243,3 +243,11 @@ def test_reader_label_overrides_are_escaped_and_reject_unknown_keys():
     assert 'Inhalt &lt;script&gt;' in result.html and '>Drucken<' in result.html
     assert '>Inhalt <script>' not in result.html
     with pytest.raises(ValueError):document([{'type':'prose','text':'Text'}],labels={'typo':'Label'})
+
+
+def test_compiled_document_preserves_required_source_credits():
+    source=Evidence.model_validate({'datasets':{'sample':{'source':{'label':'Open records','attribution':'Credit <provider>'},'rows':[{'name':'A','value':1}]}}})
+    doc=document([{'type':'table','title':'Records','query':'sample','columns':[{'field':'name','label':'Name'},{'field':'value','label':'Value'}]}])
+    result=render(doc,source)
+    assert 'Credit &lt;provider&gt;' in result.html
+    assert result.manifest['sources']['sample']['attribution']=='Credit <provider>'

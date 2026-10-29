@@ -310,3 +310,14 @@ def test_ordered_limits_require_a_bounded_positive_integer(invalid):
 def test_limit_does_not_hide_invalid_later_rows():
     with pytest.raises(DataError,match='missing fields'):
         execute(evidence([{'amount':1},{'other':2}]),Query(dataset='orders',columns=['amount'],limit=1))
+
+
+def test_optional_source_metadata_preserves_legacy_hashes_and_classifies_reference_data():
+    from hashlib import sha256
+    from anton.core.artifacts.static.data import exact_json
+    legacy={'datasets':{'orders':{'source':{'label':'Legacy records','url':'','scope':''},'rows':[{'amount':2}]}}}
+    data=Evidence.model_validate(legacy)
+    assert data.digest()==sha256(exact_json(legacy).encode()).hexdigest()
+    data.datasets['orders'].source.kind='reference'
+    data.datasets['orders'].source.attribution='Source and contributors, CC BY 4.0'
+    assert data.digest()!=sha256(exact_json(legacy).encode()).hexdigest()

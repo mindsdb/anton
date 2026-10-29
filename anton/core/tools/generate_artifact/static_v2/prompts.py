@@ -113,6 +113,9 @@ position when the location cannot be resolved. Clearly identify unresolved locat
 For every record-based task, use scratchpad to save the complete observed relevant records with
 save_static_evidence(payload). The exact payload shape is:
 {"datasets":{"short_id":{"source":{"label":"source name","url":"optional URL","scope":"filters, time range, units, and caveats"},"rows":[{"field":123,"other_field":"value"}]}}}
+Source metadata may declare kind="reference" for supporting data rather than the user's record
+observations, and attribution for required visible source credits. These labels do not establish
+authority or expand access. The host retains required credits in compiled and custom outputs.
 Rows contain scalar JSON values. Keep private columns out when possible. Do not retype or summarize a
 large dataset in tool arguments or console output. Print only schema, row counts, reconciliation results,
 and a few representative records. Derived source tables may be computed in scratchpad with assertions;

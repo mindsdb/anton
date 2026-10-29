@@ -47,7 +47,7 @@ async def test_generation_result_carries_current_evidence_counts_without_private
     monkeypatch.setattr('anton.core.tools.generate_artifact.verifiers.verify_frontend_live',lambda *a,**k:BrowserCheck(status='passed'))
     st=state(tmp_path,VALID);st.known_data='Earlier parent read failed';st.static_evidence_origin={'mode':'acquired','acquired_at':'2026-10-28T12:00:00Z'}
     result=await compose(st,evidence)
-    assert result['data_publication']['datasets']=={'readings':{'rows':1,'source_label':'Documented source'}}
+    assert result['data_publication']['datasets']=={'readings':{'rows':1,'source_label':'Documented source','kind':'records'}}
     assert result['data_publication']['origin']==st.static_evidence_origin
     assert 'PRIVATE_ROW_VALUE' not in json.dumps(result)
 
@@ -476,3 +476,27 @@ async def test_source_refusal_requires_an_attempt_even_before_procedure_recall(t
     assert 'requested source procedure is missing' in await module.collect(st)
     assert len(calls)==3
     assert 'Source readers are available in this call' in str(calls[-1]['messages'])
+
+
+def test_custom_source_credits_are_escaped_deduplicated_and_only_from_published_datasets():
+    evidence=Evidence.model_validate({'datasets':{
+        'points':{'source':{'label':'Public point reference','url':'https://example.org','kind':'reference','attribution':'Credit <script>'},'rows':[{'x':1,'private':'DO_NOT_EXPORT'}]},
+        'unused':{'source':{'label':'Unused','attribution':'PRIVATE_UNUSED_CREDIT'},'rows':[{'x':2}]}}})
+    output=Custom(mode='html',html='<html><head></head><body><h1 id="plot">Plot</h1></body></html>',
+        bindings={'a':{'dataset':'points','columns':['x']},'b':{'dataset':'points','columns':['x']}},
+        views=[{'selector':'#plot','binding':'a','inputs':['b']}])
+    html,manifest=compile_output(output,evidence)
+    assert set(manifest['sources'])=={'points'} and manifest['sources']['points']['kind']=='reference'
+    assert html.count('Credit &lt;script&gt;')==1
+    assert 'PRIVATE_UNUSED_CREDIT' not in html and 'DO_NOT_EXPORT' not in html
+    assert html.index('artifact-data-attribution')<html.index('</body>')
+
+
+async def test_generation_outcome_separates_business_records_from_reference_candidates(tmp_path,monkeypatch):
+    evidence=Evidence.model_validate({'datasets':{
+        'records':{'source':{'label':'User records'},'rows':[{'amount':2}]},
+        'places':{'source':{'label':'Supporting places','kind':'reference'},'rows':[{'x':n} for n in range(5)]}}})
+    monkeypatch.setattr('anton.core.tools.generate_artifact.verifiers.verify_frontend_live',lambda *a,**k:BrowserCheck(status='passed'))
+    result=await compose(state(tmp_path,VALID),evidence)
+    assert '1 record rows + 5 reference rows' in result['outcome']
+    assert result['data_publication']['datasets']['places']['kind']=='reference'
