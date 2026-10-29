@@ -67,6 +67,8 @@ dependencies = [
     # replaced the old in-memory test helper; pin the major version.
     "mcp>=2,<3",
     "structlog==26.1.0",
+    # Offline gazetteer (GeoNames towns over 15,000 people) for map pages: kit.geocode.
+    "geonamescache>=2.0",
 ]
 
 [project.optional-dependencies]

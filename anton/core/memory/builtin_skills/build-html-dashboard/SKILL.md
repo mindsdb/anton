@@ -1,14 +1,10 @@
 ---
 name: build-html-dashboard
-description: 'ONLY for writing dashboard or chart HTML BY HAND. NOT needed on the normal
-  path — create_artifact(type="html-app") followed by generate_artifact writes the
-  dashboard itself and carries this contract internally. NOT needed to change the content
-  of a report or add sections (report_tools does that; see DIRECT REPORTS). Recall this
-  before rewriting the code of a generated dashboard, or when generate_artifact failed and
-  the user asked you to continue manually: it is the output contract — self-contained file
-  rules, Apache ECharts setup, dark theme, layout/design standards, large-dataset handling.
-  Not needed to repair a page generate_artifact returned as browser_check_failed: that
-  result''s instruction says how.'
+description: 'NOT needed for pages: every html-app (report, dashboard, map, deck) is
+  built with the artifact kit in the scratchpad (PAGES in the ARTIFACTS section), which
+  already carries the design system, ECharts and map setup and the phone layout. Recall this
+  only when you must hand-write a whole page''s HTML that the kit cannot express even with
+  page.html()/page.echarts(): it is the output contract for hand-written pages.'
 metadata:
   display_name: HTML dashboard & visualization output format
   provenance: builtin

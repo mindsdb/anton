@@ -202,22 +202,19 @@ CREATE_ARTIFACT_TOOL = ToolDef(
         "files — the tool returns the absolute folder path you should write "
         "into. Each artifact gets its own folder, "
         "with a `metadata.json` + `README.md` written automatically.\n\n"
-        "AFTER REGISTERING a web artifact (html-app, fullstack-stateless-app, "
-        "or fullstack-stateful-app): a report the user has fully specified you "
-        "build yourself (DIRECT REPORTS in the ARTIFACTS section); anything else "
-        "goes to `generate_artifact(slug, user_request, user_language, "
-        "agent_understanding, ...)`, "
-        "which works out the requirements with the user, writes every file, and "
-        "verifies its own output. For `document`, "
+        "AFTER REGISTERING: an `html-app` (report, dashboard, map, chart page, "
+        "brief, slide deck) you build yourself in the scratchpad with the "
+        "artifact kit (PAGES in the ARTIFACTS section); the page comes out "
+        "designed, responsive and checked. A `fullstack-stateless-app` or "
+        "`fullstack-stateful-app` goes to `generate_artifact(slug, user_request, "
+        "user_language, agent_understanding, ...)`, which writes, launches and "
+        "verifies it. For `document`, "
         "`dataset`, `image` and `mixed` there is no generator: write the "
         "files yourself into the returned path.\n\n"
-        "If you do end up building a generator-made artifact BY "
-        "HAND (rewriting its code, or `generate_artifact` failed and "
-        "the user asked you to continue), the output contract lives in a skill: "
-        "call `recall_skill(\"build-html-dashboard\")` for an html-app or "
-        "`recall_skill(\"build-fullstack-backend\")` for a fullstack app before "
-        "writing anything. Hand-written code that skips it breaks "
-        "rendering/launch.\n\n"
+        "Building a fullstack app BY HAND (rewriting its code, or "
+        "`generate_artifact` failed and the user asked you to continue): call "
+        "`recall_skill(\"build-fullstack-backend\")` before writing anything. "
+        "Hand-written code that skips it breaks launch.\n\n"
         "Pick `type` from the closed enum:\n"
         "- html-app: a single self-contained HTML page (charts, dashboards, demos)\n"
         "- document: a doc, report, or markdown file the user reads\n"
@@ -429,13 +426,12 @@ LAUNCH_BACKEND_TOOL = ToolDef(
 GENERATE_ARTIFACT_TOOL = ToolDef(
     name="generate_artifact",
     description=(
-        "Build an already-registered web artifact end to end: fullstack apps, "
-        "and dashboards or reports whose requirements still need agreeing (a "
-        "report the user has fully specified is built directly — see DIRECT "
-        "REPORTS). Use it INSTEAD OF writing those files yourself in the "
-        "scratchpad. Reads `type` from the "
-        "artifact's metadata (must be `html-app`, `fullstack-stateless-app`, "
-        "or `fullstack-stateful-app`).\n\n"
+        "Build an already-registered fullstack app end to end. Use it INSTEAD "
+        "OF writing an app's files yourself in the scratchpad. Reads `type` "
+        "from the artifact's metadata (`fullstack-stateless-app` or "
+        "`fullstack-stateful-app`). Pages (`html-app`: reports, dashboards, "
+        "maps, decks) are not built here: build them with the artifact kit "
+        "(PAGES in the ARTIFACTS section).\n\n"
         "It runs the whole thing itself: gathers the data it needs (it can "
         "use the scratchpad, web search and web fetch), asks the user "
         "whatever is still unclear, shows them a short brief (and asks them to "
@@ -584,15 +580,14 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
     handler=handle_generate_artifact,
     prompt=(
         "ARTIFACT GENERATION:\n"
-        "`generate_artifact` builds an already-registered artifact end to "
+        "`generate_artifact` builds an already-registered fullstack app end to "
         "end — gathering data, showing the user a brief, writing the "
-        "requirements, the technical spec and the code, with verification "
-        "and (for fullstack) a launch and health check. Use it for fullstack "
-        "apps and for web artifacts whose requirements still need agreeing, "
-        "INSTEAD of writing their files yourself in the scratchpad; a report "
-        "the user has fully specified is built directly (DIRECT REPORTS).\n"
+        "requirements, the technical spec and the code, with verification, a "
+        "launch and a health check. Use it for fullstack apps INSTEAD of "
+        "writing their files yourself in the scratchpad; every `html-app` page "
+        "is built with the artifact kit (PAGES).\n"
         "  1. Call `create_artifact` to register the slug and pick the type "
-        "(one of html-app, fullstack-stateless-app, fullstack-stateful-app).\n"
+        "(fullstack-stateless-app or fullstack-stateful-app).\n"
         "  2. Call `generate_artifact(slug=<slug>, user_request=..., "
         "user_language=..., agent_understanding=..., known_data?, "
         "user_preferences?, attachments?)`. It asks "
@@ -612,7 +607,7 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
 )
 
 
-# `create_artifact`, `generate_artifact` and `update_artifact` where nothing
+# `create_artifact` and `update_artifact` where nothing
 # starts an app backend (`live_app_slots.fullstack_offered` is False): html-app
 # is the one web type, and no text offers a fullstack app or `launch_backend`.
 STATIC_CREATE_ARTIFACT_TOOL = replace(
@@ -620,8 +615,8 @@ STATIC_CREATE_ARTIFACT_TOOL = replace(
     description=cut_spans(
         CREATE_ARTIFACT_TOOL.description,
         (" image, fullstack app,", " etc.)", " image,"),
-        (" (html-app, fullstack-stateless-app,", ": a report the user", " (html-app)"),
-        (" for an html-app or `recall_skill(\"build-fullstack-backend\")`", " before writing", ""),
+        (" A `fullstack-stateless-app` or `fullstack-stateful-app` goes to", " For `document`", ""),
+        ("\n\nBuilding a fullstack app BY HAND", "\n\nPick `type`", ""),
         (
             "- fullstack-stateless-app: fullstack web app",
             "\n\nPass `primary`",
@@ -643,24 +638,6 @@ STATIC_CREATE_ARTIFACT_TOOL = replace(
             },
         },
     },
-)
-
-STATIC_GENERATE_ARTIFACT_TOOL = replace(
-    GENERATE_ARTIFACT_TOOL,
-    description=cut_spans(
-        GENERATE_ARTIFACT_TOOL.description,
-        (" fullstack apps, and dashboards", " or reports whose", " dashboards"),
-        (", `fullstack-stateless-app`, or", ").", ""),
-        (", and for fullstack apps a launch", ". There is no separate PRD", ""),
-        (", and you do NOT call `launch_backend` afterwards", ".", ""),
-    ),
-    prompt=cut_spans(
-        GENERATE_ARTIFACT_TOOL.prompt,
-        (" and (for fullstack) a launch and health check", ". Use it for", ""),
-        (" fullstack apps and for web artifacts", " whose requirements", " web artifacts"),
-        (" and pick the type (one of html-app,", ".\n  2. Call", " with type `html-app`"),
-        ("\nDo NOT call `launch_backend` for a fullstack", None, ""),
-    ),
 )
 
 STATIC_UPDATE_ARTIFACT_METADATA_TOOL = replace(

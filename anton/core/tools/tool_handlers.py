@@ -1876,6 +1876,15 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         yield f"Error: no artifact found for slug `{slug}`."
         return
 
+    if artifact.type == "html-app":
+        # Pages are built with the artifact kit, not the generator.
+        yield (
+            f"`{slug}` is an html-app page: build it yourself in a scratchpad cell with the "
+            "artifact kit (`from anton.core.artifacts import kit`, PAGES in the ARTIFACTS "
+            "section) and save it with `page.save(<artifact_path>)`. generate_artifact builds "
+            "fullstack apps only."
+        )
+        return
     if artifact.type not in GENERATOR_ARTIFACT_TYPES:
         yield (
             "Error: generate_artifact only supports html-app / "
