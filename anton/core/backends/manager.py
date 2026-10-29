@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
-from anton.core.backends.base import Cell, ScratchpadRuntime, ScratchpadRuntimeFactory
+from anton.core.backends.base import ApiKeySupplier, Cell, ScratchpadRuntime, ScratchpadRuntimeFactory
 from anton.core.backends.sandbox import CellSandbox
 from anton.core.datasources.data_vault import DataVault
 from anton.utils.nofollow import read_text_nofollow, replace_text_nofollow
@@ -74,12 +74,14 @@ class ScratchpadManager:
         data_vault: DataVault | None = None,
         workspace_env_overlay: dict[str, str] | None = None,
         cell_sandbox: CellSandbox | None = None,
+        coding_api_key_supplier: ApiKeySupplier | None = None,
     ) -> None:
         self._pads: dict[str, ScratchpadRuntime] = {}
         self._runtime_factory = runtime_factory
         self._coding_provider = coding_provider
         self._coding_model = coding_model
         self._coding_api_key = coding_api_key
+        self._coding_api_key_supplier = coding_api_key_supplier
         self._coding_base_url = coding_base_url
         self._cells = cells
         self._workspace_path = workspace_path
@@ -101,6 +103,9 @@ class ScratchpadManager:
         )
         self._factory_takes_workspace_env_overlay = self._probe_factory_kwarg(
             runtime_factory, "workspace_env_overlay"
+        )
+        self._factory_takes_api_key_supplier = self._probe_factory_kwarg(
+            runtime_factory, "coding_api_key_supplier"
         )
         # Unlike the kwargs above, a policy is never dropped: a factory that
         # cannot take it would run agent code unlocked. It must name the
@@ -317,6 +322,11 @@ class ScratchpadManager:
                 **(
                     {"workspace_env_overlay": self._workspace_env_overlay}
                     if self._factory_takes_workspace_env_overlay
+                    else {}
+                ),
+                **(
+                    {"coding_api_key_supplier": self._coding_api_key_supplier}
+                    if self._factory_takes_api_key_supplier and self._coding_api_key_supplier is not None
                     else {}
                 ),
                 **({"cell_sandbox": self._cell_sandbox} if self._cell_sandbox is not None else {}),
