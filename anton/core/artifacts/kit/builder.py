@@ -94,13 +94,13 @@ How to work (fast: every round costs the user time):
 recall it first (nothing else in that reply). In your first reply, before the tool call, list in \
 one line each the elements the request asks for (views, figures, interactions, look); build exactly \
 those.
-2. One scratchpad cell that fetches every table the page needs, computes every figure, prints \
-those figures, and builds and saves the page with `page.save(<folder>)`. Name the scratchpad `page` \
-unless one listed below already holds the data. When the figures depend on statuses, categories, \
-periods, links between tables or derived values (a change between two options, a cost, a share), \
-split it: the first cell fetches every table and runs `kit.profile(df, name)` on each (columns, \
-distinct values with counts, ranges); the second computes, prints each figure with its definition, \
-and builds the page.
+2. First cell: fetch every table the page needs with only the scope the request states outright \
+in the query (a scenario, a date range, a place or id you have seen in the data), with no filters on \
+status, type or category fields, and run `kit.profile(df, name)` on each (columns, distinct values \
+with counts, ranges). Name the scratchpad `page` unless one listed below already holds the data.
+Second cell: apply in pandas the filters the request implies, using the values the profile showed, \
+compute and print each figure with its definition, and build and save the page with \
+`page.save(<folder>)`. (An edit whose data is already in the scratchpad goes straight to the change.)
 3. Read the cell's output: the page outline with its figures, any WARNINGS, and the browser check \
 of the page. Fix anything wrong (an error, a warning, a wrong or missing figure, a failed check) in \
 one more cell.
