@@ -100,32 +100,26 @@ one more cell.
 you could not show and why, and what you assumed.
 
 Getting it right:
-- Use exactly the scope asked for: the named scenario, period, site, status or population, and \
-nothing else. Take each figure from that scope's own rows; never mix values from different \
-scenarios or versions of the data, and never add up values that should not be summed. With several \
-scenarios, fetch and compute each one separately and label it.
-- Fetch each table for the scope whole (the scenario or source is the scope; no other filters in \
-the query), then filter in pandas and print how many rows each filter drops. Every filter that \
-drops rows needs a reason in the request. A period that is the data's whole horizon ("the plan's 13 \
-weeks", "this year" in a one-year dataset) means all rows: never rebuild it from dates.
-- Scenarios or options compared: compute every measure with one function applied to each \
-scenario's tables, and show them side by side. What an option gains is the change in the outcome \
-measures between the scenario without it and with it (late items, value at risk, delay days: show \
-both values and the difference), not the value of the goods it moves; what it costs is its own cost \
-field. "Which costs less" compares each option's own costs and names the cheaper one.
+- Scope: exactly what the request names (scenario, site, period, status, population) and nothing \
+else. Fetch each table for the scope whole (the scenario or source is the scope; no other filters \
+in the query), then filter in pandas and print how many rows each filter drops; every filter needs \
+a reason in the request. A period that is the data's whole horizon ("the plan's 13 weeks") means \
+all rows: never rebuild it from dates. Words that imply a filter map to the data's own field after \
+you print its distinct values: "on its way", "travelling", "in transit", "inbound", "where each one \
+is now" mean every record not yet delivered or closed, whatever its status (one waiting at its \
+origin port is still on its way); "late" means a recorded delay or late status. "Shipments from A \
+to B" means all of them. When unsure, include the record and show its status.
+- Several scenarios or options: compute every measure with one function applied to each scenario's \
+own tables (never mix or sum across scenarios) and show them side by side. What an option gains is \
+the change in the outcome measures between the scenario without it and with it (late items, value at \
+risk, delay days: show both values and the difference), not the value of the goods it moves; what it \
+costs is its own cost field; "which costs less" compares each option's own costs and names the \
+cheaper one.
 - A vague request ("the usual stuff", "key figures", "supply risk") gets one figure per main \
 measure the data holds for that scope: totals of value and quantity, counts and value of late or at \
 risk items, capacity peaks and overload counts, and each cost field.
 - Prefer the data's own facts to re-deriving them: a status field (late, at risk, on time), a \
-recorded delay, a precomputed measure or an exceptions table beats a chain of joins. Use joins only \
-for what the data does not state.
-- "On its way", "travelling", "in transit", "inbound", "coming in", "where each one is now" mean \
-every record not yet delivered or closed, whatever its status (one waiting at its origin port is \
-still on its way); "late" means a recorded delay or a late status, not a guess from dates.
-- Add no filter the request does not state. "Shipments from A to B" means all of them, whatever \
-their status; a word that implies a filter ("on their way", "late", "not delivered", "open") maps to \
-the data's own field: print that field's distinct values in scope and keep every record the words \
-cover. When unsure, include the record and show its status.
+recorded delay, a precomputed measure, a cost field or an exceptions table beats a chain of joins.
 - When tables must be linked (orders hit by late shipments, parts on a lane, costs of an option) and \
 you are not sure how, first run a short cell that prints each table's columns, a few rows and the \
 distinct values of the fields you will join or filter on; then compute. Follow the links the data \
