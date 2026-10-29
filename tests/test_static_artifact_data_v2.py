@@ -274,3 +274,39 @@ def test_large_integer_sum_and_formatted_value_do_not_round_away_units():
     result=execute(evidence([{'net':10**35},{'net':1}]),q)[0]['total']
     assert result==Decimal(value)
     assert Format().display(result).replace(',','')==str(value)
+
+
+@pytest.mark.parametrize('kind,expected',[('date','2024-02-29'),('week_start','2024-02-26'),('month_start','2024-02-01'),('quarter_start','2024-01-01'),('year_start','2024-01-01')])
+def test_calendar_casts_handle_leap_days_preserve_null_and_leave_original_fields(kind,expected):
+    data=evidence([{'day':'2024-02-29'},{'day':None}])
+    query=Query(dataset='orders',columns=['day','period'],casts=[{'name':'period','field':'day','type':kind}])
+    assert execute(data,query)==[{'day':'2024-02-29','period':expected},{'day':None,'period':None}]
+    assert data.datasets['orders'].rows==[{'day':'2024-02-29'},{'day':None}]
+
+
+@pytest.mark.parametrize('invalid',['2023-02-29','02/29/2024','2024-02-29T23:00:00Z','20240229',123,True])
+def test_calendar_casts_reject_invalid_dates_and_implicit_timezones(invalid):
+    with pytest.raises(DataError):
+        execute(evidence([{'day':invalid}]),Query(dataset='orders',columns=['period'],casts=[{'name':'period','field':'day','type':'week_start'}]))
+
+
+def test_calendar_grouping_and_ordered_limit_cover_full_buckets_across_year_boundary():
+    rows=[{'day':'2024-12-29','amount':Decimal('.1')},{'day':'2024-12-30','amount':Decimal('.2')},
+          {'day':'2025-01-05','amount':Decimal('.3')},{'day':'2025-01-06','amount':None}]
+    data=evidence(rows)
+    query=Query(dataset='orders',casts=[{'name':'week','field':'day','type':'week_start'}],group_by=['week'],
+        measures=[{'name':'total','field':'amount','op':'sum'}],order_by=[{'field':'total','descending':True}],limit=2)
+    assert execute(data,query)==[{'week':'2024-12-30','total':Decimal('.5')},{'week':'2024-12-23','total':Decimal('.1')}]
+    assert data.datasets['orders'].rows==rows
+    query.limit=None
+    assert execute(data,query)[-1]=={'week':'2025-01-06','total':None}
+
+
+@pytest.mark.parametrize('invalid',[0,-1,True,1.5,'2',100001])
+def test_ordered_limits_require_a_bounded_positive_integer(invalid):
+    with pytest.raises(ValidationError):Query(dataset='orders',columns=['amount'],limit=invalid)
+
+
+def test_limit_does_not_hide_invalid_later_rows():
+    with pytest.raises(DataError,match='missing fields'):
+        execute(evidence([{'amount':1},{'other':2}]),Query(dataset='orders',columns=['amount'],limit=1))
