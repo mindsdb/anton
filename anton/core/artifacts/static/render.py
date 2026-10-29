@@ -8,6 +8,7 @@ import math
 import re
 
 from .views import checks, validate_ids
+from .labels import reader_labels
 from .charts import markup as chart_markup
 from .data import DataError, Evidence, calculate, execute, json_value, number
 from .document import Callout, Chart, Document, Html, Metric, Prose, Table, Tabs, resolve_facts, resolve_query
@@ -41,12 +42,16 @@ def _inject_head(html, payload):
 
 
 def render(document: Document, evidence: Evidence, *, resource_sources: dict | None = None) -> Rendered:
+    labels = reader_labels(document.language, document.labels)
     values = resolve_facts(document, evidence)
     bindings = {name: execute(evidence, query) for name, query in document.bindings.items()}
     sources, published_facts, covered = {}, {}, set()
     tab_count = 0
     for name, metadata in (resource_sources or {}).items():
-        sources[f'reference:{name}'] = {'label': metadata['label'], 'url': metadata['url'], 'scope': 'Supporting visual resource'}
+        sources[f'reference:{name}'] = {'label': metadata['label'], 'url': metadata['url'], 'scope': labels['reference']}
+
+    def display(fmt, value):
+        return labels['missing'] if value is None and fmt.missing == 'Not available' else fmt.display(value)
 
     def plain_text(value):
         def substitute(match):
@@ -56,7 +61,7 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
             if document.facts[name].format.percent != 'none' and value[match.end():].lstrip().startswith('%'):
                 raise DataError(f'Fact {name} already includes %; remove the percentage symbol after its placeholder')
             published_facts[name] = values[name]
-            return document.facts[name].format.display(values[name])
+            return display(document.facts[name].format, values[name])
         return re.sub(r"\{\{([A-Za-z][A-Za-z0-9_-]*)\}\}", substitute, value)
 
     def text(value):
@@ -69,7 +74,7 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
     def source(query):
         src = evidence.datasets[query.dataset].source
         sources[query.dataset] = src.model_dump()
-        return f'<p class="source">Source: {source_name(src.model_dump())}' + (f' · {escape(src.scope)}' if src.scope else '') + '</p>'
+        return f'<p class="source">{escape(labels["source"])}: {source_name(src.model_dump())}' + (f' · {escape(src.scope)}' if src.scope else '') + '</p>'
 
     def table(rows, columns):
         heads = ''.join(f'<th scope="col">{escape(c.label)}</th>' for c in columns)
@@ -78,16 +83,16 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
             cells = []
             for c in columns:
                 value = row[c.field]
-                content = c.format.display(value) if c.format else str(value) if value is not None else "Not available"
+                content = display(c.format,value) if c.format else str(value) if value is not None else labels["missing"]
                 numeric = ' class="numeric"' if isinstance(value, (int, float)) or c.format else ''
                 shown = escape(content)
                 if re.search(r'</?[A-Za-z][^>]*>', content):
                     shown = '<code>' + shown + '</code>'
                 cells.append(f'<td{numeric} data-label="{escape(c.label)}">{shown}</td>')
             body.append('<tr>' + ''.join(cells) + '</tr>')
-        empty = f'<tr><td colspan="{len(columns)}">No records match this selection.</td></tr>'
+        empty = f'<tr><td colspan="{len(columns)}">{escape(labels["no_records"])}</td></tr>'
         wide = ' wide-table' if len(columns) > 3 else ''
-        return f'<div class="table-scroll{wide}" tabindex="0" role="region" aria-label="Data table"><table role="table"><thead><tr>{heads}</tr></thead><tbody>{"".join(body) or empty}</tbody></table></div>'
+        return f'<div class="table-scroll{wide}" tabindex="0" role="region" aria-label="{escape(labels["data_table"])}"><table role="table"><thead><tr>{heads}</tr></thead><tbody>{"".join(body) or empty}</tbody></table></div>'
 
     def queried(block, index):
         if isinstance(block.query, str):
@@ -99,8 +104,8 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
         if set(fields) - available:
             raise DataError(f"{block.title}: fields are not selected by its query: {sorted(set(fields) - available)}")
         if isinstance(block, Chart) and block.kind == 'line' and any(order.field == block.x for order in query.order_by):
-            labels = [row[block.x] for row in rows if row[block.x] is not None]
-            if any(isinstance(label, str) and not re.fullmatch(r"\d{4}-\d{2}(?:-\d{2}(?:[T ].*)?)?", label) for label in labels):
+            category_labels = [row[block.x] for row in rows if row[block.x] is not None]
+            if any(isinstance(label, str) and not re.fullmatch(r"\d{4}-\d{2}(?:-\d{2}(?:[T ].*)?)?", label) for label in category_labels):
                 raise DataError('Line charts must not lexicographically sort human-readable labels. Preserve source order, or order by an explicit numeric/ISO date key.')
         # Extra query fields may drive sorting; only displayed columns leave the host.
         public_rows = [{key: row[key] for key in dict.fromkeys(fields)} for row in rows]
@@ -139,10 +144,10 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
                 if not math.isfinite(max(xs)-min(xs)):
                     raise DataError(f'{block.title}: rescale {block.x}; the browser cannot represent the scatter extent')
             chart = {"id": index, "kind": block.kind, "x": block.x, "xLabel": block.x_label,
-                     "yLabel": block.y_label, "display": [[s.format.display(row[s.field]) for s in block.series] for row in public_rows], "series": [s.model_dump() for s in block.series], "rows": public_rows}
-            content = f'<div class="chart" data-chart="{index}" aria-label="{text(block.title)}">' + chart_markup(chart, plotted, low=limits[0], high=limits[1], tick=tick, label=plain_text(block.title)) + '</div>'
+                     "yLabel": block.y_label, "display": [[display(s.format,row[s.field]) for s in block.series] for row in public_rows], "series": [s.model_dump() for s in block.series], "rows": public_rows}
+            content = f'<div class="chart" data-chart="{index}" aria-label="{text(block.title)}">' + chart_markup(chart, plotted, low=limits[0], high=limits[1], tick=tick, label=plain_text(block.title), labels=labels) + '</div>'
             content += f'<script type="application/json" class="chart-spec">{_script_json(chart)}</script>'
-            content += '<details open class="chart-data"><summary>View data</summary>' + table(public_rows, columns) + '</details>'
+            content += f'<details open class="chart-data"><summary>{escape(labels["view_data"])}</summary>' + table(public_rows, columns) + '</details>'
         return '<figure>' + title + content + source(query) + '</figure>'
 
     for query in document.bindings.values():
@@ -168,7 +173,7 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
                 if block.fact not in values:
                     raise DataError(f"Unknown metric fact: {block.fact}")
                 published_facts[block.fact] = values[block.fact]
-                value = document.facts[block.fact].format.display(values[block.fact])
+                value = display(document.facts[block.fact].format,values[block.fact])
                 destination = adjacent_metrics if layout == 'flow' else blocks
                 destination.append(f'<div class="metric"><h3>{text(block.label)}</h3><p class="metric-value">{escape(value)}</p><p class="metric-detail">{text(block.detail)}</p></div>')
             elif isinstance(block, (Table, Chart)):
@@ -194,7 +199,7 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
         if section.title:
             heading += f'<h1 id="_artifact-title">{text(section.title)}</h1>' if title_in_first_slide and section_index == 0 else f'<h2>{text(section.title)}</h2>'
         heading += f'<p class="section-summary">{text(section.summary)}</p>' if section.summary else ''
-        notes = f'<details class="speaker-notes"><summary>Speaker notes</summary><p>{text(section.notes)}</p></details>' if section.notes else ''
+        notes = f'<details class="speaker-notes"><summary>{escape(labels["speaker_notes"])}</summary><p>{text(section.notes)}</p></details>' if section.notes else ''
         sections.append(f'<section id="{section.id}" class="section" aria-label="{text(section.title or section.id)}">'
                         f'<header>{heading}</header><div class="blocks {section.layout}">{content}</div>{notes}</section>')
     title, subtitle, eyebrow = text(document.title), text(document.subtitle), text(document.eyebrow)
@@ -218,13 +223,13 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
     html = f'''<!doctype html><html lang="{document.language}" class="{classes}"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{title}</title><script type="application/json" id="_artifact-bindings">{_script_json(manifest)}</script><script>window.ARTIFACT_DATA=JSON.parse(document.getElementById("_artifact-bindings").textContent).bindings;</script><style>:root{{--accent:{accent}}}{_asset('style.css')}</style></head><body>
-<a class="skip" href="#_artifact-content">Skip to content</a>
-<div class="toolbar"><span class="document-label">{'Presentation' if document.kind == 'slides' else 'Report'}</span><div>
-<button type="button" data-action="outline" aria-expanded="false" aria-controls="_artifact-outline" hidden>Contents</button>
-<button type="button" data-action="present" hidden>Present</button><button type="button" data-action="print" hidden>Print / PDF</button></div></div>
-<div class="reading-layout"><nav id="_artifact-outline" aria-label="Contents"><p class="eyebrow">Contents</p>{outline}</nav>
+<a class="skip" href="#_artifact-content">{escape(labels["skip"])}</a>
+<div class="toolbar"><span class="document-label">{escape(labels['presentation' if document.kind == 'slides' else 'report'])}</span><div>
+<button type="button" data-action="outline" aria-expanded="false" aria-controls="_artifact-outline" hidden>{escape(labels["contents"])}</button>
+<button type="button" data-action="present" data-present="{escape(labels["present"])}" data-read="{escape(labels["read"])}" data-previous="{escape(labels["previous_slide"])}" data-next="{escape(labels["next_slide"])}" hidden>{escape(labels["present"])}</button><button type="button" data-action="print" hidden>{escape(labels["print"])}</button></div></div>
+<div class="reading-layout"><nav id="_artifact-outline" aria-label="{escape(labels["contents"])}"><p class="eyebrow">{escape(labels["contents"])}</p>{outline}</nav>
 <main id="_artifact-content">{document_header}
-{''.join(sections)}<footer id="_artifact-sources"><h2>Sources</h2>{'<ul>' + source_list + '</ul>' if source_list else '<p>No external data sources.</p>'}</footer></main></div>
+{''.join(sections)}<footer id="_artifact-sources"><h2>{escape(labels["sources"])}</h2>{'<ul>' + source_list + '</ul>' if source_list else '<p>' + escape(labels['no_sources']) + '</p>'}</footer></main></div>
 <script>{_asset('runtime.js') + _asset('slides.js') + _asset('check-views.js')}</script></body></html>'''
     validate_ids(html)
     return Rendered(html=html, manifest=manifest)

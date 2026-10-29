@@ -7,6 +7,7 @@ from typing import Annotated, Literal
 from pydantic import Field, model_validator
 
 from .views import View
+from .labels import Label, LabelText
 from .data import BinaryOp, DataError, Evidence, Model, Name, Query, calculate, execute, number
 
 
@@ -173,6 +174,7 @@ class Document(Model):
     subtitle: str = ""
     eyebrow: str = ""
     language: str = Field(default="en", pattern=r"^[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*$")
+    labels: dict[Label, LabelText] = Field(default_factory=dict)
     theme: Theme = Field(default_factory=Theme)
     facts: dict[Name, Fact] = Field(default_factory=dict, max_length=200)
     queries: dict[Name, Query] = Field(default_factory=dict, max_length=100)

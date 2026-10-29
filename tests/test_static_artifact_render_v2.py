@@ -223,3 +223,23 @@ def test_tabs_publish_exact_filtered_views_and_project_private_input_fields():
 def test_tabs_reject_missing_initial_pane_or_ambiguous_labels(change):
     doc,data=tab_specimen();payload=doc.model_dump();payload['sections'][0]['blocks'][0].update(change)
     with pytest.raises(ValueError):Document.model_validate(payload)
+
+
+@pytest.mark.parametrize('language,expected',[('fr-CA',['Sommaire','Voir les données','Non disponible']),('es',['Contenido','Ver datos','No disponible'])])
+def test_reader_labels_follow_document_language_including_missing_values(language,expected):
+    data=Evidence.model_validate({'datasets':{'sample':{'source':{'label':'Synthetic localization QA'},'rows':[{'category':'A','value':None}]}}})
+    doc=document([{'type':'chart','title':'Observations','query':'sample','x':'category','series':[{'field':'value','label':'Value'}]}],language=language)
+    result=render(doc,data)
+    assert all(value in result.html for value in expected)
+    assert 'No observed numeric values.' not in result.html
+    assert '>View data<' not in result.html and '>Contents<' not in result.html
+
+
+def test_reader_label_overrides_are_escaped_and_reject_unknown_keys():
+    from anton.core.artifacts.static.labels import EN,TRANSLATIONS
+    assert all(set(labels)==set(EN) for labels in TRANSLATIONS.values())
+    doc=document([{'type':'prose','text':'An observation'}],language='de',labels={'contents':'Inhalt <script>','print':'Drucken'})
+    result=render(doc,Evidence())
+    assert 'Inhalt &lt;script&gt;' in result.html and '>Drucken<' in result.html
+    assert '>Inhalt <script>' not in result.html
+    with pytest.raises(ValueError):document([{'type':'prose','text':'Text'}],labels={'typo':'Label'})

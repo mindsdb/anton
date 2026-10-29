@@ -143,6 +143,10 @@ Choose composition from the user's task, not a template. Give sections meaningfu
 put the central finding early; use metrics only when useful. Use charts only for comparisons they explain.
 Use flow, split, or metrics layouts deliberately; mix narrative, evidence, caveats, and conclusions.
 Choose accent and typography to suit the requested style. Respect exact user constraints over all plans.
+Set document.language to the requested language's BCP-47 code. Built-in reader labels follow
+English, Spanish and French automatically; document.labels can override any reader label for
+other languages or house terminology. Translate narrative, captions and meaningful display
+labels too, preserving exact identifiers and source observations.
 When the user specifies an exact set of outputs, do not add unrelated cards or views.
 In a structured document, every quantitative claim must use a fact binding {{fact_name}} in text or a metric bound to that fact.
 A query fact selects exactly one row; its field names an output column. For totals use a measure.

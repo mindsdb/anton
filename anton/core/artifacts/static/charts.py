@@ -32,13 +32,13 @@ def _x_ticks(items):
         for position, label in items) + '</div>'
 
 
-def markup(spec, plotted, *, low, high, tick, label):
+def markup(spec, plotted, *, low, high, tick, label, labels):
     """Values and domain have already passed the compiler's numeric checks."""
     rows, series = spec['rows'], spec['series']
     if not rows:
-        return '<p>No records match this selection.</p>'
+        return '<p>' + escape(labels['no_records']) + '</p>'
     if not any(value is not None for row in plotted for value in row):
-        return '<p>No observed numeric values.</p>'
+        return '<p>' + escape(labels['no_values']) + '</p>'
     if low == high:
         high = low + tick
     extent = high-low
@@ -49,7 +49,7 @@ def markup(spec, plotted, *, low, high, tick, label):
     if spec['kind'] == 'bar':
         groups = []
         for n, row in enumerate(rows):
-            category = str(row[spec['x']]) if row[spec['x']] is not None else 'Not available'
+            category = str(row[spec['x']]) if row[spec['x']] is not None else labels['missing']
             cells = [f'<span class="category" style="grid-row:span {len(series)}">{escape(category)}</span>']
             for i, s in enumerate(series):
                 value, shown = plotted[n][i], spec['display'][n][i]
@@ -82,7 +82,7 @@ def markup(spec, plotted, *, low, high, tick, label):
             px, py = x_at(xs[n]), y(value)
             path.append(f'{"L" if connected else "M"}{_n(px)},{_n(py)}')
             connected = True
-            category = str(row[spec['x']]) if row[spec['x']] is not None else 'Not available'
+            category = str(row[spec['x']]) if row[spec['x']] is not None else labels['missing']
             description = escape(f'{category}, {s["label"]}: {spec["display"][n][i]}')
             # A round-capped zero-length line keeps circular marks a constant
             # physical size when the responsive plot scales non-uniformly.
@@ -93,7 +93,7 @@ def markup(spec, plotted, *, low, high, tick, label):
         x_ticks = [(50, f'{min_x:.6g}')] if min_x == max_x else [(n*25, f'{min_x+(max_x-min_x)*n/4:.6g}') for n in range(5)]
     else:
         indices = sorted({round(n*(len(rows)-1)/min(4,len(rows)-1)) for n in range(min(5,len(rows)))}) if len(rows)>1 else [0]
-        x_ticks = [(x_at(xs[n])/10, str(rows[n][spec['x']]) if rows[n][spec['x']] is not None else 'Not available') for n in indices]
+        x_ticks = [(x_at(xs[n])/10, str(rows[n][spec['x']]) if rows[n][spec['x']] is not None else labels['missing']) for n in indices]
     y_labels = ''.join(f'<span style="top:{_n(y(v)/3)}%">{escape(shown)}</span>' for v, shown in ticks)
     return (legend + f'<p class="y-title">{escape(spec["yLabel"])}</p><div class="xy-chart"><div class="y-ticks">{y_labels}</div>'
         f'<div class="plot"><svg viewBox="0 0 1000 300" preserveAspectRatio="none" role="group" aria-label="{escape(label)}">{grid}{"".join(paths)}{"".join(marks)}</svg></div>'

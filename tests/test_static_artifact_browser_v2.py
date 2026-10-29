@@ -341,3 +341,20 @@ def test_tabs_without_javascript_expose_every_compiled_pane_and_no_inert_control
         assert page.locator('.chart rect').count()==4
         assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
         browser.close()
+
+
+def test_french_reader_keeps_slide_navigation_and_missing_data_localized():
+    doc=Document.model_validate({'kind':'slides','language':'fr','title':'Présentation','sections':[
+        {'id':'opening','title':'Début','blocks':[{'type':'prose','text':'Une observation.'}]},
+        {'id':'conclusion','title':'Conclusion','blocks':[{'type':'prose','text':'La suite.'}]}]})
+    with playwright.sync_playwright() as p:
+        browser=p.chromium.launch();page=browser.new_page(viewport={'width':390,'height':844})
+        page.set_content(render(doc,Evidence()).html)
+        page.get_by_role('button',name='Présenter',exact=True).click()
+        page.get_by_role('button',name='Diapositive suivante',exact=True).click()
+        assert page.locator('#conclusion').is_visible() and not page.locator('#opening').is_visible()
+        page.get_by_role('button',name='Lire',exact=True).click()
+        assert page.locator('#opening').is_visible()
+        assert page.get_by_role('button',name='Imprimer / PDF',exact=True).is_visible()
+        assert 'Aucune source de données externe.' in page.locator('body').inner_text()
+        browser.close()

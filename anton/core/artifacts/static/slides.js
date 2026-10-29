@@ -10,6 +10,7 @@
   controls.innerHTML='<button type="button" aria-label="Previous slide">←</button><span role="status" aria-live="polite"></span><button type="button" aria-label="Next slide">→</button>';
   document.querySelector('.toolbar').append(controls);
   const [previous,next]=controls.querySelectorAll('button');const status=controls.querySelector('span');
+  previous.setAttribute('aria-label',present.dataset.previous);next.setAttribute('aria-label',present.dataset.next);
   let active=0, presenting=false;
   const fromHash=()=>Math.max(0,slides.findIndex(s=>s.id===location.hash.slice(1)));
   const show=index=>{
@@ -23,7 +24,7 @@
   const toggle=()=>{
     presenting=!presenting;root.classList.toggle('presenting',presenting);
     chrome.forEach(element=>element.hidden=presenting);
-    controls.hidden=!presenting;present.textContent=presenting?'Read':'Present';
+    controls.hidden=!presenting;present.textContent=presenting?present.dataset.read:present.dataset.present;
     present.setAttribute('aria-pressed',String(presenting));
     if(!presenting)document.title=originalTitle;
     show(active);
