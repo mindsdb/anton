@@ -73,7 +73,14 @@
     var legendHost = AK.el('div');
     c.body.appendChild(legendHost);
     var layers = (b.layers || []).filter(function (L) { return L && L.type; });
-    Promise.all([AK.lib('d3'), AK.world(b.detail)]).then(function (res) {
+    // Data within a region (a city, a country) gets the finer outlines.
+    var detail = b.detail;
+    if (!detail && mode === 'map') {
+      var cs = allCoords(layers);
+      var ext = function (i) { return cs.length ? Math.max.apply(null, cs.map(function (c) { return c[i]; })) - Math.min.apply(null, cs.map(function (c) { return c[i]; })) : 360; };
+      if (Math.max(ext(0), ext(1)) < 12) detail = '50m';
+    }
+    Promise.all([AK.lib('d3'), AK.world(detail)]).then(function (res) {
       var world = res[1];
       var state = {};
       var first = true;
@@ -227,7 +234,8 @@
     var lon0 = b.center_lon != null ? b.center_lon : meanLon(coords);
     var projName = b.projection || 'natural';
     var proj = (projName === 'mercator' ? d3.geoMercator() : projName === 'equal_earth' ? d3.geoEqualEarth() : d3.geoNaturalEarth1()).rotate([-lon0, 0]);
-    // Extent: the data's box (padded, at least ~30 degrees) unless it spans most of the world.
+    // Extent: the data's box, padded in proportion to its spread (at least a few degrees, so a city's
+    // points show their region), unless it spans most of the world.
     var lons = coords.map(function (c) { return wrapLon(c[0] - lon0); }), lats = coords.map(function (c) { return c[1]; });
     var spanLon = lons.length ? Math.max.apply(null, lons) - Math.min.apply(null, lons) : 360;
     var spanLat = lats.length ? Math.max.apply(null, lats) - Math.min.apply(null, lats) : 180;
@@ -239,7 +247,7 @@
       fitShape = hasRoutes ? {type: 'Sphere'}
         : {type: 'MultiPoint', coordinates: [[lon0 - 179, 0], [lon0 + 179, 0], [lon0, 76], [lon0, -55], [lon0 - 179, 60], [lon0 + 179, -45]]};
     } else {
-      var padLon = Math.max(8, (30 - spanLon) / 2, spanLon * 0.12), padLat = Math.max(6, (20 - spanLat) / 2, spanLat * 0.15);
+      var padLon = Math.max(1.5, (6 - spanLon) / 2, spanLon * 0.15), padLat = Math.max(1.2, (4 - spanLat) / 2, spanLat * 0.18);
       var lo1 = Math.min.apply(null, lons) - padLon, lo2 = Math.max.apply(null, lons) + padLon;
       var la1 = Math.max(-70, Math.min.apply(null, lats) - padLat), la2 = Math.min(82, Math.max.apply(null, lats) + padLat);
       fitShape = {type: 'MultiPoint', coordinates: [[lo1 + lon0, la1], [lo2 + lon0, la2], [lo1 + lon0, la2], [lo2 + lon0, la1]]};
@@ -354,11 +362,17 @@
       marks.push({el: pt.node, key: pt.key, link: L.link, kind: 'point'});
     });
     var narrow = width < 560;
+    // A label fits beside the zoom buttons: a long sublabel is shortened (the whole text is in its
+    // tooltip and title), then a long name.
+    var charW = narrow ? 5.6 : 6.4, maxChars = Math.floor(Math.min(width * (narrow ? 0.86 : 0.55), width - 60) / charW);
+    var clip = function (t, n) { return t.length > n ? t.slice(0, Math.max(1, n - 1)) + '\u2026' : t; };
     var labels = pts.filter(function (p) { return p.label && (showAllLabels || p.L.label_always); }).map(function (p) {
       // Phones keep the sublabel (it may be the figure the page is about), in a smaller face.
-      var sub = p.sub;
-      var text = p.label + (sub ? ' \u00b7 ' + sub : '');
-      return {p: p, x: p.x, y: p.y, w: text.length * (narrow ? 5.6 : 6.4) + 6, text: text, sub: sub};
+      var name = clip(p.label, maxChars), sub = p.sub ? clip(p.sub, maxChars - name.length - 3) : null;
+      if (sub === '\u2026') sub = null;
+      var text = name + (sub ? ' \u00b7 ' + sub : '');
+      return {p: p, x: p.x, y: p.y, w: text.length * charW + 6, text: text, name: name, sub: sub,
+        full: p.label + (p.sub ? ' \u00b7 ' + p.sub : '')};
     });
     placeLabels(labels, width, height);
     columnLabels(labels, width, height);
@@ -370,8 +384,9 @@
           .attr('stroke', AK.css('--ak-text-3')).attr('stroke-width', 0.8).attr('opacity', 0.75);
       }
       var t = labelsG.append('text').attr('class', 'ak-lbl').attr('x', l.x + l.dx).attr('y', l.y + l.dy).attr('text-anchor', l.anchor);
-      t.append('tspan').text(l.p.label);
+      t.append('tspan').text(l.name);
       if (l.sub) t.append('tspan').attr('class', 'ak-lbl-sub').text(' \u00b7 ' + l.sub);
+      if (l.full !== l.text) t.append('title').text(l.full);
       t.node().__l = l;
       marks.push({el: t.node(), key: l.p.key, link: l.p.L.link, kind: 'label'});
     });
@@ -380,6 +395,8 @@
       var bb = this.getBBox(), l = this.__l, sx = 0, sy = 0;
       if (bb.x < 4) sx = 4 - bb.x; else if (bb.x + bb.width > width - 4) sx = width - 4 - bb.x - bb.width;
       if (bb.y < 4) sy = 4 - bb.y; else if (bb.y + bb.height > height - 4) sy = height - 4 - bb.y - bb.height;
+      // Clear of the zoom buttons in the top-right corner.
+      if (bb.y + sy < 118 && bb.x + sx + bb.width > width - 48) sx = Math.min(sx, width - 48 - bb.x - bb.width);
       if (sx || sy) { l.dx += sx; l.dy += sy; this.setAttribute('x', l.x + l.dx); this.setAttribute('y', l.y + l.dy); }
     });
 
