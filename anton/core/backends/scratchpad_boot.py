@@ -15,7 +15,9 @@ from anton.core.backends.wire import (
     RESULT_END,
     USAGE_MARKER,
     USAGE_MARKER_ENV,
+    WEB_SEARCH_OFF_MESSAGE,
     heal_surrogate_source,
+    web_search_off,
 )
 
 
@@ -869,8 +871,11 @@ if _scratchpad_model:
 
             If the configured provider/endpoint exposes no native web search
             (e.g. a generic OpenAI-compatible endpoint), a short explanatory
-            message is returned instead of raising.
+            message is returned instead of raising. So is one where the
+            deployment turns web search off, without a model call.
             """
+            if web_search_off():
+                return WEB_SEARCH_OFF_MESSAGE
             available = _llm_provider.native_web_tools()
             if "web_search" not in available:
                 return (

@@ -4,6 +4,8 @@ These delimiter strings must be identical on both sides of the subprocess pipe.
 Neither side should redefine them — import from here.
 """
 
+import os
+
 CELL_DELIM = "__ANTON_CELL_END__"
 # Optional first line of a cell: the running turn's trace context as JSON, so
 # the cell's model calls carry the same session and question ids. Per cell,
@@ -19,6 +21,16 @@ STDOUT_CHUNK_MARKER = "__ANTON_STDOUT_CHUNK__"
 # when the host sets USAGE_MARKER_ENV in the pad's environment.
 USAGE_MARKER = "__ANTON_USAGE__"
 USAGE_MARKER_ENV = "ANTON_SCRATCHPAD_USAGE"
+# "off" where the deployment refuses hosted web search, as a self-hosted
+# install's model route does. The ANTON_SCRATCHPAD_ prefix lets it through
+# the sandbox's environment allowlist to the pad.
+WEB_SEARCH_ENV = "ANTON_SCRATCHPAD_WEB_SEARCH"
+WEB_SEARCH_OFF_MESSAGE = (
+    "web_search is unavailable: web access is turned off on this install, and "
+    "outside hosts cannot be reached either. Do not try another way to reach the "
+    "internet. Tell the user that web access is off here, and answer from the "
+    "files, data and knowledge available."
+)
 # A cell's stdout limit, and how much more the worker sends for the parent to
 # scrub before it cuts, so a secret across the limit can still match whole.
 MAX_OUTPUT = 10_000
@@ -40,6 +52,10 @@ MISSING_MODULE_HINT = (
     "name, not a missing package. Only a real PyPI distribution this task "
     "genuinely needs should ever be installed.\n"
 )
+
+
+def web_search_off() -> bool:
+    return os.environ.get(WEB_SEARCH_ENV, "") == "off"
 
 
 def heal_surrogate_source(code: str) -> str:
