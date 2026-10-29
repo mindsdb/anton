@@ -402,6 +402,8 @@ h1, h2, h3, h4 { margin: 0; font-weight: 650; letter-spacing: -0.012em; line-hei
   .ak-table-tools .ak-input { flex-basis: 100%; }
   .ak-count { margin-left: 0; }
   .ak-deck { padding: 14px 12px 70px; gap: 14px; }
+  .ak-geo .ak-lbl { font-size: 10.5px; }
+  .ak-geo .ak-lbl-sub { font-size: 9.5px; }
   .ak-slide { aspect-ratio: auto; min-height: 0; }
   .ak-drawer { width: 100vw; top: auto; height: min(78vh, 640px); border-left: 0; border-top: 1px solid var(--ak-border); border-radius: 18px 18px 0 0; transform: translateY(104%); }
   .ak-dl { grid-template-columns: minmax(90px, 42%) 1fr; }

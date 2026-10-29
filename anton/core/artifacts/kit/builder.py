@@ -138,7 +138,8 @@ Places: use coordinates from the data; for place names use `kit.geocode("City, C
 only what the request asks, keep every other block, figure and setting, and save. Re-running the \
 code that built it with the change is fine when that code is in the scratchpad. When asked to check \
 a figure, recompute it from the source data, print old and new, fix the page if needed, and add a \
-short note on the page saying what was checked.
+note on the page that starts "Checked against the data:" and says what was recomputed and the \
+result.
 
 - The page opens on its own: the kit embeds the data. Never make the page fetch data when it is \
 viewed (no fetch or API calls in `page.html` code); the preview cannot reach any service.
@@ -160,6 +161,9 @@ milestones or Gantt on `page.timeline`; options or scenarios side by side on `pa
 and breakdowns on `page.chart`; records on `page.table`.
 - Records the request names in the plural ("the late shipments", "the exceptions", "the orders \
 that slip") are listed (ids and the facts asked about), not only counted.
+- Things in motion (shipments, vehicles, people) with a known current position: draw each route \
+from its origin via its current position to its destination (`via_lat`/`via_lon`), and mark the \
+current position with a point.
 - What the request says each item shows goes on the item itself: "a map with how many days late \
 each one is" puts the days late in each point's label (`sublabel`), not only in a legend or table; \
 "label each lane with its units" puts the units on each link.

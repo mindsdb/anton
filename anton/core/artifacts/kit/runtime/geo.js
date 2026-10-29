@@ -355,9 +355,10 @@
     });
     var narrow = width < 560;
     var labels = pts.filter(function (p) { return p.label && (showAllLabels || p.L.label_always); }).map(function (p) {
-      var sub = narrow ? null : p.sub;
+      // Phones keep the sublabel (it may be the figure the page is about), in a smaller face.
+      var sub = p.sub;
       var text = p.label + (sub ? ' \u00b7 ' + sub : '');
-      return {p: p, x: p.x, y: p.y, w: text.length * (narrow ? 6.2 : 6.4) + 6, text: text, sub: sub};
+      return {p: p, x: p.x, y: p.y, w: text.length * (narrow ? 5.6 : 6.4) + 6, text: text, sub: sub};
     });
     placeLabels(labels, width, height);
     columnLabels(labels, width, height);
