@@ -236,7 +236,7 @@ async def run(state):
         state.verify_warnings.append("The structured source handoff could not be read; only observed tool output was used.")
     bound_data, contract = observed_data.collect(handoff, existing)
     if bound_data:
-        evidence = contract
+        evidence = contract + "\n" + places.CONTRACT
         existing = observed_data.strip_binding(existing)
     # The component program reads window.ARTIFACT_DATA, so it needs bound data.
     components = bool(bound_data) and os.environ.get("ANTON_STATIC_COMPONENT_WRITER") == "on"

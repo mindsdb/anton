@@ -121,6 +121,20 @@ async def test_places_are_bound_only_for_a_page_with_a_map(tmp_path, monkeypatch
     assert ("window.ARTIFACT_PLACES=" in (tmp_path / "index.html").read_text()) is bound
 
 
+async def test_the_writer_is_told_that_place_names_can_be_mapped(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTON_STATIC_COMPONENT_WRITER", "on")
+    (tmp_path / "observed-data.json").write_text(json.dumps({"rows": [{"at": "Lyon"}]}))
+    prompts = []
+    async def stream(**kwargs):
+        prompts.append(kwargs["messages"][0]["content"])
+        yield StreamComplete(LLMResponse(content=PROGRAM))
+    monkeypatch.setattr(fast_static.verifiers, "verify_frontend_live", lambda *a, **kw: BrowserCheck(status="passed"))
+    state = GenState(session=SimpleNamespace(history=[], _llm=SimpleNamespace(code_stream=stream)),
+                     artifact_type="html-app", artifact_path=tmp_path, slug="page", act_first=True)
+    assert (await fast_static.run(state))["status"] == "generated"
+    assert "{place: name}" in prompts[0] and "Lyon" not in prompts[0].split("Place names")[1]
+
+
 @pytest.mark.parametrize("reply,checked", [(PROGRAM, True), (component_page.FALLBACK, False)])
 async def test_component_pages_carry_the_figure_checks_and_html_pages_do_not(tmp_path, monkeypatch, reply, checked):
     monkeypatch.setenv("ANTON_STATIC_COMPONENT_WRITER", "on")

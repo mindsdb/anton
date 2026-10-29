@@ -79,6 +79,12 @@ def resolve(text):
             "country": countries.get(place["country"], place["country"]), "source": "GeoNames"}
 
 
+# The writer sees no place list (most pages draw no map), only that place names can be mapped
+CONTRACT = ("Place names in this data (towns, ports, cities, or a record's town and region joined as "
+            "\"town, region\") can go on a map without coordinates: in a map or globe section give a "
+            "point {place: name} and a route end the name; in plain HTML read "
+            "window.ARTIFACT_PLACES[name]. Names with one known match are placed and the rest are "
+            "listed under the map, so never leave a requested place off the map for lack of coordinates.")
 _GEOGRAPHY = re.compile(r"""\btype\s*:\s*['"](?:map|globe)['"]|ARTIFACT_PLACES""")
 
 
