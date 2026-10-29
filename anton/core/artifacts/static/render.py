@@ -8,6 +8,7 @@ import math
 import re
 
 from .views import checks, validate_ids
+from .charts import markup as chart_markup
 from .data import DataError, Evidence, calculate, execute, json_value, number
 from .document import Callout, Chart, Document, Html, Metric, Prose, Table, resolve_facts, resolve_query
 
@@ -46,14 +47,17 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
     for name, metadata in (resource_sources or {}).items():
         sources[f'reference:{name}'] = {'label': metadata['label'], 'url': metadata['url'], 'scope': 'Supporting visual resource'}
 
-    def text(value):
+    def plain_text(value):
         def substitute(match):
             name = match.group(1)
             if name not in values:
                 raise DataError(f"Unknown fact in text: {name}")
             published_facts[name] = values[name]
             return document.facts[name].format.display(values[name])
-        return escape(re.sub(r"\{\{([A-Za-z][A-Za-z0-9_-]*)\}\}", substitute, value))
+        return re.sub(r"\{\{([A-Za-z][A-Za-z0-9_-]*)\}\}", substitute, value)
+
+    def text(value):
+        return escape(plain_text(value))
 
     def source_name(src):
         label = escape(src['label'])
@@ -114,7 +118,8 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
                     approximate = float(exact)
                     if not math.isfinite(approximate) or (exact and approximate == 0):
                         raise DataError(f'{block.title}: rescale {field} into representable chart units; the browser would overflow or turn a nonzero value into zero')
-            values=[float(calculate('multiply',row[series.field],100 if series.format.percent == 'ratio' else 1)) for row in public_rows for series in block.series if row[series.field] is not None]
+            plotted=[[float(calculate('multiply',row[series.field],100 if series.format.percent == 'ratio' else 1)) if row[series.field] is not None else None for series in block.series] for row in public_rows]
+            values=[value for row in plotted for value in row if value is not None]
             low,high=min([0,*values]),max([0,*values])
             rough=((high-low) or 1)/4
             power=10.0**math.floor(math.log10(rough)) if rough>0 and math.isfinite(rough) else 0
@@ -130,7 +135,7 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
                     raise DataError(f'{block.title}: rescale {block.x}; the browser cannot represent the scatter extent')
             chart = {"id": index, "kind": block.kind, "x": block.x, "xLabel": block.x_label,
                      "yLabel": block.y_label, "display": [[s.format.display(row[s.field]) for s in block.series] for row in public_rows], "series": [s.model_dump() for s in block.series], "rows": public_rows}
-            content = f'<div class="chart" data-chart="{index}" aria-label="{text(block.title)}"></div>'
+            content = f'<div class="chart" data-chart="{index}" aria-label="{text(block.title)}">' + chart_markup(chart, plotted, low=limits[0], high=limits[1], tick=tick, label=plain_text(block.title)) + '</div>'
             content += f'<script type="application/json" class="chart-spec">{_script_json(chart)}</script>'
             content += '<details open class="chart-data"><summary>View data</summary>' + table(public_rows, columns) + '</details>'
         return '<figure>' + title + content + source(query) + '</figure>'
@@ -194,8 +199,8 @@ def render(document: Document, evidence: Evidence, *, resource_sources: dict | N
 <title>{title}</title><script type="application/json" id="_artifact-bindings">{_script_json(manifest)}</script><script>window.ARTIFACT_DATA=JSON.parse(document.getElementById("_artifact-bindings").textContent).bindings;</script><style>:root{{--accent:{accent}}}{_asset('style.css')}</style></head><body>
 <a class="skip" href="#_artifact-content">Skip to content</a>
 <div class="toolbar"><span class="document-label">{'Presentation' if document.kind == 'slides' else 'Report'}</span><div>
-<button type="button" data-action="outline" aria-expanded="false" aria-controls="_artifact-outline">Contents</button>
-<button type="button" data-action="present" hidden>Present</button><button type="button" data-action="print">Print / PDF</button></div></div>
+<button type="button" data-action="outline" aria-expanded="false" aria-controls="_artifact-outline" hidden>Contents</button>
+<button type="button" data-action="present" hidden>Present</button><button type="button" data-action="print" hidden>Print / PDF</button></div></div>
 <div class="reading-layout"><nav id="_artifact-outline" aria-label="Contents"><p class="eyebrow">Contents</p>{outline}</nav>
 <main id="_artifact-content"><header class="document-header" id="_artifact-title"><p class="eyebrow">{eyebrow}</p><h1>{title}</h1><p class="subtitle">{subtitle}</p></header>
 {''.join(sections)}<footer id="_artifact-sources"><h2>Sources</h2>{'<ul>' + source_list + '</ul>' if source_list else '<p>No external data sources.</p>'}</footer></main></div>

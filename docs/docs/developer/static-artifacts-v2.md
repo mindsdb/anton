@@ -112,8 +112,15 @@ dark mode, accent, typography, and density. Reports have an outline, inspectable
 chart data, and print styles. Consecutive metrics in a flow section form a responsive
 row, without requiring the author to create artificial sections just to group KPIs.
 Standard bar/line/scatter charts use container-sized
-SVG, readable labels, units, focusable marks, and full data tables. Tables with
-more than four columns recompose into labelled records on phones; every field
+SVG, readable labels, units, focusable marks, and full data tables.
+The compiler emits the real chart geometry into the saved HTML; initial rendering,
+responsive labels and data tables do not require JavaScript. HTML labels retain
+their font size while SVG geometry scales with the plot. Point marks and strokes
+keep a constant physical size. JavaScript enhances the contents, presentation and
+print controls and closes the initially open data inspectors; it does not redraw
+the chart or recompute its values. Controls needing JavaScript stay hidden until
+their handlers are bound.
+Tables with more than four columns recompose into labelled records on phones; every field
 stays visible, while desktop retains the comparison table. Missing line
 values remain gaps. Large value labels are formatted on the host, before browser
 number conversion can lose integer precision.
