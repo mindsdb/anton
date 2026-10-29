@@ -1,0 +1,20 @@
+Geographic reference snapshot: 2026-10-29
+
+GeoNames cities5000, countryInfo and admin1CodesASCII
+Copyright GeoNames and contributors. Licensed under CC BY 4.0.
+https://www.geonames.org/
+https://creativecommons.org/licenses/by/4.0/
+https://download.geonames.org/export/dump/readme.txt
+The original source files are retained without modification. These are place
+reference coordinates, not observed positions of people, shipments or assets.
+Coverage and aliases do not establish that a match is unique or current.
+
+Natural Earth 1:110m Admin 0 Countries
+Public domain. Made with Natural Earth.
+https://www.naturalearthdata.com/about/terms-of-use/
+https://www.naturalearthdata.com/downloads/110m-cultural-vectors/110m-admin-0-countries/
+The creator-maintained GeoJSON is pinned to the revision in manifest.json.
+Only feature id/name/country code and unchanged geometry are retained.
+This is coarse world-map context, not street-level or navigational geometry.
+
+Source URLs, input/output hashes and processing are recorded in manifest.json.

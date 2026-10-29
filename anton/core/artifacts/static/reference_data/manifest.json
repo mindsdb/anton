@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "snapshot": "2026-10-29",
+  "geonames_inputs": [
+    {
+      "file": "cities5000.zip",
+      "url": "https://download.geonames.org/export/dump/cities5000.zip",
+      "bytes": 5723366,
+      "sha256": "68417d6b09cda480278c916a0b54cf636c44bb5845f322697654314c70e69764",
+      "last_modified": "Thu, 29 Oct 2026 02:56:53 GMT"
+    },
+    {
+      "file": "countryInfo.txt",
+      "url": "https://download.geonames.org/export/dump/countryInfo.txt",
+      "bytes": 32115,
+      "sha256": "5c710efde90ee4cca15001c9f6a97ae7a74c7020b365504913ddc3afeb6d3671",
+      "last_modified": "Thu, 29 Oct 2026 03:02:29 GMT"
+    },
+    {
+      "file": "admin1CodesASCII.txt",
+      "url": "https://download.geonames.org/export/dump/admin1CodesASCII.txt",
+      "bytes": 151571,
+      "sha256": "2e4867f5397acb056ea26377601b57af37cb4c81399770225018e9e439e91ad3",
+      "last_modified": "Thu, 29 Oct 2026 02:56:53 GMT"
+    },
+    {
+      "file": "readme.txt",
+      "url": "https://download.geonames.org/export/dump/readme.txt",
+      "bytes": 8843,
+      "sha256": "b1957379b6c1242c700c98ac9a8aa0a09f56c3c0a50ee72175527005f48ef2c5",
+      "last_modified": "Thu, 29 Oct 2026 02:46:36 GMT"
+    }
+  ],
+  "world_input": {
+    "url": "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/ca96624a56bd078437bca8184e78163e5039ad19/geojson/ne_110m_admin_0_countries.geojson",
+    "revision": "ca96624a56bd078437bca8184e78163e5039ad19",
+    "bytes": 838726,
+    "sha256": "6866c877d39cba9c357620878839b336d569f8c662d3cfab4cb1dbe2d39c977f"
+  },
+  "outputs": {
+    "world-countries.geojson.gz": {
+      "bytes": 95361,
+      "sha256": "7d59c3d9701785e249f43b414e7d7cff4dd57899fdbe0abe77a2fe69b6e08e88"
+    },
+    "geonames-cities5000.zip": {
+      "bytes": 5802123,
+      "sha256": "800ae37efccce7649d92053c868646d1d9cdba0b33931314571fb2d851f09503"
+    }
+  },
+  "geonames_members": {
+    "cities5000.txt": {
+      "bytes": 15280306,
+      "sha256": "81b6af3ac90ea937fabd457ef67a3925ee7ac3b5b426a2b3f66f9031d73a428d"
+    },
+    "countryInfo.txt": {
+      "bytes": 32115,
+      "sha256": "5c710efde90ee4cca15001c9f6a97ae7a74c7020b365504913ddc3afeb6d3671"
+    },
+    "admin1CodesASCII.txt": {
+      "bytes": 151571,
+      "sha256": "2e4867f5397acb056ea26377601b57af37cb4c81399770225018e9e439e91ad3"
+    },
+    "readme.txt": {
+      "bytes": 8843,
+      "sha256": "b1957379b6c1242c700c98ac9a8aa0a09f56c3c0a50ee72175527005f48ef2c5"
+    }
+  },
+  "world_features": 177,
+  "world_processing": "Only feature id/name/ISO country code and unchanged upstream geometry retained; gzip mtime=0.",
+  "place_coverage": "GeoNames cities5000: cities over 5,000 population or administrative seats. Includes multilingual/historical aliases. Not a complete gazetteer or observed GPS positions."
+}
