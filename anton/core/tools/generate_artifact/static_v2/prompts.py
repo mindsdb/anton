@@ -79,6 +79,14 @@ The source procedure catalog is available in the request context; it is not conv
 Do not probe guessed endpoints when an access procedure is available. Fetch all required records (including pagination),
 validate join cardinalities, retain units and date semantics, and reconcile totals. Never infer a date
 filter from a reporting horizon without knowing the intended date field. Keep nulls null; never impute zero.
+For geographic records, preserve supplied authoritative coordinates, including valid zeros.
+Validate latitude/longitude ranges and coordinate order. A record can have different origin,
+destination and current positions: never substitute coordinates for a different location role.
+For moving entities, a map of where they are uses their current reported location unless the
+user requests another role. When geocoding is necessary, disambiguate using the source's country,
+region and place context, validate the match, and retain its provenance. A first name match is
+not sufficient. Do not replace known source coordinates with a geocoder result or invent a
+position when the location cannot be resolved. Clearly identify unresolved locations.
 For every record-based task, use scratchpad to save the complete observed relevant records to STATIC_EVIDENCE_PATH
 as UTF-8 JSON, json.dumps(..., allow_nan=False). The exact shape is:
 {"datasets":{"short_id":{"source":{"label":"source name","url":"optional URL","scope":"filters, time range, units, and caveats"},"rows":[{"field":123,"other_field":"value"}]}}}
@@ -152,6 +160,11 @@ longitude/latitude-to-pixel formula breaks rings at the antimeridian and poles. 
 geographic path renderer with clipping, such as d3.geoPath(projection), and the same projection
 for point markers. A complete D3 browser bundle includes its geographic dependencies; a partial
 d3-geo bundle does not. Refit the projection to the real container when it resizes.
+A geographic map needs authentic geographic context and markers computed from the bound
+coordinates. A decorative grid, arbitrary SVG positions, or a schematic route cannot stand in
+for it. Preserve the source's location role; destination coordinates are not a moving entity's
+current position. Keep points anchored to their actual coordinates. Resolve dense labels with
+leader lines, an inset, clustering or inspectable details instead of moving the observations.
 All loaded scripts execute, even if
 unused by your current HTML. Discard incompatible or unused bundles with release_static_resource
 before retrying; load replacement dependencies in their required order.
