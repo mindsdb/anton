@@ -14,6 +14,7 @@ import os
 import sys
 import threading
 import time
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -2231,7 +2232,7 @@ def _llm_response(text: str, tool_input: dict | None = None, tool_id: str = "tc_
     )
 
 
-def _session_for(project: Path, replies, *, verdicts=()):
+def _session_for(project: Path, replies: list | Callable[[str], list], *, verdicts=()):
     """A ChatSession whose model plays `replies` in order and whose pad writes
     the artifact's page. `replies` may be a function of the artifact's slug,
     for a reply that names it. Returns (session, pad, slug)."""
@@ -3697,7 +3698,7 @@ async def test_a_page_built_by_hand_gets_the_same_repair_budget(service, tmp_pat
         id="put-back",
     ),
 ])
-def test_a_failed_page_is_never_called_verified(text, clause):
+def test_the_failed_page_texts_forbid_calling_it_verified(text, clause):
     """The check's verdict is per page: a view of a failed page that drew
     is not verified. A page put back may have passed before the turn, so
     there only the edit is never called verified."""
