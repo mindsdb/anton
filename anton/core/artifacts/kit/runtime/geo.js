@@ -58,16 +58,31 @@
     for (var i = 1; i < ls.length; i++) if (ls[i] - ls[i - 1] > gap) { gap = ls[i] - ls[i - 1]; from = ls[i - 1]; }
     return wrapLon(from + gap / 2 + 180);
   }
-  /* A route on a flat map: the great circle, unless it climbs toward a pole far from both ends (places on
-     opposite sides of the world), where it would run along the map's top or bottom edge; then a direct
-     line across the map. */
-  function routeLine(a, z) {
+  /* A route on a flat map: the great circle, unless it passes next to a pole far from both ends (places
+     on nearly opposite sides of the world), where it would run along the map's top or bottom edge; then
+     a direct line across the map, kept on the map's side of its edge (lon0 is the map's centre). */
+  function routeLine(a, z, lon0) {
     var ip = window.d3.geoInterpolate(a, z), top = 0;
-    for (var i = 1; i < 16; i++) top = Math.max(top, Math.abs(ip(i / 16)[1]));
-    if (top < 72 || top - Math.max(Math.abs(a[1]), Math.abs(z[1])) < 25) return {type: 'LineString', coordinates: [a, z]};
-    var dl = wrapLon(z[0] - a[0]), pts = [];
-    for (var k = 0; k <= 48; k++) pts.push([a[0] + dl * k / 48, a[1] + (z[1] - a[1]) * k / 48]);
+    for (var i = 1; i < 32; i++) top = Math.max(top, Math.abs(ip(i / 32)[1]));
+    if (top < 85 || top - Math.max(Math.abs(a[1]), Math.abs(z[1])) < 25) return {type: 'LineString', coordinates: [a, z]};
+    var a0 = wrapLon(a[0] - lon0), z0 = wrapLon(z[0] - lon0), pts = [];
+    for (var k = 0; k <= 48; k++) pts.push([lon0 + a0 + (z0 - a0) * k / 48, a[1] + (z[1] - a[1]) * k / 48]);
     return {type: 'LineString', coordinates: pts};
+  }
+  /* Points along each route's legs, so the map's centre also keeps the routes' paths off its edge. */
+  function routeSamples(layers) {
+    var out = [];
+    layers.forEach(function (L) {
+      if (L.type !== 'routes') return;
+      layerRows(L).forEach(function (r) {
+        var ends = ['from', 'via', 'to'].map(function (w) { return end(L, r, w); }).filter(Boolean);
+        for (var i = 1; i < ends.length; i++) {
+          var ip = window.d3.geoInterpolate(ends[i - 1], ends[i]);
+          [0.25, 0.5, 0.75].forEach(function (t) { out.push(ip(t)); });
+        }
+      });
+    });
+    return out;
   }
 
   var ALIASES = {
@@ -263,7 +278,7 @@
     var d3 = window.d3;
     var width = Math.round(view.getBoundingClientRect().width) || 800;
     var coords = allCoords(layers);
-    var lon0 = b.center_lon != null ? b.center_lon : centerLon(coords);
+    var lon0 = b.center_lon != null ? b.center_lon : centerLon(coords.concat(routeSamples(layers)));
     var projName = b.projection || 'natural';
     var proj = (projName === 'mercator' ? d3.geoMercator() : projName === 'equal_earth' ? d3.geoEqualEarth() : d3.geoNaturalEarth1()).rotate([-lon0, 0]);
     // Extent: the data's box, padded in proportion to its spread (at least a few degrees, so a city's
@@ -341,7 +356,7 @@
         var segs = v ? [[a, v, false], [v, z, true]] : [[a, z, false]];
         var w = L.width ? Math.max(1.5, Math.min(7, num(r[L.width]) || 2)) : 2;
         segs.forEach(function (sg) {
-          var p = routesG.append('path').datum(routeLine(sg[0], sg[1]))
+          var p = routesG.append('path').datum(routeLine(sg[0], sg[1], lon0))
             .attr('class', 'ak-route')
             .attr('d', path).attr('stroke', col(r))
             .attr('stroke-dasharray', sg[2] ? '3 5' : null).attr('opacity', sg[2] ? 0.55 : null)
