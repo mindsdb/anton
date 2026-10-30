@@ -35,5 +35,5 @@ def test_no_string_in_anton_is_a_system_note_or_hides_itself():
 
 def test_tool_result_nudges_are_labelled():
     nudges = [value for name, value in vars(prompts).items() if name.endswith("_NUDGE") and isinstance(value, str)]
-    assert len(nudges) == 6
+    assert len(nudges) == 7
     assert all(nudge.lstrip().startswith(ANTON_NOTE) for nudge in nudges)

@@ -10,6 +10,7 @@ from anton.core.backends.local import LocalScratchpadRuntime
 from anton.core.backends.utils import compute_timeouts as _compute_timeouts
 from anton.core.backends.manager import ScratchpadManager
 from anton.core.backends.local import local_scratchpad_runtime_factory
+from anton.core.backends.wire import WEB_SEARCH_ENV, WEB_SEARCH_OFF_MESSAGE, web_search_off
 
 # Alias for brevity in tests
 Scratchpad = LocalScratchpadRuntime
@@ -689,6 +690,47 @@ class TestScratchpadEnvironment:
             cell = await pad.execute("web_search('anything')")
             assert cell.error is not None
             assert "NameError" in cell.error
+        finally:
+            await pad.close()
+
+    async def test_web_search_says_off_without_a_model_call_when_the_install_turns_it_off(self, monkeypatch):
+        """The pad holds no key, so any model call would fail: the message
+        coming back clean shows none was made."""
+        monkeypatch.setenv(WEB_SEARCH_ENV, "off")
+        pad = make_scratchpad(name="websearch-off", coding_model="claude-test-model")
+        await pad.start()
+        try:
+            cell = await pad.execute("print(web_search('Louvre opening hours'))")
+            assert cell.error is None
+            assert cell.stdout.strip() == WEB_SEARCH_OFF_MESSAGE
+        finally:
+            await pad.close()
+
+    async def test_a_project_env_cannot_turn_web_search_off(self, monkeypatch):
+        """Only the server decides: its prompt would still offer the search."""
+        monkeypatch.delenv(WEB_SEARCH_ENV, raising=False)
+        pad = make_scratchpad(
+            name="websearch-overlay-off",
+            workspace_env_overlay={WEB_SEARCH_ENV: "off"},
+        )
+        await pad.start()
+        try:
+            cell = await pad.execute(f"import os; print(os.environ.get({WEB_SEARCH_ENV!r}, 'NOT_FOUND'))")
+            assert cell.stdout.strip() == "NOT_FOUND"
+        finally:
+            await pad.close()
+
+    async def test_a_project_env_cannot_turn_web_search_back_on(self, monkeypatch):
+        monkeypatch.setenv(WEB_SEARCH_ENV, "off")
+        pad = make_scratchpad(
+            name="websearch-off-overlay",
+            coding_model="claude-test-model",
+            workspace_env_overlay={WEB_SEARCH_ENV: "on"},
+        )
+        await pad.start()
+        try:
+            cell = await pad.execute("print(web_search('Louvre opening hours'))")
+            assert cell.stdout.strip() == WEB_SEARCH_OFF_MESSAGE
         finally:
             await pad.close()
 
@@ -2293,3 +2335,15 @@ class TestConcurrentTurnsOnDivergentVaults:
         # running alongside it, and not by the value left in the process env.
         assert lines_a[1] == "a-only-password"
         assert lines_b[1] == "ABSENT"
+
+
+@pytest.mark.parametrize(
+    ("value", "off"),
+    [("off", True), (None, False), ("", False), ("on", False), ("OFF", False), ("false", False)],
+)
+def test_only_the_exact_off_turns_web_search_off(monkeypatch, value, off):
+    if value is None:
+        monkeypatch.delenv(WEB_SEARCH_ENV, raising=False)
+    else:
+        monkeypatch.setenv(WEB_SEARCH_ENV, value)
+    assert web_search_off() is off

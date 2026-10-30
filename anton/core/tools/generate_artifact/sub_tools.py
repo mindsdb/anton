@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from anton.core.backends.wire import web_search_off
 from anton.core.tools.text_file import (
     DEFAULT_LINE_COUNT,
     MAX_LINE_CHARS,
@@ -286,9 +287,9 @@ def _scratchpad_schema() -> dict:
     # Reuse the exact schema + description the main agent sees, so the
     # sub-generator drives scratchpads with the same contract. Imported
     # lazily to avoid a tool_defs <-> generate_artifact import cycle.
-    from anton.core.tools.tool_defs import SCRATCHPAD_TOOL
+    from anton.core.tools.tool_defs import NO_WEB_SCRATCHPAD_TOOL, SCRATCHPAD_TOOL
 
-    return tool_schema(SCRATCHPAD_TOOL)
+    return tool_schema(NO_WEB_SCRATCHPAD_TOOL if web_search_off() else SCRATCHPAD_TOOL)
 
 
 GEN_READ_TEXT_FILE_DESCRIPTION = (

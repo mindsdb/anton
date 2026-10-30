@@ -14,6 +14,7 @@ import pytest
 
 from anton.core.backends.local import LocalScratchpadRuntime
 from anton.core.backends.sandbox import CellSandbox
+from anton.core.backends.wire import WEB_SEARCH_ENV, WEB_SEARCH_OFF_MESSAGE
 
 pytestmark = [pytest.mark.slow, pytest.mark.landlock]
 
@@ -100,3 +101,22 @@ async def test_a_venv_python_its_own_permissions_forbid_is_rebuilt_not_refused(t
     assert cell.error in (None, ""), cell.error
     assert cell.stdout.strip() == "rebuilt"
     assert python.is_symlink()
+
+
+async def test_the_web_search_switch_reaches_a_sandboxed_pad(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv(WEB_SEARCH_ENV, "off")
+    project, home, tmp = tmp_path / "project", tmp_path / "home", tmp_path / "tmp"
+    for folder in (project, home, tmp):
+        folder.mkdir()
+    policy = CellSandbox(project_dir=project, home_dir=home, tmp_dir=tmp, user_name="bob")
+    pad = LocalScratchpadRuntime(
+        "main", coding_provider="anthropic", coding_model="claude-test-model", coding_api_key="",
+        coding_base_url="", workspace_path=project, cell_sandbox=policy,
+    )
+    await pad.start()
+    try:
+        cell = await pad.execute("print(web_search('Louvre opening hours'))")
+    finally:
+        await pad.close()
+    assert cell.error in (None, ""), cell.error
+    assert cell.stdout.strip() == WEB_SEARCH_OFF_MESSAGE

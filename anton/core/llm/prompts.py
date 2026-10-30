@@ -392,6 +392,48 @@ STATIC_ARTIFACTS_PROMPT = cut_spans(
 )
 
 
+# Where the deployment turns web search off (`wire.web_search_off`): the
+# base prompt's "full internet access, try 2-3 sources" sends the agent
+# after workarounds that all fail.
+NO_WEB_CHAT_SYSTEM_PROMPT = cut_spans(
+    CHAT_SYSTEM_PROMPT,
+    ("- **Internet access**:", "- **Scratchpad execution**", ""),
+    (
+        "INTERNET & LIVE INFORMATION:",
+        "PROACTIVE FOLLOW-UP SUGGESTIONS:",
+        "NO WEB ACCESS:\n"
+        "- Web access is turned off on this install: web search is off, and the \
+scratchpad cannot reach the internet. The exceptions are the data sources connected \
+here and a host that a skill names. Do not reach for any other site, feed or API, even one \
+the user names (requests, urllib, RSS feeds, DNS over HTTPS, public APIs, web_search()).\n"
+        "- When a question needs the web or live information, say plainly that web access \
+is off on this install, then answer from the user's files, connected data and your own \
+knowledge, and say where that knowledge may be out of date.\n\n",
+    ),
+    ("web scraping, ", "plotting", ""),
+    ("- web_search(query) answers", "- get_llm, agentic_loop, and web_search", ""),
+    ("- get_llm, agentic_loop, and web_search are already", " available as globals", "- get_llm and agentic_loop are already"),
+    (
+        "- Try creative workarounds first: different HTTP headers",
+        "- Exhaust at least 2-3",
+        "- Try creative workarounds first: alternate libraries, another way to read the data \
+you have, caching/retrying with backoff, etc. Web access is off on this install, so none \
+of them turns to another site or API.\n",
+    ),
+)
+
+NO_WEB_CONVERSATION_DISCIPLINE_ACT_FIRST = cut_spans(
+    CONVERSATION_DISCIPLINE_ACT_FIRST,
+    (
+        "- NEVER let a training-data fact BLOCK",
+        "- Only STOP and ASK",
+        "- A training-data fact may be out of date, and web access is off on this install, so \
+it cannot be checked online. If one would block a request, say so, state the assumption you \
+proceed on, and let the user correct it.\n",
+    ),
+)
+
+
 def _without_direct_reports(text: str) -> str:
     return cut_spans(
         text,
@@ -582,6 +624,15 @@ RESILIENCE_NUDGE = (
     "STOP and tell the user exactly what failed and what you need — do NOT fabricate a "
     "result, claim success, or silently give up. Once real options are exhausted, asking "
     "the user is the correct move."
+)
+NO_WEB_RESILIENCE_NUDGE = cut_spans(
+    RESILIENCE_NUDGE,
+    (
+        "different headers/user-agent",
+        ". If those also fail",
+        "an alternate library, or another way to read the data you have; web access is off "
+        "on this install, so none of them turns to another site or API",
+    ),
 )
 
 # Scratchpad failures need different advice than the generic (scrape/fetch)

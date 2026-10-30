@@ -4,10 +4,11 @@ import threading
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 
+from anton.core.backends.wire import WEB_SEARCH_ENV
 from anton.core.datasources.data_vault import LocalDataVault
 from anton.core.llm.provider import StreamComplete
 from anton.core.tools.generate_artifact import engine, orchestrator, prompts
@@ -911,6 +912,17 @@ def test_public_data_sources_skill_is_loaded_from_the_store():
 
     assert "Google News RSS" in out
     assert store.asked == ["public-data-sources"]
+
+
+def test_no_public_data_sources_where_web_search_is_off(monkeypatch):
+    """The data loop judges and fetches from the catalog; with the web off,
+     every endpoint in it fails at the gateway."""
+    monkeypatch.setenv(WEB_SEARCH_ENV, "off")
+    session = AsyncMock()
+    session._skill_store = MagicMock()
+
+    assert orchestrator._public_data_sources_skill(session) == ""
+    session._skill_store.load_for_artifacts.assert_not_called()
 
 
 def test_public_data_sources_skill_is_defensive():

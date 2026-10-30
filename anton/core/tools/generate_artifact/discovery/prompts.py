@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import os
 
-from anton.core.llm.prompts import ANTON_NOTE
+from anton.core.backends.wire import web_search_off
+from anton.core.llm.prompts import ANTON_NOTE, cut_spans
 
 from ..attachments import render_for_gathering
-from ..prompts import KNOWN_DATA_HEADER, datasources_or_none, with_project_rules
+from ..prompts import KNOWN_DATA_HEADER, NO_WEB_DATA_NOTE, datasources_or_none, with_project_rules
 from .state import PrdState
 
 
@@ -66,7 +67,8 @@ def build_pipeline_system_prompt(state: PrdState) -> str:
         "pipeline; a tool being listed does NOT mean it is available on the "
         "current step. Calling one that is not available wastes a round and "
         "is answered with a refusal naming the step."
-        + fullstack_choice,
+        + fullstack_choice
+        + ("\n\n" + NO_WEB_DATA_NOTE if web_search_off() else ""),
         state.project_rules,
     )
 
@@ -246,6 +248,15 @@ _WHEN_TO_ASK_ACT_FIRST = (
 )
 
 
+# Where web search is off, `rejection_for` refuses web_fetch: pointing at it
+# would only cost a round.
+_NO_WEB_GATHERING_TEMPLATE = cut_spans(
+    _GATHERING_TEMPLATE,
+    ("; web_fetch for pages", ")", ""),
+    (" or fetched the page", " in this step", ""),
+)
+
+
 def _gathering_instruction(act_first: bool, *, static_completion: bool = False) -> str:
     if act_first and os.environ.get("ANTON_STATIC_FAST_PATH") == "direct":
         return (
@@ -267,7 +278,8 @@ def _gathering_instruction(act_first: bool, *, static_completion: bool = False) 
             "requirements or ask for preferences the request does not need. For a backend that "
             "must query data at runtime, verify its access with a real sample and finish."
         )
-    return _GATHERING_TEMPLATE.format(
+    template = _NO_WEB_GATHERING_TEMPLATE if web_search_off() else _GATHERING_TEMPLATE
+    return template.format(
         when_to_ask=_WHEN_TO_ASK_ACT_FIRST if act_first else _WHEN_TO_ASK,
     )
 

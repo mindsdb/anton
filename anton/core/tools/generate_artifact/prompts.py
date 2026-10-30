@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from anton.core.backends.wire import web_search_off
 from anton.utils.datasources import DATASOURCES_HEADER
 
 from .discovery.notes import EXEC_OUTPUT_MAX
@@ -1558,6 +1559,20 @@ def _data_sources_context(state) -> str:
     return "\n\n".join(parts)
 
 
+# None of the builder's prompts sees the agent's own, so each data step that
+# could reach for the web carries this where web search is off.
+NO_WEB_DATA_NOTE = (
+    "Web access is off on this install: web search and web fetch are refused, and "
+    "the scratchpad reaches only the data sources connected here and a host that a "
+    "skill names. Data that only some other website or API holds cannot be fetched."
+)
+
+
+def _no_web_data_section() -> str:
+    """`NO_WEB_DATA_NOTE` as a section to append, or "" while web search is on."""
+    return NO_WEB_DATA_NOTE + "\n\n" if web_search_off() else ""
+
+
 def _reasoning_language(user_language: str) -> str:
     """`reasoning` becomes the "not enough data" text the agent quotes to the
     user, so it is pinned to the run's language like every other step."""
@@ -1578,6 +1593,7 @@ def build_required_data_prompt(state) -> tuple[str, str]:
         "or gathered data is not missing; a description of data (where it "
         "lives, its columns) without the values is not the data. Return an "
         "empty `items` list when nothing is missing.\n\n"
+        + _no_web_data_section()
         + _reasoning_language(state.user_language),
         state.project_rules,
     )
@@ -1596,6 +1612,7 @@ def build_can_fetch_prompt(state, required: str) -> tuple[str, str]:
         "data and the available sources, decide whether the data can actually be "
         "obtained. It is possible when a listed connection, public source or "
         "scratchpad can provide it. It is NOT possible only when none of them can.\n\n"
+        + _no_web_data_section()
         + _reasoning_language(state.user_language),
         state.project_rules,
     )
@@ -1634,6 +1651,8 @@ def build_fetch_data_system_prompt(
         "produced, and the observed schema/sample — this summary is handed to "
         "the next steps.",
     ]
+    if web_search_off():
+        parts.append(NO_WEB_DATA_NOTE)
     if public_sources.strip():
         parts.append(public_sources.strip())
     if datasource_context.strip():

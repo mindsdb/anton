@@ -134,6 +134,17 @@ SCRATCHPAD_TOOL = ToolDef(
     handler=handle_scratchpad,
 )
 
+# Where the deployment turns web search off (`wire.web_search_off`): the
+# helper only answers that it is off, so the tool stops offering it.
+NO_WEB_SCRATCHPAD_TOOL = replace(
+    SCRATCHPAD_TOOL,
+    description=cut_spans(
+        SCRATCHPAD_TOOL.description,
+        ("web_search(query) routes", "sample(var) inspects", ""),
+        ("web_search, sample, and progress", " are already available", "sample, and progress"),
+    ),
+)
+
 
 MEMORIZE_TOOL = ToolDef(
     name="memorize",
@@ -750,6 +761,20 @@ if os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on":
     STATIC_GENERATE_ARTIFACT_TOOL = _single_call(STATIC_GENERATE_ARTIFACT_TOOL)
     CREATE_ARTIFACT_TOOL = _registration_only(CREATE_ARTIFACT_TOOL)
     STATIC_CREATE_ARTIFACT_TOOL = _registration_only(STATIC_CREATE_ARTIFACT_TOOL)
+
+
+def _without_web(tool: ToolDef) -> ToolDef:
+    return replace(tool, description=cut_spans(tool.description, (", web search and web fetch", ")", "")))
+
+
+# Where web search is off (`wire.web_search_off`) the builder is refused web
+# search and fetch, so no variant promises them. Keyed (fullstack, direct reports).
+NO_WEB_GENERATE_ARTIFACT_TOOLS = {
+    (True, True): _without_web(GENERATE_ARTIFACT_TOOL),
+    (True, False): _without_web(GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS),
+    (False, True): _without_web(STATIC_GENERATE_ARTIFACT_TOOL),
+    (False, False): _without_web(STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS),
+}
 
 RECALL_TOOL = ToolDef(
     name="recall",

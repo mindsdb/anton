@@ -23,6 +23,7 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, NamedTuple
 
 from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES_ORDERED
+from anton.core.backends.wire import web_search_off
 from anton.core.llm.client import asked_model
 
 from ..sub_tools import tool_schema
@@ -167,9 +168,9 @@ def _scratchpad_schema() -> dict:
     # drives scratchpads with the same contract. Imported lazily to avoid a
     # tool_defs <-> discovery import cycle (mirrors generate_artifact's
     # own sub_tools.py).
-    from anton.core.tools.tool_defs import SCRATCHPAD_TOOL
+    from anton.core.tools.tool_defs import NO_WEB_SCRATCHPAD_TOOL, SCRATCHPAD_TOOL
 
-    return tool_schema(SCRATCHPAD_TOOL)
+    return tool_schema(NO_WEB_SCRATCHPAD_TOOL if web_search_off() else SCRATCHPAD_TOOL)
 
 
 def _web_search_schema() -> dict:
@@ -571,6 +572,12 @@ def rejection_for(step: str, name: str, *, questions_left: int) -> str | None:
     task = _STEP_TASK.get(step, step)
     if name not in allowed:
         return f"`{name}` is not available at this step. You are {task}."
+    if name in ("web_search", "web_fetch") and web_search_off():
+        return (
+            f"`{name}` is unavailable: web access is turned off on this install. "
+            "Gather from the user's files and connected data, and say in the "
+            "brief that web data could not be fetched."
+        )
     if name == "ask_user" and questions_left <= 0:
         return (
             "`ask_user` is unavailable: the question budget for this turn is "

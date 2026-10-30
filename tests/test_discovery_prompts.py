@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from anton.core.artifacts.models import ARTIFACT_TYPES, GENERATOR_ARTIFACT_TYPES
+from anton.core.backends.wire import WEB_SEARCH_ENV
 from anton.core.tools.generate_artifact.discovery import sub_tools
 from anton.core.tools.generate_artifact.discovery.prompts import (
     GATHERING_CONTINUE,
@@ -84,6 +85,16 @@ def test_call_kickoff_carries_the_request_understanding_and_context():
 
 def test_the_gathering_step_asks_for_finish_gathering():
     assert "finish_gathering" in step_message(sub_tools.STEP_GATHERING, _state())
+
+
+def test_the_gathering_step_points_at_web_fetch_only_while_web_search_is_on(monkeypatch):
+    monkeypatch.delenv(WEB_SEARCH_ENV, raising=False)
+    assert "web_fetch for pages" in step_message(sub_tools.STEP_GATHERING, _state())
+    monkeypatch.setenv(WEB_SEARCH_ENV, "off")
+    off = step_message(sub_tools.STEP_GATHERING, _state())
+    assert "web_fetch" not in off
+    assert "fetched the page" not in off
+    assert "when there is one) and record its shape" in off
 
 
 def test_the_continue_message_mentions_finish_gathering():

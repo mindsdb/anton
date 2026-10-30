@@ -8,7 +8,9 @@ the generic nudge for everything else.
 
 from __future__ import annotations
 
+from anton.core.backends.wire import WEB_SEARCH_ENV
 from anton.core.llm.prompts import (
+    NO_WEB_RESILIENCE_NUDGE,
     RESILIENCE_NUDGE,
     SCRATCHPAD_SIZE_NUDGE,
     SCRATCHPAD_STUCK_NUDGE,
@@ -20,6 +22,14 @@ _select = ChatSession._select_resilience_nudge
 
 
 class TestSelectResilienceNudge:
+    def test_with_web_search_off_the_generic_nudge_sends_nothing_online(self, monkeypatch):
+        monkeypatch.setenv(WEB_SEARCH_ENV, "off")
+        assert _select("web_fetch", "failed to fetch the page") == NO_WEB_RESILIENCE_NUDGE
+        assert _select("scratchpad", "[error]\nNameError: name 'data' is not defined") == NO_WEB_RESILIENCE_NUDGE
+        for text in ("public API", "archive.org", "headers"):
+            assert text not in NO_WEB_RESILIENCE_NUDGE
+        assert "web access is off on this install" in NO_WEB_RESILIENCE_NUDGE
+
     def test_non_scratchpad_tool_gets_generic_nudge(self):
         assert _select("web_fetch", "failed to fetch the page") == RESILIENCE_NUDGE
 
