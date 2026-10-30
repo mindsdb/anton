@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from anton.core.tools.generate_artifact.state import (
     DATA_LOOP_MAX,
@@ -13,6 +16,7 @@ from anton.core.tools.generate_artifact.state import (
     RequiredData,
     StepResult,
     VerifyResult,
+    known_data_is_reference,
     known_data_usable,
 )
 
@@ -204,3 +208,32 @@ def test_known_data_usable_reads_the_type_gathering_settled_on():
 def test_the_required_data_schema_says_an_empty_list_means_nothing_is_missing():
     schema = RequiredData.model_json_schema()
     assert "Empty when nothing is missing" in schema["properties"]["items"]["description"]
+
+
+def _ref_state(known_data, pads=("supply_kpi", "main")):
+    return GenState(
+        session=SimpleNamespace(), artifact_type="html-app", artifact_path=Path("/tmp/x"),
+        slug="s", known_data=known_data, pad_names=list(pads),
+    )
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("scratchpad `supply_kpi`, variable `frames` (dict of DataFrames)", True),
+    ("data in scratchpad supply_kpi, variable frames", True),
+    ("in pad `supply_kpi`", True),
+    ("Live supply data metrics from scratchpad supply_kpi: Base Plan = 169 lines", True),
+    ("the main KPI is on-time share", False),
+    ("Base Plan = 169 lines, Supplier Delay = 40 late", False),
+    ("scratchpad supply_kpi_old, variable x", False),
+    # A pad this session does not list is still a reference: its cell fails
+    # and the "not enough data" path takes over, instead of the text passing
+    # as values.
+    ("scratchpad `typo_pad`, variable `df` (DataFrame)", True),
+])
+def test_reference_detection(text, expected):
+    assert known_data_is_reference(_ref_state(text)) is expected
+
+
+def test_a_reference_cannot_stand_in_for_executed_code():
+    assert known_data_usable(_ref_state("Base Plan = 169 lines")) is True
+    assert known_data_usable(_ref_state("scratchpad `supply_kpi`, variable `frames`")) is False

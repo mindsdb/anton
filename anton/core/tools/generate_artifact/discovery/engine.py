@@ -13,10 +13,17 @@ from typing import TYPE_CHECKING
 
 from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS, scratchpad_action
 
+from .. import data_files
 from .. import sub_tools as protocol
-from ..state import known_data_usable
+from ..state import known_data_is_reference, known_data_usable, settled_artifact_type
 from . import prompts, sub_tools
-from .notes import known_data_sources, render_gathering_notes, source_key, string_list
+from .notes import (
+    known_data_sources,
+    render_gathering_notes,
+    source_key,
+    string_list,
+    web_verified_sources,
+)
 from .state import PrdState, gathering_question_budget
 
 if TYPE_CHECKING:
@@ -56,6 +63,80 @@ def _exec_ran(outcome) -> bool:
     return getattr(outcome, "ok", None) is not False
 
 
+_NOT_FINISHED = "Not finished — fix the data files and call `finish_gathering` again:\n"
+_SAVE_DATA = (
+    "Not finished — save the data the page needs into the data files folder named in the "
+    "step message and list it in `data_files`, then call `finish_gathering` again. Sources "
+    "without a data file: "
+)
+
+
+def _unsaved_sources(state: "PrdState", inp: dict) -> list[str]:
+    """Declared sources whose data should be in a data file and is not. For a
+    reference to pad data: every source no file or fetched web page covers.
+    Otherwise, when cells ran and nothing was saved: the sources not marked
+    as coming from usable `known_data` or from the web."""
+    if known_data_is_reference(state):
+        covered = data_files.covered_sources(state.data_files)
+        if state.web_calls:
+            covered |= web_verified_sources(inp)
+        return [s for s in state.declared_sources if source_key(s) not in covered]
+    if not state.scratchpad_execs or state.data_files:
+        return []
+    elsewhere = known_data_sources(inp, usable=known_data_usable(state))
+    if state.web_calls:
+        elsewhere |= web_verified_sources(inp)
+    return [s for s in state.declared_sources if source_key(s) not in elsewhere]
+
+
+def _absorb_data_files(state: "PrdState", inp: dict) -> str | None:
+    """For an html-app: take the declared data files, or say why gathering
+    cannot finish yet. Data read by code is sent back once to be saved; the
+    second call is accepted either way, so gathering cannot get stuck on
+    data it cannot save.
+
+    A refusal reopens gathering: if the model never calls `finish_gathering`
+    again, the data loop has to vouch for the sources instead."""
+    if settled_artifact_type(state) != "html-app":
+        return None
+    valid, errors = data_files.state_check_declared(
+        state, data_files.parse_declared(inp.get("data_files")), state.declared_sources
+    )
+    if errors:
+        state.gathering_complete = False
+        # The refused call's own files are not recorded, so they cover nothing.
+        covered = data_files.covered_sources(state.data_files)
+        state.unverified_sources = [s for s in state.declared_sources if source_key(s) not in covered]
+        return _NOT_FINISHED + "\n".join(f"- {e}" for e in errors)
+    state.data_files = data_files.merge(state.data_files, valid, state.declared_sources)
+    if state.data_save_requested or not state.declared_sources:
+        return None
+    missing = _unsaved_sources(state, inp)
+    if not missing:
+        return None
+    state.data_save_requested = True
+    state.gathering_complete = False
+    state.unverified_sources = missing
+    return _SAVE_DATA + ", ".join(missing) + "."
+
+
+def _apply_html_app_coverage(state: "PrdState", inp: dict) -> None:
+    """Data files verify the sources they cover. A reference to pad data
+    verifies nothing on its own, whatever else ran."""
+    # A `back_to_gathering` that saves the data clears what an earlier pass marked.
+    data_files.clear_data_not_saved(state)
+    unsaved = _unsaved_sources(state, inp)
+    if known_data_is_reference(state):
+        state.unverified_sources = unsaved
+        state.known_data_verified = []
+        return
+    covered = data_files.covered_sources(state.data_files)
+    state.unverified_sources = [s for s in state.unverified_sources if source_key(s) not in covered]
+    if unsaved:
+        state.record("gathering", "data_not_saved", ", ".join(unsaved))
+        data_files.mark_data_not_saved(state)
+
+
 async def run_gathering_loop(state: "PrdState") -> None:
     """Run phase 1 to completion (or until MAX_ROUNDS is exhausted).
 
@@ -66,10 +147,13 @@ async def run_gathering_loop(state: "PrdState") -> None:
         rather than resetting, so phase 2's exchange survives.
       - `state.qa_log` gains one entry per `ask_user` call actually asked.
       - `state.final_artifact_type` / `state.gathering_notes` are set by
-        `finish_gathering`. Left as `""` / the model's last text if the
-        loop exhausts `MAX_ROUNDS`, or the model stops without calling
-        `finish_gathering` — both are the best-effort case the caller
-        (orchestrator.run) falls back on.
+        every `finish_gathering` call, a refused one included. With no call
+        at all they stay `""` / the model's last text.
+      - `state.gathering_complete` is set by an accepted `finish_gathering`
+        and cleared by a refused one. Exhausting `MAX_ROUNDS` or stopping
+        without the call leaves it as it was, False on a first pass: the
+        best-effort case in which the caller's emergency data loop
+        re-checks the data.
     """
     budget = gathering_question_budget(state.session, act_first=state.act_first)
     # One array for the whole shared-prefix region; availability per step is
@@ -94,6 +178,8 @@ async def run_gathering_loop(state: "PrdState") -> None:
         })
 
     state.step_started(sub_tools.STEP_GATHERING)
+    # One save refusal per gathering pass: a re-entry reads new data.
+    state.data_save_requested = False
     questions_asked = 0
 
     for round_idx in range(MAX_ROUNDS):
@@ -181,6 +267,11 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 state.assumptions = string_list(inp.get("assumptions"))
                 state.open_points = string_list(inp.get("open_points"))
                 state.declared_sources = string_list(inp.get("data_sources"))
+                refusal = _absorb_data_files(state, inp)
+                if refusal is not None:
+                    state.trace_log.node("gathering", "data_files_refused", detail=refusal[:200])
+                    result_blocks.append(protocol.tool_result(tc.id, refusal))
+                    continue
                 # On the hot path the gathering loop had the data tools and
                 # used them, so a source it declares is one it worked with.
                 # `web_calls` counts as much as `scratchpad_execs`: a source
@@ -204,8 +295,11 @@ async def run_gathering_loop(state: "PrdState") -> None:
                     if executed
                     else [s for s in state.declared_sources if source_key(s) in covered]
                 )
+                if settled_artifact_type(state) == "html-app":
+                    _apply_html_app_coverage(state, inp)
                 state.gathering_complete = True
-                result_blocks.append(protocol.tool_result(tc.id, "ok"))
+                section = data_files.state_files_section(state)
+                result_blocks.append(protocol.tool_result(tc.id, "ok" + (f"\n\n{section}" if section else "")))
                 finished = True
             elif name == "ask_user":
                 # The exhausted-budget case is handled by the gate above, so
@@ -266,6 +360,6 @@ async def run_gathering_loop(state: "PrdState") -> None:
             )
             return
 
-    # MAX_ROUNDS exhausted without finish_gathering — best-effort; caller
-    # checks state.final_artifact_type (still "") to detect this case.
+    # MAX_ROUNDS exhausted without an accepted finish_gathering — best-effort;
+    # the caller's data loop re-checks unless an earlier pass vouched for it.
     state.trace_log.node("gathering", "fail", detail="MAX_ROUNDS exhausted without finish_gathering")

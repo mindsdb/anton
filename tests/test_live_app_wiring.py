@@ -732,7 +732,7 @@ async def _verify_frontend_live_app(tmp_path, policy, monkeypatch, seen: dict | 
         )
         return {"files_written": ["static/index.html"], "rounds_used": 1, "summary": "s"}
 
-    def fake_verify(html, *, is_fullstack, api_paths=None, live_app=False):
+    def fake_verify(html, *, is_fullstack, api_paths=None, live_app=False, data_ids=None):
         seen["live_app"] = live_app
         return VerifyResult(errors=[])
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import warnings
 from pathlib import Path
@@ -8,9 +9,11 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from anton.core.artifacts.internal_files import DATA_DIRNAME
 from anton.core.datasources.data_vault import LocalDataVault
 from anton.core.llm.provider import StreamComplete
 from anton.core.tools.generate_artifact import engine, orchestrator, prompts
+from anton.core.tools.generate_artifact.data_files import DataFile
 from anton.core.tools.generate_artifact.discovery import checkpoint as cp
 from anton.core.tools.generate_artifact.state import (
     BrowserCheck, BrowserCheckFailed, FetchVerdict, GenState, RequiredData, RequiredDataItem,
@@ -122,7 +125,7 @@ async def test_data_phase_exits_after_one_successful_fetch(tmp_path: Path, monke
 # ── fetch_data_sample: exec-code record + journal handoff ────────────────────
 
 async def test_fetch_data_sample_appends_exec_code(tmp_path: Path, monkeypatch):
-    st = _state(tmp_path)
+    st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
 
     async def fake_run_loop(**kw):
         return {
@@ -139,6 +142,121 @@ async def test_fetch_data_sample_appends_exec_code(tmp_path: Path, monkeypatch):
     assert "df = q('select 1')" in notes
     assert "Output: ok 100 rows" in notes
     assert ok is True
+
+
+async def test_fetch_for_an_html_app_counts_only_a_saved_data_file(tmp_path: Path, monkeypatch):
+    st = _state(tmp_path)
+    st.unverified_sources = ["orders"]
+
+    async def fake_run_loop(**kw):
+        assert "data files folder" in kw["system"].lower()
+        (tmp_path / DATA_DIRNAME).mkdir()
+        (tmp_path / DATA_DIRNAME / "1.json").write_text(json.dumps([{"v": 1}]))
+        (tmp_path / DATA_DIRNAME / "2.json").write_text("not json")
+        return {"files_written": [], "rounds_used": 2, "summary": "saved .anton-data/1.json",
+                "scratchpad_execs": [{"name": "p", "code": "save()", "output": "ok"}]}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
+    notes, ok = await orchestrator._fetch_data_sample(st)
+    assert ok is True
+    assert st.data_files == [DataFile("1", ["orders"], "saved .anton-data/1.json")]
+    assert st.loop_data_ids == ["1"]
+
+
+async def test_fetch_for_an_html_app_without_a_file_fails(tmp_path: Path, monkeypatch):
+    st = _state(tmp_path)
+    st.unverified_sources = ["orders"]
+
+    async def fake_run_loop(**kw):
+        return {"files_written": [], "rounds_used": 1, "summary": "looked",
+                "scratchpad_execs": [{"name": "p", "code": "print(1)", "output": "1"}]}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
+    notes, ok = await orchestrator._fetch_data_sample(st)
+    assert ok is False and "no valid data file" in notes
+
+
+async def test_a_file_only_a_cell_mentions_is_not_taken_as_data(tmp_path: Path, monkeypatch):
+    """The summary names 1.json; a valid 2.json that only a cell's code mentions
+    is a scratch file, not data for the page."""
+    st = _state(tmp_path)
+    st.unverified_sources = ["orders"]
+
+    async def fake_run_loop(**kw):
+        (tmp_path / DATA_DIRNAME).mkdir()
+        (tmp_path / DATA_DIRNAME / "1.json").write_text(json.dumps([{"v": 1}]))
+        (tmp_path / DATA_DIRNAME / "2.json").write_text(json.dumps([{"tmp": 1}]))
+        return {"files_written": [], "rounds_used": 2, "summary": "saved .anton-data/1.json",
+                "scratchpad_execs": [{"name": "p", "output": "ok",
+                                      "code": "json.dump(rows, open('.anton-data/2.json', 'w'))"}]}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
+    notes, ok = await orchestrator._fetch_data_sample(st)
+    assert ok is True
+    assert [f.id for f in st.data_files] == ["1"]
+    assert st.loop_data_ids == ["1"]
+
+
+async def test_a_summary_that_names_no_file_takes_the_new_valid_one(tmp_path: Path, monkeypatch):
+    st = _state(tmp_path)
+    st.unverified_sources = ["orders"]
+
+    async def fake_run_loop(**kw):
+        (tmp_path / DATA_DIRNAME).mkdir()
+        (tmp_path / DATA_DIRNAME / "1.json").write_text(json.dumps([{"v": 1}]))
+        return {"files_written": [], "rounds_used": 1, "summary": "saved the orders",
+                "scratchpad_execs": [{"name": "p", "code": "save()", "output": "ok"}]}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
+    notes, ok = await orchestrator._fetch_data_sample(st)
+    assert ok is True
+    assert [f.id for f in st.data_files] == ["1"]
+    assert st.loop_data_ids == ["1"]
+
+
+async def test_fetch_counts_the_size_of_all_data_files(tmp_path: Path, monkeypatch):
+    """Gathering's file and the fetched one each fit; together they do not."""
+    (tmp_path / DATA_DIRNAME).mkdir()
+    (tmp_path / DATA_DIRNAME / "1.json").write_text(json.dumps(["x" * 300]))
+    st = _state(tmp_path)
+    st.unverified_sources = ["orders"]
+    st.data_files = [DataFile("1", ["regions"])]
+    monkeypatch.setattr(orchestrator.data_files, "MAX_PAGE_BYTES", 500)
+
+    async def fake_run_loop(**kw):
+        (tmp_path / DATA_DIRNAME / "2.json").write_text(json.dumps(["y" * 300]))
+        return {"files_written": [], "rounds_used": 1, "summary": "saved .anton-data/2.json",
+                "scratchpad_execs": [{"name": "p", "code": "save()", "output": "ok"}]}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
+    notes, ok = await orchestrator._fetch_data_sample(st)
+    assert ok is False and "page limit" in notes
+    assert [f.id for f in st.data_files] == ["1"]
+
+
+async def test_a_saved_fetch_clears_the_data_not_saved_warning(tmp_path: Path, monkeypatch):
+    """An earlier pass did not save the data; this fetch did, so neither the
+    result nor the next checkpoint repeats the warning."""
+    from anton.core.tools.generate_artifact.data_files import DATA_NOT_SAVED_WARNING
+
+    st = _state(tmp_path)
+    st.declared_sources = ["orders"]
+    st.unverified_sources = ["orders"]
+    st.data_not_saved = True
+    st.verify_warnings.append(DATA_NOT_SAVED_WARNING)
+
+    async def fake_run_loop(**kw):
+        (tmp_path / DATA_DIRNAME).mkdir()
+        (tmp_path / DATA_DIRNAME / "1.json").write_text(json.dumps([{"v": 1}]))
+        return {"files_written": [], "rounds_used": 1, "summary": "saved .anton-data/1.json",
+                "scratchpad_execs": [{"name": "p", "code": "save()", "output": "ok"}]}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
+    notes, ok = await orchestrator._fetch_data_sample(st)
+    assert ok is True and st.data_not_saved is False
+    result = orchestrator._finish(st)
+    assert DATA_NOT_SAVED_WARNING not in result["warnings"]
+    assert cp.load(tmp_path).data_not_saved is False
 
 
 def test_render_exec_notes_caps_and_drops_oldest():
@@ -1357,9 +1475,10 @@ async def test_gen_verify_frontend_hands_the_contract_paths_to_the_verifier(tmp_
         (tmp_path / "static" / "index.html").write_text(_VALID_PAGE)
         return {"files_written": ["static/index.html"], "rounds_used": 1, "summary": "s"}
 
-    def fake_verify(html, *, is_fullstack, api_paths=None, live_app=False):
+    def fake_verify(html, *, is_fullstack, api_paths=None, live_app=False, data_ids=None):
         seen["api_paths"] = api_paths
         seen["live_app"] = live_app
+        seen["data_ids"] = data_ids
         return VerifyResult(errors=[])
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
@@ -1369,6 +1488,8 @@ async def test_gen_verify_frontend_hands_the_contract_paths_to_the_verifier(tmp_
     assert seen["api_paths"] == {"/api/items"}
     # No sandbox, no live apps: the page isn't held to a live app's script rule.
     assert seen["live_app"] is False
+    # The fullstack page keeps its data behind the API: no block checks.
+    assert seen["data_ids"] is None
 
 
 # ── S-03: skipped checks and accepted warnings reach the result ─────────────
@@ -1416,7 +1537,7 @@ async def test_warnings_of_the_accepted_frontend_attempt_reach_the_result(tmp_pa
         (tmp_path / "index.html").write_text(_VALID_HTML)
         return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
 
-    def fake_verify(html, *, is_fullstack, api_paths=None, live_app=False):
+    def fake_verify(html, *, is_fullstack, api_paths=None, live_app=False, data_ids=None):
         return VerifyResult(errors=[], warnings=["Significant blocks have no stable `id` attributes."])
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
@@ -1916,7 +2037,8 @@ async def test_a_fetch_without_a_cell_that_succeeded_is_not_data(tmp_path: Path,
         return loop_result
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
-    notes, ok = await orchestrator._fetch_data_sample(_state(tmp_path))
+    st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
+    notes, ok = await orchestrator._fetch_data_sample(st)
     assert ok is False
     if isinstance(loop_result, dict):
         assert "(the fetch step ran no cell that succeeded)" in notes
@@ -1933,7 +2055,8 @@ async def test_one_cell_that_succeeded_makes_the_fetch_count(tmp_path: Path, mon
         }
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
-    notes, ok = await orchestrator._fetch_data_sample(_state(tmp_path))
+    st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
+    notes, ok = await orchestrator._fetch_data_sample(st)
     assert ok is True
     assert "Scratchpad `pad` (failed):" in notes
     assert "(the fetch step ran no cell that succeeded)" not in notes
@@ -2147,3 +2270,159 @@ async def test_known_data_is_scrubbed_before_any_step_sees_it(tmp_path: Path, mo
     )
     assert "Toronto,43.7" in seen["known_data"]
     assert secret not in seen["known_data"]
+
+
+# ── data files ──────────────────────────────────────────────────────────────
+
+
+def test_a_finished_run_keeps_only_its_data_files(tmp_path: Path):
+    folder = tmp_path / DATA_DIRNAME
+    folder.mkdir()
+    for name in ("1.json", "2.json"):
+        (folder / name).write_text("[]")
+    st = _state(tmp_path)
+    st.data_files = [DataFile("2", ["orders"])]
+    orchestrator._finish(st)
+    assert sorted(p.name for p in folder.iterdir()) == ["2.json"]
+    assert cp.load(tmp_path).data_files == [{"id": "2", "sources": ["orders"], "description": ""}]
+
+
+def test_spec_context_carries_the_data_files_after_known_data(tmp_path: Path):
+    (tmp_path / DATA_DIRNAME).mkdir()
+    (tmp_path / DATA_DIRNAME / "1.json").write_text(json.dumps([{"Id": "SO-5001"}]))
+    st = _state(tmp_path, known_data="scratchpad `p`, variable `df` (DataFrame)")
+    st.data_files = [DataFile("1", ["orders"])]
+    text = orchestrator._spec_context(st)
+    assert text.index("## Known data") < text.index("## Data files")
+    assert "SO-5001" in text
+    assert "## Data files" in prompts._brief_and_notes(st)
+
+
+async def test_hot_path_spec_sees_the_files_the_data_loop_saved(tmp_path: Path, monkeypatch):
+    """The data loop runs after the PRD; on the hot path the spec step reads
+    only the gathering history, so its files are shown to it separately."""
+    (tmp_path / DATA_DIRNAME).mkdir()
+    (tmp_path / DATA_DIRNAME / "2.json").write_text(json.dumps([{"Id": "SO-5001"}]))
+    st = _state(tmp_path)
+    st.messages = [{"role": "user", "content": "gathering"}, {"role": "assistant", "content": "ok"}]
+    st.data_files = [DataFile("2", ["orders"])]
+    st.loop_data_ids = ["2"]
+    seen = {}
+
+    async def fake_plan(session, **kw):
+        seen["user"] = kw["user"]
+        return "## Insights\n- x", None
+
+    monkeypatch.setattr(orchestrator.engine, "_plan_whole_document", fake_plan)
+    assert await orchestrator._write_tech_spec(st) is None
+    assert "## Data files" in seen["user"] and "SO-5001" in seen["user"]
+
+
+_GOOD_PAGE = (
+    '<html><head><meta name="viewport" content="width=device-width"></head><body><div id="a"></div>'
+    '<script type="application/json" data-anton-data="1"></script>'
+    "<script>const d=JSON.parse(document.querySelector('script[data-anton-data=\"1\"]').textContent);</script>"
+    "</body></html>"
+)
+
+
+async def test_frontend_fills_the_data_blocks_before_the_checks(tmp_path: Path, monkeypatch):
+    (tmp_path / DATA_DIRNAME).mkdir()
+    (tmp_path / DATA_DIRNAME / "1.json").write_text(json.dumps([{"Id": "SO-5001"}]))
+    st = _state(tmp_path)
+    st.data_files = [DataFile("1", ["orders"])]
+
+    async def fake_loop(**kw):
+        (tmp_path / "index.html").write_text(_GOOD_PAGE)
+        return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", _no_browser)
+    assert await orchestrator._gen_verify_frontend(st) is None
+    assert "SO-5001" in (tmp_path / "index.html").read_text()
+
+
+async def test_an_oversized_page_stops_without_a_retry(tmp_path: Path, monkeypatch):
+    (tmp_path / DATA_DIRNAME).mkdir()
+    # The file fits the limit it is read with; the page with it does not.
+    (tmp_path / DATA_DIRNAME / "1.json").write_text(json.dumps(["x" * 400]))
+    st = _state(tmp_path)
+    st.data_files = [DataFile("1", ["orders"])]
+    calls = {"n": 0}
+
+    async def fake_loop(**kw):
+        calls["n"] += 1
+        (tmp_path / "index.html").write_text(_GOOD_PAGE)
+        return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.data_files, "MAX_PAGE_BYTES", len(_GOOD_PAGE) + 300)
+    err = await orchestrator._gen_verify_frontend(st)
+    assert calls["n"] == 1 and err is not None and "page limit" in err
+
+
+async def test_an_unknown_block_id_is_retried(tmp_path: Path, monkeypatch):
+    (tmp_path / DATA_DIRNAME).mkdir()
+    (tmp_path / DATA_DIRNAME / "1.json").write_text("[1]")
+    st = _state(tmp_path)
+    st.data_files = [DataFile("1", ["orders"])]
+    pages = iter([_GOOD_PAGE.replace('data-anton-data="1"></script>', 'data-anton-data="9"></script>'), _GOOD_PAGE])
+    calls = {"n": 0}
+
+    async def fake_loop(**kw):
+        calls["n"] += 1
+        (tmp_path / "index.html").write_text(next(pages))
+        return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", _no_browser)
+    assert await orchestrator._gen_verify_frontend(st) is None
+    assert calls["n"] == 2
+    failed = [s.detail for s in st.trace if s.node == "verify_frontend" and s.outcome == "fail"]
+    assert len(failed) == 1 and "does not exist" in failed[0]
+    assert 'data-anton-data="1">\n[1]\n</script>' in (tmp_path / "index.html").read_text()
+
+
+def test_filling_the_data_blocks_writes_nothing_once_the_run_is_abandoned(tmp_path: Path):
+    (tmp_path / DATA_DIRNAME).mkdir()
+    (tmp_path / DATA_DIRNAME / "1.json").write_text(json.dumps([{"Id": "SO-5001"}]))
+    st = _state(tmp_path)
+    st.data_files = [DataFile("1", ["orders"])]
+    page = tmp_path / "index.html"
+    page.write_text(_GOOD_PAGE)
+
+    st.abandoned.set()
+    assert orchestrator._fill_data_blocks(st, page) is None
+    assert page.read_text() == _GOOD_PAGE
+
+    st.abandoned.clear()
+    assert orchestrator._fill_data_blocks(st, page) is None
+    assert "SO-5001" in page.read_text()
+
+
+def test_a_page_whose_data_blocks_cannot_be_filled_ends_the_run(tmp_path: Path):
+    st = _state(tmp_path)
+    st.trace_log = Mock()
+    st.data_files = [DataFile("1", ["orders"])]
+    (tmp_path / "real.html").write_text(_GOOD_PAGE)
+    (tmp_path / "index.html").symlink_to(tmp_path / "real.html")
+    fatal = orchestrator._fill_data_blocks(st, tmp_path / "index.html")
+    assert fatal is not None and "could not be read" in fatal
+    st.trace_log.node.assert_any_call("verify_frontend", "fill_skipped", "the page could not be read")
+    assert orchestrator._fill_data_blocks(_state(tmp_path), tmp_path / "missing.html") is None
+
+
+def test_a_page_whose_filled_data_cannot_be_written_ends_the_run(tmp_path: Path, monkeypatch):
+    (tmp_path / DATA_DIRNAME).mkdir()
+    (tmp_path / DATA_DIRNAME / "1.json").write_text("[1]")
+    st = _state(tmp_path)
+    st.data_files = [DataFile("1", ["orders"])]
+    page = tmp_path / "index.html"
+    page.write_text(_GOOD_PAGE)
+
+    def refuse(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(orchestrator, "write_text_nofollow", refuse)
+    fatal = orchestrator._fill_data_blocks(st, page)
+    assert fatal is not None and "could not be written" in fatal

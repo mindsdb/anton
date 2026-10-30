@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from anton.utils.datasources import DATASOURCES_HEADER
 
+from .data_files import save_hint, state_files_section
 from .discovery.notes import EXEC_OUTPUT_MAX
 
 # The body markers are quoted to the model in several places here and parsed in
@@ -28,7 +29,7 @@ from .sub_tools import FILE_BEGIN_MARKER as BEGIN, FILE_END_MARKER as END
 # How much file content fits in one reply, in characters — the unit the model
 # can compare against what it is about to write. Derived from the output budget
 # in state.py; quoted from the constant so the two cannot drift.
-from .state import REPLY_BODY_CHARS, language_name
+from .state import REPLY_BODY_CHARS, language_name, settled_artifact_type
 
 if TYPE_CHECKING:
     from anton.core.memory.skills import Skill
@@ -401,8 +402,21 @@ Not checked by the verifier, but the page breaks inside the frame without them:
 """
 
 
+# html-app page only: the fullstack frontend keeps its data behind the API.
+_DATA_BLOCK_CONTRACT = """\
+- Data blocks, when `## Data files` lists files: each file the page shows
+  sits in exactly one `<script type="application/json" data-anton-data="<id>"></script>`
+  block with an id listed under `## Data files`, and a script reads it with
+  `JSON.parse(document.querySelector('script[data-anton-data="<id>"]').textContent)`.
+  A block with an unknown id, a repeated id, a block without
+  `type="application/json"`, a page with no data block while files are
+  listed, and blocks no script reads each fail the step.\
+"""
+
+
 def _verifier_contract(*, served: bool) -> str:
-    return "## Verifier contract\n" + _VERIFIER_CONTRACT + "\n" + (
+    contract = _VERIFIER_CONTRACT if served else _VERIFIER_CONTRACT + "\n" + _DATA_BLOCK_CONTRACT
+    return "## Verifier contract\n" + contract + "\n" + (
         _BROWSER_GATE_SERVED if served else _BROWSER_GATE_HTML
     ) + "\n" + _CAUGHT_ERRORS + "\n\n" + _FRAME_NOTES
 
@@ -730,7 +744,33 @@ The user message carries these sections, in this order (some may be absent):
   data files whose content arrived as `## Data`.
 - `## Technical specification` — `spec.md`: insights and implementation notes
   that complement the PRD rather than repeat it.
-- `## Progress journal` — one line per pipeline step done so far.\
+{data_inputs}- `## Progress journal` — one line per pipeline step done so far.\
+"""
+
+# Only the html page is built from data files; the fullstack prompts keep the
+# list above as it was.
+_GEN_DATA_INPUTS = """\
+- `## Known data` — what the calling agent passed in: values, or a pointer to
+  data that is now under `## Data files`.
+- `## Data files` — the data files this page is built from: id, sources and
+  a summary of each, with real sample records.
+"""
+
+_GEN_DATA_FILES = """\
+## Data files
+When the user message has a `## Data files` section, the page's data is in
+those files and nowhere else:
+- Put each file the page shows into exactly one empty block, written as is:
+  `<script type="application/json" data-anton-data="<id>"></script>`. The
+  pipeline fills it with the file after you write the page.
+- Read a block with
+  `JSON.parse(document.querySelector('script[data-anton-data="<id>"]').textContent)`
+  and compute every figure from that data in the page's script.
+- Never retype rows from a data file into the page, and never print a data
+  file in a cell or read it: the summary under `## Data files` is complete.
+- Never generate random, test or sample data unless the request asks for
+  it. If the PRD or the spec needs data the files do not hold, show what
+  they hold and say on the page what is missing.\
 """
 
 # Appended for the fullstack frontend: `build_frontend_kickoff` renders this
@@ -742,7 +782,9 @@ _GEN_API_SPEC_INPUT = """\
 
 
 def _gen_html_inputs(*, fullstack: bool = False, backend: bool = False) -> str:
-    text = _GEN_HTML_INPUTS.format(prd_footer=PRD_SECTION_FOOTER)
+    text = _GEN_HTML_INPUTS.format(
+        prd_footer=PRD_SECTION_FOOTER, data_inputs="" if fullstack else _GEN_DATA_INPUTS
+    )
     if not fullstack:
         return text
     consumer = "your routes must serve" if backend else "your `fetch` calls must match"
@@ -769,7 +811,9 @@ the relative name given there."""
 Produce ONE self-contained HTML file named exactly `{target}`, at the root
 of the artifact folder. Inline your own CSS and all JS, each view's code in a
 `<script>` of its own as the verifier contract says, and embed all data in
-the file. Do not reference any other file of the artifact, except the assets
+the file; data under `## Data files` goes in only through its data block (see
+`## Data files` below). Do not reference any other file of the artifact,
+except the assets
 listed under `## Attached files`, by the relative name given there in quotes
 (`<img src="logo.png">`): once you have written the page, the pipeline
 replaces each such reference with the asset itself as a `data:` URI, since
@@ -880,11 +924,12 @@ def _gen_html_workflow(target: str, *, fullstack: bool = False) -> str:
    shape unclear and `## Data` holds no sample of it; otherwise skip."""
     else:
         data_step = """\
-2. Data, only if needed: when the dataset to embed is not already printed
-   under `## Data` in a usable shape, run ONE scratchpad cell that
-   aggregates it and prints it as JSON (a dashboard almost never needs raw
-   rows). Skip this step when the data is already visible or the artifact
-   needs none."""
+2. Data, only if needed: data under `## Data files` is complete — never print
+   it in a cell or read its file. For other data, when the dataset to embed
+   is not already printed under `## Data` in a usable shape, run ONE
+   scratchpad cell that aggregates it and prints it as JSON (a dashboard
+   almost never needs raw rows). Skip this step when the data is already
+   visible or the artifact needs none."""
     return f"""\
 ## Workflow
 A typical run takes one or two rounds.
@@ -1019,6 +1064,7 @@ def build_subagent_system_prompt(
         for part in [
             _gen_html_task(target),
             _gen_html_inputs(),
+            _GEN_DATA_FILES,
             _gen_html_workflow(target),
             _gen_html_output_protocol(target),
             _GEN_SIZE_RULES,
@@ -1040,7 +1086,7 @@ def _kickoff_closing(*, fullstack: bool) -> str:
         "unclear"
         if fullstack
         else "run a scratchpad cell only if the data to embed is not already "
-        "usable under `## Data`"
+        "usable under `## Data` or `## Data files`"
     )
     return (
         "Read the sections above, then follow the workflow from your "
@@ -1540,6 +1586,9 @@ def _brief_and_notes(state) -> str:
     known = known_data_section(state)
     if known:
         parts.append(known)
+    files = state_files_section(state)
+    if files:
+        parts.append(files)
     if getattr(state, "web_notes", "").strip():
         parts.append(state.web_notes.strip())
     journal = state.journal()
@@ -1615,24 +1664,45 @@ def build_fetch_data_system_prompt(
     project_rules: str = "",
     artifact_skills: str = "",
     user_language: str = "",
+    save_data: bool = False,
 ) -> str:
+    if save_data:
+        task = (
+            "You are the `fetch_data_sample` node. Use the `scratchpad` tool to run Python "
+            "that reads the required data (query the DB, call the API, read the file or "
+            "the page) and SAVE what the html-app page shows to the data files folder named "
+            "below: one `<id>.json` per dataset, from the first free id up, with only the "
+            "fields the page needs (aggregates only when the rows are too large), via "
+            "`df.to_json(path, orient=\"records\", date_format=\"iso\")` or "
+            "`json.dump(obj, f, default=str, allow_nan=False)`. Print only a short summary "
+            "(row count, fields), never the data. Do NOT write any other artifact files.\n\n"
+        )
+    else:
+        task = (
+            "You are the `fetch_data_sample` node. Use the `scratchpad` tool to "
+            "run Python that pulls a small SAMPLE of the required data (query the "
+            "DB, call the API, read the file). Confirm the shape and types. Do NOT "
+            "write any artifact files.\n\n"
+        )
+    finish_tail = (
+        "When done, call `finish(summary=...)` with a "
+        "precise description of WHICH scratchpad(s)/cell(s) you used, what each "
+        "produced, and the observed schema/sample — this summary is handed to "
+        "the next steps."
+    )
+    if save_data:
+        finish_tail += " Name each saved file as `.anton-data/<id>.json` in the summary."
     parts = [
         _ROLE_COMMON,
         _DATA_CONTEXT_HEADER
-        + "You are the `fetch_data_sample` node. Use the `scratchpad` tool to "
-        "run Python that pulls a small SAMPLE of the required data (query the "
-        "DB, call the API, read the file). Confirm the shape and types. Do NOT "
-        "write any artifact files.\n\n"
-        "Fetch ONLY WHAT IS MISSING. `## Data gathered so far` may already show "
+        + task
+        + "Fetch ONLY WHAT IS MISSING. `## Data gathered so far` may already show "
         "cells the main agent ran — do not repeat them.\n\n"
         "Work in the SAME scratchpad the brief names, not a new one: a fresh "
         "name is an isolated environment, so its variables, imports and working "
         "connection code do not exist there and you would rebuild them from "
         "scratch.\n\n"
-        "When done, call `finish(summary=...)` with a "
-        "precise description of WHICH scratchpad(s)/cell(s) you used, what each "
-        "produced, and the observed schema/sample — this summary is handed to "
-        "the next steps.",
+        + finish_tail,
     ]
     if public_sources.strip():
         parts.append(public_sources.strip())
@@ -1641,10 +1711,13 @@ def build_fetch_data_system_prompt(
     # Before the project rules: a project rule about language comes later and wins.
     parts.append(_reasoning_language(user_language))
     parts.extend(p for p in (project_rules, artifact_skills) if p)
-    parts.append(
-        "## Output folder\n"
-        f"(You will NOT write files here in this step.) Artifact folder: `{artifact_path}`"
-    )
+    if save_data:
+        parts.append("## Output folder\n" + save_hint(artifact_path))
+    else:
+        parts.append(
+            "## Output folder\n"
+            f"(You will NOT write files here in this step.) Artifact folder: `{artifact_path}`"
+        )
     return "\n\n".join(parts)
 
 
@@ -1659,11 +1732,17 @@ def build_fetch_data_kickoff(state, required_text: str = "") -> str:
     pads = (getattr(state, "scratchpads_context", "") or "").strip()
     if pads:
         parts.append(pads)
-    parts.append(
-        "Use the `scratchpad` tool to fetch a data sample, then call "
-        "`finish` with a precise summary of the scratchpads/cells and the "
-        "schema/sample you observed."
-    )
+    if settled_artifact_type(state) == "html-app":
+        parts.append(
+            "Use the `scratchpad` tool to read the data and save it as data files, "
+            "then call `finish` with a summary naming each file."
+        )
+    else:
+        parts.append(
+            "Use the `scratchpad` tool to fetch a data sample, then call "
+            "`finish` with a precise summary of the scratchpads/cells and the "
+            "schema/sample you observed."
+        )
     return "\n\n".join(parts)
 
 
@@ -1726,7 +1805,9 @@ TECH_SPEC_CARRY_FORWARD = (
     "what the build step needs and cannot get elsewhere: exact figures and "
     "computed values, quotes to display, image URLs, the source link, the "
     "full text of anything the artifact must reproduce exactly. Do not "
-    "paraphrase what must be reproduced exactly."
+    "paraphrase what must be reproduced exactly. Data under `## Data files` "
+    "reaches the build step in full: never copy its rows into the spec, refer "
+    "to a file by its id."
 )
 
 _TECH_SPEC_NO_RESTATE = (

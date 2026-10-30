@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -14,6 +15,7 @@ from .prompts import (
     STATIC_ARTIFACTS_PROMPT,
     VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
     VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
+    WITHOUT_DIRECT_REPORTS,
 )
 
 if TYPE_CHECKING:
@@ -26,6 +28,13 @@ if TYPE_CHECKING:
 # its own message with an explicit cache breakpoint, so it is cached across
 # projects and conversations; other transports send the prompt as one string.
 SESSION_CONTEXT_MARKER = "\n\n# SESSION CONTEXT (this project and conversation)\n"
+
+# The build-html-dashboard skill's pointer to the DIRECT REPORTS path. Matched
+# rather than cut with `cut_spans`: a skill description is data a project can
+# override, and a missing note must not break the prompt.
+DIRECT_REPORTS_SKILL_NOTE = re.compile(
+    r"\s*NOT needed to change the content of a report.*?DIRECT REPORTS\)\.", re.DOTALL
+)
 
 
 @dataclass(frozen=True)
@@ -75,7 +84,11 @@ class ChatSystemPromptBuilder:
         return "\n\n".join(chunks)
 
     def _build_procedural_memory_section(
-        self, skill_store: "SkillStore | None", *, fullstack_offered: bool = True
+        self,
+        skill_store: "SkillStore | None",
+        *,
+        fullstack_offered: bool = True,
+        direct_reports: bool = True,
     ) -> str:
         """Build the '## Procedural memory' section listing available skills.
 
@@ -113,6 +126,8 @@ class ChatSystemPromptBuilder:
         for s in summaries:
             label = s.get("label", "")
             when = s.get("description", "").strip()
+            if not direct_reports:
+                when = DIRECT_REPORTS_SKILL_NOTE.sub("", when).strip()
             if not label or (not fullstack_offered and label == "build-fullstack-backend"):
                 continue
             if when:
@@ -126,15 +141,16 @@ class ChatSystemPromptBuilder:
         *,
         proactive_dashboards: bool,
         output_dir: str,
+        direct_reports: bool = True,
     ) -> str:
-        visualizations_output_format_prompt = (
+        template = (
             VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT
             if proactive_dashboards
             else VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT
         )
-        output_format = visualizations_output_format_prompt.format(
-            output_dir=output_dir,
-        )
+        if not direct_reports:
+            template = WITHOUT_DIRECT_REPORTS[template]
+        output_format = template.format(output_dir=output_dir)
         return BASE_VISUALIZATIONS_PROMPT.format(output_format=output_format)
 
     def build(
@@ -156,6 +172,7 @@ class ChatSystemPromptBuilder:
         product_lines: list[str] | None = None,
         deployment_identity: DeploymentIdentity | None = None,
         fullstack_offered: bool = True,
+        direct_reports: bool = True,
     ) -> str:
         """``fullstack_offered`` False (`live_app_slots.fullstack_offered`)
         leaves out the fullstack types, the backend section and the backend
@@ -164,7 +181,12 @@ class ChatSystemPromptBuilder:
         visualizations_section = self._build_visualizations_section(
             proactive_dashboards=proactive_dashboards,
             output_dir=output_dir,
+            direct_reports=direct_reports,
         )
+
+        artifacts_section = ARTIFACTS_PROMPT if fullstack_offered else STATIC_ARTIFACTS_PROMPT
+        if not direct_reports:
+            artifacts_section = WITHOUT_DIRECT_REPORTS[artifacts_section]
 
         prompt = ""
 
@@ -191,7 +213,7 @@ class ChatSystemPromptBuilder:
             # not also introduce itself as Anton in the prompt's opening line.
             identity_lead="You are an AI coworker" if deployment_identity is not None else "You are Anton",
             runtime_identity_section=runtime_identity_section,
-            artifacts_section=ARTIFACTS_PROMPT if fullstack_offered else STATIC_ARTIFACTS_PROMPT,
+            artifacts_section=artifacts_section,
             visualizations_section=visualizations_section,
             conversation_discipline=conversation_discipline,
             conversation_started=conversation_started,
@@ -218,7 +240,7 @@ class ChatSystemPromptBuilder:
         # Saved skills change rarely (the built-ins plus the user's own), so
         # they stay in the shared part ahead of anything project-specific.
         procedural_memory = self._build_procedural_memory_section(
-            skill_store, fullstack_offered=fullstack_offered
+            skill_store, fullstack_offered=fullstack_offered, direct_reports=direct_reports
         )
         if procedural_memory:
             prompt += procedural_memory

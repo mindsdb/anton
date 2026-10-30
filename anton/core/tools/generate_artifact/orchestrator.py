@@ -25,11 +25,11 @@ from anton.core.artifacts.internal_files import (
 from anton.core.artifacts import live_app_slots
 from anton.core.llm.client import asked_model
 from anton.core.artifacts.store import BACKEND_LOG_FILENAME
-from anton.core.backends.sandbox import BACKENDS_OFF_MESSAGE, CellSandbox, cell_sandbox_of
+from anton.core.backends.sandbox import BACKENDS_OFF_MESSAGE, CellSandbox
 from anton.utils.datasources import scrub_output
 from anton.utils.nofollow import read_text_nofollow, write_text_nofollow
 
-from . import attachments, engine, prompts, verifiers
+from . import attachments, data_files, engine, prompts, verifiers
 from .discovery import checkpoint as cp
 from .discovery.orchestrator import CANCELLED, run_discovery
 from .discovery.notes import (  # noqa: F401  (EXEC_* re-exported: tests import them from here)
@@ -89,14 +89,17 @@ async def _decide(state: GenState, schema, prompt_pair, node: str) -> object:
 
 
 async def _fetch_data_sample(state: GenState, required_text: str = "") -> tuple[str, bool]:
-    """Run a scratchpad loop that pulls a data sample.
+    """Run a scratchpad loop that pulls the data the page needs.
 
-    Returns the notes for `data_notes` and whether the loop ran at least one
-    cell that succeeded — the only evidence the data loop accepts that data
-    was read.
+    Returns the notes for `data_notes` and whether the loop produced the
+    evidence the data loop accepts that data was read: for an html-app, a
+    valid data file saved to `.anton-data/`; otherwise at least one cell
+    that succeeded.
     """
     if state.public_sources is None:
         state.public_sources = _public_data_sources_skill(state.session)
+    save = settled_artifact_type(state) == "html-app"
+    before = data_files.snapshot(state.artifact_path) if save else {}
     try:
         result = await engine._run_loop(
             on_text=state.peek_for("fetch_data_sample"),
@@ -108,6 +111,7 @@ async def _fetch_data_sample(state: GenState, required_text: str = "") -> tuple[
                 project_rules=state.project_rules,
                 artifact_skills=state.artifact_skills,
                 user_language=state.user_language,
+                save_data=save,
             ),
             kickoff=prompts.build_fetch_data_kickoff(state, required_text),
             artifact_path=state.artifact_path,
@@ -126,15 +130,44 @@ async def _fetch_data_sample(state: GenState, required_text: str = "") -> tuple[
         # what stops the pipeline. Said plainly rather than folded into a
         # summary, which would read as a fetch that completed.
         return "(data fetch stopped: the turn's budget ran out mid-fetch)", False
-    summary = result.get("summary") or "(fetch produced no summary)"
+    step_summary = result.get("summary") or ""
+    summary = step_summary or "(fetch produced no summary)"
     execs = result.get("scratchpad_execs") or []
     exec_notes = _render_exec_notes(execs)
     if exec_notes:
         summary += "\n\n" + exec_notes
-    ok = any(e.get("ok", True) for e in execs)
-    if not ok:
-        summary += "\n\n(the fetch step ran no cell that succeeded)"
-    return summary, ok
+    if not save:
+        ok = any(e.get("ok", True) for e in execs)
+        if not ok:
+            summary += "\n\n(the fetch step ran no cell that succeeded)"
+        return summary, ok
+    new_ids = data_files.written_since(state.artifact_path, before)
+    # Only the step's own summary names files: the notes appended above carry cell code too.
+    named = [i for i in new_ids if data_files.rel_name(i) in step_summary]
+    sources = list(state.unverified_sources or state.declared_sources or ["fetched data"])
+    candidates = [
+        data_files.DataFile(id=i, sources=sources, description=step_summary[:300])
+        for i in (named or new_ids)
+    ]
+    valid, errors = data_files.state_check_declared(state, candidates, sources)
+    if errors:
+        summary += "\n\n(data files rejected: " + "; ".join(errors) + ")"
+    if not valid:
+        summary += "\n\n(the fetch saved no valid data file to .anton-data/)"
+        return summary, False
+    new_ids = {f.id for f in valid}
+    others = [f for f in state.data_files if f.id not in new_ids]
+    # The page carries every file, so the limit applies to all of them together.
+    size_error = data_files.check_total_size(
+        state.artifact_path, others + valid, cell_sandbox=_cell_sandbox(state)
+    )
+    if size_error:
+        summary += f"\n\n({size_error})"
+        return summary, False
+    state.data_files = others + valid
+    state.loop_data_ids += [i for i in sorted(new_ids, key=int) if i not in state.loop_data_ids]
+    data_files.clear_data_not_saved(state)
+    return summary, True
 
 
 def _absorb_discovery_notes(state: GenState) -> None:
@@ -358,6 +391,13 @@ async def _write_tech_spec(state: GenState) -> str | None:
         # conversation, so it continues it rather than being handed a summary.
         system = state.pipeline_system
         user = prompts.build_tech_spec_instruction(state)
+        # The data loop ran after the gathering history this call continues.
+        loop_files = [f for f in state.data_files if f.id in state.loop_data_ids]
+        if loop_files:
+            section = data_files.files_section(
+                state.artifact_path, loop_files, cell_sandbox=_cell_sandbox(state)
+            )
+            user = section + "\n\n" + user
         messages = state.messages
         tools = state.pipeline_tools
     else:
@@ -429,6 +469,9 @@ def _spec_context(state: GenState) -> str:
     known = prompts.known_data_section(state)
     if known:
         parts.append(known)
+    files = data_files.state_files_section(state)
+    if files:
+        parts.append(files)
     journal = state.journal()
     if journal:
         parts.append("## Progress journal (steps completed so far)\n" + journal)
@@ -466,7 +509,7 @@ async def _make_api_spec(state: GenState) -> str | None:
 
 def _cell_sandbox(state: GenState) -> CellSandbox | None:
     """The sandbox policy the session's scratchpads run agent code under, or None."""
-    return cell_sandbox_of(getattr(state.session, "_scratchpads", None))
+    return data_files.sandbox_of(state.session)
 
 
 def _runs_live_apps(state: GenState) -> bool:
@@ -1074,6 +1117,12 @@ async def _gen_verify_frontend(
             # each asset can be megabytes, and every conversation in the
             # process waits on this loop.
             await asyncio.to_thread(_embed_attachments, state, entry_file)
+            fatal = await asyncio.to_thread(_fill_data_blocks, state, entry_file)
+            if fatal is not None:
+                # Another attempt cannot shrink the data or bring a file back.
+                state.record("verify_frontend", "fail", fatal)
+                state.error = fatal
+                return state.error
         if entry_file is None:
             # One channel: this message rides on VerifyResult like every other
             # check — otherwise the contract lock cannot see it and the terminal
@@ -1092,6 +1141,7 @@ async def _gen_verify_frontend(
                     verifiers.contract_operations(state.api_spec)
                 ) if state.is_fullstack else None,
                 live_app=state.is_fullstack and _runs_live_apps(state),
+                data_ids=None if state.is_fullstack else {f.id for f in state.data_files},
             )
             if verdict.ok and not state.is_fullstack:
                 # Second gate, only once the text checks pass and only for the
@@ -1640,6 +1690,44 @@ def _embed_attachments(state: GenState, entry_file: Path) -> None:
         state.trace_log.node("verify_frontend", "embed_skipped", "the page could not be rewritten")
 
 
+def _fill_data_blocks(state: GenState, entry_file: Path) -> str | None:
+    """Put each data file into its block on the html-app page, before the page
+    is verified. Returns the error that ends the run, or None. Written under
+    `page_lock`, like `_embed_attachments`, and not at all once the run was
+    given up.
+
+    A page that cannot be read or written here ends the run: the checks that
+    follow read it by following links and would pass a page without its data."""
+    if not state.data_files:
+        return None
+    try:
+        html = read_text_nofollow(state.artifact_path, entry_file)
+    except (OSError, ValueError) as exc:
+        state.trace_log.node("verify_frontend", "fill_skipped", "the page could not be read")
+        return _page_not_filled("read", exc)
+    result = data_files.fill_page(
+        html, state.artifact_path, state.data_files, cell_sandbox=_cell_sandbox(state)
+    )
+    if result.fatal is not None:
+        return result.fatal
+    if result.html != html:
+        with state.page_lock:
+            if state.abandoned.is_set():
+                return None
+            try:
+                write_text_nofollow(state.artifact_path, entry_file, result.html)
+            except (OSError, ValueError) as exc:
+                return _page_not_filled("written", exc)
+    return None
+
+
+def _page_not_filled(action: str, exc: Exception) -> str:
+    return (
+        f"The page could not be {action} to fill its data blocks ({exc}), so it cannot "
+        "show its data. Call generate_artifact again."
+    )
+
+
 def _note_skipped(state: GenState, text: str) -> None:
     """Record a check that did not run, once per distinct reason.
 
@@ -1730,6 +1818,8 @@ def _save_checkpoint(state: GenState, stage: str) -> None:
             attachments=[a.to_dict() for a in state.attachments],
             known_data=state.known_data,
             known_data_verified=list(state.known_data_verified),
+            data_files=[f.to_dict() for f in state.data_files],
+            data_not_saved=state.data_not_saved,
         ),
     )
 
@@ -1770,6 +1860,9 @@ def _brief_fields(state: GenState) -> dict:
 
 def _finish(state: GenState) -> dict:
     _save_checkpoint(state, cp.STAGE_GENERATED)
+    # Only a finished build deletes data: one that stopped may still be resumed
+    # or reused from the files it leaves.
+    data_files.prune(state.artifact_path, {f.id for f in state.data_files})
     return {"status": "generated", **_result_shell(state), **_brief_fields(state)}
 
 

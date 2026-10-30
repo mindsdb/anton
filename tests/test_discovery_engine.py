@@ -3,15 +3,19 @@ generate_artifact/engine.py's `_run_loop` shape, with ask_user routed
 through sub_tools.dispatch_ask_user instead of handle_ask_user."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from anton.core.artifacts.internal_files import DATA_DIRNAME
 from anton.core.llm.provider import LLMResponse, ToolCall, Usage
+from anton.core.tools.generate_artifact.data_files import DATA_NOT_SAVED_WARNING
 from anton.core.tools.generate_artifact.discovery import engine
 from anton.core.tools.generate_artifact.discovery.state import PrdState
+from anton.core.tools.registry import ToolOutcome
 from tests.streaming_llm import StreamingLLM
 
 
@@ -533,11 +537,224 @@ async def test_a_cell_that_left_out_action_is_recorded_and_verifies_its_source(m
             "artifact_type": "html-app",
             "data_sources": ["hr table"],
         })]),
+        _response(tool_calls=[_tc("finish_gathering", {
+            "summary": "ok",
+            "artifact_type": "html-app",
+            "data_sources": ["hr table"],
+        })]),
     )
     state = _state(session)
     await engine.run_gathering_loop(state)
     assert [(x["code"], x["output"]) for x in state.scratchpad_execs] == [("print(2)", "[output] 504 rows")]
     assert state.unverified_sources == []
+    assert "save the data the page needs" in state.messages[4]["content"][0]["content"]
+
+
+def _save(tmp_path, file_id="1", rows=None):
+    (tmp_path / DATA_DIRNAME).mkdir(exist_ok=True)
+    (tmp_path / DATA_DIRNAME / f"{file_id}.json").write_text(json.dumps(rows or [{"Id": "SO-5001"}]))
+
+
+def _finish_with_files(data_files=None, sources=("orders",), findings=None):
+    inp = {"summary": "ok", "artifact_type": "html-app", "data_sources": list(sources)}
+    if data_files is not None:
+        inp["data_files"] = data_files
+    if findings is not None:
+        inp["data_findings"] = findings
+    return _response(tool_calls=[_tc("finish_gathering", inp)])
+
+
+async def test_a_valid_data_file_verifies_its_source_and_reaches_the_history(tmp_path):
+    _save(tmp_path)
+    state = _state(_session_with_plan_sequence(
+        _finish_with_files([{"id": "1", "sources": ["orders"], "description": "order lines"}]),
+    ), artifact_path=tmp_path)
+    await engine.run_gathering_loop(state)
+    assert state.gathering_complete is True
+    assert [f.id for f in state.data_files] == ["1"]
+    assert state.unverified_sources == []
+    result = state.messages[-1]["content"][0]["content"]
+    assert result.startswith("ok") and "## Data files" in result and "SO-5001" in result
+
+
+async def test_an_invalid_data_file_is_sent_back(tmp_path):
+    state = _state(_session_with_plan_sequence(
+        _finish_with_files([{"id": "1", "sources": ["orders"]}]),
+        _finish_with_files([]),
+    ), artifact_path=tmp_path)
+    await engine.run_gathering_loop(state)
+    first = state.messages[2]["content"][0]["content"]
+    assert "does not exist" in first and "finish_gathering" in first
+    assert state.gathering_complete is True
+
+
+async def test_a_pad_reference_without_a_file_is_sent_back_once_then_fetched(tmp_path):
+    state = _state(_session_with_plan_sequence(
+        _finish_with_files(findings=[{"source": "orders", "verified_by": "known_data"}]),
+        _finish_with_files(findings=[{"source": "orders", "verified_by": "known_data"}]),
+    ), artifact_path=tmp_path, known_data="scratchpad `supply_kpi`, variable `frames`",
+        pad_names=["supply_kpi"])
+    await engine.run_gathering_loop(state)
+    assert "save the data the page needs" in state.messages[2]["content"][0]["content"]
+    assert state.unverified_sources == ["orders"]
+    assert state.known_data_verified == []
+
+
+async def test_a_pad_reference_keeps_a_web_source_verified(monkeypatch, tmp_path):
+    import anton.core.tools.web_tools as web_tools
+
+    monkeypatch.setattr(web_tools, "handle_web_fetch_fallback", AsyncMock(return_value="page"))
+    _save(tmp_path)
+    state = _state(_session_with_plan_sequence(
+        _response(tool_calls=[_tc("web_fetch", {"url": "https://example.com/a"})]),
+        _finish_with_files(
+            [{"id": "1", "sources": ["orders"]}], sources=("orders", "article"),
+            findings=[{"source": "article", "verified_by": "https://example.com/a"}],
+        ),
+    ), artifact_path=tmp_path, known_data="scratchpad `supply_kpi`, variable `frames`",
+        pad_names=["supply_kpi"])
+    await engine.run_gathering_loop(state)
+    assert state.unverified_sources == []
+
+
+async def test_data_read_by_a_cell_and_not_saved_is_sent_back_once_then_warned(monkeypatch, tmp_path):
+    async def fake_handle_scratchpad(session, inp):
+        return ToolOutcome(content="[output] 504 rows", ok=True)
+
+    monkeypatch.setattr("anton.core.tools.tool_handlers.handle_scratchpad", fake_handle_scratchpad)
+    state = _state(_session_with_plan_sequence(
+        _response(tool_calls=[_tc("scratchpad", {"action": "exec", "name": "hr", "code": "print(2)"})]),
+        _finish_with_files(),
+        _finish_with_files(),
+    ), artifact_path=tmp_path)
+    await engine.run_gathering_loop(state)
+    assert "save the data the page needs" in state.messages[4]["content"][0]["content"]
+    assert state.unverified_sources == []
+    assert any(s.outcome == "data_not_saved" for s in state.trace)
+    assert DATA_NOT_SAVED_WARNING in state.verify_warnings
+    assert state.data_not_saved is True
+
+
+async def test_a_cell_check_on_rows_given_in_known_data_is_not_sent_back(monkeypatch, tmp_path):
+    async def fake_handle_scratchpad(session, inp):
+        return ToolOutcome(content="[output] float64", ok=True)
+
+    monkeypatch.setattr("anton.core.tools.tool_handlers.handle_scratchpad", fake_handle_scratchpad)
+    state = _state(_session_with_plan_sequence(
+        _response(tool_calls=[_tc("scratchpad", {"action": "exec", "name": "hr", "code": "print(2)"})]),
+        _finish_with_files(findings=[{"source": "orders", "verified_by": "known_data"}]),
+    ), artifact_path=tmp_path, known_data="Q1: 120, Q2: 140")
+    await engine.run_gathering_loop(state)
+    assert state.messages[4]["content"][0]["content"] == "ok"
+    assert state.gathering_complete is True
+    assert state.data_not_saved is False
+    assert DATA_NOT_SAVED_WARNING not in state.verify_warnings
+
+
+@pytest.mark.parametrize("known_data, pad_names", [
+    ("", []),
+    ("scratchpad `supply_kpi`, variable `frames`", ["supply_kpi"]),
+])
+async def test_a_re_entry_that_lists_no_files_keeps_the_saved_ones(monkeypatch, tmp_path, known_data, pad_names):
+    async def fake_handle_scratchpad(session, inp):
+        return ToolOutcome(content="[output] 504 rows", ok=True)
+
+    monkeypatch.setattr("anton.core.tools.tool_handlers.handle_scratchpad", fake_handle_scratchpad)
+    _save(tmp_path)
+    state = _state(_session_with_plan_sequence(
+        _response(tool_calls=[_tc("scratchpad", {"action": "exec", "name": "hr", "code": "print(2)"})]),
+        _finish_with_files([{"id": "1", "sources": ["orders"]}]),
+        _finish_with_files(),
+    ), artifact_path=tmp_path, known_data=known_data, pad_names=pad_names)
+    await engine.run_gathering_loop(state)
+    await engine.run_gathering_loop(state)
+    assert [f.id for f in state.data_files] == ["1"]
+    assert state.messages[-1]["content"][0]["content"].startswith("ok")
+    assert state.gathering_complete is True
+    assert state.unverified_sources == []
+    assert state.data_not_saved is False
+
+
+@pytest.mark.parametrize("re_entry", [False, True])
+async def test_a_refused_save_left_unanswered_hands_the_sources_to_the_data_loop(tmp_path, re_entry):
+    state = _state(_session_with_plan_sequence(
+        _finish_with_files(findings=[{"source": "orders", "verified_by": "known_data"}]),
+        _response("the data is in the pad"),
+    ), artifact_path=tmp_path, known_data="scratchpad `supply_kpi`, variable `frames`",
+        pad_names=["supply_kpi"], gathering_complete=re_entry)
+    await engine.run_gathering_loop(state)
+    assert "save the data the page needs" in state.messages[2]["content"][0]["content"]
+    assert state.gathering_complete is False
+    assert state.unverified_sources == ["orders"]
+
+
+async def test_a_refused_data_file_left_unanswered_reopens_gathering(tmp_path):
+    state = _state(_session_with_plan_sequence(
+        _finish_with_files([{"id": "1", "sources": ["orders"]}]),
+        _response("done"),
+    ), artifact_path=tmp_path, gathering_complete=True)
+    await engine.run_gathering_loop(state)
+    assert "does not exist" in state.messages[2]["content"][0]["content"]
+    assert state.gathering_complete is False
+
+
+async def test_a_refused_data_file_left_unanswered_hands_the_sources_to_the_data_loop(tmp_path):
+    state = _state(_session_with_plan_sequence(
+        _finish_with_files([{"id": "1", "sources": ["orders"]}]),
+        _response("the data is in the pad"),
+    ), artifact_path=tmp_path, known_data="scratchpad `supply_kpi`, variable `frames`",
+        pad_names=["supply_kpi"])
+    await engine.run_gathering_loop(state)
+    assert "does not exist" in state.messages[2]["content"][0]["content"]
+    assert state.gathering_complete is False
+    assert state.unverified_sources == ["orders"]
+
+
+async def test_a_refused_call_does_not_count_its_valid_files_as_saved(tmp_path):
+    _save(tmp_path, "1")
+    state = _state(_session_with_plan_sequence(
+        _finish_with_files(
+            [{"id": "1", "sources": ["orders"]}, {"id": "2", "sources": ["regions"]}],
+            sources=("orders", "regions"),
+        ),
+        _response("the data is in the pad"),
+    ), artifact_path=tmp_path, known_data="scratchpad `supply_kpi`, variable `frames`",
+        pad_names=["supply_kpi"])
+    await engine.run_gathering_loop(state)
+    assert "does not exist" in state.messages[2]["content"][0]["content"]
+    assert state.gathering_complete is False
+    assert state.data_files == []
+    assert state.unverified_sources == ["orders", "regions"]
+
+
+async def test_each_gathering_pass_gets_its_own_save_refusal(monkeypatch, tmp_path):
+    async def fake_handle_scratchpad(session, inp):
+        return ToolOutcome(content="[output] 504 rows", ok=True)
+
+    monkeypatch.setattr("anton.core.tools.tool_handlers.handle_scratchpad", fake_handle_scratchpad)
+    cell = _response(tool_calls=[_tc("scratchpad", {"action": "exec", "name": "hr", "code": "print(2)"})])
+    state = _state(_session_with_plan_sequence(
+        cell, _finish_with_files(), _finish_with_files(),
+        cell, _finish_with_files(), _finish_with_files(),
+    ), artifact_path=tmp_path)
+    await engine.run_gathering_loop(state)
+    assert state.data_save_requested is True
+    first_pass_len = len(state.messages)
+    await engine.run_gathering_loop(state)
+    results = [
+        b["content"] for m in state.messages[first_pass_len:] if isinstance(m["content"], list)
+        for b in m["content"] if b.get("type") == "tool_result"
+    ]
+    assert "save the data the page needs" in results[1]
+
+
+async def test_a_fullstack_gathering_ignores_data_files(tmp_path):
+    state = _state(_session_with_plan_sequence(_response(tool_calls=[_tc("finish_gathering", {
+        "summary": "ok", "artifact_type": "fullstack-stateless-app", "data_sources": ["orders"],
+        "data_files": [{"id": "1", "sources": ["orders"]}],
+    })])), artifact_path=tmp_path)
+    await engine.run_gathering_loop(state)
+    assert state.data_files == [] and state.gathering_complete is True
 
 
 _SITES = "site,lat,lon\nToronto,43.7,-79.4\nAustin,30.3,-97.7"

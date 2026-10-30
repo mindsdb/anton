@@ -102,9 +102,8 @@ from anton.core.backends.manager import ScratchpadManager
 from anton.core.tools.registry import ToolOutcome, ToolRegistry
 from anton.core.turn_cost import UNKNOWN_ROLE, TurnCost
 from anton.core.tools.tool_defs import (
+    ARTIFACT_ROUTING_TOOLS,
     ASK_USER_TOOL,
-    CREATE_ARTIFACT_TOOL,
-    GENERATE_ARTIFACT_TOOL,
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
@@ -114,8 +113,6 @@ from anton.core.tools.tool_defs import (
     SCRATCHPAD_TOOL,
     SELECT_PATH_TOOL,
     SELECT_PATH_TOOL_PICK_ONLY,
-    STATIC_CREATE_ARTIFACT_TOOL,
-    STATIC_GENERATE_ARTIFACT_TOOL,
     STATIC_UPDATE_ARTIFACT_METADATA_TOOL,
     UPDATE_ARTIFACT_METADATA_TOOL,
     ToolDef,
@@ -2932,6 +2929,12 @@ class ChatSession:
             getattr(cell, "code", "")
         )
 
+    def _direct_reports_enabled(self) -> bool:
+        """`direct_reports` from the settings the host passed; True without
+        them. Read from the settings object, not a config field: a host that
+        builds `ChatSessionConfig` itself still passes its settings."""
+        return bool(getattr(getattr(self, "_settings", None), "direct_reports", True))
+
     async def _build_system_prompt(self, user_message: str = "") -> str:
         import datetime as _dt
 
@@ -3020,6 +3023,7 @@ class ChatSession:
             ),
             deployment_identity=getattr(self, "_deployment_identity", None),
             fullstack_offered=getattr(self, "_fullstack_offered", True),
+            direct_reports=self._direct_reports_enabled(),
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
             output_dir=self._output_dir,
@@ -3279,14 +3283,15 @@ class ChatSession:
         # entirely so the LLM doesn't try to use them.
         if self._workspace is not None:
             fullstack = self._fullstack_offered
-            self.tool_registry.register_tool(CREATE_ARTIFACT_TOOL if fullstack else STATIC_CREATE_ARTIFACT_TOOL)
+            create, generate = ARTIFACT_ROUTING_TOOLS[(fullstack, self._direct_reports_enabled())]
+            self.tool_registry.register_tool(create)
             self.tool_registry.register_tool(LIST_ARTIFACTS_TOOL)
             self.tool_registry.register_tool(
                 UPDATE_ARTIFACT_METADATA_TOOL if fullstack else STATIC_UPDATE_ARTIFACT_METADATA_TOOL
             )
             if fullstack:
                 self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
-            self.tool_registry.register_tool(GENERATE_ARTIFACT_TOOL if fullstack else STATIC_GENERATE_ARTIFACT_TOOL)
+            self.tool_registry.register_tool(generate)
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""

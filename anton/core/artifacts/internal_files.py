@@ -55,6 +55,9 @@ BACKEND_LOG_FILENAME = "backend.log"
 STATE_DB_FILENAME = ".anton_state.db"
 STATE_SNAPSHOT_FILENAME = ".state_manifest.published.json"
 REVISIONS_DIRNAME = ".revisions"
+# Data the gathering and data-loop cells save for an html-app page. The page
+# carries the same data inline, so the files are never content of their own.
+DATA_DIRNAME = ".anton-data"
 
 # Store-owned, publish-state or running-backend files, not authored content.
 # `state_manifest.json` is deliberately absent: it is a deliverable the
@@ -72,7 +75,7 @@ HOUSEKEEPING_FILES = frozenset({
 
 # Separate from the file set because `store._reconcile` matches the two
 # differently (see there).
-HOUSEKEEPING_DIRS = frozenset({REVISIONS_DIRNAME})
+HOUSEKEEPING_DIRS = frozenset({REVISIONS_DIRNAME, DATA_DIRNAME})
 
 NON_CONTENT_NAMES = HOUSEKEEPING_FILES | GENERATION_INPUT_FILES | HOUSEKEEPING_DIRS
 

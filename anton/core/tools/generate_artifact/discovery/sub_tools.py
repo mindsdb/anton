@@ -100,9 +100,10 @@ FINISH_GATHERING_SCHEMA: dict = {
                             "description": (
                                 "How the sample was obtained: scratchpad "
                                 "name and cell, the URL fetched, or "
-                                "`known_data` when the rows or values are "
-                                "already in the known data the calling "
-                                "agent passed in."
+                                "`known_data` when the rows or values "
+                                "themselves are in the text of the known "
+                                "data the calling agent passed in (a "
+                                "reference to a scratchpad is not)."
                             ),
                         },
                         "shape": {
@@ -123,6 +124,32 @@ FINISH_GATHERING_SCHEMA: dict = {
                     "One entry per source in `data_sources`: what was "
                     "actually seen. Empty when the artifact needs no "
                     "external data."
+                ),
+            },
+            "data_files": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "The file's id: `<id>.json` in the data files folder.",
+                        },
+                        "sources": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "The `data_sources` names this file covers, exactly as listed there.",
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "What the data is: filters, scope, units, as of when.",
+                        },
+                    },
+                    "required": ["id", "sources"],
+                },
+                "description": (
+                    "html-app only: the data files saved for the page, written by a scratchpad "
+                    "cell in this step or listed under `## Saved data files`."
                 ),
             },
             "constraints": {

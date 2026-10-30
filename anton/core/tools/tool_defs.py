@@ -461,16 +461,24 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "proposes those to the user itself, and anything you put here is "
         "shown to them in the brief as something decided for them. One or "
         "two sentences is the normal size.\n"
-        "- `known_data` (optional): the data you already have for it. When "
-        "you already read the rows or values the artifact shows and they "
-        "are small (a few hundred rows at most), paste them here: an "
-        "html-app is then built from them without fetching them again. A "
-        "description of the data without its values does not count. If you "
-        "already fetched something, also NAME THE SCRATCHPAD it lives in "
-        "(and the cell): the tool runs its own checks in that pad and "
-        "cannot find it otherwise. Pass it on every call that needs it: a "
-        "new request on an artifact that was already built does not reuse "
-        "the earlier call's `known_data`.\n"
+        "- `known_data` (optional): the data you already have for it. Every "
+        "value comes from the user, your instructions or a tool's output (a "
+        "scratchpad cell, a file you read, a web page), never from arithmetic "
+        "you did in your head. Compute each derived figure (a total, "
+        "difference, share, average) in a scratchpad cell first, then paste "
+        "the value it printed or keep it in a variable you list in the "
+        "reference. Paste small values themselves (a few figures or a short "
+        "table), copied from that output; rounding for display is fine. Do "
+        "not name a scratchpad next to pasted values: any scratchpad named "
+        "here makes the tool read the data from it. For data in "
+        "a scratchpad, pass a reference instead of the rows: the scratchpad in "
+        "backticks, each variable that holds the data and its type, e.g. "
+        "\"scratchpad `sales`, variable `orders` (DataFrame)\"; "
+        "also give the row count, fields, filters and as-of date when you know "
+        "them. The tool saves that data from the scratchpad itself, so it is "
+        "never retyped. Pass it on every call that needs it: a new request on "
+        "an artifact that was already built does not reuse the earlier call's "
+        "`known_data`.\n"
         "- `user_preferences` (optional): preferences the user stated "
         "themselves, in this or an earlier conversation (language, style, "
         "preferred APIs). Never infer a preference from an artifact you "
@@ -542,16 +550,23 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
             "known_data": {
                 "type": "string",
                 "description": (
-                    "The data already known for this artifact. Paste the "
-                    "rows or values themselves when you already read them "
-                    "and they are small (a few hundred rows at most): an "
-                    "html-app is built from them without fetching them "
-                    "again, and a description without the values does not "
-                    "count. If you already fetched something, also name the "
-                    "scratchpad it lives in (and the cell) — the tool reuses "
-                    "that pad for its own checks and cannot find it "
-                    "otherwise. A new request on a built artifact does not "
-                    "reuse the earlier call's value: pass it again."
+                    "The data already known for this artifact, from the user, "
+                    "your instructions or a tool's output, never from "
+                    "arithmetic you did in your head. Compute each derived "
+                    "figure (a total, difference, share, average) in a "
+                    "scratchpad cell first, then paste the value it printed or "
+                    "keep it in a variable you list in the reference. Give "
+                    "small values themselves, copied from that output and "
+                    "without naming a scratchpad, or a reference to data in a "
+                    "scratchpad — the "
+                    "scratchpad in backticks, each variable and its type, e.g. "
+                    "\"scratchpad `sales`, variable `orders` (DataFrame)\", "
+                    "plus row count, fields, filters and as-of "
+                    "date when known. The tool saves referenced data itself. A "
+                    "new request on a built artifact does not reuse the earlier "
+                    "call's value: pass it again, and say when the data in the "
+                    "scratchpad changed since then — the same text reuses the "
+                    "data saved last time."
                 ),
             },
             "user_preferences": {
@@ -677,6 +692,53 @@ STATIC_UPDATE_ARTIFACT_METADATA_TOOL = replace(
         },
     },
 )
+
+
+def _without_direct_reports(tool: ToolDef) -> ToolDef:
+    """`tool` with the DIRECT REPORTS routing dropped from its texts."""
+    if tool.name == "create_artifact":
+        return replace(tool, description=cut_spans(
+            tool.description,
+            (
+                ": a report the user has fully specified you build yourself "
+                "(DIRECT REPORTS in the ARTIFACTS section); anything else goes to",
+                " `generate_artifact(",
+                ": it goes to",
+            ),
+        ))
+    return replace(
+        tool,
+        description=cut_spans(
+            tool.description,
+            (
+                " whose requirements still need agreeing (a report the user has fully "
+                "specified is built directly — see DIRECT REPORTS)",
+                ".",
+                "",
+            ),
+        ),
+        prompt=cut_spans(
+            tool.prompt,
+            (" whose requirements still need agreeing", ",", ""),
+            ("; a report the user has fully specified is built directly (DIRECT REPORTS)", ".\n", ""),
+        ),
+    )
+
+
+CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(CREATE_ARTIFACT_TOOL)
+STATIC_CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(STATIC_CREATE_ARTIFACT_TOOL)
+GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(GENERATE_ARTIFACT_TOOL)
+STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(STATIC_GENERATE_ARTIFACT_TOOL)
+# (fullstack offered, direct reports) -> the `create_artifact` and `generate_artifact` tools.
+ARTIFACT_ROUTING_TOOLS = {
+    (True, True): (CREATE_ARTIFACT_TOOL, GENERATE_ARTIFACT_TOOL),
+    (True, False): (CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS, GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS),
+    (False, True): (STATIC_CREATE_ARTIFACT_TOOL, STATIC_GENERATE_ARTIFACT_TOOL),
+    (False, False): (
+        STATIC_CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
+        STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
+    ),
+}
 
 
 

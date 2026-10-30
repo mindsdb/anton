@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +28,8 @@ if TYPE_CHECKING:
     from anton.core.artifacts.render_check import CheckedView, Comparison, RenderScreenshot, RenderStatus, ViewCoverage
     from anton.core.tools.tool_handlers import PageKey
     from anton.utils.datasources import DatasourceCatalog
+
+    from .data_files import DataFile
 
 # ── Budgets (see design spec) ────────────────────────────────────────────────
 DATA_LOOP_MAX: int = 3
@@ -258,14 +261,39 @@ def settled_artifact_type(state) -> str:
     return state.final_artifact_type or state.artifact_type
 
 
+_PAD_IN_BACKTICKS = re.compile(r"\b(?:scratch)?pad\s+`[^`\s]+`", re.IGNORECASE)
+
+
+def known_data_is_reference(state) -> bool:
+    """Whether `known_data` points at data in a pad: "scratchpad `<name>`"
+    for any name, or one of the session's pads in backticks or right after
+    "scratchpad"/"pad". Text that also carries values counts as a reference:
+    the pad holds the full rows."""
+    text = getattr(state, "known_data", "") or ""
+    if _PAD_IN_BACKTICKS.search(text):
+        return True
+    for name in getattr(state, "pad_names", None) or []:
+        escaped = re.escape(name)
+        if re.search(rf"`{escaped}`", text):
+            return True
+        if re.search(rf"\b(?:scratch)?pad\s+`?{escaped}(?![\w-])", text, re.IGNORECASE):
+            return True
+    return False
+
+
 def known_data_usable(state) -> bool:
     """Whether `known_data` can stand in for executed code.
 
-    Only for an html-app, whose page embeds a snapshot. A fullstack backend
+    Only for an html-app, whose page embeds a snapshot, and only when it
+    holds the values rather than a reference to a pad. A fullstack backend
     reads its source at run time and needs working access code in
     `data_notes`.
     """
-    return settled_artifact_type(state) == "html-app" and bool((state.known_data or "").strip())
+    return (
+        settled_artifact_type(state) == "html-app"
+        and bool((state.known_data or "").strip())
+        and not known_data_is_reference(state)
+    )
 
 
 @dataclass
@@ -446,6 +474,26 @@ class GenState:
     # iteration that brings no `known_data` puts them back in
     # `unverified_sources`: nothing else vouches for them.
     known_data_verified: list[str] = field(default_factory=list)
+    # Data files this run builds the page from (`data_files.DataFile`):
+    # declared by gathering or a redraw, or found after a data-loop fetch.
+    data_files: list["DataFile"] = field(default_factory=list)
+    # The previous build's files a new request may list again.
+    previous_data_files: list["DataFile"] = field(default_factory=list)
+    # `data_files.snapshot` when the run started: those files are only reused,
+    # never rewritten.
+    data_snapshot: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # The current gathering pass was already sent back once to save its data.
+    # Reset at the start of each pass. Not persisted.
+    data_save_requested: bool = False
+    # The session's agent pads, to tell a reference to pad data in
+    # `known_data` from the values themselves.
+    pad_names: list[str] = field(default_factory=list)
+    # Gathering read data with code and did not save it. Persisted: in the
+    # ask-first flow the page is built by the next call, which must still warn.
+    data_not_saved: bool = False
+    # Ids the data loop saved this call. The spec step on the hot path sees
+    # only the gathering history, so these are shown to it separately.
+    loop_data_ids: list[str] = field(default_factory=list)
     # Raw material for the deterministic renderers in discovery/notes.py.
     scratchpad_execs: list[dict] = field(default_factory=list)
     web_calls: list[dict] = field(default_factory=list)
