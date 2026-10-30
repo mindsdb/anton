@@ -144,6 +144,11 @@ def parse_skill_dir(skill_dir: Path) -> AgentSkill | None:
         )
         return None
 
+    return parse_skill_text(text, folder_name)
+
+
+def parse_skill_text(text: str, folder_name: str) -> AgentSkill | None:
+    """Parse SKILL.md *text* into a ``Skill``; *folder_name* is the name fallback."""
     opening = _DELIMITER_LINE.match(text)
     if opening is None:
         logger.debug("parse_skill_md: no opening '---' delimiter")

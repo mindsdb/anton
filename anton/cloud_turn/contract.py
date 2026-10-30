@@ -188,8 +188,13 @@ class TurnRequestV1:
     #: "project": {...}}, slot in profile|rules|lessons. Read-only in the pod.
     memory: dict | None = None
     #: Optional skills cowork resolved for this tenant + project:
-    #: {slug: {"files": {relpath: text}}}. Staged read-only in the pod; the pod
-    #: never writes skills back (agent-built skills are a desktop draft flow).
+    #: {slug: {"files": {relpath: text}, "always_on": bool}}. Staged read-only in
+    #: the pod; the pod never writes skills back (agent-built skills are a
+    #: desktop draft flow). ``"always_on": true`` (org and team skills) also puts
+    #: the skill's SKILL.md body into every turn's prompt; absent means recall only.
+    #: When present (even ``{}``), the block is the complete set of skills the
+    #: turn may recall or list; only a request without it falls back to the
+    #: pod's mounted org skills tree.
     skills: dict | None = None
     #: Optional trace-attribution block cowork resolved for this turn:
     #: ``{"surface": "web", "cowork_server_version": ..., "install_channel": ...}``,
