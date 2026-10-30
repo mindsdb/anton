@@ -1427,13 +1427,14 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolO
 # The tool reason for each live-app launch failure; `root_cause` tiers each one.
 _LIVE_APP_FAILURE_REASONS: "dict[LaunchFailure, str]" = {
     "no_host": "live_app_unavailable",
+    "launches_disabled": "live_app_unavailable",
     "config": "live_app_unavailable",
     "no_slot": "live_app_unavailable",
     "slot_reset": "live_app_unavailable",
     "slot_unavailable": "live_app_unavailable",
     "slots_full": "live_app_slots_full",
     "slots_changed": "live_app_slots_full",
-    "slot_busy": "live_app_slots_full",
+    "slot_busy": "live_app_slots_busy",
     "launch_files": "live_app_invalid_files",
     "missing_package": "live_app_missing_package",
     "app_not_ready": "launch_failed",
@@ -1792,10 +1793,16 @@ _STATUS_INSTRUCTIONS = {
         "`read_text_file`, then change it in a scratchpad cell to fix the code "
         "each finding names. Leave the `data-anton-data` blocks as they are: "
         "each holds the page's data on a line of its own, so read the page by "
-        "line ranges around them. Keep every view, its tab and its `runView` call, "
-        "and keep the `runView` helper with its `console.error`: a repair "
-        "fixes a view's code, it never removes the view or its error report "
-        "to quiet a finding. The browser check runs after each cell that "
+        "line ranges around them. When a view failed with \"no script defined this "
+        "view\", its own script did not parse, or it registered the view under "
+        "another title: fix that view's script. When views failed with \"two "
+        "scripts defined this view\", two views share that title: give one a "
+        "title of its own, in its `defineView` and its `runView` call. "
+        "Keep every view, its tab and its `runView` call, keep each view's "
+        "code in a `<script>` of its own, and keep the `runView` helper with "
+        "its `console.error`: a repair fixes a view's code, it never removes "
+        "the view or its error report to quiet a finding, and never merges "
+        "views' scripts. The browser check runs after each cell that "
         "changes the page, and this page gets `repair_cells` repair cells this "
         "turn; when a cell's result says none are left, stop editing the page. "
         "Do NOT call generate_artifact again for this page: it would rebuild "

@@ -750,8 +750,12 @@ class TestPipelineContractMirrored:
         # Every view's setup goes through one helper, so a view that fails
         # fails alone, and the browser check and the preview's error list
         # both hear its name.
-        "function runView(name, el, setup)",
+        "function runView(name, el)",
         "data-view-failed",
+        # A browser parses each `<script>` as a whole, so each view's code
+        # sits in a script of its own and a syntax error stops only that view.
+        "helper alone in the page's first inline `<script>`",
+        "Give each view an inline `<script>` of its own that holds only its setup",
         # A promise the setup neither awaits nor returns, or ends with its
         # own `.catch`, fails outside the helper, unnamed and unmarked.
         "Await or return every promise the setup starts",

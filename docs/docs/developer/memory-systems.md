@@ -110,7 +110,7 @@ Confirmations are *never* shown mid-turn — only after the full response, right
 before the next prompt.
 
 **Compaction (synaptic homeostasis).** When a memory file exceeds the
-threshold (`_COMPACTION_THRESHOLD = 20` entries in `cortex.py`), session start
+threshold (`COMPACTION_THRESHOLD = 20` entries in `cortex.py`), session start
 fires a background compaction: the coding model removes duplicates, merges
 restatements, and drops superseded entries. Atomic rewrite (`.tmp` +
 `os.rename`), exclusive lock, silently skipped on LLM failure — it never

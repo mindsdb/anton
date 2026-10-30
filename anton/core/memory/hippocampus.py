@@ -115,6 +115,12 @@ def _is_scratchpad_related(engram: Engram) -> bool:
     return bool(engram.topic and "scratchpad" in engram.topic.lower())
 
 
+def writer_lock_name(file_name: str) -> str:
+    """Name of the sibling file every writer of `file_name` flocks, so a host
+    that writes memory files itself can take the same lock."""
+    return file_name + ".lock"
+
+
 class Hippocampus:
     """Reads and writes memory traces at a single scope (global OR project).
 
@@ -639,6 +645,14 @@ class Hippocampus:
             self._write_unlocked(self._lessons_path, entry, mode="append")
 
 
+    def entry_file(self, kind: Literal["rules", "lesson"]) -> Path:
+        """The file that holds entries of `kind`: rules.md or lessons.md."""
+        if kind == "rules":
+            return self._rules_path
+        if kind == "lesson":
+            return self._lessons_path
+        raise ValueError(f"no memory file holds {kind!r} entries")
+
     def entry_count(self) -> int:
         """Count total entries across rules.md and lessons.md."""
         count = 0
@@ -664,7 +678,7 @@ class Hippocampus:
         No-op on Windows, where fcntl is unavailable, as the lock was before.
         """
         path.parent.mkdir(parents=True, exist_ok=True)
-        lock_path = path.with_name(path.name + ".lock")
+        lock_path = path.with_name(writer_lock_name(path.name))
         with open(lock_path, "a", encoding="utf-8") as lock:
             if sys.platform != "win32":
                 import fcntl
