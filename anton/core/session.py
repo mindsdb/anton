@@ -2186,10 +2186,10 @@ class ChatSession:
         # `tool_handlers.REPAIR_CELLS` of them (`check_cell_artifacts`).
         # Reset every turn.
         self._repair_cells: dict[PageKey, int] = {}
-        # The pages a check this turn left with no repair cells and not
-        # passing, put back or not. Never cleared within the turn: while it
-        # is non-empty the completion check is skipped, since its rounds
-        # would edit such a page again. Reset every turn.
+        # The pages a check this turn left with no repair cells and failed, or
+        # unverified after an edit, put back or not. Never cleared within the
+        # turn: while it is non-empty the completion check is skipped, since
+        # its rounds would edit such a page again. Reset every turn.
         self._out_of_repairs: set[PageKey] = set()
         # The views the check that failed a page this turn measured, kept
         # until the page passes. Until then, a check of the page that no

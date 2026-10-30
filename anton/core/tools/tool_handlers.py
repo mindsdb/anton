@@ -292,8 +292,8 @@ class ArtifactLint:
     restored: frozenset[PageKey] = frozenset()
     # The pages this cell edited, whatever their checks found.
     edited: frozenset[PageKey] = frozenset()
-    # The pages this cell's checks left with no repair cells and not passing,
-    # put back or not.
+    # The pages this cell's checks left with no repair cells and failed, or
+    # unverified after this cell edited them, put back or not.
     out_of_repairs: frozenset[PageKey] = frozenset()
 
 
@@ -525,10 +525,12 @@ def _check_pages(
     `repairs_used` it already spent; once a page fails with none left, its
     line says so and lists no findings, so the agent stops editing a page it
     cannot fix this turn. A page this check leaves with no repair cells and
-    not passing comes back in `out_of_repairs`, put back or not: the session
-    then skips the completion check, whose rounds would edit it again
-    (`record_page_checks`). A check that no longer finds a view in
-    `failed_views`, the views the check that first failed the page
+    failed, or unverified after this cell edited it, comes back in
+    `out_of_repairs`, put back or not: the session then skips the completion
+    check, whose rounds would edit it again (`record_page_checks`). A page
+    left unverified without being counted (no browser, a sandbox, a page too
+    large for the local browser) is not marked. A check that no longer finds
+    a view in `failed_views`, the views the check that first failed the page
     measured, fails, even after an unverified check in between: a repair
     fixes a view, it never removes one. The views each failed check
     measured come back in `failed_views`.
@@ -687,9 +689,9 @@ def _check_pages(
         removed = _removed_views(failed_views.get(key, ()), outcome)
         status: "RenderStatus" = "failed" if removed or key in shown_as_text else outcome.status
         page_checks[key] = status
-        if status != "passed" and left <= 0:
-            out_of_repairs.add(key)
         failed = status == "failed"
+        if left <= 0 and (failed or (status == "unverified" and page.edited)):
+            out_of_repairs.add(key)
         if failed:
             views_of_failed[key] = tuple(outcome.views)
         comparison = outcome.comparison

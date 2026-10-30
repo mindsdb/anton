@@ -3637,6 +3637,30 @@ async def test_a_page_that_passed_and_fails_again_counts_the_repairs_it_already_
     assert broken.messages[-1] == f"{label} — {tool_handlers._repairs_left_line(1)}"
     assert last.messages == [f"{label} — {tool_handlers._NO_REPAIRS_LEFT}"]
     assert session._repair_cells == {tool_handlers.PageKey(slug, "index.html"): 2}
+    assert last.out_of_repairs == frozenset({tool_handlers.PageKey(slug, "index.html")})
+
+
+async def test_a_page_the_cell_left_alone_is_not_out_of_repair_cells_when_its_check_is_unverified(
+    service, tmp_path
+):
+    """The second repair passes, spending the last cell. A later cell writes
+    only the data file, and the page's check gets no answer: nothing failed
+    and the page was not edited, so it is not marked."""
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    session = _repair_session()
+    _failed_build(session, slug, "index.html")
+    key = tool_handlers.PageKey(slug, "index.html")
+    service.answer(_FAILED_ROUTES, (200, _answer("passed", views=_VIEWS, unopened=[]), 0.0), (503, b"not ready", 0.0))
+
+    await _repair_cell(session, store, slug, "index.html", "first repair")
+    await _repair_cell(session, store, slug, "index.html", "second repair passes")
+    before = tool_handlers.snapshot_existing_artifacts(store)
+    (store.root / slug / "data.json").write_text("[]")
+    lint = await tool_handlers.check_cell_artifacts(session, store=store, before=before)
+
+    assert session._repair_cells == {key: 2}
+    assert lint.page_checks == {key: "unverified"}
+    assert lint.out_of_repairs == frozenset()
 
 
 async def test_a_page_built_by_hand_gets_the_same_repair_budget(service, tmp_path):
