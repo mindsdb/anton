@@ -117,10 +117,10 @@ TOOL_ACCESS: dict[str, dict[str, str]] = {
         "manage_onboarding": "write",
     },
     "linear": {
-        # Classified from the tool list Linear's hosted server publishes,
-        # by each tool's read-only or mutating shape (get/list/search vs
-        # save/create/delete/update). Not yet re-listed live with a
-        # connector token.
+        # Live-listed 2026-10-30 with a Cowork OAuth connector token: these
+        # are exactly the 84 tools the server advertises. Every read tool
+        # carries a read-only hint except `whoami`, which only returns the
+        # connected user.
         # READ
         "extract_images": "read",
         "get_agent_skill": "read",
