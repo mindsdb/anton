@@ -461,7 +461,15 @@ async def _stream_turn(
                 logger.info("emitting %d turn-history row(s)", len(rows))
                 wire({"kind": "history", "rows": rows})
         logger.info("cloud turn completed")
-        wire({"kind": "turn_completed"})
+        completed = {"kind": "turn_completed"}
+        # The slugs this turn's artifact tools touched, so the host stats only
+        # those folders at turn end instead of the whole artifacts folder.
+        # `getattr`: a session double (or a build predating the record) sends
+        # none, and the host then diffs the whole folder.
+        touched = getattr(session, "artifacts_touched", None)
+        if touched is not None:
+            completed["artifacts_touched"] = sorted(touched)
+        wire(completed)
         terminal_emitted = True
     except Exception as exc:
         # ProviderErrorFilter omits provider bodies from diagnostics; the wire is unchanged.
