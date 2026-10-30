@@ -3656,6 +3656,30 @@ async def test_a_page_built_by_hand_gets_the_same_repair_budget(service, tmp_pat
     assert last.messages == [f"{slug}/index.html — {tool_handlers._NO_REPAIRS_LEFT}"]
 
 
+@pytest.mark.parametrize("text,clause", [
+    pytest.param(
+        tool_handlers._NO_REPAIRS_LEFT,
+        "do not call it or any view in it browser-verified, tested or working",
+        id="no-repair-cells-left",
+    ),
+    pytest.param(
+        tool_handlers._repairs_left_line(1),
+        "Until a check passes it, do not call it or any view in it browser-verified, tested or working",
+        id="repair-cells-left",
+    ),
+    pytest.param(
+        tool_handlers._RESTORED,
+        "do not call the edit or any view it changed browser-verified, tested or working",
+        id="put-back",
+    ),
+])
+def test_a_failed_page_is_never_called_verified(text, clause):
+    """The check's verdict is per page: a view of a failed page that drew
+    is not verified. A page put back may have passed before the turn, so
+    there only the edit is never called verified."""
+    assert text.endswith(clause)
+
+
 # ── A page out of repair cells ends the turn without the completion check ────
 
 _FAILED_ROUTES = (200, _answer("failed", findings=[_ROUTES_ERROR], views=_VIEWS, unopened=[]), 0.0)

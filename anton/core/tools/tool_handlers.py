@@ -239,14 +239,14 @@ REPAIR_CELLS = 2
 _NO_REPAIRS_LEFT = (
     "failed the browser check, and this page has no repair cells left this turn: do not edit it "
     "again this turn. Tell the user it failed its browser check and may not display correctly in "
-    "the preview"
+    "the preview, and do not call it or any view in it browser-verified, tested or working"
 )
 # Said instead of `_NO_REPAIRS_LEFT` when anton put the page back as the turn
 # found it (`page_copies.TurnPages.restore`).
 _RESTORED = (
     "failed the browser check with no repair cells left, so anton put back the page as it was before this "
     "turn: do not edit it again this turn. Tell the user the edit could not be made safely and the page is as "
-    "it was"
+    "it was, and do not call the edit or any view it changed browser-verified, tested or working"
 )
 _FULLSTACK_PAGE_SKIP = (
     "not checked in a browser: a fullstack app's page calls its backend, which "
@@ -416,7 +416,8 @@ def _repairs_left_line(left: int) -> str:
     cells = "cell" if left == 1 else "cells"
     return (
         f"{left} repair {cells} left for this page this turn: change it in a scratchpad cell to fix "
-        "the code each finding names, and keep every view"
+        "the code each finding names, and keep every view. Until a check passes it, do not call it or "
+        "any view in it browser-verified, tested or working"
     )
 
 
