@@ -1826,7 +1826,8 @@ _STATUS_INSTRUCTIONS = {
         "the page from the spec instead of repairing it. This repair needs no "
         "`recall_skill`. Once a cell's check passes, say \"browser-verified\", "
         "\"tested\" or \"works\" only of the views that check names. If the "
-        "page still fails, tell the user it failed its browser check."
+        "page still fails, tell the user it failed its browser check, and do "
+        "not call it or any view in it browser-verified, tested or working."
     ),
     "stopped_over_budget": (
         "This turn reached its token budget and the pipeline stopped "

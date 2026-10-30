@@ -1067,6 +1067,11 @@ async def test_a_page_that_failed_its_browser_check_comes_back_to_repair(tmp_pat
     for step in ("repair it yourself now", "`read_text_file`", "scratchpad cell", "`runView`",
                  "Do NOT call generate_artifact again", "needs no `recall_skill`"):
         assert step in instruction, step
+    # The check's verdict is per page: a view of a page that still fails is not verified.
+    assert instruction.endswith(
+        "If the page still fails, tell the user it failed its browser check, and do not call it or any "
+        "view in it browser-verified, tested or working."
+    )
 
 
 async def test_a_view_whose_script_did_not_parse_comes_back_to_repair_in_its_own_script(tmp_path: Path, monkeypatch):
