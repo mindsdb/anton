@@ -115,7 +115,16 @@
     var tone = b.tone || 'info';
     var c = AK.el('div', 'ak-callout ak-tone-' + tone);
     var icons = {good: '✓', bad: '!', warn: '!', info: 'i', neutral: 'i', accent: '★'};
-    var ic = AK.el('div', 'ak-callout-icon', b.icon || icons[tone] || 'i');
+    // The icon is one glyph in a small badge: a common icon name becomes its glyph, and any other word
+    // falls back to the tone's mark rather than spilling out of the badge.
+    var named = {sparkles: '✨', sparkle: '✨', star: '★', lightbulb: '💡', bulb: '💡', idea: '💡', check: '✓',
+      checkmark: '✓', tick: '✓', success: '✓', warning: '!', alert: '!', error: '!', info: 'i', note: 'i',
+      flag: '⚑', target: '◎', trend: '↗', trendingup: '↗', trendingdown: '↘', up: '↑', down: '↓', clock: '⏱',
+      calendar: '📅', money: '$', dollar: '$', rocket: '🚀', fire: '🔥', heart: '♥', pin: '📍', key: '🔑'};
+    var raw = b.icon == null ? '' : String(b.icon).trim();
+    var glyphs = typeof Intl !== 'undefined' && Intl.Segmenter ? Array.from(new Intl.Segmenter().segment(raw)).length : Array.from(raw).length;
+    var glyph = glyphs <= 2 ? raw : named[raw.toLowerCase().replace(/[^a-z]/g, '')];
+    var ic = AK.el('div', 'ak-callout-icon', glyph || icons[tone] || 'i');
     ic.setAttribute('aria-hidden', 'true');
     c.appendChild(ic);
     var body = AK.el('div', 'ak-callout-body');

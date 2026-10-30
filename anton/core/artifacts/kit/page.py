@@ -314,7 +314,8 @@ class Page:
 
     def callout(self, md: str, *, title: str | None = None, tone: str = "info", icon: str | None = None,
                 id: str | None = None) -> dict:
-        """A highlighted message: the key finding, a recommendation, a caveat. tone good|bad|warn|info|accent|neutral."""
+        """A highlighted message: the key finding, a recommendation, a caveat. tone good|bad|warn|info|accent|neutral.
+        `icon` is one character or emoji for its badge (a common name like "lightbulb" becomes its glyph)."""
         if tone not in TONES:
             raise KitError(f"callout tone must be one of {TONES}")
         return self._add({"type": "callout", "md": md, "title": title, "tone": tone, "icon": icon, "id": id})

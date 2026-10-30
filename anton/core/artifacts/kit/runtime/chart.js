@@ -39,6 +39,22 @@
         if (Math.abs(opt._akHeight - box.getBoundingClientRect().height) > 2) { box.style.height = opt._akHeight + 'px'; chart.resize(); }
         delete opt._akHeight;
       }
+      // Reference lines named in a key under the plot, when value labels would collide with their names.
+      var oldKey = view.querySelector('.ak-chart-refkey');
+      if (oldKey) oldKey.remove();
+      if (opt._akRefKey) {
+        var key = AK.el('div', 'ak-chart-refkey');
+        opt._akRefKey.forEach(function (r) {
+          var item = AK.el('span');
+          var swatch = AK.el('i');
+          swatch.style.borderTopColor = r.color;
+          item.appendChild(swatch);
+          item.appendChild(document.createTextNode(r.label));
+          key.appendChild(item);
+        });
+        view.appendChild(key);
+        delete opt._akRefKey;
+      }
       chart.setOption(opt, true);
       if (b.link && chart._akBind !== true) { chart._akBind = true; bindSelection(b, chart); }
     };
@@ -122,16 +138,21 @@
     return {cats: cats, series: out};
   }
 
-  function refLines(b, T) {
+  function refLineList(b, T) {
     var lines = (b.ref_lines || []).slice();
     if (b.threshold && b.threshold.value != null) lines.push({value: b.threshold.value, label: b.threshold.label, tone: b.threshold.tone_above || b.threshold.tone || 'bad'});
+    return lines.map(function (l) { return {value: l.value, label: l.label || String(l.value), color: AK.resolveColor(l.tone || 'neutral') || T.text3}; });
+  }
+  // offPlot: the lines' names go in a key under the chart (value labels would collide with them).
+  function refLines(b, T, offPlot) {
+    var lines = refLineList(b, T);
     if (!lines.length) return null;
     return {
       silent: true, symbol: 'none',
       data: lines.map(function (l) {
-        var col = AK.resolveColor(l.tone || 'neutral') || T.text3;
+        var col = l.color;
         var item = {lineStyle: {color: col, type: 'dashed', width: 1.5},
-          label: {formatter: l.label || String(l.value), color: col, fontWeight: 600, fontSize: 11, position: 'insideEndTop'}};
+          label: {show: !offPlot, formatter: l.label, color: col, fontWeight: 600, fontSize: 11, position: 'insideEndTop'}};
         if (b.horizontal || b.kind === 'hbar') item.xAxis = l.value; else item.yAxis = l.value;
         return item;
       })
@@ -258,9 +279,10 @@
         // every value.
         item.labelLayout = {hideOverlap: true};
       }
-      if (i === 0) { var ml = refLines(b, T); if (ml) item.markLine = ml; }
+      if (i === 0) { var ml = refLines(b, T, showValues); if (ml) item.markLine = ml; }
       return item;
     });
+    if (showValues && refLineList(b, T).length) opt._akRefKey = refLineList(b, T);
     y2.forEach(function (f, k) {
       var vals = s.cats.map(function (c) {
         var r = rows.filter(function (x) { return String(x[b.x]) === String(c); })[0];
@@ -292,6 +314,13 @@
     if (b.x_label) opt.grid.bottom = 24;
     if ((b.ref_lines && b.ref_lines.length) || b.threshold) opt.grid.right = 28;
     if (horizontal && showValues) opt.grid.right = Math.max(opt.grid.right || 16, Math.round(widest * 6.8) + 12);
+    // An upright bar's value label wider than its bar would reach into the axis labels (or past the
+    // right edge) at either end of the plot: room for its overhang.
+    if (!horizontal && showValues) {
+      var overhang = Math.max(0, Math.round(widest * 3.4 - slot / 2));
+      opt.grid.left = Math.max(opt.grid.left || 8, 8 + overhang);
+      opt.grid.right = Math.max(opt.grid.right || 16, 8 + overhang);
+    }
     // A slanted first label reaches left of the plot: room for it.
     if (catAxis.axisLabel.rotate) opt.grid.left = Math.max(opt.grid.left || 8, Math.round(Math.min(longestCat, 12) * 4.2));
     if (horizontal && !b.height) {
