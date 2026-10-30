@@ -60,10 +60,13 @@ jobs:
     needs: [auto-release, verify-wheel]
     permissions:
       contents: read
+      id-token: write  # the build job assumes its ECR writer role through GitHub OIDC
     uses: ./.github/workflows/scratchpad-dev-build.yml
     with:
       environment: production
       version: ${{ needs.auto-release.outputs.version }}
+    secrets:
+      AWS_DEV_ACCOUNT_ID: ${{ secrets.AWS_DEV_ACCOUNT_ID }}
 
   publish:
     name: Publish to PyPI

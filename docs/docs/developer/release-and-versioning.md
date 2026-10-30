@@ -104,7 +104,9 @@ How to ship a stable version:
      publishes it to PyPI,
    - publishes a GitHub release with auto-generated notes,
    - triggers `tests_e2e_release.yml` to run live e2e tests against the
-     released version.
+     released version,
+   - builds the scratchpad pod image after those tests pass and pushes it to
+     `minds-anton-scratchpad` as `production`.
 
 ### Staging release candidates
 
