@@ -1869,8 +1869,30 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         return
 
     slug = (tc_input.get("slug") or "").strip()
+    if not slug and os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on":
+        # A new page can enter the same generator without a separate model
+        # round trip solely to register its folder. Existing-slug edits keep
+        # their normal path. Validate before creating any persistent resource.
+        name = (tc_input.get("name") or "").strip()
+        fields = ("user_request", "agent_understanding", "user_language")
+        missing = next((key for key in fields if not isinstance(tc_input.get(key), str)
+                        or not tc_input[key].strip()), None)
+        if name and missing:
+            yield f"Error: `{missing}` is required."
+            return
+        if name:
+            from anton.core.tools.generate_artifact.state import MAX_USER_LANGUAGE_CHARS
+
+            if len(" ".join(tc_input["user_language"].split())) > MAX_USER_LANGUAGE_CHARS:
+                yield "Error: `user_language` must be only the language's English name."
+                return
+            artifact = store.create(name=name, description=tc_input["agent_understanding"].strip(),
+                                    type="html-app", primary="index.html")
+            slug = artifact.slug
+            _track_artifact(session, store, slug, summary=f"Created artifact: {name}")
     if not slug:
-        yield "Error: `slug` is required."
+        yield ("Error: `slug` (an existing artifact) or `name` (a new one) is required."
+               if os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on" else "Error: `slug` is required.")
         return
     artifact = store.open(slug)
     if artifact is None:
@@ -1995,6 +2017,21 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         with model_route(route):
             return await coro
 
+    def failure_context(detail):
+        message = detail if detail.startswith("Error:") else _generation_failed(detail)
+        if os.environ.get("ANTON_STATIC_SINGLE_CALL") != "on":
+            return message
+        # Creation may have happened inside this call. Losing its identity on
+        # failure makes a caller recreate the artifact or discard collected data.
+        recovery = {"status": "failed", "slug": slug, "path": str(folder),
+                    "primary": artifact.primary, "message": message,
+                    "if_the_user_asks_to_retry": "Call generate_artifact with this slug; it keeps the saved source data. Do not create another artifact or substitute demo/default values."}
+        for key, name in (("observed_data_file", "observed-data.json"),
+                          ("last_saved_component_program", "presentation-program.js")):
+            if (folder / name).is_file():
+                recovery[key] = str(folder / name)
+        return json.dumps(recovery, indent=2)
+
     queue: "asyncio.Queue[str | None]" = asyncio.Queue()
     task = asyncio.create_task(
         _at_artifact_model(
@@ -2039,9 +2076,8 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         handled = True
         if restored is not None:
             _record_put_back(session, previous_page[0], restored)
-        text = _generation_failed(f"generator crashed: {exc}")
         yield ToolOutcome(
-            content=_with_put_back(text, restored),
+            content=_with_put_back(failure_context(f"generator crashed: {exc}"), restored),
             ok=False,
             reason=type(exc).__name__,
         )
@@ -2076,7 +2112,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
             else _generation_failed(result)
         )
         yield ToolOutcome(
-            content=_with_put_back(content, restored), ok=False, reason="pipeline"
+            content=_with_put_back(failure_context(content), restored), ok=False, reason="pipeline"
         )
         return
     if restored is not None:
