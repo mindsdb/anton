@@ -769,21 +769,6 @@ def test_memory_scratch_is_outside_the_mount_by_default():
     )
 
 
-def _real_cloud_session(tmp_path, monkeypatch, **req_overrides):
-    from unittest.mock import MagicMock
-
-    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
-    monkeypatch.setattr(
-        llm_client_mod.LLMClient, "from_settings",
-        classmethod(lambda cls, settings: _mock_llm()),
-    )
-    body = dict(protocol_version=1, conversation_id="c", input="hi")
-    body.update(req_overrides)
-    session = build_cloud_chat_session(TurnRequestV1(**body))  # REAL ChatSession
-    session._scratchpads = MagicMock(available_packages=[])
-    return session
-
-
 def test_memorize_is_offered_with_or_without_existing_memory(tmp_path, monkeypatch, memory_dir):
     """The allowlist names `memorize` unconditionally, and an allowlist name that
     matches no built tool is a hard error — so a cortex must always exist. Both
@@ -806,8 +791,6 @@ def _engram(**kw):
 
 
 async def test_encode_captures_instead_of_writing(tmp_path, monkeypatch, memory_dir):
-    from anton.cloud_turn.session import drain_pending_memory
-
     session, cfg = _build(tmp_path, monkeypatch, memory=_MEMORY)
     before = (memory_dir / "global" / "rules.md").read_text()
 
@@ -918,19 +901,6 @@ _SKILLS = {
         "references/recipe.md": "- prefer polars",
     }},
 }
-
-
-@pytest.fixture()
-def skills_tmp(tmp_path_factory, monkeypatch):
-    """Route the per-turn mkdtemp staging into pytest tmp.
-
-    Outside `tmp_path` for the same reason as memory_dir: tmp_path is the
-    workspace mount, and the real staging lives outside the mount."""
-    import tempfile
-
-    root = tmp_path_factory.mktemp("skills-scratch")
-    monkeypatch.setattr(tempfile, "tempdir", str(root))
-    return root
 
 
 def test_skills_reach_the_skill_store(tmp_path, monkeypatch, skills_tmp):
@@ -1048,16 +1018,16 @@ def test_skills_never_land_in_the_tenant_workspace(tmp_path, monkeypatch, skills
 
 def test_each_turn_gets_a_fresh_root(tmp_path, monkeypatch, skills_tmp):
     # A skill deleted/renamed/disabled server-side must not survive into the
-    # next turn on this pod — and a fresh mkdtemp per turn also means two
-    # overlapping turns can never wipe each other's tree.
+    # next turn on this pod. A process runs one turn at a time, so staging the
+    # next turn also deletes the earlier turn's tree. A turn running in another
+    # process keeps its own (tests/cloud_turn/test_staged_skills_cleanup.py).
     _, cfg1 = _build(tmp_path, monkeypatch, skills=_SKILLS)
     assert (cfg1.settings.skills_root / "csv-summary" / "SKILL.md").is_file()
 
     _, cfg2 = _build(tmp_path, monkeypatch, skills={})
     assert cfg2.settings.skills_root != cfg1.settings.skills_root
     assert not (cfg2.settings.skills_root / "csv-summary").exists()
-    # the first turn's tree is untouched — no cross-turn interference
-    assert (cfg1.settings.skills_root / "csv-summary" / "SKILL.md").is_file()
+    assert not cfg1.settings.skills_root.exists()
 
 
 def test_bad_slugs_and_escaping_paths_are_dropped(tmp_path, monkeypatch, skills_tmp):

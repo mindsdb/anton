@@ -1,9 +1,8 @@
 """The prompt section for skills an organization applies on every turn.
 
 Cowork shares skills org-wide and with teams, and those skills hold for every
-task rather than waiting to be recalled. The cloud pod appends this section to
-its prompt suffix; cowork-server builds the same text for desktop, so the
-format here is a contract and must change in step with it.
+task rather than waiting to be recalled. ``build_cloud_chat_session`` appends
+this section to the cloud pod's prompt suffix.
 """
 
 from __future__ import annotations

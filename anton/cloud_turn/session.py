@@ -26,6 +26,8 @@ import hmac
 import json
 import logging
 import os
+import shutil
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -132,7 +134,12 @@ _MEMORY_GLOBAL_ROOT_ENV = "ANTON_CLOUD_MEMORY_GLOBAL_ROOT"
 #: Per-turn skills staging: a FRESH mkdtemp each turn (unlike _MEMORY_DIR).
 #: Skills carry no cross-turn state, and the unpredictable path stops prior-turn
 #: cell code planting a symlink or two turns wiping each other's tree. Used for
-#: every request that carries a `skills` block; see _SKILLS_ROOT_ENV below.
+#: every request that carries a `skills` block; see _SKILLS_ROOT_ENV below. The
+#: name carries the staging process's pid. A turn's SkillStore reads only its
+#: own folder (settings.skills_root). remove_staged_skills deletes the folder
+#: when the turn ends, or, for a turn killed before then, when a later turn
+#: stages. A folder whose pid names another running process stays: usually a
+#: turn still running, and rarely a process that reused a killed turn's pid.
 _SKILLS_DIR_PREFIX = "anton-cloud-skills-"
 
 #: Pod-side mount of the org's skills tree. It holds every member's skills, so
@@ -210,6 +217,98 @@ def _safe_skill_file(skill_dir: Path, rel: str) -> Path | None:
     return candidate
 
 
+def _staged_pid(path: Path) -> int | None:
+    """The pid staging wrote into `path`'s name (``<prefix><pid>-``), or None.
+
+    Staging always writes the pid, so a name with none was not staged by this
+    release. In a pod it came from cell code, since a new image starts with an
+    empty temp dir.
+    """
+    head, sep, _ = path.name.removeprefix(_SKILLS_DIR_PREFIX).partition("-")
+    if not sep or not (head.isascii() and head.isdigit()):
+        return None
+    return int(head)
+
+
+def _running_elsewhere(pid: int) -> bool:
+    """Whether `pid` is a running process other than this one.
+
+    The entrypoint (``__main__.main``) runs one turn per process, so a folder
+    carrying this process's pid belongs to this turn or an earlier one, never
+    to a turn running beside it. A pid with no process behind it is a turn
+    killed before its own cleanup ran.
+    """
+    if pid == os.getpid():
+        return False
+    # Signal 0 is CTRL_C_EVENT on Windows, and cloud turns run only on Linux.
+    if sys.platform == "win32":
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (OSError, OverflowError):
+        # PermissionError is another user's live process. Anything else can't
+        # be told apart from one, so the folder stays.
+        return True
+    return True
+
+
+def remove_staged_skills() -> None:
+    """Delete every staged skills folder that no running turn owns.
+
+    Staging calls it first, which clears what a killed turn left behind, and
+    the entrypoint calls it when the turn ends, which clears the turn's own
+    folder. A runner can exec several turns in one pod, each in its own
+    process, and those turns share one temp dir. They can overlap, and nothing
+    stops an earlier turn when the next one starts. So an entry whose name
+    carries another running process's pid stays, whatever kind of entry it
+    is, and nothing is logged for it.
+
+    Staging makes only folders, and names each with its pid. So a symlink,
+    file or FIFO under the prefix came from cell code and holds no skills. It
+    is unlinked, which removes a symlink itself and never its target, and a
+    failure to unlink it logs only at debug level, since it would otherwise
+    warn on every turn. A folder whose name carries no pid was not staged here
+    either, and it stays, with a debug line. Cell code can write anywhere in
+    the temp dir, so deleting its folder protects nothing, and a folder it
+    locked would warn on every turn.
+
+    Best-effort: nothing here fails the turn. A staged folder that can't be
+    deleted logs a warning on every call, on purpose, because it may still
+    hold skills that a later turn's cells can read.
+    """
+    try:
+        staged = list(Path(tempfile.gettempdir()).glob(f"{_SKILLS_DIR_PREFIX}*"))
+    except OSError:
+        logger.warning("skills: could not list staged skills folders", exc_info=True)
+        return
+    for path in staged:
+        pid = _staged_pid(path)
+        if pid is not None and _running_elsewhere(pid):
+            continue
+        if os.path.islink(path) or not os.path.isdir(path):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.debug(
+                    "skills: could not remove a planted entry under the staging prefix",
+                    exc_info=True,
+                )
+            continue
+        if pid is None:
+            logger.debug(
+                "skills: skipped %r, a folder whose name carries no staging pid", path.name
+            )
+            continue
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            pass  # another process removed it first
+        except OSError:
+            logger.warning("skills: could not remove a staged skills folder", exc_info=True)
+
+
 def _stage_skills(skills: dict | None) -> Path:
     """The session's skills_root.
 
@@ -224,8 +323,14 @@ def _stage_skills(skills: dict | None) -> Path:
 
     Only a request with no block at all (an older sender) falls back to the
     mount, with a warning, when one is configured.
+
+    Either way, staged folders that no running turn owns are deleted first
+    (remove_staged_skills), which clears what a turn killed before its own
+    cleanup left behind.
     """
+    remove_staged_skills()
     mounted = os.environ.get(_SKILLS_ROOT_ENV, "").strip()
+    # Kept on purpose: an older sender still sends no block during the rollout.
     if skills is None and mounted:
         logger.warning(
             "skills: request has no skills block; reading the whole mounted "
@@ -238,7 +343,7 @@ def _stage_skills(skills: dict | None) -> Path:
     from anton.core.memory import skills as skills_memory
     from anton.core.tools.skill_format import validate_name
 
-    dest = Path(tempfile.mkdtemp(prefix=_SKILLS_DIR_PREFIX))
+    dest = Path(tempfile.mkdtemp(prefix=f"{_SKILLS_DIR_PREFIX}{os.getpid()}-"))
 
     entries = skills if isinstance(skills, dict) else {}
     for slug, entry in entries.items():

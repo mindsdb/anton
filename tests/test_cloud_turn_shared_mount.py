@@ -11,17 +11,14 @@ def _skill_md(name: str, body: str) -> str:
 
 
 @pytest.fixture()
-def org_mount(tmp_path_factory, monkeypatch):
+def org_mount(tmp_path_factory, monkeypatch, skills_tmp):
     """The org skills tree mounted in the pod, holding a skill the caller was
     not given (another member's private skill), with per-turn staging routed
     into pytest tmp."""
-    import tempfile
-
     mount = tmp_path_factory.mktemp("mnt") / "skills"
     (mount / "someone-elses").mkdir(parents=True)
     (mount / "someone-elses" / "SKILL.md").write_text(_skill_md("someone-elses", "Secret steps."))
     monkeypatch.setenv("ANTON_CLOUD_SKILLS_ROOT", str(mount))
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path_factory.mktemp("skills-scratch")))
     return mount
 
 
