@@ -1564,8 +1564,7 @@ def _data_sources_context(state) -> str:
 NO_WEB_DATA_NOTE = (
     "Web access is off on this install: web search and web fetch are refused, and "
     "the scratchpad reaches only the data sources connected here and a host that a "
-    "skill or the user names. Data that only some other website or API holds cannot "
-    "be fetched."
+    "skill names. Data that only some other website or API holds cannot be fetched."
 )
 
 

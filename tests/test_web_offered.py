@@ -16,6 +16,7 @@ from anton.core.tools.generate_artifact import sub_tools as builder_sub_tools
 from anton.core.tools.generate_artifact.discovery import sub_tools as discovery_sub_tools
 from anton.core.tools.generate_artifact.discovery.prompts import build_pipeline_system_prompt
 from anton.core.tools.generate_artifact.state import GenState
+from anton.core.tools.tool_defs import NO_WEB_GENERATE_ARTIFACT_TOOL, NO_WEB_STATIC_GENERATE_ARTIFACT_TOOL
 from anton.workspace import Workspace
 from tests.conftest import make_mock_llm, run_turn
 
@@ -60,7 +61,8 @@ async def test_with_web_search_off_the_agent_is_told_the_web_is_out_of_reach(tmp
 
     assert "NO WEB ACCESS:" in system
     assert "say plainly that web access is off on this install" in system
-    assert "a host that a skill or the user names for the task" in system
+    assert "a host that a skill names" in system
+    assert "even one the user names" in system
     assert "so none of them turns to another site or API" in system
     assert "it cannot be checked online" in system
     for text in _WEB_ON_TEXTS:
@@ -114,3 +116,9 @@ def test_without_the_switch_the_artifact_builder_is_unchanged(monkeypatch):
         assert builder_prompts.NO_WEB_DATA_NOTE not in text
     for schema in (builder_sub_tools._scratchpad_schema(), discovery_sub_tools._scratchpad_schema()):
         assert "web_search(query)" in schema["description"]
+
+
+def test_neither_generate_artifact_variant_promises_the_web():
+    for tool in (NO_WEB_GENERATE_ARTIFACT_TOOL, NO_WEB_STATIC_GENERATE_ARTIFACT_TOOL):
+        assert "web search" not in tool.description
+        assert "(it can use the scratchpad), asks the user" in tool.description

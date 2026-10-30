@@ -404,9 +404,8 @@ NO_WEB_CHAT_SYSTEM_PROMPT = cut_spans(
         "NO WEB ACCESS:\n"
         "- Web access is turned off on this install: web search is off, and the \
 scratchpad cannot reach the internet. The exceptions are the data sources connected \
-here and a host that a skill or the user names for the task. Do not reach for any other \
-site, feed or API on your own (requests, urllib, RSS feeds, DNS over HTTPS, public APIs, \
-web_search()).\n"
+here and a host that a skill names. Do not reach for any other site, feed or API, even one \
+the user names (requests, urllib, RSS feeds, DNS over HTTPS, public APIs, web_search()).\n"
         "- When a question needs the web or live information, say plainly that web access \
 is off on this install, then answer from the user's files, connected data and your own \
 knowledge, and say where that knowledge may be out of date.\n\n",

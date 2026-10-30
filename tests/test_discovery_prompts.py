@@ -93,6 +93,7 @@ def test_the_gathering_step_points_at_web_fetch_only_while_web_search_is_on(monk
     monkeypatch.setenv(WEB_SEARCH_ENV, "off")
     off = step_message(sub_tools.STEP_GATHERING, _state())
     assert "web_fetch" not in off
+    assert "fetched the page" not in off
     assert "when there is one) and record its shape" in off
 
 

@@ -248,7 +248,11 @@ _WHEN_TO_ASK_ACT_FIRST = (
 
 # Where web search is off, `rejection_for` refuses web_fetch: pointing at it
 # would only cost a round.
-_NO_WEB_GATHERING_TEMPLATE = cut_spans(_GATHERING_TEMPLATE, ("; web_fetch for pages", ")", ""))
+_NO_WEB_GATHERING_TEMPLATE = cut_spans(
+    _GATHERING_TEMPLATE,
+    ("; web_fetch for pages", ")", ""),
+    (" or fetched the page", " in this step", ""),
+)
 
 
 def _gathering_instruction(act_first: bool) -> str:

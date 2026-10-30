@@ -145,15 +145,6 @@ NO_WEB_SCRATCHPAD_TOOL = replace(
 )
 
 
-def generate_artifact_without_web(generate_artifact_tool: ToolDef) -> ToolDef:
-    """Either `generate_artifact` variant, minus the web search and fetch its
-    builder is refused where web search is off."""
-    return replace(
-        generate_artifact_tool,
-        description=cut_spans(generate_artifact_tool.description, (", web search and web fetch", ")", "")),
-    )
-
-
 MEMORIZE_TOOL = ToolDef(
     name="memorize",
     description=(
@@ -681,6 +672,17 @@ STATIC_GENERATE_ARTIFACT_TOOL = replace(
         (" and pick the type (one of html-app,", ".\n  2. Call", " with type `html-app`"),
         ("\nDo NOT call `launch_backend` for a fullstack", None, ""),
     ),
+)
+
+# Where web search is off (`wire.web_search_off`) the builder is refused web
+# search and fetch, so neither variant promises them.
+NO_WEB_GENERATE_ARTIFACT_TOOL = replace(
+    GENERATE_ARTIFACT_TOOL,
+    description=cut_spans(GENERATE_ARTIFACT_TOOL.description, (", web search and web fetch", ")", "")),
+)
+NO_WEB_STATIC_GENERATE_ARTIFACT_TOOL = replace(
+    STATIC_GENERATE_ARTIFACT_TOOL,
+    description=cut_spans(STATIC_GENERATE_ARTIFACT_TOOL.description, (", web search and web fetch", ")", "")),
 )
 
 STATIC_UPDATE_ARTIFACT_METADATA_TOOL = replace(

@@ -21,16 +21,17 @@ STDOUT_CHUNK_MARKER = "__ANTON_STDOUT_CHUNK__"
 # when the host sets USAGE_MARKER_ENV in the pad's environment.
 USAGE_MARKER = "__ANTON_USAGE__"
 USAGE_MARKER_ENV = "ANTON_SCRATCHPAD_USAGE"
-# "off" where the deployment refuses hosted web search, as a self-hosted
-# install's model route does. The ANTON_SCRATCHPAD_ prefix lets it through
-# the sandbox's environment allowlist to the pad.
+# "off" where the deployment refuses hosted web search and blocks the open
+# internet, as a self-hosted install does: the agent then gets no web tools
+# and is told the web is out of reach. The ANTON_SCRATCHPAD_ prefix lets it
+# through the sandbox's environment allowlist to the pad.
 WEB_SEARCH_ENV = "ANTON_SCRATCHPAD_WEB_SEARCH"
 WEB_SEARCH_OFF_MESSAGE = (
     "web_search is unavailable: web access is turned off on this install, and the "
     "internet cannot be reached either, apart from the data sources connected here "
-    "and a host that a skill or the user names. Do not look for another site or API "
-    "on your own. Tell the user that web access is off here, and answer from the "
-    "files, data and knowledge available."
+    "and a host that a skill names. Do not look for another site or API. Tell the "
+    "user that web access is off here, and answer from the files, data and "
+    "knowledge available."
 )
 # A cell's stdout limit, and how much more the worker sends for the parent to
 # scrub before it cuts, so a secret across the limit can still match whole.

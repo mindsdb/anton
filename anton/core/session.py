@@ -110,7 +110,9 @@ from anton.core.tools.tool_defs import (
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
+    NO_WEB_GENERATE_ARTIFACT_TOOL,
     NO_WEB_SCRATCHPAD_TOOL,
+    NO_WEB_STATIC_GENERATE_ARTIFACT_TOOL,
     READ_IMAGE_TOOL,
     READ_TEXT_FILE_TOOL,
     RECALL_TOOL,
@@ -122,7 +124,6 @@ from anton.core.tools.tool_defs import (
     STATIC_UPDATE_ARTIFACT_METADATA_TOOL,
     UPDATE_ARTIFACT_METADATA_TOOL,
     ToolDef,
-    generate_artifact_without_web,
 )
 from anton.core.interaction.elicit import Elicitor
 from anton.core.interaction.emitter import TurnEmitter
@@ -3300,9 +3301,10 @@ class ChatSession:
             )
             if fullstack:
                 self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
-            generate_tool = GENERATE_ARTIFACT_TOOL if fullstack else STATIC_GENERATE_ARTIFACT_TOOL
-            if not getattr(self, "_web_offered", True):
-                generate_tool = generate_artifact_without_web(generate_tool)
+            if getattr(self, "_web_offered", True):
+                generate_tool = GENERATE_ARTIFACT_TOOL if fullstack else STATIC_GENERATE_ARTIFACT_TOOL
+            else:
+                generate_tool = NO_WEB_GENERATE_ARTIFACT_TOOL if fullstack else NO_WEB_STATIC_GENERATE_ARTIFACT_TOOL
             self.tool_registry.register_tool(generate_tool)
 
     async def close(self) -> None:
