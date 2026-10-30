@@ -210,12 +210,12 @@ def _recording_request(sent: list):
     """Stands in for the upload service; the real publish() builds the payload."""
     def fake_request(url, api_key, *, method="POST", payload=None, verify=True, timeout=30):
         sent.append(json.loads(payload.decode())["access"])
-        return json.dumps({"view_url": "u", "report_id": "r", "md5": f"m{len(sent)}", "version": len(sent)})
+        return 200, json.dumps({"view_url": "u", "report_id": "r", "md5": f"m{len(sent)}", "version": len(sent)}).encode()
     return fake_request
 
 
 async def _tool_publish(tmp_path, f, tc_input: dict, sent: list) -> str:
-    with mock.patch("anton.publisher.minds_request", _recording_request(sent)), \
+    with mock.patch("anton.publisher.minds_request_with_status", _recording_request(sent)), \
          mock.patch("anton.config.settings.AntonSettings", return_value=_settings(f.parent.parent)), \
          mock.patch("webbrowser.open"):
         return await tools.handle_publish_or_preview(
