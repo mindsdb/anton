@@ -916,7 +916,7 @@ def test_public_data_sources_skill_is_loaded_from_the_store():
 
 def test_no_public_data_sources_where_web_search_is_off(monkeypatch):
     """The data loop judges and fetches from the catalog; with the web off,
-    every endpoint in it fails at the gateway."""
+     every endpoint in it fails at the gateway."""
     monkeypatch.setenv(WEB_SEARCH_ENV, "off")
     session = AsyncMock()
     session._skill_store = MagicMock()
