@@ -454,11 +454,6 @@
     columnLabels(labels, width, height);
     var leadG = labelsG.append('g');
     labels.forEach(function (l) {
-      if (l.column || Math.abs(l.dx) > 14 || Math.abs(l.dy) > 20) {
-        var ex = l.x + l.dx + (l.anchor === 'end' ? 3 : (l.anchor === 'start' ? -3 : 0)), ey = l.y + l.dy - 4;
-        leadG.append('line').attr('x1', l.x).attr('y1', l.y).attr('x2', ex).attr('y2', ey)
-          .attr('stroke', AK.css('--ak-text-3')).attr('stroke-width', 0.8).attr('opacity', 0.75);
-      }
       var t = labelsG.append('text').attr('class', 'ak-lbl').attr('x', l.x + l.dx).attr('y', l.y + l.dy).attr('text-anchor', l.anchor);
       t.append('tspan').text(l.name);
       if (l.sub && l.two) t.append('tspan').attr('class', 'ak-lbl-sub ak-lbl-l2').attr('x', l.x + l.dx).attr('dy', '1.1em').text(l.sub);
@@ -474,14 +469,26 @@
       if (bb.y < 4) sy = 4 - bb.y; else if (bb.y + bb.height > height - 4) sy = height - 4 - bb.y - bb.height;
       // Clear of the zoom buttons in the top-right corner.
       if (bb.y + sy < toolsH && bb.x + sx + bb.width > width - toolsW) sx = Math.min(sx, width - toolsW - bb.x - bb.width);
-      // A label pushed back over its own point goes to the point's left instead, or under it when
-      // the left has no room.
+      // A label pushed back over its own point goes to the point's left instead, or under (else
+      // above) it when the left has no room; it then sits beside its point, with no leader line.
       var r = (l.p.rad || 5) + 2;
       if (sx < 0 && bb.x + sx < l.x + r && bb.x + sx + bb.width > l.x - r && bb.y + sy < l.y + r && bb.y + sy + bb.height > l.y - r) {
+        l.beside = true;
         sx = l.x - r - 2 - bb.width - bb.x;
-        if (bb.x + sx < 4) { sx = Math.max(4 - bb.x, Math.min(0, width - toolsW - bb.x - bb.width)); sy = l.y + r + 1 - bb.y; }
+        if (bb.x + sx < 4) {
+          sx = Math.max(4 - bb.x, Math.min(0, width - toolsW - bb.x - bb.width));
+          sy = l.y + r + 1 + bb.height <= height - 4 ? l.y + r + 1 - bb.y : l.y - r - 1 - bb.height - bb.y;
+        }
       }
       if (sx || sy) { l.dx += sx; l.dy += sy; setLabelX(this, l.x + l.dx); this.setAttribute('y', l.y + l.dy); }
+    });
+    // Leader lines, once every label has its place: from each point to a label set apart from it.
+    labels.forEach(function (l) {
+      if (!l.beside && (l.column || Math.abs(l.dx) > 14 || Math.abs(l.dy) > 20)) {
+        var ex = l.x + l.dx + (l.anchor === 'end' ? 3 : (l.anchor === 'start' ? -3 : 0)), ey = l.y + l.dy - 4;
+        leadG.append('line').attr('x1', l.x).attr('y1', l.y).attr('x2', ex).attr('y2', ey)
+          .attr('stroke', AK.css('--ak-text-3')).attr('stroke-width', 0.8).attr('opacity', 0.75);
+      }
     });
 
     // Zoom and pan; marks keep their screen size.
@@ -763,7 +770,7 @@
           // Right of the point unless that runs off the canvas; then left of it.
           var bx = {x: p.x + 8 + tw > width - 6 ? p.x - 8 - tw : p.x + 8, y: p.y - 8, w: tw, h: 14};
           // A label with no room on either side goes under its point, whole on the canvas.
-          if (bx.x < 4) bx = {x: Math.max(4, Math.min(p.x - tw / 2, width - tw - 4)), y: p.y + 7, w: tw, h: 14};
+          if (bx.x < 4) bx = {x: Math.max(4, Math.min(p.x - tw / 2, width - tw - 4)), y: p.y + (p.rad || 5) + 5, w: tw, h: 14};
           placed.forEach(function (o) { if (bx.x < o.x + o.w && bx.x + bx.w > o.x && bx.y < o.y + o.h && bx.y + bx.h > o.y) bx.y = o.y + o.h + 1; });
           placed.push(bx);
           ctx.globalAlpha = dim ? 0.3 : 1;
