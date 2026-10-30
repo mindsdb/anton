@@ -282,7 +282,14 @@
       if (i === 0) { var ml = refLines(b, T, showValues); if (ml) item.markLine = ml; }
       return item;
     });
-    if (showValues && refLineList(b, T).length) opt._akRefKey = refLineList(b, T);
+    var keyLines = showValues ? refLineList(b, T) : [];
+    // Each name with its value (unless the name shows it), so two lines of one colour are told apart.
+    if (keyLines.length) opt._akRefKey = keyLines.map(function (l) {
+      var v = unitOf(AK.fmt(l.value, yfmt), b.unit), n = String(+l.value);
+      if (l.label === String(l.value)) return {color: l.color, label: v};
+      var shown = l.label.indexOf(v) >= 0 || new RegExp('(^|[^\\d.])' + n.replace('.', '\\.') + '(?!\\d)').test(l.label.replace(/,/g, ''));
+      return {color: l.color, label: shown ? l.label : l.label + ' · ' + v};
+    });
     y2.forEach(function (f, k) {
       var vals = s.cats.map(function (c) {
         var r = rows.filter(function (x) { return String(x[b.x]) === String(c); })[0];
@@ -314,13 +321,9 @@
     if (b.x_label) opt.grid.bottom = 24;
     if ((b.ref_lines && b.ref_lines.length) || b.threshold) opt.grid.right = 28;
     if (horizontal && showValues) opt.grid.right = Math.max(opt.grid.right || 16, Math.round(widest * 6.8) + 12);
-    // An upright bar's value label wider than its bar would reach into the axis labels (or past the
-    // right edge) at either end of the plot: room for its overhang.
-    if (!horizontal && showValues) {
-      var overhang = Math.max(0, Math.round(widest * 3.4 - slot / 2));
-      opt.grid.left = Math.max(opt.grid.left || 8, 8 + overhang);
-      opt.grid.right = Math.max(opt.grid.right || 16, 8 + overhang);
-    }
+    // Upright bars' value labels sit above the bars: headroom keeps the tallest one's label inside the
+    // plot, clear of the top axis label.
+    if (!horizontal && showValues && b.y_max == null) valAxis.boundaryGap = [0, '10%'];
     // A slanted first label reaches left of the plot: room for it.
     if (catAxis.axisLabel.rotate) opt.grid.left = Math.max(opt.grid.left || 8, Math.round(Math.min(longestCat, 12) * 4.2));
     if (horizontal && !b.height) {

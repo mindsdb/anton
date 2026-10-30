@@ -765,6 +765,12 @@
           if (on) { ctx.strokeStyle = p.color; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(p.x, p.y, rr + 5 + 3 * Math.sin(t * 3), 0, 2 * Math.PI); ctx.stroke(); }
           ctx.globalAlpha = 1;
         }
+      });
+      // Labels over every point, the selected point's first, so its name is the one kept in a crowd.
+      var order = selKey == null ? pts : pts.filter(function (p) { return p.key === selKey; })
+        .concat(pts.filter(function (p) { return p.key !== selKey; }));
+      order.forEach(function (p) {
+        var dim = selKey != null && p.key !== selKey;
         if (p.lbl && p.vis) {
           var tw = ctx.measureText(p.lbl).width;
           // Right of the point unless that runs off the canvas; then left of it.

@@ -119,7 +119,7 @@
     // falls back to the tone's mark rather than spilling out of the badge.
     var named = {sparkles: '✨', sparkle: '✨', star: '★', lightbulb: '💡', bulb: '💡', idea: '💡', check: '✓',
       checkmark: '✓', tick: '✓', success: '✓', warning: '!', alert: '!', error: '!', info: 'i', note: 'i',
-      flag: '⚑', target: '◎', trend: '↗', trendingup: '↗', trendingdown: '↘', up: '↑', down: '↓', clock: '⏱',
+      flag: '⚑', target: '◎', trend: '↗', trendingup: '↗', trendingdown: '↘', arrowup: '↑', arrowdown: '↓', clock: '⏱',
       calendar: '📅', money: '$', dollar: '$', rocket: '🚀', fire: '🔥', heart: '♥', pin: '📍', key: '🔑'};
     var raw = b.icon == null ? '' : String(b.icon).trim();
     var glyphs = typeof Intl !== 'undefined' && Intl.Segmenter ? Array.from(new Intl.Segmenter().segment(raw)).length : Array.from(raw).length;
