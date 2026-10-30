@@ -63,6 +63,13 @@ def _unit_clash(unit: str | None, format: str | None) -> str | None:
     return unit
 
 
+def _md(md: Any) -> str:
+    """Markdown as written, except a literal backslash-n (a line break escaped twice) is the line break
+    it was meant to be; code spans keep theirs."""
+    parts = re.split(r"(`[^`]*`)", str(md))
+    return "".join(p if p.startswith("`") else p.replace("\\n", "  \n") for p in parts)
+
+
 def kpi(label: str, value: Any, format: str | None = None, *, sub: str | None = None, delta: Any = None,
         delta_format: str | None = None, delta_label: str | None = None, better: str | None = None,
         tone: str | None = None, spark: list | None = None, color_value: bool = False, unit: str | None = None) -> dict:
@@ -70,7 +77,11 @@ def kpi(label: str, value: Any, format: str | None = None, *, sub: str | None = 
     `unit` ("km", "kg", "hours") follows the value."""
     _check_format(format, f"kpi {label!r}")
     from .data import _scalar
-    card = {k: v for k, v in dict(label=label, format=format, sub=sub, delta=_scalar(delta),
+    for name, v in (("value", value), ("delta", delta)):
+        if isinstance(v, (list, tuple, set, dict)) or (hasattr(v, "__len__") and hasattr(v, "dtype")):
+            raise KitError(f"kpi {label!r}: {name} is one number, not {type(v).__name__}. For a before/after pair "
+                           "show the new value with delta= (the change), or put both in page.compare.")
+    card ={k: v for k, v in dict(label=label, format=format, sub=sub, delta=_scalar(delta),
                                   delta_format=delta_format, delta_label=delta_label, better=better, tone=tone,
                                   spark=[_scalar(x) for x in spark] if spark is not None else None,
                                   color_value=color_value or None, unit=_unit_clash(unit, format)).items() if v is not None}
@@ -310,14 +321,14 @@ class Page:
              id: str | None = None) -> dict:
         """Markdown-lite text: paragraphs, **bold**, *italic*, `code`, [links](https://...), lists, ## headings.
         style="lead" for a larger intro paragraph."""
-        return self._add({"type": "text", "md": md, "style": style, "card": card or None, "title": title, "id": id})
+        return self._add({"type": "text", "md": _md(md), "style": style, "card": card or None, "title": title, "id": id})
 
     def callout(self, md: str, *, title: str | None = None, tone: str = "info", icon: str | None = None,
                 id: str | None = None) -> dict:
         """A highlighted message: the key finding, a recommendation, a caveat. tone good|bad|warn|info|accent|neutral."""
         if tone not in TONES:
             raise KitError(f"callout tone must be one of {TONES}")
-        return self._add({"type": "callout", "md": md, "title": title, "tone": tone, "icon": icon, "id": id})
+        return self._add({"type": "callout", "md": _md(md), "title": title, "tone": tone, "icon": icon, "id": id})
 
     def list(self, items: list[str], *, ordered: bool = False, title: str | None = None, id: str | None = None) -> dict:
         return self._add({"type": "list", "items": [str(i) for i in items], "ordered": ordered or None,
@@ -394,6 +405,12 @@ class Page:
             if bad:
                 raise KitError(f"chart {title!r}: y field {f!r} must be numeric; got e.g. {bad[0]!r}")
         if series and kind in ("bar", "hbar", "line", "area"):
+            svals = [r.get(series) for r in rws if r.get(series) is not None]
+            if (len(rws) >= 3 and svals and all(is_number(v) for v in svals) and len(set(svals)) == len(rws)
+                    and len({r.get(x) for r in rws}) == len(rws)):
+                raise KitError(f"chart {title!r}: series={series!r} holds one number per row, but series names the "
+                               f"groups (a scenario, a region). To draw two measures side by side use "
+                               f"y=[{y!r}, {series!r}].")
             seen = set()
             for r in rws:
                 k = (r.get(x), r.get(series))
@@ -619,6 +636,13 @@ class Page:
             name, rws = self._dataset(layer["data"], f"timeline {title!r} {kind}")
             want = [layer.get("row"), layer.get("start"), layer.get("end"), layer.get("date"), layer.get("label")]
             want += list(layer.get("tooltip") or []) + list(layer.get("detail_fields") or [])
+            # A `tone` naming a field colours each item by its value (a status, or a tone per row).
+            if isinstance(layer.get("tone"), str) and rws and layer["tone"] in _fields(rws) and not layer.get("color"):
+                layer["color"] = layer.pop("tone")
+            if isinstance(layer.get("color"), str) and rws and layer["color"] in _fields(rws) and not layer.get("colors"):
+                vals = {r.get(layer["color"]) for r in rws}
+                if vals <= set(TONES):
+                    layer["colors"], layer["tone_values"] = {v: v for v in vals}, True
             if isinstance(layer.get("color"), str) and rws and layer["color"] in _fields(rws):
                 want.append(layer["color"])
             elif layer.get("color"):

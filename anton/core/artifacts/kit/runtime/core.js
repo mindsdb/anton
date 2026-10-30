@@ -60,7 +60,8 @@
   AK.md = function (src) {
     var lines = String(src == null ? '' : src).replace(/\r/g, '').split('\n');
     var out = [], para = [], list = null;
-    function flushPara() { if (para.length) { out.push('<p>' + inline(para.join(' ')) + '</p>'); para = []; } }
+    // A line ending in two spaces or a backslash breaks the line (markdown's hard break).
+    function flushPara() { if (para.length) { out.push('<p>' + inline(para.join(' ')).replace(/\u0001 ?/g, '<br>').replace(/<br>$/, '') + '</p>'); para = []; } }
     function flushList() { if (list) { out.push('<' + list.tag + '>' + list.items.map(function (i) { return '<li>' + inline(i) + '</li>'; }).join('') + '</' + list.tag + '>'); list = null; } }
     lines.forEach(function (raw) {
       var line = raw.trim(), m;
@@ -68,7 +69,7 @@
       if ((m = line.match(/^(#{1,3})\s+(.*)$/))) { flushPara(); flushList(); var lv = Math.min(3, m[1].length + 1); out.push('<h' + lv + '>' + inline(m[2]) + '</h' + lv + '>'); return; }
       if ((m = line.match(/^[-*•]\s+(.*)$/))) { flushPara(); if (!list || list.tag !== 'ul') { flushList(); list = {tag: 'ul', items: []}; } list.items.push(m[1]); return; }
       if ((m = line.match(/^\d+[.)]\s+(.*)$/))) { flushPara(); if (!list || list.tag !== 'ol') { flushList(); list = {tag: 'ol', items: []}; } list.items.push(m[1]); return; }
-      flushList(); para.push(line);
+      flushList(); para.push(/ {2,}$|\\$/.test(raw) ? line.replace(/\\$/, '') + '\u0001' : line);
     });
     flushPara(); flushList();
     return out.join('');

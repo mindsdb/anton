@@ -49,7 +49,9 @@ page = kit.Page(title, subtitle=None, lang="en", theme="light"|"dark", badges=[.
 # formats: int, number:1, percent (12.5 -> 12.5%), fraction (0.125 -> 12.5%), currency, currency:2,
 #   currency_compact ($2.4M), compact, days, date (Mar 3, 2026), date_short, date_iso, month, text,
 #   datetime_short (Mar 3, 09:00), time (09:00); timestamps keep their times of day unless formatted as dates
-page.kpis([kit.kpi(label, value, format, unit=None, sub=None, delta=None, better="up"|"down", tone="good"|"bad"|"warn"|"accent")])
+page.kpis([kit.kpi(label, value, format, unit=None, sub=None, delta=None, delta_format=None, better="up"|"down",
+                   tone="good"|"bad"|"warn"|"accent")])   # one value each; delta in the value's format unless
+                   # delta_format says otherwise (a % change: delta_format="percent:1")
 page.text(markdown, style="lead") · page.callout(markdown, title=None, tone="info"|"good"|"warn"|"bad")
 page.compare(["Current", "Proposed"], [kit.metric(label, [v1, v2], format, unit=None, better="higher"|"lower",
              show_pct=False)], title=)   # two columns: a change column (second minus first) in each
@@ -63,8 +65,10 @@ page.table(df, [field, kit.col(field, label, format, unit=None, pill=True, tones
            search=None, filters=[fields], sort={"field": f, "desc": True}, totals={field: "sum"},
            key=None, link=None, detail="drawer"|"inline"|False, detail_fields=[fields the detail shows],
            row_tone={"field": f, "map": {value: tone}})
-page.map(kit.points(df, lat, lon, label=, sublabel=, color=field, colors={value: tone}, shape="circle"|
-           "square"|"diamond", tooltip=[fields], key=, link=, pulse=False, name=legend_name),
+page.map(kit.points(df, lat, lon, label=, sublabel=, color=field, colors={value: tone}, size=field,
+           shape="circle"|"square"|"diamond", tooltip=[fields], key=, link=, pulse=False, name=legend_name),
+           # color= a numeric field shades light to dark with its range in the legend; size= a numeric
+           # field sizes each marker by area, with a size key
          kit.routes(df, from_lat, from_lon, to_lat, to_lon, via_lat=None, via_lon=None, color=, colors=,
            animate=False, key=, link=, tooltip=[...]),
          kit.regions(df, country, value, format=), title=, fit="data"|"world")
@@ -73,7 +77,8 @@ page.network(links_df, source=, target=, value=None, nodes=nodes_df, id_field="i
              tiers=[group order, left to right], style="graph"|"sankey", link_color=field,
              link_colors={value: tone}, dashed=field, value_format=, controls=False, title=)
              # nodes highlight their links on click or Enter (built in); controls=True adds a row of buttons
-page.timeline(bars=[kit.bars(df, row, start, end, label=None, name=legend, tone=)],
+page.timeline(bars=[kit.bars(df, row, start, end, label=None, name=legend, tone=, color=field,
+                             colors={value: tone}, tooltip=[fields])],   # color=field: each bar by its value
               milestones=[kit.milestones(df, row, date, label=, tooltip=[fields])],
               markers=[kit.marker(date, label, tone)], milestone_list=None, title=)
               # one lane per bars layer (plan vs actual); milestones also listed as text, collapsed

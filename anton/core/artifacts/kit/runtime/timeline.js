@@ -46,17 +46,18 @@
     var items = [];
     bars.forEach(function (L) {
       var rows = AK.data(L.data);
-      if (L.color && rows.length && rows[0][L.color] !== undefined) {
+      // A field of tone names (good, bad) colours the bars but names nothing a legend could show.
+      if (L.color && rows.length && rows[0][L.color] !== undefined && !L.tone_values) {
         var sc = AK.colorScale(AK.uniq(rows, L.color), L.colors, L.color);
         sc.domain().forEach(function (v) { items.push({label: v, color: sc(v)}); });
-      } else if (L.name) items.push({label: L.name, color: AK.resolveColor(L.color_value || L.tone || L.color) || AK.css('--ak-accent')});
+      } else if (L.name && !L.tone_values) items.push({label: L.name, color: AK.resolveColor(L.color_value || L.tone || L.color) || AK.css('--ak-accent')});
     });
     mss.forEach(function (L) {
       var rows = AK.data(L.data);
-      if (L.color && rows.length && rows[0][L.color] !== undefined) {
+      if (L.color && rows.length && rows[0][L.color] !== undefined && !L.tone_values) {
         var sc = AK.colorScale(AK.uniq(rows, L.color), L.colors, L.color);
         sc.domain().forEach(function (v) { items.push({label: v, color: sc(v), shape: L.shape === 'diamond' ? 'diamond' : 'dot'}); });
-      } else if (L.name) items.push({label: L.name, color: AK.resolveColor(L.color_value || L.tone || L.color) || AK.css('--ak-text-2'), shape: L.shape === 'diamond' ? 'diamond' : 'dot'});
+      } else if (L.name && !L.tone_values) items.push({label: L.name, color: AK.resolveColor(L.color_value || L.tone || L.color) || AK.css('--ak-text-2'), shape: L.shape === 'diamond' ? 'diamond' : 'dot'});
     });
     markers.forEach(function (m) { if (m.label) items.push({label: m.label, color: AK.resolveColor(m.tone || 'neutral'), shape: 'dash'}); });
     if (items.length && b.legend !== false) c.body.insertBefore(AK.legend(items), view);
@@ -195,7 +196,7 @@
         gRows.appendChild(g);
       });
       // Bars
-      var lane = 0;
+      var lane = 0, spans = {}, pending = [];
       bars.forEach(function (L) {
         var rows = AK.data(L.data);
         var sc = L.color && rows.length && rows[0][L.color] !== undefined ? AK.colorScale(AK.uniq(rows, L.color), L.colors, L.color) : null;
@@ -218,20 +219,32 @@
           rect.addEventListener('mouseleave', function () { AK.tip(null); });
           gBars.appendChild(rect);
           var text = L.label ? (r[L.label] == null ? '' : AK.fmt(r[L.label], AK.fieldFormat(L, L.label) || 'auto')) : '';
-          if (text) {
-            var tw = text.length * 6.4 + 12;
-            var inside = (x1 - x0) > tw;
-            // Outside the bar: after it when there is room, else before it, else trimmed to fit.
-            var after = x1 + 5 + tw <= width - 4, before = x0 - 5 - tw >= labelW;
-            var lt = AK.svg('text', {x: inside ? x0 + 6 : (after ? x1 + 5 : (before ? x0 - 5 : x0 + 6)), y: y + bh / 2 + 4,
-              'font-size': 11, 'font-weight': 600, 'text-anchor': inside || after || !before ? 'start' : 'end',
-              fill: inside || (!after && !before) ? '#fff' : AK.css('--ak-text-2')});
-            var room = Math.floor(((x1 - x0) - 12) / 6.4);
-            lt.textContent = inside || after || before || text.length <= room ? text : text.slice(0, Math.max(1, room - 1)) + '\u2026';
-            gBars.appendChild(lt);
-          }
+          var slot = k + '|' + y;
+          (spans[slot] = spans[slot] || []).push([x0, Math.max(x0 + 3, x1)]);
+          if (text) pending.push({slot: slot, x0: x0, x1: x1, y: y, bh: bh, text: text});
         });
         if (!L.overlay) lane++;
+      });
+      // Bar labels: inside the bar when it fits; else after it, or before it, where no other bar or
+      // label of that lane is; else shortened to fit inside (the tooltip has the whole text).
+      pending.forEach(function (p) {
+        var tw = p.text.length * 6.4 + 12, taken = spans[p.slot];
+        var free = function (a, z) {
+          return taken.every(function (s) { return z <= s[0] || a >= s[1] || (s[0] === p.x0 && s[1] === Math.max(p.x0 + 3, p.x1)); });
+        };
+        var inside = (p.x1 - p.x0) > tw;
+        var after = !inside && p.x1 + 5 + tw <= width - 4 && free(p.x1 + 1, p.x1 + 5 + tw);
+        var before = !inside && !after && p.x0 - 5 - tw >= labelW && free(p.x0 - 5 - tw, p.x0 - 1);
+        var room = Math.floor(((p.x1 - p.x0) - 12) / 6.4);
+        if (!inside && !after && !before && room < 3) return;
+        var lt = AK.svg('text', {x: inside ? p.x0 + 6 : (after ? p.x1 + 5 : (before ? p.x0 - 5 : p.x0 + 6)), y: p.y + p.bh / 2 + 4,
+          'font-size': 11, 'font-weight': 600, 'text-anchor': before ? 'end' : 'start',
+          fill: inside || (!after && !before) ? '#fff' : AK.css('--ak-text-2')});
+        lt.textContent = inside || after || before || p.text.length <= room ? p.text : p.text.slice(0, Math.max(1, room - 1)) + '\u2026';
+        lt.style.pointerEvents = 'none';
+        if (after) taken.push([p.x1 + 1, p.x1 + 5 + tw]);
+        if (before) taken.push([p.x0 - 5 - tw, p.x0 - 1]);
+        gBars.appendChild(lt);
       });
       // Milestones
       var all = [], msBoxes = [], msHidden = 0;
