@@ -185,36 +185,6 @@ class _Tabs:
         return self._page._into(tab["children"])
 
 
-
-# Common function words of each language (words a sentence can hardly do without, and that other
-# languages here do not share), to tell which language a piece of text is in.
-_FUNCTION_WORDS = {
-    "en": set("the and of to is are for with was were has have at by from this that will be not been their".split()),
-    "es": set("el la los las del y que por para con una es son está están al se su sus más pero".split()),
-    "fr": set("le la les des du et que pour avec une est sont dans au aux sur ce cette ses pas qui où d l qu".split()),
-    "de": set("der die das und ist mit für auf nicht ein eine von zu den dem im sind wird".split()),
-    "pt": set("os da do das dos em para com uma não são está mais pelo pela".split()),
-    "it": set("il la gli della delle di che con una non sono è più nel degli l dell nella".split()),
-}
-_LANG_NAMES = {"en": "English", "es": "Spanish", "fr": "French", "de": "German", "pt": "Portuguese", "it": "Italian"}
-# English status words data often holds, which a page in another language translates like any word.
-_ENGLISH_STATUS = {"late", "on time", "delayed", "delivered", "in transit", "shipped", "open", "closed", "pending",
-                   "cancelled", "canceled", "completed", "overdue", "resolved", "unresolved", "in progress",
-                   "scheduled", "at risk", "approved", "rejected", "planned", "active", "inactive"}
-
-
-def _text_language(text: str, page_lang: str) -> str | None:
-    """The language a piece of text is in when it is clearly not the page's (two or more of another
-    language's function words, more than the page language's), else None."""
-    words = re.findall(r"[^\W\d_]+", text.lower())
-    if len(words) < 3:
-        return None
-    hits = {lg: sum(w in fw for w in words) for lg, fw in _FUNCTION_WORDS.items()}
-    best = max(hits, key=hits.get)
-    if best != page_lang and hits[best] >= 2 and hits[best] > hits.get(page_lang, 0):
-        return best
-    return None
-
 class Page:
     """A report or dashboard page. Add blocks in reading order; containers are context managers.
 
@@ -997,63 +967,6 @@ class Page:
         for num, sentence in dict.fromkeys(unsupported):
             self.checks.append(f"{num} in \"{sentence}\"")
 
-    def _check_language(self) -> None:
-        """Warn when text the page shows is in another language than the page: sentences in a data
-        field (comments, notes) or in the page's own words, and, on a non-English page, English
-        status words (Late, Delivered) left as they are in the data."""
-        lang = str(self.spec.get("lang") or "en")[:2]
-        if lang not in _FUNCTION_WORDS:
-            return
-        data = self.spec.get("data", {})
-        found: dict[str, list[str]] = {}
-
-        def look(where: str, values) -> None:
-            for v in values:
-                if not isinstance(v, str) or not v.strip():
-                    continue
-                other = _text_language(v, lang)
-                if other or (lang != "en" and v.strip().lower() in _ENGLISH_STATUS):
-                    found.setdefault(f"{where} ({_LANG_NAMES.get(other or 'en', other or 'en')})", []).append(v.strip())
-
-        def fields(rows, names):
-            for f in dict.fromkeys(n for n in names if isinstance(n, str)):
-                yield f, [r.get(f) for r in rows]
-
-        look("the page's own text", [self.spec.get(k) for k in ("title", "subtitle")]
-             + list(self.spec.get("notes") or []) + list(self.spec.get("meta") or []))
-        for b in self._walk():
-            t, title = b.get("type"), b.get("title")
-            look("the page's own text", [b.get(k) for k in ("title", "subtitle", "note", "md")]
-                 + [str(i) for i in b.get("items") or [] if not isinstance(i, dict)]
-                 + [k.get(x) for k in b.get("items") or [] if isinstance(k, dict) for x in ("label", "sub")])
-            if t == "table":
-                rows = data.get(b["data"], [])
-                names = [c["field"] for c in b.get("columns") or []]
-                if b.get("detail") not in (None, False):
-                    names += list(b.get("detail_fields") or _fields(rows))
-                for f, vals in fields(rows, names):
-                    look(f"table {title!r} field {f!r}", vals)
-            elif t in ("map", "globe"):
-                for L in b.get("layers") or []:
-                    rows = data.get(L.get("data"), []) if isinstance(L.get("data"), str) else []
-                    for f, vals in fields(rows, [L.get("label"), L.get("sublabel"), L.get("color")] + list(L.get("tooltip") or [])):
-                        look(f"{t} {title!r} field {f!r}", vals)
-            elif t == "timeline":
-                for L in (b.get("bars") or []) + (b.get("milestones") or []):
-                    rows = data.get(L.get("data"), [])
-                    for f, vals in fields(rows, [L.get("row"), L.get("label"), L.get("color")] + list(L.get("tooltip") or [])):
-                        look(f"timeline {title!r} field {f!r}", vals)
-            elif t == "chart" and isinstance(b.get("data"), str):
-                rows = data.get(b["data"], [])
-                for f, vals in fields(rows, [b.get("x"), b.get("series")]):
-                    look(f"chart {title!r} field {f!r}", vals)
-        for where, vals in list(found.items())[:4]:
-            distinct = list(dict.fromkeys(vals))
-            sample = distinct[0] if len(distinct[0]) <= 70 else distinct[0][:67] + "…"
-            self.warnings.append(f"{where} shows text not in the page's language on a '{lang}' page, e.g. {sample!r} "
-                                 f"({len(distinct)} distinct): translate it (a dict of the distinct values, mapped in "
-                                 "pandas) or leave it out when the request does not need it; keep names and ids.")
-
     def _check_field_names_in_text(self) -> None:
         """Warn when the page's words use a data field's raw name (signup_date, order.total) instead of
         words a reader knows. A CamelCase name counts only when the page gives that field a label (so
@@ -1201,7 +1114,6 @@ class Page:
         self._check_percents()
         self._check_times()
         self._check_details()
-        self._check_language()
         self._check_field_names_in_text()
         self._check_prose_numbers()
         self._save_warnings = self.warnings[start:]

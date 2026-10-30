@@ -633,28 +633,6 @@ async def test_a_build_that_never_saves_a_page_fails(tmp_path):
     assert result["summary"] == "I could not reach the data."
     assert plan.await_count <= builder.MAX_ROUNDS
 
-
-def test_text_in_another_language_than_the_page_is_flagged():
-    visits = pd.DataFrame({"paciente": ["P-1", "P-2", "P-3"], "estado": ["Pending", "Atendido", "Atendido"],
-                           "nota": ["Waiting for the lab results from the night shift", "Alta sin incidencias",
-                                    "Revisión con la enfermera de guardia"]})
-    page = kit.Page("Visitas", "Urgencias del lunes", lang="es")
-    page.table(visits, ["paciente", "estado", "nota"], title="Visitas")
-    page.html_text()
-    flagged = [w for w in page.warnings if "not in the page's language" in w]
-    assert len(flagged) == 2
-    assert any("'nota' (English)" in w and "Waiting for the lab" in w for w in flagged)
-    assert any("'estado' (English)" in w and "'Pending'" in w for w in flagged)
-
-    french = kit.Page("Semaines où la charge dépasse la capacité", "Atelier d'assemblage final", lang="fr")
-    french.table(pd.DataFrame({"semaine": ["S1"], "note": ["La charge dépasse la capacité de l'atelier"]}), ["semaine", "note"])
-    english = kit.Page("Capacity options ranked by cost per bed per week", lang="en")
-    english.table(pd.DataFrame({"site": ["Riverview"], "status": ["Late"]}), ["site", "status"])
-    for p in (french, english):
-        p.html_text()
-        assert not [w for w in p.warnings if "not in the page's language" in w]
-
-
 def _supply_net():
     nodes = pd.DataFrame({"id": ["S1", "S2", "C1", "P1", "P2", "D1", "D2"],
                           "group": ["Supplier", "Supplier", "Subcontractor", "Plant", "Plant", "Store", "Store"]})
