@@ -248,6 +248,13 @@ _RESTORED = (
     "turn: do not edit it again this turn. Tell the user the edit could not be made safely and the page is as "
     "it was, and do not call the edit or any view it changed browser-verified, tested or working"
 )
+# Said after the "not checked in a browser" line, instead of what the check
+# still found, when that check leaves an edited page with no repair cells.
+_UNVERIFIED_NO_REPAIRS_LEFT = (
+    "this page has no repair cells left this turn: do not edit it again this turn. Tell the user it was "
+    "not verified in a browser and may not display correctly in the preview, and do not call it or any "
+    "view in it browser-verified, tested or working"
+)
 _FULLSTACK_PAGE_SKIP = (
     "not checked in a browser: a fullstack app's page calls its backend, which "
     "the render check does not run"
@@ -720,6 +727,12 @@ def _check_pages(
                     messages.append(f"{label} — {_RESTORED}")
                     continue
             messages.append(f"{label} — {_NO_REPAIRS_LEFT}")
+            continue
+        if key in out_of_repairs:
+            # Unverified: no findings and no screenshot, nothing that sends
+            # the agent back to edit a page it cannot repair this turn.
+            messages.append(f"{label} — not checked in a browser: {outcome.unverified_reason}")
+            messages.append(f"{label} — {_UNVERIFIED_NO_REPAIRS_LEFT}")
             continue
         if outcome.screenshot is not None and (shot is None or (failed and not shot_failed)):
             shot, shot_page, shot_failed = outcome.screenshot, label, failed

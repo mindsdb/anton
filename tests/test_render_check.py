@@ -3641,6 +3641,26 @@ async def test_a_page_that_passed_and_fails_again_counts_the_repairs_it_already_
     assert last.out_of_repairs == frozenset({tool_handlers.PageKey(slug, "index.html")})
 
 
+async def test_a_repair_the_service_could_not_vouch_for_says_no_repair_cells_are_left(service, tmp_path):
+    """The second repair's check gets no answer: the page has no repair cells
+    left, so the agent hears that, not what the check still found."""
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    session = _repair_session()
+    _failed_build(session, slug, "index.html")
+    key = tool_handlers.PageKey(slug, "index.html")
+    service.answer(_FAILED_ROUTES, (503, b"not ready", 0.0))
+
+    await _repair_cell(session, store, slug, "index.html", "first repair")
+    lint = await _repair_cell(session, store, slug, "index.html", "second repair")
+
+    label = f"{slug}/index.html"
+    assert len(lint.messages) == 2
+    assert lint.messages[0].startswith(f"{label} — not checked in a browser: ")
+    assert lint.messages[1] == f"{label} — {tool_handlers._UNVERIFIED_NO_REPAIRS_LEFT}"
+    assert lint.screenshot is None
+    assert lint.out_of_repairs == frozenset({key})
+
+
 async def test_a_page_the_cell_left_alone_is_not_out_of_repair_cells_when_its_check_is_unverified(
     service, tmp_path
 ):
@@ -3691,6 +3711,11 @@ async def test_a_page_built_by_hand_gets_the_same_repair_budget(service, tmp_pat
         tool_handlers._repairs_left_line(1),
         "Until a check passes it, do not call it or any view in it browser-verified, tested or working",
         id="repair-cells-left",
+    ),
+    pytest.param(
+        tool_handlers._UNVERIFIED_NO_REPAIRS_LEFT,
+        "do not call it or any view in it browser-verified, tested or working",
+        id="unverified-no-repair-cells-left",
     ),
     pytest.param(
         tool_handlers._RESTORED,
