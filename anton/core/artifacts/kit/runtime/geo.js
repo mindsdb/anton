@@ -304,6 +304,11 @@
     box.style.height = height + 'px';
     var pad = width < 520 ? 10 : 18;
     proj.fitExtent([[pad, pad], [width - pad, height - pad]], fitShape);
+    // The zoom buttons sit over the top-right corner (toolsW by toolsH): when a point or route end
+    // would land under them, the map is fitted beside them instead.
+    var toolsW = 48, toolsH = 118;
+    var underTools = function (c) { var p = proj(c); return p && p[0] > width - toolsW && p[1] < toolsH; };
+    if (coords.some(underTools)) proj.fitExtent([[pad, pad], [width - toolsW, height - pad]], fitShape);
     var path = d3.geoPath(proj);
 
     // Two stacked layers: the world (drawn once) and the marks (routes, points, labels), so motion
@@ -468,7 +473,14 @@
       if (bb.x < 4) sx = 4 - bb.x; else if (bb.x + bb.width > width - 4) sx = width - 4 - bb.x - bb.width;
       if (bb.y < 4) sy = 4 - bb.y; else if (bb.y + bb.height > height - 4) sy = height - 4 - bb.y - bb.height;
       // Clear of the zoom buttons in the top-right corner.
-      if (bb.y + sy < 118 && bb.x + sx + bb.width > width - 48) sx = Math.min(sx, width - 48 - bb.x - bb.width);
+      if (bb.y + sy < toolsH && bb.x + sx + bb.width > width - toolsW) sx = Math.min(sx, width - toolsW - bb.x - bb.width);
+      // A label pushed back over its own point goes to the point's left instead, or under it when
+      // the left has no room.
+      var r = (l.p.rad || 5) + 2;
+      if (sx < 0 && bb.x + sx < l.x + r && bb.x + sx + bb.width > l.x - r && bb.y + sy < l.y + r && bb.y + sy + bb.height > l.y - r) {
+        sx = l.x - r - 2 - bb.width - bb.x;
+        if (bb.x + sx < 4) { sx = Math.max(4 - bb.x, Math.min(0, width - toolsW - bb.x - bb.width)); sy = l.y + r + 1 - bb.y; }
+      }
       if (sx || sy) { l.dx += sx; l.dy += sy; setLabelX(this, l.x + l.dx); this.setAttribute('y', l.y + l.dy); }
     });
 
@@ -750,6 +762,8 @@
           var tw = ctx.measureText(p.lbl).width;
           // Right of the point unless that runs off the canvas; then left of it.
           var bx = {x: p.x + 8 + tw > width - 6 ? p.x - 8 - tw : p.x + 8, y: p.y - 8, w: tw, h: 14};
+          // A label with no room on either side goes under its point, whole on the canvas.
+          if (bx.x < 4) bx = {x: Math.max(4, Math.min(p.x - tw / 2, width - tw - 4)), y: p.y + 7, w: tw, h: 14};
           placed.forEach(function (o) { if (bx.x < o.x + o.w && bx.x + bx.w > o.x && bx.y < o.y + o.h && bx.y + bx.h > o.y) bx.y = o.y + o.h + 1; });
           placed.push(bx);
           ctx.globalAlpha = dim ? 0.3 : 1;
