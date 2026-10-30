@@ -230,3 +230,10 @@ class TestMindsCloudProviderNormalization:
         # Should build without raising; creds derived from the minds_* fields.
         LLMClient.from_settings(s)
         assert s.openai_base_url == "https://api.mindshub.ai/v1"
+
+
+def test_direct_reports_flag_reads_the_env(monkeypatch):
+    monkeypatch.delenv("ANTON_DIRECT_REPORTS", raising=False)
+    assert AntonSettings(_env_file=None).direct_reports is True
+    monkeypatch.setenv("ANTON_DIRECT_REPORTS", "false")
+    assert AntonSettings(_env_file=None).direct_reports is False

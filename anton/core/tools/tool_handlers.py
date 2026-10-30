@@ -553,6 +553,7 @@ def _check_pages(
     comparisons: "dict[PageKey, Comparison]" = {}
     put_back: set[PageKey] = set()
     edited = frozenset(page.key(store) for page in pages if page.edited)
+    shown_as_text = _markup_shown_as_text(store, pages)
 
     def _repairs_left_after(page: _ChangedPage) -> int:
         """The repair cells PAGE has left this turn once this check is done.
@@ -601,6 +602,15 @@ def _check_pages(
     if render_check.configured_url() is None:
         for page in to_check:
             label = f"{page.slug}/{page.path.name}"
+            if page.key(store) in shown_as_text:
+                left = _repairs_left_after(page)
+                page_checks[page.key(store)] = "failed"
+                if left <= 0:
+                    messages.append(f"{label} — {_NO_REPAIRS_LEFT}")
+                    continue
+                messages.append(f"{label} — {shown_as_text[page.key(store)]}")
+                messages.append(f"{label} — {_repairs_left_line(left)}")
+                continue
             if cell_sandbox is not None:
                 messages.append(f"{label} — {_SANDBOX_BROWSER_SKIP}")
                 page_checks[page.key(store)] = "unverified"
@@ -664,7 +674,7 @@ def _check_pages(
             )
         left = _repairs_left_after(page)
         removed = _removed_views(failed_views.get(key, ()), outcome)
-        status: "RenderStatus" = "failed" if removed else outcome.status
+        status: "RenderStatus" = "failed" if removed or key in shown_as_text else outcome.status
         page_checks[key] = status
         failed = status == "failed"
         if failed:
@@ -712,7 +722,7 @@ def _check_pages(
                 )
             messages += _comparison_lines(label, _notes(key, comparison))
             continue
-        if outcome.status == "unverified":
+        if outcome.status == "unverified" and key not in shown_as_text:
             messages.append(f"{label} — not checked in a browser: {outcome.unverified_reason}")
             if page.key(store) in findings_listed_earlier:
                 # An earlier unverified check this turn already listed what
@@ -735,6 +745,8 @@ def _check_pages(
                     f"{render_check.view_coverage(views=removed).checked}. A repair fixes the code a "
                     "finding names and keeps every view: put them back"
                 ))
+            if key in shown_as_text:
+                lines.insert(0, shown_as_text[key])
         messages += [f"{label} — {line}" for line in lines]
         if more:
             messages.append(f"{label} — and {more} more distinct findings, not listed")
@@ -813,6 +825,27 @@ def lint_changed_artifact_files(
         failing=failing, repairs_used=repairs_used, failed_views=failed_views, turn_pages=turn_pages,
     )
     return replace(checked, messages=messages + checked.messages)
+
+
+def _markup_shown_as_text(store, pages: list[_ChangedPage]) -> dict[PageKey, str]:
+    """A finding for each page this cell wrote that shows HTML tags as text.
+    Escaped markup loads without an error, so no browser check fails such a page."""
+    from anton.core.artifacts import report_tools
+
+    found: dict[PageKey, str] = {}
+    for page in pages:
+        if not page.edited or page.size > _ARTIFACT_LINT_SIZE_CEILING:
+            continue
+        try:
+            shown = report_tools.shown_markup(page.path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        if shown:
+            found[page.key(store)] = (
+                f"the page shows HTML tags as text, so that markup does not render or run: {shown}. "
+                f"With report_tools, {report_tools.SHOWN_MARKUP_FIX}"
+            )
+    return found
 
 
 def record_page_checks(
@@ -1394,13 +1427,14 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolO
 # The tool reason for each live-app launch failure; `root_cause` tiers each one.
 _LIVE_APP_FAILURE_REASONS: "dict[LaunchFailure, str]" = {
     "no_host": "live_app_unavailable",
+    "launches_disabled": "live_app_unavailable",
     "config": "live_app_unavailable",
     "no_slot": "live_app_unavailable",
     "slot_reset": "live_app_unavailable",
     "slot_unavailable": "live_app_unavailable",
     "slots_full": "live_app_slots_full",
     "slots_changed": "live_app_slots_full",
-    "slot_busy": "live_app_slots_full",
+    "slot_busy": "live_app_slots_busy",
     "launch_files": "live_app_invalid_files",
     "missing_package": "live_app_missing_package",
     "app_not_ready": "launch_failed",
@@ -1756,10 +1790,16 @@ _STATUS_INSTRUCTIONS = {
         "`views_measured` names. That page is on disk: repair it yourself now, "
         "instead of asking the user how to proceed. Read it with "
         "`read_text_file`, then change it in a scratchpad cell to fix the code "
-        "each finding names. Keep every view, its tab and its `runView` call, "
-        "and keep the `runView` helper with its `console.error`: a repair "
-        "fixes a view's code, it never removes the view or its error report "
-        "to quiet a finding. The browser check runs after each cell that "
+        "each finding names. When a view failed with \"no script defined this "
+        "view\", its own script did not parse, or it registered the view under "
+        "another title: fix that view's script. When views failed with \"two "
+        "scripts defined this view\", two views share that title: give one a "
+        "title of its own, in its `defineView` and its `runView` call. "
+        "Keep every view, its tab and its `runView` call, keep each view's "
+        "code in a `<script>` of its own, and keep the `runView` helper with "
+        "its `console.error`: a repair fixes a view's code, it never removes "
+        "the view or its error report to quiet a finding, and never merges "
+        "views' scripts. The browser check runs after each cell that "
         "changes the page, and this page gets `repair_cells` repair cells this "
         "turn; when a cell's result says none are left, stop editing the page. "
         "Do NOT call generate_artifact again for this page: it would rebuild "
@@ -1829,8 +1869,30 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         return
 
     slug = (tc_input.get("slug") or "").strip()
+    if not slug and os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on":
+        # A new page can enter the same generator without a separate model
+        # round trip solely to register its folder. Existing-slug edits keep
+        # their normal path. Validate before creating any persistent resource.
+        name = (tc_input.get("name") or "").strip()
+        fields = ("user_request", "agent_understanding", "user_language")
+        missing = next((key for key in fields if not isinstance(tc_input.get(key), str)
+                        or not tc_input[key].strip()), None)
+        if name and missing:
+            yield f"Error: `{missing}` is required."
+            return
+        if name:
+            from anton.core.tools.generate_artifact.state import MAX_USER_LANGUAGE_CHARS
+
+            if len(" ".join(tc_input["user_language"].split())) > MAX_USER_LANGUAGE_CHARS:
+                yield "Error: `user_language` must be only the language's English name."
+                return
+            artifact = store.create(name=name, description=tc_input["agent_understanding"].strip(),
+                                    type="html-app", primary="index.html")
+            slug = artifact.slug
+            _track_artifact(session, store, slug, summary=f"Created artifact: {name}")
     if not slug:
-        yield "Error: `slug` is required."
+        yield ("Error: `slug` (an existing artifact) or `name` (a new one) is required."
+               if os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on" else "Error: `slug` is required.")
         return
     artifact = store.open(slug)
     if artifact is None:
@@ -1955,6 +2017,21 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         with model_route(route):
             return await coro
 
+    def failure_context(detail):
+        message = detail if detail.startswith("Error:") else _generation_failed(detail)
+        if os.environ.get("ANTON_STATIC_SINGLE_CALL") != "on":
+            return message
+        # Creation may have happened inside this call. Losing its identity on
+        # failure makes a caller recreate the artifact or discard collected data.
+        recovery = {"status": "failed", "slug": slug, "path": str(folder),
+                    "primary": artifact.primary, "message": message,
+                    "if_the_user_asks_to_retry": "Call generate_artifact with this slug; it keeps the saved source data. Do not create another artifact or substitute demo/default values."}
+        for key, name in (("observed_data_file", "observed-data.json"),
+                          ("last_saved_component_program", "presentation-program.js")):
+            if (folder / name).is_file():
+                recovery[key] = str(folder / name)
+        return json.dumps(recovery, indent=2)
+
     queue: "asyncio.Queue[str | None]" = asyncio.Queue()
     task = asyncio.create_task(
         _at_artifact_model(
@@ -1999,9 +2076,8 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         handled = True
         if restored is not None:
             _record_put_back(session, previous_page[0], restored)
-        text = _generation_failed(f"generator crashed: {exc}")
         yield ToolOutcome(
-            content=_with_put_back(text, restored),
+            content=_with_put_back(failure_context(f"generator crashed: {exc}"), restored),
             ok=False,
             reason=type(exc).__name__,
         )
@@ -2036,7 +2112,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
             else _generation_failed(result)
         )
         yield ToolOutcome(
-            content=_with_put_back(content, restored), ok=False, reason="pipeline"
+            content=_with_put_back(failure_context(content), restored), ok=False, reason="pipeline"
         )
         return
     if restored is not None:

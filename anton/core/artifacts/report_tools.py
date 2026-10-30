@@ -71,8 +71,12 @@ main{max-width:1100px;margin:0 auto;padding:24px 16px}h1{font-size:1.7rem;margin
 h2{font-size:1.15rem;margin:0 0 .6em}section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:0 0 16px}
 p{margin:.4em 0}.subtitle{color:var(--muted);margin-top:-.4em}a{color:var(--accent)}
 .table-wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:.95rem}
-caption{text-align:left;color:var(--muted);padding:0 0 6px}th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
-th{font-weight:600;background:color-mix(in srgb,var(--line) 35%,transparent)}td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+caption{text-align:left;color:var(--muted);padding:0 0 6px}th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);overflow-wrap:break-word}
+th{font-weight:600;background:color-mix(in srgb,var(--line) 35%,transparent)}td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+@media (max-width:640px){table.cards thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+table.cards,table.cards tbody,table.cards tr,table.cards td{display:block;width:100%}table.cards tr[hidden]{display:none}
+table.cards tr{border-bottom:1px solid var(--line);padding:6px 0}table.cards td{border:0;padding:3px 0;display:flex;gap:12px;justify-content:space-between;text-align:right}
+table.cards td::before{content:attr(data-label);font-weight:600;color:var(--muted);text-align:left}}
 svg.bars{width:100%;height:auto}svg.bars text{fill:var(--fg);font-size:13px}svg.bars .bar{fill:var(--accent)}svg.bars .threshold{stroke:var(--mark);stroke-dasharray:4 3}
 .filter label{font-weight:600;margin-right:8px}.filter select{font:inherit;padding:4px 8px;margin-bottom:10px}.total{font-weight:600}
 @media print{body{background:#fff;color:#000}section{border:0;padding:0;break-inside:avoid}.filter select{display:none}}
@@ -148,8 +152,19 @@ def _numeric_columns(body, count) -> list[bool]:
             for i in range(count)]
 
 
-def _tds(cells, numeric) -> str:
-    return "".join(f'<td{" class=num" if n else ""}>{_esc(v)}</td>' for v, n in zip(cells, numeric))
+# A table with more columns than this shows each row as a card on a phone:
+# squeezed into 390 px, its columns would be a letter or two wide.
+_CARD_COLUMNS = 4
+
+
+def _tds(cells, numeric, columns) -> str:
+    cards = len(columns) > _CARD_COLUMNS
+    return "".join(f'<td{_card_label(c) if cards else ""}{" class=num" if n else ""}>{_esc(v)}</td>'
+                   for v, n, c in zip(cells, numeric, columns))
+
+
+def _card_label(column) -> str:
+    return f' data-label="{_esc(column)}"'
 
 
 _TABLE_WRAP = '<div class="table-wrap">'
@@ -159,6 +174,8 @@ def _table_html(columns, numeric, trs, *, table_attrs: str = "", caption: str = 
     """A scrollable table, one row per line. ``trs`` are whole ``<tr>`` elements."""
     head = "<thead><tr>" + "".join(
         f'<th scope="col"{" class=num" if n else ""}>{_esc(c)}</th>' for c, n in zip(columns, numeric)) + "</tr></thead>"
+    if len(columns) > _CARD_COLUMNS:
+        table_attrs += ' class="cards"'
     return (f"{_TABLE_WRAP}<table{table_attrs}>{caption}\n{head}\n<tbody>\n"
             + "".join(tr + "\n" for tr in trs) + "</tbody></table></div>\n")
 
@@ -169,7 +186,7 @@ def table(columns, rows, *, caption: str | None = None, id: str | None = None) -
     body = [_row_cells(columns, r) for r in rows]
     numeric = _numeric_columns(body, len(columns))
     cap = f"<caption>{_esc(caption)}</caption>" if caption else ""
-    trs = [f"<tr>{_tds(r, numeric)}</tr>" for r in body]
+    trs = [f"<tr>{_tds(r, numeric, columns)}</tr>" for r in body]
     return Html(_table_html(columns, numeric, trs, table_attrs=_attr_id(id), caption=cap))
 
 
@@ -231,7 +248,7 @@ def filter_table(columns, rows, *, key: str, label: str, region_name: str, value
         total += r[v] if visible and v is not None and _is_number(r[v]) else 0
         val_attr = f' data-rt-value="{_esc(r[v])}"' if v is not None and _is_number(r[v]) else ""
         trs.append(f'<tr data-rt-key="{_esc(row_key)}"{val_attr}{"" if visible else " hidden"}>'
-                   f"{_tds(r, numeric)}</tr>")
+                   f"{_tds(r, numeric, columns)}</tr>")
     total_html = ""
     if v is not None:
         tl = total_label or f"Total {value}"
@@ -297,9 +314,12 @@ def _read(path: Path) -> str:
 _VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
 
 # Markup that reaches the reader as text, e.g. "<h2>Summary</h2>" passed as a plain
-# string and escaped. Text inside <code> or <pre> is left alone.
-_SHOWN_TAG = re.compile(r"</?(?:h[1-6]|p|a|div|section|span|table|tr|td|th|ul|ol|li|strong|em|b|i|br)\b[^<>]{0,200}>",
-                        re.I)
+# string and escaped. Text inside <code>, <pre> or <textarea> is left alone.
+_SHOWN_TAG = re.compile(
+    r"</?(?:h[1-6]|p|a|div|section|span|table|thead|tbody|tr|td|th|caption|ul|ol|li|dl|dt|dd|strong|em|b|i|br"
+    r"|style|script|svg|path|rect|circle|polyline|polygon|g|img|canvas|iframe|select|option|label|button|input"
+    r"|form|dialog|details|summary|header|footer|nav|main|article|aside|html|head|body|link|meta)\b[^<>]{0,200}>",
+    re.I)
 
 
 class _Reader(HTMLParser):
@@ -324,7 +344,7 @@ class _Reader(HTMLParser):
             self.resources.append((tag, a.get("src") or a.get("href")))
         elif tag in ("script", "style"):
             self._skip += 1
-        elif tag in ("code", "pre"):
+        elif tag in ("code", "pre", "textarea"):
             self._code += 1
         elif tag == "title" and self.title is None:
             self._in_title = True  # the document title; svg <title>s come later
@@ -339,7 +359,7 @@ class _Reader(HTMLParser):
     def handle_endtag(self, tag):
         if tag in ("script", "style") and self._skip:
             self._skip -= 1
-        elif tag in ("code", "pre") and self._code:
+        elif tag in ("code", "pre", "textarea") and self._code:
             self._code -= 1
         elif tag == "title" and self._in_title:
             self._in_title = False
@@ -385,6 +405,16 @@ def _external_host(url: str | None) -> str | None:
     return m.group(1).lower() if m else None
 
 
+SHOWN_MARKUP_FIX = "a plain string is escaped; pass HTML you wrote yourself as rt.Html(markup)"
+
+
+def shown_markup(html: str) -> list[str]:
+    """HTML tags the page shows its reader as text, at most three."""
+    reader = _Reader()
+    reader.feed(html)
+    return reader.shown_tags[:3]
+
+
 def check(path) -> dict:
     """Read a saved page back. Raises ValueError on structural problems.
 
@@ -424,7 +454,7 @@ def check(path) -> dict:
     if broken:
         problems.append(f"local links that do not resolve: {broken}")
     if reader.shown_tags:
-        problems.append(f"HTML tags shown as text: {reader.shown_tags[:3]}")
+        problems.append(f"HTML tags shown as text: {reader.shown_tags[:3]} ({SHOWN_MARKUP_FIX})")
     if problems:
         raise ValueError("; ".join(problems))
     return {

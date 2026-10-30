@@ -7,6 +7,7 @@ our cloud ScratchpadRuntime (Enterprise).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -15,6 +16,9 @@ from anton.utils.datasources import scrub_output
 
 if TYPE_CHECKING:
     from anton.core.backends.sandbox import CellSandbox
+
+# Returns the host's current coding API key, or None when it has none.
+ApiKeySupplier = Callable[[], Awaitable["str | None"]]
 
 
 # The code of the summary cell `_compact_cells` puts in place of older cells.
@@ -347,4 +351,7 @@ class ScratchpadRuntimeFactory(Protocol):
         # The Landlock policy the pad's agent code runs under. The manager
         # passes it only when set, and refuses a factory without it then.
         cell_sandbox: CellSandbox | None = None,
+        # Returns the host's current coding API key, which can change after
+        # the pad starts. Optional for factories that predate it.
+        coding_api_key_supplier: ApiKeySupplier | None = None,
     ) -> ScratchpadRuntime: ...

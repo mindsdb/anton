@@ -355,6 +355,9 @@ class GenState:
     live_app: "LiveAppLaunchResult | None" = None
     # Why a live app's launch didn't happen, when no new backend could fix it.
     launch_failure: "LiveAppLaunchError | None" = None
+    # Where an app the run gave up on may still run, when its stop failed:
+    # the run's final text carries it. Empty when the stop went through.
+    live_app_stop_note: str = ""
     trace: list[StepResult] = field(default_factory=list)
     error: str | None = None
     trace_log: "GenTrace | NullTrace" = field(default_factory=NullTrace)
@@ -475,6 +478,7 @@ class GenState:
     # change them mid-run has to live in a step message instead.
     _pipeline_system: str = ""
     _pipeline_tools: "list[dict] | None" = None
+    _pipeline_kickoff_evidence: str = ""
 
     @property
     def datasource_context(self) -> str:
