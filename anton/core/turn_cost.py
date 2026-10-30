@@ -117,7 +117,8 @@ class TurnCost:
     error_type: str = ""
     # The completion verifier was applicable but produced no verdict this turn
     # (denied by billing/model access, or suppressed by the verifier latch —
-    # ENG-1632). Such turns deliberately book ended_by="completed" (the work
+    # ENG-1632), or was skipped because a page ran out of repair cells, with
+    # `verifier_failure` left empty since nothing failed. Such turns deliberately book ended_by="completed" (the work
     # succeeded; a priced-out check is not a broken turn), so WITHOUT this flag
     # they are byte-identical in analytics to turns that were verified and
     # passed — silently joining the honest-stop denominator, concentrated in

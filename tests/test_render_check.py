@@ -2231,9 +2231,10 @@ def _llm_response(text: str, tool_input: dict | None = None, tool_id: str = "tc_
     )
 
 
-def _session_for(project: Path, replies: list, *, verdicts=()):
+def _session_for(project: Path, replies, *, verdicts=()):
     """A ChatSession whose model plays `replies` in order and whose pad writes
-    the artifact's page. Returns (session, pad, slug)."""
+    the artifact's page. `replies` may be a function of the artifact's slug,
+    for a reply that names it. Returns (session, pad, slug)."""
     from unittest.mock import AsyncMock, MagicMock
 
     from anton.core.llm.provider import StreamComplete, StreamTextDelta
@@ -2254,7 +2255,7 @@ def _session_for(project: Path, replies: list, *, verdicts=()):
         return pending.pop(0) if pending else _VerifierVerdict(status="COMPLETE", reason="done")
 
     mock_llm.generate_object_code = AsyncMock(side_effect=verdict)
-    queue = list(replies)
+    queue = list(replies(slug) if callable(replies) else replies)
 
     def plan_stream(**kwargs):
         reply = queue.pop(0) if queue else _llm_response("")
@@ -3553,6 +3554,7 @@ async def test_the_second_failed_repair_lists_no_findings_and_says_none_are_left
     assert first.screenshot is not None
     assert second.messages == [f"{label} — {tool_handlers._NO_REPAIRS_LEFT}"]
     assert second.screenshot is None
+    assert (first.out_of_repairs, second.out_of_repairs) == (frozenset(), frozenset({key}))
     assert session._repair_cells == {key: 2}
     assert tool_handlers.page_check_lines(store, checks=session._page_checks) == [
         "“Map” failed the browser check, so it may not display correctly in the preview."
@@ -3652,6 +3654,207 @@ async def test_a_page_built_by_hand_gets_the_same_repair_budget(service, tmp_pat
     assert built.messages[-1] == f"{slug}/index.html — {tool_handlers._repairs_left_line(2)}"
     assert session._repair_cells == {key: 2}
     assert last.messages == [f"{slug}/index.html — {tool_handlers._NO_REPAIRS_LEFT}"]
+
+
+# ── A page out of repair cells ends the turn without the completion check ────
+
+_FAILED_ROUTES = (200, _answer("failed", findings=[_ROUTES_ERROR], views=_VIEWS, unopened=[]), 0.0)
+_FAILED_LINE = "“Shipments map” failed the browser check, so it may not display correctly in the preview."
+
+
+def _write(n: int):
+    """A reply whose cell rewrites the page."""
+    return _llm_response("", {"action": "exec", "name": "main", "code": f"write_page({n})"}, f"tc_{n}")
+
+
+def _generate_call(slug: str):
+    """A reply that calls generate_artifact on SLUG."""
+    from anton.core.llm.provider import LLMResponse, ToolCall, Usage
+
+    return LLMResponse(
+        content="",
+        tool_calls=[ToolCall(id="tc_gen", name="generate_artifact", input={
+            "slug": slug, "user_request": "draw the map", "agent_understanding": "a shipments map",
+            "user_language": "en",
+        })],
+        usage=Usage(input_tokens=10, output_tokens=20),
+        stop_reason="tool_use",
+    )
+
+
+async def _fake_generate_failing_its_browser_check(**kw):
+    """generate_artifact's run: its last build writes the page and fails
+    only its browser check."""
+    from anton.core.artifacts.render_check import CheckedView
+    from anton.core.tools.generate_artifact.state import BrowserCheckFailed
+
+    (kw["artifact_path"] / "index.html").write_text(_PAGE.replace("hi", "built"))
+    _failed_build(kw["session"], kw["slug"], "index.html")
+    return BrowserCheckFailed(
+        page="index.html", findings=("x",), views=tuple(CheckedView.model_validate(v) for v in _VIEWS),
+        screenshot=None, error="Frontend verification failed after 2 attempt(s): x",
+    )
+
+
+def _keeps_asking_for_more():
+    from anton.core.session import _VerifierVerdict
+
+    return [_VerifierVerdict(status="INCOMPLETE", reason="the globe still fails")] * 3
+
+
+async def test_a_page_out_of_repair_cells_ends_the_turn_without_the_completion_check(service, project, policy):
+    """The page is built and fails, and both repair cells fail. A completion
+    check that keeps asking for more work would start a round that edits
+    the page again; it is not asked, and the answer ends on anton's line."""
+    from unittest.mock import patch
+
+    service.answer(_FAILED_ROUTES)
+    session, pad, slug = _session_for(project, [
+        _write(1), _write(2), _write(3), _llm_response("The globe failed its browser check."),
+        _write(4), _llm_response("Fixed it."),
+    ], verdicts=_keeps_asking_for_more())
+    session._scratchpads._cell_sandbox = policy
+    # A turn with no session id and no counted model call books nothing.
+    session._session_id = "conv-t"
+
+    with patch("anton.analytics.send_event") as send:
+        streamed, _ = await _final_text(session)
+
+    assert session._llm.generate_object_code.await_count == 0
+    assert len(pad.ran) == 3
+    assert len(service.requests) == 3
+    assert streamed.endswith("The globe failed its browser check.\n\n" + _FAILED_LINE)
+    assert session._out_of_repairs == {tool_handlers.PageKey(slug, "index.html")}
+    (turn,) = [c for c in send.call_args_list if c.args[1] == "turn_completed"]
+    assert turn.kwargs["verification_skipped"] == "true"
+
+
+async def test_a_build_that_failed_its_browser_check_then_two_failed_repairs_skip_the_check(
+    service, project, policy, monkeypatch
+):
+    """The first failure is generate_artifact's: the repair cells count from
+    the record it left, under the same page."""
+    import anton.core.tools.generate_artifact as gen_pkg
+
+    monkeypatch.setattr(gen_pkg, "generate", _fake_generate_failing_its_browser_check)
+    service.answer(_FAILED_ROUTES)
+    session, pad, slug = _session_for(project, lambda slug: [
+        _generate_call(slug), _write(1), _write(2), _llm_response("The globe failed its browser check."),
+        _write(3), _llm_response("Fixed it."),
+    ], verdicts=_keeps_asking_for_more())
+    session._scratchpads._cell_sandbox = policy
+
+    streamed, _ = await _final_text(session)
+
+    assert session._llm.generate_object_code.await_count == 0
+    assert len(pad.ran) == 2
+    assert session._repair_cells == {tool_handlers.PageKey(slug, "index.html"): 2}
+    assert streamed.endswith(_FAILED_LINE)
+
+
+class _DataPad(_PagePad):
+    """Rewrites the page, except on its fourth cell, which writes only the
+    artifact's data file."""
+
+    async def execute_streaming(self, code, **kwargs):
+        from anton.core.backends.base import Cell
+
+        self.ran.append(code)
+        if len(self.ran) == 4:
+            (self.page.parent / "data.json").write_text("[]")
+        else:
+            self.page.write_text(_PAGE.replace("hi", f"cell {len(self.ran)}"))
+        yield Cell(code=code, stdout="wrote", stderr="", error=None, description="write")
+
+
+async def test_a_page_put_back_stays_out_of_repair_cells_after_a_later_check_passes_it(service, project, policy):
+    """The page passed before the turn. The turn breaks it, both repairs fail
+    and anton puts it back, recorded as passed. A later cell changes only the
+    data file and the page's check passes, but the page still can't be
+    edited this turn: the completion check stays skipped."""
+    from unittest.mock import AsyncMock
+
+    broke = {"pressed": "Map", "reason": "new_problem", "viewports": ["desktop"], "findings": []}
+    service.answer(
+        *[(200, {**_FAILED_ROUTES[1], "comparison": _comparison(broken_views=[broke])}, 0.0)] * 3,
+        (200, {**_answer("passed", views=_VIEWS, unopened=[]), "comparison": _comparison()}, 0.0),
+    )
+    session, _, slug = _session_for(project, [
+        _write(1), _write(2), _write(3), _write(4), _llm_response("The edit could not be made safely."),
+        _write(5), _llm_response("Done."),
+    ], verdicts=_keeps_asking_for_more())
+    page = project / "artifacts" / slug / "index.html"
+    page.write_text(_PAGE.replace("hi", "before"))
+    pad = _DataPad(page)
+    session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+    session._scratchpads._cell_sandbox = policy
+
+    await _final_text(session)
+
+    assert session._llm.generate_object_code.await_count == 0
+    assert len(pad.ran) == 4
+    assert page.read_text() == _PAGE.replace("hi", "before")
+    assert session._page_checks == {tool_handlers.PageKey(slug, "index.html"): "passed"}
+
+
+async def test_a_second_repair_that_passes_still_gets_the_completion_check(service, project, policy):
+    service.answer(_FAILED_ROUTES, _FAILED_ROUTES, (200, _answer("passed", views=_VIEWS, unopened=[]), 0.0))
+    session, pad, _ = _session_for(project, [
+        _write(1), _write(2), _write(3), _llm_response("The map works."),
+    ])
+    session._scratchpads._cell_sandbox = policy
+
+    streamed, _ = await _final_text(session)
+
+    assert session._llm.generate_object_code.await_count == 1
+    assert session._out_of_repairs == set()
+    assert "failed the browser check" not in streamed
+
+
+async def test_a_page_with_a_repair_cell_left_still_gets_the_completion_check(service, project, policy):
+    service.answer(_FAILED_ROUTES)
+    session, _, _ = _session_for(project, [_write(1), _write(2), _llm_response("The globe still fails.")])
+    session._scratchpads._cell_sandbox = policy
+
+    await _final_text(session)
+
+    assert session._llm.generate_object_code.await_count == 1
+    assert session._out_of_repairs == set()
+
+
+async def test_a_second_repair_the_service_could_not_vouch_for_skips_the_check(service, project, policy):
+    service.answer(_FAILED_ROUTES, _FAILED_ROUTES, (503, b"not ready", 0.0))
+    session, pad, slug = _session_for(project, [
+        _write(1), _write(2), _write(3), _llm_response("The map may not display."),
+        _write(4), _llm_response("Fixed it."),
+    ], verdicts=_keeps_asking_for_more())
+    session._scratchpads._cell_sandbox = policy
+
+    await _final_text(session)
+
+    assert session._llm.generate_object_code.await_count == 0
+    assert len(pad.ran) == 3
+    assert session._page_checks == {tool_handlers.PageKey(slug, "index.html"): "unverified"}
+
+
+async def test_on_desktop_a_page_out_of_repair_cells_skips_the_check_with_no_end_line(project, monkeypatch):
+    from anton.core.artifacts.html_lint import HtmlFinding
+
+    monkeypatch.delenv("ANTON_RENDER_CHECK_URL", raising=False)
+    monkeypatch.setattr(
+        "anton.core.artifacts.html_lint.lint_html",
+        lambda path, *, cell_sandbox: [HtmlFinding(kind="console_error", detail="boom")],
+    )
+    session, pad, _ = _session_for(project, [
+        _write(1), _write(2), _write(3), _llm_response("The globe failed its browser check."),
+        _write(4), _llm_response("Fixed it."),
+    ], verdicts=_keeps_asking_for_more())
+
+    streamed, _ = await _final_text(session)
+
+    assert session._llm.generate_object_code.await_count == 0
+    assert len(pad.ran) == 3
+    assert streamed.endswith("The globe failed its browser check.")
 
 
 # ── Comparing with the page as it was before the turn ────────────────────────

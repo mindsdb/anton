@@ -292,6 +292,9 @@ class ArtifactLint:
     restored: frozenset[PageKey] = frozenset()
     # The pages this cell edited, whatever their checks found.
     edited: frozenset[PageKey] = frozenset()
+    # The pages this cell's checks left with no repair cells and not passing,
+    # put back or not.
+    out_of_repairs: frozenset[PageKey] = frozenset()
 
 
 _STATUS_RANK = {"passed": 0, "unverified": 1, "failed": 2}
@@ -520,7 +523,10 @@ def _check_pages(
     gets a line with the repair cells it has left this turn, after the
     `repairs_used` it already spent; once a page fails with none left, its
     line says so and lists no findings, so the agent stops editing a page it
-    cannot fix this turn. A check that no longer finds a view in
+    cannot fix this turn. A page this check leaves with no repair cells and
+    not passing comes back in `out_of_repairs`, put back or not: the session
+    then skips the completion check, whose rounds would edit it again
+    (`record_page_checks`). A check that no longer finds a view in
     `failed_views`, the views the check that first failed the page
     measured, fails, even after an unverified check in between: a repair
     fixes a view, it never removes one. The views each failed check
@@ -552,6 +558,7 @@ def _check_pages(
     views_of_failed: "dict[PageKey, tuple[CheckedView, ...]]" = {}
     comparisons: "dict[PageKey, Comparison]" = {}
     put_back: set[PageKey] = set()
+    out_of_repairs: set[PageKey] = set()
     edited = frozenset(page.key(store) for page in pages if page.edited)
     shown_as_text = _markup_shown_as_text(store, pages)
 
@@ -606,6 +613,7 @@ def _check_pages(
                 left = _repairs_left_after(page)
                 page_checks[page.key(store)] = "failed"
                 if left <= 0:
+                    out_of_repairs.add(page.key(store))
                     messages.append(f"{label} — {_NO_REPAIRS_LEFT}")
                     continue
                 messages.append(f"{label} — {shown_as_text[page.key(store)]}")
@@ -636,12 +644,14 @@ def _check_pages(
             if not findings:
                 continue
             if left <= 0:
+                out_of_repairs.add(page.key(store))
                 messages.append(f"{label} — {_NO_REPAIRS_LEFT}")
                 continue
             messages += [f"{label} — {f.message()}" for f in findings]
             messages.append(f"{label} — {_repairs_left_line(left)}")
         return ArtifactLint(
-            messages=messages, page_checks=page_checks, repaired=frozenset(repaired), edited=edited
+            messages=messages, page_checks=page_checks, repaired=frozenset(repaired), edited=edited,
+            out_of_repairs=frozenset(out_of_repairs),
         )
 
     # Whether `shot` is a failed page's: until one is, every page is asked
@@ -676,6 +686,8 @@ def _check_pages(
         removed = _removed_views(failed_views.get(key, ()), outcome)
         status: "RenderStatus" = "failed" if removed or key in shown_as_text else outcome.status
         page_checks[key] = status
+        if status != "passed" and left <= 0:
+            out_of_repairs.add(key)
         failed = status == "failed"
         if failed:
             views_of_failed[key] = tuple(outcome.views)
@@ -757,6 +769,7 @@ def _check_pages(
         messages=messages, screenshot=shot, screenshot_page=shot_page, page_checks=page_checks,
         findings_listed=frozenset(findings_listed), repaired=frozenset(repaired), failed_views=views_of_failed,
         comparisons=comparisons, restored=frozenset(put_back), edited=edited,
+        out_of_repairs=frozenset(out_of_repairs),
     )
 
 
@@ -856,6 +869,7 @@ def record_page_checks(
     repaired: frozenset[PageKey] = frozenset(),
     failed_views: "dict[PageKey, tuple[CheckedView, ...]] | None" = None,
     restored: frozenset[PageKey] = frozenset(),
+    out_of_repairs: frozenset[PageKey] = frozenset(),
 ) -> None:
     """Remember, for this turn, how each page last fared in a browser, and
     which pages an unverified check already listed findings for.
@@ -872,7 +886,9 @@ def record_page_checks(
     loses them once a check passes it. Each page in `restored` was put back,
     as the turn found it or as a generate_artifact run found it with no
     status known: it loses its `_failed_views`, and its record unless
-    `checks` names it.
+    `checks` names it. Each page in `out_of_repairs` stays in
+    `_out_of_repairs` for the rest of the turn, whatever a later check of it
+    finds, and the session skips the completion check while it is non-empty.
     Best-effort, like `_track_artifact`: a session without the record (a
     test double) loses nothing else.
     """
@@ -882,6 +898,9 @@ def record_page_checks(
     listed = getattr(session, "_unverified_findings_listed", None)
     if isinstance(listed, set):
         listed.update(findings_listed)
+    spent = getattr(session, "_out_of_repairs", None)
+    if isinstance(spent, set):
+        spent.update(out_of_repairs)
     cells = getattr(session, "_repair_cells", None)
     if isinstance(cells, dict):
         for key in repaired:
@@ -1075,6 +1094,7 @@ async def check_cell_artifacts(
     record_page_checks(
         session, checks=lint.page_checks, findings_listed=lint.findings_listed,
         repaired=lint.repaired, failed_views=lint.failed_views, restored=lint.restored,
+        out_of_repairs=lint.out_of_repairs,
     )
     if turn_pages is not None:
         # A page this very cell put back stays put back.

@@ -2186,6 +2186,11 @@ class ChatSession:
         # `tool_handlers.REPAIR_CELLS` of them (`check_cell_artifacts`).
         # Reset every turn.
         self._repair_cells: dict[PageKey, int] = {}
+        # The pages a check this turn left with no repair cells and not
+        # passing, put back or not. Never cleared within the turn: while it
+        # is non-empty the completion check is skipped, since its rounds
+        # would edit such a page again. Reset every turn.
+        self._out_of_repairs: set[PageKey] = set()
         # The views the check that failed a page this turn measured, kept
         # until the page passes. Until then, a check of the page that no
         # longer finds one of them fails, even after an unverified check in
@@ -5578,6 +5583,7 @@ class ChatSession:
         self._page_checks = {}
         self._unverified_findings_listed = set()
         self._repair_cells = {}
+        self._out_of_repairs = set()
         self._failed_views = {}
         self._turn_pages = TurnPages()
         # What the project held when this turn began: a cell may delete or
@@ -7437,6 +7443,17 @@ class ChatSession:
                 or _spend_ceiling_hit
                 or self._unanswered_question is not None
             ):
+                break
+            # A page out of repair cells can't be fixed this turn, and a
+            # continuation round would only edit it again. Last, so only a
+            # turn whose verifier would have run is booked as skipped.
+            if self._out_of_repairs:
+                logger.info(
+                    "completion-verifier skipped — out of repair cells: %s",
+                    ", ".join(sorted(f"{key.slug}/{key.page}" for key in self._out_of_repairs)),
+                )
+                if self._turn_cost is not None:
+                    self._turn_cost.verification_skipped = True
                 break
 
             # Append the assistant's final text so the verifier can see it.

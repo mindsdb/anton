@@ -296,3 +296,4 @@ def test_the_local_browser_holds_a_failed_page_to_the_same_repair_budget(monkeyp
 
     assert lint.messages == [f"{slug}/index.html — {tool_handlers._NO_REPAIRS_LEFT}"]
     assert lint.page_checks == {key: "failed"}
+    assert lint.out_of_repairs == frozenset({key})

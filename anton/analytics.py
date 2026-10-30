@@ -170,7 +170,8 @@ _pending_lock = threading.Lock()
 #
 #   turn_completed   ended_by, verification_skipped ("true" when the turn
 #                    completed without a verifier verdict — denied/latched,
-#                    ENG-1632 — so honest-stop denominators can exclude it),
+#                    ENG-1632, or skipped for a page out of repair cells —
+#                    so honest-stop denominators can exclude it),
 #                    tokens_total, input_tokens, output_tokens,
 #                    cache_read_tokens, cache_creation_tokens, llm_calls,
 #                    rounds, continuations, peak_context_tokens, duration_ms,
