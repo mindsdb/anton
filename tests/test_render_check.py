@@ -3800,7 +3800,7 @@ async def test_a_page_out_of_repair_cells_ends_the_turn_without_the_completion_c
     assert streamed.endswith("The globe failed its browser check.\n\n" + _FAILED_LINE)
     assert session._out_of_repairs == {tool_handlers.PageKey(slug, "index.html")}
     (turn,) = [c for c in send.call_args_list if c.args[1] == "turn_completed"]
-    assert turn.kwargs["verification_skipped"] == "true"
+    assert (turn.kwargs["verification_skipped"], turn.kwargs["verifier_failure"]) == ("true", "out_of_repairs")
 
 
 async def test_a_latched_verifier_still_books_its_own_skip_with_a_page_out_of_repair_cells(

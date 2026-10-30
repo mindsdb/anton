@@ -7552,6 +7552,7 @@ class ChatSession:
                 )
                 if self._turn_cost is not None:
                     self._turn_cost.verification_skipped = True
+                    self._turn_cost.verifier_failure = "out_of_repairs"
                 break
 
             if self._verifier_latch.latched:
