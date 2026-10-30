@@ -3753,6 +3753,52 @@ async def test_a_page_out_of_repair_cells_ends_the_turn_without_the_completion_c
     assert turn.kwargs["verification_skipped"] == "true"
 
 
+async def test_a_latched_verifier_still_books_its_own_skip_with_a_page_out_of_repair_cells(
+    service, project, policy
+):
+    """The latch decides first: the turn counts toward its re-probe and books
+    why it skipped, as it would without the page."""
+    from unittest.mock import patch
+
+    service.answer(_FAILED_ROUTES)
+    session, _, _ = _session_for(project, [
+        _write(1), _write(2), _write(3), _llm_response("The globe failed its browser check."),
+    ])
+    session._scratchpads._cell_sandbox = policy
+    session._session_id = "conv-t"
+    session._verifier_latch.latched = True
+    session._verifier_latch.reason = session._verifier_latch.last_no_verdict = "denied"
+
+    with patch("anton.analytics.send_event") as send:
+        await _final_text(session)
+
+    assert session._verifier_latch.skips == 1
+    (turn,) = [c for c in send.call_args_list if c.args[1] == "turn_completed"]
+    assert turn.kwargs["verifier_failure"] == "latched_denied"
+
+
+async def test_a_spent_continuation_budget_still_ends_on_the_hand_back(service, project, policy):
+    """With no continuation left, the turn hands back as it would without
+    the page: that round runs no tools, so it can't edit the page."""
+    from unittest.mock import patch
+
+    service.answer(_FAILED_ROUTES)
+    session, pad, _ = _session_for(project, [
+        _write(1), _write(2), _write(3), _llm_response("The globe failed its browser check."),
+        _llm_response("I could not make the globe pass its browser check."),
+    ])
+    session._scratchpads._cell_sandbox = policy
+    session._session_id = "conv-t"
+    session._max_continuations = 0
+
+    with patch("anton.analytics.send_event") as send:
+        await _final_text(session)
+
+    assert len(pad.ran) == 3
+    (turn,) = [c for c in send.call_args_list if c.args[1] == "turn_completed"]
+    assert (turn.kwargs["ended_by"], turn.kwargs["verification_skipped"]) == ("handback_budget", "false")
+
+
 async def test_a_build_that_failed_its_browser_check_then_two_failed_repairs_skip_the_check(
     service, project, policy, monkeypatch
 ):

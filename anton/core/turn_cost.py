@@ -117,8 +117,7 @@ class TurnCost:
     error_type: str = ""
     # The completion verifier was applicable but produced no verdict this turn
     # (denied by billing/model access, or suppressed by the verifier latch —
-    # ENG-1632), or was skipped because a page ran out of repair cells, with
-    # `verifier_failure` left empty since nothing failed. Such turns deliberately book ended_by="completed" (the work
+    # ENG-1632). Such turns deliberately book ended_by="completed" (the work
     # succeeded; a priced-out check is not a broken turn), so WITHOUT this flag
     # they are byte-identical in analytics to turns that were verified and
     # passed — silently joining the honest-stop denominator, concentrated in
@@ -126,7 +125,9 @@ class TurnCost:
     # Stamped at the skip/deny sites, never read from live session state at
     # emit (late finalizers would read a later turn's latch state — see the
     # note below on stamped-at-open fields). Handback terminals don't need it:
-    # their ended_by already distinguishes them.
+    # their ended_by already distinguishes them. Also stamped when a page ran
+    # out of repair cells and the check was skipped (`ChatSession._out_of_repairs`):
+    # `verifier_failure` stays empty, and an earlier round may have had a verdict.
     verification_skipped: bool = False
     # A model call this turn ended with the provider's content filter. The
     # turn books ended_by="content_filter" unless it was cancelled or failed.

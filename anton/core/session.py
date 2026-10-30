@@ -7444,17 +7444,6 @@ class ChatSession:
                 or self._unanswered_question is not None
             ):
                 break
-            # A page out of repair cells can't be fixed this turn, and a
-            # continuation round would only edit it again. Last, so only a
-            # turn whose verifier would have run is booked as skipped.
-            if self._out_of_repairs:
-                logger.info(
-                    "completion-verifier skipped — out of repair cells: %s",
-                    ", ".join(sorted(f"{key.slug}/{key.page}" for key in self._out_of_repairs)),
-                )
-                if self._turn_cost is not None:
-                    self._turn_cost.verification_skipped = True
-                break
 
             # Append the assistant's final text so the verifier can see it.
             # Once this has run, the post-loop fallback must NOT append `reply`
@@ -7558,6 +7547,16 @@ class ChatSession:
                     self._verifier_latch.skips,
                 )
                 self._verifier_latch.skips = 0
+
+            # A continuation round would only edit a page out of repair cells again.
+            if self._out_of_repairs:
+                logger.info(
+                    "completion-verifier skipped — out of repair cells: %s",
+                    ", ".join(sorted(f"{key.slug}/{key.page}" for key in self._out_of_repairs)),
+                )
+                if self._turn_cost is not None:
+                    self._turn_cost.verification_skipped = True
+                break
 
             # Ask the cheap coding model to self-assess completion over a compact,
             # text-rendered view of the recent conversation (ENG-716). The
