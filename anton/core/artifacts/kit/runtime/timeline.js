@@ -89,7 +89,7 @@
         view.innerHTML = '';
         var drawn = draw(w);
         view.appendChild(drawn);
-        if (drawn.__hiddenLabels) view.appendChild(AK.el('div', 'ak-note', AK.t('moreLabels', {n: drawn.__hiddenLabels})));
+        if (drawn.__hiddenLabels) view.appendChild(AK.el('div', 'ak-note', AK.t(listHost ? 'moreLabels' : 'moreLabelsTip', {n: drawn.__hiddenLabels})));
       } catch (e) { AK.fail(view, e); }
     });
 
@@ -197,7 +197,7 @@
         gRows.appendChild(g);
       });
       // Bars
-      var lane = 0;
+      var lane = 0, barBoxes = [];
       bars.forEach(function (L) {
         var rows = AK.data(L.data);
         var sc = L.color && rows.length && rows[0][L.color] !== undefined ? AK.colorScale(AK.uniq(rows, L.color), L.colors, L.color) : null;
@@ -210,6 +210,7 @@
           var y = rowY[k] + (lanes > 1 ? 15 + myLane * 14 : (rowH - bh) / 2);
           var x0 = X(Math.min(a, z)), x1 = X(Math.max(a, z));
           var col = sc ? sc(r[L.color]) : fixed;
+          if (lanes > 1) barBoxes.push({x: x0, y: y, w: Math.max(3, x1 - x0), h: bh});
           var rect = AK.svg('rect', {x: x0, y: y, width: Math.max(3, x1 - x0), height: bh, rx: Math.min(6, bh / 2), fill: col, 'class': 'ak-tl-bar', opacity: L.opacity || (L.overlay ? 0.45 : 0.92)});
           if (L.dashed) { rect.setAttribute('fill-opacity', 0.15); rect.setAttribute('stroke', col); rect.setAttribute('stroke-dasharray', '4 3'); }
           rect.addEventListener('mousemove', function (e) {
@@ -236,7 +237,8 @@
         if (!L.overlay) lane++;
       });
       // Milestones
-      var all = [], msBoxes = [], msLabels = [], msHidden = 0;
+      // With several lanes a milestone sits among the bars: its label keeps clear of them too.
+      var all = [], msBoxes = barBoxes.slice(), msLabels = [], msHidden = 0;
       mss.forEach(function (L) {
         var rows = AK.data(L.data);
         var sc = L.color && rows.length && rows[0][L.color] !== undefined ? AK.colorScale(AK.uniq(rows, L.color), L.colors, L.color) : null;
@@ -263,7 +265,8 @@
           node.addEventListener('click', function () { focus(m); if (b.link) AK.select(b.link, k, view); });
           node.addEventListener('focus', function () { focus(m); });
           gMs.appendChild(node);
-          msBoxes.push({x: x - 7, y: y - 7, w: 14, h: 14, dot: m});
+          var dr = (shape === 'diamond' ? 8 : (L.radius || 6)) + 1;
+          msBoxes.push({x: x - dr, y: y - dr, w: 2 * dr, h: 2 * dr, dot: m});
           if (L.label && L.show_labels !== false && r[L.label] != null) msLabels.push({m: m, txt: String(r[L.label])});
         });
       });

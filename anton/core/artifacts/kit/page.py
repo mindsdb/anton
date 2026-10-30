@@ -582,7 +582,14 @@ class Page:
         _need(lrows, [source, target, value, link_color, link_label if isinstance(link_label, str) else None]
               + list(tooltip or []) + ([dashed] if isinstance(dashed, str) else []), f"network {title!r} links")
         if value:
-            text = [r.get(value) for r in lrows if r.get(value) is not None and not is_number(r.get(value))]
+            def numeric(v):
+                try:
+                    float(str(v).replace(",", ""))
+                    return True
+                except ValueError:
+                    return False
+            text = [r.get(value) for r in lrows if r.get(value) is not None and not is_number(r.get(value))
+                    and not numeric(r.get(value))]
             if text:
                 raise KitError(f"network {title!r}: value={value!r} holds text (e.g. {str(text[0])[:40]!r}); value is "
                                f"each link's number (its width and label). For text on the links use "
@@ -596,14 +603,12 @@ class Page:
             loose = sorted({str(r[k]) for r in lrows for k in (source, target) if str(r.get(k)) not in ids})
             if loose:
                 self.warnings.append(f"network {title!r}: link ends not in nodes (drawn with their id as label): {', '.join(loose[:8])}")
-        if not value and link_label is None:
-            self.warnings.append(f"network {title!r}: the links show no figure; if the request asks for one on each "
-                                 "link (units, a cost), pass value= (or link_label= for text).")
         if tiers and not group:
             raise KitError("network: tiers order the node `group` values; give nodes=... and group=...")
         if tiers:
             # Each tier is a group or a list of groups sharing a column.
-            tiers = [[str(g) for g in t] if isinstance(t, (list, tuple, set)) else [str(t)] for t in tiers]
+            tiers = [[str(g) for g in t] if isinstance(t, (list, tuple, set)) else [str(t)]
+                     for t in ([tiers] if isinstance(tiers, str) else tiers)]
             have = {str(r.get(group)) for r in nrows if r.get(group) is not None} if nodes is not None else set()
             named = {g for t in tiers for g in t}
             if have and not have & named:

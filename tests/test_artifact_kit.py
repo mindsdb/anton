@@ -651,3 +651,11 @@ def test_network_tiers_can_share_a_column_and_values_are_numbers():
     assert any("tiers name groups no node has" in w for w in page.warnings)
     with pytest.raises(kit.KitError, match="link_label='note'"):
         page.network(links, value="note", nodes=nodes, label="id", group="group")
+
+
+def test_network_values_may_be_numeric_text_and_tiers_a_single_group():
+    nodes, links = _supply_net()
+    links = links.assign(units=links["units"].astype(str))
+    page = kit.Page("Flow")
+    b = page.network(links, value="units", nodes=nodes, label="id", group="group", tiers="Supplier")
+    assert b["tiers"] == [["Supplier"]]
