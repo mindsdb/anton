@@ -145,6 +145,15 @@ NO_WEB_SCRATCHPAD_TOOL = replace(
 )
 
 
+def generate_artifact_without_web(generate_artifact_tool: ToolDef) -> ToolDef:
+    """Either `generate_artifact` variant, minus the web search and fetch its
+    builder is refused where web search is off."""
+    return replace(
+        generate_artifact_tool,
+        description=cut_spans(generate_artifact_tool.description, (", web search and web fetch", ")", "")),
+    )
+
+
 MEMORIZE_TOOL = ToolDef(
     name="memorize",
     description=(

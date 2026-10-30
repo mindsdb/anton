@@ -11,6 +11,11 @@ from anton.core.backends.wire import WEB_SEARCH_ENV
 from anton.core.llm.prompts import CHAT_SYSTEM_PROMPT, NO_WEB_CHAT_SYSTEM_PROMPT
 from anton.core.memory import skills as skills_mod
 from anton.core.session import ChatSession, ChatSessionConfig
+from anton.core.tools.generate_artifact import prompts as builder_prompts
+from anton.core.tools.generate_artifact import sub_tools as builder_sub_tools
+from anton.core.tools.generate_artifact.discovery import sub_tools as discovery_sub_tools
+from anton.core.tools.generate_artifact.discovery.prompts import build_pipeline_system_prompt
+from anton.core.tools.generate_artifact.state import GenState
 from anton.workspace import Workspace
 from tests.conftest import make_mock_llm, run_turn
 
@@ -62,6 +67,7 @@ async def test_with_web_search_off_the_agent_is_told_the_web_is_out_of_reach(tmp
         assert text not in system, text
     assert "web_search" not in tools["scratchpad"]["description"]
     assert "sample(var)" in tools["scratchpad"]["description"]
+    assert "(it can use the scratchpad), asks the user" in tools["generate_artifact"]["description"]
 
 
 async def test_without_the_switch_the_prompt_is_unchanged(tmp_path, monkeypatch):
@@ -73,7 +79,38 @@ async def test_without_the_switch_the_prompt_is_unchanged(tmp_path, monkeypatch)
         assert text in system, text
     assert "web_search(query)" in tools["scratchpad"]["description"]
     assert "agentic_loop, web_search, sample" in tools["scratchpad"]["description"]
+    assert "web search and web fetch" in tools["generate_artifact"]["description"]
 
 
 def test_the_no_web_prompt_keeps_every_placeholder():
     assert NO_WEB_CHAT_SYSTEM_PROMPT.count("{") == CHAT_SYSTEM_PROMPT.count("{")
+
+
+def _builder_texts() -> list[str]:
+    """Everything the artifact builder's data steps are told."""
+    state = GenState(
+        session=object(), artifact_type="html-app", artifact_path=Path("/tmp/a"), slug="a",
+        brief="A live BTC price dashboard", is_fullstack=False,
+    )
+    return [
+        build_pipeline_system_prompt(state),
+        builder_prompts.build_required_data_prompt(state)[0],
+        builder_prompts.build_can_fetch_prompt(state, "- BTC price")[0],
+        builder_prompts.build_fetch_data_system_prompt(Path("/tmp/a")),
+    ]
+
+
+def test_with_web_search_off_the_artifact_builder_is_told_the_web_is_out_of_reach(monkeypatch):
+    monkeypatch.setenv(WEB_SEARCH_ENV, "off")
+    for text in _builder_texts():
+        assert builder_prompts.NO_WEB_DATA_NOTE in text
+    for schema in (builder_sub_tools._scratchpad_schema(), discovery_sub_tools._scratchpad_schema()):
+        assert "web_search" not in schema["description"]
+
+
+def test_without_the_switch_the_artifact_builder_is_unchanged(monkeypatch):
+    monkeypatch.delenv(WEB_SEARCH_ENV, raising=False)
+    for text in _builder_texts():
+        assert builder_prompts.NO_WEB_DATA_NOTE not in text
+    for schema in (builder_sub_tools._scratchpad_schema(), discovery_sub_tools._scratchpad_schema()):
+        assert "web_search(query)" in schema["description"]

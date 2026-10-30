@@ -122,6 +122,7 @@ from anton.core.tools.tool_defs import (
     STATIC_UPDATE_ARTIFACT_METADATA_TOOL,
     UPDATE_ARTIFACT_METADATA_TOOL,
     ToolDef,
+    generate_artifact_without_web,
 )
 from anton.core.interaction.elicit import Elicitor
 from anton.core.interaction.emitter import TurnEmitter
@@ -3299,7 +3300,10 @@ class ChatSession:
             )
             if fullstack:
                 self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
-            self.tool_registry.register_tool(GENERATE_ARTIFACT_TOOL if fullstack else STATIC_GENERATE_ARTIFACT_TOOL)
+            generate_tool = GENERATE_ARTIFACT_TOOL if fullstack else STATIC_GENERATE_ARTIFACT_TOOL
+            if not getattr(self, "_web_offered", True):
+                generate_tool = generate_artifact_without_web(generate_tool)
+            self.tool_registry.register_tool(generate_tool)
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""

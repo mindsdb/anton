@@ -168,9 +168,9 @@ def _scratchpad_schema() -> dict:
     # drives scratchpads with the same contract. Imported lazily to avoid a
     # tool_defs <-> discovery import cycle (mirrors generate_artifact's
     # own sub_tools.py).
-    from anton.core.tools.tool_defs import SCRATCHPAD_TOOL
+    from anton.core.tools.tool_defs import NO_WEB_SCRATCHPAD_TOOL, SCRATCHPAD_TOOL
 
-    return tool_schema(SCRATCHPAD_TOOL)
+    return tool_schema(NO_WEB_SCRATCHPAD_TOOL if web_search_off() else SCRATCHPAD_TOOL)
 
 
 def _web_search_schema() -> dict:
