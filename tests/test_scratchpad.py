@@ -706,6 +706,20 @@ class TestScratchpadEnvironment:
         finally:
             await pad.close()
 
+    async def test_a_project_env_cannot_turn_web_search_off(self, monkeypatch):
+        """Only the server decides: its prompt would still offer the search."""
+        monkeypatch.delenv(WEB_SEARCH_ENV, raising=False)
+        pad = make_scratchpad(
+            name="websearch-overlay-off",
+            workspace_env_overlay={WEB_SEARCH_ENV: "off"},
+        )
+        await pad.start()
+        try:
+            cell = await pad.execute(f"import os; print(os.environ.get({WEB_SEARCH_ENV!r}, 'NOT_FOUND'))")
+            assert cell.stdout.strip() == "NOT_FOUND"
+        finally:
+            await pad.close()
+
     async def test_a_project_env_cannot_turn_web_search_back_on(self, monkeypatch):
         monkeypatch.setenv(WEB_SEARCH_ENV, "off")
         pad = make_scratchpad(

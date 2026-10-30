@@ -40,6 +40,7 @@ from anton.core.backends.wire import (
     STDOUT_SCRUB_MARGIN,
     USAGE_MARKER,
     USAGE_MARKER_ENV,
+    WEB_SEARCH_ENV,
 )
 from anton.core.llm.provider import (
     USAGE_LOG_ENV,
@@ -1092,6 +1093,12 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             env["ANTON_SCRATCHPAD_PROVIDER"] = self._coding_provider
         else:
             env.pop("ANTON_SCRATCHPAD_PROVIDER", None)
+        # The server's own value or none: a project .env must not switch the
+        # pad's search off while the agent's prompt still offers it.
+        if WEB_SEARCH_ENV in os.environ:
+            env[WEB_SEARCH_ENV] = os.environ[WEB_SEARCH_ENV]
+        else:
+            env.pop(WEB_SEARCH_ENV, None)
         # Propagate provider credentials from the ANTON_* names into the SDK
         # names the scratchpad's nested get_llm() expects.
         if "ANTHROPIC_API_KEY" not in env and "ANTON_ANTHROPIC_API_KEY" in env:
