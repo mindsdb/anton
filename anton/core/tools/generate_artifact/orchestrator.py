@@ -26,6 +26,7 @@ from anton.core.artifacts import live_app_slots
 from anton.core.llm.client import asked_model
 from anton.core.artifacts.store import BACKEND_LOG_FILENAME
 from anton.core.backends.sandbox import BACKENDS_OFF_MESSAGE, CellSandbox, cell_sandbox_of
+from anton.core.backends.wire import web_search_off
 from anton.utils.datasources import scrub_output
 from anton.utils.nofollow import read_text_nofollow, write_text_nofollow
 
@@ -564,7 +565,8 @@ _PUBLIC_SOURCES_SKILL = "public-data-sources"
 
 
 def _public_data_sources_skill(session) -> str:
-    """Body of the built-in public-data-sources skill, or "".
+    """Body of the built-in public-data-sources skill, or "", which is also
+    the answer where web search is off: none of its endpoints can be reached.
 
     The catalog must not be copied into the prompt — it already lives in
     `builtin_skills/public-data-sources/SKILL.md` and is maintained there. The
@@ -581,6 +583,8 @@ def _public_data_sources_skill(session) -> str:
     coroutine appears at all, because the mock is rejected by type before any
     call; here the call is unavoidable.)
     """
+    if web_search_off():
+        return ""
     try:
         store = getattr(session, "_skill_store", None)
         skill = store.load_for_artifacts(_PUBLIC_SOURCES_SKILL) if store is not None else None

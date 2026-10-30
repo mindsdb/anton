@@ -6,7 +6,8 @@ neither has to re-derive it — only the task-specific instructions differ.
 
 from __future__ import annotations
 
-from anton.core.llm.prompts import ANTON_NOTE
+from anton.core.backends.wire import web_search_off
+from anton.core.llm.prompts import ANTON_NOTE, cut_spans
 
 from ..attachments import render_for_gathering
 from ..prompts import KNOWN_DATA_HEADER, datasources_or_none, with_project_rules
@@ -244,8 +245,14 @@ _WHEN_TO_ASK_ACT_FIRST = (
 )
 
 
+# Where web search is off, `rejection_for` refuses web_fetch: pointing at it
+# would only cost a round.
+_NO_WEB_GATHERING_TEMPLATE = cut_spans(_GATHERING_TEMPLATE, ("; web_fetch for pages", ")", ""))
+
+
 def _gathering_instruction(act_first: bool) -> str:
-    return _GATHERING_TEMPLATE.format(
+    template = _NO_WEB_GATHERING_TEMPLATE if web_search_off() else _GATHERING_TEMPLATE
+    return template.format(
         when_to_ask=_WHEN_TO_ASK_ACT_FIRST if act_first else _WHEN_TO_ASK,
     )
 
