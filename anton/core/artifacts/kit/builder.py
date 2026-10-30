@@ -70,7 +70,7 @@ page.map(kit.points(df, lat, lon, label=, sublabel=, color=field, colors={value:
          kit.regions(df, country, value, format=), title=, fit="data"|"world")
 page.globe(<the same layers>, title=, rotate="spin"|"sway"|False)    # drag to turn; routes arc above it
 page.network(links_df, source=, target=, value=None, nodes=nodes_df, id_field="id", label=, group=,
-             tiers=[group order, left to right], style="graph"|"sankey", link_color=field,
+             tiers=[group order, left to right; a list for groups sharing a column], style="graph"|"sankey", link_color=field,
              link_colors={value: tone}, dashed=field, value_format=, controls=False, title=)
              # nodes highlight their links on click or Enter (built in); controls=True adds a row of buttons
 page.timeline(bars=[kit.bars(df, row, start, end, label=None, name=legend, tone=)],

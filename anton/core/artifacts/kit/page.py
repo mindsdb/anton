@@ -597,7 +597,8 @@ class Page:
                 controls: bool | None = None, labels: dict | None = None, formats: dict | None = None,
                 id: str | None = None) -> dict:
         """A network diagram from link rows (source, target, value). `nodes` (optional) gives node rows with
-        `id_field`, `label`, `group`; `tiers` orders groups left to right (e.g. ["Source","Hub","Destination"]).
+        `id_field`, `label`, `group`; `tiers` orders groups left to right (e.g. ["Source","Hub","Destination"]);
+        a tier may hold several groups (["Supplier", "Subcontractor"]).
         style "graph" (boxes and arrows, value labels on links) or "sankey" (bands sized by value).
         `link_color` colours links by a field (e.g. link type) with `link_colors` {value: colour/tone};
         `dashed` True or a field marking dashed links; `link_label` a field to label links with (False: none).
@@ -609,6 +610,12 @@ class Page:
         lname, lrows = self._dataset(links, f"network {title!r} links")
         _need(lrows, [source, target, value, link_color, link_label if isinstance(link_label, str) else None]
               + list(tooltip or []) + ([dashed] if isinstance(dashed, str) else []), f"network {title!r} links")
+        if value:
+            text = [r.get(value) for r in lrows if r.get(value) is not None and not is_number(r.get(value))]
+            if text:
+                raise KitError(f"network {title!r}: value={value!r} holds text (e.g. {str(text[0])[:40]!r}); value is "
+                               f"each link's number (its width and label). For text on the links use "
+                               f"link_label={value!r} with a numeric value field.")
         nspec: dict = {"id": id_field}
         if nodes is not None:
             nname, nrows = self._dataset(nodes, f"network {title!r} nodes")
@@ -620,6 +627,17 @@ class Page:
                 self.warnings.append(f"network {title!r}: link ends not in nodes (drawn with their id as label): {', '.join(loose[:8])}")
         if tiers and not group:
             raise KitError("network: tiers order the node `group` values; give nodes=... and group=...")
+        if tiers:
+            # Each tier is a group or a list of groups sharing a column.
+            tiers = [[str(g) for g in t] if isinstance(t, (list, tuple, set)) else [str(t)] for t in tiers]
+            have = {str(r.get(group)) for r in nrows if r.get(group) is not None} if nodes is not None else set()
+            named = {g for t in tiers for g in t}
+            if have and not have & named:
+                self.warnings.append(f"network {title!r}: tiers name groups no node has ({', '.join(sorted(named)[:6])}); "
+                                     f"the node groups are {', '.join(sorted(have)[:8])}.")
+            elif have - named:
+                self.warnings.append(f"network {title!r}: groups not in tiers go in a last column: "
+                                     f"{', '.join(sorted(have - named)[:8])}.")
         lspec = {"data": lname, "source": source, "target": target, "value": value, "label": link_label,
                  "color": link_color, "colors": link_colors, "dashed": dashed, "tooltip": tooltip,
                  "labels": labels, "formats": formats}

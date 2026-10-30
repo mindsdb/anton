@@ -37,8 +37,18 @@
     var list = order.map(function (id) { return nodes[id]; });
     // Tiers: explicit group order first, else longest path from sources.
     var tierOrder = b.tiers || null;
+    // A tier is a group or a list of groups sharing a column; with no node in any named tier the
+    // layout falls back to the flow itself.
+    var tierOf = function (g) {
+      for (var k = 0; k < tierOrder.length; k++) {
+        var e = tierOrder[k];
+        if (Array.isArray(e) ? e.map(String).indexOf(String(g)) >= 0 : String(e) === String(g)) return k;
+      }
+      return -1;
+    };
+    if (tierOrder && groupF && !list.some(function (n) { return tierOf(n.group) >= 0; })) tierOrder = null;
     if (tierOrder && groupF) {
-      list.forEach(function (n) { var k = tierOrder.indexOf(n.group); n.tier = k >= 0 ? k : null; });
+      list.forEach(function (n) { var k = tierOf(n.group); n.tier = k >= 0 ? k : null; });
       var fallback = Math.max.apply(null, list.map(function (n) { return n.tier == null ? -1 : n.tier; })) + 1;
       list.forEach(function (n) { if (n.tier == null) n.tier = fallback; });
     } else {

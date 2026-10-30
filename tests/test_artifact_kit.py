@@ -653,3 +653,23 @@ def test_text_in_another_language_than_the_page_is_flagged():
     for p in (french, english):
         p.html_text()
         assert not [w for w in p.warnings if "not in the page's language" in w]
+
+
+def _supply_net():
+    nodes = pd.DataFrame({"id": ["S1", "S2", "C1", "P1", "P2", "D1", "D2"],
+                          "group": ["Supplier", "Supplier", "Subcontractor", "Plant", "Plant", "Store", "Store"]})
+    links = pd.DataFrame({"source": ["S1", "S2", "C1", "P1", "P1", "P2"], "target": ["P1", "P2", "P2", "D1", "D2", "D2"],
+                          "units": [10, 20, 5, 7, 8, 9], "note": ["a b", "c", "d", "e", "f", "g"]})
+    return nodes, links
+
+
+def test_network_tiers_can_share_a_column_and_values_are_numbers():
+    nodes, links = _supply_net()
+    page = kit.Page("Flow")
+    b = page.network(links, value="units", nodes=nodes, label="id", group="group",
+                     tiers=[["Supplier", "Subcontractor"], "Plant", "Store"])
+    assert b["tiers"] == [["Supplier", "Subcontractor"], ["Plant"], ["Store"]] and not page.warnings
+    page.network(links, value="units", nodes=nodes, label="id", group="group", tiers=["Vendor", "Factory"])
+    assert any("tiers name groups no node has" in w for w in page.warnings)
+    with pytest.raises(kit.KitError, match="link_label='note'"):
+        page.network(links, value="note", nodes=nodes, label="id", group="group")
