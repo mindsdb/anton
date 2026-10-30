@@ -603,6 +603,9 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     # Publish flow
     import urllib.error
 
+    from rich.markup import escape
+
+    from anton.minds_client import describe_minds_request_failure
     from anton.publisher import ArtifactOwnedByOtherUserError, publish
 
     if not settings.minds_api_key:
@@ -722,13 +725,15 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
                         access_version=access_version,
                     )
                 except Exception as e2:
-                    console.print(f"  [anton.error]Publish failed: {e2}[/]")
+                    failure = describe_minds_request_failure(e2) or str(e2)
+                    console.print(f"  [anton.error]Publish failed: {escape(failure)}[/]")
                     console.print()
-                    return f"PUBLISH FAILED: {e2}"
+                    return f"PUBLISH FAILED: {failure}"
             else:
-                console.print(f"  [anton.error]Publish failed: {e}[/]")
+                failure = describe_minds_request_failure(e) or str(e)
+                console.print(f"  [anton.error]Publish failed: {escape(failure)}[/]")
                 console.print()
-                return f"PUBLISH FAILED: {e}"
+                return f"PUBLISH FAILED: {failure}"
 
     view_url = result.get("view_url", "")
     returned_report_id = result.get("report_id", "")
