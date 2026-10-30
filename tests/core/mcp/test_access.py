@@ -103,7 +103,19 @@ def test_a_write_tier_tool_never_returns_records():
 
 def test_an_unknown_engine_or_tool_does_not_return_records():
     assert returns_records(engine="hubspot", tool="some_new_tool_added_later") is False
-    assert returns_records(engine="linear", tool="list_issues") is False
+    assert returns_records(engine="an-engine-with-no-table", tool="list_issues") is False
+
+
+def test_linear_and_github_read_mode_exposes_reads_and_hides_writes_and_unknowns():
+    for engine, read_tool, write_tool in (
+        ("linear", "list_issues", "save_issue"),
+        ("github", "pull_request_read", "merge_pull_request"),
+    ):
+        assert allowed_for_mode(engine, read_tool, "read") is True
+        assert allowed_for_mode(engine, write_tool, "read") is False
+        assert allowed_for_mode(engine, "a_tool_added_later", "read") is False
+    # Unclassified until its purpose is known.
+    assert allowed_for_mode("github", "ui_get", "read") is False
 
 
 def test_a_read_tool_with_no_output_classification_does_not_return_records(monkeypatch):
