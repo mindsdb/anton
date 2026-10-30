@@ -632,3 +632,44 @@ async def test_a_build_that_never_saves_a_page_fails(tmp_path):
     assert result["status"] == "failed" and result["page"] is None
     assert result["summary"] == "I could not reach the data."
     assert plan.await_count <= builder.MAX_ROUNDS
+
+
+def test_a_kpi_takes_one_value():
+    for value in ([0, 3], (0, 3), pd.Series([0, 3])):
+        with pytest.raises(kit.KitError, match="one number"):
+            kit.kpi("Delayed shipments", value, "int")
+    with pytest.raises(kit.KitError, match="one number"):
+        kit.kpi("Delayed shipments", 3, "int", delta=[0, 3])
+    import numpy as np
+    assert kit.kpi("Delayed shipments", np.int64(3), "int", delta=np.float64(1.5))["value"] == 3
+
+
+def test_a_series_holding_a_number_per_row_asks_for_two_y_fields():
+    page = kit.Page("Pressure")
+    df = pd.DataFrame({"measure": ["Arrivals", "Occupancy", "Transfers"], "base": [100, 100, 100],
+                       "surge": [120.6, 107.3, 131.0]})
+    with pytest.raises(kit.KitError, match=r"y=\['base', 'surge'\]"):
+        page.chart("bar", df, x="measure", y="base", series="surge")
+    years = pd.DataFrame({"region": ["N", "N", "S", "S"], "year": [2024, 2025, 2024, 2025], "sales": [1, 2, 3, 4]})
+    page.chart("bar", years, x="region", y="sales", series="year")  # a numeric series of groups is fine
+
+
+def test_timeline_tone_naming_a_field_colours_each_bar():
+    df = pd.DataFrame({"room": ["A", "A", "B"], "start": ["2026-03-04 08:00", "2026-03-04 09:00", "2026-03-04 08:30"],
+                       "end": ["2026-03-04 08:45", "2026-03-04 10:00", "2026-03-04 09:00"],
+                       "tone": ["good", "bad", "good"], "status": ["Held", "Cancelled", "Held"]})
+    page = kit.Page("Rooms")
+    block = page.timeline(bars=[kit.bars(df, "room", "start", "end", tone="tone")])
+    layer = block["bars"][0]
+    assert layer["color"] == "tone" and layer["colors"] == {"good": "good", "bad": "bad"} and layer["tone_values"]
+    assert "tone" not in layer and "color_value" not in layer
+    by_status = page.timeline(bars=[kit.bars(df, "room", "start", "end", color="status")])["bars"][0]
+    assert by_status["color"] == "status" and "colors" not in by_status
+    fixed = page.timeline(bars=[kit.bars(df, "room", "start", "end", tone="bad")])["bars"][0]
+    assert fixed["tone"] == "bad" and "color" not in fixed
+
+
+def test_a_typed_backslash_n_is_a_line_break():
+    page = kit.Page("Notes")
+    assert page.callout("Cost: $393,120\\nTwo options")["md"] == "Cost: $393,120  \nTwo options"
+    assert page.text("Run `a\\nb` here")["md"] == "Run `a\\nb` here"
