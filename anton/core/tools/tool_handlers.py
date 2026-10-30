@@ -1586,6 +1586,14 @@ _REPLACED_BUILD_FIELDS = (
     "browser_unchecked",
 )
 # Joins the instruction of a result that carries `changes_from_previous`.
+# `browser_check_failed`'s instruction when the page has no repair cells left.
+_BUILD_FAILED_NO_REPAIRS_LEFT = (
+    "The page passed the pipeline's static checks, but a browser loaded `<path>/<page>` and found the "
+    "problems `findings` lists, and this page has no repair cells left this turn: do not edit it, and do "
+    "not call generate_artifact for it again this turn. Tell the user it failed its browser check and may "
+    "not display correctly in the preview, and do not call it or any view in it browser-verified, tested "
+    "or working."
+)
 _CHANGES_INSTRUCTION = (
     "`changes_from_previous` names the views this build broke (`broke`), left without a graphic (`blank`), "
     "removed (`removed`) or left fewer than half their marks (`shrank`), against the page as it was before this "
@@ -2186,9 +2194,14 @@ def _browser_check_failed_outcome(
     streak, with or without the screenshot: the next step is a repair cell,
     not this tool again, and the streak's nudge would say to stop. A list
     result must be a success anyway, since the tool loops' list arm adds
-    no nudge."""
+    no nudge. `repair_cells` is what the page has left this turn; with none
+    left the page is out of repair cells (`record_page_checks`), and the
+    result asks for no repair and carries no screenshot."""
     from anton.core.artifacts import render_check
 
+    key = PageKey(slug, result.page)
+    used = getattr(session, "_repair_cells", None)
+    left = max(REPAIR_CELLS - (used.get(key, 0) if isinstance(used, dict) else 0), 0)
     outcome = {
         "slug": slug,
         "path": str(folder),
@@ -2196,8 +2209,13 @@ def _browser_check_failed_outcome(
         "page": result.page,
         "findings": list(result.findings),
         "views_measured": render_check.view_coverage(views=result.views).checked,
-        "repair_cells": REPAIR_CELLS,
+        "repair_cells": left,
     }
+    if left == 0:
+        # A rebuild of a page that already spent its repair cells this turn.
+        record_page_checks(session, checks={}, out_of_repairs=frozenset({key}))
+        text = json.dumps({**outcome, "instruction": _BUILD_FAILED_NO_REPAIRS_LEFT}, indent=2)
+        return ToolOutcome(content=text, ok=True)
     instruction = _STATUS_INSTRUCTIONS["browser_check_failed"]
     # A rebuild of an existing page is compared with the page as the turn
     # found it: the repair starts knowing what the build broke or dropped.
