@@ -104,3 +104,11 @@ def test_turn_request_carries_the_always_on_skill_flag():
     }))
     assert request.skills == skills
     assert request.skills["tone"]["always_on"] is True
+
+
+def test_an_empty_skills_block_is_kept_apart_from_none():
+    """{} names no recallable skills; only an absent block (an older sender)
+    lets the pod fall back to the mounted org tree."""
+    base = {"protocol_version": 1, "conversation_id": "c", "input": "query"}
+    assert TurnRequestV1.from_json(json.dumps(base)).skills is None
+    assert TurnRequestV1.from_json(json.dumps({**base, "skills": {}})).skills == {}

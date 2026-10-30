@@ -131,13 +131,13 @@ _MEMORY_GLOBAL_ROOT_ENV = "ANTON_CLOUD_MEMORY_GLOBAL_ROOT"
 
 #: Per-turn skills staging: a FRESH mkdtemp each turn (unlike _MEMORY_DIR).
 #: Skills carry no cross-turn state, and the unpredictable path stops prior-turn
-#: cell code planting a symlink or two turns wiping each other's tree. Used only
-#: as a fallback when no shared mount is configured; see _SKILLS_ROOT_ENV below.
+#: cell code planting a symlink or two turns wiping each other's tree. Used for
+#: every request that carries a `skills` block; see _SKILLS_ROOT_ENV below.
 _SKILLS_DIR_PREFIX = "anton-cloud-skills-"
 
-#: Pod-side mount of the org's skills tree. When set, skills are read from it
-#: directly and the wire payload's `skills` block is ignored: cowork-server owns
-#: that tree and the pod sees the live copy, not a per-turn snapshot.
+#: Pod-side mount of the org's skills tree. It holds every member's skills, so
+#: it is read only for a request with no `skills` block at all (older senders);
+#: a request that carries one names the complete set this turn may see.
 _SKILLS_ROOT_ENV = "ANTON_CLOUD_SKILLS_ROOT"
 _CLOUD_TURN_ENV = "ANTON_CLOUD_TURN"
 _DATASOURCE_CORRELATION_ENV = "ANTON_CLOUD_DATASOURCE_CORRELATION_ID"
@@ -213,18 +213,24 @@ def _safe_skill_file(skill_dir: Path, rel: str) -> Path | None:
 def _stage_skills(skills: dict | None) -> Path:
     """The session's skills_root.
 
-    With the org tree mounted (_SKILLS_ROOT_ENV set), this is the mount itself
-    and nothing is staged: cowork-server owns that tree and the pod reads it
-    live, so the wire payload's `skills` block is ignored entirely.
+    A request's `skills` block, when present, is the complete set of skills
+    this turn may recall or list: they are materialized into a fresh per-turn
+    dir for SkillStore to read, and the org mount (_SKILLS_ROOT_ENV) is never
+    used, since it holds every member's private and team skills. An empty
+    block means no skills. Wire data is untrusted (like memory): bad slugs and
+    escaping paths are dropped, no single bad entry fails the turn. Builtins
+    resolve via SkillStore regardless; a wire skill shadowing one is logged
+    (the prompt mandates some).
 
-    Without a mount (desktop, CI), the request's skills are materialized into a
-    fresh per-turn dir for SkillStore to read, as before. Wire data is
-    untrusted (like memory): bad slugs and escaping paths are dropped, no
-    single bad entry fails the turn. Builtins resolve via SkillStore
-    regardless; a wire skill shadowing one is logged (the prompt mandates some).
+    Only a request with no block at all (an older sender) falls back to the
+    mount, with a warning, when one is configured.
     """
     mounted = os.environ.get(_SKILLS_ROOT_ENV, "").strip()
-    if mounted:
+    if skills is None and mounted:
+        logger.warning(
+            "skills: request has no skills block; reading the whole mounted "
+            "org skills tree (older sender)"
+        )
         root = Path(mounted)
         root.mkdir(parents=True, exist_ok=True)
         return root
@@ -272,8 +278,8 @@ def _always_on_skills(skills: dict | None) -> list[dict]:
 
     Same untrusted wire data as _stage_skills, which still stages these for
     recall: an entry with a bad slug or a SKILL.md that does not parse is
-    skipped, never fails the turn. Read from the wire even when the org tree is
-    mounted, since only the request says which skills apply to this user.
+    skipped, never fails the turn. Always read from the wire, since only the
+    request says which skills apply to this user.
     """
     from anton.core.tools.skill_format import parse_skill_text, validate_name
 
@@ -293,7 +299,14 @@ def _always_on_skills(skills: dict | None) -> list[dict]:
         if not body:
             logger.warning("skills: always-on %r has no readable SKILL.md body", slug)
             continue
-        out.append({"name": parsed.name or str(slug), "body": body})
+        # parse_skill_text skips validation, so a frontmatter name can be
+        # arbitrarily long; the slug already passed validate_name.
+        name = parsed.name or str(slug)
+        try:
+            validate_name(name)
+        except ValueError:
+            name = str(slug)
+        out.append({"name": name, "body": body})
     return out
 
 
@@ -789,15 +802,16 @@ def build_cloud_chat_session(
     settings.resolve_workspace(str(base))
     if request.model:
         settings.planning_model = request.model
-    # Mounted (_SKILLS_ROOT_ENV set): the organization's own live skills tree,
-    # owned by cowork-server, read directly. Unmounted (desktop, CI): the
-    # request's skills are staged outside the workspace instead, since that PVC
-    # outlives the turn and cells could read anything left under it. Builtins
-    # resolve via SkillStore's package root regardless.
+    # The request's skills block is the complete set this turn may recall or
+    # list, staged outside the workspace (that PVC outlives the turn and cells
+    # could read anything left under it). Only a request with no block falls
+    # back to the org mount (_SKILLS_ROOT_ENV), which holds every member's
+    # skills. Builtins resolve via SkillStore's package root regardless.
     settings.skills_root = _stage_skills(request.skills)
-    # That tree holds every member's skills, and the pod can't tell the
-    # asker's own apart, so an artifact build here follows only anton's
-    # built-ins (SkillStore.list_for_artifacts) until the host names folders.
+    # The pod can't tell the asker's own skills apart from ones shared with
+    # them (and the mount fallback holds everyone's), so an artifact build
+    # here follows only anton's built-ins (SkillStore.list_for_artifacts)
+    # until the host names folders.
     settings.skills_artifact_roots = []
     # Skills the agent builds stage here instead of the store, and the entrypoint
     # reports them for cowork to surface. ON the workspace, unlike everything
