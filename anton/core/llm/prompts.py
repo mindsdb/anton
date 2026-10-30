@@ -403,9 +403,10 @@ NO_WEB_CHAT_SYSTEM_PROMPT = cut_spans(
         "PROACTIVE FOLLOW-UP SUGGESTIONS:",
         "NO WEB ACCESS:\n"
         "- Web access is turned off on this install: web search is off, and the \
-scratchpad cannot reach the internet, apart from the data sources connected here. \
-Do not try to reach the web in any way (requests, urllib, RSS feeds, DNS over HTTPS, \
-public APIs, web_search()).\n"
+scratchpad cannot reach the internet. The exceptions are the data sources connected \
+here and a host that a skill or the user names for the task. Do not reach for any other \
+site, feed or API on your own (requests, urllib, RSS feeds, DNS over HTTPS, public APIs, \
+web_search()).\n"
         "- When a question needs the web or live information, say plainly that web access \
 is off on this install, then answer from the user's files, connected data and your own \
 knowledge, and say where that knowledge may be out of date.\n\n",
@@ -418,7 +419,7 @@ knowledge, and say where that knowledge may be out of date.\n\n",
         "- Exhaust at least 2-3",
         "- Try creative workarounds first: alternate libraries, another way to read the data \
 you have, caching/retrying with backoff, etc. Web access is off on this install, so none \
-of them goes online.\n",
+of them turns to another site or API.\n",
     ),
 )
 
@@ -595,7 +596,7 @@ NO_WEB_RESILIENCE_NUDGE = cut_spans(
         "different headers/user-agent",
         ". If those also fail",
         "an alternate library, or another way to read the data you have; web access is off "
-        "on this install, so none of them goes online",
+        "on this install, so none of them turns to another site or API",
     ),
 )
 

@@ -26,9 +26,10 @@ USAGE_MARKER_ENV = "ANTON_SCRATCHPAD_USAGE"
 # the sandbox's environment allowlist to the pad.
 WEB_SEARCH_ENV = "ANTON_SCRATCHPAD_WEB_SEARCH"
 WEB_SEARCH_OFF_MESSAGE = (
-    "web_search is unavailable: web access is turned off on this install, and "
-    "outside hosts cannot be reached either. Do not try another way to reach the "
-    "internet. Tell the user that web access is off here, and answer from the "
+    "web_search is unavailable: web access is turned off on this install, and the "
+    "internet cannot be reached either, apart from the data sources connected here "
+    "and a host that a skill or the user names. Do not look for another site or API "
+    "on your own. Tell the user that web access is off here, and answer from the "
     "files, data and knowledge available."
 )
 # A cell's stdout limit, and how much more the worker sends for the parent to

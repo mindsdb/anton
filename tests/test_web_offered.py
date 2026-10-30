@@ -55,7 +55,8 @@ async def test_with_web_search_off_the_agent_is_told_the_web_is_out_of_reach(tmp
 
     assert "NO WEB ACCESS:" in system
     assert "say plainly that web access is off on this install" in system
-    assert "so none of them goes online" in system
+    assert "a host that a skill or the user names for the task" in system
+    assert "so none of them turns to another site or API" in system
     assert "it cannot be checked online" in system
     for text in _WEB_ON_TEXTS:
         assert text not in system, text
