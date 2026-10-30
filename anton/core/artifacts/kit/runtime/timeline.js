@@ -116,7 +116,9 @@
       var narrow = width < 560;
       var R = rowKeys();
       var lanes = Math.max(1, bars.filter(function (L) { return !L.overlay; }).length);
-      var rowH = b.row_height || (lanes > 1 ? 30 + lanes * 14 : 46);
+      // Rows whose milestones carry labels get room for a label above and below each milestone.
+      var msLabelled = mss.some(function (L) { return L.label && L.show_labels !== false; });
+      var rowH = b.row_height || (lanes > 1 ? 30 + lanes * 14 : 46) + (msLabelled ? 10 : 0);
       var longest = Math.max.apply(null, R.keys.map(function (k) { return String(R.labels[k]).length; }).concat([4]));
       var labelW = narrow ? Math.min(110, Math.max(70, longest * 6.6)) : Math.min(230, Math.max(110, longest * 7.4 + 18));
       var top = 34 + (markers.length ? 18 : 0), right = narrow ? 14 : 30;
@@ -234,7 +236,7 @@
         if (!L.overlay) lane++;
       });
       // Milestones
-      var all = [], msBoxes = [], msHidden = 0;
+      var all = [], msBoxes = [], msLabels = [], msHidden = 0;
       mss.forEach(function (L) {
         var rows = AK.data(L.data);
         var sc = L.color && rows.length && rows[0][L.color] !== undefined ? AK.colorScale(AK.uniq(rows, L.color), L.colors, L.color) : null;
@@ -261,24 +263,29 @@
           node.addEventListener('click', function () { focus(m); if (b.link) AK.select(b.link, k, view); });
           node.addEventListener('focus', function () { focus(m); });
           gMs.appendChild(node);
-          if (L.show_labels && r[L.label] != null) {
-            // Above the milestone, else below it, kept inside the chart; a label with no free spot is
-            // left to the milestone's tooltip, detail and list rather than drawn over another.
-            var txt = String(r[L.label]), w = txt.length * 6.2 + 6;
-            var lx = Math.max(labelW + w / 2, Math.min(width - 4 - w / 2, x));
-            var spot = [y - 10, y + 20].map(function (ly) { return {x: lx - w / 2, y: ly - 11, w: w, h: 14, ly: ly}; })
-              .filter(function (bx) {
-                return !msBoxes.some(function (o) { return bx.x < o.x + o.w && bx.x + bx.w > o.x && bx.y < o.y + o.h && bx.y + bx.h > o.y; });
-              })[0];
-            if (!spot) msHidden++;
-            if (spot) {
-              msBoxes.push(spot);
-              var lab = AK.svg('text', {x: lx, y: spot.ly, 'text-anchor': 'middle', 'class': 'ak-tl-lbl'});
-              lab.textContent = txt;
-              gMs.appendChild(lab);
-            }
-          }
+          msBoxes.push({x: x - 7, y: y - 7, w: 14, h: 14, dot: m});
+          if (L.label && L.show_labels !== false && r[L.label] != null) msLabels.push({m: m, txt: String(r[L.label])});
         });
+      });
+      // Milestone labels, where they fit: above the milestone, else below it, kept inside the chart
+      // and clear of every other label and milestone; a label with no free spot is left to the
+      // milestone's tooltip, detail and list rather than drawn over another.
+      msLabels.forEach(function (ml) {
+        // A label wider than the plot (a phone) is shortened to fit; its tooltip and list keep it whole.
+        var room = Math.floor((width - 4 - labelW - 6) / 6.6);
+        if (room < 6) { msHidden++; return; }
+        if (ml.txt.length > room) ml.txt = ml.txt.slice(0, room - 1) + '\u2026';
+        var x = ml.m.x, y = ml.m.y, w = ml.txt.length * 6.6 + 6;
+        var lx = Math.max(labelW + w / 2, Math.min(width - 4 - w / 2, x));
+        var spot = [y - 10, y + 20].map(function (ly) { return {x: lx - w / 2, y: ly - 11, w: w, h: 14, ly: ly}; })
+          .filter(function (bx) {
+            return !msBoxes.some(function (o) { return o.dot !== ml.m && bx.x < o.x + o.w && bx.x + bx.w > o.x && bx.y < o.y + o.h && bx.y + bx.h > o.y; });
+          })[0];
+        if (!spot) { msHidden++; return; }
+        msBoxes.push(spot);
+        var lab = AK.svg('text', {x: lx, y: spot.ly, 'text-anchor': 'middle', 'class': 'ak-tl-lbl'});
+        lab.textContent = ml.txt;
+        gMs.appendChild(lab);
       });
       // Markers
       mkLabels.forEach(function (m) {

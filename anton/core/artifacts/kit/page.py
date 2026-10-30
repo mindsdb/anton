@@ -145,11 +145,12 @@ def bars(data: Any, row: str, start: str, end: str, *, label: str | None = None,
 
 def milestones(data: Any, row: str, date: str, *, label: str | None = None, color: str | None = None,
                colors: dict | None = None, tone: str | None = None, name: str | None = None, shape: str = "circle",
-               tooltip: list | None = None, show_labels: bool = False, detail_fields: list | None = None,
+               tooltip: list | None = None, show_labels: bool | None = None, detail_fields: list | None = None,
                labels: dict | None = None, formats: dict | None = None) -> dict:
-    """A timeline layer of dated events per row. Hover/tap shows `label`, the date and `tooltip` fields."""
+    """A timeline layer of dated events per row. `label` is written beside each milestone where it fits
+    (show_labels=False: only in its tooltip); hover/tap shows it with the date and `tooltip` fields."""
     return {"data": data, "row": row, "date": date, "label": label, "color": color, "colors": colors, "tone": tone,
-            "name": name, "shape": shape, "tooltip": tooltip, "show_labels": show_labels or None,
+            "name": name, "shape": shape, "tooltip": tooltip, "show_labels": show_labels,
             "detail_fields": detail_fields, "labels": labels, "formats": formats}
 
 
@@ -625,6 +626,9 @@ class Page:
             loose = sorted({str(r[k]) for r in lrows for k in (source, target) if str(r.get(k)) not in ids})
             if loose:
                 self.warnings.append(f"network {title!r}: link ends not in nodes (drawn with their id as label): {', '.join(loose[:8])}")
+        if not value and link_label is None:
+            self.warnings.append(f"network {title!r}: the links show no figure; if the request asks for one on each "
+                                 "link (units, a cost), pass value= (or link_label= for text).")
         if tiers and not group:
             raise KitError("network: tiers order the node `group` values; give nodes=... and group=...")
         if tiers:
