@@ -28,3 +28,19 @@ def test_known_data_asks_to_say_when_pad_data_changed():
     # refreshed pad has to show in the text.
     schema = GENERATE_ARTIFACT_TOOL.input_schema["properties"]["known_data"]["description"]
     assert "say when the data in the scratchpad changed" in schema
+
+
+def test_known_data_asks_for_derived_figures_from_a_scratchpad():
+    description = GENERATE_ARTIFACT_TOOL.description
+    schema = GENERATE_ARTIFACT_TOOL.input_schema["properties"]["known_data"]["description"]
+    for text in (description, schema):
+        assert "never from arithmetic you did in your head" in text, text
+        assert "in a scratchpad cell first" in text, text
+        # A scratchpad named next to pasted values turns the whole text into a reference.
+        assert re.search(r"nam(e|ing) a scratchpad", text), text
+
+
+def test_gathering_computes_derived_figures_in_code():
+    from anton.core.tools.generate_artifact.discovery.prompts import _GATHERING_INSTRUCTION
+
+    assert "never typed in as a literal" in _GATHERING_INSTRUCTION
