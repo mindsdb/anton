@@ -142,6 +142,30 @@ def test_text_only_no_deltas_still_completes():
     assert events == [{"kind": "turn_completed"}]
 
 
+class _TouchingSession(_FakeSession):
+    """A session whose turn touched artifacts through its tools."""
+
+    def __init__(self, touched, **kwargs):
+        super().__init__(**kwargs)
+        self._touched = set(touched)
+
+    @property
+    def artifacts_touched(self):
+        return set(self._touched)
+
+
+def test_completed_names_the_artifacts_the_turn_touched_sorted():
+    events = _drive(_TouchingSession({"report-b2", "deck-a1"}, deltas=["ok"]))
+    assert events[-1] == {"kind": "turn_completed", "artifacts_touched": ["deck-a1", "report-b2"]}
+
+
+def test_completed_says_so_when_the_turn_touched_no_artifact():
+    """An empty list, not a missing key: the host stats nothing, rather than
+    diffing the whole folder as it does for a session without the record."""
+    events = _drive(_TouchingSession(set(), deltas=["ok"]))
+    assert events[-1] == {"kind": "turn_completed", "artifacts_touched": []}
+
+
 def test_step_events_go_on_the_wire():
     """Tool/progress/round events are emitted as structured wire events so the
     cowork step UI can render them; tool args accumulate pod-side and ship once
