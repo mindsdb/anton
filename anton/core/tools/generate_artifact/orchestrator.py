@@ -1475,21 +1475,34 @@ async def _run_and_verify_app_in_slot(state: GenState) -> "str | object | None":
         if stop is not None:
             if launched:
                 await _stop_launched_app(state)
+                if stop is not OVER_BUDGET:
+                    state.error = stop = _with_stop_note(state, stop)
             return stop
 
     if launched:
         await _stop_launched_app(state)
-    state.error = f"Application failed to launch: {problem}" + _tail_section(
+    state.error = _with_stop_note(state, f"Application failed to launch: {problem}" + _tail_section(
         problem, tail, heading="--- backend.log tail ---",
-    )
+    ))
     return state.error
 
 
 async def _stop_launched_app(state: GenState) -> None:
     """Gave up on an app that may still run: free its slot, and send no
-    address for it."""
-    await live_app_slots.stop_live_app(state.session, folder=state.artifact_path)
+    address for it. When the stop fails, `state.live_app_stop_note` says
+    where the app may still run, for the run's final text."""
+    slot = await live_app_slots.stop_live_app(state.session, folder=state.artifact_path)
     state.app_url, state.live_app = None, None
+    if slot is not None:
+        state.live_app_stop_note = (
+            f"The app may still be running in slot {slot}: the run could not stop it. "
+            "It stops by itself after a while with no requests."
+        )
+
+
+def _with_stop_note(state: GenState, text: str) -> str:
+    """`text`, then where an app the run could not stop may still run."""
+    return f"{text}\n\n{state.live_app_stop_note}" if state.live_app_stop_note else text
 
 
 async def _after_earlier_launch(
@@ -1510,7 +1523,11 @@ async def _after_earlier_launch(
         )
     else:
         await _stop_launched_app(state)
-        earlier = f"The app this run launched earlier failed its check, so the run stopped it: {failed_check}"
+        earlier = (
+            f"The app this run launched earlier failed its check: {failed_check} {state.live_app_stop_note}"
+            if state.live_app_stop_note
+            else f"The app this run launched earlier failed its check, so the run stopped it: {failed_check}"
+        )
     return live_app_slots.LiveAppLaunchError(f"{failure} {earlier}", cause=failure.cause, log_tail=failure.log_tail)
 
 
@@ -1804,7 +1821,7 @@ def _stopped_over_budget(state: GenState, detail: str) -> dict:
     # this is the only way to show them one.
     return {
         "status": "stopped_over_budget",
-        "detail": detail,
+        "detail": _with_stop_note(state, detail),
         **({"brief_shown": True} if state.brief_shown else {"brief_summary": state.brief}),
         **_result_shell(state),
     }

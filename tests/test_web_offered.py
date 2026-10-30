@@ -16,7 +16,7 @@ from anton.core.tools.generate_artifact import sub_tools as builder_sub_tools
 from anton.core.tools.generate_artifact.discovery import sub_tools as discovery_sub_tools
 from anton.core.tools.generate_artifact.discovery.prompts import build_pipeline_system_prompt
 from anton.core.tools.generate_artifact.state import GenState
-from anton.core.tools.tool_defs import NO_WEB_GENERATE_ARTIFACT_TOOL, NO_WEB_STATIC_GENERATE_ARTIFACT_TOOL
+from anton.core.tools.tool_defs import NO_WEB_GENERATE_ARTIFACT_TOOLS
 from anton.workspace import Workspace
 from tests.conftest import make_mock_llm, run_turn
 
@@ -118,7 +118,8 @@ def test_without_the_switch_the_artifact_builder_is_unchanged(monkeypatch):
         assert "web_search(query)" in schema["description"]
 
 
-def test_neither_generate_artifact_variant_promises_the_web():
-    for tool in (NO_WEB_GENERATE_ARTIFACT_TOOL, NO_WEB_STATIC_GENERATE_ARTIFACT_TOOL):
+def test_no_generate_artifact_variant_promises_the_web():
+    assert len(NO_WEB_GENERATE_ARTIFACT_TOOLS) == 4
+    for tool in NO_WEB_GENERATE_ARTIFACT_TOOLS.values():
         assert "web search" not in tool.description
         assert "(it can use the scratchpad), asks the user" in tool.description

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -11,6 +13,10 @@ from .prompts import (
     CHAT_SYSTEM_PROMPT,
     CONVERSATION_DISCIPLINE_ACT_FIRST,
     CONVERSATION_DISCIPLINE_ASK_FIRST,
+    NO_DIRECT_REPORTS_ARTIFACTS_PROMPT,
+    NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT,
+    NO_DIRECT_REPORTS_VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
+    NO_DIRECT_REPORTS_VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
     NO_WEB_CHAT_SYSTEM_PROMPT,
     NO_WEB_CONVERSATION_DISCIPLINE_ACT_FIRST,
     STATIC_ARTIFACTS_PROMPT,
@@ -28,6 +34,13 @@ if TYPE_CHECKING:
 # its own message with an explicit cache breakpoint, so it is cached across
 # projects and conversations; other transports send the prompt as one string.
 SESSION_CONTEXT_MARKER = "\n\n# SESSION CONTEXT (this project and conversation)\n"
+
+# The build-html-dashboard skill's pointer to the DIRECT REPORTS path. Matched
+# rather than cut with `cut_spans`: a skill description is data a project can
+# override, and a missing note must not break the prompt.
+DIRECT_REPORTS_SKILL_NOTE = re.compile(
+    r"\s*NOT needed to change the content of a report.*?DIRECT REPORTS\)\.", re.DOTALL
+)
 
 
 @dataclass(frozen=True)
@@ -77,7 +90,13 @@ class ChatSystemPromptBuilder:
         return "\n\n".join(chunks)
 
     def _build_procedural_memory_section(
-        self, skill_store: "SkillStore | None", *, fullstack_offered: bool = True, web_offered: bool = True
+        self,
+        skill_store: "SkillStore | None",
+        *,
+        direct_generation: bool = False,
+        fullstack_offered: bool = True,
+        direct_reports: bool = True,
+        web_offered: bool = True,
     ) -> str:
         """Build the '## Procedural memory' section listing available skills.
 
@@ -99,24 +118,27 @@ class ChatSystemPromptBuilder:
         if not summaries:
             return ""
 
-        lines: list[str] = [
-            "",
-            "",
-            "## Procedural memory (skills available)",
-            "",
-            (
+        instructions = (
                 "These are reusable procedures you've previously refined for "
                 "recurring tasks. When the user's request matches one of "
                 "them, call `recall_skill(label)` to load the full step-by-"
                 "step procedure into your context. You may recall multiple "
                 "skills if the task spans several. If none apply, proceed "
                 "with normal reasoning."
-            ),
-            "",
-        ]
+        )
+        if direct_generation:
+            instructions = (
+                "These are reusable procedures. Call recall_skill(label) when a procedure "
+                "matches. For an HTML artifact delegated to generate_artifact, pass what "
+                "a recalled source procedure says about access in known_data instead of "
+                "querying the same source beforehand."
+            )
+        lines: list[str] = ["", "", "## Procedural memory (skills available)", "", instructions, ""]
         for s in summaries:
             label = s.get("label", "")
             when = s.get("description", "").strip()
+            if not direct_reports:
+                when = DIRECT_REPORTS_SKILL_NOTE.sub("", when).strip()
             if not label or (not fullstack_offered and label == "build-fullstack-backend"):
                 continue
             if not web_offered and label == "public-data-sources":
@@ -132,15 +154,20 @@ class ChatSystemPromptBuilder:
         *,
         proactive_dashboards: bool,
         output_dir: str,
+        direct_generation: bool = False,
+        direct_reports: bool = True,
     ) -> str:
-        visualizations_output_format_prompt = (
-            VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT
-            if proactive_dashboards
-            else VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT
-        )
-        output_format = visualizations_output_format_prompt.format(
-            output_dir=output_dir,
-        )
+        if direct_generation:
+            from .static_artifact_prompt import visualizations
+
+            return visualizations(proactive=proactive_dashboards)
+        if proactive_dashboards:
+            template = (VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT if direct_reports
+                        else NO_DIRECT_REPORTS_VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT)
+        else:
+            template = (VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT if direct_reports
+                        else NO_DIRECT_REPORTS_VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT)
+        output_format = template.format(output_dir=output_dir)
         return BASE_VISUALIZATIONS_PROMPT.format(output_format=output_format)
 
     def build(
@@ -163,16 +190,33 @@ class ChatSystemPromptBuilder:
         deployment_identity: DeploymentIdentity | None = None,
         fullstack_offered: bool = True,
         web_offered: bool = True,
+        direct_reports: bool = True,
     ) -> str:
         """``fullstack_offered`` False (`live_app_slots.fullstack_offered`)
         leaves out the fullstack types, the backend section and the backend
         skill's line: nothing on this deployment would start the app's
         backend. ``web_offered`` False (`wire.web_search_off`) swaps the
         internet sections for one that says the web is out of reach."""
+        direct_generation = (os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on"
+                             and any(getattr(tool, "name", "") == "generate_artifact"
+                                     and "name" in tool.input_schema.get("properties", {})
+                                     for tool in tool_defs or []))
         visualizations_section = self._build_visualizations_section(
             proactive_dashboards=proactive_dashboards,
             output_dir=output_dir,
+            direct_generation=direct_generation,
+            direct_reports=direct_reports,
         )
+        if fullstack_offered:
+            artifacts_section = ARTIFACTS_PROMPT if direct_reports else NO_DIRECT_REPORTS_ARTIFACTS_PROMPT
+        else:
+            artifacts_section = (STATIC_ARTIFACTS_PROMPT if direct_reports
+                                 else NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT)
+        # The single-call path has its own artifact instructions, which have no direct report path
+        if direct_generation:
+            from .static_artifact_prompt import ARTIFACTS
+
+            artifacts_section = ARTIFACTS
 
         prompt = ""
 
@@ -202,7 +246,7 @@ class ChatSystemPromptBuilder:
             # not also introduce itself as Anton in the prompt's opening line.
             identity_lead="You are an AI coworker" if deployment_identity is not None else "You are Anton",
             runtime_identity_section=runtime_identity_section,
-            artifacts_section=ARTIFACTS_PROMPT if fullstack_offered else STATIC_ARTIFACTS_PROMPT,
+            artifacts_section=artifacts_section,
             visualizations_section=visualizations_section,
             conversation_discipline=conversation_discipline,
             conversation_started=conversation_started,
@@ -229,7 +273,8 @@ class ChatSystemPromptBuilder:
         # Saved skills change rarely (the built-ins plus the user's own), so
         # they stay in the shared part ahead of anything project-specific.
         procedural_memory = self._build_procedural_memory_section(
-            skill_store, fullstack_offered=fullstack_offered, web_offered=web_offered
+            skill_store, direct_generation=direct_generation, fullstack_offered=fullstack_offered,
+            direct_reports=direct_reports, web_offered=web_offered,
         )
         if procedural_memory:
             prompt += procedural_memory
