@@ -137,7 +137,11 @@ SCRATCHPAD_TOOL = ToolDef(
 # helper only answers that it is off, so the tool stops offering it.
 NO_WEB_SCRATCHPAD_TOOL = replace(
     SCRATCHPAD_TOOL,
-    description=cut_spans(SCRATCHPAD_TOOL.description, ("web_search(query) routes", "sample(var) inspects", "")),
+    description=cut_spans(
+        SCRATCHPAD_TOOL.description,
+        ("web_search(query) routes", "sample(var) inspects", ""),
+        ("web_search, sample, and progress", " are already available", "sample, and progress"),
+    ),
 )
 
 

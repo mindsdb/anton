@@ -51,6 +51,7 @@ from anton.core.tools.skill_draft import CREATE_SKILL_DRAFT_TOOL
 from anton.memory.history_store import is_user_turn, repair_replayed_tool_ids
 from anton.core.llm.prompts import (
     ANTON_NOTE,
+    NO_WEB_RESILIENCE_NUDGE,
     RESILIENCE_NUDGE,
     SCRATCHPAD_INSTALL_NUDGE,
     SCRATCHPAD_SIZE_NUDGE,
@@ -255,6 +256,10 @@ logger = logging.getLogger(__name__)
 #: "share of failures classified" without remembering the denominator is itself
 #: substring-defined.
 _LEGACY_FAILURE_MARKERS = ("[error]", "Task failed:", "failed", "timed out", "Rejected:")
+
+
+def _generic_resilience_nudge() -> str:
+    return NO_WEB_RESILIENCE_NUDGE if web_search_off() else RESILIENCE_NUDGE
 
 
 def _legacy_looks_like_failure(text: str) -> bool:
@@ -2562,7 +2567,7 @@ class ChatSession:
         every non-scratchpad tool keep the generic nudge.
         """
         if tool_name != "scratchpad":
-            return RESILIENCE_NUDGE
+            return _generic_resilience_nudge()
         low = result_text.lower()
         # An install/missing-module failure is neither a size nor a liveness
         # problem — checked before both: the legacy mid-install kill wording
@@ -2601,7 +2606,7 @@ class ChatSession:
         # Other scratchpad failures (syntax/runtime errors): the generic
         # "you've failed twice, change approach" nudge still applies — only
         # the size/timeout cases get specialised advice.
-        return RESILIENCE_NUDGE
+        return _generic_resilience_nudge()
 
     def repair_history(self) -> None:
         """Fix dangling tool_use blocks left by mid-stream cancellation.

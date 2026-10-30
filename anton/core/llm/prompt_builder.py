@@ -12,6 +12,7 @@ from .prompts import (
     CONVERSATION_DISCIPLINE_ACT_FIRST,
     CONVERSATION_DISCIPLINE_ASK_FIRST,
     NO_WEB_CHAT_SYSTEM_PROMPT,
+    NO_WEB_CONVERSATION_DISCIPLINE_ACT_FIRST,
     STATIC_ARTIFACTS_PROMPT,
     VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
     VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
@@ -76,7 +77,7 @@ class ChatSystemPromptBuilder:
         return "\n\n".join(chunks)
 
     def _build_procedural_memory_section(
-        self, skill_store: "SkillStore | None", *, fullstack_offered: bool = True
+        self, skill_store: "SkillStore | None", *, fullstack_offered: bool = True, web_offered: bool = True
     ) -> str:
         """Build the '## Procedural memory' section listing available skills.
 
@@ -86,6 +87,8 @@ class ChatSystemPromptBuilder:
         or no skills are saved — the caller skips the section entirely.
         ``fullstack_offered`` False leaves out `build-fullstack-backend`,
         whose line offers the fullstack types the tools leave out.
+        ``web_offered`` False leaves out `public-data-sources`, a catalog of
+        web endpoints nothing here can reach.
         """
         if skill_store is None:
             return ""
@@ -115,6 +118,8 @@ class ChatSystemPromptBuilder:
             label = s.get("label", "")
             when = s.get("description", "").strip()
             if not label or (not fullstack_offered and label == "build-fullstack-backend"):
+                continue
+            if not web_offered and label == "public-data-sources":
                 continue
             if when:
                 lines.append(f"- `{label}` — {when}")
@@ -175,10 +180,12 @@ class ChatSystemPromptBuilder:
         if prefix:
             prompt += f"{prefix}\n\n"
 
-        conversation_discipline = (
-            CONVERSATION_DISCIPLINE_ACT_FIRST if act_first
-            else CONVERSATION_DISCIPLINE_ASK_FIRST
-        )
+        if not act_first:
+            conversation_discipline = CONVERSATION_DISCIPLINE_ASK_FIRST
+        elif web_offered:
+            conversation_discipline = CONVERSATION_DISCIPLINE_ACT_FIRST
+        else:
+            conversation_discipline = NO_WEB_CONVERSATION_DISCIPLINE_ACT_FIRST
 
         # ENG-1638: two questions, two sub-blocks. `runtime_identity_lines` say
         # what is serving THIS conversation (from the provider's response, or the
@@ -222,7 +229,7 @@ class ChatSystemPromptBuilder:
         # Saved skills change rarely (the built-ins plus the user's own), so
         # they stay in the shared part ahead of anything project-specific.
         procedural_memory = self._build_procedural_memory_section(
-            skill_store, fullstack_offered=fullstack_offered
+            skill_store, fullstack_offered=fullstack_offered, web_offered=web_offered
         )
         if procedural_memory:
             prompt += procedural_memory

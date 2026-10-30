@@ -412,6 +412,25 @@ knowledge, and say where that knowledge may be out of date.\n\n",
     ),
     ("web scraping, ", "plotting", ""),
     ("- web_search(query) answers", "- get_llm, agentic_loop, and web_search", ""),
+    ("- get_llm, agentic_loop, and web_search are already", " available as globals", "- get_llm and agentic_loop are already"),
+    (
+        "- Try creative workarounds first: different HTTP headers",
+        "- Exhaust at least 2-3",
+        "- Try creative workarounds first: alternate libraries, another way to read the data \
+you have, caching/retrying with backoff, etc. Web access is off on this install, so none \
+of them goes online.\n",
+    ),
+)
+
+NO_WEB_CONVERSATION_DISCIPLINE_ACT_FIRST = cut_spans(
+    CONVERSATION_DISCIPLINE_ACT_FIRST,
+    (
+        "- NEVER let a training-data fact BLOCK",
+        "- Only STOP and ASK",
+        "- A training-data fact may be out of date, and web access is off on this install, so \
+it cannot be checked online. If one would block a request, say so, state the assumption you \
+proceed on, and let the user correct it.\n",
+    ),
 )
 
 
@@ -569,6 +588,15 @@ RESILIENCE_NUDGE = (
     "STOP and tell the user exactly what failed and what you need — do NOT fabricate a "
     "result, claim success, or silently give up. Once real options are exhausted, asking "
     "the user is the correct move."
+)
+NO_WEB_RESILIENCE_NUDGE = cut_spans(
+    RESILIENCE_NUDGE,
+    (
+        "different headers/user-agent",
+        ". If those also fail",
+        "an alternate library, or another way to read the data you have; web access is off "
+        "on this install, so none of them goes online",
+    ),
 )
 
 # Scratchpad failures need different advice than the generic (scrape/fetch)
