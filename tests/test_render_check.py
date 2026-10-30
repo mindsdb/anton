@@ -3802,6 +3802,28 @@ async def test_a_latched_verifier_still_books_its_own_skip_with_a_page_out_of_re
     assert turn.kwargs["verifier_failure"] == "latched_denied"
 
 
+async def test_a_page_out_of_repair_cells_leaves_the_latched_verifiers_re_probe_due(service, project, policy):
+    """The turn the latch would re-probe on skips the check for the page, so
+    the re-probe stays due for the next turn instead of a whole window on."""
+    from anton.core.session import _reprobe_turns_for
+
+    service.answer(_FAILED_ROUTES)
+    session, _, _ = _session_for(project, [
+        _write(1), _write(2), _write(3), _llm_response("The globe failed its browser check."),
+    ])
+    session._scratchpads._cell_sandbox = policy
+    latch = session._verifier_latch
+    latch.latched = True
+    latch.reason = latch.last_no_verdict = "hard"
+    latch.skips = _reprobe_turns_for("hard") - 1
+
+    await _final_text(session)
+
+    assert session._llm.generate_object_code.await_count == 0
+    assert latch.latched
+    assert latch.skips == _reprobe_turns_for("hard")
+
+
 async def test_a_spent_continuation_budget_still_ends_on_the_hand_back(service, project, policy):
     """With no continuation left, the turn hands back as it would without
     the page: that round runs no tools, so it can't edit the page."""

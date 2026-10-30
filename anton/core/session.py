@@ -7542,13 +7542,9 @@ class ChatSession:
                             f"latched_{self._verifier_latch.reason}"
                         )
                     break
-                logger.info(
-                    "completion-verifier re-probing after %d skipped verifications",
-                    self._verifier_latch.skips,
-                )
-                self._verifier_latch.skips = 0
 
-            # A continuation round would only edit a page out of repair cells again.
+            # A continuation round would only edit a page out of repair cells
+            # again. Before the re-probe below, which this turn leaves due.
             if self._out_of_repairs:
                 logger.info(
                     "completion-verifier skipped — out of repair cells: %s",
@@ -7557,6 +7553,13 @@ class ChatSession:
                 if self._turn_cost is not None:
                     self._turn_cost.verification_skipped = True
                 break
+
+            if self._verifier_latch.latched:
+                logger.info(
+                    "completion-verifier re-probing after %d skipped verifications",
+                    self._verifier_latch.skips,
+                )
+                self._verifier_latch.skips = 0
 
             # Ask the cheap coding model to self-assess completion over a compact,
             # text-rendered view of the recent conversation (ENG-716). The
