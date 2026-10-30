@@ -5,6 +5,7 @@ to hold, so "remove it from `tools`" — the old mechanism — is unavailable.
 """
 from __future__ import annotations
 
+from anton.core.backends.wire import WEB_SEARCH_ENV
 from anton.core.tools.generate_artifact.discovery import sub_tools as st
 
 
@@ -22,6 +23,20 @@ def test_the_tool_array_is_rebuilt_identically_every_time():
 def test_gathering_allows_everything():
     for name in ("scratchpad", "web_search", "web_fetch", "ask_user", "finish_gathering"):
         assert st.rejection_for(st.STEP_GATHERING, name, questions_left=1) is None
+
+
+def test_web_tools_are_refused_where_the_install_turns_web_search_off(monkeypatch):
+    """Refused in the gate, not dropped from the array, so the cached prefix
+    stays the same."""
+    monkeypatch.setenv(WEB_SEARCH_ENV, "off")
+    for name in ("web_search", "web_fetch"):
+        reason = st.rejection_for(st.STEP_GATHERING, name, questions_left=1)
+        assert reason is not None
+        assert "web access is turned off" in reason
+    assert st.rejection_for(st.STEP_GATHERING, "scratchpad", questions_left=1) is None
+    assert [t["name"] for t in st.pipeline_tool_schemas()] == [
+        "scratchpad", "web_search", "web_fetch", "ask_user", "finish_gathering",
+    ]
 
 
 def test_finish_gathering_is_rejected_while_drafting_the_brief():
