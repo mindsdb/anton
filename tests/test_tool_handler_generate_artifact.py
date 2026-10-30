@@ -1142,6 +1142,47 @@ async def test_a_page_that_failed_its_browser_check_comes_back_to_repair(tmp_pat
     for step in ("repair it yourself now", "`read_text_file`", "scratchpad cell", "`runView`",
                  "Do NOT call generate_artifact again", "needs no `recall_skill`"):
         assert step in instruction, step
+    # The check's verdict is per page: a view of a page that still fails is not verified.
+    assert instruction.endswith(
+        "If the page still fails, tell the user it failed its browser check, and do not call it or any "
+        "view in it browser-verified, tested or working."
+    )
+
+
+@pytest.mark.parametrize("used,left", [(1, 1), (2, 0)])
+async def test_a_rebuild_that_failed_its_browser_check_reports_the_repair_cells_left(
+    tmp_path: Path, monkeypatch, used, left
+):
+    """A rebuild of a page that already spent repair cells this turn gets
+    only what is left. With none left the page is out of repair cells: no
+    repair, no screenshot, and never called verified."""
+    from anton.core.tools import tool_handlers
+
+    slug = _make_artifact(tmp_path, type="html-app")
+
+    async def fake_generate(**kw):
+        return _browser_check_failed()
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    key = tool_handlers.PageKey(slug, "dashboard.html")
+    session = _session(tmp_path)
+    session._render_screenshots_refused = False
+    session._repair_cells = {key: used}
+    session._out_of_repairs = set()
+    _, result = await _collect_raw(session, {"slug": slug, "user_request": "rebuild it", "agent_understanding": "a page"})
+
+    body = json.loads(result.content if isinstance(result.content, str) else result.content[0]["text"])
+    assert body["repair_cells"] == left
+    if left:
+        assert session._out_of_repairs == set()
+        assert body["instruction"].startswith(tool_handlers._STATUS_INSTRUCTIONS["browser_check_failed"])
+    else:
+        assert session._out_of_repairs == {key}
+        assert isinstance(result.content, str)
+        assert body["instruction"] == tool_handlers._BUILD_FAILED_NO_REPAIRS_LEFT
+        assert body["instruction"].endswith(
+            "do not call it or any view in it browser-verified, tested or working."
+        )
 
 
 async def test_a_view_whose_script_did_not_parse_comes_back_to_repair_in_its_own_script(tmp_path: Path, monkeypatch):

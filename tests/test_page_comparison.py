@@ -242,6 +242,7 @@ async def test_a_page_the_turn_broke_past_its_repair_cells_goes_back_as_it_was(s
     assert last.messages == [f"{slug}/index.html — {tool_handlers._RESTORED}"]
     assert (store.root / slug / "index.html").read_text() == _BEFORE
     assert session._page_checks == {key: "passed"}
+    assert last.out_of_repairs == frozenset({key})
     assert session._failed_views == {}
     # Only the line for the page put back: what the broken version lost is not the user's page any more.
     assert ChatSession._unverified_page_lines(session) == [

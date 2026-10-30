@@ -239,14 +239,21 @@ REPAIR_CELLS = 2
 _NO_REPAIRS_LEFT = (
     "failed the browser check, and this page has no repair cells left this turn: do not edit it "
     "again this turn. Tell the user it failed its browser check and may not display correctly in "
-    "the preview"
+    "the preview, and do not call it or any view in it browser-verified, tested or working"
 )
 # Said instead of `_NO_REPAIRS_LEFT` when anton put the page back as the turn
 # found it (`page_copies.TurnPages.restore`).
 _RESTORED = (
     "failed the browser check with no repair cells left, so anton put back the page as it was before this "
     "turn: do not edit it again this turn. Tell the user the edit could not be made safely and the page is as "
-    "it was"
+    "it was, and do not call the edit or any view it changed browser-verified, tested or working"
+)
+# Said after the "not checked in a browser" line, instead of what the check
+# still found, when that check leaves an edited page with no repair cells.
+_UNVERIFIED_NO_REPAIRS_LEFT = (
+    "this page has no repair cells left this turn: do not edit it again this turn. Tell the user it was "
+    "not verified in a browser and may not display correctly in the preview, and do not call it or any "
+    "view in it browser-verified, tested or working"
 )
 _FULLSTACK_PAGE_SKIP = (
     "not checked in a browser: a fullstack app's page calls its backend, which "
@@ -292,6 +299,9 @@ class ArtifactLint:
     restored: frozenset[PageKey] = frozenset()
     # The pages this cell edited, whatever their checks found.
     edited: frozenset[PageKey] = frozenset()
+    # The pages this cell's checks left with no repair cells and failed, or
+    # unverified after this cell edited them, put back or not.
+    out_of_repairs: frozenset[PageKey] = frozenset()
 
 
 _STATUS_RANK = {"passed": 0, "unverified": 1, "failed": 2}
@@ -413,7 +423,8 @@ def _repairs_left_line(left: int) -> str:
     cells = "cell" if left == 1 else "cells"
     return (
         f"{left} repair {cells} left for this page this turn: change it in a scratchpad cell to fix "
-        "the code each finding names, and keep every view"
+        "the code each finding names, and keep every view. Until a check passes it, do not call it or "
+        "any view in it browser-verified, tested or working"
     )
 
 
@@ -520,8 +531,13 @@ def _check_pages(
     gets a line with the repair cells it has left this turn, after the
     `repairs_used` it already spent; once a page fails with none left, its
     line says so and lists no findings, so the agent stops editing a page it
-    cannot fix this turn. A check that no longer finds a view in
-    `failed_views`, the views the check that first failed the page
+    cannot fix this turn. A page this check leaves with no repair cells and
+    failed, or unverified after this cell edited it, comes back in
+    `out_of_repairs`, put back or not: the session then skips the completion
+    check, whose rounds would edit it again (`record_page_checks`). A page
+    left unverified without being counted (no browser, a sandbox, a page too
+    large for the local browser) is not marked. A check that no longer finds
+    a view in `failed_views`, the views the check that first failed the page
     measured, fails, even after an unverified check in between: a repair
     fixes a view, it never removes one. The views each failed check
     measured come back in `failed_views`.
@@ -552,6 +568,7 @@ def _check_pages(
     views_of_failed: "dict[PageKey, tuple[CheckedView, ...]]" = {}
     comparisons: "dict[PageKey, Comparison]" = {}
     put_back: set[PageKey] = set()
+    out_of_repairs: set[PageKey] = set()
     edited = frozenset(page.key(store) for page in pages if page.edited)
     shown_as_text = _markup_shown_as_text(store, pages)
 
@@ -606,6 +623,7 @@ def _check_pages(
                 left = _repairs_left_after(page)
                 page_checks[page.key(store)] = "failed"
                 if left <= 0:
+                    out_of_repairs.add(page.key(store))
                     messages.append(f"{label} — {_NO_REPAIRS_LEFT}")
                     continue
                 messages.append(f"{label} — {shown_as_text[page.key(store)]}")
@@ -636,12 +654,14 @@ def _check_pages(
             if not findings:
                 continue
             if left <= 0:
+                out_of_repairs.add(page.key(store))
                 messages.append(f"{label} — {_NO_REPAIRS_LEFT}")
                 continue
             messages += [f"{label} — {f.message()}" for f in findings]
             messages.append(f"{label} — {_repairs_left_line(left)}")
         return ArtifactLint(
-            messages=messages, page_checks=page_checks, repaired=frozenset(repaired), edited=edited
+            messages=messages, page_checks=page_checks, repaired=frozenset(repaired), edited=edited,
+            out_of_repairs=frozenset(out_of_repairs),
         )
 
     # Whether `shot` is a failed page's: until one is, every page is asked
@@ -677,6 +697,8 @@ def _check_pages(
         status: "RenderStatus" = "failed" if removed or key in shown_as_text else outcome.status
         page_checks[key] = status
         failed = status == "failed"
+        if left <= 0 and (failed or (status == "unverified" and page.edited)):
+            out_of_repairs.add(key)
         if failed:
             views_of_failed[key] = tuple(outcome.views)
         comparison = outcome.comparison
@@ -705,6 +727,12 @@ def _check_pages(
                     messages.append(f"{label} — {_RESTORED}")
                     continue
             messages.append(f"{label} — {_NO_REPAIRS_LEFT}")
+            continue
+        if key in out_of_repairs:
+            # Unverified: no findings and no screenshot, nothing that sends
+            # the agent back to edit a page it cannot repair this turn.
+            messages.append(f"{label} — not checked in a browser: {outcome.unverified_reason}")
+            messages.append(f"{label} — {_UNVERIFIED_NO_REPAIRS_LEFT}")
             continue
         if outcome.screenshot is not None and (shot is None or (failed and not shot_failed)):
             shot, shot_page, shot_failed = outcome.screenshot, label, failed
@@ -757,6 +785,7 @@ def _check_pages(
         messages=messages, screenshot=shot, screenshot_page=shot_page, page_checks=page_checks,
         findings_listed=frozenset(findings_listed), repaired=frozenset(repaired), failed_views=views_of_failed,
         comparisons=comparisons, restored=frozenset(put_back), edited=edited,
+        out_of_repairs=frozenset(out_of_repairs),
     )
 
 
@@ -856,6 +885,7 @@ def record_page_checks(
     repaired: frozenset[PageKey] = frozenset(),
     failed_views: "dict[PageKey, tuple[CheckedView, ...]] | None" = None,
     restored: frozenset[PageKey] = frozenset(),
+    out_of_repairs: frozenset[PageKey] = frozenset(),
 ) -> None:
     """Remember, for this turn, how each page last fared in a browser, and
     which pages an unverified check already listed findings for.
@@ -872,7 +902,9 @@ def record_page_checks(
     loses them once a check passes it. Each page in `restored` was put back,
     as the turn found it or as a generate_artifact run found it with no
     status known: it loses its `_failed_views`, and its record unless
-    `checks` names it.
+    `checks` names it. Each page in `out_of_repairs` stays in
+    `_out_of_repairs` for the rest of the turn, whatever a later check of it
+    finds, and the session skips the completion check while it is non-empty.
     Best-effort, like `_track_artifact`: a session without the record (a
     test double) loses nothing else.
     """
@@ -882,6 +914,9 @@ def record_page_checks(
     listed = getattr(session, "_unverified_findings_listed", None)
     if isinstance(listed, set):
         listed.update(findings_listed)
+    spent = getattr(session, "_out_of_repairs", None)
+    if isinstance(spent, set):
+        spent.update(out_of_repairs)
     cells = getattr(session, "_repair_cells", None)
     if isinstance(cells, dict):
         for key in repaired:
@@ -1075,6 +1110,7 @@ async def check_cell_artifacts(
     record_page_checks(
         session, checks=lint.page_checks, findings_listed=lint.findings_listed,
         repaired=lint.repaired, failed_views=lint.failed_views, restored=lint.restored,
+        out_of_repairs=lint.out_of_repairs,
     )
     if turn_pages is not None:
         # A page this very cell put back stays put back.
@@ -1551,6 +1587,14 @@ _REPLACED_BUILD_FIELDS = (
     "browser_unchecked",
 )
 # Joins the instruction of a result that carries `changes_from_previous`.
+# `browser_check_failed`'s instruction when the page has no repair cells left.
+_BUILD_FAILED_NO_REPAIRS_LEFT = (
+    "The page passed the pipeline's static checks, but a browser loaded `<path>/<page>` and found the "
+    "problems `findings` lists, and this page has no repair cells left this turn: do not edit it, and do "
+    "not call generate_artifact for it again this turn. Tell the user it failed its browser check and may "
+    "not display correctly in the preview, and do not call it or any view in it browser-verified, tested "
+    "or working."
+)
 _CHANGES_INSTRUCTION = (
     "`changes_from_previous` names the views this build broke (`broke`), left without a graphic (`blank`), "
     "removed (`removed`) or left fewer than half their marks (`shrank`), against the page as it was before this "
@@ -1806,7 +1850,8 @@ _STATUS_INSTRUCTIONS = {
         "the page from the spec instead of repairing it. This repair needs no "
         "`recall_skill`. Once a cell's check passes, say \"browser-verified\", "
         "\"tested\" or \"works\" only of the views that check names. If the "
-        "page still fails, tell the user it failed its browser check."
+        "page still fails, tell the user it failed its browser check, and do "
+        "not call it or any view in it browser-verified, tested or working."
     ),
     "stopped_over_budget": (
         "This turn reached its token budget and the pipeline stopped "
@@ -2186,9 +2231,14 @@ def _browser_check_failed_outcome(
     streak, with or without the screenshot: the next step is a repair cell,
     not this tool again, and the streak's nudge would say to stop. A list
     result must be a success anyway, since the tool loops' list arm adds
-    no nudge."""
+    no nudge. `repair_cells` is what the page has left this turn; with none
+    left the page is out of repair cells (`record_page_checks`), and the
+    result asks for no repair and carries no screenshot."""
     from anton.core.artifacts import render_check
 
+    key = PageKey(slug, result.page)
+    used = getattr(session, "_repair_cells", None)
+    left = max(REPAIR_CELLS - (used.get(key, 0) if isinstance(used, dict) else 0), 0)
     outcome = {
         "slug": slug,
         "path": str(folder),
@@ -2196,8 +2246,13 @@ def _browser_check_failed_outcome(
         "page": result.page,
         "findings": list(result.findings),
         "views_measured": render_check.view_coverage(views=result.views).checked,
-        "repair_cells": REPAIR_CELLS,
+        "repair_cells": left,
     }
+    if left == 0:
+        # A rebuild of a page that already spent its repair cells this turn.
+        record_page_checks(session, checks={}, out_of_repairs=frozenset({key}))
+        text = json.dumps({**outcome, "instruction": _BUILD_FAILED_NO_REPAIRS_LEFT}, indent=2)
+        return ToolOutcome(content=text, ok=True)
     instruction = _STATUS_INSTRUCTIONS["browser_check_failed"]
     # A rebuild of an existing page is compared with the page as the turn
     # found it: the repair starts knowing what the build broke or dropped.

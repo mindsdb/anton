@@ -2190,6 +2190,11 @@ class ChatSession:
         # `tool_handlers.REPAIR_CELLS` of them (`check_cell_artifacts`).
         # Reset every turn.
         self._repair_cells: dict[PageKey, int] = {}
+        # The pages a check this turn left with no repair cells and failed, or
+        # unverified after an edit, put back or not. Never cleared within the
+        # turn: while it is non-empty the completion check is skipped, since
+        # its rounds would edit such a page again. Reset every turn.
+        self._out_of_repairs: set[PageKey] = set()
         # The views the check that failed a page this turn measured, kept
         # until the page passes. Until then, a check of the page that no
         # longer finds one of them fails, even after an unverified check in
@@ -5600,6 +5605,7 @@ class ChatSession:
         self._page_checks = {}
         self._unverified_findings_listed = set()
         self._repair_cells = {}
+        self._out_of_repairs = set()
         self._failed_views = {}
         self._turn_pages = TurnPages()
         # What the project held when this turn began: a cell may delete or
@@ -7558,6 +7564,20 @@ class ChatSession:
                             f"latched_{self._verifier_latch.reason}"
                         )
                     break
+
+            # A continuation round would only edit a page out of repair cells
+            # again. Before the re-probe below, which this turn leaves due.
+            if self._out_of_repairs:
+                logger.info(
+                    "completion-verifier skipped — out of repair cells: %s",
+                    ", ".join(sorted(f"{key.slug}/{key.page}" for key in self._out_of_repairs)),
+                )
+                if self._turn_cost is not None:
+                    self._turn_cost.verification_skipped = True
+                    self._turn_cost.verifier_failure = "out_of_repairs"
+                break
+
+            if self._verifier_latch.latched:
                 logger.info(
                     "completion-verifier re-probing after %d skipped verifications",
                     self._verifier_latch.skips,

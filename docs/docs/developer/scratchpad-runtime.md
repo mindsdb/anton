@@ -311,7 +311,10 @@ rows and HTML map markers count. A view that broke fails the page, so its
 repair cells apply. The others are not failures, and the agent hears about
 each set once a turn.
 When a page the turn's edits made worse fails with no repair cells left,
-anton puts the copy back. A `generate_artifact` run on an existing
+anton puts the copy back. Once a check leaves a page with no repair cells
+and failed, or unverified after the cell edited it, put back or not, the
+turn skips the completion check (`ChatSession._out_of_repairs`): its
+continuation rounds would only edit that page again. A `generate_artifact` run on an existing
 artifact that fails, stops over budget, crashes or is abandoned by the
 turn puts the main page back as it was when the run started: as the turn
 found it, when the run was the first to change it. A build that fails only
