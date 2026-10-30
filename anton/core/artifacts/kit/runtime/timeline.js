@@ -50,14 +50,14 @@
       if (L.color && rows.length && rows[0][L.color] !== undefined && !L.tone_values) {
         var sc = AK.colorScale(AK.uniq(rows, L.color), L.colors, L.color);
         sc.domain().forEach(function (v) { items.push({label: v, color: sc(v)}); });
-      } else if (L.name && !L.tone_values) items.push({label: L.name, color: AK.resolveColor(L.color_value || L.tone || L.color) || AK.css('--ak-accent')});
+      } else if (L.name) items.push({label: L.name, color: L.tone_values ? AK.css('--ak-text-3') : (AK.resolveColor(L.color_value || L.tone || L.color) || AK.css('--ak-accent'))});
     });
     mss.forEach(function (L) {
       var rows = AK.data(L.data);
       if (L.color && rows.length && rows[0][L.color] !== undefined && !L.tone_values) {
         var sc = AK.colorScale(AK.uniq(rows, L.color), L.colors, L.color);
         sc.domain().forEach(function (v) { items.push({label: v, color: sc(v), shape: L.shape === 'diamond' ? 'diamond' : 'dot'}); });
-      } else if (L.name && !L.tone_values) items.push({label: L.name, color: AK.resolveColor(L.color_value || L.tone || L.color) || AK.css('--ak-text-2'), shape: L.shape === 'diamond' ? 'diamond' : 'dot'});
+      } else if (L.name) items.push({label: L.name, color: AK.resolveColor(L.color_value || L.tone || L.color) || AK.css('--ak-text-2'), shape: L.shape === 'diamond' ? 'diamond' : 'dot'});
     });
     markers.forEach(function (m) { if (m.label) items.push({label: m.label, color: AK.resolveColor(m.tone || 'neutral'), shape: 'dash'}); });
     if (items.length && b.legend !== false) c.body.insertBefore(AK.legend(items), view);
@@ -213,6 +213,8 @@
           if (L.dashed) { rect.setAttribute('fill-opacity', 0.15); rect.setAttribute('stroke', col); rect.setAttribute('stroke-dasharray', '4 3'); }
           rect.addEventListener('mousemove', function (e) {
             var pairs = [[AK.label(L, L.start), AK.fmt(r[L.start], whenFmt)], [AK.label(L, L.end), AK.fmt(r[L.end], whenFmt)]];
+            // The bar's label too: on a crowded lane it may be shortened or left off the bar.
+            if (L.label && r[L.label] != null && (L.tooltip || []).indexOf(L.label) < 0) pairs.unshift([AK.label(L, L.label), AK.fmt(r[L.label], AK.fieldFormat(L, L.label) || 'auto')]);
             (L.tooltip || []).forEach(function (f) { pairs.push([AK.label(L, f), AK.fmt(r[f], AK.fieldFormat(L, f) || 'auto')]); });
             AK.tip(AK.tipRows((L.name ? L.name + ' · ' : '') + R.labels[k], pairs), e);
           });

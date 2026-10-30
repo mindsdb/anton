@@ -642,16 +642,19 @@ def test_a_kpi_takes_one_value():
         kit.kpi("Delayed shipments", 3, "int", delta=[0, 3])
     import numpy as np
     assert kit.kpi("Delayed shipments", np.int64(3), "int", delta=np.float64(1.5))["value"] == 3
+    assert kit.kpi("Delayed shipments", np.array(3.0), "int")["value"] == 3
 
 
-def test_a_series_holding_a_number_per_row_asks_for_two_y_fields():
+def test_a_series_holding_a_number_per_row_is_flagged():
     page = kit.Page("Pressure")
     df = pd.DataFrame({"measure": ["Arrivals", "Occupancy", "Transfers"], "base": [100, 100, 100],
                        "surge": [120.6, 107.3, 131.0]})
-    with pytest.raises(kit.KitError, match=r"y=\['base', 'surge'\]"):
-        page.chart("bar", df, x="measure", y="base", series="surge")
+    page.chart("bar", df, x="measure", y="base", series="surge")
+    assert any("pass y as a list" in w for w in page.warnings)
+    quiet = kit.Page("Sales")
     years = pd.DataFrame({"region": ["N", "N", "S", "S"], "year": [2024, 2025, 2024, 2025], "sales": [1, 2, 3, 4]})
-    page.chart("bar", years, x="region", y="sales", series="year")  # a numeric series of groups is fine
+    quiet.chart("bar", years, x="region", y="sales", series="year")  # a numeric series of groups is fine
+    assert not quiet.warnings
 
 
 def test_timeline_tone_naming_a_field_colours_each_bar():
@@ -673,3 +676,4 @@ def test_a_typed_backslash_n_is_a_line_break():
     page = kit.Page("Notes")
     assert page.callout("Cost: $393,120\\nTwo options")["md"] == "Cost: $393,120  \nTwo options"
     assert page.text("Run `a\\nb` here")["md"] == "Run `a\\nb` here"
+    assert page.text("Saved to C:\\new\\notes")["md"] == "Saved to C:\\new\\notes"

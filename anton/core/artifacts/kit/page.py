@@ -65,9 +65,18 @@ def _unit_clash(unit: str | None, format: str | None) -> str | None:
 
 def _md(md: Any) -> str:
     """Markdown as written, except a literal backslash-n (a line break escaped twice) is the line break
-    it was meant to be; code spans keep theirs."""
+    it was meant to be; code spans and path-like words (C:\\new, a\\b\\nc) keep theirs."""
+    if md is None:
+        return ""
+
+    def breaks(m: "re.Match") -> str:
+        word = m.group(0)
+        if re.match(r"[A-Za-z]:\\", word) or re.search(r"\\[^n]", word):
+            return word
+        return word.replace("\\n", "  \n")
+
     parts = re.split(r"(`[^`]*`)", str(md))
-    return "".join(p if p.startswith("`") else p.replace("\\n", "  \n") for p in parts)
+    return "".join(p if p.startswith("`") else re.sub(r"\S*\\n\S*", breaks, p) for p in parts)
 
 
 def kpi(label: str, value: Any, format: str | None = None, *, sub: str | None = None, delta: Any = None,
@@ -78,10 +87,10 @@ def kpi(label: str, value: Any, format: str | None = None, *, sub: str | None = 
     _check_format(format, f"kpi {label!r}")
     from .data import _scalar
     for name, v in (("value", value), ("delta", delta)):
-        if isinstance(v, (list, tuple, set, dict)) or (hasattr(v, "__len__") and hasattr(v, "dtype")):
+        if isinstance(v, (list, tuple, set, dict)) or getattr(v, "ndim", 0) > 0:
             raise KitError(f"kpi {label!r}: {name} is one number, not {type(v).__name__}. For a before/after pair "
                            "show the new value with delta= (the change), or put both in page.compare.")
-    card ={k: v for k, v in dict(label=label, format=format, sub=sub, delta=_scalar(delta),
+    card = {k: v for k, v in dict(label=label, format=format, sub=sub, delta=_scalar(delta),
                                   delta_format=delta_format, delta_label=delta_label, better=better, tone=tone,
                                   spark=[_scalar(x) for x in spark] if spark is not None else None,
                                   color_value=color_value or None, unit=_unit_clash(unit, format)).items() if v is not None}
@@ -408,9 +417,9 @@ class Page:
             svals = [r.get(series) for r in rws if r.get(series) is not None]
             if (len(rws) >= 3 and svals and all(is_number(v) for v in svals) and len(set(svals)) == len(rws)
                     and len({r.get(x) for r in rws}) == len(rws)):
-                raise KitError(f"chart {title!r}: series={series!r} holds one number per row, but series names the "
-                               f"groups (a scenario, a region). To draw two measures side by side use "
-                               f"y=[{y!r}, {series!r}].")
+                self.warnings.append(f"chart {title!r}: series={series!r} holds a different number on every row, so "
+                                     f"each bar is its own group. series names groups (a scenario, a region); if "
+                                     f"{series!r} is a second measure, pass y as a list of the measure fields instead.")
             seen = set()
             for r in rws:
                 k = (r.get(x), r.get(series))
@@ -640,8 +649,8 @@ class Page:
             if isinstance(layer.get("tone"), str) and rws and layer["tone"] in _fields(rws) and not layer.get("color"):
                 layer["color"] = layer.pop("tone")
             if isinstance(layer.get("color"), str) and rws and layer["color"] in _fields(rws) and not layer.get("colors"):
-                vals = {r.get(layer["color"]) for r in rws}
-                if vals <= set(TONES):
+                vals = {r.get(layer["color"]) for r in rws} - {None}
+                if vals and vals <= set(TONES):
                     layer["colors"], layer["tone_values"] = {v: v for v in vals}, True
             if isinstance(layer.get("color"), str) and rws and layer["color"] in _fields(rws):
                 want.append(layer["color"])

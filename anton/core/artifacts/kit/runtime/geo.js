@@ -134,8 +134,8 @@
     return c.card;
   }
 
-  // A colour field holding numbers (occupancy, days late) is a scale, not categories: light to dark
-  // in the layer's colour, its range shown in the legend.
+  // A colour field holding numbers is a scale, not categories: from faint to full strength in the
+  // layer's colour, its range shown in the legend (colors= keeps numbers as categories).
   function numericField(rows, f) {
     var seen = {}, n = 0;
     for (var i = 0; i < rows.length; i++) {
@@ -149,8 +149,12 @@
   function rampFor(L, rows) {
     var vals = rows.map(function (r) { return r[L.color]; }).filter(AK.isNum);
     var lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
-    var base = d3.color(AK.resolveColor(L.color_value) || AK.css('--ak-accent'));
-    var ramp = d3.interpolateLab(base.brighter(1.3).formatHex(), base.darker(1).formatHex());
+    var base = d3.color(AK.resolveColor(L.color_value) || '') || d3.color(AK.css('--ak-accent')) || d3.color('#4f46e5');
+    var dark = document.documentElement.getAttribute('data-ak-theme') === 'dark';
+    var faint = d3.color(AK.css('--ak-surface-2')) || d3.color(dark ? '#1e293b' : '#f1f5f9');
+    // The strong end stands out against the page in either theme: deeper on light, brighter on dark.
+    var strong = dark ? base.brighter(0.5) : base.darker(0.5);
+    var ramp = d3.interpolateLab(d3.interpolateLab(faint.formatHex(), base.formatHex())(dark ? 0.5 : 0.3), strong.formatHex());
     var f = function (v) { return AK.isNum(v) ? ramp(hi > lo ? (v - lo) / (hi - lo) : 1) : AK.css('--ak-text-3'); };
     f.lo = lo; f.hi = hi; f.ramp = ramp;
     return f;
@@ -223,7 +227,7 @@
       var sr = sizeRange(L, layerRows(L)), fmt = AK.fieldFormat(L, L.size) || 'auto';
       var it = AK.el('span', 'ak-legend-item');
       it.appendChild(document.createTextNode(AK.label(L, L.size) + ' '));
-      [sr.lo, sr.hi].forEach(function (v, i) {
+      (sr.lo === sr.hi ? [sr.hi] : [sr.lo, sr.hi]).forEach(function (v, i) {
         var d = 2 * sizeRadius(v, sr.hi, mode === 'globe' ? 11 : 15);
         var dot = AK.el('i'); dot.style.cssText = 'width:' + d + 'px;height:' + d + 'px;border-radius:50%;background:none;border:1.5px solid ' + AK.css('--ak-text-3') + ';vertical-align:middle;margin-left:' + (i ? 8 : 0) + 'px';
         it.appendChild(dot);

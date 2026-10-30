@@ -67,8 +67,8 @@ page.table(df, [field, kit.col(field, label, format, unit=None, pill=True, tones
            row_tone={"field": f, "map": {value: tone}})
 page.map(kit.points(df, lat, lon, label=, sublabel=, color=field, colors={value: tone}, size=field,
            shape="circle"|"square"|"diamond", tooltip=[fields], key=, link=, pulse=False, name=legend_name),
-           # color= a numeric field shades light to dark with its range in the legend; size= a numeric
-           # field sizes each marker by area, with a size key
+           # color= a numeric field shades faint to strong with its range in the legend (colors= keeps
+           # numbers such as zone ids as categories); size= a numeric field sizes markers by area, with a key
          kit.routes(df, from_lat, from_lon, to_lat, to_lon, via_lat=None, via_lon=None, color=, colors=,
            animate=False, key=, link=, tooltip=[...]),
          kit.regions(df, country, value, format=), title=, fit="data"|"world")
