@@ -17,6 +17,13 @@ MCP_SERVER_URLS: dict[str, str] = {
     "hubspot": "https://mcp.hubspot.com",
     "notion": "https://mcp.notion.com/mcp",
     "slack": "https://mcp.slack.com/mcp",
+    # Both take the connector's existing OAuth token or personal key as a
+    # Bearer header. Chat reaches them only for `method == "mcp"`
+    # connections (`wiring.py`), so listing them here changes nothing for a
+    # token-method connection; Code Mode forwards to them directly.
+    "linear": "https://mcp.linear.app/mcp",
+    # github.com only. A GitHub Enterprise Server host has no hosted server.
+    "github": "https://api.githubcopilot.com/mcp/",
 }
 
 
