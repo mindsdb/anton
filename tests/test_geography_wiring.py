@@ -194,3 +194,93 @@ def test_generation_can_add_globe_requirement_without_dropping_existing_map(tmp_
     assert generated_requirement(state, tmp_path / "index.html").kind == "map_and_globe"
     state.user_request = "Fix the loading failure"
     assert generated_requirement(state, tmp_path / "index.html").kind == "map_and_globe"
+
+
+@pytest.mark.parametrize("writer", ["standard", "fast"])
+async def test_generated_supporting_page_does_not_inherit_other_output_geography(tmp_path, monkeypatch, writer):
+    async def stream(**kwargs):
+        yield StreamComplete(LLMResponse(content=TABLE))
+
+    async def write(**kwargs):
+        (tmp_path / "index.html").write_text(TABLE)
+        return {"files_written": ["index.html"], "rounds_used": 1, "summary": "notes"}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", write)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", lambda *a, **kw: BrowserCheck(status="passed"))
+    session = SimpleNamespace(
+        _llm=SimpleNamespace(code_stream=stream), history=[],
+        _scratchpads=SimpleNamespace(cell_sandbox=None),
+        _artifact_geography_request="Build a world map. Also create a notes page.",
+    )
+    state = GenState(
+        session=session, artifact_type="html-app", artifact_path=tmp_path, slug="notes",
+        user_request="Create a notes page", brief="Sources and caveats", prd="Sources and caveats",
+    )
+    if writer == "fast":
+        result = await fast_static.run(state)
+        assert isinstance(result, dict) and result["status"] == "generated", result
+    else:
+        assert await orchestrator._gen_verify_frontend(state) is None
+    assert ("notes", "index.html") not in session._geography_requirements
+
+
+def test_supporting_page_wording_cannot_clear_existing_repair_requirement(tmp_path):
+    from anton.core.artifacts.geography_pages import generated_requirement
+
+    state = GenState(session=SimpleNamespace(), artifact_type="html-app", artifact_path=tmp_path,
+                     slug="map", user_request="Build a world map")
+    generated_requirement(state, tmp_path / "index.html")
+    state.user_request = "Replace the page with notes"
+    assert generated_requirement(state, tmp_path / "index.html").kind == "map"
+    assert generated_requirement(state, tmp_path / "index.html").required
+
+
+@pytest.mark.parametrize("separate_cells", [False, True])
+async def test_separate_direct_map_and_globe_outputs_keep_their_own_kind(tmp_path, monkeypatch, separate_cells):
+    from tests.test_geography import ATLAS, D3, GLOBE_POLYGONS, page
+
+    monkeypatch.delenv("ANTON_RENDER_CHECK_URL", raising=False)
+    monkeypatch.setattr("anton.core.artifacts.html_lint.lint_html", lambda *a, **kw: [])
+    store = ArtifactStore(tmp_path)
+    world_map = store.create(name="World map", description="World map of sites", type="html-app", primary="index.html")
+    globe = store.create(name="Earth globe", description="Earth globe of sites", type="html-app", primary="index.html")
+    session = SimpleNamespace(
+        _artifact_geography_request="Build a separate world map and an Earth globe",
+        _geography_requirements={}, _page_checks={},
+    )
+    before = tool_handlers.snapshot_existing_artifacts(store)
+    for artifact, script in [(world_map, D3), (globe, GLOBE_POLYGONS)]:
+        (store.root / artifact.slug / "index.html").write_text(page(ATLAS + script))
+        if separate_cells:
+            result = await tool_handlers.check_cell_artifacts(session, store=store, before=before)
+            assert set(result.page_checks.values()) == {"passed"}, result.messages
+            before = tool_handlers.snapshot_existing_artifacts(store)
+    if not separate_cells:
+        result = await tool_handlers.check_cell_artifacts(session, store=store, before=before)
+        assert set(result.page_checks.values()) == {"passed"}, result.messages
+    assert session._geography_requirements[(world_map.slug, "index.html")].kind == "map"
+    assert session._geography_requirements[(globe.slug, "index.html")].kind == "globe"
+
+
+@pytest.mark.parametrize("tool_request", ["Build the dashboard from my notes", "Create a notes page with a world map"])
+def test_notes_used_as_input_do_not_remove_requested_geography(tmp_path, tool_request):
+    from anton.core.artifacts.geography_pages import generated_requirement
+
+    session = SimpleNamespace(_artifact_geography_request="Build a world map")
+    state = GenState(session=session, artifact_type="html-app", artifact_path=tmp_path,
+                     slug="map", user_request=tool_request)
+    requirement = generated_requirement(state, tmp_path / "index.html")
+    assert requirement.kind == "map"
+    assert requirement.required
+
+
+def test_one_direct_page_keeps_both_requested_views(pages):
+    from anton.core.artifacts.geography_pages import check_pages
+
+    store, slug, folder = pages
+    path = folder / "index.html"
+    path.write_text(TABLE)
+    requirements = {}
+    check_pages(store, [tool_handlers._ChangedPage(slug=slug, path=path, edited=True, size=path.stat().st_size)],
+                request="Build a world map and an Earth globe", requirements=requirements, size_limit=10000)
+    assert requirements[(slug, "index.html")].kind == "map_and_globe"

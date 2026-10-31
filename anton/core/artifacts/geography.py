@@ -199,6 +199,10 @@ def _ordinary_kinds(code: str, *, supplied_data: bool = False) -> tuple[set[str]
         evidence = kinds if data and _has(r"\bd3\.geoPath\s*\(", code) else uncertain
         if projection or orthographic:
             evidence.add("map")
+        else:
+            # A custom projection still has geographic data and a drawing
+            # chain. Leave its correctness to the browser/visual check.
+            uncertain.add("map")
         if orthographic:
             evidence.add("globe")
     if _has(r"\becharts\.registerMap\s*\(", code) and _has(r"\.setOption\s*\(", code):
