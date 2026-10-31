@@ -662,6 +662,19 @@ def test_network_values_may_be_numeric_text_and_tiers_a_single_group():
     assert b["tiers"] == [["Supplier"]]
 
 
+def test_a_reference_line_on_another_scale_than_its_series_is_a_warning(tmp_path):
+    df = pd.DataFrame({"week": ["W1", "W2", "W3"], "load": [81.5, 92.9, 104.0], "share": [0.2, 0.35, 0.5]})
+    page = kit.Page("Load")
+    page.chart("line", df, x="week", y="load", format="percent", threshold={"value": 0.9, "label": "Watch"}, title="Load")
+    page.chart("line", df, x="week", y="share", format="fraction", ref_lines=[{"value": 40, "label": "Goal"}], title="Share")
+    page.chart("line", df, x="week", y="load", format="percent", threshold={"value": 90, "label": "Watch"}, title="Fine")
+
+    page.save(tmp_path)
+
+    lines = [w for w in page.warnings if "same scale" in w]
+    assert len(lines) == 2 and "'Watch'" in lines[0] and "'Goal'" in lines[1]
+
+
 def test_a_kpi_takes_one_value():
     for value in ([0, 3], (0, 3), pd.Series([0, 3])):
         with pytest.raises(kit.KitError, match="one number"):
