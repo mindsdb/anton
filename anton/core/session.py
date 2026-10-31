@@ -2141,6 +2141,7 @@ class ChatSession:
             coding_api_key=coding_conn.api_key or "",
             coding_api_key_supplier=key_supplier,
             coding_base_url=coding_conn.base_url or "",
+            coding_flavor=coding_conn.flavor,
             cells=config.cells,
             workspace_path=config.workspace.base if config.workspace else None,
             session_id=config.session_id,
