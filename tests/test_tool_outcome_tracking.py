@@ -317,6 +317,76 @@ class TestPackageInstallTelemetry:
         assert sent == []
 
     @pytest.mark.asyncio
+    async def test_local_archive_entry_is_refused_before_any_install(self, monkeypatch):
+        """An entry named like a local archive parses as a plain name, but
+        pip and uv install that file from where it lies and run its build or
+        install code, which the write check never reads. It is refused like
+        a flag or a URL, whatever the case of its ending."""
+        sent = []
+        monkeypatch.setattr(
+            "anton.analytics.send_event",
+            lambda settings, action, **extra: sent.append((action, extra)),
+        )
+        pad = SimpleNamespace(install_packages=AsyncMock())
+        for bad in (
+            "job.tar.gz",
+            "job-1.0-py3-none-any.whl",
+            "job.zip",
+            "JOB.TGZ",
+            "job.tar.bz2",
+            "job.tar.xz",
+            "job.whl[extra]",
+            "job.tar",
+            "job.tbz",
+            "job.txz",
+            "job.tlz",
+            "job.tar.lz",
+            "job.tar.lzma",
+        ):
+            result = await prepare_scratchpad_exec(
+                _install_session(pad),
+                {"action": "exec", "name": "main", "code": "import requests",
+                 "packages": [bad, "requests"]},
+            )
+            assert isinstance(result, ToolOutcome), bad
+            assert result.ok is False
+            assert result.reason == "package_install_rejected"
+            assert "Install refused" in result.content
+        pad.install_packages.assert_not_called()
+        assert sent == []
+
+    @pytest.mark.asyncio
+    async def test_install_action_also_refuses_local_archive_entries(self):
+        from anton.core.tools.tool_handlers import handle_scratchpad
+
+        pad = SimpleNamespace(install_packages=AsyncMock())
+        session = _install_session(pad)
+        result = await handle_scratchpad(
+            session, {"action": "install", "name": "main", "packages": ["job-1.0.tar.gz"]},
+        )
+        assert isinstance(result, ToolOutcome)
+        assert result.ok is False
+        assert result.reason == "package_install_rejected"
+        pad.install_packages.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_names_that_only_look_like_files_still_install(self):
+        """A package whose name holds a file-like word, but doesn't end like
+        an archive, comes from the index as any name does: pip and uv read
+        "discord.py" or "job.egg" as a name, never as a file."""
+        pad = SimpleNamespace(
+            install_packages=AsyncMock(return_value="Successfully installed x")
+        )
+        result = await prepare_scratchpad_exec(
+            _install_session(pad),
+            {"action": "exec", "name": "main", "code": "import requests",
+             "packages": ["zipp", "wheel", "py", "python-dateutil", "backports.zoneinfo", "pytest-xdist",
+                          "discord.py", "web.py", "job.egg"]},
+        )
+        assert not isinstance(result, ToolOutcome)
+        pad.install_packages.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_install_action_also_refuses_flag_shaped_entries(self):
         from anton.core.tools.tool_handlers import handle_scratchpad
 

@@ -41,6 +41,16 @@ MISSING_MODULE_HINT = (
     "genuinely needs should ever be installed.\n"
 )
 
+# The helpers scratchpad_boot.py injects into the cell namespace before any
+# cell runs, by name. The host's write check reads a call to one as a call
+# to a name the pad binds.
+INJECTED_HELPER_NAMES = frozenset(
+    {"get_llm", "agentic_loop", "web_search", "query_minds_data", "progress", "sample"}
+)
+# The list the boot binds in the cell namespace for the data helpers to
+# record their queries in.
+EXPLAINABILITY_QUERIES_NAME = "_anton_explainability_queries"
+
 
 def heal_surrogate_source(code: str) -> str:
     """Return ``code`` with any lone surrogates resolved to valid UTF-8.

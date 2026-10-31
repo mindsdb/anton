@@ -2293,3 +2293,28 @@ class TestConcurrentTurnsOnDivergentVaults:
         # running alongside it, and not by the value left in the process env.
         assert lines_a[1] == "a-only-password"
         assert lines_b[1] == "ABSENT"
+
+
+def test_injected_helper_names_match_the_boot() -> None:
+    """`INJECTED_HELPER_NAMES` is a hand-kept copy of the names the boot
+    passes to `_inject_helper`. The write check reads a call to one as bound,
+    so a helper added to the boot without adding its name here would get a
+    false "can't be checked" card. Collect the boot's injected names from its
+    source and pin the two in step."""
+    import ast
+    import importlib.util
+    from pathlib import Path
+
+    from anton.core.backends.wire import INJECTED_HELPER_NAMES
+
+    # Read the boot's source without importing it: the module runs its boot
+    # on import, which reads the environment.
+    origin = importlib.util.find_spec("anton.core.backends.scratchpad_boot").origin
+    tree = ast.parse(Path(origin).read_text())
+    injected = {
+        node.args[0].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_inject_helper"
+        and node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)
+    }
+    assert injected == set(INJECTED_HELPER_NAMES)

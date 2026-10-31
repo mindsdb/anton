@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict
 from anton.core.backends.sandbox import cell_sandbox_of, validate_pad_name
 from anton.core.tools.registry import ToolOutcome
 from anton.core.utils.write_check import (
+    PACKAGE_FILE_SUFFIXES,
     CellWrites,
     FileChange,
     HttpWrite,
@@ -559,14 +560,19 @@ def invalid_package_spec(entry: str) -> bool:
     call — dependency confusion through the one install path this ticket
     leaves open. Direct-URL requirements ("name @ https://…") are refused
     for the same reason: installs come from the configured index or not
-    at all.
+    at all. So is a name ending like a local archive
+    (`PACKAGE_FILE_SUFFIXES`, any case), such as "job.tar.gz" or
+    "job-1.0-py3-none-any.whl": pip and uv install that file from where it
+    lies, with the code it runs to build or install it. A name such as
+    "discord.py" is a name on the index, as any other is.
     """
     from packaging.requirements import InvalidRequirement, Requirement
 
     try:
-        return Requirement(str(entry)).url is not None
+        requirement = Requirement(str(entry))
     except InvalidRequirement:
         return True
+    return requirement.url is not None or requirement.name.lower().endswith(PACKAGE_FILE_SUFFIXES)
 
 
 def reject_invalid_packages(packages: list[str]) -> str | None:

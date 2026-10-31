@@ -10,6 +10,7 @@ import dill
 from anton.core.backends.wire import (
     CELL_DELIM,
     CELL_TRACE_MARKER,
+    EXPLAINABILITY_QUERIES_NAME,
     MISSING_MODULE_HINT,
     RESULT_START,
     RESULT_END,
@@ -51,7 +52,7 @@ except ValueError:
     SESSION_MAX_BYTES = _SESSION_MAX_DEFAULT
 
 # Never snapshot these: rebuilt on every boot, and per-cell state.
-_SESSION_EXCLUDE_ALWAYS = frozenset({"__builtins__", "_anton_explainability_queries"})
+_SESSION_EXCLUDE_ALWAYS = frozenset({"__builtins__", EXPLAINABILITY_QUERIES_NAME})
 
 # Helpers this module injects. They are excluded because they are rebuilt fresh each
 # boot and some (`get_llm`, `web_search`, `query_minds_data`) close over live network
@@ -63,9 +64,6 @@ _SESSION_EXCLUDE_ALWAYS = frozenset({"__builtins__", "_anton_explainability_quer
 # value was dropped from the snapshot and then re-injected as the helper on the next
 # turn — so `print(sample)` returned `<function sample>` with no error. If the agent
 # rebinds one of these names, its value is data and gets persisted like any other.
-_INJECTED_HELPER_NAMES = frozenset(
-    {"get_llm", "agentic_loop", "web_search", "query_minds_data", "progress", "sample"}
-)
 
 # The helper objects this boot actually created, recorded by `_inject_helper` at the
 # point of definition. It must NOT be built from `namespace` after injection: on a
@@ -458,7 +456,7 @@ def _dump_namespace(ns: dict) -> str | None:
 namespace, _session_load_note = _load_namespace()
 if _session_load_note:
     _session_notes.append(_session_load_note)
-namespace["_anton_explainability_queries"] = []
+namespace[EXPLAINABILITY_QUERIES_NAME] = []
 
 # The running cell's trace context, read by every helper model call. The main
 # loop sets it from the cell's CELL_TRACE_MARKER line.
@@ -940,7 +938,7 @@ if not _cloud_turn and _minds_datasource and _minds_api_key and _minds_url:
             try:
                 with _minds_urllib.urlopen(req, context=ctx, timeout=60) as resp:
                     parsed = json.loads(resp.read().decode())
-                    namespace.setdefault("_anton_explainability_queries", []).append({
+                    namespace.setdefault(EXPLAINABILITY_QUERIES_NAME, []).append({
                         "datasource": ds,
                         "sql": query,
                         "engine": _minds_engine or None,
@@ -954,7 +952,7 @@ if not _cloud_turn and _minds_datasource and _minds_api_key and _minds_url:
                     body = e.read().decode()
                 except Exception:
                     pass
-                namespace.setdefault("_anton_explainability_queries", []).append({
+                namespace.setdefault(EXPLAINABILITY_QUERIES_NAME, []).append({
                     "datasource": ds,
                     "sql": query,
                     "engine": _minds_engine or None,
@@ -968,7 +966,7 @@ if not _cloud_turn and _minds_datasource and _minds_api_key and _minds_url:
                     "error_message": f"HTTP {e.code}: {body or e.reason}",
                 }
             except Exception as e:
-                namespace.setdefault("_anton_explainability_queries", []).append({
+                namespace.setdefault(EXPLAINABILITY_QUERIES_NAME, []).append({
                     "datasource": ds,
                     "sql": query,
                     "engine": _minds_engine or None,
@@ -1522,7 +1520,7 @@ while True:
         _cell_out["shipped"] = 0
         _cell_out["buf"] = out_buf
         error = None
-        namespace["_anton_explainability_queries"] = []
+        namespace[EXPLAINABILITY_QUERIES_NAME] = []
         _cell_log_handler.buf = log_buf
 
         sys.stdout = out_buf
@@ -1599,7 +1597,7 @@ while True:
         "stderr": err_buf.getvalue(),
         "logs": logs_val,
         "error": error,
-        "explainability_queries": list(namespace.get("_anton_explainability_queries", [])),
+        "explainability_queries": list(namespace.get(EXPLAINABILITY_QUERIES_NAME, [])),
     }
     if len(stdout_full) > MAX_OUTPUT:
         # For LocalScratchpadRuntime, which scrubs before it cuts. Only for cut

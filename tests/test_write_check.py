@@ -13,8 +13,11 @@ import re
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal
 
 import pytest
+import yaml
+from pydantic import BaseModel, ConfigDict
 
 from anton.core.backends.base import Cell, CompactedCell
 from anton.core.utils import scratchpad
@@ -438,6 +441,103 @@ def test_a_line_that_starts_with_hash_counts_as_code_and_as_a_comment(text):
         "attribute-of-self", "entry-of-an-alias", "rebinding-built-on-itself", "helper-run-before-rebinding"])
 def test_cells_that_write_a_database(code, snap):
     assert _held(code, snap)
+
+
+class _UnreadCase(BaseModel):
+    """One row of the unread-code fixture. `extra="forbid"` so a typo'd key
+    (`kind:` for `kinds:`) fails the run instead of being ignored, and `card`
+    is one of the three the test knows."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    code: str
+    card: Literal["unchecked", "read", "none"]
+    earlier: list[str] = []
+    earlier_errored: list[bool] = []
+    files: dict[str, str] = {}
+    empty_project: bool = False
+    kinds: list[str] = []
+    not_kinds: list[str] = []
+
+
+_UNREAD_CODE = yaml.safe_load(
+    (Path(__file__).parent / "fixtures" / "write_check_unread_code.yaml").read_text())
+_UNREAD_CODE_RULE = _UNREAD_CODE["rule"]
+_UNREAD_CODE_CASES = [_UnreadCase.model_validate(case) for case in _UNREAD_CODE["cases"]]
+
+
+@pytest.mark.parametrize("case", _UNREAD_CODE_CASES, ids=[c.name for c in _UNREAD_CODE_CASES])
+def test_cells_that_run_code_the_check_cant_read(case: "_UnreadCase", tmp_path, monkeypatch):
+    """Each cell runs code the check can or can't read; the card follows the
+    rule the fixture names. A missed run would go out with no card, so an
+    unread source holds the cell, while a literal keeps its read."""
+    if not case.empty_project:
+        (tmp_path / "stock.csv").write_text("x")
+    for rel, text in case.files.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text)
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    writes = find_cell_writes(
+        code=case.code, earlier_code=case.earlier, snapshots=(snap,),
+        http_rules=parse_http_write_rules(_UNREAD_CODE_RULE), earlier_errored=case.earlier_errored)
+    if case.card == "none":
+        assert not writes.needs_approval()
+    elif case.card == "unchecked":
+        assert writes.unchecked
+        assert "This step can't be checked before it runs." in _card_prompt(writes)
+    else:
+        assert writes.needs_approval() and not writes.unchecked
+    for kind in case.kinds:
+        assert kind in writes.kinds()
+    for kind in case.not_kinds:
+        assert kind not in writes.kinds()
+
+
+# Literal code too deep for Python's parser fails when it runs, so it runs
+# nothing: the parser runs out of stack on each.
+_TOO_DEEP = "1" + "+1" * 20_000
+_TOO_NESTED = "-" * 20_000 + "1"
+# Literal code longer than the check reads as one more cell.
+_TOO_LONG = "\n".join(f"x{n} = {n}" for n in range(12_000))
+
+
+@pytest.mark.parametrize("earlier, code, card", [
+    ([f"exec({_TOO_NESTED!r})"], "print(1)", "none"),
+    ([], f"import timeit\ntimeit.timeit({_TOO_DEEP!r})", "none"),
+    ([], f"import subprocess\nsubprocess.run(['python3', '-c', {_TOO_DEEP!r}])", "none"),
+    ([f"import timeit\ntimeit.timeit('pass', setup={_TOO_DEEP!r})"], "print(1)", "none"),
+    ([], f"exec({_TOO_LONG!r})", "unchecked"),
+    ([], f"import subprocess\nsubprocess.run(['python3', '-c', {_TOO_LONG!r}])", "unchecked"),
+], ids=["earlier-exec-too-deep", "timeit-too-deep", "python-c-too-deep", "earlier-timeit-setup-too-deep",
+        "exec-too-long", "python-c-too-long"])
+def test_literal_code_too_deep_or_too_long_to_read(earlier, code, card, snap):
+    """Literal code Python's parser can't take runs nothing, so it gets no
+    card, and the check doesn't crash on it; literal code past the length
+    the check reads is code it can't read."""
+    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,))
+    assert writes.unchecked is (card == "unchecked")
+    assert writes.needs_approval() is (card != "none")
+
+
+def test_an_import_of_a_module_written_since_the_turn_began_is_unchecked(tmp_path, monkeypatch):
+    """A module on disk now but missing from the snapshot the turn began with
+    is one a cell wrote where the check couldn't place it; one the snapshot
+    holds is a project module. The snapshot comparison alone decides this,
+    with no earlier cell: `job.py` and `pkg/` land after the snapshot, so an
+    import of either is unchecked, while `helpers.py`, in the snapshot, is a
+    project module an import runs no unread code to reach."""
+    (tmp_path / "stock.csv").write_text("x")
+    (tmp_path / "helpers.py").write_text("x = 1\n")
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    (tmp_path / "job.py").write_text("import requests\nrequests.post('https://erp.example.test/api/orders')\n")
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    for code in ("import job", "from pkg import run"):
+        assert find_cell_writes(code=code, earlier_code=(), snapshots=(snap,)).unchecked
+    assert not find_cell_writes(code="import helpers", earlier_code=(), snapshots=(snap,)).needs_approval()
 
 
 @pytest.mark.parametrize("code", [
@@ -2257,12 +2357,21 @@ def test_paths_gathered_into_a_list_are_held(code, earlier, snap):
     ("import os\nos.system('echo rm report.pdf | sh')", [("delete", ())]),
     ("import subprocess\nsubprocess.run(['sh'], input='rm report.pdf', text=True)", [("delete", ("report.pdf",))]),
     ("import os\nos.system('$(which rm) report.pdf')", [("delete", ())]),
+    ("import os\nos.system('sudo -E rm report.pdf')", [("delete", ("report.pdf",))]),
+    ("import os\nos.system('setsid rm report.pdf')", [("delete", ("report.pdf",))]),
+    ("import os\nos.system('# tidy up\\nrm report.pdf')", [("delete", ("report.pdf",))]),
+    ("import os\nos.system('rm report.pdf # tidy up\\nmv summary.md x.md')",
+     [("delete", ("report.pdf",)), ("move", ("summary.md",))]),
+    ("import os\nos.system('# rm report.pdf\\necho done')", []),
+    ("import subprocess\nc0 = ['rm', 'report.pdf']\nc1 = c0\nsubprocess.run(c1)", [("delete", ("report.pdf",))]),
+    ("import pty\npty.spawn(['rm', 'report.pdf'])", [("delete", ("report.pdf",))]),
 ], ids=["named-command", "named-words", "built-up-command", "f-string", "plus", "format", "percent",
         "f-string-root", "sh-c", "bash-lc", "getoutput", "getstatusoutput", "mv-t", "mv-target-directory",
         "sudo", "xargs", "find-delete", "find-exec-rm", "git-clean", "spawnlp", "shell-variable",
         "if-then", "for-do", "helper-command", "exec-code", "split-text", "shlex-split", "list-plus-list",
         "list-plus-glob", "mv-flags-then-t", "timeout", "stdbuf", "ionice", "busybox", "piped-into-sh",
-        "sh-input", "command-substitution"])
+        "sh-input", "command-substitution", "sudo-keep-env", "setsid", "comment-line-first",
+        "comment-ends-at-its-line", "commented-out", "aliased-words", "pty-spawn"])
 def test_shell_deletes_and_moves_in_every_form(code, expected, snap):
     assert _files(code, (snap,)) == expected
 

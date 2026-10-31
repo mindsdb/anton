@@ -65,6 +65,9 @@ PUT_CELL = (
     "r = requests.put('https://erp.example.com/api/suppliers/S005', json={'lead_time_days': 21})\n"
     "print(r.status_code)\n"
 )
+# Code the check can't read: the script comes from a file when the cell runs.
+SCRIPT_CELL = "SCRIPT = open('job.py').read()\n"
+EXEC_SCRIPT_CELL = 'exec(compile(SCRIPT, "job", "exec"))\n'
 PLANNER_RULE = "POST https://planner.example.com/api/*/orders/*"
 PLANNER_POST = "import requests\nrequests.post('https://planner.example.com/api/v2/orders/9', json={'qty': 5})\n"
 
@@ -536,6 +539,28 @@ async def test_a_bad_entry_in_the_setting_is_skipped_with_one_warning(project, c
     assert len(seen.cards) == 1, "the good entry still holds"
 
 
+# ── Code the check can't read ─────────────────────────────────────────────
+
+@pytest.mark.parametrize("answer", [APPROVE, CANCEL], ids=["approve", "cancel"])
+async def test_a_cell_that_runs_code_the_check_cant_read_waits_and_says_so(project, answer):
+    """The script the cell runs is read from a file when it runs, so the
+    check can't see what it changes. The cell waits on a card that says so,
+    and runs only on Approve; the cell that read the file needs none."""
+    harness = _session(project, SCRIPT_CELL, EXEC_SCRIPT_CELL)
+    seen = await _run(harness=harness, answers=[answer])
+    assert len(seen.cards) == 1 and seen.ran_before == [1]
+    assert "This step can't be checked before it runs." in seen.cards[0].request.prompt
+    assert harness.pad.ran == ([SCRIPT_CELL, EXEC_SCRIPT_CELL] if answer == APPROVE else [SCRIPT_CELL])
+    if answer != APPROVE:
+        assert "Not run: this step would run code the check couldn't read." in _history_text(harness.session)
+    # The same card comes from an exception in the check (`CellWrites(unchecked=True)`),
+    # so pin that the check itself reads this cell as unchecked, without raising.
+    from anton.core.utils.write_check import find_cell_writes, snapshot_project_files
+    snap = snapshot_project_files(root=project, label="project", taken_at=10**10)
+    writes = find_cell_writes(code=EXEC_SCRIPT_CELL, earlier_code=[SCRIPT_CELL], snapshots=(snap,))
+    assert writes.unchecked and writes.needs_approval()
+
+
 # ── One unanswered card ───────────────────────────────────────────────────
 
 async def test_after_a_timeout_later_cells_in_the_turn_are_refused_without_a_card(project):
@@ -616,12 +641,13 @@ async def test_read_only_work_and_new_files_raise_no_card(project, code):
 # ── Off ───────────────────────────────────────────────────────────────────
 
 async def test_with_the_setting_off_the_same_cells_run_with_no_card(project):
-    harness = _session(project, UPDATE_CELL, RENAME_CELL, write_approval=False)
+    cells = (UPDATE_CELL, RENAME_CELL, SCRIPT_CELL, EXEC_SCRIPT_CELL)
+    harness = _session(project, *cells, write_approval=False)
     assert getattr(harness.session, "_write_gate", None) is None
     drained = _spy_on_draining(harness.session)
     seen = await _run(harness=harness, answers=[])
     assert seen.cards == []
-    assert harness.pad.ran == [UPDATE_CELL, RENAME_CELL]
+    assert harness.pad.ran == list(cells), "code the check can't read runs with no card too"
     assert "prepare_scratchpad_exec" not in drained, "the inline exec keeps its plain await"
 
 
