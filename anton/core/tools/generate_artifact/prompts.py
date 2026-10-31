@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from anton.core.artifacts.geography_guidance import GEOGRAPHY_GUIDANCE
 from anton.utils.datasources import DATASOURCES_HEADER
 
 from .discovery.notes import EXEC_OUTPUT_MAX
@@ -166,26 +167,7 @@ VISUAL DESIGN (for every HTML file you produce):
   `<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>`
   Initialise with `echarts.init(dom, 'dark')` and customise background to #0d1117.
   NEVER use Plotly, matplotlib, or other chart libraries unless explicitly asked.
-- MAPS AND GLOBES: ECharts ships no world outline, so a map or globe uses
-  one of these tested recipes, at exactly these versions. Load the world
-  atlas with d3@7.9.0 and topojson-client@3.1.0:
-  `<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>`
-  `<script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js"></script>`
-  `const WORLD_ATLAS = 'https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json';`
-  `d3.json(WORLD_ATLAS).then((world) => { const countries = topojson.feature(world, world.objects.countries); /* draw */ });`
-  Load it with `d3.json`, never `fetch()`: the verifier fails an absolute
-  URL in `fetch()`. Then draw `countries` in one of three ways:
-  - d3 into an `<svg>` (`d3.geoNaturalEarth1().fitSize([w, h], countries)`,
-    `d3.geoPath`);
-  - ECharts: `echarts.registerMap('world', countries)`, then a `map` series
-    with `map: 'world'`;
-  - a globe: globe.gl@2.34.2
-    (`<script src="https://cdn.jsdelivr.net/npm/globe.gl@2.34.2/dist/globe.gl.min.js"></script>`)
-    with `.polygonsData(countries.features)`. It is heavy, so the browser
-    check may run out of time on it and leave the page unverified.
-  Never write GeoJSON into the page by hand: a world outline runs to hundreds
-  of KB. Leaflet, raster map tiles, MapLibre (it needs a web worker) and
-  echarts-gl (it needs `eval`) break the preview policy below.
+""" + GEOGRAPHY_GUIDANCE + """
 - PREVIEW POLICY: the web app preview runs the page in a sandboxed frame
   under a content security policy that blocks what it does not allow. Build
   to that policy so the page renders on every deployment: no external
@@ -1686,10 +1668,9 @@ any other stack. Describe behaviour, screens, data flow, and endpoints on top of
   an absolute URL anywhere in the spec.
 - Frontend: one self-contained HTML file (`static/index.html` for fullstack
   types) — vanilla JavaScript, Tailwind CSS via CDN for styling (hand-written
-  CSS where needed), Apache ECharts for charts. A map or globe uses the
-  tested recipe: d3@7.9.0 and topojson-client@3.1.0 load world-atlas@2.0.2,
-  drawn with d3, with ECharts, or on a globe with globe.gl@2.34.2. These
-  libraries need network access when the page opens; when the PRD requires
+  CSS where needed), Apache ECharts for charts. For Earth geography, use
+  the shared MAPS AND GLOBES guidance below. These libraries need network
+  access when the page opens; when the PRD requires
   offline use, the spec says so and the frontend is styled with hand-written
   CSS only.
 - Durable state (`fullstack-stateful-app` ONLY): the platform STATE store — a
@@ -1804,6 +1785,7 @@ def build_tech_spec_instruction(state) -> str:
         + "\n".join(content)
         + "\n\n## Fixed stack\n"
         + _TECH_SPEC_STACK
+        + "\n\n" + GEOGRAPHY_GUIDANCE
         + "\n\nKeep the whole document short: it complements the PRD, and "
         "every line is context the build step carries on every round.\n\n"
         "## Language\n"

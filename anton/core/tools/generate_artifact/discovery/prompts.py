@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 
+from anton.core.artifacts.geography_guidance import GEOGRAPHY_GUIDANCE
 from anton.core.llm.prompts import ANTON_NOTE
 
 from ..attachments import render_for_gathering
@@ -66,7 +67,8 @@ def build_pipeline_system_prompt(state: PrdState) -> str:
         "pipeline; a tool being listed does NOT mean it is available on the "
         "current step. Calling one that is not available wastes a round and "
         "is answered with a refusal naming the step."
-        + fullstack_choice,
+        + fullstack_choice
+        + "\n\n" + GEOGRAPHY_GUIDANCE,
         state.project_rules,
     )
 

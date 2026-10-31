@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from anton.core.artifacts.geography_guidance import GEOGRAPHY_GUIDANCE
+
 from .identity import DeploymentIdentity, build_runtime_identity_section
 from .prompts import (
     ARTIFACTS_PROMPT,
@@ -239,6 +241,9 @@ class ChatSystemPromptBuilder:
             conversation_discipline=conversation_discipline,
             conversation_started=conversation_started,
         )
+
+        # Geography must reach direct writes and repairs even without a skill store.
+        prompt += "\n\n" + GEOGRAPHY_GUIDANCE
 
         # Short pointer only — the full backend/fullstack contract lives in the
         # built-in `build-fullstack-backend` skill (recalled on demand).

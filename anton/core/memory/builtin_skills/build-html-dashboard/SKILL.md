@@ -18,6 +18,8 @@ Before coding, list the insights you want to present/convey/highlight as `1 - <c
 Example: `1 - Line chart of weekly signups: shows growth inflection after the March launch, flags whether momentum is sustained.`
 This is a checklist, not a brief — no narrative prose, no design discussion.
 
+For an Earth map or globe, follow the always-available MAPS AND GLOBES guidance: use real coastlines and country geometry, never invented or hand-transcribed outlines, coordinate arrays, decorative blobs or a blank sphere. SVG paths generated from authentic geographic data are allowed, as is authentic user-supplied GeoJSON; non-geographic maps and explicitly requested schematics remain valid. Load the atlas in the page's JavaScript, not in Python or a scratchpad. During repairs, preserve the real geography and requested views and interactions while fixing the failure; this also applies when no skill recall is needed. Keep library names and loading details out of the user-facing brief.
+
 BUILD THE DASHBOARD — use multiple scratchpad cells, but produce ONE single self-contained HTML file:
 
 Before the first write, call `create_artifact(type="html-app", name=..., description=..., primary="index.html")` and use the returned `<artifact_path>` for every file you write. All paths below referring to "the output directory" mean `<artifact_path>`. The final dashboard MUST be a single .html file with all data, CSS, JS and images inlined, with no exception: the web app preview shows only the page itself, so a separate file next to it (`dashboard_data.js`, `logo.png`) does not load there, whatever its size. Build every page this way so it renders on every deployment. Keep the whole page under 8 MB; a larger page cannot be checked in a browser.
