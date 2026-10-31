@@ -1,19 +1,41 @@
 """The prompt section for skills an organization applies on every turn.
 
-Cowork shares skills org-wide and with teams, and those skills hold for every
-task rather than waiting to be recalled. The cloud pod appends this section to
-its prompt suffix; cowork-server builds the same text for desktop, so the
-format here is a contract and must change in step with it.
+Cowork can mark a skill shared with everyone or with a team as always on. Such
+a skill holds for every task rather than waiting to be recalled.
+``build_cloud_chat_session`` appends this section to the cloud pod's prompt
+suffix.
 """
 
 from __future__ import annotations
 
 import re
+from typing import NamedTuple
 
+#: Characters of one skill's body the section keeps; a longer body is cut at a
+#: line boundary and marked as truncated.
 ALWAYS_ON_SKILL_MAX_CHARS = 6000
+#: Characters the section may use after its header: every skill's whole block
+#: and the closing line.
 ALWAYS_ON_TOTAL_MAX_CHARS = 24000
 #: Names listed on the closing "available on demand" line before "and N more".
 ALWAYS_ON_OMITTED_MAX_NAMES = 20
+
+
+class AlwaysOnSkill(NamedTuple):
+    """One skill the section renders, read once from the turn's skills block."""
+
+    #: The skill's heading, and the ``name`` attribute of its ``<org_skill>`` tag.
+    name: str
+    #: The SKILL.md body, without its frontmatter.
+    body: str
+
+
+class _RenderedSkill(NamedTuple):
+    """A skill's name beside its whole block, so the closing line can take it back."""
+
+    name: str
+    block: str
+
 
 _HEADER = (
     "\n\n## Organization and team skills (always apply)\n"
@@ -33,7 +55,7 @@ _TAG_RE = re.compile(r"<(\s*/?\s*org_skill)", re.IGNORECASE)
 
 
 def _escape(body: str) -> str:
-    """*body* with every ``<org_skill`` / ``</org_skill`` neutralised."""
+    """*body* with every ``<org_skill`` / ``</org_skill`` neutralized."""
     return _TAG_RE.sub(r"&lt;\1", body)
 
 
@@ -68,37 +90,37 @@ def _omitted_line(omitted: list[str]) -> str:
     return f"\n\n(Also available on demand: {names}.)"
 
 
-def render_always_on_skills(skills: list[dict]) -> str:
+def render_always_on_skills(skills: list[AlwaysOnSkill]) -> str:
     """The always-apply section for *skills*, or "" when there are none.
 
-    *skills* is ``[{"name": str, "body": str}]`` in the order cowork sent them.
-    Each skill's whole block (heading, tags, body, truncation marker) counts
-    against the total budget, as does the closing line. The first skill that no
-    longer fits, and every one after it, is left out and named on that closing
-    line instead, since it is still staged for recall.
+    *skills* are in the order cowork sent them. Each skill's whole block
+    (heading, tags, body, truncation marker) counts against the total budget,
+    as does the closing line. The first skill that no longer fits, and every
+    one after it, is left out and named on that closing line instead, since it
+    is still staged for recall.
     """
-    blocks: list[tuple[str, str]] = []
+    rendered: list[_RenderedSkill] = []
     omitted: list[str] = []
     used = 0
     for skill in skills:
-        name, body = skill["name"], _escape(skill["body"])
+        body = _escape(skill.body)
         text = _truncate(body)
         if text != body:
             text += _TRUNCATED
-        block = _block(name, text)
+        block = _block(skill.name, text)
         if omitted or used + len(block) > ALWAYS_ON_TOTAL_MAX_CHARS:
-            omitted.append(name)
+            omitted.append(skill.name)
             continue
         used += len(block)
-        blocks.append((name, block))
+        rendered.append(_RenderedSkill(skill.name, block))
     # The closing line counts too: drop rendered skills from the end until it fits.
-    while omitted and blocks and used + len(_omitted_line(omitted)) > ALWAYS_ON_TOTAL_MAX_CHARS:
-        name, block = blocks.pop()
-        used -= len(block)
-        omitted.insert(0, name)
-    if not blocks and not omitted:
+    while omitted and rendered and used + len(_omitted_line(omitted)) > ALWAYS_ON_TOTAL_MAX_CHARS:
+        last = rendered.pop()
+        used -= len(last.block)
+        omitted.insert(0, last.name)
+    if not rendered and not omitted:
         return ""
-    section = _HEADER + "".join(block for _, block in blocks)
+    section = _HEADER + "".join(skill.block for skill in rendered)
     if omitted:
         section += _omitted_line(omitted)
     return section

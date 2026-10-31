@@ -335,6 +335,25 @@ async def test_tool_does_not_retry_without_report_id_while_the_report_may_exist(
 
 
 @pytest.mark.asyncio
+async def test_tool_says_why_the_upload_service_refused(tmp_path):
+    """The service's reason reaches the person and the agent, brackets and all."""
+    f = _artifact(tmp_path)
+    reason = "pip install failed: [notice] A new release of pip is available [/notice]"
+    refusal = _http_error(400, "Bad Request", json.dumps({"error": reason}).encode())
+    session = _session(tmp_path)
+    session._console = Console(record=True, width=300)
+    with mock.patch("anton.publisher.minds_request", side_effect=refusal), \
+         mock.patch("anton.config.settings.AntonSettings", return_value=_settings(f.parent.parent)), \
+         mock.patch("webbrowser.open"):
+        out = await tools.handle_publish_or_preview(
+            session, {"file_path": str(f), "action": "publish", "access_mode": "public"},
+        )
+
+    assert out == f"PUBLISH FAILED: HTTP Error 400: {reason}"
+    assert f"Publish failed: HTTP Error 400: {reason}" in session._console.export_text()
+
+
+@pytest.mark.asyncio
 async def test_tool_retries_without_report_id_when_the_report_is_gone(tmp_path):
     f = _artifact(tmp_path)
     (f.parent / ".published.json").write_text(json.dumps({

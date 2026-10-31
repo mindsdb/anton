@@ -509,6 +509,19 @@ def _no_user_registry(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture()
+def skills_tmp(tmp_path_factory, monkeypatch):
+    """Route a cloud turn's per-turn mkdtemp skills staging into pytest tmp.
+
+    Outside `tmp_path`, which the cloud session tests use as the workspace
+    mount, because the real staging lives outside the mount."""
+    import tempfile
+
+    root = tmp_path_factory.mktemp("skills-scratch")
+    monkeypatch.setattr(tempfile, "tempdir", str(root))
+    return root
+
+
+@pytest.fixture()
 def usage_lines(caplog) -> Callable[[], list[dict]]:
     """Read back the `llm_usage` lines logged so far, parsed; the test sets ANTON_USAGE_LOG."""
     caplog.set_level("INFO", logger="anton.usage")

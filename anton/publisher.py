@@ -16,6 +16,8 @@ import zipfile
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 
+from pydantic import BaseModel, ValidationError
+
 from anton.core.artifacts.internal_files import (
     GENERATION_INPUT_FILES,
     NON_CONTENT_NAMES,
@@ -85,20 +87,43 @@ class ArtifactOwnedByOtherUserError(RuntimeError):
         super().__init__(message)
 
 
-def _raise_if_owned_by_other_user(err: urllib.error.HTTPError) -> None:
-    """Turn the upload's 409 `artifact_owned_by_other_user` into a typed error.
+#: Bytes of an upload error's body that publish reads. The service's JSON
+#: answers are far smaller.
+_ERROR_BODY_MAX_BYTES = 65_536
 
-    Anything else, including a 409 body that cannot be read or parsed, is left
-    for the caller to re-raise.
+
+class _UploadErrorBody(BaseModel):
+    """The JSON body the upload service answers a failed upload with."""
+
+    #: What went wrong, in words the person publishing can act on.
+    error: str | None = None
+    #: A stable reason clients match on, such as OWNED_BY_OTHER_USER_CODE.
+    code: str | None = None
+
+
+def _upload_error(err: urllib.error.HTTPError) -> Exception:
+    """The error publish raises for the upload's *err*, from one read of its body.
+
+    A 409 ``artifact_owned_by_other_user`` is ArtifactOwnedByOtherUserError.
+    Every other answer stays an HTTPError with the same status and headers.
+    Its reason is the body's ``error`` when the body has one, so the message a
+    caller shows says why ("HTTP Error 500: <error>"), and its body can be
+    read again by a caller that reads it itself. A body that can't be read
+    leaves *err* as it is.
     """
-    if err.code != 409:
-        return
     try:
-        code = json.loads(err.read(65_536))["code"]
+        body = err.read(_ERROR_BODY_MAX_BYTES)
     except Exception:
-        return
-    if code == OWNED_BY_OTHER_USER_CODE:
-        raise ArtifactOwnedByOtherUserError() from err
+        return err
+    try:
+        answer = _UploadErrorBody.model_validate_json(body)
+    except ValidationError:
+        answer = _UploadErrorBody()
+    if err.code == 409 and answer.code == OWNED_BY_OTHER_USER_CODE:
+        return ArtifactOwnedByOtherUserError()
+    return urllib.error.HTTPError(
+        err.filename, err.code, answer.error or err.msg, err.hdrs, io.BytesIO(body)
+    )
 
 
 DEFAULT_PUBLISH_URL = "https://view.mindshub.ai"
@@ -539,6 +564,9 @@ def publish(
         ArtifactOwnedByOtherUserError: the service answered 409
                   `artifact_owned_by_other_user` — another owner holds
                   `report_id`. Do not retry without `report_id`.
+        urllib.error.HTTPError: any other answer the service refused the
+                  upload with. Its reason is the body's `error` when it has
+                  one, and its body reads again (`_upload_error`).
     """
     if not file_path.exists():
         raise FileNotFoundError(f"Path not found: {file_path}")
@@ -610,8 +638,10 @@ def publish(
     try:
         raw = minds_request(url, api_key, method="POST", payload=payload, verify=ssl_verify)
     except urllib.error.HTTPError as err:
-        _raise_if_owned_by_other_user(err)
-        raise
+        raised = _upload_error(err)
+        if raised is err:
+            raise
+        raise raised from err
     # Upload succeeded (minds_request raises on failure): record the published
     # key schema so the next publish can warn on an incompatible change.
     if state_manifest is not None:
