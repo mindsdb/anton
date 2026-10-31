@@ -1,4 +1,5 @@
 """Earth geography guidance reaches the prompts used to plan, build and repair."""
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -11,10 +12,11 @@ from anton.core.llm.prompt_builder import (
     ChatSystemPromptBuilder,
     SystemPromptContext,
 )
-from anton.core.tools.generate_artifact import engine, orchestrator, prompts
+from anton.core.llm.provider import LLMResponse, StreamComplete
+from anton.core.tools.generate_artifact import component_page, engine, fast_static, observed_data, orchestrator, prompts
 from anton.core.tools.generate_artifact.discovery import sub_tools
 from anton.core.tools.generate_artifact.discovery.prompts import step_message
-from anton.core.tools.generate_artifact.state import GenState
+from anton.core.tools.generate_artifact.state import BrowserCheck, GenState
 
 
 @pytest.mark.parametrize("single_call", [False, True])
@@ -129,3 +131,63 @@ def test_manual_dashboard_skill_keeps_the_same_geography_and_repair_scope():
     assert "Load the atlas in the page's JavaScript, not in Python or a scratchpad" in skill
     assert "During repairs, preserve the real geography" in skill
     assert "Not needed to repair a page generate_artifact returned as browser_check_failed" in skill
+
+
+@pytest.mark.parametrize("components", [False, True], ids=["ordinary-html", "component"])
+async def test_actual_fast_writer_call_receives_geography_and_preserves_its_output_api(
+    tmp_path, monkeypatch, components,
+):
+    monkeypatch.setenv("ANTON_STATIC_COMPONENT_WRITER", "on" if components else "off")
+    data = {"points": [{"name": "Paris", "lat": 48.8566, "lon": 2.3522}]}
+    (tmp_path / "observed-data.json").write_text(json.dumps(data))
+    key = observed_data.identity(data)
+    program = (
+        "await CoworkPage({title:'World map',sections:[{type:'map',title:'Sites',"
+        f"points:window.ARTIFACT_DATA['{key}'].points"
+        "}]});"
+    )
+    html = """<!doctype html><html lang="en"><head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js"></script>
+</head><body><svg id="world-map" viewBox="0 0 800 400"></svg><script>
+(async () => {
+  const world = await d3.json('https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json');
+  const countries = topojson.feature(world, world.objects.countries);
+  const projection = d3.geoNaturalEarth1().fitSize([800, 400], countries);
+  const path = d3.geoPath(projection);
+  d3.select('svg').selectAll('path').data(countries.features).join('path').attr('d', path);
+})().catch(console.error);
+</script></body></html>"""
+    calls = []
+
+    async def stream(**kwargs):
+        calls.append(kwargs)
+        yield StreamComplete(LLMResponse(content=program if components else html))
+
+    monkeypatch.setattr(
+        fast_static.verifiers, "verify_frontend_live",
+        lambda *args, **kwargs: BrowserCheck(status="passed"),
+    )
+    session = SimpleNamespace(history=[], _llm=SimpleNamespace(code_stream=stream))
+    state = GenState(
+        session=session, artifact_type="html-app", artifact_path=tmp_path,
+        slug="world-map", user_request="Build a world map", act_first=True,
+    )
+
+    result = await fast_static.run(state)
+
+    assert result["status"] == "generated"
+    assert len(calls) == 1
+    assert calls[0]["system"].count(GEOGRAPHY_GUIDANCE) == 1
+    exception = "For component output, satisfy this geography guidance through the supported map/globe"
+    assert (exception in calls[0]["system"]) is components
+    assert ("presentation-program.js" in result["internal_files"]) is components
+    written = (tmp_path / "index.html").read_text()
+    if components:
+        assert calls[0]["system"].startswith(component_page.SYSTEM)
+        assert "API and use USE_HTML_WRITER" in calls[0]["system"]
+        assert component_page.existing_program(written) == program
+    else:
+        assert "complete HTML document" in calls[0]["system"]
+        assert observed_data.strip_binding(written) == html
