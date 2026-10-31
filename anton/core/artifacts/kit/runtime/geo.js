@@ -127,15 +127,53 @@
         try {
           if (mode === 'globe') drawGlobe(b, view, box, layers, world, state);
           else drawMap(b, view, box, layers, world, state);
-          if (first) { legendHost.appendChild(buildLegend(b, layers)); first = false; }
+          if (first) { legendHost.appendChild(buildLegend(b, layers, mode)); first = false; }
         } catch (e) { AK.fail(box, e); }
       });
     }, function (e) { AK.fail(box, e); });
     return c.card;
   }
 
+  // A colour field holding numbers is a scale, not categories: from faint to full strength in the
+  // layer's colour, its range shown in the legend (colors= keeps numbers as categories).
+  function numericField(rows, f) {
+    var seen = {}, n = 0;
+    for (var i = 0; i < rows.length; i++) {
+      var v = rows[i][f];
+      if (v == null || v === '') continue;
+      if (typeof v !== 'number' || !isFinite(v)) return false;
+      if (!seen[v]) { seen[v] = 1; n++; }
+    }
+    return n >= 3;
+  }
+  function rampFor(L, rows) {
+    var vals = rows.map(function (r) { return r[L.color]; }).filter(AK.isNum);
+    var lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
+    var base = d3.color(AK.resolveColor(L.color_value) || '') || d3.color(AK.css('--ak-accent')) || d3.color('#4f46e5');
+    var dark = document.documentElement.getAttribute('data-ak-theme') === 'dark';
+    var faint = d3.color(AK.css('--ak-surface-2')) || d3.color(dark ? '#1e293b' : '#f1f5f9');
+    // The strong end stands out against the page in either theme: deeper on light, brighter on dark.
+    var strong = dark ? base.brighter(0.5) : base.darker(0.5);
+    var ramp = d3.interpolateLab(d3.interpolateLab(faint.formatHex(), base.formatHex())(dark ? 0.5 : 0.3), strong.formatHex());
+    var f = function (v) { return AK.isNum(v) ? ramp(hi > lo ? (v - lo) / (hi - lo) : 1) : AK.css('--ak-text-3'); };
+    f.lo = lo; f.hi = hi; f.ramp = ramp;
+    return f;
+  }
+  // Marker area follows a size field (a floor keeps the smallest visible and clickable).
+  function sizeRadius(v, max, scale) {
+    return Math.max(3, (scale || 15) * Math.sqrt(Math.max(0, v || 0) / (max || 1)));
+  }
+  function sizeRange(L, rows) {
+    var vals = rows.map(function (r) { return num(r[L.size]); }).filter(AK.isNum);
+    return vals.length ? {lo: Math.min.apply(null, vals), hi: Math.max.apply(null, vals) || 1} : null;
+  }
+
   function colorFor(L) {
     var rows = layerRows(L);
+    if (L.color && rows.length && rows[0][L.color] !== undefined && !L.colors && numericField(rows, L.color)) {
+      var ramp = rampFor(L, rows);
+      return function (r) { return ramp(r[L.color]); };
+    }
     if (L.color && rows.length && rows[0][L.color] !== undefined) {
       var scale = AK.colorScale(AK.uniq(rows, L.color), L.colors, L.color);
       return function (r) { return scale(r[L.color]); };
@@ -144,18 +182,21 @@
     return function () { return fixed; };
   }
 
-  function buildLegend(b, layers) {
+  function buildLegend(b, layers, mode) {
     if (b.legend === false) return AK.el('div');
-    var items = [];
+    var items = [], ramps = [], sized = [];
     layers.forEach(function (L) {
       var rows = layerRows(L);
       var shape = L.type === 'routes' ? 'line' : (L.shape === 'square' ? '' : (L.shape === 'diamond' ? 'diamond' : 'dot'));
-      if (L.color && rows.length && rows[0][L.color] !== undefined) {
+      if (L.color && rows.length && rows[0][L.color] !== undefined && !L.colors && numericField(rows, L.color)) {
+        ramps.push(L);
+      } else if (L.color && rows.length && rows[0][L.color] !== undefined) {
         var scale = AK.colorScale(AK.uniq(rows, L.color), L.colors, L.color);
         scale.domain().forEach(function (v) { items.push({label: v, color: scale(v), shape: shape}); });
       } else if (L.name) {
         items.push({label: L.name, color: AK.resolveColor(L.color_value || L.color) || AK.css('--ak-accent'), shape: shape});
       }
+      if (L.type === 'points' && L.size && !L.radius && sizeRange(L, rows)) sized.push(L);
       if (L.type === 'routes' && hasVia(L) && L.remaining_label) items.push({label: L.remaining_label, color: AK.css('--ak-text-3'), shape: 'dash'});
     });
     var seen = {};
@@ -173,7 +214,28 @@
         lg.appendChild(grad);
       }
     }
-    return items.length || regions ? lg : AK.el('div');
+    ramps.forEach(function (L) {
+      var ramp = rampFor(L, layerRows(L)), fmt = AK.fieldFormat(L, L.color) || 'auto';
+      var it = AK.el('span', 'ak-legend-item');
+      it.appendChild(document.createTextNode(AK.label(L, L.color) + ' ' + AK.fmt(ramp.lo, fmt) + ' '));
+      var bar = AK.el('i'); bar.style.cssText = 'width:80px;height:8px;border-radius:4px;background:linear-gradient(90deg,' + ramp.ramp(0) + ',' + ramp.ramp(1) + ')';
+      it.appendChild(bar);
+      it.appendChild(document.createTextNode(' ' + AK.fmt(ramp.hi, fmt)));
+      lg.appendChild(it);
+    });
+    sized.forEach(function (L) {
+      var sr = sizeRange(L, layerRows(L)), fmt = AK.fieldFormat(L, L.size) || 'auto';
+      var it = AK.el('span', 'ak-legend-item');
+      it.appendChild(document.createTextNode(AK.label(L, L.size) + ' '));
+      (sr.lo === sr.hi ? [sr.hi] : [sr.lo, sr.hi]).forEach(function (v, i) {
+        var d = 2 * sizeRadius(v, sr.hi, mode === 'globe' ? 11 : 15);
+        var dot = AK.el('i'); dot.style.cssText = 'width:' + d + 'px;height:' + d + 'px;border-radius:50%;background:none;border:1.5px solid ' + AK.css('--ak-text-3') + ';vertical-align:middle;margin-left:' + (i ? 8 : 0) + 'px';
+        it.appendChild(dot);
+        it.appendChild(document.createTextNode(' ' + AK.fmt(v, fmt)));
+      });
+      lg.appendChild(it);
+    });
+    return items.length || regions || ramps.length || sized.length ? lg : AK.el('div');
   }
 
   function tooltipFor(L, r) {
@@ -379,14 +441,13 @@
     layers.forEach(function (L) {
       if (L.type !== 'points') return;
       var rows = layerRows(L), col = colorFor(L);
-      var sizes = L.size ? rows.map(function (r) { return num(r[L.size]) || 0; }) : null;
-      var maxS = sizes ? Math.max.apply(null, sizes) || 1 : 1;
+      var sr = L.size ? sizeRange(L, rows) : null;
       rows.forEach(function (r, i) {
         var cc = coord(r, L.lat || 'lat', L.lon || 'lon');
         if (!cc) return;
         var p = proj(cc);
         if (!p) return;
-        var rad = L.radius || (sizes ? 4 + 10 * Math.sqrt(sizes[i] / maxS) : (L.shape && L.shape !== 'circle' ? 6 : 5.5));
+        var rad = L.radius || (sr ? sizeRadius(num(r[L.size]), sr.hi) : (L.shape && L.shape !== 'circle' ? 6 : 5.5));
         pts.push({L: L, r: r, x: p[0], y: p[1], rad: rad, color: col(r), key: L.key ? String(r[L.key]) : null,
           label: L.label && r[L.label] != null ? String(r[L.label]) : null, sub: L.sublabel && r[L.sublabel] != null ? AK.fmt(r[L.sublabel], AK.fieldFormat(L, L.sublabel) || 'auto') : null});
       });
@@ -669,7 +730,7 @@
     });
     layers.forEach(function (L) {
       if (L.type !== 'points') return;
-      var col = colorFor(L);
+      var col = colorFor(L), sr = L.size ? sizeRange(L, layerRows(L)) : null;
       layerRows(L).forEach(function (r) {
         var cc = coord(r, L.lat || 'lat', L.lon || 'lon');
         if (!cc) return;
@@ -677,7 +738,7 @@
         var lbl = text;
         if (text) { var li = AK.el('li', null, text); list.appendChild(li); }
         pts.push({L: L, r: r, c: cc, color: col(r), key: L.key ? String(r[L.key]) : null, link: L.link, shape: L.shape,
-          rad: L.radius || (L.shape && L.shape !== 'circle' ? 5.5 : 4.5), lbl: lbl});
+          rad: L.radius || (sr ? sizeRadius(num(r[L.size]), sr.hi, 11) : (L.shape && L.shape !== 'circle' ? 5.5 : 4.5)), lbl: lbl});
       });
     });
 
