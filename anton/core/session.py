@@ -102,6 +102,7 @@ from anton.core.backends.manager import ScratchpadManager
 from anton.core.tools.registry import ToolOutcome, ToolRegistry
 from anton.core.turn_cost import UNKNOWN_ROLE, TurnCost
 from anton.core.tools.tool_defs import (
+    APPROVE_HELD_WRITE_TOOL,
     ASK_USER_TOOL,
     CREATE_ARTIFACT_TOOL,
     CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
@@ -138,6 +139,7 @@ from anton.core.utils.scratchpad import (
     scratchpad_action,
 )
 from anton.core.utils.write_check import parse_http_write_rules
+from anton.core.utils.write_hold import parse_relay_hosts
 # Artifact-edit tracking + lint and the scratchpad observer hooks: shared with
 # handle_scratchpad's own exec branch (tool_handlers.py) rather than duplicated
 # here, since this inline streaming exec bypasses that handler entirely.
@@ -2122,9 +2124,16 @@ class ChatSession:
         self._write_gate: WriteGate | None = None
         if getattr(s, "write_approval", False) is True:
             listed = getattr(s, "write_approval_http", "")
+            relayed = getattr(s, "write_relay_hosts", "")
             self._write_gate = WriteGate(
                 http_rules=parse_http_write_rules(listed if isinstance(listed, str) else ""),
+                relayed_hosts=parse_relay_hosts(relayed if isinstance(relayed, str) else ""),
             )
+        # The write relay's control address (`write_relay_url`). With it, and
+        # an elicitor that can ask, the session offers `approve_held_write`.
+        # `isinstance` so a MagicMock settings object reads unset.
+        relay_url = getattr(s, "write_relay_url", None)
+        self._write_relay_url: str | None = (relay_url.strip() or None) if isinstance(relay_url, str) else None
 
         coding_provider = config.llm_client.coding_provider
         coding_conn = coding_provider.export_connection_info()
@@ -3248,6 +3257,16 @@ class ChatSession:
                     ),
                 )
             )
+
+        # A request the write relay held: the tool reads it from the relay and
+        # asks the user on a card. Only with a relay to read and a way to ask,
+        # since without the card the tool could only refuse.
+        if (
+            self._write_relay_url is not None
+            and self.elicitor is not None
+            and "choice" in self.elicitor.supported_kinds
+        ):
+            self.tool_registry.register_tool(APPROVE_HELD_WRITE_TOOL)
 
         if self._cortex is not None or self._self_awareness is not None:
             self.tool_registry.register_tool(MEMORIZE_TOOL)
