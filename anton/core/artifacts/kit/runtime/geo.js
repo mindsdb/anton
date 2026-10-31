@@ -826,13 +826,25 @@
           if (on) { ctx.strokeStyle = p.color; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(p.x, p.y, rr + 5 + 3 * Math.sin(t * 3), 0, 2 * Math.PI); ctx.stroke(); }
           ctx.globalAlpha = 1;
         }
+      });
+      // Labels over every point, the selected point's first, so its name is the one kept in a crowd.
+      var order = selKey == null ? pts : pts.filter(function (p) { return p.key === selKey; })
+        .concat(pts.filter(function (p) { return p.key !== selKey; }));
+      order.forEach(function (p) {
+        var dim = selKey != null && p.key !== selKey;
         if (p.lbl && p.vis) {
           var tw = ctx.measureText(p.lbl).width;
           // Right of the point unless that runs off the canvas; then left of it.
           var bx = {x: p.x + 8 + tw > width - 6 ? p.x - 8 - tw : p.x + 8, y: p.y - 8, w: tw, h: 14};
           // A label with no room on either side goes under its point, whole on the canvas.
           if (bx.x < 4) bx = {x: Math.max(4, Math.min(p.x - tw / 2, width - tw - 4)), y: p.y + (p.rad || 5) + 5, w: tw, h: 14};
-          placed.forEach(function (o) { if (bx.x < o.x + o.w && bx.x + bx.w > o.x && bx.y < o.y + o.h && bx.y + bx.h > o.y) bx.y = o.y + o.h + 1; });
+          var hits = function (o) { return bx.x < o.x + o.w && bx.x + bx.w > o.x && bx.y < o.y + o.h && bx.y + bx.h > o.y; };
+          var y0 = bx.y;
+          placed.forEach(function (o) { if (hits(o)) bx.y = o.y + o.h + 1; });
+          // A label still on top of another, or pushed more than a line away from its point, is left off
+          // (the point keeps its tooltip and the page its table): a name that overlaps another or sits
+          // by a different point is read wrongly or not at all.
+          if (placed.some(hits) || bx.y - y0 > 16) return;
           placed.push(bx);
           ctx.globalAlpha = dim ? 0.3 : 1;
           ctx.lineWidth = 3.2; ctx.strokeStyle = C.halo; ctx.lineJoin = 'round';

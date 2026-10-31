@@ -277,6 +277,8 @@ button:focus-visible, [tabindex]:focus-visible, summary:focus-visible { outline:
 .ak-legend-item i.ak-dash { height: 0; width: 18px; border-top: 2px dashed currentColor; border-radius: 0; }
 .ak-legend-item i.ak-diamond { width: 9px; height: 9px; transform: rotate(45deg); border-radius: 2px; }
 .ak-note { font-size: 12.5px; color: var(--ak-text-3); }
+.ak-chart-refkey { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 4px; font-size: 12px; font-weight: 600; color: var(--ak-text-2); }
+.ak-chart-refkey i { display: inline-block; width: 18px; border-top: 2px dashed; margin-right: 6px; vertical-align: middle; }
 .ak-loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--ak-text-3); font-size: 13px; }
 .ak-error { padding: 14px 16px; border-radius: var(--ak-radius-sm); background: var(--ak-bad-soft); color: var(--ak-bad); font-size: 13.5px; }
 
