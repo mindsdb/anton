@@ -1877,8 +1877,11 @@ async def test_what_an_unverified_check_found_reaches_the_agent_once_per_page(se
         "#world-map has no drawn content (it may still have been drawing)"
     )
     first, second = (result["content"] for result in _tool_results(session))
-    assert first.endswith(f"[artifact lint]\n{unchecked}\n{blank}")
-    assert second.endswith(f"[artifact lint]\n{unchecked}")
+    # The unspecified map request also gets static advice; it does not change
+    # the browser's unavailable status or repeat its earlier blank finding.
+    assert "[artifact lint]\n" in first and "Geography check:" in first
+    assert first.endswith(f"{unchecked}\n{blank}")
+    assert second.endswith(unchecked)
     assert streamed.endswith(_LINE)
 
 
@@ -1992,8 +1995,9 @@ async def test_a_check_that_listed_nothing_leaves_the_next_one_free_to_list(serv
     results = [result["content"] for result in _tool_results(session)]
     assert len(pad.ran) == 3 and len(service.requests) == 3
     unchecked = f"{slug}/index.html — not checked in a browser: the check ran out of time"
+    assert "[artifact lint]\n" in results[0] and "Geography check:" in results[0]
     assert results[0].endswith(
-        f"[artifact lint]\n{slug}/index.html — not checked in a browser: "
+        f"{slug}/index.html — not checked in a browser: "
         "the render-check service is busy or not ready (HTTP 503)"
     )
     assert unchecked in results[1] and unchecked in results[2]
@@ -2289,8 +2293,9 @@ async def test_the_cell_result_carries_the_screenshot_on_the_streaming_path(serv
 
     assert [r["body"]["html"] for r in service.requests] == [_PAGE.replace("hi", "cell 1")]
     text, caption, image = _tool_results(session)[0]["content"]
+    assert "[artifact lint]\n" in text["text"] and "Geography check:" in text["text"]
     assert text["text"].endswith(
-        f"[artifact lint]\n{slug}/index.html — loaded in a browser the way the app preview loads it, as it opens: no problems found"
+        f"{slug}/index.html — loaded in a browser the way the app preview loads it, as it opens: no problems found"
     )
     assert caption["text"].startswith(render_check.SCREENSHOT_CAPTION)
     assert image["source"]["data"] == _SHOT
