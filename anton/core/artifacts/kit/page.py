@@ -894,23 +894,27 @@ class Page:
                     check(f"kpi {k.get('label')!r}", k.get("format"), [k.get("value")])
             elif t == "chart":
                 rows = data.get(b["data"], [])
-                lines = [x for x in ([b.get("threshold")] + list(b.get("ref_lines") or []))
-                         if isinstance(x, dict) and is_number(x.get("value"))]
-                for f in ([b["y"]] if isinstance(b.get("y"), str) else list(b.get("y") or [])):
-                    fmt = (b.get("formats") or {}).get(f) or b.get("format") or self.spec.get("formats", {}).get(f)
-                    check(f"chart {b.get('title')!r}", fmt, [r.get(f) for r in rows])
-                    # A reference line on another scale than its series (0.9 on percents, 90 on fractions)
-                    # is drawn at the wrong height.
-                    kind = str(fmt or "").split(":")[0]
-                    vals = [r.get(f) for r in rows if is_number(r.get(f))]
-                    for line in lines if vals and kind in ("percent", "fraction") else []:
-                        v = float(line["value"])
-                        if (kind == "percent" and 0 < v <= 1 and max(vals) > 1.5) or \
-                                (kind == "fraction" and 1.5 < v <= 100 and looks_fractional(vals)):
-                            self.warnings.append(
-                                f"chart {b.get('title')!r}: the line {line.get('label') or v!r} is at {v:g} but "
-                                f"{f!r} is in {'percent units (12.5 for 12.5%)' if kind == 'percent' else 'fractions (0.125 for 12.5%)'}; "
-                                "give the line's value on the same scale.")
+                ys = [b["y"]] if isinstance(b.get("y"), str) else list(b.get("y") or [])
+                for f in ys:
+                    check(f"chart {b.get('title')!r}", (b.get("formats") or {}).get(f) or b.get("format")
+                          or self.spec.get("formats", {}).get(f), [r.get(f) for r in rows])
+                # A reference line on another scale than its series (0.9 on percents, 90 on fractions) is
+                # drawn at the wrong height: off the data's range, and inside it once scaled by 100.
+                # Lines are drawn on the first series' axis.
+                refs = b.get("ref_lines") if isinstance(b.get("ref_lines"), list) else []
+                lines = [x for x in [b.get("threshold")] + refs if isinstance(x, dict) and is_number(x.get("value"))]
+                f = ys[0] if ys else None
+                kind = str((b.get("formats") or {}).get(f) or b.get("format")
+                           or self.spec.get("formats", {}).get(f) or "").split(":")[0]
+                vals = [float(r[f]) for r in rows if f and is_number(r.get(f))]
+                for line in lines if vals and kind in ("percent", "fraction") else []:
+                    v, lo, hi = float(line["value"]), min(vals), max(vals)
+                    if (kind == "percent" and 0 < v <= 1 and v < lo and lo / 2 <= v * 100 <= hi * 1.5) or \
+                            (kind == "fraction" and v > max(1.5, hi * 3) and lo - (hi - lo) <= v / 100 <= hi * 1.5):
+                        self.warnings.append(
+                            f"chart {b.get('title')!r}: the line {line.get('label') or v!r} is at {v:g} but "
+                            f"{f!r} is in {'percent units (12.5 for 12.5%)' if kind == 'percent' else 'fractions (0.125 for 12.5%)'}; "
+                            "give the line's value on the same scale.")
             elif t == "table":
                 rows = data.get(b["data"], [])
                 for c in b.get("columns") or []:

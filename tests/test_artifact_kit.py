@@ -675,6 +675,21 @@ def test_a_reference_line_on_another_scale_than_its_series_is_a_warning(tmp_path
     assert len(lines) == 2 and "'Watch'" in lines[0] and "'Goal'" in lines[1]
 
 
+def test_a_reference_line_inside_its_series_range_is_not_a_warning(tmp_path):
+    df = pd.DataFrame({"m": ["Jan", "Feb", "Mar", "Apr"], "errors": [0.4, 2.3, 3.1, 0.8],
+                       "growth": [-3.2, -1.0, 2.4, 1.1], "util": [0.815, 0.929, 1.04, 0.88]})
+    page = kit.Page("Rates")
+    page.chart("line", df, x="m", y="errors", format="percent", threshold={"value": 1.0, "label": "SLO"}, title="Errors")
+    page.chart("line", df, x="m", y="growth", format="percent", ref_lines=[{"value": 0.5}], title="Growth")
+    page.chart("line", df, x="m", y=["util", "errors"], format="fraction", threshold={"value": 90, "label": "Watch"},
+               title="Load")
+
+    page.save(tmp_path)
+
+    lines = [w for w in page.warnings if "same scale" in w]
+    assert len(lines) == 1 and "'Watch'" in lines[0]
+
+
 def test_a_kpi_takes_one_value():
     for value in ([0, 3], (0, 3), pd.Series([0, 3])):
         with pytest.raises(kit.KitError, match="one number"):

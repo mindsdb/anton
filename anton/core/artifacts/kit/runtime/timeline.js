@@ -57,7 +57,7 @@
       if (L.color && rows.length && rows[0][L.color] !== undefined && !L.tone_values) {
         var sc = AK.colorScale(AK.uniq(rows, L.color), L.colors, L.color);
         sc.domain().forEach(function (v) { items.push({label: v, color: sc(v), shape: L.shape === 'diamond' ? 'diamond' : 'dot'}); });
-      } else if (L.name) items.push({label: L.name, color: AK.resolveColor(L.color_value || L.tone || L.color) || AK.css('--ak-text-2'), shape: L.shape === 'diamond' ? 'diamond' : 'dot'});
+      } else if (L.name) items.push({label: L.name, color: L.tone_values ? AK.css('--ak-text-3') : (AK.resolveColor(L.color_value || L.tone || L.color) || AK.css('--ak-text-2')), shape: L.shape === 'diamond' ? 'diamond' : 'dot'});
     });
     markers.forEach(function (m) { if (m.label) items.push({label: m.label, color: AK.resolveColor(m.tone || 'neutral'), shape: 'dash'}); });
     if (items.length && b.legend !== false) c.body.insertBefore(AK.legend(items), view);
@@ -226,21 +226,32 @@
           var text = L.label ? (r[L.label] == null ? '' : AK.fmt(r[L.label], AK.fieldFormat(L, L.label) || 'auto')) : '';
           var slot = k + '|' + y;
           (spans[slot] = spans[slot] || []).push([x0, Math.max(x0 + 3, x1)]);
-          if (text) pending.push({slot: slot, x0: x0, x1: x1, y: y, bh: bh, text: text});
+          if (text) pending.push({slot: slot, k: k, x0: x0, x1: x1, y: y, bh: bh, text: text});
         });
         if (!L.overlay) lane++;
       });
       // Bar labels: inside the bar when it fits; else after it, or before it, where no other bar or
       // label of that lane is; else shortened to fit inside (the tooltip has the whole text).
+      // Milestone dots of each row are drawn over the bars: a label keeps clear of them too.
+      var dots = {};
+      mss.forEach(function (L) {
+        var dr = (L.shape === 'diamond' ? 8 : (L.radius || 6)) + 1;
+        AK.data(L.data).forEach(function (r) {
+          var k = String(r[L.row]), d = t(r[L.date]);
+          if (rowY[k] != null && d != null) (dots[k] = dots[k] || []).push([X(d) - dr, X(d) + dr]);
+        });
+      });
       pending.forEach(function (p) {
-        var tw = p.text.length * 6.4 + 12, taken = spans[p.slot];
+        var tw = p.text.length * 6.4 + 12, taken = spans[p.slot], near = dots[p.k] || [];
         var free = function (a, z) {
-          return taken.every(function (s) { return z <= s[0] || a >= s[1] || (s[0] === p.x0 && s[1] === Math.max(p.x0 + 3, p.x1)); });
+          return taken.every(function (s) { return z <= s[0] || a >= s[1] || (s[0] === p.x0 && s[1] === Math.max(p.x0 + 3, p.x1)); })
+            && near.every(function (s) { return z <= s[0] || a >= s[1]; });
         };
-        var inside = (p.x1 - p.x0) > tw;
+        var inside = (p.x1 - p.x0) > tw && near.every(function (s) { return p.x0 + tw - 6 <= s[0] || p.x0 + 6 >= s[1]; });
         var after = !inside && p.x1 + 5 + tw <= width - 4 && free(p.x1 + 1, p.x1 + 5 + tw);
         var before = !inside && !after && p.x0 - 5 - tw >= labelW && free(p.x0 - 5 - tw, p.x0 - 1);
         var room = Math.floor(((p.x1 - p.x0) - 12) / 6.4);
+        near.forEach(function (s) { if (s[1] > p.x0 + 6 && s[0] < p.x1) room = Math.min(room, Math.floor((s[0] - p.x0 - 10) / 6.4)); });
         if (!inside && !after && !before && room < 3) return;
         var lt = AK.svg('text', {x: inside ? p.x0 + 6 : (after ? p.x1 + 5 : (before ? p.x0 - 5 : p.x0 + 6)), y: p.y + p.bh / 2 + 4,
           'font-size': 11, 'font-weight': 600, 'text-anchor': before ? 'end' : 'start',

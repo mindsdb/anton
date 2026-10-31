@@ -265,7 +265,13 @@
     var base = [[10, 4, 'start'], [-10, 4, 'end'], [0, -12, 'middle'], [0, 18, 'middle'], [10, -9, 'start'], [10, 16, 'start'], [-10, -9, 'end'], [-10, 16, 'end']];
     // Nearer spots first; farther ones (drawn with a leader line) when the near ones are taken.
     var cands = base.concat(base.map(function (c) { return [c[0] * 2.4, c[1] * 2.6, c[2]]; }), base.map(function (c) { return [c[0] * 3.8, c[1] * 4.2, c[2]]; }));
-    labels.forEach(function (l) { placed.push({x: l.x - 6, y: l.y - 6, w: 12, h: 12}); });
+    // A sized point is bigger than the default 5px one: its box, and every spot, grow by the difference.
+    var grow = function (l) { return Math.max(0, ((l.p && l.p.rad) || 5) - 5); };
+    labels.forEach(function (l) { var r = 6 + grow(l); placed.push({x: l.x - r, y: l.y - r, w: 2 * r, h: 2 * r}); });
+    function spot(l, c) {
+      var g = grow(l);
+      return [c[0] + (c[0] > 0 ? g : (c[0] < 0 ? -g : 0)), c[1] + (c[1] > 4 ? g : (c[1] < 0 ? -g : 0)), c[2]];
+    }
     function boxOf(l, c) {
       var w = l.w, h = l.h || 14;
       var x = c[2] === 'start' ? l.x + c[0] : (c[2] === 'end' ? l.x + c[0] - w : l.x - w / 2);
@@ -278,8 +284,8 @@
     }
     labels.forEach(function (l) {
       var best = null, bestScore = Infinity;
-      cands.forEach(function (c, i) {
-        var bx = boxOf(l, c);
+      cands.forEach(function (c0, i) {
+        var c = spot(l, c0), bx = boxOf(l, c);
         var score = i * 3;
         if (bx.x < 2 || bx.x + bx.w > width - 2 || bx.y < 2 || bx.y + bx.h > height - 2) score += 2500;
         placed.forEach(function (p) { score += overlap(bx, p) * 10; });
@@ -834,8 +840,9 @@
         var dim = selKey != null && p.key !== selKey;
         if (p.lbl && p.vis) {
           var tw = ctx.measureText(p.lbl).width;
-          // Right of the point unless that runs off the canvas; then left of it.
-          var bx = {x: p.x + 8 + tw > width - 6 ? p.x - 8 - tw : p.x + 8, y: p.y - 8, w: tw, h: 14};
+          // Right of the point unless that runs off the canvas; then left of it; clear of a sized marker.
+          var off = Math.max(8, (p.rad || 5) + 4);
+          var bx = {x: p.x + off + tw > width - 6 ? p.x - off - tw : p.x + off, y: p.y - 8, w: tw, h: 14};
           // A label with no room on either side goes under its point, whole on the canvas.
           if (bx.x < 4) bx = {x: Math.max(4, Math.min(p.x - tw / 2, width - tw - 4)), y: p.y + (p.rad || 5) + 5, w: tw, h: 14};
           var hits = function (o) { return bx.x < o.x + o.w && bx.x + bx.w > o.x && bx.y < o.y + o.h && bx.y + bx.h > o.y; };
