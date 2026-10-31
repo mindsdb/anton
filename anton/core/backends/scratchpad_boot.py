@@ -506,13 +506,23 @@ if _scratchpad_model:
             # vision_format="anthropic" for every mdb.ai/mindshub.ai host used
             # to assume every model behind it was Claude, which broke non-Claude
             # models sharing the same gateway (ENG-1992).
-            # Resolve the OpenAI "flavor" so the injected web_search() helper can
-            # route through whatever native web tooling the endpoint exposes.
-            # Detect Minds/mdb.ai by HOST, not provider name (always "openai" for
-            # an OpenAIProvider even on the minds gateway) — see resolve_web_flavor.
-            _llm_provider_kwargs["flavor"] = _ProviderClass.resolve_web_flavor(
-                _scratchpad_provider_name, _llm_base_url
-            )
+            # The OpenAI "flavor" sets the API the pad's model calls use and
+            # the native web tooling web_search() routes through. The host
+            # passes the agent's own in ANTON_SCRATCHPAD_FLAVOR, so a provider
+            # on chat completions never sends the pad to the Responses API.
+            # Without it, infer one: detect Minds/mdb.ai by HOST, not provider
+            # name (always "openai" for an OpenAIProvider even on the minds
+            # gateway) — see resolve_web_flavor.
+            _llm_flavor = os.environ.get("ANTON_SCRATCHPAD_FLAVOR", "")
+            if _llm_flavor not in (
+                _ProviderClass.FLAVOR_OPENAI,
+                _ProviderClass.FLAVOR_MINDS_PASSTHROUGH,
+                _ProviderClass.FLAVOR_OPENAI_COMPATIBLE_GENERIC,
+            ):
+                _llm_flavor = _ProviderClass.resolve_web_flavor(
+                    _scratchpad_provider_name, _llm_base_url
+                )
+            _llm_provider_kwargs["flavor"] = _llm_flavor
         else:
             _llm_provider_kwargs = {}  # Anthropic doesn't need ssl_verify
 

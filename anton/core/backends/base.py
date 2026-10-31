@@ -354,4 +354,8 @@ class ScratchpadRuntimeFactory(Protocol):
         # Returns the host's current coding API key, which can change after
         # the pad starts. Optional for factories that predate it.
         coding_api_key_supplier: ApiKeySupplier | None = None,
+        # The OpenAI transport the agent's coding provider sends on, so the
+        # pad's model calls use the same API. Optional for factories that
+        # predate it, which leave the pad to infer it from the base URL.
+        coding_flavor: str | None = None,
     ) -> ScratchpadRuntime: ...

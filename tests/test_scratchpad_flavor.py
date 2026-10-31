@@ -50,3 +50,61 @@ def test_openai_compatible_minds_base_still_passthrough():
         resolve("openai-compatible", "https://api.mindshub.ai/v1")
         == OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH
     )
+
+
+# ── The agent's own flavor reaches the pad ────────────────────────────
+
+
+from anton.core.backends.manager import ScratchpadManager  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "flavor",
+    [
+        OpenAIProvider.FLAVOR_OPENAI,
+        OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH,
+        OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC,
+    ],
+)
+def test_export_connection_info_carries_the_providers_flavor(flavor):
+    provider = OpenAIProvider(api_key="k", base_url="http://model-route:8000/v1", flavor=flavor)
+    assert provider.export_connection_info().flavor == flavor
+
+
+class _Pad:
+    async def start(self):
+        pass
+
+
+def _manager(factory, flavor):
+    return ScratchpadManager(
+        runtime_factory=factory,
+        coding_provider="openai",
+        coding_model="m",
+        coding_api_key="k",
+        coding_base_url="http://model-route:8000/v1",
+        coding_flavor=flavor,
+    )
+
+
+async def test_the_manager_passes_the_flavor_to_a_factory_that_takes_it():
+    seen = {}
+
+    def factory(*, name, cells, coding_provider, coding_model, coding_api_key,
+                coding_base_url, workspace_path, coding_flavor=None):
+        seen["coding_flavor"] = coding_flavor
+        return _Pad()
+
+    await _manager(factory, OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC).get_or_create("p")
+    assert seen == {"coding_flavor": OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC}
+
+
+async def test_the_manager_leaves_the_flavor_off_a_factory_that_predates_it():
+    """A factory written against the previous signature still builds its pad."""
+
+    def factory(*, name, cells, coding_provider, coding_model, coding_api_key,
+                coding_base_url, workspace_path):
+        return _Pad()
+
+    pad = await _manager(factory, OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC).get_or_create("p")
+    assert isinstance(pad, _Pad)
