@@ -226,13 +226,14 @@ class _TurnSeen:
 
 def _session(
     project: Path, *cells: str, write_approval: bool = True, packages: tuple[str, ...] = (), http: str = "",
+    relay_hosts: str = "",
 ) -> _Harness:
     workspace = MagicMock(base=project)
     workspace.artifacts_dir = project / "artifacts"
     session = ChatSession(ChatSessionConfig(
         llm_client=_llm(*cells, packages=packages),
         workspace=workspace,
-        settings=CoreSettings(write_approval=write_approval, write_approval_http=http),
+        settings=CoreSettings(write_approval=write_approval, write_approval_http=http, write_relay_hosts=relay_hosts),
     ))
     pad = _Pad()
     session._scratchpads.get_or_create = AsyncMock(return_value=pad)
@@ -534,6 +535,95 @@ async def test_a_bad_entry_in_the_setting_is_skipped_with_one_warning(project, c
     assert warned == ["write approval: skipped the HTTP write entry 'POST': an entry is a method and a URL"]
     seen = await _run(harness=harness, answers=[CANCEL])
     assert len(seen.cards) == 1, "the good entry still holds"
+
+
+# ── Hosts the write relay holds writes for ────────────────────────────────
+#
+# The relay is the only network path to such a host. It holds every request
+# but a GET or HEAD and raises its own card through approve_held_write, so the
+# cell's check leaves a request to it out: one request, one card.
+
+RELAYED = "gw.example.internal:8765"
+RELAY_RULE = f"POST http://{RELAYED}/**"
+RELAYED_POST = f"import requests\nrequests.post('http://{RELAYED}/api/orders', json={{'qty': 5}})\n"
+
+
+async def test_a_post_to_a_relayed_host_raises_no_card_of_its_own(project):
+    harness = _session(project, RELAYED_POST, http=RELAY_RULE, relay_hosts=RELAYED)
+    seen = await _run(harness=harness, answers=[])
+    assert seen.cards == [], "the relay holds it and asks through approve_held_write"
+    assert harness.pad.ran == [RELAYED_POST]
+
+
+async def test_a_relayed_host_is_matched_ignoring_case_and_by_its_default_port(project):
+    put = "import requests\nrequests.put('HTTP://GW.Example.Internal/api/orders/9', json={'qty': 5})\n"
+    harness = _session(project, put, relay_hosts="gw.example.internal")
+    seen = await _run(harness=harness, answers=[])
+    assert seen.cards == [], "an entry without a port is port 80, as a URL without one is"
+    assert harness.pad.ran == [put]
+
+
+async def test_a_post_to_a_host_the_relay_does_not_hold_still_waits(project):
+    other = RELAYED_POST.replace("gw.example.internal", "other.example.internal")
+    harness = _session(
+        project, other, http=f"{RELAY_RULE}, POST http://other.example.internal:8765/**", relay_hosts=RELAYED,
+    )
+    seen = await _run(harness=harness, answers=[CANCEL])
+    assert len(seen.cards) == 1
+    assert "http://other.example.internal:8765/api/orders" in seen.cards[0].request.prompt
+    assert harness.pad.ran == []
+
+
+@pytest.mark.parametrize("url", [
+    f"https://{RELAYED}/api/orders/9",
+    "http://gw.example.internal:9999/api/orders/9",
+    f"http://{RELAYED}@evil.example.com/api/orders/9",
+    f"http://evil.example.com\\\\@{RELAYED}/api/orders/9",
+    "http://gw.example.internal.:8765/api/orders/9",
+], ids=["https", "another-port", "user-info", "backslash", "trailing-dot"])
+async def test_a_url_that_only_looks_like_a_relayed_host_still_waits(project, url):
+    code = f"import requests\nrequests.put('{url}', json={{'qty': 5}})\n"
+    harness = _session(project, code, relay_hosts=RELAYED)
+    seen = await _run(harness=harness, answers=[CANCEL])
+    assert len(seen.cards) == 1, "the relay only holds plain http:// to the host and port it lists"
+    assert harness.pad.ran == []
+
+
+async def test_an_address_the_code_picks_when_it_runs_still_waits(project):
+    code = "import requests, os\nrequests.put(os.environ['ORDERS_URL'], json={'qty': 5})\n"
+    harness = _session(project, code, relay_hosts=RELAYED)
+    seen = await _run(harness=harness, answers=[CANCEL])
+    assert len(seen.cards) == 1, "the address could be any host"
+    assert harness.pad.ran == []
+
+
+async def test_data_and_file_changes_beside_a_relayed_request_still_wait(project):
+    code = RELAYED_POST + UPDATE_CELL
+    harness = _session(project, code, RENAME_CELL, http=RELAY_RULE, relay_hosts=RELAYED)
+    seen = await _run(harness=harness, answers=[CANCEL, CANCEL])
+    assert len(seen.cards) == 2
+    first = seen.cards[0].request.prompt
+    assert "UPDATE suppliers" in first
+    assert RELAYED not in first, "the relay holds the request, so the card leaves it out"
+    assert "report.pdf" in seen.cards[1].request.prompt
+    assert harness.pad.ran == []
+
+
+async def test_the_relay_hosts_setting_reads_its_environment_variable(project, monkeypatch, caplog):
+    monkeypatch.setenv("ANTON_WRITE_RELAY_HOSTS", "GW.example.internal:8765, planner.example.internal\nbad/entry")
+    workspace = MagicMock(base=project)
+    workspace.artifacts_dir = project / "artifacts"
+    with caplog.at_level(logging.WARNING, logger="anton.core.utils.write_hold"):
+        session = ChatSession(ChatSessionConfig(
+            llm_client=_llm(), workspace=workspace, settings=CoreSettings(write_approval=True),
+        ))
+    try:
+        assert session._write_gate.relayed_hosts == {"gw.example.internal:8765", "planner.example.internal:80"}
+        assert [r.getMessage() for r in caplog.records if r.name == "anton.core.utils.write_hold"] == [
+            "write approval: skipped the write relay host entry 'bad/entry': an entry is host:port",
+        ]
+    finally:
+        await session.close()
 
 
 # ── One unanswered card ───────────────────────────────────────────────────

@@ -100,7 +100,8 @@ class WriteGate:
     Present on a session only when the host turns the setting on. `begin_turn`
     records what the project and shared folders held when the turn began.
     `http_rules` are the endpoints the operator lists as writes
-    (`write_approval_http`).
+    (`write_approval_http`). `relayed_hosts` are the `host:port`s the write
+    relay holds writes for (`write_relay_hosts`).
     """
 
     snapshots: tuple[ProjectSnapshot, ...] = ()
@@ -109,6 +110,7 @@ class WriteGate:
     # timeout once per cell.
     unanswered: bool = False
     http_rules: tuple[HttpWriteRule, ...] = ()
+    relayed_hosts: frozenset[str] = frozenset()
 
     async def begin_turn(self, *, manager: ScratchpadManager) -> None:
         self.unanswered = False
@@ -420,11 +422,14 @@ async def ask_approval_choice(
     options: tuple[AskOption, ...],
     cancel_detail: str = "Leave things as they are",
     log_label: str = "write approval",
+    question_id: str | None = None,
 ) -> ApprovalChoice:
     """Choose one host-built action, or return why none was approved.
 
     The gate remembers unanswered cards exactly as ask_approval_card does.
     Cancel is always explicit, and no default or typed answer authorizes work.
+    `question_id` names the card when the host reads it, as the recording
+    proxy reads a held request's (`write_hold`); else a fresh `write:` id.
     """
     from anton.core.interaction.elicit import ApprovalRequest, AskOption, elicit
 
@@ -437,7 +442,7 @@ async def ask_approval_choice(
         timeout_s=getattr(session.elicitor, "timeout_s", None),
     )
     try:
-        answer = await elicit(session, f"write:{uuid.uuid4().hex}", request, counted=False)
+        answer = await elicit(session, question_id or f"write:{uuid.uuid4().hex}", request, counted=False)
     except Exception as exc:
         logger.warning("%s: the question failed (%s)", log_label, type(exc).__name__)
         return ApprovalChoice(None, "error")
@@ -498,6 +503,15 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
         # The type only, as for a failed question.
         logger.warning("write approval: the check failed (%s)", type(exc).__name__)
         writes = CellWrites(unchecked=True)
+    if gate.relayed_hosts and writes.http:
+        # The write relay holds a request to a host it relays and raises its
+        # own card through approve_held_write, so a second card here would
+        # ask twice. `held_by_relay` counts only a request whose `http://`
+        # host and port the code writes out.
+        from anton.core.utils.write_hold import held_by_relay
+
+        kept = tuple(w for w in writes.http if not held_by_relay(w, gate.relayed_hosts))
+        writes = writes.model_copy(update={"http": kept})
     if not writes.needs_approval():
         if writes.not_held_files:
             _log_decision(writes=writes, status="not_held")
