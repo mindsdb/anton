@@ -263,3 +263,12 @@ def test_non_geographic_json_with_object_type_field_is_safe_to_inspect():
     data = {'type': {'name': 'sales'}, 'rows': [1, 2]}
     html = observed_data.bind(page(D3), {observed_data.identity(data): data})
     assert check_geography(html, MAP).errors
+
+
+@pytest.mark.parametrize("projection", ["geoNaturalEarth2", "geoRobinson"])
+def test_custom_d3_projection_with_data_and_drawing_is_advisory(projection):
+    html = page(ATLAS + D3.replace("geoNaturalEarth1", projection))
+    result = check_geography(html, MAP)
+    assert result.errors == []
+    assert len(result.warnings) == 1
+    assert "custom" in result.warnings[0]

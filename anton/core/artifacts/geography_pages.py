@@ -25,6 +25,11 @@ _MULTIPLE_OUTPUTS = re.compile(
     r"(?:notes|summary|table|report|dashboard|page|artifact)\b", re.I,
 )
 _SUPPORTING_PAGE = re.compile(r"\b(?:notes|sources|appendix|readme|methodology|caveats)\b", re.I)
+_SUPPORTING_OUTPUT = re.compile(
+    r"^\s*(?:(?:please\s+)?(?:create|build|write|generate|make|produce|add)\s+"
+    r"(?:(?:a|an|the|supporting|separate)\s+)*)?" + _SUPPORTING_PAGE.pattern,
+    re.I,
+)
 
 
 def _merge(left: GeographyRequirement | None, right: GeographyRequirement | None) -> GeographyRequirement | None:
@@ -55,10 +60,12 @@ def generated_requirement(state: GenState, entry: Path) -> GeographyRequirement 
     active = getattr(state.session, "_artifact_geography_request", "")
     active = active if isinstance(active, str) else ""
     original = classify_request(active)
-    if original is not None and not _MULTIPLE_OUTPUTS.search(active):
-        requirement = _merge(requirement, original)
-    elif original is not None and requirement is None and not _SUPPORTING_PAGE.search(state.user_request):
-        requirement = replace(original, required=False)
+    supporting_only = requirement is None and bool(_SUPPORTING_OUTPUT.search(state.user_request))
+    if original is not None and not supporting_only:
+        if not _MULTIPLE_OUTPUTS.search(active):
+            requirement = _merge(requirement, original)
+        elif requirement is None:
+            requirement = replace(original, required=False)
     # A repair's abbreviated request cannot remove a view. A stronger request
     # may add another kind of view to the same page.
     requirement = _merge(requirements.get(key), requirement)
@@ -82,6 +89,7 @@ def check_pages(
     """
     request = request if isinstance(request, str) else ""
     intent = classify_request(request)
+    multiple_outputs = bool(_MULTIPLE_OUTPUTS.search(request))
     by_slug: dict[str, list[_ChangedPage]] = {}
     for page in pages:
         by_slug.setdefault(page.slug, []).append(page)
@@ -108,9 +116,17 @@ def check_pages(
             if known_elsewhere and corroborating is None:
                 continue
             confident = (
-                len(by_slug) == 1 and not _MULTIPLE_OUTPUTS.search(request)
+                len(by_slug) == 1 and not multiple_outputs
             ) or (corroborating is not None and corroborating.required)
-            requirements[key] = intent if confident else replace(intent, required=False)
+            # Separate geographic outputs inherit their own attributed view,
+            # not every view requested across the whole turn.
+            attributed = (
+                corroborating
+                if multiple_outputs and intent.kind == "map_and_globe"
+                and corroborating is not None and corroborating.required
+                else intent
+            )
+            requirements[key] = attributed if confident else replace(attributed, required=False)
 
     findings = {}
     for page in pages:
