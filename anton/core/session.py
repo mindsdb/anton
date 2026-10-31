@@ -20,6 +20,7 @@ import uuid
 
 from pydantic import BaseModel, Field, field_validator
 
+from anton.core.artifacts.geography import GeographyRequirement
 from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
@@ -2180,6 +2181,8 @@ class ChatSession:
         # ends with a line for each artifact with a page that did not pass.
         # Reset every turn.
         self._page_checks: dict[PageKey, RenderStatus] = {}
+        self._geography_requirements: dict[PageKey, GeographyRequirement] = {}
+        self._artifact_geography_request = ""
         # The pages whose findings an unverified check already listed for
         # the agent this turn, in a cell's result or in generate_artifact's
         # `checks_skipped`. A later unverified check of such a page lists
@@ -5598,6 +5601,8 @@ class ChatSession:
         # session per turn get the same result either way.
         self._artifacts_touched = set()
         self._page_checks = {}
+        self._geography_requirements = {}
+        self._artifact_geography_request = ""
         self._unverified_findings_listed = set()
         self._repair_cells = {}
         self._failed_views = {}
@@ -5655,6 +5660,10 @@ class ChatSession:
         (e.g. an eval-run id) without any change to Anton.
         """
         user_input = _scrub_user_input(user_input)
+        self._artifact_geography_request = (
+            user_input if isinstance(user_input, str)
+            else "\n".join(block.get("text", "") for block in user_input if block.get("type") == "text")
+        )
         # Stamp the inbound user turn here, not in _append_history: tool_result
         # and synthetic user-role messages also flow through append and must
         # NOT be stamped.
