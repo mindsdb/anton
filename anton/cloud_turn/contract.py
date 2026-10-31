@@ -102,7 +102,14 @@ at most 64 KB:
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
+
+from pydantic import BaseModel, ConfigDict
+
+from anton.core.tools.skill_format import validate_name
+
+logger = logging.getLogger(__name__)
 
 TURN_PROTOCOL_VERSION = 1
 DATASOURCE_PROTOCOL_VERSION = 1
@@ -165,6 +172,72 @@ def _parse_datasource_block(value: object) -> DatasourceBlockV1 | None:
     return DatasourceBlockV1(DATASOURCE_PROTOCOL_VERSION, tuple(refs))
 
 
+class TurnSkillEntry(BaseModel):
+    """One skill in a turn's ``skills`` block, which keys it by its slug.
+
+    cowork-server sends ``{"files": {relpath: text}, "always_on": true}`` and
+    leaves ``always_on`` out, or false, for a skill the agent recalls on demand.
+    Frozen, so no field of a parsed entry can be reassigned: staging and the
+    always-on prompt section read the same one.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    #: Each file of the skill's folder, by its path inside that folder
+    #: (``SKILL.md``, ``references/recipe.md``), to its text.
+    files: dict[str, str]
+    #: True also puts the skill's SKILL.md body into every turn's prompt.
+    always_on: bool = False
+
+
+def parse_turn_skills(value: object) -> dict[str, TurnSkillEntry] | None:
+    """The request's ``skills`` block as entries by slug, or None when it is absent.
+
+    The block is untrusted wire data, so no part of it fails the turn. A block
+    that is not an object names no skills. An entry is dropped when its slug is
+    not a valid skill name (with a warning) or its value is not an object.
+    Inside an entry, ``files`` that is not an object reads as no files, a file
+    whose path or text is not a string is dropped, and only a JSON ``true``
+    turns ``always_on`` on. A path that escapes the skill's folder is dropped
+    where the pod writes the files (``session._stage_skills``).
+
+    None and ``{}`` stay apart: ``{}`` names no skills, and only an absent block
+    lets the pod take the rollout fallback described at
+    ``session._SKILLS_ROOT_ENV``.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        return {}
+    entries: dict[str, TurnSkillEntry] = {}
+    for slug, raw in value.items():
+        if not _is_skill_name(slug):
+            logger.warning("skills: dropping invalid slug %r", slug)
+            continue
+        if not isinstance(raw, dict):
+            continue
+        files = raw.get("files")
+        entries[slug] = TurnSkillEntry(
+            files={
+                rel: text
+                for rel, text in (files.items() if isinstance(files, dict) else ())
+                if isinstance(rel, str) and isinstance(text, str)
+            },
+            always_on=raw.get("always_on") is True,
+        )
+    return entries
+
+
+def _is_skill_name(slug: object) -> bool:
+    if not isinstance(slug, str):
+        return False
+    try:
+        validate_name(slug)
+    except ValueError:
+        return False
+    return True
+
+
 @dataclass
 class TurnRequestV1:
     """One turn to run in the pod. Sent as a single JSON line on stdin."""
@@ -187,14 +260,17 @@ class TurnRequestV1:
     #: Optional memory cowork resolved for this tenant: {"global": {slot: text},
     #: "project": {...}}, slot in profile|rules|lessons. Read-only in the pod.
     memory: dict | None = None
-    #: Optional skills cowork resolved for this tenant + project:
-    #: {slug: {"files": {relpath: text}, "always_on": bool}}. Staged read-only in
-    #: the pod; the pod never writes skills back (agent-built skills are a
-    #: desktop draft flow). ``"always_on": true`` (org and team skills) also puts
-    #: the skill's SKILL.md body into every turn's prompt; absent means recall only.
-    #: When present (even ``{}``), the block is the complete set of skills the
-    #: turn may recall or list; only a request without it falls back to the
-    #: pod's mounted org skills tree.
+    #: Optional skills cowork resolved for this turn's person and project:
+    #: {slug: {"files": {relpath: text}, "always_on": true}}, kept as the JSON
+    #: value; the session reads it through parse_turn_skills (TurnSkillEntry).
+    #: When present (even ``{}``), it is the complete set of skills the turn may
+    #: recall or list. The pod stages them into a fresh folder each turn and
+    #: deletes that folder when the turn ends. It never writes skills back: a
+    #: skill the agent builds goes out as a draft on the `skill` event above.
+    #: ``"always_on": true`` (organization and team skills) also puts the
+    #: skill's SKILL.md body into every turn's prompt, and omitted or false
+    #: means recall only. A request without the block stages no skills, except
+    #: for the rollout fallback described at session._SKILLS_ROOT_ENV.
     skills: dict | None = None
     #: Optional trace-attribution block cowork resolved for this turn:
     #: ``{"surface": "web", "cowork_server_version": ..., "install_channel": ...}``,

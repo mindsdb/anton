@@ -1,4 +1,4 @@
-"""A cloud turn's staged skills folder is gone once the turn ends (ENG-3787).
+"""A cloud turn's staged skills folder is gone once the turn ends.
 
 A pod lives across many turns, so a folder left behind keeps the skills an
 earlier request carried readable from later turns' cells, after the sharer may
@@ -21,6 +21,7 @@ import pytest
 import anton.cloud_turn.__main__ as entry
 import anton.core.llm.client as llm_client_mod
 from anton.cloud_turn import session as cloud_session
+from anton.cloud_turn.contract import parse_turn_skills
 from tests.test_cloud_turn_session import _mock_llm
 
 PREFIX = cloud_session._SKILLS_DIR_PREFIX
@@ -29,6 +30,8 @@ SKILLS = {
         "files": {"SKILL.md": "---\nname: team-steps\ndescription: team procedure\n---\nShared steps.\n"}
     }
 }
+#: SKILLS as the session reads it, for tests that stage it directly.
+PARSED_SKILLS = parse_turn_skills(SKILLS)
 
 
 def _raw(skills: dict | None = SKILLS) -> str:
@@ -143,8 +146,8 @@ async def test_a_build_that_raises_after_staging_still_removes_its_folder(
 async def test_the_org_mount_survives_a_turn_that_read_it(
     skills_tmp, offline_turn, tmp_path, monkeypatch
 ):
-    """Only staged folders are deleted. An older sender's turn reads the mount
-    as its skills root, and the mount is the org's store, not a copy."""
+    """Only staged folders are deleted. A turn with no skills block reads the
+    mount as its skills root, and the mount is the org's store, not a copy."""
     mount = tmp_path / "mnt" / "skills"
     (mount / "org-skill").mkdir(parents=True)
     (mount / "org-skill" / "SKILL.md").write_text("Org steps.")
@@ -169,7 +172,7 @@ def test_staging_removes_what_finished_turns_left_and_keeps_a_running_turns(skil
         (folder / "old-skill").mkdir(parents=True)
         (folder / "old-skill" / "SKILL.md").write_text("Old steps.")
 
-    dest = cloud_session._stage_skills(SKILLS)
+    dest = cloud_session._stage_skills(PARSED_SKILLS)
 
     assert _staged(skills_tmp) == sorted([dest, running, unnamed])
     assert (running / "old-skill" / "SKILL.md").is_file()
@@ -182,7 +185,8 @@ _OTHER_PROCESS_TURN = """
 import json, sys, tempfile
 tempfile.tempdir = sys.argv[1]
 from anton.cloud_turn import session
-print(session._stage_skills(json.loads(sys.argv[2])), flush=True)
+from anton.cloud_turn.contract import parse_turn_skills
+print(session._stage_skills(parse_turn_skills(json.loads(sys.argv[2]))), flush=True)
 sys.stdin.read()
 """
 
@@ -197,7 +201,7 @@ def test_a_turn_running_in_another_process_keeps_its_folder_until_it_exits(skill
     )
     try:
         running = Path(other.stdout.readline().strip())
-        mine = cloud_session._stage_skills(SKILLS)
+        mine = cloud_session._stage_skills(PARSED_SKILLS)
 
         assert _staged(skills_tmp) == sorted([running, mine])
         assert (running / "team-steps" / "SKILL.md").is_file()
@@ -206,7 +210,7 @@ def test_a_turn_running_in_another_process_keeps_its_folder_until_it_exits(skill
         other.wait(timeout=60)
         other.stdout.close()
 
-    again = cloud_session._stage_skills(SKILLS)
+    again = cloud_session._stage_skills(PARSED_SKILLS)
 
     assert _staged(skills_tmp) == [again]
 
@@ -229,7 +233,7 @@ def test_planted_entries_are_unlinked_quietly_unless_a_running_process_names_the
     running.write_text("planted")
     caplog.set_level(logging.DEBUG, logger=cloud_session.logger.name)
 
-    dest = cloud_session._stage_skills(SKILLS)
+    dest = cloud_session._stage_skills(PARSED_SKILLS)
 
     assert _staged(skills_tmp) == sorted([dest, running])
     assert running.read_text() == "planted"

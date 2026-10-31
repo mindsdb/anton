@@ -1,6 +1,8 @@
 """_handle_publish passes the selected access through to publisher.publish."""
 
+import io
 import json
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -138,6 +140,33 @@ async def test_switching_to_public_drops_the_stored_hash(tmp_path):
     assert entry["mode"] == "public"
     assert "password_hash" not in entry
     assert "access_password" not in entry
+
+
+@pytest.mark.parametrize("status, reason", [
+    # The upload service's answer when MindsHub refuses the access rule it saves.
+    (500, "artifact-access upsert failed: HTTP 403"),
+    (400, "pip install failed: [notice] A new release of pip is available [/notice]"),
+])
+@pytest.mark.asyncio
+async def test_publish_says_why_the_upload_service_refused(tmp_path, status, reason):
+    """The upload's own reason, read by the real publisher, reaches the person."""
+    root = _make_artifact(tmp_path)
+    refusal = urllib.error.HTTPError(
+        "https://view.test/upload", status, "Refused", {},
+        io.BytesIO(json.dumps({"error": reason}).encode()),
+    )
+
+    async def fake_prompt_access(*a, **k):
+        return {"mode": "restricted", "emails": [], "org_allowed": True}
+
+    console = Console(record=True, width=200)
+    with mock.patch("anton.publisher.minds_request", side_effect=refusal), \
+         mock.patch("anton.publish_access.prompt_access", side_effect=fake_prompt_access), \
+         mock.patch("webbrowser.open"):
+        await chat._handle_publish(console, _settings(root, tmp_path), file_arg="sales/report.html")
+
+    assert f"Publish failed: HTTP Error {status}: {reason}" in console.export_text()
+    assert not (root / "sales" / ".published.json").exists()
 
 
 @pytest.mark.asyncio

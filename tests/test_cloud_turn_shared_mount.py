@@ -3,6 +3,7 @@ import logging
 import pytest
 
 from anton.cloud_turn import session as cloud_session
+from anton.cloud_turn.contract import parse_turn_skills
 from tests.test_cloud_turn_session import _real_cloud_session
 
 
@@ -26,7 +27,8 @@ _SHARED = {"shared-with-me": {"files": {"SKILL.md": _skill_md("shared-with-me", 
 
 
 def test_skills_read_from_mount_only_without_a_skills_block(monkeypatch, tmp_path, caplog):
-    """An older sender with no skills block keeps the mount, with a warning."""
+    """The rollout fallback: a request with no skills block, on a pod that
+    has the mount, reads the mount, with a warning."""
     mount = tmp_path / "mnt" / "skills"
     (mount / "my-skill").mkdir(parents=True)
     (mount / "my-skill" / "SKILL.md").write_text("hello")
@@ -37,11 +39,15 @@ def test_skills_read_from_mount_only_without_a_skills_block(monkeypatch, tmp_pat
 
     assert root == mount
     assert (root / "my-skill" / "SKILL.md").read_text() == "hello"
-    assert "no skills block" in caplog.text
+    warnings = [
+        r for r in caplog.records
+        if r.name == cloud_session.logger.name and r.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1 and "no skills block" in warnings[0].getMessage()
 
 
 def test_a_skills_block_replaces_the_mount(org_mount):
-    root = cloud_session._stage_skills(_SHARED)
+    root = cloud_session._stage_skills(parse_turn_skills(_SHARED))
 
     assert root != org_mount
     assert root.name.startswith(cloud_session._SKILLS_DIR_PREFIX)
@@ -50,7 +56,7 @@ def test_a_skills_block_replaces_the_mount(org_mount):
 
 
 def test_an_empty_skills_block_means_no_skills(org_mount):
-    root = cloud_session._stage_skills({})
+    root = cloud_session._stage_skills(parse_turn_skills({}))
     assert root != org_mount
     assert list(root.iterdir()) == []
 
@@ -82,6 +88,17 @@ async def test_prompt_lists_only_the_requests_skills(tmp_path, monkeypatch, org_
     assert "someone-elses" not in prompt
 
 
+@pytest.mark.parametrize("block", ["x", ["shared-with-me"], 7])
+async def test_a_malformed_skills_block_never_reads_the_mount(tmp_path, monkeypatch, org_mount, block):
+    """Only an absent block takes the fallback, and the mount holds every
+    member's skills, so a block that is present but not an object names none."""
+    session = _real_cloud_session(tmp_path, monkeypatch, skills=block)
+    store = session._skill_store
+    assert store.root != org_mount
+    assert store.load("someone-elses") is None
+    assert "someone-elses" not in {s["label"] for s in store.list_summaries()}
+
+
 async def test_without_a_skills_block_the_mount_is_still_read(tmp_path, monkeypatch, org_mount):
     from anton.core.tools.recall_skill import handle_recall_skill
 
@@ -91,10 +108,13 @@ async def test_without_a_skills_block_the_mount_is_still_read(tmp_path, monkeypa
 
 
 def test_skills_fall_back_to_tmp_staging_without_env(monkeypatch, tmp_path):
-    """Desktop and CI keep the old behaviour."""
+    """Without the mount (desktop, CI), the request's skills stage into a
+    per-turn folder."""
     monkeypatch.delenv("ANTON_CLOUD_SKILLS_ROOT", raising=False)
 
-    root = cloud_session._stage_skills({"my-skill": {"files": {"SKILL.md": "x"}}})
+    root = cloud_session._stage_skills(
+        parse_turn_skills({"my-skill": {"files": {"SKILL.md": "x"}}})
+    )
 
     assert root.name.startswith(cloud_session._SKILLS_DIR_PREFIX)
     assert (root / "my-skill" / "SKILL.md").read_text() == "x"

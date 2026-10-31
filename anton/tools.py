@@ -620,6 +620,7 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     import json as _json
 
     from rich.live import Live
+    from rich.markup import escape
     from rich.spinner import Spinner
 
     from anton.utils.prompt import prompt_or_cancel
@@ -722,11 +723,11 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
                         access_version=access_version,
                     )
                 except Exception as e2:
-                    console.print(f"  [anton.error]Publish failed: {e2}[/]")
+                    console.print(f"  [anton.error]Publish failed: {escape(str(e2))}[/]")
                     console.print()
                     return f"PUBLISH FAILED: {e2}"
             else:
-                console.print(f"  [anton.error]Publish failed: {e}[/]")
+                console.print(f"  [anton.error]Publish failed: {escape(str(e))}[/]")
                 console.print()
                 return f"PUBLISH FAILED: {e}"
 
