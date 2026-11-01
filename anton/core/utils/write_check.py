@@ -103,16 +103,20 @@ What it finds:
   them) and also passed or stored as a value, a loader's or a runner's own
   method too; a write of a startup hook, a ``.pth`` file but for a literal
   with no line it runs, or a ``sitecustomize`` or ``usercustomize``
-  module; once a cell wrote a hook a new Python process runs as it starts
-  (such a module in any folder, or a ``.pth`` file in the installed
-  packages, the user site, a folder with a ``site-packages`` or
-  ``dist-packages`` part, or a folder the check can't place, or a file
-  written where the check can't place it under a name such a hook may
-  have, a frame's or a model's only inside the installed packages), a
-  Python process the cell starts, and the first cell after the pad starts
-  a new process of its own, one that doesn't parse among them: after a
-  cell whose process died, was killed or was canceled, after a remote
-  pad's error, or when the pad's process isn't running as the cell comes;
+  module or package, by a copy, a move or a download that lands one too;
+  once a cell wrote a hook a new Python process runs as it starts (such a
+  module in any folder, or a ``.pth`` file in the installed packages, the
+  user site, a folder with a ``site-packages`` or ``dist-packages`` part,
+  or a folder the check can't place, or a file written where the check
+  can't place it under a name such a hook may have, read through a name
+  the path is bound to or a temporary file's suffix, a frame's or a
+  model's only inside the installed packages), or unpacked or copied a
+  folder's files into the installed packages, a Python process the cell
+  starts, and the first cell after the pad starts a new process of its
+  own, one that doesn't parse among them: after a cell whose process
+  died, was killed or was canceled, a remote pad's own among them, after
+  a remote pad's error, or when the pad's process isn't running as the
+  cell comes;
   ``site.addsitedir`` of a folder that holds a
   ``.pth`` file, on disk or as a cell wrote it; an import of a module a
   cell wrote (to the project, or to a temporary folder, as source or as
@@ -1867,6 +1871,8 @@ _PY_FILE = re.compile(r"\.(?:pyc?|so|pyd)\b")
 # `site` adds: the import lines of a `.pth` file, and these modules; and
 # how a string may name one (`_CodeSigns.names_a_startup_hook`).
 _STARTUP_HOOK_MODULES = frozenset({"sitecustomize.py", "usercustomize.py"})
+# The folders of those modules written as packages, as `sitecustomize/__init__.py`.
+_STARTUP_HOOK_PACKAGES = frozenset(name.removesuffix(".py") for name in _STARTUP_HOOK_MODULES)
 _NAMES_A_STARTUP_HOOK = re.compile(r"\.pth|(?:site|user)customize")
 # Every name Python, or the pad's boot, binds before a cell runs, so a call
 # to one is no sign that code the check couldn't read defined it.
@@ -2579,6 +2585,10 @@ class _CodeSigns:
     # `rp`, or to a lookup of a member by name (`_LOOKUP_CALL_NAMES`), as
     # `go = operator.methodcaller("run_path")` binds `go`.
     hint_aliases: frozenset[str]
+    # Each name an assignment binds to a `functools.partial` of another name,
+    # with that name, as `job` with `base` for `job = partial(base, cmd)`:
+    # `job` holds a runner once `base` does (`_Reader.runner_aliases`).
+    partial_heads: tuple[_NameValue, ...]
     # The names an `except ... as`, `global` or `nonlocal` statement, a `*`
     # or `**` parameter, a match pattern or a walrus gives, which
     # `_Cell.bindings` doesn't hold where they bind, and each place one
@@ -2844,7 +2854,7 @@ class _Cell:
         """Whether `node` runs whenever its scope runs (`_under_branch`)."""
         return not self._under_branch(node, scope=self.scope_of(node))
 
-    def runs_to_its_end(self, node: ast.AST, *, swallowers: frozenset[str]) -> bool:
+    def runs_to_its_end(self, node: ast.AST, *, swallowers: frozenset[int]) -> bool:
         """Whether `node` surely runs to its end whenever its scope runs: it
         runs surely (`runs_surely`), and no with around it in its scope may
         swallow an error and stop its body short (`_may_swallow`, by
@@ -2868,39 +2878,43 @@ class _Cell:
         return not isinstance(stmt, (ast.For, ast.AsyncFor)) or _runs_body_surely(stmt)
 
     @cached_property
-    def swallowing_names(self) -> frozenset[str]:
-        """The names a with's context may be called by that may swallow an
-        error its body raises (`_may_swallow`), as this cell alone gives
-        them: `_SWALLOWING_CONTEXTS`, a name the cell imports one of them
-        as, and a class the cell defines with its own `__exit__` or
-        `__aexit__`, which may return true. The reader adds what the
-        conversation's other cells give (`_swallowers`)."""
-        aliases = {
+    def swallowing_aliases(self) -> frozenset[str]:
+        """The names the cell imports a context that may swallow an error
+        its body raises (`_SWALLOWING_CONTEXTS`) as, as `quietly` for `from
+        contextlib import suppress as quietly` (`_swallowing_withs`)."""
+        return frozenset(
             a.asname for stmt in self.signs.imports if isinstance(stmt, ast.ImportFrom) for a in stmt.names
             if a.asname and a.name in _SWALLOWING_CONTEXTS
-        }
-        classes = {
+        )
+
+    @cached_property
+    def swallowing_classes(self) -> frozenset[str]:
+        """The classes the cell defines with their own `__exit__` or
+        `__aexit__`, which may return true and so swallow an error a with's
+        body raises (`_swallowing_withs`)."""
+        return frozenset(
             d.name for d in self.definitions if isinstance(d, ast.ClassDef) and any(
                 isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef)) and s.name in ("__exit__", "__aexit__")
                 for s in d.body
             )
-        }
-        return _SWALLOWING_CONTEXTS | aliases | classes
+        )
 
     @cached_property
-    def context_roots(self) -> frozenset[str]:
-        """The names the contexts the cell's withs enter start from
-        (`_context_names`), as `cm` for `with cm:` and `guard` for `with
-        guard():`."""
-        return frozenset(root for stmt in self.signs.withs for item in stmt.items
-                         for root in [_context_names(item.context_expr).root] if root is not None)
+    def node_ids(self) -> frozenset[int]:
+        """The ids of the cell's calls and withs, the nodes a set of setter
+        calls (`_Reader.global_setters`) or swallowing withs
+        (`_Reader.swallowers`) names: the part of either set that is the
+        cell's own keys what the cell reads of a block
+        (`_first_sure_binding`), so another cell's check reads it again only
+        where that part differs."""
+        return frozenset(id(node) for node in (*self.calls, *self.signs.withs))
 
     @cached_property
     def value_heads(self) -> tuple[_NameValue, ...]:
         """Each name the cell binds to a value by an assignment, in any
         scope, with the last name the value is spelled with or calls
         (`_last_name`), as `suppress` for `cm = contextlib.suppress(E)`:
-        what `_swallowers` follows from a swallowing context to a name."""
+        what `_swallowing_withs` follows from a swallowing context to a name."""
         out: list[_NameValue] = []
         for name, found in self.bindings.items():
             for b in found:
@@ -2942,7 +2956,7 @@ class _Cell:
             use is n or _inside(use, n, self) for n in stmt.body
         )
 
-    def binds_whole(self, name: str, *, setters: frozenset[str], swallowers: frozenset[str]) -> bool:
+    def binds_whole(self, name: str, *, setters: frozenset[int], swallowers: frozenset[int]) -> bool:
         """Whether the cell's code, run to its end, surely binds `name` at
         its top level (`_first_sure_binding`)."""
         body = self.tree.body
@@ -2950,7 +2964,7 @@ class _Cell:
         return self._first_sure_binding(body, name, setters=setters, walrus=walrus, swallowers=swallowers) < len(body)
 
     def bound_on_the_way(
-        self, node: ast.AST, name: str, *, setters: frozenset[str], swallowers: frozenset[str],
+        self, node: ast.AST, name: str, *, setters: frozenset[int], swallowers: frozenset[int],
         within: ast.AST | None = None,
     ) -> bool:
         """Whether the code of the cell that runs before `node`, a read at
@@ -2991,16 +3005,21 @@ class _Cell:
         return False
 
     def _first_sure_binding(
-        self, block: list[ast.stmt], name: str, *, setters: frozenset[str], walrus: bool,
-        swallowers: frozenset[str],
+        self, block: list[ast.stmt], name: str, *, setters: frozenset[int], walrus: bool,
+        swallowers: frozenset[int],
     ) -> int:
         """The index of the first statement of `block`, a statement list of
         the cell, that surely binds `name` when it runs to its end
         (`_binds_on_every_path`), a with read by `swallowers`, or the
         block's length where none does. Read once per block, name and
         swallowers, past each statement that can't bind it
-        (`_bound_under`), unless a call of one of `setters` may."""
-        key = (id(block), name, setters, walrus, swallowers)
+        (`_bound_under`), unless a call in `setters` may; a name the cell
+        can't bind at all, with no such call in it, needs no read."""
+        own = self.node_ids
+        mine = setters & own
+        if not mine and name not in self.signs.bound_aside and name not in self._names_bound_under:
+            return len(block)
+        key = (id(block), name, mine, walrus, swallowers & own)
         if key not in self._first_sure:
             self._first_sure[key] = next((
                 i for i, stmt in enumerate(block)
@@ -3008,6 +3027,11 @@ class _Cell:
                 and _binds_on_every_path([stmt], name, setters=setters, walrus=walrus, swallowers=swallowers)
             ), len(block))
         return self._first_sure[key]
+
+    @cached_property
+    def _names_bound_under(self) -> frozenset[str]:
+        """Every name a statement of the cell may bind (`_bound_under`)."""
+        return frozenset().union(*self._bound_under.values())
 
     @cached_property
     def _bound_under(self) -> dict[int, set[str]]:
@@ -3059,7 +3083,7 @@ class _Cell:
             scope = self.scope_of(scope)
         return out
 
-    def binds_in_scope(self, node: ast.AST, name: str, *, swallowers: frozenset[str]) -> bool:
+    def binds_in_scope(self, node: ast.AST, name: str, *, swallowers: frozenset[int]) -> bool:
         """Whether a def, lambda, class or comprehension around `node` binds
         `name` in its own scope, so a read of it there never reaches the
         module's names: an assignment, parameter, loop, with, comprehension
@@ -3467,6 +3491,7 @@ class _Cell:
         list_changes: list[_ListChange] = []
         path_aliases: set[str] = set()
         hint_aliases: set[str] = set()
+        partial_heads: list[_NameValue] = []
         aside: list[_AsideSite] = []
         declared: list[ast.Global] = []
         spelled: dict[str, list[ast.Constant]] = {}
@@ -3547,6 +3572,7 @@ class _Cell:
                     elif isinstance(stored, ast.Name) and (stored is not target or isinstance(node, ast.AugAssign)):
                         list_changes.append(_ListChange(stored.id, stored))
                 value = node.value
+                wrapped = _partial_head(value)
                 if isinstance(node, ast.Assign) and isinstance(value, (ast.Name, ast.Attribute)):
                     names = [t.id for t in targets if isinstance(t, ast.Name)]
                     last = _last_name(value)
@@ -3557,18 +3583,20 @@ class _Cell:
                 elif isinstance(node, ast.Assign) and (
                     isinstance(value, ast.Subscript) and _module_entry_by_name(value)
                     or isinstance(value, ast.Call) and _last_name(value.func) in _LOOKUP_CALL_NAMES
-                    or isinstance(value, ast.Call) and _last_name(value.func) == "partial" and value.args
-                    and _is_hint(_last_name(value.args[0]))
+                    or wrapped is not None and _is_hint(_last_name(wrapped))
                 ):
                     # `f = vars(runpy)[k]`, `go = operator.methodcaller(k)`, `f = getattr(m, k)`,
                     # `job = partial(subprocess.run, cmd)`.
                     hint_aliases.update(t.id for t in targets if isinstance(t, ast.Name))
+                elif isinstance(node, ast.Assign) and isinstance(wrapped, ast.Name):
+                    partial_heads += [_NameValue(t.id, wrapped) for t in targets if isinstance(t, ast.Name)]
         return _CodeSigns(
             hints=tuple(hints), imports=tuple(imports), names_builtins=names_builtins,
             names_a_py_file=names_a_py_file, names_a_startup_hook=names_a_startup_hook, names_unpack=names_unpack,
             names_dash_c=names_dash_c, path_changes=tuple(path_changes), list_changes=tuple(list_changes),
             path_aliases=frozenset(path_aliases), hint_aliases=frozenset(hint_aliases),
-            bound_aside=frozenset(site.name for site in aside), aside_sites=tuple(aside),
+            partial_heads=tuple(partial_heads), bound_aside=frozenset(site.name for site in aside),
+            aside_sites=tuple(aside),
             globals_declared=tuple(declared), spelled={k: tuple(v) for k, v in spelled.items()},
             deleted=frozenset(deleted), py_files=frozenset(py_files), withs=tuple(withs),
         )
@@ -3686,8 +3714,8 @@ _SWALLOWING_CONTEXTS = frozenset({
 
 
 def _binds_on_every_path(
-    block: Sequence[ast.stmt], name: str, *, setters: AbstractSet[str] = frozenset(), walrus: bool = False,
-    swallowers: AbstractSet[str] = _SWALLOWING_CONTEXTS,
+    block: Sequence[ast.stmt], name: str, *, setters: AbstractSet[int] = frozenset(), walrus: bool = False,
+    swallowers: AbstractSet[int],
 ) -> bool:
     """Whether running `block`, a list of statements, to its end surely
     binds `name` in its scope: one of them assigns, imports, defines or
@@ -3700,11 +3728,12 @@ def _binds_on_every_path(
     first break or continue (`_before_a_jump`), a match each of whose
     cases does by its pattern or its body and whose last case matches
     anything, or a try whose body or else does and each of whose handlers
-    does too or ends in a raise, or whose finally does. A call of one of
-    `setters`, functions that set it as a global on every path, binds it
-    too, and, with `walrus`, so does a walrus the statement surely runs
-    (`_walrus_runs`). Any other loop may run no time. Each block is read
-    once, and an elif chain arm by arm, with no deep recursion."""
+    does too or ends in a raise, or whose finally does. A call in
+    `setters`, a call of a function that sets it as a global on every path
+    (`_Reader.global_setters`), binds it too, and, with `walrus`, so does a
+    walrus the statement surely runs (`_walrus_runs`). Any other loop may
+    run no time. Each block is read once, and an elif chain arm by arm,
+    with no deep recursion."""
     def every(stmts: Sequence[ast.stmt]) -> bool:
         return _binds_on_every_path(stmts, name, setters=setters, walrus=walrus, swallowers=swallowers)
 
@@ -3737,8 +3766,7 @@ def _binds_on_every_path(
             every(stmt.body) or every(stmt.orelse)
         ) and all(every(h.body) or isinstance(h.body[-1], ast.Raise) for h in stmt.handlers)):
             return True
-        if (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call) and isinstance(stmt.value.func, ast.Name)
-                and stmt.value.func.id in setters):
+        if isinstance(stmt, ast.Expr) and id(stmt.value) in setters:
             return True
         if walrus and _walrus_runs(stmt, name):
             return True
@@ -3769,17 +3797,11 @@ def _if_binds(
         return every(rest)
 
 
-def _may_swallow(stmt: ast.With | ast.AsyncWith, swallowers: AbstractSet[str]) -> bool:
+def _may_swallow(stmt: ast.With | ast.AsyncWith, swallowers: AbstractSet[int]) -> bool:
     """Whether a with may swallow an error its body raises, so the body may
-    stop short and the code after it run: one of its contexts is called by,
-    or starts from, a name in `swallowers` (`_context_names`,
-    `_Reader.swallowers`), as `suppress(E)`, `quietly(E)` after `from
-    contextlib import suppress as quietly`, and `cm` after `cm =
-    suppress(E)` are."""
-    return any(
-        name is not None and name in swallowers
-        for item in stmt.items for name in _context_names(item.context_expr)
-    )
+    stop short and the code after it run: it is one of `swallowers`, by id
+    (`_Reader.swallowers`, `_swallowing_withs`)."""
+    return id(stmt) in swallowers
 
 
 class _ContextNames(NamedTuple):
@@ -3789,55 +3811,91 @@ class _ContextNames(NamedTuple):
     there or `cm` for `cm`, None where it starts from no name."""
 
     last: str | None
-    root: str | None
+    root: ast.Name | None
+
+    @property
+    def root_name(self) -> str | None:
+        """The name it starts from, by its text."""
+        return None if self.root is None else self.root.id
 
 
 def _context_names(context: ast.expr) -> _ContextNames:
     """The names `context`, what a with enters, is read by (`_ContextNames`)."""
     head = context.func if isinstance(context, ast.Call) else context
     root = _root_of(head)
-    return _ContextNames(last=_last_name(head) or None, root=root.id if isinstance(root, ast.Name) else None)
+    return _ContextNames(last=_last_name(head) or None, root=root if isinstance(root, ast.Name) else None)
 
 
-def _swallowers(cells: Sequence[_Cell]) -> frozenset[str]:
-    """The names a with's context may be called by, or start from, that may
-    swallow an error its body raises (`_may_swallow`), read across the
-    conversation's `cells`: each cell's own (`_Cell.swallowing_names`), so a
-    name an earlier cell imports a swallowing context as, or a class an
-    earlier cell defines with `__exit__`, counts in a later one; each name
-    any cell binds to one of them, a call of one or an instance of one
-    (`_Cell.value_heads`), as `cm` for `cm = suppress(E)`, followed until no
-    more turn up; and a name a context starts from that neither read code
-    (`_Cell.names_bound`) nor Python or the pad's boot (`_BUILTIN_NAMES`)
-    binds, since only code the check can't read may have bound it. A name
-    that holds what such code made is added once that is read
-    (`_tainted_contexts`)."""
-    out = set(_SWALLOWING_CONTEXTS).union(*(cell.swallowing_names for cell in cells))
-    named: dict[str, list[str]] = {}
-    for cell in cells:
-        for name, head in cell.value_heads:
-            named.setdefault(_last_name(head), []).append(name)
-    todo = [name for name in out if name in named]
-    while todo:
-        for name in named.get(todo.pop(), ()):
-            if name not in out:
-                out.add(name)
-                todo.append(name)
+def _swallowing_withs(reader: _Reader) -> frozenset[int]:
+    """The withs of `reader`'s cells, by id, that may swallow an error their
+    body raises (`_may_swallow`): one of whose contexts (`_context_names`)
+    is called by, or spelled with, the last name of a context that may
+    (`_SWALLOWING_CONTEXTS`), or of a name a cell imports one as
+    (`_Cell.swallowing_aliases`); or starts from a class a cell defines
+    with `__exit__` (`_Cell.swallowing_classes`), so `requests.Session()`
+    is no cell's `Session`; from a name any cell binds to a call or an
+    instance of one of them (`_Cell.value_heads`), as `cm` for `cm =
+    suppress(E)`, followed until no more turn up; from a name read code
+    doesn't bind where the with runs (`_Reader.binds`), nor Python or the
+    pad's boot (`_BUILTIN_NAMES`), since only code the check can't read may
+    have bound it; or from a name that holds what such code made
+    (`_Reader.tainted_contexts`). A with at module level reads the aliases
+    and classes of the cells that run up to it (`_Reader.ran_ahead`); one
+    inside a function, which runs when it is called, those of every
+    cell."""
+    cells = reader.cells
+    aliasing = [cell for cell in cells if cell.swallowing_aliases]
+    defining = [cell for cell in cells if cell.swallowing_classes]
+    aliases = frozenset().union(*(cell.swallowing_aliases for cell in aliasing))
+    classes = frozenset().union(*(cell.swallowing_classes for cell in defining))
+    named = _SWALLOWING_CONTEXTS | aliases
+    followed: set[str] = set()
+    heads = [(name, _context_names(head)) for cell in cells for name, head in cell.value_heads]
+    grew = True
+    while grew:
+        grew = False
+        for name, spelled in heads:
+            if name not in followed and (
+                spelled.last in named or spelled.root_name in classes or spelled.root_name in followed
+            ):
+                followed.add(name)
+                grew = True
     bound = set(_BUILTIN_NAMES).union(*(cell.names_bound for cell in cells))
-    out.update(root for cell in cells for root in cell.context_roots if root not in bound)
+    out: set[int] = set()
+    for cell in cells:
+        for stmt in cell.signs.withs:
+            ahead = {id(c) for c in (cells if cell.scope_of(stmt) is not None else reader.ran_ahead(stmt))} if (
+                aliasing or defining
+            ) else set()
+            for item in stmt.items:
+                spelled = _context_names(item.context_expr)
+                root = spelled.root
+                if (
+                    spelled.last in _SWALLOWING_CONTEXTS
+                    or any(spelled.last in c.swallowing_aliases for c in aliasing if id(c) in ahead)
+                    or root is not None and (
+                        root.id in followed or root.id in reader.tainted_contexts
+                        or any(root.id in c.swallowing_classes for c in defining if id(c) in ahead)
+                        or root.id not in _BUILTIN_NAMES and (root.id not in bound or not reader.binds(root))
+                    )
+                ):
+                    out.add(id(stmt))
+                    break
     return frozenset(out)
 
 
 def _tainted_contexts(reader: _Reader, defined: _Defined | None) -> frozenset[str]:
-    """The names a with's context starts from (`_Cell.context_roots`) that
-    hold what code the check can't read made (`_Defined.tainted`), as a
-    name imported from a module a cell wrote does, beyond the swallowers
-    `reader` reads already: such a context may swallow an error too."""
+    """The names a with's context starts from (`_context_names`) that hold
+    what code the check can't read made (`_Defined.tainted`), as a name
+    imported from a module a cell wrote does, for a with `reader` doesn't
+    read as one that may swallow an error already (`_Reader.swallowers`):
+    such a context may swallow one too."""
     if defined is None or not defined.tainted:
         return frozenset()
     return frozenset(
-        root for cell in reader.cells for root in cell.context_roots if root in defined.tainted
-    ) - reader.swallowers
+        root for cell in reader.cells for stmt in cell.signs.withs if id(stmt) not in reader.swallowers
+        for item in stmt.items for root in [_context_names(item.context_expr).root_name] if root in defined.tainted
+    )
 
 
 def _assigns(target: ast.AST, name: str) -> bool:
@@ -3899,7 +3957,7 @@ def _before_a_jump(body: Sequence[ast.stmt], *, jumps: tuple[type[ast.AST], ...]
 
 
 def _sets_global(func: ast.FunctionDef | ast.AsyncFunctionDef, cell: _Cell, name: str, *,
-                 swallowers: AbstractSet[str]) -> bool:
+                 swallowers: AbstractSet[int]) -> bool:
     """Whether a call of `func`, a def of `cell`, binds `name` at module
     level: it declares `name` global and binds it on every path through its
     body before its first return (`_binds_on_every_path`,
@@ -3977,7 +4035,7 @@ def _walrus_binds(node: ast.AST, name: str) -> bool:
 
 
 def _binds_before(
-    stmt: ast.AST, field: str, name: str, *, setters: AbstractSet[str], walrus: bool, swallowers: AbstractSet[str],
+    stmt: ast.AST, field: str, name: str, *, setters: AbstractSet[int], walrus: bool, swallowers: AbstractSet[int],
 ) -> bool:
     """Whether `stmt`, a statement, handler or case, surely binds `name`
     before the block its `field` holds runs: a loop's target for its body,
@@ -4197,15 +4255,14 @@ class _Reader:
         self, cells: list[_Cell], *, current: _Cell, project_root: Path | None = None,
         errored: frozenset[int] = frozenset(), errored_paths: Literal["any", "unknown"] = "any",
         stopped_early: frozenset[int] = frozenset(), stopped_at: Mapping[int, int] | None = None,
-        swallowers: frozenset[str] = frozenset(),
+        tainted_contexts: frozenset[str] = frozenset(),
     ) -> None:
         self.cells = cells
         self.current = current
-        # The names a with's context may be called by, or start from, that
-        # may swallow an error its body raises, across the cells
-        # (`_swallowers`), with `swallowers` beside them: each with that
-        # may, read by `_may_swallow`, vouches for nothing its body binds.
-        self.swallowers = _swallowers(cells) | swallowers
+        # The names a with's context may start from that hold what code the
+        # check can't read made (`_tainted_contexts`): such a with may
+        # swallow an error its body raises (`swallowers`).
+        self.tainted_contexts = tainted_contexts
         # The turn's project root, to read a literal relative SQL-file path.
         self.project_root = project_root
         # The earlier cells that stopped on an error, by index, for a reader
@@ -4266,7 +4323,7 @@ class _Reader:
         # The member each `getattr` by a key bound to literal texts reads, by
         # the call's id (`looked_up_member`).
         self._looked_up: dict[int, str | None] = {}
-        self._setters: dict[str, frozenset[str]] = {}
+        self._setters: dict[str, frozenset[int]] = {}
         for cell in self.in_order:
             for name in cell.module_bound:
                 self._binders.setdefault(name, []).append(cell)
@@ -4803,20 +4860,23 @@ class _Reader:
 
     def items_of(self, *, node: ast.AST, key: ast.AST | None, depth: int) -> list[ast.AST] | None:
         """The elements of the list, tuple, set or dict values `node` holds,
-        with what the pad adds to it, only the one a literal `key` names when
-        the literal says which; None when the check can't place them, or
-        at the depth limit (`stops`)."""
+        with what the pad adds to it, only those `key` names where the check
+        reads which (`_key_values`); None when the check can't place them,
+        or at the depth limit (`stops`)."""
         if self.stops("items", node, depth=depth, limit=6):
             return None
         if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
             elements = [e.value if isinstance(e, ast.Starred) else e for e in node.elts]
-            if (isinstance(key, ast.Constant) and type(key.value) is int and not isinstance(node, ast.Set)
-                    and -len(elements) <= key.value < len(elements)):
-                return [elements[key.value]]
+            keys = None if key is None or isinstance(node, ast.Set) else _key_values(key, self, depth=depth + 1)
+            if keys and not any(isinstance(e, ast.Starred) for e in node.elts) and all(
+                type(k) is int and -len(elements) <= k < len(elements) for k in keys
+            ):
+                return [elements[k] for k in dict.fromkeys(keys)]
             return elements
         if isinstance(node, ast.Dict):
-            if isinstance(key, ast.Constant) and all(isinstance(k, ast.Constant) for k in node.keys):
-                hits = [v for k, v in zip(node.keys, node.values) if k.value == key.value]
+            keys = None if key is None else _key_values(key, self, depth=depth + 1)
+            if keys and all(isinstance(k, ast.Constant) for k in node.keys):
+                hits = [v for k, v in zip(node.keys, node.values) if k.value in keys]
                 if hits:
                     return hits
             return list(node.values)
@@ -4925,16 +4985,27 @@ class _Reader:
             return [cls]
         return None
 
-    def partial_of(self, *, node: ast.expr) -> ast.Call | None:
-        """The `functools.partial(f, ...)` call `node` is, or a name holds."""
+    def partials_of(self, *, node: ast.expr, depth: int = 0) -> list[ast.Call]:
+        """Each `functools.partial(f, ...)` call `node` is, or a name holds;
+        one whose `f` is a partial, or a name that holds partials, reads as
+        each of those with its own arguments after theirs, as
+        `partial(base, cmd)` after `base = partial(subprocess.run,
+        check=True)` reads as `partial(subprocess.run, cmd, check=True)`, up
+        to `_PARAM_DEPTH` partials deep."""
         if isinstance(node, ast.Name):
             if node.id not in self.bound_names:
-                return None
+                return []
             values = [b.value for b in self.bindings_of(node.id, node=node) if b.how == "value"]
         else:
             values = [node]
-        return next((v for v in values if isinstance(v, ast.Call) and v.args
-                     and self.dotted(v.func) == "functools.partial"), None)
+        out: list[ast.Call] = []
+        for v in values:
+            if not (isinstance(v, ast.Call) and v.args and self.dotted(v.func) == "functools.partial"):
+                continue
+            inner = self.partials_of(node=v.args[0], depth=depth + 1) if depth < _PARAM_DEPTH else []
+            out += [ast.copy_location(ast.Call(func=v.func, args=[*i.args, *v.args[1:]],
+                                               keywords=[*i.keywords, *v.keywords]), v) for i in inner] or [v]
+        return out
 
     # ── names ────────────────────────────────────────────────────────────
 
@@ -5219,11 +5290,18 @@ class _Reader:
             ), self.current.index + 1)
         return first < cell.host
 
-    def global_setters(self, name: str) -> frozenset[str]:
-        """The functions the cells define whose call binds `name` at module
-        level, by name: each def of the name, outside a class, sets it
-        (`_sets_global`), so whichever of them ran last does, and no cell
-        binds the name at module level any other way. Read once per name."""
+    @cached_property
+    def swallowers(self) -> frozenset[int]:
+        """The withs of the cells, by id, that may swallow an error their
+        body raises (`_swallowing_withs`): each, read by `_may_swallow`,
+        vouches for nothing its body binds. Read once per check."""
+        return _swallowing_withs(self)
+
+    def global_setters(self, name: str) -> frozenset[int]:
+        """The calls, by id, that bind `name` at module level: a call as a
+        statement, by its bare name, of a function whose def that is live
+        where the call runs sets the name (`_live_setter`). Read once per
+        name."""
         if name not in self._setters:
             declaring = {
                 scope.name for cell in self.cells for declared in cell.signs.globals_declared
@@ -5231,14 +5309,40 @@ class _Reader:
                 if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef))
             }
             self._setters[name] = frozenset(
-                func for func in declaring
-                if not any(func in cell.imports or any(b.scope is None for b in cell.bindings.get(func, ()))
-                           for cell in self.cells)
-                and all(_sets_global(d, cell, name, swallowers=self.swallowers) for cell in self.cells
-                        for d in cell.definitions if isinstance(d, (ast.FunctionDef, ast.AsyncFunctionDef))
-                        and d.name == func and not isinstance(cell.scope_of(d), ast.ClassDef))
-            )
+                id(call) for cell in self.cells if declaring for call in cell.calls
+                if isinstance(call.func, ast.Name) and call.func.id in declaring
+                and isinstance(cell.parents.get(call), ast.Expr) and self._live_setter(call, call.func.id, name)
+            ) if declaring else frozenset()
         return self._setters[name]
+
+    def _live_setter(self, call: ast.Call, func: str, name: str) -> bool:
+        """Whether `call`, a call of the function `func` by its bare name,
+        runs a def that sets `name` as a global (`_sets_global`). Read back
+        from the last module-level binding of `func`, a def, class, import
+        or assignment, made before the call where the call is at module
+        level (`defined_ahead`), or anywhere for a call inside a function,
+        which runs later: each must be such a def, up to one that surely
+        ran to its end (`_Cell.runs_to_its_end`, `ran_before_stop`), since
+        a later def replaces an earlier one, and one an if may skip leaves
+        the one before it live."""
+        made: list[tuple[_Cell, ast.AST]] = []
+        for other in self.cells:
+            made += [(other, d) for d in other.definitions if d.name == func and other.scope_of(d) is None]
+            made += [(other, stmt) for stmt in other.signs.imports
+                     if func in _import_names(stmt) and other.scope_of(stmt) is None]
+            made += [(other, b.value) for b in self._module_bindings(other, func)]
+        if self.cell_of(call).scope_of(call) is None:
+            made = [(other, node) for other, node in made if self.defined_ahead(other, node, call)]
+        for other, node in sorted(made, key=lambda m: self.position(m[1]), reverse=True):
+            if not (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and _sets_global(node, other, name, swallowers=self.swallowers)):
+                return False
+            if other.surely_run and (
+                self.ran_before_stop(other, node) if other.host in self.stopped_early
+                else other.runs_to_its_end(node, swallowers=self.swallowers)
+            ):
+                return True
+        return False
 
     def binds_surely(self, node: ast.AST, name: str) -> bool:
         """Whether read code surely gave `name` a value on every path to
@@ -5679,13 +5783,24 @@ class _Reader:
         """The names that may hold something that runs code by another name
         than its own: an import under another name, as
         `from runpy import run_path as rp` binds `rp`, and a name an
-        assignment binds to a hint (`_CodeSigns.hint_aliases`)."""
+        assignment binds to a hint (`_CodeSigns.hint_aliases`), or to a
+        `functools.partial` of a name that is one (`_CodeSigns.partial_heads`),
+        followed until no more turn up."""
         out = {name for cell in self.cells for name in cell.signs.hint_aliases}
         for cell in self.cells:
             for name, full in cell.imports.items():
                 last = full.rpartition(".")[2]
                 if name != last and _is_hint(last):
                     out.add(name)
+        heads = [(made, head) for cell in self.cells for made, head in cell.signs.partial_heads
+                 if isinstance(head, ast.Name)]
+        grew = True
+        while grew:
+            grew = False
+            for made, head in heads:
+                if made not in out and head.id in out:
+                    out.add(made)
+                    grew = True
         return frozenset(out)
 
     def uncalled(self, func: Function) -> bool:
@@ -8544,6 +8659,10 @@ def _written_statements(node: ast.AST, reader: _Reader, *, depth: int = 0) -> tu
         if b.how == "element" and isinstance(b.value, ast.Name):
             # A loop over a parameter, as `for s in stmts` of `*stmts`.
             found += _parameter_items(b.value, reader, depth=depth + 1)
+        if b.how in ("element", "unpacked") and isinstance(b.value, ast.Call):
+            # A loop over a dict's entries, as `for name, sql in Q.items()`.
+            for item in _walked_items(b.value, reader, depth=depth + 1) or ():
+                found += _written_statements(item, reader, depth=depth + 1)
         if b.how != "param":
             found += reader.statements_held(node.id, b, prose=False)
             continue
@@ -8795,45 +8914,52 @@ class _FileFinder:
                 continue
             if not isinstance(node, ast.Call):
                 continue
-            partial = reader.partial_of(node=node.func) if isinstance(node.func, (ast.Name, ast.Call)) else None
-            if partial is not None:
-                # A call through functools.partial, read as the call it makes.
-                node = _partial_call(partial=partial, call=node)
-            name = reader.dotted(node.func)
-            method = node.func.attr if isinstance(node.func, ast.Attribute) else ""
-            if name in _DELETE_FUNCS:
-                target = _target_arg(node, keywords=("path", "self"))
-                if target is not None:
-                    self.delete(target, node, files_only=name in _FILE_DELETES)
-            elif name in _MOVE_FUNCS:
-                source = _target_arg(node, keywords=("src", "self"))
-                if source is not None:
-                    self.add(_MOVE_FUNCS[name], self.locate(self.paths(source)), node)
-                self.note_overwrite(node)
-            elif name in _COPY_FUNCS:
-                self.note_overwrite(node)
-            elif name in _SHELL_FUNCS or name in _SPREAD_ARGV_FUNCS or name in _LIST_ARGV_FUNCS:
-                self.shell(node)
-            elif method == "unlink" and not node.args:
-                if not isinstance(node.func.value, (ast.Constant, ast.JoinedStr)):
-                    self.delete(node.func.value, node, files_only=True)
-            elif method == "rmdir" and _on_a_path(node.func.value, reader, cell):
-                self.add("delete", self.locate(self.paths(node.func.value)), node)
-            elif method in ("rename", "replace") and _is_path_rename(node, reader, cell):
-                self.add("rename", self.locate(self.paths(node.func.value)), node)
-                dest = node.args[0] if node.args else next(
-                    (k.value for k in node.keywords if k.arg == "target"), None
-                )
-                if dest is not None:
-                    self.overwrite(self.paths(dest), node)
-            elif method in _EXECUTE or method in _READ_SQL or method == "to_sql":
-                database_writes.append(node)
-            else:
-                write = _file_write(node, reader)
-                if write is not None and write.kind != "create":
-                    self.overwrite(self.paths(write.target), node, append=write.kind == "append")
+            partials = reader.partials_of(node=node.func) if isinstance(node.func, (ast.Name, ast.Call)) else []
+            # A call through functools.partial, read as each call it makes.
+            for made in [_partial_call(partial=partial, call=node) for partial in partials] or [node]:
+                self.call_change(made, database_writes)
         for call in sorted(database_writes, key=lambda c: (c.lineno, c.col_offset)):
             self.database_write(call)
+
+    def call_change(self, node: ast.Call, database_writes: list[ast.Call]) -> None:
+        """The change `node`, a call `walk` reaches, makes to a file: a
+        delete, a move, a rename, an overwrite, or what a program it runs
+        does (`shell`); a call that runs SQL goes on `database_writes`, read
+        once the walk is done."""
+        reader, cell = self.reader, self.cell
+        name = reader.dotted(node.func)
+        method = node.func.attr if isinstance(node.func, ast.Attribute) else ""
+        if name in _DELETE_FUNCS:
+            target = _target_arg(node, keywords=("path", "self"))
+            if target is not None:
+                self.delete(target, node, files_only=name in _FILE_DELETES)
+        elif name in _MOVE_FUNCS:
+            source = _target_arg(node, keywords=("src", "self"))
+            if source is not None:
+                self.add(_MOVE_FUNCS[name], self.locate(self.paths(source)), node)
+            self.note_overwrite(node)
+        elif name in _COPY_FUNCS:
+            self.note_overwrite(node)
+        elif name in _SHELL_FUNCS or name in _SPREAD_ARGV_FUNCS or name in _LIST_ARGV_FUNCS:
+            self.shell(node)
+        elif method == "unlink" and not node.args:
+            if not isinstance(node.func.value, (ast.Constant, ast.JoinedStr)):
+                self.delete(node.func.value, node, files_only=True)
+        elif method == "rmdir" and _on_a_path(node.func.value, reader, cell):
+            self.add("delete", self.locate(self.paths(node.func.value)), node)
+        elif method in ("rename", "replace") and _is_path_rename(node, reader, cell):
+            self.add("rename", self.locate(self.paths(node.func.value)), node)
+            dest = node.args[0] if node.args else next(
+                (k.value for k in node.keywords if k.arg == "target"), None
+            )
+            if dest is not None:
+                self.overwrite(self.paths(dest), node)
+        elif method in _EXECUTE or method in _READ_SQL or method == "to_sql":
+            database_writes.append(node)
+        else:
+            write = _file_write(node, reader)
+            if write is not None and write.kind != "create":
+                self.overwrite(self.paths(write.target), node, append=write.kind == "append")
 
     def lookup(self, *, node: ast.AST) -> bool:
         """Whether `node` is a lookup `_plain_lookup` can't read, on a module,
@@ -9202,6 +9328,8 @@ def _node_commands(node: ast.AST, reader: _Reader, *, depth: int) -> list[str | 
                     out += [c for item in walked for c in _commands(item, reader, depth=depth + 1)]
                 else:
                     held = [f for t in _held_texts(node.id, b, reader, depth=0) for f in _program_filled(t, reader)]
+                    if not held and b.how == "value":
+                        held = _derived_commands(b.value, reader, depth=here) or []
                     unread = unread or not held and not isinstance(b.value, ast.Constant)
                     out += held
         if unread and out:
@@ -9211,7 +9339,81 @@ def _node_commands(node: ast.AST, reader: _Reader, *, depth: int) -> list[str | 
             out.append([_NOT_LITERAL])
         return _capped(out)
     text = _command_text(node, reader)
-    return [] if text is None else list(_program_filled(text, reader))
+    if text is None:
+        return _derived_commands(node, reader, depth=depth) or []
+    return list(_program_filled(text, reader))
+
+
+# Methods of a text that give back a command read from it: the same words,
+# or the same words in another case.
+_SAME_COMMAND_METHODS = frozenset({"strip", "lstrip", "rstrip"})
+_CASE_METHODS = {"lower": str.lower, "upper": str.upper, "casefold": str.casefold}
+
+
+def _derived_commands(node: ast.AST, reader: _Reader, *, depth: int) -> list[str | list[str]] | None:
+    """The commands a value taken from other commands holds, read from
+    those (`_commands`): an entry of a list or dict of them
+    (`_Reader.items_of`), by `[k]`, `.get(k)` with its default, or a
+    list's `.pop()`; each arm of an if-else; a text's `strip` and its kin,
+    or its `lower`, `upper` or `casefold` in that case; `str` of a text and
+    `list` or `tuple` of a list; a full slice, the same command; and any
+    other slice of a list, or a comprehension that keeps some of its
+    words, as each of the list's tails, since either may drop the words
+    before any of them. Empty where a part holds no command the check
+    reads; None for any other value."""
+    parts: list[ast.AST]
+    if isinstance(node, ast.IfExp):
+        parts = [node.body, node.orelse]
+    elif isinstance(node, ast.Subscript) and not isinstance(node.slice, ast.Slice):
+        items = reader.items_of(node=node.value, key=node.slice, depth=depth + 1)
+        if items is None:
+            return []
+        parts = items
+    elif isinstance(node, ast.Subscript):
+        whole = node.slice.lower is None and node.slice.upper is None and node.slice.step is None
+        sliced = _commands(node.value, reader, depth=depth + 1)
+        if whole:
+            return sliced
+        return [words[at:] for words in sliced if isinstance(words, list) for at in range(len(words))]
+    elif (isinstance(node, (ast.ListComp, ast.GeneratorExp)) and len(node.generators) == 1
+          and isinstance(node.elt, ast.Name) and isinstance(node.generators[0].target, ast.Name)
+          and node.elt.id == node.generators[0].target.id):
+        walked = node.generators[0].iter
+        # The first iterable runs where the comprehension does, so a name
+        # there reads what it holds before the comprehension.
+        found = _latest(reader.bindings_of(walked.id, node=node)) if isinstance(walked, ast.Name) else None
+        if found is not None and (not found or any(b.how != "value" for b in found)):
+            return []
+        held = [walked] if found is None else [b.value for b in found]
+        lists = [c for value in held for c in _commands(value, reader, depth=depth + 1) if isinstance(c, list)]
+        return [words[at:] for words in lists for at in range(len(words))]
+    elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and (
+        node.func.attr in ("pop", "get") and len(node.args) <= 2 and not node.keywords
+    ):
+        key = node.args[0] if node.args else None
+        items = reader.items_of(node=node.func.value, key=key, depth=depth + 1)
+        if items is None:
+            return []
+        parts = [*items, *node.args[1:]] if node.func.attr == "get" else items
+    elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and not node.args
+          and not node.keywords and node.func.attr in (*_SAME_COMMAND_METHODS, *_CASE_METHODS)):
+        texts = [c for c in _commands(node.func.value, reader, depth=depth + 1) if isinstance(c, str)]
+        change = _CASE_METHODS.get(node.func.attr, str.strip)
+        return [change(text) for text in texts]
+    elif isinstance(node, ast.Call) and len(node.args) == 1 and not node.keywords and (
+        reader.dotted(node.func) in ("str", "list", "tuple")
+    ):
+        kind = str if reader.dotted(node.func) == "str" else list
+        return [c for c in _commands(node.args[0], reader, depth=depth + 1) if isinstance(c, kind)]
+    else:
+        return None
+    out: list[str | list[str]] = []
+    for part in parts:
+        got = _commands(part, reader, depth=depth + 1)
+        if not got:
+            return []
+        out += got
+    return out
 
 
 def _capped(commands: list[str | list[str]]) -> list[str | list[str]]:
@@ -9405,6 +9607,34 @@ def _node_texts(node: ast.AST, reader: _Reader, *, depth: int) -> list[str] | No
             return None
         return got
     return _all_texts(parts, reader, depth=depth + 1)
+
+
+def _key_values(key: ast.AST, reader: _Reader, *, depth: int) -> list[str | int] | None:
+    """The keys or indexes a subscript's `key` can be: a literal whole
+    number, a negative one among them (`_whole_number`), or each value a
+    name is given that is one; else each literal text it can hold
+    (`_literal_texts`), as a loop over literal keys or a parameter the
+    calls pass texts gives. None where the check can't read them."""
+    number = _whole_number(key)
+    if number is not None:
+        return [number]
+    if isinstance(key, ast.Name):
+        found = reader.bindings_of(key.id, node=key)
+        numbers = [_whole_number(b.value) if b.how == "value" else None for b in found]
+        if found and None not in numbers:
+            return [n for n in numbers if n is not None]
+    texts = _literal_texts(key, reader, depth=depth)
+    return None if texts is None else list(texts)
+
+
+def _whole_number(node: ast.AST) -> int | None:
+    """The whole number `node` writes out, as `2` or `-1`; None for anything
+    else, `True` among them."""
+    negative = isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub)
+    value = node.operand if isinstance(node, ast.UnaryOp) and negative else node
+    if isinstance(value, ast.Constant) and type(value.value) is int:
+        return -value.value if negative else value.value
+    return None
 
 
 def _joined_texts(parts: Sequence[ast.AST], reader: _Reader, *, depth: int) -> list[str] | None:
@@ -10200,14 +10430,17 @@ _POPEN_ARGS_FUNCS = frozenset({
 def _python_launch(call: ast.Call, reader: _Reader) -> _Launch | None:
     """The Python `call` launches when it runs a program (`_LAUNCHERS`),
     named through the imports or a name bound to it (`_Reader.module_member`),
-    or made through `functools.partial`: each command it can run, read by
+    or made through `functools.partial`, each partial a name may hold in
+    turn (`_Reader.partials_of`): each command it can run, read by
     `_command_launch`. The program is the path the exec and spawn forms
     take before the program's words, or `executable=` when the call gives
     it. A call whose command the check can't read at all may run any
     program. None for any other call."""
-    partial = reader.partial_of(node=call.func) if isinstance(call.func, (ast.Name, ast.Call)) else None
-    if partial is not None:
-        call = _partial_call(partial=partial, call=call)
+    partials = reader.partials_of(node=call.func) if isinstance(call.func, (ast.Name, ast.Call)) else []
+    if partials:
+        made = [_python_launch(_partial_call(partial=partial, call=call), reader) for partial in partials]
+        launches = [launch for launch in made if launch is not None]
+        return _Launch.joined(launches) if launches else None
     last = _last_name(call.func)
     loop_kind = _LOOP_LAUNCHERS.get(last) if isinstance(call.func, ast.Attribute) else None
     if loop_kind is not None:
@@ -10431,7 +10664,11 @@ def _ipython_launch(args: list[str], *, moved: bool) -> _Launch:
     (`!`) and IPython's other syntax don't parse, and the shell
     `get_ipython` gives runs commands and code. With no `-c`, it runs a
     script, or the code its input gives it, as `python` does. Its options
-    end at the first `--`: the words after it are the script's own."""
+    end at the first `--`: the words after it are the script's own. Of two
+    `-c` options the last one counts, as for any of its options, and a
+    first word `help` asks for its help, unless a `--` follows."""
+    if args[:1] == ["help"] and "--" not in args:
+        return _Launch()
     code: str | None = None
     words = iter(args)
     for word in words:
@@ -10443,10 +10680,9 @@ def _ipython_launch(args: list[str], *, moved: bool) -> _Launch:
         if option in _IPYTHON_LOADING_OPTIONS or option.startswith("--") and "." in option:
             return _Launch(unread=True)
         if option in _IPYTHON_CODE_OPTIONS:
-            given = value if equals else next(words, None)
-            code = given if code is None else code
+            code = value if equals else next(words, None)
         elif word.startswith("-c") and not word.startswith("--"):
-            code = word[2:] if code is None else code
+            code = word[2:]
     if code is None:
         return _Launch(unread=True)
     if "get_ipython" in code or _parse_ran(code) is None:
@@ -10894,8 +11130,18 @@ def _urllib_call(call: ast.Call, name: str, reader: _Reader) -> _HttpCall | None
 
 def _http_call(call: ast.Call, reader: _Reader) -> _HttpCall | None:
     """The request `call` sends or builds: a requests or httpx function or
-    `Request`, a Session's or Client's method, or urllib's `Request` or
-    `urlopen`."""
+    `Request`, a Session's or Client's method, one of either looked up by a
+    name, as `getattr(requests, verb)(url)` is, whose method is each text
+    the name holds (`_http_methods`), or urllib's `Request` or `urlopen`."""
+    looked = call.func
+    if (isinstance(looked, ast.Call) and isinstance(looked.func, ast.Name) and looked.func.id == "getattr"
+            and len(looked.args) == 2 and not looked.keywords):
+        holder, verb_node = looked.args
+        client = None if reader.dotted(holder) in _HTTP_LIBRARIES else _http_client(holder, reader)
+        if reader.dotted(holder) not in _HTTP_LIBRARIES and client is None:
+            return None
+        return _HttpCall(method=verb_node, url=_target_arg(call, keywords=("url",)),
+                         base=None if client is None else _keyword(client, "base_url"))
     name = reader.dotted(call.func)
     if name in ("urllib.request.Request", "urllib.request.urlopen"):
         return _urllib_call(call, name, reader)
@@ -12065,9 +12311,12 @@ class _WrittenModules:
     the folders a cell unpacks an archive or clones a repository into
     (`unpacked`), "." for the working folder, with whether one is a folder
     the check can't place (`unpacked_anywhere`), and where the first such
-    unpack or clone runs (`_Reader.position`), None with none; and whether
-    a write the check can't place, or an unpack, may write a startup hook a
-    new Python process runs (`hooks_anywhere`, `_unplaced_hook`)."""
+    unpack or clone runs (`_Reader.position`), None with none; whether a
+    write the check can't place, or an unpack, may write a startup hook a
+    new Python process runs (`hooks_anywhere`, `_unplaced_hook`); and
+    whether a cell unpacks an archive or copies a folder's files into the
+    installed packages (`trees_in_packages`, `_lands_in_packages`), which
+    may put a startup hook there that each later Python process runs."""
 
     paths: frozenset[str]
     names: frozenset[str]
@@ -12076,6 +12325,15 @@ class _WrittenModules:
     unpacked_anywhere: bool = False
     first_unpack: tuple[int, ...] | None = None
     hooks_anywhere: bool = False
+    trees_in_packages: bool = False
+
+
+def _made_file(call: ast.Call, reader: _Reader) -> ast.AST | None:
+    """The file `call`, one that writes the file an argument names
+    (`_FILE_MAKERS`), writes, as `urlretrieve`'s second argument; None for
+    any other call."""
+    where = _FILE_MAKERS.get(reader.module_member(call.func) or reader.dotted(call.func))
+    return None if where is None else where.given(call)
 
 
 def _written_modules(reader: _Reader, cells: Sequence[_Cell]) -> _WrittenModules:
@@ -12093,7 +12351,7 @@ def _written_modules(reader: _Reader, cells: Sequence[_Cell]) -> _WrittenModules
     paths: set[str] = set()
     names: set[str] = set()
     unpacked: set[str] = set()
-    anywhere = unpacked_anywhere = hooks_anywhere = False
+    anywhere = unpacked_anywhere = hooks_anywhere = trees_in_packages = False
     # Where each unpack or clone runs.
     unpacks: list[tuple[int, ...]] = []
     for cell in cells:
@@ -12109,9 +12367,7 @@ def _written_modules(reader: _Reader, cells: Sequence[_Cell]) -> _WrittenModules
             elif last == "touch" and isinstance(call.func, ast.Attribute):
                 target = call.func.value
             if target is None and last in _FILE_MAKER_NAMES:
-                maker = reader.module_member(call.func) or reader.dotted(call.func)
-                where = _WRITESTR if last == "writestr" else _FILE_MAKERS.get(maker)
-                target = None if where is None else where.given(call)
+                target = _WRITESTR.given(call) if last == "writestr" else _made_file(call, reader)
             if target is not None:
                 got = reader.paths(target, cell=cell)
                 if isinstance(got, _Unknown) or _TEMP_PATH in got:
@@ -12140,6 +12396,9 @@ def _written_modules(reader: _Reader, cells: Sequence[_Cell]) -> _WrittenModules
                 dest = _TREE_DESTINATIONS[last].given(call)
                 got = ["."] if dest is None else reader.paths(dest, cell=cell)
                 unpacks.append(reader.position(call))
+                trees_in_packages = trees_in_packages or dest is not None and _writes_site_packages(dest, reader) or (
+                    not isinstance(got, _Unknown) and _lands_in_packages(got, reader.cwds)
+                )
                 if isinstance(got, _Unknown):
                     unplaced = unpacked_anywhere = hooks_anywhere = True
                     continue
@@ -12153,8 +12412,10 @@ def _written_modules(reader: _Reader, cells: Sequence[_Cell]) -> _WrittenModules
             ):
                 name = reader.module_member(call.func) or reader.dotted(call.func)
                 for command in _shell_commands(call, name, reader) if name in _LAUNCHERS else ():
-                    commands = [command] if isinstance(command, list) else _script_commands(command)
-                    for words in commands:
+                    folders = _run_folders(call, reader, cell)
+                    steps = ([_ScriptCommand(words=command, cd=None)] if isinstance(command, list)
+                             else _script_walk(command))
+                    for words, cd in steps:
                         paths.update(path for w in words for path in [_REDIRECT.sub("", w).replace("\\", "/")]
                                      if _module_stem(path) is not None)
                         into = _cloned_into(words) or _unpacked_into(words) or _copied_tree_into(words)
@@ -12162,12 +12423,30 @@ def _written_modules(reader: _Reader, cells: Sequence[_Cell]) -> _WrittenModules
                             unpacks.append(reader.position(call))
                             unpacked.add(into)
                             unpacked_anywhere = unpacked_anywhere or _unreadable_word(into)
+                        into = _unpacked_into(words) or _copied_contents_into(words)
+                        trees_in_packages = trees_in_packages or (
+                            into is not None and _lands_in_packages([into], folders)
+                        )
+                        if cd is not None:
+                            folders = _shell_cd(folders, cd)
         if unplaced:
             anywhere = True
             names.update(cell.signs.py_files)
     return _WrittenModules(paths=frozenset(paths), names=frozenset(names), anywhere=anywhere,
                            unpacked=frozenset(unpacked), unpacked_anywhere=unpacked_anywhere,
-                           first_unpack=min(unpacks, default=None), hooks_anywhere=hooks_anywhere)
+                           first_unpack=min(unpacks, default=None), hooks_anywhere=hooks_anywhere,
+                           trees_in_packages=trees_in_packages)
+
+
+def _lands_in_packages(folders: Iterable[str], cwds: Sequence[str] | _Unknown) -> bool:
+    """Whether one of `folders`, each read against the folders `cwds` a
+    relative one is in, is inside the installed packages
+    (`_names_package_folder`)."""
+    return any(
+        _names_package_folder(folder)
+        or not isinstance(cwds, _Unknown) and any(_names_package_folder(_join(cwd, folder)) for cwd in cwds)
+        for folder in folders
+    )
 
 
 
@@ -12247,19 +12526,27 @@ def _writes_site_packages(target: ast.AST, reader: _Reader, *, depth: int = 0) -
     return False
 
 
-def _copied_module_stems(call: ast.Call, reader: _Reader, cell: _Cell) -> set[str]:
-    """The basenames of the Python files `call`, a copy or a move of a file,
-    reads from (`_COPY_FUNCS`, `shutil.move`): a copy or move into a folder
-    keeps each source's own name, so `shutil.copy("a/erp.py", "lib")` writes
-    `lib/erp.py`. Empty for any other call, or a source the check can't
-    place."""
+def _copied_names(call: ast.Call, reader: _Reader, cell: _Cell) -> list[str] | _Unknown:
+    """The basenames of the files `call`, a copy or a move of a file into a
+    folder (`_COPY_INTO_FOLDER`), reads from, which each keeps under the
+    folder it lands in, so `shutil.copy("a/erp.py", "lib")` writes
+    `lib/erp.py`. Empty for any other call; unknown for a source the check
+    can't place."""
     if reader.dotted(call.func) not in _COPY_INTO_FOLDER:
-        return set()
+        return []
     source = _target_arg(call, keywords=("src",))
     got = reader.paths(source, cell=cell) if source is not None else _UNKNOWN
     if isinstance(got, _Unknown):
-        return set()
-    return {posixpath.basename(p.replace("\\", "/")) for p in got if _module_stem(p.replace("\\", "/")) is not None}
+        return _UNKNOWN
+    return [posixpath.basename(p.replace("\\", "/")) for p in got]
+
+
+def _copied_module_stems(call: ast.Call, reader: _Reader, cell: _Cell) -> set[str]:
+    """The basenames of the Python files `call`, a copy or a move of a file
+    into a folder, reads from (`_copied_names`). Empty for any other call,
+    or a source the check can't place."""
+    names = _copied_names(call, reader, cell)
+    return set() if isinstance(names, _Unknown) else {name for name in names if _module_stem(name) is not None}
 
 
 def _copied_tree_into(words: list[str]) -> str | None:
@@ -12279,6 +12566,22 @@ def _copied_tree_into(words: list[str]) -> str | None:
     folder = dest.endswith("/") or len(sources) > 1
     tree = any(s.endswith("/") or "*" in s or "?" in s or "[" in s for s in sources)
     return dest if folder or tree else None
+
+
+def _copied_contents_into(words: list[str]) -> str | None:
+    """The folder a copy command, by its words (`_TREE_COPY_PROGRAMS`), puts
+    a folder's own files into, under names the check can't read: its last
+    operand, where a source is a listing's wildcard or ends with `/` or `/.`,
+    as `cp hooks/* lib/`, `cp -r hooks/. lib/` and `rsync -a hooks/ lib/`
+    do. None for any other command."""
+    bare, _ = _command_words(words)
+    if len(bare) < 3 or _program_name(bare[0]) not in _TREE_COPY_PROGRAMS:
+        return None
+    operands = [w for w in bare[1:] if not w.startswith("-")]
+    if len(operands) < 2:
+        return None
+    contents = any(s.endswith(("/", "/.")) or s == "." or "*" in s or "?" in s or "[" in s for s in operands[:-1])
+    return operands[-1] if contents else None
 
 
 def _cloned_into(words: list[str]) -> str | None:
@@ -12577,8 +12880,11 @@ class _Modules:
     @cached_property
     def hooks_written(self) -> bool:
         """Whether a cell writes a startup hook that each Python process
-        started after it runs as it starts (`_HookWrite.runs_at_start`)."""
-        return any(write.runs_at_start for write in self._hook_writes)
+        started after it runs as it starts (`_HookWrite.runs_at_start`), or
+        unpacks or copies a folder's files into the installed packages,
+        where one may land (`_WrittenModules.trees_in_packages`); the cells
+        that do are among those `_naming` reads."""
+        return self._written.trees_in_packages or any(write.runs_at_start for write in self._hook_writes)
 
     @cached_property
     def hooks_may_run(self) -> bool:
@@ -12841,7 +13147,8 @@ def _looks_up_a_runner(call: ast.Call, reader: _Reader, *, called: bool) -> bool
     harmless names holds nothing. Where the lookup is `called` right away
     and one text alone names a runner of text or a class whose instances
     run code (`_READ_AS_MEMBER`), the call is read as the literal key's
-    (`_Reader.looked_up_member`): `getattr(timeit, n)("pass")` with `n`
+    where the lookup reads as that member, with no default or a constant
+    one (`_Reader.looked_up_member`): `getattr(timeit, n)("pass")` with `n`
     bound to "Timer" runs the literal it is handed, and `getattr(cProfile,
     n)()` makes a profiler whose `run` holds where it is called. An
     `operator.methodcaller` or `operator.attrgetter` holds where a key
@@ -12866,7 +13173,10 @@ def _looks_up_a_runner(call: ast.Call, reader: _Reader, *, called: bool) -> bool
         if texts is None:
             return True
         running = [text for text in dict.fromkeys(texts) if _runs_on_holder(module, text)]
-        return bool(running) and not (called and len(running) == 1 and f"{module}.{running[0]}" in _READ_AS_MEMBER)
+        member = f"{module}.{running[0]}" if len(running) == 1 else None
+        return bool(running) and not (
+            called and member in _READ_AS_MEMBER and reader.looked_up_member(call) == member
+        )
     methods = _runner_methods(held, reader)
     return bool(methods) and (texts is None or any(text in methods for text in texts))
 
@@ -12998,9 +13308,11 @@ def _may_be_text(node: ast.AST, reader: _Reader, *, unknown: bool, depth: int = 
     parameter holds what each call of its function passes for it
     (`_Reader.args_for`), and none for a function nothing calls; an
     attribute holds what a cell stores in it, as `self.app = FastAPI()`
-    does, else an object where it is one of an object a call made, as
-    `demo.app` is. Any other code reads as `unknown`, and so does a name no
-    value binds, or past `_PARAM_DEPTH` names."""
+    does, and one of an instance of a class the cells define what their
+    code stores on `self` (`_made_by_a_class`), else an object where it is
+    one of an object a call made, as `demo.app` is. Any other code reads as
+    `unknown`, and so does a name no value binds, or past `_PARAM_DEPTH`
+    names."""
     if isinstance(node, ast.Call):
         return _last_name(node.func) in _TEXT_SOURCES
     if isinstance(node, ast.Subscript) and _made_object(node.value, reader, depth=depth):
@@ -13011,6 +13323,8 @@ def _may_be_text(node: ast.AST, reader: _Reader, *, unknown: bool, depth: int = 
         return unknown
     if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
         stored = [v for cell in reader.cells for v in cell.member_values.get((node.value.id, node.attr), ())]
+        if not stored and _made_by_a_class(node.value, reader):
+            stored = [v for cell in reader.cells for v in cell.member_values.get(("self", node.attr), ())]
         if stored:
             return any(_may_be_text(v, reader, unknown=unknown, depth=depth + 1) for v in stored)
         return False if _made_object(node.value, reader, depth=depth) else unknown
@@ -13035,22 +13349,37 @@ def _may_be_text(node: ast.AST, reader: _Reader, *, unknown: bool, depth: int = 
     return False
 
 
-# The last names of the calls that load a file's data, which may hold texts
-# under its keys, as a config read by `json.load` does (`_made_object`).
-_DATA_LOADS = frozenset({"load", "safe_load", "full_load"})
+# The last names of the calls that give data which may hold texts under its
+# keys or attributes, as a config `json.load` reads, a copy of the
+# environment or the settings `dotenv_values` reads do (`_made_object`).
+_DATA_LOADS = frozenset({"load", "safe_load", "full_load", "copy", "deepcopy", "to_dict", "dotenv_values"})
 
 
 def _made_object(node: ast.AST, reader: _Reader, *, depth: int) -> bool:
     """Whether `node`, what a subscript or an attribute is read on, is a name
-    that holds only what a call made that gives an object, not text
-    (`_may_be_text`), as `df = pd.read_csv(...)` or `demo =
-    gr.Interface(...)` do, but a load of a file's data (`_DATA_LOADS`)."""
+    that holds only what a member of an installed package or of Python's
+    own modules made (`_Reader.module_member`) that gives an object, not
+    text (`_may_be_text`) nor data that may hold texts (`_DATA_LOADS`), as
+    `df = pd.read_csv(...)` or `demo = gr.Interface(...)` do. What another
+    call gives may hold texts, as a response's `.json()`, `parse_args()`
+    or `dict(os.environ)` does."""
     if not isinstance(node, ast.Name) or depth > _PARAM_DEPTH:
         return False
     found = reader.bindings_of(node.id, node=node)
     return bool(found) and all(
-        b.how == "value" and isinstance(b.value, ast.Call) and _last_name(b.value.func) not in _DATA_LOADS
+        b.how == "value" and isinstance(b.value, ast.Call) and reader.module_member(b.value.func) is not None
+        and _last_name(b.value.func) not in _DATA_LOADS
         and not _may_be_text(b.value, reader, unknown=True, depth=depth + 1) for b in found
+    )
+
+
+def _made_by_a_class(node: ast.Name, reader: _Reader) -> bool:
+    """Whether the name `node` holds only instances of a class the cells
+    define (`_Reader.classes`), made by calling it by name."""
+    found = reader.bindings_of(node.id, node=node)
+    return bool(found) and all(
+        b.how == "value" and isinstance(b.value, ast.Call) and isinstance(b.value.func, ast.Name)
+        and b.value.func.id in reader.classes for b in found
     )
 
 
@@ -13078,13 +13407,13 @@ def _unittest_main_unread(call: ast.Call, reader: _Reader) -> bool:
     can't read: a `module=` that names anything but `__main__`, or that the
     check can't read, loads that module, and a `None` there, which may also
     come through a name, discovers the tests under the working folder and
-    imports them; an `argv` the check can't read, or
-    with a test name or `discover` past the program word, loads tests from
-    disk, and so does a `defaultTest` given, which names the tests to
-    load. Each is read by keyword or in the order `TestProgram` takes them.
-    With no `argv`, it reads `sys.argv`, which a cell may set
-    (`_sets_test_argv`). With none of these it runs the cell's own TestCase
-    from `__main__`, which read code holds already."""
+    imports them; an `argv` the check can't read, or one whose words load
+    tests (`_loads_tests`), and a `defaultTest` given, which names the
+    tests to load, unless each of its names is the cells' own
+    (`_names_own_test`). Each is read by keyword or in the order
+    `TestProgram` takes them. With no `argv`, it reads `sys.argv`, which a
+    cell may set (`_sets_test_argv`). With none of these it runs the cell's
+    own TestCase from `__main__`, which read code holds already."""
     positional = list(itertools.takewhile(lambda a: not isinstance(a, ast.Starred), call.args))
     if len(positional) != len(call.args) or any(k.arg is None for k in call.keywords):
         return True
@@ -13095,24 +13424,68 @@ def _unittest_main_unread(call: ast.Call, reader: _Reader) -> bool:
             return True
     default = _given_at(call, positional, "defaultTest", 1)
     if default is not None and not (isinstance(default, ast.Constant) and default.value is None):
-        return True
+        named = ([default] if isinstance(default, ast.Constant) else reader.items_of(node=default, key=None, depth=0))
+        names = [_literal_source(item) for item in named or ()]
+        if not names or any(name is None or not _names_own_test(name, reader) for name in names):
+            return True
     argv = _given_at(call, positional, "argv", 2)
     if argv is None or isinstance(argv, ast.Constant) and argv.value is None:
         return _sets_test_argv(reader)
     items = reader.items_of(node=argv, key=None, depth=0)
-    if items is None:
+    return items is None or _loads_tests(items, reader)
+
+
+# The options unittest's command line takes, and those that take a value.
+_UNITTEST_FLAGS = frozenset({
+    "-h", "--help", "-v", "--verbose", "-q", "--quiet", "--locals", "-f", "--failfast", "-c", "--catch", "-b",
+    "--buffer",
+})
+_UNITTEST_VALUE_OPTIONS = frozenset({"-k", "--durations"})
+
+
+def _loads_tests(items: Sequence[ast.AST], reader: _Reader) -> bool:
+    """Whether a unittest argv, by its `items`, loads tests from disk: a
+    word past the program word that the check can't read or that is
+    `discover`; else a test name that isn't the cells' own
+    (`_names_own_test`), unless an option unittest doesn't take
+    (`_UNITTEST_FLAGS`, `_UNITTEST_VALUE_OPTIONS`, a long one by a prefix,
+    short flags run together) stops its run before it loads any."""
+    words = [_literal_source(item) for item in items[1:]]
+    if any(word is None or word.lower() == "discover" for word in words):
         return True
-    return any(
-        (word := _literal_source(item)) is None or word == "discover" or not word.startswith("-")
-        for item in items[1:]
-    )
+    loads = False
+    rest = iter(word for word in words if word is not None)
+    for word in rest:
+        option = word.partition("=")[0]
+        if option in _UNITTEST_VALUE_OPTIONS:
+            if "=" not in word:
+                next(rest, None)
+        elif word.startswith("-k"):
+            continue
+        elif word.startswith("--"):
+            if not any(flag.startswith(option) for flag in (*_UNITTEST_FLAGS, *_UNITTEST_VALUE_OPTIONS)
+                       if flag.startswith("--")):
+                return False
+        elif word.startswith("-") and len(word) > 1:
+            if not all(f"-{letter}" in _UNITTEST_FLAGS for letter in word[1:]):
+                return False
+        else:
+            loads = loads or not _names_own_test(word, reader)
+    return loads
+
+
+def _names_own_test(name: str, reader: _Reader) -> bool:
+    """Whether the test name `name` names a class the cells define
+    (`_Reader.classes`), or a member of one, as `TestTotals.test_ok` does,
+    which unittest looks up in `__main__` and loads nothing for."""
+    return name.partition(".")[0] in reader.classes
 
 
 def _sets_test_argv(reader: _Reader) -> bool:
     """Whether a cell sets `sys.argv`, which `unittest.main` reads when it
     is given no argv, to words that load tests from disk: a list the check
-    can't read, or one with a test name or `discover` past the program
-    word; any change in place, as an append or an entry store, counts."""
+    can't read, or one that does (`_loads_tests`); any change in place, as
+    an append or an entry store, counts."""
     for cell in reader.cells:
         for node in cell.stores:
             for target in node.targets if isinstance(node, ast.Assign) else ():
@@ -13121,10 +13494,7 @@ def _sets_test_argv(reader: _Reader) -> bool:
                 if reader.dotted(target) != "sys.argv":
                     continue
                 items = reader.items_of(node=node.value, key=None, depth=0)
-                if items is None or any(
-                    (word := _literal_source(item)) is None or word == "discover" or not word.startswith("-")
-                    for item in items[1:]
-                ):
+                if items is None or _loads_tests(items, reader):
                     return True
         for merge in cell.merges:
             if reader.dotted(merge.target) == "sys.argv":
@@ -13242,14 +13612,12 @@ def _passed_calls(node: ast.AST, cell: _Cell, reader: _Reader) -> list[ast.Call]
     with the arguments and keywords it is handed, so
     `ex.submit(subprocess.run, ["rm", "x"])` reads as `subprocess.run(["rm",
     "x"])`. A `functools.partial` of it, written out or held in a name
-    (`_Reader.partial_of`), is read where the partial is handed on, with
-    the partial's own arguments first (`_partial_call`). Unknown where the
-    check can't read what the caller hands it; none where `node` sits in no
-    call that may run it."""
+    (`_Reader.partials_of`), is read where the partial is handed on, with
+    the partial's own arguments first (`_partial_call`), each partial a
+    name may hold in turn. Unknown where the check can't read what the
+    caller hands it; none where `node` sits in no call that may run it."""
+    bound = reader.partials_of(node=node) if isinstance(node, ast.Name) else []
     partials: list[ast.Call] = []
-    bound = reader.partial_of(node=node) if isinstance(node, ast.Name) else None
-    if bound is not None:
-        partials.append(bound)
     holder = _value_holder(node, cell)
     while (isinstance(holder, ast.Call) and holder.args and holder.args[0] is node
            and reader.dotted(holder.func) == "functools.partial"):
@@ -13263,7 +13631,7 @@ def _passed_calls(node: ast.AST, cell: _Cell, reader: _Reader) -> list[ast.Call]
         call = ast.copy_location(ast.Call(func=node, args=given.args, keywords=given.keywords), node)
         for partial in reversed(partials):
             call = _partial_call(partial=partial, call=call)
-        out.append(call)
+        out += [_partial_call(partial=partial, call=call) for partial in bound] or [call]
     return out
 
 
@@ -13282,8 +13650,7 @@ def _partial_launcher(node: ast.AST, reader: _Reader) -> bool:
     `job`; such a name is one of `_Reader.runner_aliases`."""
     if not (isinstance(node, ast.Name) and node.id in reader.runner_aliases):
         return False
-    partial = reader.partial_of(node=node)
-    return partial is not None and reader.module_member(partial.args[0]) in _LAUNCHERS
+    return any(reader.module_member(partial.args[0]) in _LAUNCHERS for partial in reader.partials_of(node=node))
 
 
 def _passed_launch(node: ast.AST, cell: _Cell, reader: _Reader, *, read: _ExecRead, modules: _Modules) -> bool:
@@ -13315,9 +13682,10 @@ def _value_call_args(node: ast.AST, wrapper: ast.AST | None, reader: _Reader) ->
     after it for `submit`, `asyncio.to_thread`, `atexit.register`,
     `Context.run` and an event loop's calls, with the keywords of those
     that forward them; a pool's `args` and `kwds`; those a call of what a
-    delaying call gives is handed (`_DELAYING_CALLS`); and those each call
-    of its parameter in a function the pad defines makes (`_helper_calls`).
-    Unknown for a caller that runs it on each element (`_MAPPING_CALLERS`),
+    delaying call gives is handed (`_DELAYING_CALLS`); those each call of
+    its parameter in a function the pad defines makes (`_helper_calls`);
+    and each item of the one sequence a caller that runs it on each
+    element walks (`_MAPPING_CALLERS`, `_mapped_args`). Unknown for
     arguments the check can't read, `node` handed on in another place than
     the function's, or a caller the check doesn't know; none where
     `wrapper` is no call, or one that only looks at the value
@@ -13347,7 +13715,9 @@ def _value_call_args(node: ast.AST, wrapper: ast.AST | None, reader: _Reader) ->
             return _UNKNOWN
         return _passed_lists(_given_at(wrapper, positional, "args", 1), _given_at(wrapper, positional, "kwds", 2))
     if last in _MAPPING_CALLERS:
-        return _UNKNOWN
+        if positional[:1] != [node] or len(positional) != len(wrapper.args) or len(positional) != 2:
+            return _UNKNOWN
+        return _mapped_args(positional[1], reader, spread=last.startswith("starmap"))
     first = 1 if last in _CALLERS_AFTER_A_FIRST else 0
     if last in _CALLERS_FORWARDING_ALL | _CALLERS_FORWARDING_ARGS | _CALLERS_AFTER_A_FIRST:
         if len(positional) <= first or positional[first] is not node or len(positional) != len(wrapper.args):
@@ -13357,6 +13727,35 @@ def _value_call_args(node: ast.AST, wrapper: ast.AST | None, reader: _Reader) ->
             return _UNKNOWN
         return [_PassedArgs(args=list(wrapper.args[first + 1:]), keywords=keywords)]
     return _UNKNOWN
+
+
+def _mapped_args(walked: ast.AST, reader: _Reader, *, spread: bool) -> list[_PassedArgs] | _Unknown:
+    """The arguments a caller that runs a function on each item of `walked`
+    (`_MAPPING_CALLERS`) hands it: each item (`_Reader.items_of`), or the
+    element a comprehension makes, as the one argument, or, with `spread`,
+    as `starmap` does, the elements of each item, a list or tuple written
+    out. Unknown where the check can't read the items."""
+    made = (ast.ListComp, ast.GeneratorExp)
+    found = reader.bindings_of(walked.id, node=walked) if isinstance(walked, ast.Name) else []
+    values = [b.value for b in found if b.how == "value"]
+    items: list[ast.AST] | None
+    if isinstance(walked, made):
+        items = [walked.elt]
+    elif found and len(values) == len(found) and all(isinstance(v, made) for v in values):
+        items = [v.elt for v in values if isinstance(v, made)]
+    else:
+        items = reader.items_of(node=walked, key=None, depth=0)
+    if items is None:
+        return _UNKNOWN
+    out: list[_PassedArgs] = []
+    for item in items:
+        if not spread:
+            out.append(_PassedArgs(args=[item], keywords=[]))
+        elif isinstance(item, (ast.List, ast.Tuple)) and not any(isinstance(e, ast.Starred) for e in item.elts):
+            out.append(_PassedArgs(args=list(item.elts), keywords=[]))
+        else:
+            return _UNKNOWN
+    return out
 
 
 def _helper_calls(wrapper: ast.Call, node: ast.AST, func: Function, reader: _Reader) -> list[_PassedArgs] | _Unknown:
@@ -13538,19 +13937,26 @@ def _hook_write(call: ast.Call, reader: _Reader, cell: _Cell) -> _HookWrite:
     file to such a path or one the check can't place, an open whose mode
     the check can't read among them, or a program it runs that may write
     one (`_command_hook_write`), as `cp hook.txt site-packages/hook.pth` or
-    an `echo` into one does. Each path is read against the folders the
-    write runs in (`_placed_hooks`): the pad's (`_Reader.cwds`), and those
-    a program's `cwd=` names (`_run_folders`). A data writer's file
-    (`_WRITER_METHODS`), as `torch.save` and `to_csv` write, holds a frame,
-    an array, a chart or a model, not a module's code or the import lines
-    a `.pth` file runs, so it counts only inside the installed packages
-    (`_writes_site_packages`); and a literal text with no such line
-    (`_runs_no_pth_line`) writes no hook into a `.pth` file."""
+    an `echo` into one does. A copy or move into a folder writes each file
+    it copies there under the file's own name (`_copied_names`), and a
+    call that writes the file an argument names (`_made_file`), as
+    `urlretrieve` does, writes that file. Each path is read against the
+    folders the write runs in (`_placed_hooks`): the pad's
+    (`_Reader.cwds`), and those a program's `cwd=` names (`_run_folders`).
+    A data writer's file (`_WRITER_METHODS`), as `torch.save` and `to_csv`
+    write, holds a frame, an array, a chart or a model, not a module's code
+    or the import lines a `.pth` file runs, so it counts only inside the
+    installed packages (`_writes_site_packages`); and a literal text with
+    no such line (`_runs_no_pth_line`) writes no hook into a `.pth` file,
+    one named so in a folder the check can't place among them
+    (`_written_names`)."""
     if not cell.signs.names_a_startup_hook:
         return _NO_HOOK
     last = _last_name(call.func)
-    if last in _FILE_WRITE_NAMES:
-        target = _written_target(call, reader, cell)
+    if last in _FILE_WRITE_NAMES or last in _FILE_MAKER_NAMES:
+        target = _written_target(call, reader, cell) if last in _FILE_WRITE_NAMES else None
+        if target is None:
+            target = _made_file(call, reader)
         if target is None:
             # A read, as `open("x.pth")` is, writes nothing; an open by a
             # mode the check can't read may write the file it opens.
@@ -13562,8 +13968,23 @@ def _hook_write(call: ast.Call, reader: _Reader, cell: _Cell) -> _HookWrite:
             return _NO_HOOK
         got = reader.paths(target, cell=cell)
         if isinstance(got, _Unknown):
-            return _UNPLACED_HOOK
+            # A `.pth` file by its literal name, in a folder the check can't
+            # place, holds a hook only where it may hold an import line.
+            written = _written_names(target, reader, cell)
+            pth = written is not None and bool(written) and all(
+                name.endswith(".pth") and _RUN_TIME_PART not in name for name in written
+            )
+            return _NO_HOOK if pth and _runs_no_pth_line(call, cell) else _UNPLACED_HOOK
         hooks = [path for path in got if _is_startup_hook(path)]
+        # A copy or move into a folder lands each source there under its own
+        # name, as `cp` does (`_copy_landings`); in the installed packages,
+        # one the check can't name may land as a hook.
+        names = _copied_names(call, reader, cell)
+        if site and (isinstance(names, _Unknown) or any(_may_name_a_hook(name) for name in names)):
+            return _UNPLACED_HOOK
+        if not hooks and not isinstance(names, _Unknown):
+            hooks = [path for folder in got for name in names
+                     for path in [f"{folder.rstrip('/')}/{name}"] if _is_startup_hook(path)]
         if not hooks or all(path.endswith(".pth") for path in hooks) and _runs_no_pth_line(call, cell):
             return _NO_HOOK
         return _UNPLACED_HOOK if site else _placed_hooks(hooks, reader.cwds)
@@ -13625,7 +14046,7 @@ def _runs_at_start(path: str) -> bool:
     whose paths have a `site-packages` or `dist-packages` part
     (`_names_package_folder`). A `.pth` file anywhere else runs only once
     `site.addsitedir` adds its folder (`_Modules.may_hold_pth`)."""
-    return ntpath.basename(path) in _STARTUP_HOOK_MODULES or _names_package_folder(path)
+    return _names_hook_module(path) or _names_package_folder(path)
 
 
 # Programs that write the files their operands name, so an operand may name
@@ -13634,6 +14055,13 @@ def _runs_at_start(path: str) -> bool:
 # (`_copy_landings`).
 _COPYING_PROGRAMS = frozenset({*_TREE_COPY_PROGRAMS, "ln"})
 _FILE_WRITING_PROGRAMS = frozenset({*_COPYING_PROGRAMS, "tee", "touch", "curl", "wget", "dd"})
+# Programs that download what a URL names, by default into the working
+# folder under the URL's last part, with the flags that name another folder
+# for it (`_download_landings`).
+_DOWNLOAD_FOLDER_FLAGS: dict[str, frozenset[str]] = {
+    "wget": frozenset({"-P", "--directory-prefix"}),
+    "curl": frozenset({"--output-dir"}),
+}
 
 
 def _script_hook_write(script: str, *, cwds: Sequence[str] | _Unknown, depth: int) -> _HookWrite:
@@ -13651,9 +14079,10 @@ def _script_hook_write(script: str, *, cwds: Sequence[str] | _Unknown, depth: in
 def _command_hook_write(words: list[str], *, cwds: Sequence[str] | _Unknown, depth: int) -> _HookWrite:
     """Where a command, by its words, run in the folders `cwds`, may write a
     startup hook (`_is_startup_hook`): a file a redirection writes, an
-    operand of a program that writes files (`_FILE_WRITING_PROGRAMS`), or
-    a place a copy, move or link lands a file (`_copy_landings`), that
-    names one (`_placed_hooks`); any, where one of them is a word the check
+    operand of a program that writes files (`_FILE_WRITING_PROGRAMS`), a
+    place a download lands a file (`_download_landings`), or a place a
+    copy, move or link lands one (`_copy_landings`), that names one
+    (`_placed_hooks`); any, where one of them is a word the check
     can't read, or the program is; what a command `find` runs on each
     match writes (`_find_exec_commands`), in the match's own folder for
     `-execdir` and `-okdir`; and what a shell's script writes in turn
@@ -13675,6 +14104,7 @@ def _command_hook_write(words: list[str], *, cwds: Sequence[str] | _Unknown, dep
             folders = _UNKNOWN if command.flag.endswith("dir") else cwds
             out = out.joined(_command_hook_write(command.words, cwds=folders, depth=depth))
     targets = (_copy_landings(bare[1:]) if verb in _COPYING_PROGRAMS
+               else _download_landings(verb, bare[1:]) if verb in _DOWNLOAD_FOLDER_FLAGS
                else bare[1:] if verb in _FILE_WRITING_PROGRAMS else [])
     for at, word in enumerate(words):
         redirect = _REDIRECT.match(word)
@@ -13714,22 +14144,50 @@ def _copy_landings(args: list[str]) -> list[str]:
     )]
 
 
+def _download_landings(verb: str, args: list[str]) -> list[str]:
+    """Where a download command (`_DOWNLOAD_FOLDER_FLAGS`), by its words past
+    the program, may write a file: each word, as the file an output flag
+    names, and the last part of each URL it gets, in the folder its folder
+    flag names, or else the working folder, as `wget -P site-packages` and
+    `curl -O --output-dir site-packages` save one."""
+    flags = _DOWNLOAD_FOLDER_FLAGS[verb]
+    folder: str | None = None
+    rest = iter(args)
+    for word in rest:
+        flag, equals, value = word.partition("=")
+        if flag in flags:
+            folder = value if equals else next(rest, "")
+        elif verb == "wget" and word.startswith("-P") and len(word) > 2:
+            folder = word[2:]
+    names = [posixpath.basename(re.split(r"[?#]", word, maxsplit=1)[0]) for word in args if "://" in word]
+    return [*args, *(name if folder is None else f"{folder.rstrip('/')}/{name}" for name in names if name)]
+
+
 def _is_startup_hook(path: str) -> bool:
     """Whether `path` names a startup hook by its file's name: a `.pth`
     file, or a `sitecustomize` or `usercustomize` module
-    (`_STARTUP_HOOK_MODULES`)."""
-    name = ntpath.basename(path)
-    return name.endswith(".pth") or name in _STARTUP_HOOK_MODULES
+    (`_names_hook_module`)."""
+    return ntpath.basename(path).endswith(".pth") or _names_hook_module(path)
+
+
+def _names_hook_module(path: str) -> bool:
+    """Whether `path` names a `sitecustomize` or `usercustomize` module, as
+    its file (`_STARTUP_HOOK_MODULES`) or as a file inside its package's
+    folder (`_STARTUP_HOOK_PACKAGES`), which an import of the module runs."""
+    *folders, name = re.split(r"[/\\]", path)
+    return name in _STARTUP_HOOK_MODULES or not _STARTUP_HOOK_PACKAGES.isdisjoint(folders)
 
 
 def _may_name_a_hook(name: str) -> bool:
     """Whether a file's name, `name`, with each part picked at run time
     `_RUN_TIME_PART`, may be a startup hook's (`_is_startup_hook`): one
     that may end in `.pth` past its last such part, or match a hook
-    module's name. A name with a part the check can't read at all, as a
-    temporary file's (`_TEMP_PATH`), may be any."""
+    module's name; a listing's wildcard reads as such a part. A name with a
+    part the check can't read at all, as a temporary file's (`_TEMP_PATH`),
+    may be any."""
     if _NOT_LITERAL in name:
         return True
+    name = re.sub(r"[*?]|\[[^]]*\]", _RUN_TIME_PART, name)
     if _RUN_TIME_PART not in name:
         return _is_startup_hook(name)
     tail = name.rsplit(_RUN_TIME_PART, 1)[1]
@@ -13739,17 +14197,34 @@ def _may_name_a_hook(name: str) -> bool:
     )
 
 
-def _written_names(target: ast.AST, reader: _Reader, cell: _Cell) -> list[str] | None:
+def _written_names(target: ast.AST, reader: _Reader, cell: _Cell, *, depth: int = 0) -> list[str] | None:
     """The names the file a write to `target`, code of `cell`, may have, a
     part picked at run time `_RUN_TIME_PART` (`_Reader.paths`). Where the
     check can't place the folder, or it is a temporary one, which the path
     stands for whole (`_TEMP_PATH`), they are read from the end of the
     path: the right side of a `/`, or of a `+` after a part the check can't
-    read, the last argument of a join, or what an f-string ends with. None
-    where the check can't read them."""
+    read, the last argument of a join, or what an f-string ends with; from
+    a temporary file's suffix (`_temp_file_names`); or, for a name, or a
+    temporary file's `.name`, from each value it is bound to
+    (`_Reader.read_bindings`), up to `_PARAM_DEPTH` names. None where the
+    check can't read them."""
     got = reader.paths(target, cell=cell)
     if not isinstance(got, _Unknown) and not any(_TEMP_PATH in p for p in got):
         return [posixpath.basename(p.replace("\\", "/")) for p in got]
+    made = _temp_file_names(target, reader)
+    if made is not None:
+        return made
+    holder = target.value if isinstance(target, ast.Attribute) and target.attr == "name" else target
+    if isinstance(holder, ast.Name):
+        if depth > _PARAM_DEPTH:
+            return None
+        found = reader.read_bindings("written names", holder, depth=depth, compute=lambda b, at: (
+            _written_names(b.value, reader, b.cell, depth=at) if b.how == "value" and holder is target
+            else _temp_file_names(b.value, reader)
+        ))
+        if not found or any(names is None for names in found):
+            return None
+        return [name for names in found if names is not None for name in names]
     node, after = target, False
     while True:
         if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Div, ast.Add)):
@@ -13768,6 +14243,31 @@ def _written_names(target: ast.AST, reader: _Reader, cell: _Cell) -> list[str] |
         return None
     return [posixpath.basename(t) if "/" in t else _RUN_TIME_PART + t if after else t
             for t in (text.replace("\\", "/") for text in texts)]
+
+
+# The makers of a temporary file that has a name on disk, with where each
+# takes the suffix that name ends with.
+_TEMP_FILE_SUFFIXES = {
+    "tempfile.mkstemp": _ArgPlace(0, "suffix"), "tempfile.mktemp": _ArgPlace(0, "suffix"),
+    "tempfile.NamedTemporaryFile": _ArgPlace(4, "suffix"),
+}
+
+
+def _temp_file_names(node: ast.AST, reader: _Reader) -> list[str] | None:
+    """The names a temporary file a call (`_TEMP_FILE_SUFFIXES`) makes may
+    have: its prefix, random letters, digits and underscores, then its
+    suffix, so only the suffix can end it in `.pth`, and none is a hook
+    module's. Each is read as "tmp" and a suffix `_literal_texts` reads,
+    no suffix or a `None` as an empty one. None for any other node, or a
+    suffix the check can't read."""
+    if not isinstance(node, ast.Call):
+        return None
+    where = _TEMP_FILE_SUFFIXES.get(reader.module_member(node.func) or reader.dotted(node.func))
+    if where is None:
+        return None
+    suffix = where.given(node)
+    texts = [] if suffix is None else _literal_texts(suffix, reader)
+    return None if texts is None else [f"tmp{text}" for text in texts or [""]]
 
 
 def _unplaced_hook(call: ast.Call, target: ast.AST, reader: _Reader, cell: _Cell) -> bool:
@@ -14064,17 +14564,46 @@ def _runs_through_a_holder(func: Function, cell: _Cell) -> bool:
 
 def _calls_after(node: ast.AST, cell: _Cell) -> Sequence[ast.AST]:
     """The calls of `cell` outside every def and lambda
-    (`_Cell.module_calls`) that run after `node`, a def or lambda of the
-    cell, is made: those later in its class's body, as `x = helper()`
-    after `def helper()` there, and those after the top-level statement
-    holding it. Any of them may run what that statement made through what
-    holds it. All of them for the cell's tree, as for the checked cell
-    calling into an earlier one's."""
+    (`_Cell.module_calls`) that may run `node`, a def or lambda of the
+    cell, through what holds it: those after the top-level statement
+    holding it, any of which may run what that statement made, and, for a
+    method or a lambda a class's body binds, those later in that body that
+    call it by a name the body binds to it, as `x = helper()` or
+    `helper.__func__()` after `def helper()` there, and `sm.__func__()`
+    after `sm = staticmethod(helper)`.
+    All of them for the cell's tree, as for the checked cell calling into
+    an earlier one's."""
     placed = cell.module_calls
     if node is cell.tree:
         return placed.calls
-    end = (getattr(node, "end_lineno", 0) or 0, getattr(node, "end_col_offset", 0) or 0)
-    return placed.calls[bisect.bisect_left(placed.places, end):]
+    top = node
+    while (parent := cell.parents.get(top)) is not None and not isinstance(parent, ast.Module):
+        top = parent
+    top_end = bisect.bisect_left(placed.places, _end_of(top))
+    after = placed.calls[top_end:]
+    scope = cell.scope_of(node)
+    if not isinstance(scope, ast.ClassDef):
+        return after
+    held: ast.AST = node
+    while (parent := cell.parents.get(held)) is not None and parent is not scope:
+        held = parent
+    names = ({node.name} if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+             else {name for target in held.targets for name in _stored_names(target)}
+             if isinstance(held, ast.Assign) else set())
+    for stmt in scope.body:
+        if isinstance(stmt, ast.Assign) and _end_of(stmt) > _end_of(node) and any(
+            isinstance(n, ast.Name) and n.id in names for n in ast.walk(stmt.value)
+        ):
+            names.update(name for target in stmt.targets for name in _stored_names(target))
+    inside = placed.calls[bisect.bisect_left(placed.places, _end_of(node)):top_end]
+    called = [call for call in inside if cell.scope_of(call) is scope
+              and isinstance(root := _root_of(call.func), ast.Name) and root.id in names]
+    return [*called, *after]
+
+
+def _end_of(node: ast.AST) -> tuple[int, int]:
+    """Where `node` ends in its code: its last line and column."""
+    return getattr(node, "end_lineno", 0) or 0, getattr(node, "end_col_offset", 0) or 0
 
 
 # The decorators that call the function they are handed as they are handed
@@ -14914,6 +15443,17 @@ class _NameValue(NamedTuple):
     value: ast.AST
 
 
+def _partial_head(value: ast.AST) -> ast.AST | None:
+    """The function a `functools.partial(f, ...)` call `value` wraps, through
+    a partial of a partial written out, as `subprocess.run` for
+    `partial(partial(subprocess.run, cmd), check=True)`; None for any other
+    value."""
+    head: ast.AST | None = None
+    while isinstance(value, ast.Call) and _last_name(value.func) == "partial" and value.args:
+        head = value = value.args[0]
+    return head
+
+
 def _literal_exec_values(
     reader: _Reader, cells: Sequence[_Cell], literal: _ExecRead, namespaces: Sequence[_Cell],
     *, errored: frozenset[int],
@@ -15425,15 +15965,16 @@ def find_cell_writes(
         _exec_cells(reader, with_literal, ran_only=True) if with_literal else _ExecRead.empty()
     )
 
-    def with_cells(old: _Reader, read: _ExecRead, *, swallowers: frozenset[str] = frozenset()) -> _Reader:
-        """A reader of `old`'s cells and what `read` read, with `swallowers`
-        beside those `old` reads (`_Reader.swallowers`), stopped where `old`
-        stopped and with what `old` read the cells make; `old` itself when
-        neither adds anything."""
-        if not read.cells and not swallowers:
+    def with_cells(old: _Reader, read: _ExecRead, *, tainted: frozenset[str] = frozenset()) -> _Reader:
+        """A reader of `old`'s cells and what `read` read, with the names
+        `tainted` beside those `old` reads (`_Reader.tainted_contexts`),
+        stopped where `old` stopped and with what `old` read the cells make;
+        `old` itself when neither adds anything."""
+        if not read.cells and not tainted:
             return old
         new = _Reader([*old.cells, *read.cells], current=current, project_root=project_root,
-                      stopped_early=frozenset(errored), stopped_at=stopped_at, swallowers=old.swallowers | swallowers)
+                      stopped_early=frozenset(errored), stopped_at=stopped_at,
+                      tainted_contexts=old.tainted_contexts | tainted)
         new.stopped = old.stopped
         new.made = old.made
         return new
@@ -15481,7 +16022,7 @@ def find_cell_writes(
         more = _tainted_contexts(reader, defined)
         if not more:
             break
-        reader = with_cells(reader, _ExecRead.empty(), swallowers=more)
+        reader = with_cells(reader, _ExecRead.empty(), tainted=more)
     inputs = _ReadInputs(
         current=current, ran=tuple(ran), literal_code=literal_code, defined=defined, modules=modules,
         snapshots=tuple(snapshots), owned=owned, http_rules=tuple(http_rules),
@@ -15498,7 +16039,7 @@ def find_cell_writes(
         # `_PATH_LIMIT` paths for one value it gives up, and the first read
         # stands alone.
         wide = _Reader(reader.cells, current=current, project_root=project_root, errored=frozenset(errored),
-                       swallowers=reader.swallowers)
+                       tainted_contexts=reader.tainted_contexts)
         wide.made = reader.made
         maybe = _CellRead(wide, inputs=inputs, files_only=True)
         maybe.run()

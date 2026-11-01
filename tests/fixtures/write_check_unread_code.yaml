@@ -18003,3 +18003,1530 @@ cases:
               return push()
           x = [helper()]
     card: none
+
+  # A copy or a move into a folder lands each file under its own name, and
+  # a download lands under its URL's last part in the folder its flag names:
+  # a .pth file that lands in site-packages runs in each later Python
+  # process, and the copy that puts it there writes it.
+
+  - name: a python -c after an earlier cell copies a .pth file into the site-packages folder
+    earlier:
+      - |-
+        open('zz.pth', 'w').write('import job\n')
+      - |-
+        import shutil
+        shutil.copy('zz.pth', '/opt/venv/lib/python3.12/site-packages')
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: unchecked
+
+  - name: a python -c after an earlier cell moves a .pth file into the site-packages folder
+    earlier:
+      - |-
+        open('zz.pth', 'w').write('import job\n')
+      - |-
+        import shutil
+        shutil.move('zz.pth', '/opt/venv/lib/python3.12/site-packages/')
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: unchecked
+
+  - name: a python -c after an earlier cell copies a .pth file a name holds into a site-packages folder a name holds
+    earlier:
+      - |-
+        open('zz.pth', 'w').write('import job\n')
+      - |-
+        import shutil
+        from pathlib import Path
+        src = 'zz.pth'
+        sp = Path('/opt/venv/lib/python3.12/site-packages')
+        shutil.copy2(src, sp)
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: unchecked
+
+  - name: a pip install by name after an earlier cell copies a .pth file into the site-packages folder
+    earlier:
+      - |-
+        open('zz.pth', 'w').write('import job\n')
+      - |-
+        import shutil
+        shutil.copy('zz.pth', '/opt/venv/lib/python3.12/site-packages')
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-m', 'pip', 'install', 'requests'])
+    card: unchecked
+
+  - name: a cell after one killed at its timeout, once an earlier cell copied a .pth file into the site-packages folder
+    earlier:
+      - |-
+        open('zz.pth', 'w').write('import job\n')
+      - |-
+        import shutil
+        shutil.copy('zz.pth', '/opt/venv/lib/python3.12/site-packages')
+      - code: |-
+          import time
+          time.sleep(600)
+        errored: true
+        stopped_at: 1
+        ended_process: true
+    code: |-
+      print(1)
+    card: unchecked
+
+  - name: a cell that copies a .pth file into the site-packages folder
+    earlier:
+      - |-
+        open('zz.pth', 'w').write('import job\n')
+    code: |-
+      import shutil
+      shutil.copy('zz.pth', '/opt/venv/lib/python3.12/site-packages')
+    card: unchecked
+
+  - name: a python -c after an earlier cell copies each file of a folder it lists into the site-packages folder
+    earlier:
+      - |-
+        import os, shutil
+        for f in os.listdir('hooks'):
+            shutil.copy(os.path.join('hooks', f), '/opt/venv/lib/python3.12/site-packages')
+        print('copied the .pth hooks')
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: unchecked
+
+  - name: site adds a folder the cell copies a .pth file into
+    earlier:
+      - |-
+        open('zz.pth', 'w').write('import job\n')
+    code: |-
+      import os, shutil, site
+      os.makedirs('lib', exist_ok=True)
+      shutil.copy('zz.pth', 'lib')
+      site.addsitedir('lib')
+    card: unchecked
+
+  - name: a python -c after an earlier cell copies a folder's files into site-packages with copytree
+    earlier:
+      - |-
+        import os
+        os.makedirs('hooks', exist_ok=True)
+        open('hooks/zz.pth', 'w').write('import job\n')
+      - |-
+        import shutil
+        shutil.copytree('hooks', '/opt/venv/lib/python3.12/site-packages', dirs_exist_ok=True)
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: unchecked
+
+  - name: a python -c after an earlier cell downloads a .pth file into site-packages with wget -P
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run(['wget', '-P', '/opt/venv/lib/python3.12/site-packages', 'https://example.com/zz.pth'])
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: unchecked
+
+  - name: a pip install by name after an earlier cell downloads a .pth file into site-packages with wget's long folder flag
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run(['wget', '--directory-prefix=/opt/venv/lib/python3.12/site-packages', 'https://example.com/zz.pth'])
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-m', 'pip', 'install', 'requests'])
+    card: unchecked
+
+  - name: a cell after one killed at its timeout, once an earlier cell downloaded a .pth file into site-packages with curl's output folder
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run(['curl', '-O', '--output-dir', '/opt/venv/lib/python3.12/site-packages', 'https://example.com/zz.pth'])
+      - code: |-
+          import time
+          time.sleep(600)
+        errored: true
+        stopped_at: 1
+        ended_process: true
+    code: |-
+      print(1)
+    card: unchecked
+
+  - name: site adds a folder an earlier cell downloaded a .pth file into with wget -P
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run(['wget', '-P', 'lib', 'https://example.com/zz.pth'])
+    code: |-
+      import site
+      site.addsitedir('lib')
+    card: unchecked
+
+  - name: a python -c after an earlier cell copies a CSV into the site-packages folder
+    earlier:
+      - |-
+        import shutil
+        shutil.copy('stock.csv', '/opt/venv/lib/python3.12/site-packages')
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: none
+
+  - name: a python -c after an earlier cell copies a .pth file into a project folder
+    earlier:
+      - |-
+        open('zz.pth', 'w').write('import job\n')
+      - |-
+        import os, shutil
+        os.makedirs('lib', exist_ok=True)
+        shutil.copy('zz.pth', 'lib')
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: none
+
+  - name: a python -c after an earlier cell downloads a CSV into site-packages with wget -P
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run(['wget', '-P', '/opt/venv/lib/python3.12/site-packages', 'https://example.com/data.csv'])
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: none
+
+  - name: a python -c after an earlier cell downloads a .pth file into a project folder with wget -P
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run(['wget', '-P', 'lib', 'https://example.com/zz.pth'])
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: none
+
+  # A sitecustomize package, and an unpack or a copy of a folder's files
+  # into site-packages, may put a startup hook there under a name the check
+  # can't read; so may a file urlretrieve writes there by a hook's name.
+
+  - name: a python -c after an earlier cell writes a sitecustomize package into site-packages
+    earlier:
+      - |-
+        import os
+        os.makedirs('/opt/venv/lib/python3.12/site-packages/sitecustomize', exist_ok=True)
+        open('/opt/venv/lib/python3.12/site-packages/sitecustomize/__init__.py', 'w').write('import job\n')
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: unchecked
+
+  - name: a python -c after an earlier cell writes a sitecustomize package into the project
+    earlier:
+      - |-
+        import os
+        os.makedirs('sitecustomize', exist_ok=True)
+        open('sitecustomize/__init__.py', 'w').write('import job\n')
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: unchecked
+
+  - name: a python -c after an earlier cell unpacks an archive into site-packages
+    earlier:
+      - |-
+        import shutil
+        shutil.unpack_archive('hooks.zip', '/opt/venv/lib/python3.12/site-packages')
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: unchecked
+
+  - name: a python -c after an earlier cell extracts a tar archive into site-packages
+    earlier:
+      - |-
+        import tarfile
+        tarfile.open('hooks.tar').extractall('/opt/venv/lib/python3.12/site-packages')
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: unchecked
+
+  - name: a python -c after an earlier cell unpacks an archive into the folder a site lookup names
+    earlier:
+      - |-
+        import shutil, site
+        shutil.unpack_archive('hooks.zip', site.getsitepackages()[0])
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: unchecked
+
+  - name: a python -c after an earlier cell unzips an archive into site-packages
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run(['unzip', 'hooks.zip', '-d', '/opt/venv/lib/python3.12/site-packages'])
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: unchecked
+
+  - name: a python -c after an earlier cell unpacks an archive once a cd moved into site-packages
+    earlier:
+      - |-
+        import os
+        os.system('cd /opt/venv/lib/python3.12/site-packages && tar xf /tmp/hooks.tar')
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: unchecked
+
+  - name: a python -c after an earlier cell unzips an archive in site-packages as its working folder
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run(['unzip', '/tmp/hooks.zip'], cwd='/opt/venv/lib/python3.12/site-packages')
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: unchecked
+
+  - name: a python -c after an earlier cell copies a folder's files into site-packages with cp -r
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run(['cp', '-r', 'hooks/.', '/opt/venv/lib/python3.12/site-packages/'])
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: unchecked
+
+  - name: a python -c after an earlier cell syncs a folder's files into site-packages with rsync
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run(['rsync', '-a', 'hooks/', '/opt/venv/lib/python3.12/site-packages/'])
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: unchecked
+
+  - name: a python -c after an earlier cell copies a listing's files into site-packages through the shell
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run('cp hooks/* /opt/venv/lib/python3.12/site-packages/', shell=True)
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: unchecked
+
+  - name: a python -c after an earlier cell downloads a .pth file into site-packages with urlretrieve
+    earlier:
+      - |-
+        import urllib.request
+        urllib.request.urlretrieve('https://example.com/zz.pth', '/opt/venv/lib/python3.12/site-packages/zz.pth')
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: unchecked
+
+  - name: a python -c after an earlier cell unzips an archive into a project folder
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run(['unzip', 'data.zip', '-d', 'data'])
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: none
+
+  - name: a python -c after an earlier cell extracts a tar archive into a project folder
+    earlier:
+      - |-
+        import tarfile
+        tarfile.open('data.tar').extractall('data')
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: none
+
+  - name: a python -c after an earlier cell copies a folder's files into a backup folder with cp -r
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run(['cp', '-r', 'data/.', 'backup/'])
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: none
+
+  - name: a python -c after an earlier cell copies a whole folder into site-packages under its own name
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run(['cp', '-r', 'mypkg', '/opt/venv/lib/python3.12/site-packages/'])
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: none
+
+  - name: a python -c after an earlier cell copies a folder into a backup folder with copytree
+    earlier:
+      - |-
+        import shutil
+        shutil.copytree('data', 'backup', dirs_exist_ok=True)
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: none
+
+  - name: a python -c after an earlier cell downloads a CSV with urlretrieve in a cell that names a .pth file
+    earlier:
+      - |-
+        import urllib.request
+        urllib.request.urlretrieve('https://example.com/data.csv', 'data.csv')
+        print('see zz.pth')
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: none
+
+  # A file written through a name is named by what the name holds: the end
+  # of the path it is bound to, or a temporary file's suffix. Only one that
+  # may be a startup hook holds the first cell a new process runs.
+
+  - name: a cell after one killed at its timeout, once an earlier cell wrote a summary under the home folder through a name
+    earlier:
+      - |-
+        from pathlib import Path
+        out = Path.home() / 'Downloads' / 'summary.txt'
+        with open(out, 'w') as f:
+            f.write('done')
+      - code: |-
+          import time
+          time.sleep(600)
+        errored: true
+        stopped_at: 1
+        ended_process: true
+    code: |-
+      print(1)
+    card: none
+
+  - name: a cell after one killed at its timeout, once an earlier cell wrote text under the home folder through a name
+    earlier:
+      - |-
+        from pathlib import Path
+        out = Path.home() / 'Downloads' / 'summary.md'
+        out.write_text('done')
+      - code: |-
+          import time
+          time.sleep(600)
+        errored: true
+        stopped_at: 1
+        ended_process: true
+    code: |-
+      print(1)
+    card: none
+
+  - name: a cell after one killed at its timeout, once an earlier cell wrote notes into the temporary folder through a name
+    earlier:
+      - |-
+        import os, tempfile
+        path = os.path.join(tempfile.gettempdir(), 'notes.txt')
+        with open(path, 'w') as f:
+            f.write('done')
+      - code: |-
+          import time
+          time.sleep(600)
+        errored: true
+        stopped_at: 1
+        ended_process: true
+    code: |-
+      print(1)
+    card: none
+
+  - name: a cell after one killed at its timeout, once an earlier cell wrote an Excel report into a temporary folder through a name
+    earlier:
+      - |-
+        import os, tempfile
+        import pandas as pd
+        out = os.path.join(tempfile.mkdtemp(), 'report.xlsx')
+        with pd.ExcelWriter(out) as w:
+            pd.DataFrame({'a': [1]}).to_excel(w)
+      - code: |-
+          import time
+          time.sleep(600)
+        errored: true
+        stopped_at: 1
+        ended_process: true
+    code: |-
+      print(1)
+    card: none
+
+  - name: a cell after one killed at its timeout, once an earlier cell wrote to a named temporary file by its name
+    earlier:
+      - |-
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(suffix='.csv', delete=False)
+        with open(tmp.name, 'w') as f:
+            f.write('a,b')
+      - code: |-
+          import time
+          time.sleep(600)
+        errored: true
+        stopped_at: 1
+        ended_process: true
+    code: |-
+      print(1)
+    card: none
+
+  - name: a cell after one killed at its timeout, once an earlier cell wrote to mkstemp's path with a suffix
+    earlier:
+      - |-
+        import os, tempfile
+        fd, path = tempfile.mkstemp(suffix='.csv')
+        with open(path, 'w') as f:
+            f.write('a,b')
+      - code: |-
+          import time
+          time.sleep(600)
+        errored: true
+        stopped_at: 1
+        ended_process: true
+    code: |-
+      print(1)
+    card: none
+
+  - name: a cell after one killed at its timeout, once an earlier cell wrote to mkstemp's path with no suffix
+    earlier:
+      - |-
+        import os, tempfile
+        fd, path = tempfile.mkstemp()
+        with open(path, 'w') as f:
+            f.write('a,b')
+      - code: |-
+          import time
+          time.sleep(600)
+        errored: true
+        stopped_at: 1
+        ended_process: true
+    code: |-
+      print(1)
+    card: none
+
+  - name: a cell after a cancelled one, once an earlier cell wrote a summary under the home folder through a name
+    earlier:
+      - |-
+        from pathlib import Path
+        out = Path.home() / 'Downloads' / 'summary.txt'
+        with open(out, 'w') as f:
+            f.write('done')
+      - code: |-
+          import time
+          for i in range(10**9):
+              time.sleep(1)
+        errored: true
+        stopped_at: 1
+        ended_process: true
+    code: |-
+      print(1)
+    card: none
+
+  - name: a cell after one killed at its timeout, once an earlier cell wrote a .pth file under the home folder through a name
+    earlier:
+      - |-
+        from pathlib import Path
+        out = Path.home() / 'hooks' / 'zz.pth'
+        out.write_text('import job\n')
+      - code: |-
+          import time
+          time.sleep(600)
+        errored: true
+        stopped_at: 1
+        ended_process: true
+    code: |-
+      print(1)
+    card: unchecked
+
+  - name: a cell after one killed at its timeout, once an earlier cell wrote to mkstemp's path with a .pth suffix
+    earlier:
+      - |-
+        import os, tempfile
+        fd, path = tempfile.mkstemp(suffix='.pth')
+        with open(path, 'w') as f:
+            f.write('import job')
+      - code: |-
+          import time
+          time.sleep(600)
+        errored: true
+        stopped_at: 1
+        ended_process: true
+    code: |-
+      print(1)
+    card: unchecked
+
+  - name: a cell after one killed at its timeout, once an earlier cell wrote through a name an if rebinds to a .pth file
+    earlier:
+      - |-
+        import os, sys, tempfile
+        path = os.path.join(tempfile.gettempdir(), 'notes.txt')
+        if len(sys.argv) > 3:
+            path = os.path.join(tempfile.gettempdir(), 'zz.pth')
+        with open(path, 'w') as f:
+            f.write('import job')
+      - code: |-
+          import time
+          time.sleep(600)
+        errored: true
+        stopped_at: 1
+        ended_process: true
+    code: |-
+      print(1)
+    card: unchecked
+
+  # A setter vouches for its global where its def that is live at the call
+  # sets it: the latest one made before the call, whatever came before it.
+
+  - name: a frame a loader sets as a global once a later cell redefines it as a setter, after a pip install from a requirements file
+    files:
+      requirements.txt: |
+        pandas
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'])
+      - |-
+        import pandas as pd
+        def load():
+            return pd.read_csv('stock.csv')
+      - |-
+        import pandas as pd
+        def load():
+            global df
+            df = pd.read_csv('stock.csv')
+    code: |-
+      load()
+      print(df.head())
+    card: none
+
+  - name: a frame a loader sets as a global once a later cell redefines a draft of it, after a pip install from a requirements file
+    files:
+      requirements.txt: |
+        pandas
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'])
+      - |-
+        import pandas as pd
+        def load():
+            global df
+            print('todo')
+      - |-
+        import pandas as pd
+        def load():
+            global df
+            df = pd.read_csv('stock.csv')
+    code: |-
+      load()
+      print(df.head())
+    card: none
+
+  - name: a frame a loader sets as a global once the cell redefines it as a setter before the call, after a pip install from a requirements file
+    files:
+      requirements.txt: |
+        pandas
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'])
+    code: |-
+      import pandas as pd
+      def load():
+          return pd.read_csv('stock.csv')
+      def load():
+          global df
+          df = pd.read_csv('stock.csv')
+      load()
+      print(df.head())
+    card: none
+
+  - name: a frame a loader sets as a global once a later def replaces an imported name, after a python script ran
+    files:
+      etl.py: |
+        print(1)
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, 'etl.py'])
+      - |-
+        from json import load
+      - |-
+        import pandas as pd
+        def load():
+            global df
+            df = pd.read_csv('stock.csv')
+    code: |-
+      load()
+      print(df.head())
+    card: none
+
+  - name: a frame a loader sets as a global before a later cell redefines it to return the frame, after a pip install from a requirements file
+    files:
+      requirements.txt: |
+        pandas
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'])
+      - |-
+        import pandas as pd
+        def load():
+            global df
+            df = pd.read_csv('stock.csv')
+      - |-
+        import pandas as pd
+        def load():
+            return pd.read_csv('stock.csv')
+    code: |-
+      load()
+      print(df.head())
+    card: unchecked
+
+  # A statement read through a key the check reads, a helper's parameter,
+  # a loop over literal keys, a name's index or one from the end, is the
+  # entry that key names; a loop over a dict's items reads each value.
+
+  - name: a read on a project database through a dict entry a helper's parameter names
+    files:
+      shop.db: x
+    code: |-
+      import sqlite3
+      con = sqlite3.connect('shop.db')
+      Q = {'orders': 'SELECT * FROM orders', 'reset': 'DELETE FROM staging'}
+      def q(name):
+          return con.execute(Q[name]).fetchall()
+      print(q('orders'))
+    card: none
+
+  - name: a read on a project database through a dict entry the parameter of an earlier cell's helper names
+    files:
+      shop.db: x
+    earlier:
+      - |-
+        import sqlite3
+        con = sqlite3.connect('shop.db')
+        Q = {'orders': 'SELECT * FROM orders', 'reset': 'DELETE FROM staging'}
+        def q(name):
+            return con.execute(Q[name]).fetchall()
+    code: |-
+      print(q('orders'))
+    card: none
+
+  - name: a read on a project database through dict entries a loop over literal keys names
+    files:
+      shop.db: x
+    code: |-
+      import sqlite3
+      con = sqlite3.connect('shop.db')
+      Q = {'orders': 'SELECT * FROM orders', 'reset': 'DELETE FROM staging'}
+      for name in ['orders']:
+          print(con.execute(Q[name]).fetchall())
+    card: none
+
+  - name: a read on a project database through a list entry a name's index names
+    files:
+      shop.db: x
+    code: |-
+      import sqlite3
+      con = sqlite3.connect('shop.db')
+      QS = ['SELECT * FROM orders', 'DELETE FROM staging']
+      i = 0
+      print(con.execute(QS[i]).fetchall())
+    card: none
+
+  - name: a read on a project database through a list's last entry
+    files:
+      shop.db: x
+    code: |-
+      import sqlite3
+      con = sqlite3.connect('shop.db')
+      QS = ['DELETE FROM staging', 'SELECT * FROM orders']
+      print(con.execute(QS[-1]).fetchall())
+    card: none
+
+  - name: pandas reads a project database through dict entries a comprehension's loop over literal keys names
+    files:
+      shop.db: x
+    code: |-
+      import sqlite3
+      import pandas as pd
+      con = sqlite3.connect('shop.db')
+      Q = {'orders': 'SELECT * FROM orders', 'reset': 'DELETE FROM staging'}
+      frames = {k: pd.read_sql(Q[k], con) for k in ['orders']}
+    card: none
+
+  - name: a delete on a project database through a dict entry a helper's parameter names
+    files:
+      shop.db: x
+    code: |-
+      import sqlite3
+      con = sqlite3.connect('shop.db')
+      Q = {'orders': 'SELECT * FROM orders', 'reset': 'DELETE FROM staging'}
+      def q(name):
+          return con.execute(Q[name]).fetchall()
+      print(q('reset'))
+    card: read
+    kinds: [overwrite]
+
+  - name: a delete on a project database through a loop over a dict's items
+    files:
+      shop.db: x
+    code: |-
+      import sqlite3
+      con = sqlite3.connect('shop.db')
+      Q = {'orders': 'SELECT * FROM orders', 'reset': 'DELETE FROM staging'}
+      for name, sql in Q.items():
+          con.execute(sql)
+    card: read
+    kinds: [overwrite]
+
+  - name: a delete on a project database through a loop over a dict's values
+    files:
+      shop.db: x
+    code: |-
+      import sqlite3
+      con = sqlite3.connect('shop.db')
+      Q = {'orders': 'SELECT * FROM orders', 'reset': 'DELETE FROM staging'}
+      for sql in Q.values():
+          con.execute(sql)
+    card: read
+    kinds: [overwrite]
+
+  # A command taken from other commands reads as those: an entry of a list
+  # or dict of commands, a list's pop, either arm of an if-else, a text's
+  # strip or lower, str or list of one, a slice, and a comprehension that
+  # keeps some of a list's words, read as each of the list's tails.
+
+  - name: a command a while loop rebinds to a pop of a list of git commands
+    code: |-
+      import os
+      todo = ['git status', 'git log -1']
+      cmd = 'ls'
+      while todo:
+          os.system(cmd)
+          cmd = todo.pop()
+    card: none
+
+  - name: a command an if rebinds to the first entry of a list of git command lists
+    code: |-
+      import subprocess
+      CMDS = [['git', 'status'], ['git', 'log']]
+      cmd = ['ls']
+      if CMDS:
+          cmd = CMDS[0]
+      subprocess.run(cmd)
+    card: none
+
+  - name: a command a loop over a range rebinds to an entry of a list of git commands by its index
+    code: |-
+      import os
+      CMDS = ['git status', 'git log']
+      cmd = 'ls'
+      for i in range(2):
+          os.system(cmd)
+          cmd = CMDS[i]
+    card: none
+
+  - name: a git command run straight from a dict entry
+    code: |-
+      import subprocess
+      CMDS = {'s': ['git', 'status'], 'l': ['git', 'log']}
+      subprocess.run(CMDS['s'])
+    card: none
+
+  - name: a git command text run straight from a dict entry
+    code: |-
+      import os
+      CMDS = {'a': 'git status', 'b': 'git log'}
+      os.system(CMDS['a'])
+    card: none
+
+  - name: a git command taken from a dict with get and a literal default
+    code: |-
+      import os
+      CMDS = {'a': 'git status'}
+      cmd = CMDS.get('b', 'git log')
+      os.system(cmd)
+    card: none
+
+  - name: a git command picked by a conditional expression
+    code: |-
+      import subprocess
+      fast = True
+      full = ['git', 'log']
+      cmd = ['git', 'status']
+      cmd = cmd if fast else full
+      subprocess.run(cmd)
+    card: none
+
+  - name: a git command stripped of its spaces
+    code: |-
+      import os
+      cmd = 'git status '
+      cmd = cmd.strip()
+      os.system(cmd)
+    card: none
+
+  - name: a command text lowered
+    code: |-
+      import os
+      cmd = 'LS'
+      cmd = cmd.lower()
+      os.system(cmd)
+    card: none
+
+  - name: a git command made str
+    code: |-
+      import os
+      cmd = 'git status'
+      cmd = str(cmd)
+      os.system(cmd)
+    card: none
+
+  - name: a git command list copied with list
+    code: |-
+      import subprocess
+      cmd = ['git', 'status']
+      cmd = list(cmd)
+      subprocess.run(cmd)
+    card: none
+
+  - name: a git command list copied with a slice
+    code: |-
+      import subprocess
+      cmd = ['git', 'status']
+      cmd = cmd[:]
+      subprocess.run(cmd)
+    card: none
+
+  - name: an ffmpeg command list filtered by a comprehension
+    code: |-
+      import subprocess
+      cmd = ['ffmpeg', '-y', '-i', 'a.mp4', 'b.mp3']
+      cmd = [c for c in cmd if c]
+      subprocess.run(cmd)
+    card: none
+
+  - name: a python script a while loop rebinds the command to from a pop of a list of commands
+    code: |-
+      import os
+      todo = ['git status', 'python3 job.py']
+      cmd = 'ls'
+      while todo:
+          os.system(cmd)
+          cmd = todo.pop()
+    card: unchecked
+
+  - name: a python script run straight from a dict entry
+    code: |-
+      import subprocess
+      CMDS = {'s': ['git', 'status'], 'j': ['python3', 'job.py']}
+      subprocess.run(CMDS['j'])
+    card: unchecked
+
+  - name: a python script run from a dict entry a key the check can't read names
+    code: |-
+      import subprocess, sys
+      CMDS = {'s': ['git', 'status'], 'j': ['python3', 'job.py']}
+      subprocess.run(CMDS[sys.argv[1]])
+    card: unchecked
+
+  - name: a python script picked by a conditional expression
+    code: |-
+      import subprocess
+      fast = True
+      cmd = ['git', 'status']
+      cmd = cmd if fast else ['python3', 'job.py']
+      subprocess.run(cmd)
+    card: unchecked
+
+  - name: a python script command lowered
+    code: |-
+      import os
+      cmd = 'PYTHON3 JOB.PY'
+      cmd = cmd.lower()
+      os.system(cmd)
+    card: unchecked
+
+  - name: a python script a slice takes from a command's tail
+    code: |-
+      import subprocess
+      cmd = ['sudo', 'python3', 'job.py']
+      subprocess.run(cmd[1:])
+    card: unchecked
+
+  - name: a python script a comprehension keeps of a command's words
+    code: |-
+      import subprocess
+      cmd = ['nice', 'python3', 'job.py']
+      cmd = [c for c in cmd if c != 'nice']
+      subprocess.run(cmd)
+    card: unchecked
+
+  - name: a python script a dict's get gives as its default
+    code: |-
+      import os
+      CMDS = {'a': 'git status'}
+      cmd = CMDS.get('b', 'python3 job.py')
+      os.system(cmd)
+    card: unchecked
+
+  # A value a call gives counts as an object only where an installed
+  # package's or Python's own member makes it; a response's JSON, parsed
+  # arguments, a copy of the environment, or an instance of the cell's
+  # class holding a setting may hold the import string an app runner gets.
+
+  - name: uvicorn running an app name from a response's JSON config
+    code: |-
+      import requests, uvicorn
+      cfg = requests.get('https://example.com/cfg.json').json()
+      uvicorn.run(cfg['app'])
+    card: unchecked
+
+  - name: uvicorn running an app name parsed from arguments
+    code: |-
+      import argparse, uvicorn
+      parser = argparse.ArgumentParser()
+      parser.add_argument('--app', default='main:app')
+      args = parser.parse_args([])
+      uvicorn.run(args.app)
+    card: unchecked
+
+  - name: uvicorn running an app name from a copy of the environment
+    code: |-
+      import os, uvicorn
+      env = dict(os.environ)
+      uvicorn.run(env['APP'])
+    card: unchecked
+
+  - name: uvicorn running an app name a settings class stores on its instance
+    code: |-
+      import os, uvicorn
+      class Settings:
+          def __init__(self):
+              self.app = os.environ.get('APP', 'main:app')
+      settings = Settings()
+      uvicorn.run(settings.app)
+    card: unchecked
+
+  - name: help on a module name from a response's JSON config
+    code: |-
+      import requests
+      cfg = requests.get('https://example.com/cfg.json').json()
+      help(cfg['module'])
+    card: unchecked
+
+  - name: uvicorn running an app a server class's instance stores
+    code: |-
+      import uvicorn
+      from fastapi import FastAPI
+      class Server:
+          def __init__(self):
+              self.app = FastAPI()
+      server = Server()
+      uvicorn.run(server.app)
+    card: none
+
+  # A context the cells' own class names only where it is that class: a
+  # requests Session is no cell's Session.
+
+  - name: a response a requests session's block binds, after a pip install from a requirements file and a cell's own class named Session
+    files:
+      requirements.txt: |
+        pandas
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'])
+      - |-
+        class Session:
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                return False
+    code: |-
+      import requests
+      with requests.Session() as s:
+          r = s.get('https://example.com/data.json')
+      print(r.json())
+    card: none
+
+  - name: a response a block of the cell's own Session class binds, after a pip install from a requirements file
+    files:
+      requirements.txt: |
+        pandas
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'])
+      - |-
+        class Session:
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                return False
+    code: |-
+      with Session() as s:
+          r = s
+      print(r.json())
+    card: unchecked
+
+  # A context only unread code bound where its with runs may swallow an
+  # error, whatever a later cell binds it to; an alias a later cell imports
+  # doesn't reach an earlier with.
+
+  - name: a call to a name unread code defined, after an earlier cell's block of a context only unread code bound then
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+      - |-
+        with cm:
+            push = print
+      - |-
+        import contextlib
+        cm = contextlib.nullcontext()
+    code: |-
+      push(1)
+    card: unchecked
+
+  - name: a call to a name unread code defined, after an earlier cell's block of nullcontext before a later cell imports suppress under its name
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+      - |-
+        import contextlib
+        with contextlib.nullcontext():
+            push = print
+      - |-
+        from contextlib import suppress as nullcontext
+    code: |-
+      push(1)
+    card: none
+
+  # A partial of a launcher mapped over items the check reads runs each
+  # item; one a name holds is read as each partial it may hold, a partial of
+  # a partial among them.
+
+  - name: a partial of a launcher that runs git, an executor maps over a literal list
+    code: |-
+      import subprocess
+      from functools import partial
+      run = partial(subprocess.run, check=True)
+      from concurrent.futures import ThreadPoolExecutor
+      with ThreadPoolExecutor() as ex:
+          list(ex.map(run, [['git', 'status'], ['git', 'log', '-1']]))
+    card: none
+
+  - name: a partial of a launcher that runs git, the builtin map runs over a literal list
+    code: |-
+      import subprocess
+      from functools import partial
+      run = partial(subprocess.run, check=True)
+      list(map(run, [['git', 'status']]))
+    card: none
+
+  - name: a partial of a launcher that runs ffmpeg, an executor maps over a comprehension of commands
+    code: |-
+      import subprocess, glob
+      from functools import partial
+      from concurrent.futures import ThreadPoolExecutor
+      run = partial(subprocess.run, check=True)
+      cmds = [['ffmpeg', '-i', f, f + '.mp3'] for f in glob.glob('*.mp4')]
+      with ThreadPoolExecutor(4) as ex:
+          list(ex.map(run, cmds))
+    card: none
+
+  - name: a launcher that runs git, an executor maps over a literal list
+    code: |-
+      import subprocess
+      from concurrent.futures import ThreadPoolExecutor
+      with ThreadPoolExecutor() as ex:
+          out = list(ex.map(subprocess.run, [['git', 'status'], ['git', 'log', '-1']]))
+    card: none
+
+  - name: a launcher that runs git, starmap runs over literal argument tuples
+    code: |-
+      import subprocess, itertools
+      list(itertools.starmap(subprocess.run, [(['git', 'status'],), (['git', 'log'],)]))
+    card: none
+
+  - name: a partial of a python launcher, an executor maps over a literal list
+    code: |-
+      import subprocess, sys
+      from functools import partial
+      from concurrent.futures import ThreadPoolExecutor
+      run = partial(subprocess.run, check=True)
+      with ThreadPoolExecutor() as ex:
+          list(ex.map(run, [['git', 'status'], [sys.executable, 'etl.py']]))
+    card: unchecked
+
+  - name: a partial of a python launcher, the builtin map runs over a comprehension of scripts
+    code: |-
+      import subprocess, sys, glob
+      from functools import partial
+      run = partial(subprocess.run, check=True)
+      cmds = [[sys.executable, f] for f in glob.glob('*.py')]
+      list(map(run, cmds))
+    card: unchecked
+
+  - name: a partial of a launcher that runs git, an if rebinds to run a python script, handed to an executor's submit
+    code: |-
+      import subprocess, sys
+      from functools import partial
+      from concurrent.futures import ThreadPoolExecutor
+      job = partial(subprocess.run, ['git', 'status'])
+      if len(sys.argv) > 5:
+          job = partial(subprocess.run, [sys.executable, 'etl.py'])
+      with ThreadPoolExecutor() as ex:
+          ex.submit(job)
+    card: unchecked
+
+  - name: a partial of a partial of a launcher running a python script, a thread's target
+    code: |-
+      import subprocess, sys, threading
+      from functools import partial
+      base = partial(subprocess.run, check=True)
+      job = partial(base, [sys.executable, 'etl.py'])
+      threading.Thread(target=job).start()
+    card: unchecked
+
+  - name: a partial written out of a partial of a launcher running a python script, a thread's target
+    code: |-
+      import subprocess, threading
+      from functools import partial
+      job = partial(partial(subprocess.run, ['python', 'x.py']), check=True)
+      threading.Thread(target=job).start()
+    card: unchecked
+
+  - name: a partial of a partial of a launcher that runs git, a thread's target
+    code: |-
+      import subprocess, threading
+      from functools import partial
+      base = partial(subprocess.run, check=True)
+      job = partial(base, ['git', 'status'])
+      threading.Thread(target=job).start()
+    card: none
+
+  # A requests or session method looked up by a name sends each method
+  # the name holds.
+
+  - name: a request a requests method looked up by a name sends
+    code: |-
+      import requests
+      method = 'post'
+      getattr(requests, method)('https://erp.example.test/api/orders', json={'qty': 1})
+    card: read
+    kinds: [http]
+
+  - name: a request a session's method looked up by a name sends
+    code: |-
+      import requests
+      s = requests.Session()
+      method = 'post'
+      getattr(s, method)('https://erp.example.test/api/orders', json={'qty': 1})
+    card: read
+    kinds: [http]
+
+  - name: a request a requests method looked up by a name's lower case sends
+    code: |-
+      import requests
+      verb = 'POST'
+      getattr(requests, verb.lower())('https://erp.example.test/api/orders', json={'qty': 1})
+    card: read
+    kinds: [http]
+
+  - name: a read a requests method looked up by a name sends
+    code: |-
+      import requests
+      method = 'get'
+      print(getattr(requests, method)('https://erp.example.test/api/orders').json())
+    card: none
+
+  # A call in a class's body runs a method of it only where it calls that
+  # method by a name the body binds to it; a decorated def in a block runs
+  # through the calls after that block.
+
+  - name: a call to a name unread code defined, from a dataclass method a field after it doesn't call
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      from dataclasses import dataclass, field
+      @dataclass
+      class Cfg:
+          def go(self):
+              push()
+          items: list = field(default_factory=list)
+      push = print
+      Cfg().go()
+    card: none
+
+  - name: a method that names its own class with a compiled pattern after it in the class body, after a pip install from a requirements file
+    files:
+      requirements.txt: |
+        pandas
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'])
+    code: |-
+      import re
+      import pandas as pd
+      class Money:
+          def __init__(self, cents):
+              self.cents = cents
+          def __add__(self, other):
+              return Money(self.cents + other.cents)
+          PATTERN = re.compile(r'(\d+)')
+      df = pd.read_csv('stock.csv')
+      print(Money(1) + Money(2))
+    card: none
+
+  - name: a method that names its own class with a model config at the bottom of the class body, after a pip install from a requirements file
+    files:
+      requirements.txt: |
+        pandas
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'])
+    code: |-
+      from pydantic import BaseModel, ConfigDict
+      class Order(BaseModel):
+          qty: int
+          def doubled(self):
+              return Order(qty=self.qty * 2)
+          model_config = ConfigDict(frozen=True)
+      print(Order(qty=1).doubled())
+    card: none
+
+  - name: a method that calls a helper the cell defines later, with a property call after it in the class body, after a pip install from a requirements file
+    files:
+      requirements.txt: |
+        pandas
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'])
+    code: |-
+      class Report:
+          def _rows(self):
+              return load_rows()
+          rows = property(_rows)
+      def load_rows():
+          return [1, 2]
+      print(Report().rows)
+    card: none
+
+  - name: a decorated def under an if, then a log call in that block, after a pip install from a requirements file
+    files:
+      requirements.txt: |
+        pandas
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'])
+    code: |-
+      import functools, logging
+      if True:
+          @functools.lru_cache(maxsize=None)
+          def rate(code):
+              return lookup(code)
+          logging.info('cache ready')
+      def lookup(code):
+          return 1.0
+      print(rate('EUR'))
+    card: none
+
+  - name: a call to a name unread code defined, from a class-body lambda only a staticmethod wraps
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      class C:
+          f = lambda self: push()
+          g = staticmethod(f)
+      def push():
+          pass
+      C().f()
+    card: none
+
+  - name: a call to a name unread code defined, from a class-body lambda the body calls before the cell rebinds the name
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      class C:
+          f = lambda: push()
+          x = f()
+      def push():
+          pass
+    card: unchecked
+
+  - name: a call to a name unread code defined, from a method the class body calls through another name before the cell rebinds the name
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      class C:
+          def helper():
+              return push()
+          run = helper
+          x = run()
+      def push():
+          pass
+    card: unchecked
+
+  # A runner looked up by a name with a default the check can't place may
+  # be that default: the lookup holds.
+
+  - name: a timing runner looked up by a name with a function default, handed the request
+    code: |-
+      import timeit
+      n = 'timeit'
+      getattr(timeit, n, print)('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})', number=1)
+    card: unchecked
+
+  - name: a timing runner looked up by a name with a spread default, handed the request
+    code: |-
+      import timeit
+      n = 'timeit'
+      getattr(timeit, n, *[None])('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})', number=1)
+    card: unchecked
+
+  - name: a timer class looked up by a name with a name default, handed the request
+    code: |-
+      import timeit
+      n = 'Timer'
+      fallback = print
+      getattr(timeit, n, fallback)('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})').timeit(number=1)
+    card: unchecked
+
+  # IPython keeps the last -c it is given, and its help word asks for its
+  # help; unittest looks up the cells' own test class in __main__, and an
+  # option it doesn't take stops it first; a path line written into a .pth
+  # file a lookup places runs nothing.
+
+  - name: ipython given two -c options, the last the request
+    code: |-
+      import subprocess
+      subprocess.run(['ipython', '-c', 'print(1)', '-c', 'import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})'])
+    card: read
+    kinds: [http]
+
+  - name: ipython asked for its help by its help word
+    code: |-
+      import subprocess
+      subprocess.run(['ipython', 'help'])
+    card: none
+
+  - name: unittest main after an earlier cell set sys.argv for a script's own options
+    earlier:
+      - |-
+        import sys
+        sys.argv = ['report.py', '--input', 'stock.csv']
+    code: |-
+      import unittest
+      class T(unittest.TestCase):
+          def test_a(self):
+              self.assertEqual(1, 1)
+      unittest.main(exit=False)
+    card: none
+
+  - name: unittest main given the cell's own test class as its default test
+    code: |-
+      import unittest
+      class T(unittest.TestCase):
+          def test_a(self):
+              pass
+      unittest.main(defaultTest='T', argv=['x'], exit=False)
+    card: none
+
+  - name: unittest main given the cell's own test method in its argv
+    code: |-
+      import unittest
+      class T(unittest.TestCase):
+          def test_a(self):
+              pass
+      unittest.main(argv=['x', 'T.test_a'], exit=False)
+    card: none
+
+  - name: unittest main given a test module's name in its argv
+    code: |-
+      import unittest
+      unittest.main(argv=['x', 'tests.test_x'], exit=False)
+    card: unchecked
+
+  - name: a python -c after an earlier cell writes a path line into a .pth file in the folder a site lookup names
+    earlier:
+      - |-
+        import site
+        open(site.getsitepackages()[0] + '/extra.pth', 'w').write('/srv/shared/lib\n')
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: none
+
+  - name: a helper that runs git through a list of its starred parameter
+    code: |-
+      import subprocess
+      def run(*args, **kw):
+          return subprocess.run(list(args), capture_output=True, text=True, **kw)
+      print(run('git', 'status').stdout)
+    card: none
+
+  - name: a helper that runs a python script through a list of its starred parameter
+    code: |-
+      import subprocess
+      def run(*args, **kw):
+          return subprocess.run(list(args), capture_output=True, text=True, **kw)
+      print(run('python3', 'job.py').stdout)
+    card: unchecked

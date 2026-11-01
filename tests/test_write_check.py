@@ -1320,6 +1320,31 @@ def test_an_earlier_cell_is_parsed_once_across_checks(snap, monkeypatch):
     assert parsed == ["rm7('report.pdf')"], "a later check parses only its own cell"
 
 
+def test_checks_that_enter_new_contexts_add_nothing_to_what_the_cached_cells_read(snap, monkeypatch):
+    """A cached earlier cell keeps what it read of each block for the
+    names it binds, keyed by its own withs and calls alone: a later check
+    whose own cell enters a context no cell binds reads the same keys, so
+    what the cache holds stays the same size from check to check."""
+    from anton.core.utils import write_check
+
+    monkeypatch.setattr(write_check, "_EARLIER_CELLS", write_check._EarlierCells(budget=1_000_000))
+    earlier = ("exec(open('helpers.py').read())", *(
+        f"if {i} % 2:\n    push{i} = print\nelse:\n    push{i} = len\n"
+        f"try:\n    w{i} = 1\nexcept Exception:\n    w{i} = 2"
+        for i in range(20)
+    ))
+
+    def kept() -> int:
+        return sum(len(c.cell._first_sure) for c in write_check._EARLIER_CELLS._cells.values() if c.cell is not None)
+
+    sizes = []
+    for j in range(5):
+        code = f"with ctx{j}:\n    pass\n" + "\n".join(f"push{i}(1)" for i in range(20))
+        find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
+        sizes.append(kept())
+    assert sizes[0] > 0 and len(set(sizes)) == 1
+
+
 def test_the_earlier_cell_cache_keys_a_cell_by_its_place_and_keeps_to_its_budget():
     from anton.core.utils.write_check import _EarlierCells
 

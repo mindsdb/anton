@@ -30,6 +30,7 @@ from anton.core.backends.base import Cell, CompactedCell
 from anton.core.backends.local import LocalScratchpadRuntime
 from anton.core.backends.remote import RemoteScratchpadRuntime
 from anton.core.backends.sandbox import CellSandbox
+from anton.core.backends.wire import NOTHING_KEPT
 from anton.core.interaction.elicit import AskAnswer, AskRequest
 from anton.core.interaction.emitter import TurnEmitter
 from anton.core.llm.provider import (
@@ -1106,6 +1107,59 @@ async def test_a_cell_after_a_remote_error_is_held_once_a_hook_was_written(proje
     with patch.object(pad, "_sse", failing_stream):
         cell = await pad.execute("total = 2")
     assert cell.error and cell.ended_process and pad.process_running
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    outcome = await _hold()(session, pad=pad, code="print(1)")
+    assert (outcome is not None) is held
+    assert elicitor.asked == int(held)
+
+
+@pytest.mark.parametrize("ended, held", [(True, True), (False, False)], ids=["process-ended", "process-kept"])
+async def test_a_cell_after_a_remote_cell_whose_process_ended_is_held_once_a_hook_was_written(project, ended, held):
+    """A remote pad's service ends the pad's process during a cell, as a
+    timeout kill does, and says so in the cell it sends. The next cell runs
+    in a new process, which runs the startup hooks a cell wrote, so it is
+    held once a hook was written. A cell whose process the service kept
+    runs the next one in that process."""
+    pad = RemoteScratchpadRuntime(
+        name="main", endpoint_url="https://scratchpad.example.com", api_key="test", workspace_path=project,
+        cells=[Cell(code=HOOK_CELL, stdout="", stderr="", error=None)],
+    )
+
+    async def killed_stream(path: str, body: dict):
+        yield {"type": "cell", "cell": {"code": body["code"], "stdout": "", "stderr": "",
+                                        "error": "Timed out after 60s.", "stopped_at": NOTHING_KEPT,
+                                        "ended_process": ended}}
+
+    with patch.object(pad, "_sse", killed_stream):
+        cell = await pad.execute("import time\ntime.sleep(999)")
+    assert cell.ended_process is ended and cell.stopped_at == NOTHING_KEPT
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    outcome = await _hold()(session, pad=pad, code="print(1)")
+    assert (outcome is not None) is held
+    assert elicitor.asked == int(held)
+
+
+@pytest.mark.parametrize("earlier, held", [(HOOK_CELL, True), ("total = 1", False)],
+                         ids=["a-hook-written", "no-hook"])
+async def test_a_cell_after_a_remote_cancel_is_held_once_a_hook_was_written(project, earlier, held):
+    """A Stop on a remote pad asks its service to stop the running cell and
+    restart the pad. The cancel records the stopped cell's own code as one
+    that ended its process, as the local runtime's does, so the next cell,
+    which runs in a new process, is held once a hook was written."""
+    pad = RemoteScratchpadRuntime(
+        name="main", endpoint_url="https://scratchpad.example.com", api_key="test", workspace_path=project,
+        cells=[Cell(code=earlier, stdout="", stderr="", error=None)],
+    )
+    pad._running_code = "import time\ntime.sleep(999)"
+    with patch.object(pad, "_post", AsyncMock(return_value={})) as post:
+        await pad.cancel()
+    post.assert_awaited_once_with("/scratchpad/cancel", {"name": "main"})
+    stopped = pad.cells[-1]
+    assert (stopped.code, stopped.stopped_at, stopped.ended_process) == (
+        "import time\ntime.sleep(999)", NOTHING_KEPT, True,
+    )
     elicitor = _AnswersAtOnce(answer=CANCEL)
     session = await _gated_session(project, elicitor=elicitor)
     outcome = await _hold()(session, pad=pad, code="print(1)")

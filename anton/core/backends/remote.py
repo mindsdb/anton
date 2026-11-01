@@ -46,6 +46,8 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
         )
         self._endpoint_url = endpoint_url
         self._api_key = api_key
+        # The code of the cell the service runs now, which a cancel records.
+        self._running_code: str | None = None
 
     @property
     def process_running(self) -> bool:
@@ -119,7 +121,23 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
             pass  # Best effort on close
 
     async def cancel(self) -> None:
+        """Ask the service to stop the running cell and restart the pad, and
+        record the cell it stopped, as the local runtime does: its process
+        is gone, so it kept none of its names, and the next cell runs in a
+        new process."""
         await self._post("/scratchpad/cancel", {"name": self.name})
+        running, self._running_code = self._running_code, None
+        self._record_cell(
+            Cell(
+                code=running if running is not None else "# (cancelled by user)",
+                stdout="",
+                stderr="",
+                error="Cancelled by user.",
+                description="Cancelled",
+                stopped_at=NOTHING_KEPT,
+                ended_process=True,
+            )
+        )
 
     async def install_packages(self, packages: list[str]) -> str:
         result = await self._post("/scratchpad/install", {
@@ -149,45 +167,54 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
             "trace_context": json.loads(trace_context_to_json(trace)) if trace is not None else None,
         }
 
-        async for event in self._sse("/scratchpad/execute-stream", body):
-            event_type = event.get("type", "")
+        self._running_code = code
+        try:
+            async for event in self._sse("/scratchpad/execute-stream", body):
+                event_type = event.get("type", "")
 
-            if event_type == "progress":
-                yield event.get("message", "")
+                if event_type == "progress":
+                    yield event.get("message", "")
 
-            elif event_type == "cell":
-                cell_data = event.get("cell", {})
-                cell = Cell(
-                    code=cell_data.get("code", code),
-                    stdout=cell_data.get("stdout", ""),
-                    stderr=cell_data.get("stderr", ""),
-                    error=cell_data.get("error"),
-                    description=cell_data.get("description", description),
-                    estimated_time=cell_data.get("estimated_time", estimated_time),
-                    logs=cell_data.get("logs", ""),
-                    stopped_at=stopped_line(cell_data.get("stopped_at")),
-                )
-                cell = self._record_cell(cell)
-                yield cell
+                elif event_type == "cell":
+                    cell_data = event.get("cell", {})
+                    cell = Cell(
+                        code=cell_data.get("code", code),
+                        stdout=cell_data.get("stdout", ""),
+                        stderr=cell_data.get("stderr", ""),
+                        error=cell_data.get("error"),
+                        description=cell_data.get("description", description),
+                        estimated_time=cell_data.get("estimated_time", estimated_time),
+                        logs=cell_data.get("logs", ""),
+                        stopped_at=stopped_line(cell_data.get("stopped_at")),
+                        # The service says when it ended the pad's process, as a
+                        # timeout kill does, so the next cell runs in a new one.
+                        ended_process=cell_data.get("ended_process") is True,
+                    )
+                    self._running_code = None
+                    cell = self._record_cell(cell)
+                    yield cell
 
-            elif event_type == "error":
-                error_msg = event.get("error", "Unknown remote error")
-                cell = Cell(
-                    code=code,
-                    stdout="",
-                    stderr="",
-                    error=error_msg,
-                    description=description,
-                    # The service sent no cell, so what it bound is unknown:
-                    # none of it counts as bound. Nor can the check tell
-                    # whether the service started a new process for the next
-                    # cell, which runs the startup hooks a cell wrote, so it
-                    # counts as one that ended its process.
-                    stopped_at=NOTHING_KEPT,
-                    ended_process=True,
-                )
-                cell = self._record_cell(cell)
-                yield cell
+                elif event_type == "error":
+                    error_msg = event.get("error", "Unknown remote error")
+                    cell = Cell(
+                        code=code,
+                        stdout="",
+                        stderr="",
+                        error=error_msg,
+                        description=description,
+                        # The service sent no cell, so what it bound is unknown:
+                        # none of it counts as bound. Nor can the check tell
+                        # whether the service started a new process for the next
+                        # cell, which runs the startup hooks a cell wrote, so it
+                        # counts as one that ended its process.
+                        stopped_at=NOTHING_KEPT,
+                        ended_process=True,
+                    )
+                    self._running_code = None
+                    cell = self._record_cell(cell)
+                    yield cell
+        finally:
+            self._running_code = None
 
     async def cleanup(self) -> None:
         try:
