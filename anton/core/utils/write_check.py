@@ -1690,7 +1690,8 @@ _CODE_RUNNERS = frozenset({
     "doctest.testmod", "doctest.testfile", "doctest.run_docstring_examples", "doctest.DocTestRunner",
     "pytest.main", "papermill.execute_notebook", "nbclient.execute",
     "runpy._run_code", "runpy._run_module_code", "runpy._run_module_as_main",
-    # Each runs the import lines of the .pth files in the folders it adds.
+    # Each runs the import lines of the .pth files in the folders it adds;
+    # `site.addsitedir` only where the folder may hold one (`_adds_unread_site`).
     "site.addsitedir", "site.addpackage", "site.main",
     # The default loader's own discovery, which imports the test modules it
     # finds. `unittest.TestLoader()` goes through `_INSTANCE_RUNNERS`.
@@ -1798,12 +1799,23 @@ _LIST_CHANGES = frozenset({"insert", "append", "extend", "__setitem__", "__iadd_
 _SYS_PATH_CHANGES = frozenset({
     "sys.path", "site.addsitedir", *(f"sys.path.{method}" for method in _LIST_CHANGES),
 })
-# A word that names a Python file: its source, or bytecode Python loads
-# with no source (`_module_stem`).
-_PY_FILE = re.compile(r"\.pyc?\b")
+# The call that adds a folder to `sys.path` and runs its `.pth` files.
+_SITE_DIR_ADDER = "site.addsitedir"
+# A word that names a Python file: its source, bytecode Python loads with no
+# source, or a compiled extension (`_module_stem`).
+_PY_FILE = re.compile(r"\.(?:pyc?|so|pyd)\b")
+# The startup hooks a Python process runs as it starts, from each folder
+# `site` adds: the import lines of a `.pth` file, and these modules; and
+# how a string may name one (`_CodeSigns.names_a_startup_hook`).
+_STARTUP_HOOK_MODULES = frozenset({"sitecustomize.py", "usercustomize.py"})
+_NAMES_A_STARTUP_HOOK = re.compile(r"\.pth|(?:site|user)customize")
 # Every name Python, or the pad's boot, binds before a cell runs, so a call
 # to one is no sign that code the check couldn't read defined it.
 _BUILTIN_NAMES = frozenset({*vars(builtins), *INJECTED_HELPER_NAMES, EXPLAINABILITY_QUERIES_NAME})
+# Runners that import and run an app from a string target, as
+# `uvicorn.run("module:app")` imports `module`; given an app object instead,
+# they run read code (`_app_runner_unread`).
+_APP_RUNNERS = frozenset({"uvicorn.run"})
 # Runners and importers that run code the check can't read wherever they are
 # passed on or stored to be called later.
 _RUNNER_VALUES = frozenset({*_CODE_RUNNERS, *_STRING_RUNNERS, *_IMPORTERS})
@@ -1831,6 +1843,16 @@ _MOVE_FUNCS = {
     "pathlib.PosixPath.rename": "rename", "pathlib.PosixPath.replace": "rename",
 }
 _COPY_FUNCS = frozenset({"shutil.copy", "shutil.copy2", "shutil.copyfile"})
+# Calls that make a link at the path their second argument names, which an
+# import reaches like the file it points at; the path methods that make one
+# at the path they are called on (`_written_target`).
+_LINK_FUNCS = frozenset({"os.symlink", "os.link"})
+_LINK_METHODS = frozenset({"symlink_to", "hardlink_to"})
+_LINK_NAMES = frozenset({*(name.rpartition(".")[2] for name in _LINK_FUNCS), *_LINK_METHODS})
+# Calls that copy or move a file and, given a folder, keep its own name
+# (`_copied_module_stems`); `copyfile` needs a file destination, so it keeps
+# no name.
+_COPY_INTO_FOLDER = (_COPY_FUNCS - {"shutil.copyfile"}) | {"shutil.move"}
 # Modules and classes that hold a delete, a move, a copy or a shell call, for
 # a lookup by a name the check computes (`_FileFinder.lookup`).
 _LOOKUP_MODULES = frozenset({
@@ -1841,7 +1863,7 @@ _SHELL_FUNCS = frozenset({
     "subprocess.Popen", "subprocess.getoutput", "subprocess.getstatusoutput", "os.system", "os.popen",
     "asyncio.create_subprocess_shell", "anyio.run_process", "anyio.open_process", "trio.run_process",
     "trio.lowlevel.open_process", "pexpect.run", "pexpect.spawn", "invoke.run", "IPython.utils.process.system",
-    "IPython.utils.process.getoutput",
+    "IPython.utils.process.getoutput", "psutil.Popen",
 })
 # Calls that run a program from its words: where the words start, either
 # spread over the arguments (the l forms) or as one list (the v forms).
@@ -1855,6 +1877,15 @@ _LIST_ARGV_FUNCS = {
     "os.spawnv": 2, "os.spawnve": 2, "os.spawnvp": 2, "os.spawnvpe": 2,
     "os.posix_spawn": 1, "os.posix_spawnp": 1, "pty.spawn": 0,
 }
+# `os.startfile` opens a file with the program its type is bound to, running
+# a `.py` it names (`_python_launch`).
+_STARTFILE = "os.startfile"
+_SHELL_FUNCS |= {_STARTFILE}
+# An asyncio event loop's own launcher methods, placed by their name since
+# the loop `get_running_loop` or `get_event_loop` returns is one the check
+# can't read: one runs a program's words after the protocol, the other a
+# shell command (`_loop_launch`).
+_LOOP_LAUNCHERS = {"subprocess_exec": "exec", "subprocess_shell": "shell"}
 # Every call that runs a program, and the last names they are called by.
 _LAUNCHERS = frozenset({*_SHELL_FUNCS, *_SPREAD_ARGV_FUNCS, *_LIST_ARGV_FUNCS})
 _LAUNCH_NAMES = frozenset(name.rpartition(".")[2] for name in _LAUNCHERS)
@@ -1951,11 +1982,20 @@ _PYTHON_EXITS = frozenset({"--version", "--help", "--help-env", "--help-xoptions
 _PYTHON_TOOLS = frozenset({
     "pytest", "py.test", "papermill", "uvicorn", "gunicorn", "jupyter-execute", "hypercorn", "celery", "gradio",
     "pyinstrument", "scalene", "tox", "nox", "alembic", "flask", "sphinx-build", "dbt",
+    # Launchers that start a training run, a worker or a server from a
+    # script, a module or an app the project holds.
+    "torchrun", "accelerate", "deepspeed", "locust", "invoke", "inv", "fab", "doit", "viztracer", "kernprof",
+    "behave", "django-admin", "prefect", "airflow", "snakemake", "luigi", "voila", "mkdocs", "dask", "daphne",
+    "fire", "datasette", "waitress-serve", "functions-framework", "make",
 })
 _PYTHON_TOOL_COMMANDS = frozenset({
     ("streamlit", "run"), ("jupyter", "execute"), ("jupyter", "run"), ("coverage", "run"), ("fastapi", "dev"),
     ("fastapi", "run"), ("panel", "serve"), ("bokeh", "serve"), ("marimo", "run"), ("marimo", "edit"),
     ("dagster", "dev"),
+    ("shiny", "run"), ("chainlit", "run"), ("solara", "run"), ("textual", "run"), ("modal", "run"),
+    ("scrapy", "crawl"), ("scrapy", "runspider"), ("kedro", "run"), ("mlflow", "run"), ("memray", "run"),
+    ("quarto", "render"), ("pre-commit", "run"), ("wandb", "agent"), ("sqlmesh", "run"), ("hatch", "build"),
+    ("jupytext", "--execute"),
 })
 _TOOL_EXITS = frozenset({"--version", "-V", "--help", "-h"})
 _CONFTEST_TOOLS = frozenset({"pytest", "py.test"})
@@ -1976,6 +2016,20 @@ _ENV_RUNNERS: dict[str, tuple[tuple[str, ...], ...]] = {
     "pixi": (("run",), ("exec",)),
     "rye": (("run",),),
 }
+# The flags of each runner that run its command in another folder, project
+# or environment than the cell's, and those of the words that run the
+# command after them, as `env -C` does.
+_RUNNER_FOLDER_FLAGS: dict[str, frozenset[str]] = {
+    "uv": frozenset({"--directory", "--project", "--env-file"}),
+    "poetry": frozenset({"-C", "--directory", "-P", "--project"}),
+    "pdm": frozenset({"-p", "--project"}),
+    "conda": frozenset({"--cwd"}),
+    "mamba": frozenset({"--cwd"}),
+    "micromamba": frozenset({"--cwd"}),
+    "pixi": frozenset({"--manifest-path"}),
+    "rye": frozenset({"--pyproject"}),
+}
+_PREFIX_FOLDER_FLAGS = frozenset({"-C", "--chdir", "-D"})
 # Installers besides pip, by the head word to the commands that install the
 # packages named after them, and to those that install the project in the
 # folder they run in, which runs its build code. A package named by a path,
@@ -2013,7 +2067,7 @@ _INSTALL_VALUE_FLAGS = frozenset({"-c", "--channel", "--suffix", "--source"})
 _ENV_RUNNER_VALUE_FLAGS = frozenset({
     "--with", "--with-requirements", "--with-editable", "--python", "-p", "--project", "--directory",
     "--package", "--extra", "--group", "--env-file", "--index", "--from", "--spec", "-n", "--name",
-    "--prefix", "--cwd",
+    "--prefix", "--cwd", "-C", "-P", "--manifest-path", "--pyproject",
 })
 # uv run's flags that run a Python module or script, as `python -m` and a
 # script path do.
@@ -2044,6 +2098,13 @@ _PIP_FETCH_COMMANDS = _PIP_PACKAGE_COMMANDS - {"uninstall"}
 # flags do (`_PIP_SOURCE_FLAGS`), and the folders their config files lie in.
 _INSTALLER_SOURCE_SETTING = re.compile(
     r"(?:PIP|UV)_\w*(?:INDEX|FIND_LINKS|CONFIG)\w*|HOME|XDG_CONFIG_\w+|APPDATA", re.IGNORECASE,
+)
+# The settings, in a Python process's environment, that change what it
+# imports or runs as it starts: the folders it imports from, its home and
+# user site, the script an interactive start runs, and the modules a warning
+# filter or `breakpoint()` names.
+_PYTHON_SETTING = re.compile(
+    r"PYTHON(?:PATH|HOME|USERBASE|PLATLIBDIR|STARTUP|INSPECT|WARNINGS|BREAKPOINT)", re.IGNORECASE,
 )
 # pip's flags that name where a package comes from, the long ones matched by
 # unique prefix (`--req` is `--requirement`), and the short ones' letters.
@@ -2077,7 +2138,7 @@ _CHDIR_FUNCS = frozenset({"os.chdir", "contextlib.chdir"})
 # Calls that end the process, so nothing after them runs.
 _EXITS = frozenset({"sys.exit", "os._exit", "os.abort", "exit", "quit"})
 _SHELL_DELETE = frozenset({"rm", "unlink", "rmdir", "shred"})
-_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish", "tcsh", "csh"})
 # Windows' shells: cmd runs the text after `/c` or `/k` as a script, and
 # PowerShell the text after `-Command` (`_inner_script`).
 _CMD_SHELLS = frozenset({"cmd"})
@@ -2160,8 +2221,8 @@ _WRITER_METHODS = {
 }
 # The last names of the calls `_written_target` reads a written path from.
 _FILE_WRITE_NAMES = frozenset({
-    "open", "write_text", "write_bytes", "ExcelWriter", "rename", "replace", *_WRITER_METHODS,
-    *(name.rpartition(".")[2] for name in (*_MOVE_FUNCS, *_COPY_FUNCS)),
+    "open", "write_text", "write_bytes", "ExcelWriter", "rename", "replace", *_WRITER_METHODS, *_LINK_METHODS,
+    *(name.rpartition(".")[2] for name in (*_MOVE_FUNCS, *_COPY_FUNCS, *_LINK_FUNCS)),
 })
 # Folders under the project whose files are the agent's own output.
 _AGENT_FOLDERS = tuple(f".anton/{name}/" for name in sorted(_ANTON_WALKED))
@@ -2398,9 +2459,13 @@ class _CodeSigns:
     # Whether a string names a Python file, `.py` or `.pyc` at the end of a
     # word (`_PY_FILE`), as a write of a module the pad imports needs.
     names_a_py_file: bool
-    # Whether a string names a `.pth` file, whose import lines Python runs
-    # as it starts.
-    names_a_pth_file: bool
+    # Whether a string names a startup hook, a file a Python process runs as
+    # it starts (`_NAMES_A_STARTUP_HOOK`): a `.pth` file's import lines, or a
+    # `sitecustomize` or `usercustomize` module.
+    names_a_startup_hook: bool
+    # Whether a string names a program that unpacks an archive into a folder
+    # (`_NAMES_UNPACK`), as a write of a module the pad imports may land there.
+    names_unpack: bool
     # Whether a string holds `-c`, as the code `python -c` runs follows.
     names_dash_c: bool
     # Code that may change where `import` looks, which `_Modules` reads
@@ -2782,12 +2847,12 @@ class _Cell:
         by a last name or key a runner, launcher, loader or the builtin
         exec(), eval() or compile() has (`_UNREAD_CALL_NAMES`), a PyRun_
         function, a lookup by `getattr` or a call of what one returns, and
-        a write of a file where the cell names a `.pth` file."""
+        a write of a file where the cell names a startup hook."""
         out: list[ast.Call] = []
         for call in self.calls:
             name = _member_name(call.func)
             if (isinstance(call.func, ast.Call) or name in _UNREAD_CALL_NAMES or name.startswith(_PYAPI_PREFIXES)
-                    or self.signs.names_a_pth_file and name in _FILE_WRITE_NAMES):
+                    or self.signs.names_a_startup_hook and name in _FILE_WRITE_NAMES):
                 out.append(call)
         return tuple(out)
 
@@ -2902,7 +2967,7 @@ class _Cell:
         one walk once per cell (`_CodeSigns`)."""
         hints: list[ast.AST] = []
         imports: list[ast.Import | ast.ImportFrom] = []
-        names_builtins = names_a_py_file = names_a_pth_file = names_dash_c = False
+        names_builtins = names_a_py_file = names_a_startup_hook = names_dash_c = names_unpack = False
         path_changes: list[ast.AST] = []
         list_changes: list[_ListChange] = []
         path_aliases: set[str] = set()
@@ -2932,7 +2997,8 @@ class _Cell:
             elif isinstance(node, ast.Constant) and isinstance(node.value, str):
                 names_builtins = names_builtins or node.value in _EXEC_CALLS or node.value in _BUILTINS_MODULE_NAMES
                 names_a_py_file = names_a_py_file or bool(_PY_FILE.search(node.value))
-                names_a_pth_file = names_a_pth_file or ".pth" in node.value
+                names_a_startup_hook = names_a_startup_hook or bool(_NAMES_A_STARTUP_HOOK.search(node.value))
+                names_unpack = names_unpack or bool(_NAMES_UNPACK.search(node.value))
                 names_dash_c = names_dash_c or "-c" in node.value
                 if _PY_FILE.search(node.value):
                     py_files.update(n for word in node.value.split() for n in _module_names(word.strip("'\";,()")))
@@ -2996,8 +3062,8 @@ class _Cell:
                     hint_aliases.update(t.id for t in targets if isinstance(t, ast.Name))
         return _CodeSigns(
             hints=tuple(hints), imports=tuple(imports), names_builtins=names_builtins,
-            names_a_py_file=names_a_py_file, names_a_pth_file=names_a_pth_file, names_dash_c=names_dash_c,
-            path_changes=tuple(path_changes), list_changes=tuple(list_changes),
+            names_a_py_file=names_a_py_file, names_a_startup_hook=names_a_startup_hook, names_unpack=names_unpack,
+            names_dash_c=names_dash_c, path_changes=tuple(path_changes), list_changes=tuple(list_changes),
             path_aliases=frozenset(path_aliases), hint_aliases=frozenset(hint_aliases),
             bound_aside=frozenset(aside), globals_declared=tuple(declared), spelled=frozenset(spelled),
             deleted=frozenset(deleted), py_files=frozenset(py_files),
@@ -3504,15 +3570,29 @@ class _Reader:
     def points_installers(self) -> bool:
         """Whether a cell sets, in the pad's own environment, a setting that
         points pip or uv at another index or a folder
-        (`_changes_point_installers`), as `os.environ["PIP_INDEX_URL"] = ...`
-        or `os.putenv(...)` does. Read once per check, where an install needs it."""
+        (`_INSTALLER_SOURCE_SETTING`, `_Reader.environ_sets`). Read once per
+        check, where an install needs it."""
+        return self.environ_sets(_INSTALLER_SOURCE_SETTING)
+
+    @cached_property
+    def points_python(self) -> bool:
+        """Whether a cell sets, in the pad's own environment, a setting that
+        changes what a Python process imports or runs as it starts
+        (`_PYTHON_SETTING`, `_Reader.environ_sets`), as `PYTHONPATH` does.
+        Read once per check, where a launch of Python needs it."""
+        return self.environ_sets(_PYTHON_SETTING)
+
+    def environ_sets(self, setting: re.Pattern[str]) -> bool:
+        """Whether a cell sets, in the pad's own environment, a setting
+        `setting` matches (`_changes_set`), as `os.environ["PIP_INDEX_URL"] =
+        ...` or `os.putenv(...)` does."""
 
         def environ(node: ast.AST) -> bool:
             return self.dotted(node) == "os.environ"
 
         return any(
-            _changes_point_installers(cell, self, holds=environ, depth=0) or any(
-                self.dotted(c.func) == "os.putenv" and (not c.args or _names_installer_setting(c.args[0]))
+            _changes_set(cell, self, holds=environ, setting=setting, depth=0) or any(
+                self.dotted(c.func) == "os.putenv" and (not c.args or _names_setting(c.args[0], setting))
                 for c in cell.calls
             )
             for cell in self.cells
@@ -7121,11 +7201,16 @@ def _move_destination(call: ast.Call) -> ast.AST | None:
 
 
 def _written_target(call: ast.Call, reader: _Reader, cell: _Cell) -> ast.AST | None:
-    """The path `call` writes: a file it writes into or creates, or the
-    destination of a rename, move or copy."""
+    """The path `call` writes: a file it writes into or creates, the
+    destination of a rename, move or copy, or the link a symlink or hardlink
+    makes, which an import reaches like the file it points at."""
     name = reader.dotted(call.func)
     if name in _MOVE_FUNCS or name in _COPY_FUNCS:
         return _move_destination(call)
+    if name in _LINK_FUNCS:
+        return call.args[1] if len(call.args) > 1 else _keyword(call, "dst")
+    if isinstance(call.func, ast.Attribute) and call.func.attr in _LINK_METHODS:
+        return call.func.value
     if isinstance(call.func, ast.Attribute) and call.func.attr in ("rename", "replace") and (
         _is_path_rename(call, reader, cell)
     ):
@@ -8408,9 +8493,11 @@ def _command_word(node: ast.AST, reader: _Reader) -> str:
 def _command_text(node: ast.AST, reader: _Reader) -> str | None:
     """The text a command, or one of its words, is (`_sql_text`), with
     `sys.executable`, whole or as a part, read as `python`, the program it
-    names (`_executable_filled`)."""
-    if _names_executable(node, reader):
-        return "python"
+    names, and a path built from it as the program that path names
+    (`_interpreter_text`, `_executable_filled`)."""
+    built = _interpreter_text(node, reader)
+    if built is not None:
+        return built
     text = _sql_text(node, reader)
     return None if text is None else _executable_filled(text, reader)
 
@@ -8437,12 +8524,11 @@ def _program_filled(text: str, reader: _Reader) -> list[str]:
 
 
 def _executable_filled(text: str, reader: _Reader) -> str:
-    """`text` with each placeholder for `sys.executable` read as `python`."""
+    """`text` with each placeholder for `sys.executable` read as `python`,
+    and for a path built from it as that path (`_interpreter_text`)."""
     if _HOLE not in text:
         return text
-    return _NUMBERED_HOLE.sub(
-        lambda m: "python" if _names_executable(reader.hole_node(m.group()), reader) else m.group(), text,
-    )
+    return _NUMBERED_HOLE.sub(lambda m: _interpreter_text(reader.hole_node(m.group()), reader) or m.group(), text)
 
 
 def _names_executable(node: ast.AST | None, reader: _Reader) -> bool:
@@ -8451,6 +8537,83 @@ def _names_executable(node: ast.AST | None, reader: _Reader) -> bool:
     return node is not None and (
         reader.dotted(node) == "sys.executable" or reader.module_member(node) == "sys.executable"
     )
+
+
+# The folders of the running environment, which hold its interpreter and its
+# other programs, as `bin/pip` under `sys.prefix` (`_interpreter_text`).
+_PYTHON_FOLDERS = frozenset({"sys.prefix", "sys.exec_prefix", "sys.base_prefix", "sys.base_exec_prefix"})
+# Calls that give back the one path they are handed, as a text or a path,
+# and the methods of a path that do; the calls that join parts onto the path
+# they are handed first, and those that give its folder.
+_SAME_PATH_CALLS = frozenset({
+    *_SAME_TEXT_CALLS, "os.fsdecode", "os.path.abspath", "os.path.realpath", "os.path.normpath",
+    "os.path.expanduser",
+})
+_SAME_PATH_METHODS = frozenset({"resolve", "absolute", "expanduser", "as_posix", "__fspath__"})
+_PATH_JOINS = frozenset({
+    "os.path.join", "posixpath.join", "ntpath.join", "pathlib.Path", "pathlib.PurePath", "pathlib.PosixPath",
+    "pathlib.WindowsPath",
+})
+_PATH_FOLDERS = frozenset({"os.path.dirname", "posixpath.dirname", "ntpath.dirname"})
+
+
+def _interpreter_text(node: ast.AST | None, reader: _Reader, *, depth: int = 0) -> str | None:
+    """The path `node` builds from the running interpreter's, as a program
+    word reads it: `python` for `sys.executable` (`_names_executable`), "."
+    for its folder or one of `_PYTHON_FOLDERS`, and literal parts joined onto
+    one of those, so `os.path.join(os.path.dirname(sys.executable), "pip")`
+    names pip. A call that gives back the path it is handed, a join, a
+    path's `.parent`, `.with_name` and `.joinpath`, `/`, `+` and an f-string
+    read through, and a name through the values its bindings give it where
+    they all read the same, up to `_PARAM_DEPTH` names. None for any other
+    code."""
+    if node is None or depth > _PARAM_DEPTH:
+        return None
+    if _names_executable(node, reader):
+        return "python"
+    if isinstance(node, ast.Name):
+        bindings = reader.bindings_of(node.id, node=node)
+        if not bindings or any(b.how != "value" for b in bindings):
+            return None
+        texts = {_interpreter_text(b.value, reader, depth=depth + 1) for b in bindings}
+        return texts.pop() if len(texts) == 1 else None
+    if isinstance(node, ast.Attribute):
+        if reader.dotted(node) in _PYTHON_FOLDERS or reader.module_member(node) in _PYTHON_FOLDERS:
+            return "."
+        base = _interpreter_text(node.value, reader, depth=depth) if node.attr == "parent" else None
+        return None if base is None else posixpath.dirname(base) or "."
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Div, ast.Add)):
+        base = _interpreter_text(node.left, reader, depth=depth)
+        part = node.right.value if isinstance(node.right, ast.Constant) and isinstance(node.right.value, str) else None
+        if base is None or part is None:
+            return None
+        return posixpath.join(base, part) if isinstance(node.op, ast.Div) else base + part
+    if isinstance(node, ast.JoinedStr) and node.values and isinstance(node.values[0], ast.FormattedValue):
+        head, *rest = node.values
+        base = _interpreter_text(head.value, reader, depth=depth) if head.conversion == -1 else None
+        if base is None or head.format_spec is not None or not all(isinstance(v, ast.Constant) for v in rest):
+            return None
+        return base + "".join(str(v.value) for v in rest if isinstance(v, ast.Constant))
+    if not isinstance(node, ast.Call) or node.keywords:
+        return None
+    func, parts = node.func, list(node.args)
+    if isinstance(func, ast.Attribute) and func.attr in _SAME_PATH_METHODS:
+        return None if parts else _interpreter_text(func.value, reader, depth=depth)
+    if isinstance(func, ast.Attribute) and func.attr in ("with_name", "joinpath"):
+        base = _interpreter_text(func.value, reader, depth=depth)
+        if func.attr == "with_name" and base is not None:
+            base = posixpath.dirname(base) or "."
+    else:
+        name = reader.module_member(func) or reader.dotted(func)
+        if not parts or not (name in _SAME_PATH_CALLS or name in _PATH_JOINS or name in _PATH_FOLDERS):
+            return None
+        base, parts = _interpreter_text(parts[0], reader, depth=depth), parts[1:]
+        if base is None or parts and name not in _PATH_JOINS:
+            return None
+        if name in _PATH_FOLDERS:
+            return posixpath.dirname(base) or "."
+    texts = [p.value for p in parts if isinstance(p, ast.Constant) and isinstance(p.value, str)]
+    return None if base is None or len(texts) != len(parts) else posixpath.join(base, *texts)
 
 
 def _script_commands(text: str, *, escapes: bool = True) -> list[list[str]]:
@@ -8737,14 +8900,16 @@ class _Launch:
     read; whether it installs the project in the cell's folder, which runs
     such code only where the project builds (`_Reader.project_builds`);
     whether it installs packages by name, from an index a setting in its
-    environment may point elsewhere (`_INSTALLER_SOURCE_SETTING`); and the
+    environment may point elsewhere (`_INSTALLER_SOURCE_SETTING`); the
     literal code it hands `python -c`, each read as one more cell
-    (`_exec_cells`)."""
+    (`_exec_cells`); and whether it starts a Python interpreter, which runs
+    the startup hooks a cell wrote (`_Modules.hooks_written`)."""
 
     unread: bool = False
     sources: tuple[str, ...] = ()
     syncs: bool = False
     installs: bool = False
+    starts_python: bool = False
 
     @classmethod
     def joined(cls, launches: Sequence[_Launch]) -> _Launch:
@@ -8754,6 +8919,7 @@ class _Launch:
             sources=tuple(source for launch in launches for source in launch.sources),
             syncs=any(launch.syncs for launch in launches),
             installs=any(launch.installs for launch in launches),
+            starts_python=any(launch.starts_python for launch in launches),
         )
 
     def pointed(self, points: bool) -> _Launch:
@@ -8774,6 +8940,9 @@ def _python_launch(call: ast.Call, reader: _Reader) -> _Launch | None:
     if partial is not None:
         call = _partial_call(partial=partial, call=call)
     last = _last_name(call.func)
+    loop_kind = _LOOP_LAUNCHERS.get(last) if isinstance(call.func, ast.Attribute) else None
+    if loop_kind is not None:
+        return _loop_launch(call, reader, kind=loop_kind)
     if last not in _LAUNCH_NAMES and last not in reader.runner_aliases:
         return None
     name = reader.dotted(call.func)
@@ -8784,6 +8953,9 @@ def _python_launch(call: ast.Call, reader: _Reader) -> _Launch | None:
     commands = _shell_commands(call, name, reader)
     index = _SPREAD_ARGV_FUNCS.get(name, _LIST_ARGV_FUNCS.get(name, 0))
     program = call.args[index - 1] if 0 < index <= len(call.args) else _keyword(call, "executable")
+    if program is None and name == "subprocess.Popen" and len(call.args) > 2:
+        # Popen takes its program as `executable`, the third argument.
+        program = call.args[2]
     if program is not None:
         word = _command_word(program, reader)
         words = _literal_texts(program, reader) if _unreadable_word(word) else [word]
@@ -8803,7 +8975,11 @@ def _python_launch(call: ast.Call, reader: _Reader) -> _Launch | None:
     given = _keyword(call, "input")
     stdin = None if given is None else _sql_text(given, reader)
     env = _keyword(call, "env")
-    moved = _keyword(call, "cwd") is not None or env is not None
+    # Another folder or environment, as `cwd=` and `env=` give, the pad's
+    # own after a cell changes into another folder, or one a cell set a
+    # setting in that changes what Python imports (`_Reader.points_python`).
+    moved = (_keyword(call, "cwd") is not None or env is not None or reader.cwds != ["."]
+             or reader.points_python)
     launch = _Launch.joined([
         _script_launch(c, depth=0, stdin=stdin, moved=moved) if isinstance(c, str)
         else _command_launch(c, depth=0, stdin=stdin, moved=moved)
@@ -8812,8 +8988,28 @@ def _python_launch(call: ast.Call, reader: _Reader) -> _Launch | None:
     # An install where the call's environment, or the pad's own, may point
     # it at another index or a folder of the cell's.
     return launch.pointed(launch.installs and (
-        env is not None and _env_points_installers(env, reader) or reader.points_installers
+        env is not None and _env_sets(env, reader, setting=_INSTALLER_SOURCE_SETTING) or reader.points_installers
     ))
+
+
+def _loop_launch(call: ast.Call, reader: _Reader, *, kind: str) -> _Launch:
+    """The Python an asyncio loop's launcher method runs (`_LOOP_LAUNCHERS`):
+    `subprocess_exec` takes the program's words after its protocol factory,
+    read as a command (`_command_launch`); `subprocess_shell` takes a shell
+    command after it, read as a script (`_script_launch`). The pad's own
+    folder or a setting that changes what Python imports makes it `moved`."""
+    moved = reader.cwds != ["."] or reader.points_python
+    if kind == "exec":
+        words = [_command_word(w, reader) for w in call.args[1:]]
+        return _Launch() if not words else replace(
+            _command_launch(words, depth=0, stdin=None, moved=moved), starts_python=True)
+    command = call.args[1] if len(call.args) > 1 else None
+    text = None if command is None else _command_text(command, reader)
+    if command is None:
+        return _Launch()
+    if text is None or _HOLE in text:
+        return _Launch(unread=True)
+    return replace(_script_launch(text, depth=0, stdin=None, moved=moved), starts_python=True)
 
 
 def _never_given(node: ast.AST, reader: _Reader, *, depth: int = 0) -> bool:
@@ -8893,7 +9089,7 @@ def _command_launch(words: list[str], *, depth: int, stdin: str | None, moved: b
         return _Launch()
     # The words before the program, all of them for a command a runner hands a shell.
     before = words[: words.index(bare[0])] if bare[0] in words else words
-    moved = moved or any(_SHELL_ASSIGNMENT.match(w) for w in before)
+    moved = moved or any(_SHELL_ASSIGNMENT.match(w) or _moves_folder(w, _PREFIX_FOLDER_FLAGS) for w in before)
     if _unreadable_word(bare[0]):
         return _Launch(unread=True)
     verb, args = _program_name(bare[0]), bare[1:]
@@ -8912,20 +9108,28 @@ def _command_launch(words: list[str], *, depth: int, stdin: str | None, moved: b
         ])
     target = _env_runner_target(verb, args)
     if target is not None:
-        return _command_launch(target, depth=depth, stdin=stdin, moved=moved)
+        # The runner's own words, which may move it into another folder or
+        # environment, as `uv run --directory sub` does.
+        own = args[: len(args) - len(target)] if args[len(args) - len(target):] == target else args
+        flags = _RUNNER_FOLDER_FLAGS.get(verb, frozenset())
+        return _command_launch(target, depth=depth, stdin=stdin,
+                               moved=moved or any(_moves_folder(w, flags) for w in own))
     installs = _install_unread(verb, args)
     if installs is not None:
         # In another folder, the project it installs may be any.
         return _Launch(unread=True) if installs.syncs and moved else installs.pointed(_points_installers(before))
     pip_args = _pip_arguments(verb, args)
     if pip_args is not None:
-        return _pip_launch(pip_args).pointed(_points_installers(before))
+        return replace(_pip_launch(pip_args).pointed(_points_installers(before)), starts_python=True)
     if verb == "py":
         if args and args[0] in _PY_LAUNCHER_LISTS:
             return _Launch()
-        return _python_arguments(list(itertools.dropwhile(_PY_LAUNCHER_FLAG.fullmatch, args)), moved=moved)
+        launch = _python_arguments(list(itertools.dropwhile(_PY_LAUNCHER_FLAG.fullmatch, args)), moved=moved)
+        return replace(launch, starts_python=True)
+    if verb.startswith("ipython") and _PYTHON_PROGRAM.fullmatch(verb):
+        return replace(_ipython_launch(args, moved=moved), starts_python=True)
     if _PYTHON_PROGRAM.fullmatch(verb):
-        return _python_arguments(args, moved=moved)
+        return replace(_python_arguments(args, moved=moved), starts_python=True)
     first = args[0] if args else ""
     if verb.endswith(_PYTHON_SCRIPTS):
         return _Launch(unread=True)
@@ -8935,6 +9139,43 @@ def _command_launch(words: list[str], *, depth: int, stdin: str | None, moved: b
         verb in _PYTHON_TOOLS or (verb, first) in _PYTHON_TOOL_COMMANDS
         or (verb == "jupyter-nbconvert" or verb == "jupyter" and first == "nbconvert") and "--execute" in args
     ))
+
+
+# IPython's own flags that load a profile or a directory of startup scripts,
+# which run as it starts; and a line of its input that starts a magic or a
+# shell escape, which runs a command the check reads not as Python.
+_IPYTHON_PROFILE_FLAGS = frozenset({"--profile", "--profile-dir", "--ipython-dir"})
+_IPYTHON_MAGIC = re.compile(r"(?:^|\n)\s*[!%]")
+
+
+def _ipython_launch(args: list[str], *, moved: bool) -> _Launch:
+    """What IPython runs given its arguments `args`. A `--profile` or
+    directory flag loads startup scripts the check can't read. Its `-c`
+    holds a magic (`%run`), a cell magic (`%%bash`) or a shell escape (`!`),
+    which run a command, not plain Python: such a `-c` is unread, while
+    plain Python after `-c` is read as `python -c` (`_python_arguments`). A
+    script before it runs is unread; a bare shell runs nothing."""
+    code: str | None = None
+    for at, word in enumerate(args):
+        if word.partition("=")[0] in _IPYTHON_PROFILE_FLAGS:
+            return _Launch(unread=True)
+        if word == "-c" and at + 1 < len(args):
+            code = args[at + 1]
+        elif word.startswith("-c") and len(word) > 2 and not word.startswith("--"):
+            code = word[2:]
+    if code is None:
+        # A script file given runs; a bare shell waits for input.
+        return _Launch(unread=any(not word.startswith("-") for word in args))
+    if _IPYTHON_MAGIC.search(code):
+        return _Launch(unread=True)
+    return _python_arguments(["-c", code], moved=moved)
+
+
+def _moves_folder(word: str, flags: AbstractSet[str]) -> bool:
+    """Whether `word`, a flag before a command's program, is one of `flags`,
+    which run the program in another folder or environment, as `--flag
+    value` or `--flag=value`."""
+    return word.partition("=")[0] in flags
 
 
 def _takes_value(flag: str, value_flags: AbstractSet[str]) -> bool:
@@ -9161,13 +9402,14 @@ def _points_installers(words: Iterable[str]) -> bool:
     )
 
 
-def _env_points_installers(env: ast.AST, reader: _Reader, *, depth: int = 0) -> bool:
+def _env_sets(env: ast.AST, reader: _Reader, *, setting: re.Pattern[str], depth: int = 0) -> bool:
     """Whether `env`, the environment a call hands a program or the pad's
-    own takes, may hold a setting that points pip or uv at another index or
-    a folder (`_INSTALLER_SOURCE_SETTING`): a dict, or `dict()`'s keywords,
-    with such a key or a key the check can't read, or one the check can't
-    read whole. The pad's own environment, as `os.environ` or a copy of it,
-    holds what a cell set in it (`_Reader.points_installers`)."""
+    own takes, may hold a setting `setting` matches, as one that points pip
+    or uv at another index or a folder (`_INSTALLER_SOURCE_SETTING`): a
+    dict, or `dict()`'s keywords, with such a key or a key the check can't
+    read, or one the check can't read whole. The pad's own environment, as
+    `os.environ` or a copy of it, holds what a cell set in it
+    (`_Reader.points_installers`, `_Reader.points_python`)."""
     if depth > _PARAM_DEPTH:
         return True
     name = reader.dotted(env.func) if isinstance(env, ast.Call) else reader.dotted(env)
@@ -9175,35 +9417,39 @@ def _env_points_installers(env: ast.AST, reader: _Reader, *, depth: int = 0) -> 
         return False
     if isinstance(env, ast.Dict):
         return any(
-            _env_points_installers(v, reader, depth=depth + 1) if k is None else _names_installer_setting(k)
+            _env_sets(v, reader, setting=setting, depth=depth + 1) if k is None else _names_setting(k, setting)
             for k, v in zip(env.keys, env.values)
         )
     if isinstance(env, ast.Call) and name == "dict":
-        return any(_env_points_installers(a, reader, depth=depth + 1) for a in env.args) or any(
-            _env_points_installers(k.value, reader, depth=depth + 1) if k.arg is None
-            else bool(_INSTALLER_SOURCE_SETTING.fullmatch(k.arg)) for k in env.keywords
+        return any(_env_sets(a, reader, setting=setting, depth=depth + 1) for a in env.args) or any(
+            _env_sets(k.value, reader, setting=setting, depth=depth + 1) if k.arg is None
+            else bool(setting.fullmatch(k.arg)) for k in env.keywords
         )
     if not isinstance(env, ast.Name):
         return True
     found = reader.bindings_of(env.id, node=env)
-    if not found or any(b.how != "value" or _env_points_installers(b.value, reader, depth=depth + 1) for b in found):
+    if not found or any(
+        b.how != "value" or _env_sets(b.value, reader, setting=setting, depth=depth + 1) for b in found
+    ):
         return True
     name = env.id
 
     def holds(node: ast.AST) -> bool:
         return isinstance(node, ast.Name) and node.id == name
 
-    return any(_changes_point_installers(cell, reader, holds=holds, depth=depth) for cell in reader.cells)
+    return any(_changes_set(cell, reader, holds=holds, setting=setting, depth=depth) for cell in reader.cells)
 
 
-def _changes_point_installers(cell: _Cell, reader: _Reader, *, holds: Callable[[ast.AST], bool], depth: int) -> bool:
+def _changes_set(
+    cell: _Cell, reader: _Reader, *, holds: Callable[[ast.AST], bool], setting: re.Pattern[str], depth: int,
+) -> bool:
     """Whether `cell` changes in place an environment's dict, the one each
-    node `holds` reads, to hold a setting that points pip or uv elsewhere
-    (`_names_installer_setting`): a store under such a key, a `setdefault`
-    of one, or an `update` with one (`_env_points_installers`)."""
+    node `holds` reads, to hold a setting `setting` matches
+    (`_names_setting`): a store under such a key, a `setdefault` of one, or
+    an `update` with one (`_env_sets`)."""
     for node in cell.stores:
         if isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Subscript) and holds(t.value) and _names_installer_setting(t.slice) for t in node.targets
+            isinstance(t, ast.Subscript) and holds(t.value) and _names_setting(t.slice, setting) for t in node.targets
         ):
             return True
     for call in cell.calls:
@@ -9211,21 +9457,20 @@ def _changes_point_installers(cell: _Cell, reader: _Reader, *, holds: Callable[[
         if not (isinstance(func, ast.Attribute) and holds(func.value)):
             continue
         if func.attr == "update" and (
-            any(_env_points_installers(a, reader, depth=depth + 1) for a in call.args)
-            or any(k.arg is None or _INSTALLER_SOURCE_SETTING.fullmatch(k.arg) for k in call.keywords)
+            any(_env_sets(a, reader, setting=setting, depth=depth + 1) for a in call.args)
+            or any(k.arg is None or setting.fullmatch(k.arg) for k in call.keywords)
         ):
             return True
-        if func.attr in ("setdefault", "__setitem__") and (not call.args or _names_installer_setting(call.args[0])):
+        if func.attr in ("setdefault", "__setitem__") and (not call.args or _names_setting(call.args[0], setting)):
             return True
     return False
 
 
-def _names_installer_setting(key: ast.AST) -> bool:
-    """Whether `key`, an environment's key, names a setting that points pip
-    or uv elsewhere (`_INSTALLER_SOURCE_SETTING`), or is one the check can't
-    read."""
+def _names_setting(key: ast.AST, setting: re.Pattern[str]) -> bool:
+    """Whether `key`, an environment's key, names a setting `setting`
+    matches, or is one the check can't read."""
     if isinstance(key, ast.Constant) and isinstance(key.value, str):
-        return bool(_INSTALLER_SOURCE_SETTING.fullmatch(key.value))
+        return bool(setting.fullmatch(key.value))
     return True
 
 
@@ -10320,19 +10565,25 @@ def _holds_a_running_member(node: ast.AST, reader: _Reader) -> bool:
 # in a folder on `sys.path`: its source, its bytecode with no source beside
 # it, or a package's `__init__.py`.
 _MODULE_FILE_ENDS = (".py", ".pyc", "/__init__.py")
+# The endings of a compiled extension module, which an import loads like a
+# `.py`: its name runs up to the first dot, as `erp.cpython-311.so` is `erp`.
+_EXTENSION_ENDS = (".so", ".pyd")
 
 
 def _module_stem(path: str) -> str | None:
     """The name an import reaches a module file at `path` by, in the folder
-    that holds it: the stem of a `.py` file, or of a `.pyc` file outside
-    `__pycache__`, which Python loads with no source beside it. None for any
-    other file, a `.pyc` in `__pycache__` among them: Python reads one only
-    for the source it was compiled from."""
+    that holds it: the stem of a `.py` file, of a `.pyc` file outside
+    `__pycache__` (which Python loads with no source beside it), or of a
+    compiled extension (`_EXTENSION_ENDS`), whose name runs to its first dot.
+    None for any other file, a `.pyc` in `__pycache__` among them: Python
+    reads one only for the source it was compiled from."""
     folders, _, name = path.rpartition("/")
     if name.endswith(".py"):
         return name[: -len(".py")]
     if name.endswith(".pyc") and "__pycache__" not in folders.split("/"):
         return name[: -len(".pyc")]
+    if name.endswith(_EXTENSION_ENDS):
+        return name.split(".", 1)[0] or None
     return None
 
 
@@ -10350,6 +10601,9 @@ def _module_names(path: str) -> set[str]:
 # Folders an environment installs packages into: what an import reaches in
 # one is an installed package, not a project's module.
 _PACKAGE_FOLDERS = frozenset({"site-packages", "dist-packages"})
+# The endings of an archive an import reads modules out of once it is on
+# `sys.path` (`_Modules.archive_on_path`).
+_ARCHIVE_PATH_ENDS = (".zip", ".whl", ".egg", ".pyz")
 # Calls that write files whose paths the check doesn't read, as an archive's
 # extraction does, or a copy of a folder.
 class _TreeDestination(NamedTuple):
@@ -10441,7 +10695,24 @@ def _written_modules(reader: _Reader, cells: Sequence[_Cell]) -> _WrittenModules
                 if isinstance(got, _Unknown) or _TEMP_PATH in got:
                     unplaced = True
                 else:
-                    paths.update(p for p in (path.replace("\\", "/") for path in got) if _module_stem(p) is not None)
+                    places = [path.replace("\\", "/") for path in got]
+                    paths.update(p for p in places if _module_stem(p) is not None)
+                    # A copy or move into a folder keeps the source's own
+                    # name, so `erp.py` lands under it.
+                    for stem in _copied_module_stems(call, reader, cell):
+                        paths.update(f"{p.rstrip('/')}/{stem}" for p in places if _module_stem(p) is None)
+                    # A link to a folder is a package by its own last name,
+                    # as `os.symlink("/pkg", "lib/erp")` makes `erp`.
+                    if last in _LINK_NAMES:
+                        names.update(posixpath.basename(p.rstrip("/")) for p in places
+                                     if _module_stem(p) is None and posixpath.basename(p.rstrip("/")).isidentifier())
+                    # A write to a folder under a name the check can't read,
+                    # as a loop over an archive's members does, may put any
+                    # module there: the folder holds any, like an unpack.
+                    for p in places:
+                        if _RUN_TIME_PART in p and _RUN_TIME_PART not in p.split(_RUN_TIME_PART, 1)[0]:
+                            unpacks.append(reader.position(call))
+                            unpacked.add(posixpath.dirname(p.split(_RUN_TIME_PART, 1)[0] + "x") or ".")
             elif last in _TREE_WRITERS:
                 where = _TREE_DESTINATIONS[last]
                 dest = call.args[where.place] if len(call.args) > where.place else _keyword(call, where.keyword)
@@ -10455,18 +10726,20 @@ def _written_modules(reader: _Reader, cells: Sequence[_Cell]) -> _WrittenModules
                     names.update(posixpath.basename(p.rstrip("/")) for p in got)
                 else:
                     unplaced = True
-            elif last in _LAUNCH_NAMES and (cell.signs.names_a_py_file or "clone" in cell.signs.spelled):
+            elif last in _LAUNCH_NAMES and (
+                cell.signs.names_a_py_file or cell.signs.names_unpack or "clone" in cell.signs.spelled
+            ):
                 name = reader.module_member(call.func) or reader.dotted(call.func)
                 for command in _shell_commands(call, name, reader) if name in _LAUNCHERS else ():
                     commands = [command] if isinstance(command, list) else _script_commands(command)
                     for words in commands:
                         paths.update(path for w in words for path in [_REDIRECT.sub("", w).replace("\\", "/")]
                                      if _module_stem(path) is not None)
-                        cloned = _cloned_into(words)
-                        if cloned is not None:
+                        into = _cloned_into(words) or _unpacked_into(words) or _copied_tree_into(words)
+                        if into is not None:
                             unpacks.append(reader.position(call))
-                            unpacked.add(cloned)
-                            unpacked_anywhere = unpacked_anywhere or _unreadable_word(cloned)
+                            unpacked.add(into)
+                            unpacked_anywhere = unpacked_anywhere or _unreadable_word(into)
         if unplaced:
             anywhere = True
             names.update(cell.signs.py_files)
@@ -10474,6 +10747,110 @@ def _written_modules(reader: _Reader, cells: Sequence[_Cell]) -> _WrittenModules
                            unpacked=frozenset(unpacked), unpacked_anywhere=unpacked_anywhere,
                            first_unpack=min(unpacks, default=None))
 
+
+
+# Programs that unpack an archive into a folder, so a module the pad imports
+# may land there (`_unpacked_into`, `_CodeSigns.names_unpack`), by the flag
+# each takes the folder after; `7z` takes it glued, as `-olib`.
+_UNPACK_DEST_FLAGS: dict[str, frozenset[str]] = {
+    "unzip": frozenset({"-d"}),
+    "tar": frozenset({"-C", "--directory"}),
+    "bsdtar": frozenset({"-C", "--directory"}),
+    "unar": frozenset({"-o", "-output-directory", "--output-directory"}),
+}
+_SEVENZIP = frozenset({"7z", "7za", "7zr"})
+_UNPACK_PROGRAMS = frozenset({*_UNPACK_DEST_FLAGS, *_SEVENZIP})
+# Programs that copy files into a folder, keeping their own names, so a
+# module lands there (`_copied_tree_into`).
+_TREE_COPY_PROGRAMS = frozenset({"cp", "mv", "rsync", "install"})
+_NAMES_UNPACK = re.compile(r"\b(?:unzip|tar|bsdtar|unar|7z[ar]?|rsync|install)\b")
+
+
+def _unpacked_into(words: list[str]) -> str | None:
+    """The folder an archive-extraction command, by its words, unpacks into
+    (`_UNPACK_PROGRAMS`): the folder after its destination flag, the one
+    glued to `7z`'s `-o`, or "." for the working folder when it gives none;
+    None for any other command."""
+    bare, _ = _command_words(words)
+    if not bare:
+        return None
+    verb = _program_name(bare[0])
+    if verb not in _UNPACK_PROGRAMS:
+        return None
+    args = bare[1:]
+    flags = _UNPACK_DEST_FLAGS.get(verb, frozenset())
+    for i, word in enumerate(args):
+        if verb in _SEVENZIP and word.startswith("-o") and len(word) > 2:
+            return word[2:]
+        flag, equals, value = word.partition("=")
+        if flag in flags:
+            return value if equals else (args[i + 1] if i + 1 < len(args) else ".")
+    return "."
+
+
+# Calls and members that name a folder inside an environment's installed
+# packages, where a written module joins the packages already there
+# (`_writes_site_packages`): `site`'s and `sysconfig`'s folder lookups, a
+# spec a `find_spec` makes, and the location of a package already imported.
+_SITE_PACKAGES_CALLS = frozenset({
+    "site.getsitepackages", "site.getusersitepackages", "site.getuserbase", "sysconfig.get_path",
+    "sysconfig.get_paths", "importlib.util.find_spec", "importlib.find_loader", "pkgutil.get_loader",
+})
+_SITE_PACKAGES_MEMBERS = frozenset({"__file__", "origin", "submodule_search_locations", "__path__"})
+
+
+def _writes_site_packages(target: ast.AST, reader: _Reader, *, depth: int = 0) -> bool:
+    """Whether `target`, a path a write names, lands inside an environment's
+    installed packages: it reads a folder lookup of `site` or `sysconfig`
+    (`_SITE_PACKAGES_CALLS`), the origin or path of a spec or an imported
+    package (`_SITE_PACKAGES_MEMBERS`), there or through a name a value binds
+    to it, up to `_PARAM_DEPTH` names."""
+    if depth > _PARAM_DEPTH:
+        return False
+    for node in ast.walk(target):
+        if isinstance(node, ast.Attribute) and node.attr in _SITE_PACKAGES_MEMBERS:
+            return True
+        if isinstance(node, ast.Call) and reader.module_member(node.func) in _SITE_PACKAGES_CALLS:
+            return True
+        if isinstance(node, ast.Name):
+            if any(b.how == "value" and b.value is not target and _writes_site_packages(b.value, reader, depth=depth + 1)
+                   for b in reader.bindings_of(node.id, node=node)):
+                return True
+    return False
+
+
+def _copied_module_stems(call: ast.Call, reader: _Reader, cell: _Cell) -> set[str]:
+    """The basenames of the Python files `call`, a copy or a move of a file,
+    reads from (`_COPY_FUNCS`, `shutil.move`): a copy or move into a folder
+    keeps each source's own name, so `shutil.copy("a/erp.py", "lib")` writes
+    `lib/erp.py`. Empty for any other call, or a source the check can't
+    place."""
+    if reader.dotted(call.func) not in _COPY_INTO_FOLDER:
+        return set()
+    source = _target_arg(call, keywords=("src",))
+    got = reader.paths(source, cell=cell) if source is not None else _UNKNOWN
+    if isinstance(got, _Unknown):
+        return set()
+    return {posixpath.basename(p.replace("\\", "/")) for p in got if _module_stem(p.replace("\\", "/")) is not None}
+
+
+def _copied_tree_into(words: list[str]) -> str | None:
+    """The folder a copy command, by its words, copies files into
+    (`_TREE_COPY_PROGRAMS`), keeping their names: the last operand, when it
+    is a folder (it ends in `/`, or more than one source feeds it) or a
+    source is a folder or a listing's wildcard, so a module may land there.
+    None for any other command, or a single file copied to a file, which the
+    `.py` words the walk already reads cover."""
+    bare, _ = _command_words(words)
+    if len(bare) < 3 or _program_name(bare[0]) not in _TREE_COPY_PROGRAMS:
+        return None
+    operands = [w for w in bare[1:] if not w.startswith("-")]
+    if len(operands) < 2:
+        return None
+    dest, sources = operands[-1], operands[:-1]
+    folder = dest.endswith("/") or len(sources) > 1
+    tree = any(s.endswith("/") or "*" in s or "?" in s or "[" in s for s in sources)
+    return dest if folder or tree else None
 
 
 def _cloned_into(words: list[str]) -> str | None:
@@ -10568,9 +10945,13 @@ class _Modules:
         cells = self._reader.cells
         if any(c.signs.names_a_py_file for c in cells):
             return list(cells)
+        if self.path_changed:
+            # A sys.path change may put a folder a cell wrote modules into on
+            # the import path, even when no cell names a `.py` file.
+            return [c for c in cells if c.writer_calls]
         return [c for c in cells if any(
-            _last_name(call.func) in _TREE_WRITERS
-            or "clone" in c.signs.spelled and _last_name(call.func) in _LAUNCH_NAMES
+            _last_name(call.func) in _TREE_WRITERS or _last_name(call.func) in _LINK_NAMES
+            or ("clone" in c.signs.spelled or c.signs.names_unpack) and _last_name(call.func) in _LAUNCH_NAMES
             for call in c.writer_calls
         )]
 
@@ -10642,6 +11023,17 @@ class _Modules:
             return False
         if top in self.written or self._new_on_disk(top):
             return True
+        installed = not _loaded_first(top) and top not in sys.stdlib_module_names
+        if self.wrote_site_packages and installed:
+            # A cell wrote a module into the installed packages, where an
+            # import finds it beside them: any installed package, not one
+            # Python ships or loads first, which an import gets ahead of it.
+            return True
+        if self.archive_on_path and installed:
+            # A cell put an archive on `sys.path`, which zipimport reads any
+            # module out of: any installed package, read behind what Python
+            # ships and loads first.
+            return True
         changed = self.path_changed or cell.launched
         if changed and (top in self._portions and top not in sys.stdlib_module_names
                         or not self._found_first(top) and self._unpacked_on_path(cell)):
@@ -10670,6 +11062,52 @@ class _Modules:
         if folders is None:
             return True
         return any(self.unread(name, cell=cell) for folder in folders for name in self._names_under(folder))
+
+    @cached_property
+    def wrote_site_packages(self) -> bool:
+        """Whether a cell writes a module into the installed packages
+        (`_writes_site_packages`), where an import finds it: a file write to
+        such a path, or a copy or move into one. Read once per check, where
+        an import asks."""
+        reader = self._reader
+        for cell in reader.cells:
+            for call in cell.writer_calls:
+                if _last_name(call.func) not in _FILE_WRITE_NAMES:
+                    continue
+                target = _written_target(call, reader, cell)
+                if target is not None and _writes_site_packages(target, reader):
+                    return True
+        return False
+
+    @cached_property
+    def hooks_written(self) -> bool:
+        """Whether a cell writes a startup hook (`_writes_a_startup_hook`),
+        which each Python process started after it runs: read only in the
+        cells that name one."""
+        reader = self._reader
+        return any(
+            _writes_a_startup_hook(call, reader, cell)
+            for cell in reader.cells if cell.signs.names_a_startup_hook for call in cell.calls
+        )
+
+    def may_hold_pth(self, folder: str) -> bool:
+        """Whether `folder`, relative to the project, may hold a `.pth` file
+        whose import lines `site.addsitedir` runs: one directly in it in the
+        snapshot or on disk now, as an earlier cell may have written, or
+        any once a cell writes a startup hook (`hooks_written`), writes where
+        the check can't place, or unpacks a tree of files."""
+        written = self._written
+        project = self.project
+        if project is None or self.hooks_written or self._anywhere or written.unpacked or written.unpacked_anywhere:
+            return True
+        prefix = f"{folder}/" if folder else ""
+        if any(path.startswith(prefix) and path.endswith(".pth") and "/" not in path[len(prefix):]
+               for path in project.files):
+            return True
+        try:
+            return any((project.root / folder).glob("*.pth"))
+        except OSError:
+            return True
 
     def _names_under(self, folder: str) -> frozenset[str]:
         """The names an import reaches a module or package directly inside
@@ -10703,6 +11141,14 @@ class _Modules:
             for cell in reader.cells
             for node in (*cell.signs.path_changes, *(n for name, n in cell.signs.list_changes if name in aliases))
         )
+
+    @cached_property
+    def archive_on_path(self) -> bool:
+        """Whether a cell puts an archive on `sys.path` (`_ARCHIVE_PATH_ENDS`),
+        a `.zip`, `.whl`, `.egg` or `.pyz` it copies, downloads or finds there,
+        which zipimport reads any module out of."""
+        entries = self.path_entries
+        return entries is not None and any(entry.lower().endswith(_ARCHIVE_PATH_ENDS) for entry in entries)
 
     @cached_property
     def path_entries(self) -> frozenset[str] | None:
@@ -10983,7 +11429,11 @@ def _runs_unread(call: ast.Call, reader: _Reader, cell: _Cell, *, read: _ExecRea
         # A name bound to a loader's or a runner's method, as `go = pr.run`,
         # or to a lookup of one, as `go = operator.methodcaller("run_path")`.
         return True
+    if reader.module_member(func) in _APP_RUNNERS:
+        return _app_runner_unread(call, reader)
     name = reader.module_member(func) if _runner_named(func, reader) else None
+    if name == _SITE_DIR_ADDER:
+        return _adds_unread_site(call, reader, cell, modules=modules)
     if name in _CODE_RUNNERS or name is not None and name.startswith(_PYAPI_FUNCS):
         return True
     if name in _UNITTEST_MAINS:
@@ -11001,6 +11451,34 @@ def _runs_unread(call: ast.Call, reader: _Reader, cell: _Cell, *, read: _ExecRea
             _literal_source(s) is None and not _names_read_code(s, reader) for s in code.sources
         ) or bool(literal) and id(call) not in read.tried
     return isinstance(func, ast.Attribute) and last in _RUNNER_METHODS and last in _runner_methods(func.value, reader)
+
+
+def _app_runner_unread(call: ast.Call, reader: _Reader) -> bool:
+    """Whether an app runner (`_APP_RUNNERS`) imports and runs code the check
+    can't read: a string target names a module it imports from the working
+    folder (a literal, or a name bound to one), so it runs that module's
+    code; an app object, which is read code, runs nothing new."""
+    target = call.args[0] if call.args else _keyword(call, "app")
+    return target is not None and bool(_literal_texts(target, reader))
+
+
+def _adds_unread_site(call: ast.Call, reader: _Reader, cell: _Cell, *, modules: _Modules) -> bool:
+    """Whether `site.addsitedir` runs code the check can't read: the import
+    lines of the `.pth` files in the folder it adds, which it runs as it
+    adds it. Held where the check can't place the folder, where it lies
+    outside the project or the pad's working folder may move, or where the
+    folder may hold such a file (`_Modules.may_hold_pth`). An import from it
+    afterwards is read as one after any change of `sys.path`."""
+    target = _target_arg(call, keywords=("sitedir",))
+    project = modules.project
+    got = reader.paths(target, cell=cell) if target is not None else _UNKNOWN
+    if isinstance(got, _Unknown) or project is None or reader.cwds != ["."]:
+        return True
+    for path in got:
+        rel = None if _TEMP_PATH in path or _unreadable_text(path) else _relative(path, project)
+        if rel is None or rel == ".." or rel.startswith("../") or modules.may_hold_pth(rel):
+            return True
+    return False
 
 
 def _unittest_main_unread(call: ast.Call, reader: _Reader) -> bool:
@@ -11050,14 +11528,68 @@ def _names_read_code(node: ast.AST, reader: _Reader) -> bool:
     return all(b.how == "value" and isinstance(b.value, ast.Lambda) for b in reader.bindings_of(node.id, node=node))
 
 
-def _launches_unread(call: ast.Call, reader: _Reader, *, read: _ExecRead) -> bool:
+def _launches_unread(call: ast.Call, reader: _Reader, *, read: _ExecRead, modules: _Modules) -> bool:
     """Whether `call` launches Python that runs code the check can't read
     (`_python_launch`), installs a project that builds (`_Launch.syncs`),
-    or hands `python -c` literal code `read` left unread at `_EXEC_LIMIT`."""
+    hands `python -c` literal code `read` left unread at `_EXEC_LIMIT`, or
+    starts a Python interpreter once a cell wrote a startup hook it runs
+    (`_Modules.hooks_written`)."""
     launch = _python_launch(call, reader)
     return launch is not None and (
         launch.unread or launch.syncs and reader.project_builds or bool(launch.sources) and id(call) not in read.tried
+        or launch.starts_python and modules.hooks_written
     )
+
+
+# The callers that invoke a function value with the arguments that follow
+# it (`_value_call_args`): `executor.submit`, `asyncio.to_thread`, a thread's
+# `target`, `loop.run_in_executor`, and `map`/`executor.map` over each
+# element.
+_THREAD_MAKERS = frozenset({"threading.Thread", "Thread"})
+
+
+def _passed_launch(node: ast.AST, cell: _Cell, reader: _Reader, *, read: _ExecRead, modules: _Modules) -> bool:
+    """Whether a launcher `node`, handed to a caller that runs it later,
+    launches Python the check can't read: the caller passes it the arguments
+    that follow it (`_value_call_args`), read as its own call, so
+    `ex.submit(subprocess.run, [sys.executable, "etl.py"])` holds while
+    `ex.submit(subprocess.run, ["git", "status"])` does not. A caller the
+    check can't read the arguments of, as `map` over each element, holds."""
+    wrapper = cell.parents.get(node)
+    if isinstance(wrapper, (ast.keyword, ast.Starred)):
+        wrapper = cell.parents.get(wrapper)
+    argv = _value_call_args(node, wrapper, reader)
+    if argv is None:
+        return False
+    if isinstance(argv, _Unknown):
+        return True
+    synthetic = ast.copy_location(ast.Call(func=node, args=argv, keywords=[]), node)
+    return _launches_unread(synthetic, reader, read=read, modules=modules)
+
+
+def _value_call_args(node: ast.AST, wrapper: ast.AST | None, reader: _Reader) -> list[ast.AST] | _Unknown | None:
+    """The arguments a caller `wrapper` hands the function value `node`: those
+    after it for `submit`, `asyncio.to_thread` and `run_in_executor`, a
+    thread's `args`; unknown for `map`, which runs it on each element, or a
+    thread with `kwargs` or an argument list the check can't read; None when
+    `wrapper` is no such caller, so passing the value holds nothing."""
+    if not isinstance(wrapper, ast.Call):
+        return None
+    dotted, last = reader.dotted(wrapper.func), _last_name(wrapper.func)
+    if dotted in _THREAD_MAKERS or last == "Thread":
+        if node is not _keyword(wrapper, "target") or _keyword(wrapper, "kwargs") is not None:
+            return _UNKNOWN if node is _keyword(wrapper, "target") else None
+        given = _keyword(wrapper, "args")
+        if given is None:
+            return []
+        return list(given.elts) if isinstance(given, (ast.List, ast.Tuple)) else _UNKNOWN
+    if last == "submit" or dotted == "asyncio.to_thread":
+        return list(wrapper.args[1:]) if wrapper.args[:1] == [node] else None
+    if last == "run_in_executor":
+        return list(wrapper.args[2:]) if len(wrapper.args) > 1 and wrapper.args[1] is node else None
+    if last == "map":
+        return _UNKNOWN if wrapper.args[:1] == [node] else None
+    return None
 
 
 def _unread_run_at(node: ast.AST, reader: _Reader, cell: _Cell, *, read: _ExecRead, modules: _Modules) -> bool:
@@ -11097,17 +11629,21 @@ def _unread_run_at(node: ast.AST, reader: _Reader, cell: _Cell, *, read: _ExecRe
             _holds_a_running_member(node, reader)
         ):
             return True
+        if reader.module_member(node) in _LAUNCHERS:
+            # A launcher handed to a caller that runs it later, as
+            # `Thread(target=subprocess.run, args=([...],))`.
+            return _passed_launch(node, cell, reader, read=read, modules=modules)
         if not _runner_named(node, reader):
             return False
         member = reader.module_member(node)
         return member in _RUNNER_VALUES and not (member in _RUNNER_TYPES and _type_runner_aside(node, cell))
     if not isinstance(node, ast.Call):
         return False
-    if _looks_up_a_runner(node, reader) or (
-        _last_name(node.func) in _FILE_WRITE_NAMES and _writes_a_pth_file(node, reader, cell)
-    ):
+    if _looks_up_a_runner(node, reader) or _writes_a_startup_hook(node, reader, cell):
         return True
-    return _runs_unread(node, reader, cell, read=read, modules=modules) or _launches_unread(node, reader, read=read)
+    return _runs_unread(node, reader, cell, read=read, modules=modules) or _launches_unread(
+        node, reader, read=read, modules=modules,
+    )
 
 
 def _type_runner_aside(node: ast.AST, cell: _Cell) -> bool:
@@ -11133,14 +11669,80 @@ def _type_runner_aside(node: ast.AST, cell: _Cell) -> bool:
     return isinstance(parent, ast.Compare)
 
 
-def _writes_a_pth_file(call: ast.Call, reader: _Reader, cell: _Cell) -> bool:
-    """Whether `call`, a write of a file, may write a `.pth` file, whose
-    import lines `site` runs as a Python starts, in a cell that names one."""
-    if not cell.signs.names_a_pth_file:
+def _writes_a_startup_hook(call: ast.Call, reader: _Reader, cell: _Cell) -> bool:
+    """Whether `call`, in a cell that names a startup hook
+    (`_CodeSigns.names_a_startup_hook`), may write one (`_is_startup_hook`),
+    which `site` runs as a Python starts: a write of a file to such a path
+    or one the check can't place, an open whose mode the check can't read
+    among them, or a program it runs that may write one
+    (`_command_writes_a_hook`), as `cp hook.txt site-packages/hook.pth` or
+    an `echo` into one does."""
+    if not cell.signs.names_a_startup_hook:
         return False
-    target = _written_target(call, reader, cell)
-    got = reader.paths(target, cell=cell) if target is not None else _UNKNOWN
-    return isinstance(got, _Unknown) or any(".pth" in path for path in got)
+    last = _last_name(call.func)
+    if last in _FILE_WRITE_NAMES:
+        target = _written_target(call, reader, cell)
+        if target is None:
+            # A read, as `open("x.pth")` is, writes nothing.
+            return _opens_by_unread_mode(call, reader)
+        got = reader.paths(target, cell=cell)
+        return isinstance(got, _Unknown) or any(_is_startup_hook(path) for path in got)
+    name = (reader.module_member(call.func) or reader.dotted(call.func)) if last in _LAUNCH_NAMES else None
+    if name not in _LAUNCHERS:
+        return False
+    return any(
+        _command_writes_a_hook(words, depth=0)
+        for command in _shell_commands(call, name, reader)
+        for words in ([command] if isinstance(command, list) else _script_commands(command))
+    )
+
+
+def _opens_by_unread_mode(call: ast.Call, reader: _Reader) -> bool:
+    """Whether `call` opens a file with a mode that isn't a literal, so it may
+    open it for writing."""
+    if reader.dotted(call.func) in ("open", "io.open"):
+        mode = call.args[1] if len(call.args) > 1 else _keyword(call, "mode")
+    elif isinstance(call.func, ast.Attribute) and call.func.attr == "open":
+        mode = _target_arg(call, keywords=("mode",))
+    else:
+        return False
+    return mode is not None and not (isinstance(mode, ast.Constant) and isinstance(mode.value, str))
+
+
+# Programs that write the files their operands name, so an operand may name
+# a startup hook (`_command_writes_a_hook`).
+_FILE_WRITING_PROGRAMS = frozenset({"cp", "mv", "ln", "install", "rsync", "tee", "touch", "curl", "wget", "dd"})
+
+
+def _command_writes_a_hook(words: list[str], *, depth: int) -> bool:
+    """Whether a command, by its words, may write a startup hook
+    (`_is_startup_hook`): a file a redirection writes, or an operand of a
+    program that writes files (`_FILE_WRITING_PROGRAMS`), that names one or
+    that the check can't read; any, for a program the check can't read; and
+    what a shell's script writes in turn, up to `_SHELL_DEPTH` shells."""
+    bare, _ = _command_words(words)
+    if not bare:
+        return False
+    if _unreadable_word(bare[0]):
+        return True
+    verb = _program_name(bare[0])
+    if verb in _SCRIPT_RUNNERS:
+        script = _inner_script(verb, bare[1:], None)
+        return isinstance(script, _Unknown) or depth >= _SHELL_DEPTH or script is not None and any(
+            _command_writes_a_hook(inner, depth=depth + 1) for inner in _script_commands(script)
+        )
+    targets = bare[1:] if verb in _FILE_WRITING_PROGRAMS else []
+    for at, word in enumerate(words):
+        redirect = _REDIRECT.match(word)
+        if redirect and ">" in redirect.group():
+            targets.append(word[redirect.end():] or (words[at + 1] if at + 1 < len(words) else ""))
+    return any(_unreadable_word(target) or _is_startup_hook(target) for target in targets)
+
+
+def _is_startup_hook(path: str) -> bool:
+    """Whether `path` names a startup hook: a `.pth` file, or a
+    `sitecustomize` or `usercustomize` module (`_STARTUP_HOOK_MODULES`)."""
+    return ".pth" in path or ntpath.basename(path) in _STARTUP_HOOK_MODULES
 
 
 def _names_a_runner(node: ast.AST, reader: _Reader) -> bool:

@@ -1105,6 +1105,8 @@ cases:
     code: |-
       import site
       site.addsitedir(".")
+    files:
+      hook.pth: import job
     card: unchecked
 
   - name: site adds a folder after a cell writes a pth file
@@ -2716,6 +2718,244 @@ cases:
       pip_main(["install", "./vendor/erp_sync"])
     card: unchecked
 
+
+  # A copy or move into a folder keeps the source's name, so a module lands
+  # there; a later import of it runs code the check didn't read.
+
+  - name: a module copied into a folder destination then imported
+    code: |-
+      import shutil, sys
+      shutil.copy('downloads/erp.py', 'lib')
+      sys.path.insert(0, 'lib')
+      import erp
+    card: unchecked
+
+  - name: a module copied with copy2 into a folder path then imported
+    code: |-
+      import shutil, sys
+      shutil.copy2('downloads/erp.py', 'lib/')
+      sys.path.insert(0, 'lib')
+      import erp
+    card: unchecked
+
+  - name: a module moved into a folder destination then imported
+    code: |-
+      import shutil, sys
+      shutil.move('downloads/erp.py', 'lib')
+      sys.path.insert(0, 'lib')
+      import erp
+    card: unchecked
+
+  - name: modules copied by a shell cp glob into a folder then imported
+    code: |-
+      import subprocess, sys
+      subprocess.run('cp downloads/*.py lib/', shell=True)
+      sys.path.insert(0, 'lib')
+      import erp
+    card: unchecked
+
+  - name: a tree copied by rsync into a folder then imported
+    code: |-
+      import subprocess, sys
+      subprocess.run(['rsync', '-a', 'vendor/', 'lib/'])
+      sys.path.insert(0, 'lib')
+      import erp
+    card: unchecked
+
+  - name: modules copied by a loop into the installed packages then imported
+    code: |-
+      import site, shutil, glob
+      for f in glob.glob('downloads/*.py'):
+          shutil.copy(f, site.getsitepackages()[0])
+      import erp
+      erp.main()
+    card: unchecked
+
+  # A shell program that unpacks an archive into a folder may put any module
+  # there, as the git clone the walk already reads does.
+
+  - name: an import after unzip unpacks an archive into a folder on sys.path
+    code: |-
+      import subprocess, sys
+      subprocess.run(['unzip', '-o', 'bundle.zip', '-d', 'lib'])
+      sys.path.insert(0, 'lib')
+      import erp
+    card: unchecked
+
+  - name: an import after tar extracts an archive into a folder on sys.path
+    code: |-
+      import subprocess, sys
+      subprocess.run(['tar', '-xzf', 'bundle.tar.gz', '-C', 'lib'])
+      sys.path.insert(0, 'lib')
+      import erp
+    card: unchecked
+
+  - name: an import after 7z extracts an archive into a folder on sys.path
+    code: |-
+      import subprocess, sys
+      subprocess.run(['7z', 'x', 'bundle.7z', '-olib'])
+      sys.path.insert(0, 'lib')
+      import erp
+    card: unchecked
+
+  # A module written into the installed packages, or a submodule added to an
+  # installed package, imports beside the packages already there.
+
+  - name: a submodule written into an installed package then imported
+    code: |-
+      import importlib.util, os
+      spec = importlib.util.find_spec('openpyxl')
+      open(os.path.join(os.path.dirname(spec.origin), 'patch_hook.py'), 'w').write('import requests')
+      import openpyxl.patch_hook
+    card: unchecked
+
+  - name: a submodule written under an imported package's folder then imported
+    code: |-
+      import pandas, os
+      open(os.path.join(os.path.dirname(pandas.__file__), 'erp_hook.py'), 'w').write('import requests\ndef main():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+      import pandas.erp_hook
+    card: unchecked
+
+  - name: an installed module patched in place then imported by a subprocess
+    code: |-
+      import requests, os, subprocess, sys
+      open(os.path.join(os.path.dirname(requests.__file__), 'api.py'), 'a').write('\nimport os\n')
+      subprocess.run([sys.executable, '-c', 'import requests'])
+    card: unchecked
+
+  # A link, a compiled module, a write under a name the check can't read, or
+  # an archive on sys.path each reaches a module the check didn't read.
+
+  - name: a symlink of a module into a folder then imported
+    code: |-
+      import os, sys
+      os.symlink('/tmp/erp.py', 'lib/erp.py')
+      sys.path.insert(0, 'lib')
+      import erp
+    card: unchecked
+
+  - name: a hardlink of a module into a folder then imported
+    code: |-
+      import os, sys
+      os.link('/tmp/erp.py', 'lib/erp.py')
+      sys.path.insert(0, 'lib')
+      import erp
+    card: unchecked
+
+  - name: a module linked with Path.symlink_to then imported
+    code: |-
+      import sys
+      from pathlib import Path
+      Path('lib/erp.py').symlink_to('/tmp/erp.py')
+      sys.path.insert(0, 'lib')
+      import erp
+    card: unchecked
+
+  - name: a package folder symlinked into a folder then imported
+    code: |-
+      import os, sys
+      os.symlink('/tmp/vendor', 'lib/erp')
+      sys.path.insert(0, 'lib')
+      import erp
+    card: unchecked
+
+  - name: a compiled extension module copied into a folder then imported
+    code: |-
+      import shutil, sys
+      shutil.copy('build/erp.cpython-311-darwin.so', 'lib/')
+      sys.path.insert(0, 'lib')
+      import erp
+    card: unchecked
+
+  - name: an archive's members written into a folder under names the check can't read then imported
+    code: |-
+      import zipfile, sys
+      z = zipfile.ZipFile('bundle.zip')
+      for n in z.namelist():
+          open('lib/' + n, 'wb').write(z.read(n))
+      sys.path.insert(0, 'lib')
+      import erp
+    card: unchecked
+
+  - name: a copied archive placed on sys.path then imported
+    code: |-
+      import shutil, sys
+      shutil.copy('downloads/bundle.zip', 'lib.zip')
+      sys.path.insert(0, 'lib.zip')
+      import erp
+    card: unchecked
+
+  - name: a downloaded wheel placed on sys.path then imported
+    code: |-
+      import sys, urllib.request
+      urllib.request.urlretrieve('https://example.org/erp-1.0-py3-none-any.whl', 'erp.whl')
+      sys.path.insert(0, 'erp.whl')
+      import erp
+    card: unchecked
+
+  - name: a project egg placed on sys.path then imported
+    files:
+      erp.egg: x
+    code: |-
+      import sys
+      sys.path.append('erp.egg')
+      import erp
+    card: unchecked
+
+  # An app runner given an import string loads and runs that module; the site
+  # adder runs the import lines of a folder's .pth files.
+
+  - name: uvicorn runs an app named by an import string
+    files:
+      app.py: |
+        import requests
+        requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+        from fastapi import FastAPI
+        app = FastAPI()
+    code: |-
+      import uvicorn
+      uvicorn.run('app:app', port=8000)
+    card: unchecked
+
+  - name: site adds a folder that holds a .pth file, then imports an installed package
+    files:
+      lib/hook.pth: import job
+    code: |-
+      import site
+      site.addsitedir('lib')
+      import pandas
+    card: unchecked
+
+  - name: site adds a folder an earlier cell wrote a .pth file into
+    earlier:
+      - |-
+        open('lib/x.pth', 'w').write('import job')
+    code: |-
+      import site
+      site.addsitedir('lib')
+    card: unchecked
+
+  - name: site adds a folder outside the project
+    code: |-
+      import site
+      site.addsitedir('/opt/vendor')
+    card: unchecked
+
+  - name: site adds a folder named by a value the check can't read
+    code: |-
+      import site
+      site.addsitedir(input())
+    card: unchecked
+
+  - name: site adds a folder, then imports a project module there
+    files:
+      lib/helpers.py: |
+        x = 1
+    code: |-
+      import site
+      site.addsitedir('lib')
+      import helpers
+    card: unchecked
   # ── Python processes ──────────────────────────────────────────────────────
   # A subprocess, os.system, os.exec/spawn, pty or asyncio launch of a Python
   # program runs a file the check never reads. The program may be python, a
@@ -4079,6 +4319,466 @@ cases:
       subprocess.run(['pip', 'uninstall', '-y', 'openpyxl'])
     card: none
 
+
+  # A startup hook a cell writes (a sitecustomize or usercustomize module, or
+  # a .pth file) runs as each later Python process starts.
+
+  - name: a sitecustomize module written into site-packages before a pip subprocess
+    code: |-
+      import site, os, subprocess, sys
+      open(os.path.join(site.getsitepackages()[0], 'sitecustomize.py'), 'w').write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+      subprocess.run([sys.executable, '-m', 'pip', 'install', 'openpyxl'])
+    card: unchecked
+
+  - name: a usercustomize module written into the user site folder before a pip subprocess
+    code: |-
+      import site, os, subprocess, sys
+      os.makedirs(site.getusersitepackages(), exist_ok=True)
+      open(os.path.join(site.getusersitepackages(), 'usercustomize.py'), 'w').write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+      subprocess.run([sys.executable, '-m', 'pip', 'list'])
+    card: unchecked
+
+  - name: a sitecustomize module written into the project
+    code: |-
+      open('sitecustomize.py', 'w').write('import requests')
+    card: unchecked
+
+  - name: a .pth file copied into site-packages by a shell cp
+    code: |-
+      import subprocess, site
+      subprocess.run(['cp', 'hook.txt', site.getsitepackages()[0] + '/hook.pth'])
+    card: unchecked
+
+  - name: a .pth file written by an echo redirect in a shell text
+    code: |-
+      import os
+      os.system('echo "import job" > $(python3 -c "import site; print(site.getsitepackages()[0])")/hook.pth')
+    card: unchecked
+
+  - name: a .pth file written by an echo redirect through sh -c
+    code: |-
+      import subprocess
+      subprocess.run(['sh', '-c', 'echo "import job" > /usr/lib/python3/site-packages/hook.pth'])
+    card: unchecked
+
+  - name: a .pth file written by tee in a shell text
+    code: |-
+      import subprocess
+      subprocess.run('echo import job | tee lib/hook.pth', shell=True)
+    card: unchecked
+
+  - name: a .pth file written by an open whose mode the check can't read
+    code: |-
+      m = input()
+      open('lib/hook.pth', m).write('import job')
+    card: unchecked
+
+  - name: a pip subprocess after an earlier cell writes a sitecustomize module into site-packages
+    earlier:
+      - |-
+        import site, os
+        open(os.path.join(site.getsitepackages()[0], 'sitecustomize.py'), 'w').write('import job')
+    code: |-
+      import subprocess
+      subprocess.run(['pip', 'install', 'openpyxl'])
+    card: unchecked
+
+  - name: a python -c after an earlier cell writes a .pth file into site-packages
+    earlier:
+      - |-
+        import site
+        from pathlib import Path
+        Path(site.getsitepackages()[0], 'hook.pth').write_text('import job')
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: unchecked
+
+  # python -c imports a project module when the launch runs in another folder
+  # or with PYTHONPATH set, so the working folder reaches the module.
+
+  - name: python -c that imports a project module after os.chdir into its folder
+    files:
+      sub/job.py: |
+        import requests
+        def main():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      import os, subprocess, sys
+      os.chdir('sub')
+      subprocess.run([sys.executable, '-c', 'import job; job.main()'])
+    card: unchecked
+
+  - name: python -c that imports a project module after an earlier cell's os.chdir
+    earlier:
+      - |-
+        import os
+        os.chdir('sub')
+    files:
+      sub/job.py: |
+        import requests
+        def main():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'import job; job.main()'])
+    card: unchecked
+
+  - name: python -c that imports a project module inside contextlib.chdir
+    files:
+      sub/job.py: |
+        import requests
+        def main():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      import contextlib, subprocess, sys
+      with contextlib.chdir('sub'):
+          subprocess.run([sys.executable, '-c', 'import job; job.main()'])
+    card: unchecked
+
+  - name: python -c that imports a project module after PYTHONPATH is set in os.environ
+    files:
+      lib/job.py: |
+        import requests
+        def main():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      import os, subprocess, sys
+      os.environ['PYTHONPATH'] = 'lib'
+      subprocess.run([sys.executable, '-c', 'import job; job.main()'])
+    card: unchecked
+
+  - name: python -c that imports a project module after os.environ.update sets PYTHONPATH
+    files:
+      lib/job.py: |
+        import requests
+        def main():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      import os, subprocess, sys
+      os.environ.update(PYTHONPATH='lib')
+      subprocess.run([sys.executable, '-c', 'import job; job.main()'])
+    card: unchecked
+
+  - name: python -c that imports a project module after os.putenv sets PYTHONPATH
+    files:
+      lib/job.py: |
+        import requests
+        def main():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      import os, subprocess, sys
+      os.putenv('PYTHONPATH', 'lib')
+      subprocess.run([sys.executable, '-c', 'import job; job.main()'])
+    card: unchecked
+
+  - name: python -c that imports a project module under env -C
+    files:
+      sub/job.py: |
+        import requests
+        def main():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      import subprocess
+      subprocess.run(['env', '-C', 'sub', 'python3', '-c', 'import job; job.main()'])
+    card: unchecked
+
+  - name: python -c that imports a project module under env --chdir
+    files:
+      sub/job.py: |
+        import requests
+        def main():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      import subprocess
+      subprocess.run(['env', '--chdir=sub', 'python3', '-c', 'import job; job.main()'])
+    card: unchecked
+
+  - name: python -c that imports a project module under uv run --directory
+    files:
+      sub/job.py: |
+        import requests
+        def main():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      import subprocess
+      subprocess.run(['uv', 'run', '--directory', 'sub', 'python', '-c', 'import job; job.main()'])
+    card: unchecked
+
+  - name: python -c that imports a project module under poetry -C
+    files:
+      sub/job.py: |
+        import requests
+        def main():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      import subprocess
+      subprocess.run(['poetry', '-C', 'sub', 'run', 'python', '-c', 'import job; job.main()'])
+    card: unchecked
+
+  - name: python -c that imports a project module under conda run --cwd
+    files:
+      sub/job.py: |
+        import requests
+        def main():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      import subprocess
+      subprocess.run(['conda', 'run', '--cwd', 'sub', 'python', '-c', 'import job; job.main()'])
+    card: unchecked
+
+  # Console scripts that load and run a project's code, a test, a server or a
+  # migration are Python launches.
+
+  - name: a training run a console script starts from a script
+    earlier:
+      - |-
+        open('train.py', 'w').write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import subprocess
+      subprocess.run(['torchrun', '--nproc_per_node', '1', 'train.py'], check=True)
+    card: unchecked
+
+  - name: a crawl a console script starts
+    code: |-
+      import subprocess
+      subprocess.run(['scrapy', 'crawl', 'erp'])
+    card: unchecked
+
+  - name: a target a make command runs
+    code: |-
+      import subprocess
+      subprocess.run(["make", "etl"])
+    card: unchecked
+
+  - name: a migration django-admin runs
+    code: |-
+      import subprocess
+      subprocess.run(['django-admin', 'migrate'])
+    card: unchecked
+
+  - name: a project an mlflow run starts
+    code: |-
+      import subprocess
+      subprocess.run(['mlflow', 'run', '.'])
+    card: unchecked
+
+  - name: a notebook jupytext executes
+    code: |-
+      import subprocess
+      subprocess.run(['jupytext', '--execute', 'nb.ipynb'])
+    card: unchecked
+
+  - name: a project a hatch build runs
+    code: |-
+      import subprocess
+      subprocess.run(['hatch', 'build'])
+    card: unchecked
+
+  # IPython's -c runs magics and shell escapes, which run a command the check
+  # reads not as plain Python.
+
+  - name: ipython -c that runs a script through the run magic
+    code: |-
+      import subprocess
+      subprocess.run(['ipython', '-c', '%run job.py'])
+    card: unchecked
+
+  - name: ipython -c that runs a script through a shell escape
+    code: |-
+      import subprocess
+      subprocess.run(['ipython', '-c', '!python3 job.py'])
+    card: unchecked
+
+  - name: ipython -c that deletes a file through a shell escape
+    code: |-
+      import subprocess
+      subprocess.run(['ipython', '-c', '!rm stock.csv'])
+    card: unchecked
+
+  - name: ipython3 -c that runs a script through the run magic
+    code: |-
+      import subprocess
+      subprocess.run(['ipython3', '-c', '%run -i job.py'])
+    card: unchecked
+
+  - name: ipython -c that runs a shell command through a cell magic
+    code: |-
+      import subprocess
+      subprocess.run(['ipython', '-c', '%%bash\npython3 job.py'])
+    card: unchecked
+
+  - name: ipython run under a named profile whose startup scripts run
+    code: |-
+      import subprocess
+      subprocess.run(['ipython', '--profile=etl', '-c', 'print(1)'])
+    card: unchecked
+
+  # Python under a non-bash shell, which runs the inner python command.
+
+  - name: python run through fish -c
+    earlier:
+      - |-
+        open('job.py', 'w').write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import subprocess
+      subprocess.run(['fish', '-c', 'python3 job.py'])
+    card: unchecked
+
+  - name: python run through tcsh -c
+    earlier:
+      - |-
+        open('job.py', 'w').write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import subprocess
+      subprocess.run(['tcsh', '-c', 'python3 job.py'])
+    card: unchecked
+
+  - name: python run through csh -c
+    earlier:
+      - |-
+        open('job.py', 'w').write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import subprocess
+      subprocess.run(['csh', '-c', 'python3 job.py'])
+    card: unchecked
+
+  - name: python run through bash with an rcfile before -c
+    earlier:
+      - |-
+        open('job.py', 'w').write('x = 1')
+    code: |-
+      import subprocess
+      subprocess.run(['bash', '--rcfile', 'init.sh', '-c', 'python3 job.py'])
+    card: unchecked
+
+  # Launchers outside subprocess: an event loop's own methods, os.startfile,
+  # psutil's Popen, and Popen's executable given by position.
+
+  - name: python run through an event loop's subprocess_exec
+    earlier:
+      - |-
+        open('job.py', 'w').write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import asyncio, sys
+      async def go():
+          loop = asyncio.get_running_loop()
+          await loop.subprocess_exec(asyncio.SubprocessProtocol, sys.executable, 'job.py')
+      asyncio.run(go())
+    card: unchecked
+
+  - name: python run through an event loop's subprocess_shell
+    earlier:
+      - |-
+        open('job.py', 'w').write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import asyncio
+      async def go():
+          loop = asyncio.get_running_loop()
+          await loop.subprocess_shell(asyncio.SubprocessProtocol, 'python3 job.py')
+      asyncio.run(go())
+    card: unchecked
+
+  - name: a script opened by os.startfile
+    code: |-
+      import os
+      os.startfile('job.py')
+    card: unchecked
+
+  - name: python run through psutil's Popen
+    earlier:
+      - |-
+        open('job.py', 'w').write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import psutil
+      p = psutil.Popen(['python3', 'job.py'])
+      p.wait()
+    card: unchecked
+
+  - name: python given as Popen's executable by position
+    files:
+      app.py: |
+        x = 1
+    code: |-
+      import subprocess, sys
+      subprocess.Popen(['w', 'app.py'], -1, sys.executable)
+    card: unchecked
+
+  # A launcher handed to a caller that runs it later with the arguments that
+  # follow it.
+
+  - name: a launcher handed to a thread target with its argument list
+    files:
+      etl.py: |
+        x = 1
+    code: |-
+      import subprocess, sys, threading
+      threading.Thread(target=subprocess.run, args=([sys.executable, 'etl.py'],)).start()
+    card: unchecked
+
+  - name: a launcher handed to an executor submit
+    files:
+      etl.py: |
+        x = 1
+    code: |-
+      import subprocess, sys
+      from concurrent.futures import ThreadPoolExecutor
+      ThreadPoolExecutor().submit(subprocess.run, [sys.executable, 'etl.py'])
+    card: unchecked
+
+  - name: a Popen handed to an executor submit
+    files:
+      app.py: |
+        x = 1
+    code: |-
+      import subprocess, sys
+      ex.submit(subprocess.Popen, [sys.executable, 'app.py'])
+    card: unchecked
+
+  - name: a launcher handed to asyncio.to_thread
+    files:
+      etl.py: |
+        x = 1
+    code: |-
+      import asyncio, subprocess, sys
+      asyncio.run(asyncio.to_thread(subprocess.run, [sys.executable, 'etl.py']))
+    card: unchecked
+
+  - name: a launcher handed to loop.run_in_executor
+    files:
+      etl.py: |
+        x = 1
+    code: |-
+      import asyncio, subprocess, sys
+      loop.run_in_executor(None, subprocess.run, [sys.executable, 'etl.py'])
+    card: unchecked
+
+  - name: a launcher mapped over a list of argument lists
+    files:
+      scripts/a.py: |
+        x = 1
+    code: |-
+      import subprocess, sys
+      list(map(subprocess.run, [[sys.executable, 'scripts/a.py']]))
+    card: unchecked
+
+  - name: os.system mapped over shell commands by an executor
+    files:
+      scripts/a.py: |
+        x = 1
+    code: |-
+      import os
+      ex.map(os.system, ['python3 scripts/a.py'])
+    card: unchecked
+
+  - name: a server started in a background thread through a launcher value
+    files:
+      app.py: |
+        x = 1
+    code: |-
+      import subprocess, threading
+      threading.Thread(target=subprocess.run, args=(['streamlit', 'run', 'app.py'],), daemon=True).start()
+    card: unchecked
   # ── Caps ──────────────────────────────────────────────────────────────────
   # A depth or count guard stops the reader with a write still unread. Where
   # the dropped read could have produced a write finding, the cell is
@@ -8131,6 +8831,13 @@ cases:
     card: read
     kinds: [http]
 
+
+  - name: python -c of the request through realpath of sys.executable
+    code: |-
+      import subprocess, sys, os
+      subprocess.run([os.path.realpath(sys.executable), '-c', 'import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})'])
+    card: read
+    kinds: [http]
   # ── Cells that must run with no card (none) ───────────────────────────────
   # A literal with no write, a call named like a builtin but shadowed or an
   # attribute, an installed-package import, a package install, a non-Python
@@ -10740,4 +11447,180 @@ cases:
     code: |-
       import pip
       pip.main(["install", "pandas"])
+    card: none
+
+  # A program path built from the interpreter's, read as the program it names
+  # (`_interpreter_text`): pip installs a package by name, python runs a
+  # harmless literal. None of these holds.
+
+  - name: pip installs a package by name through the pip joined onto the interpreter's folder
+    code: |-
+      import subprocess, sys, os
+      subprocess.run([os.path.join(os.path.dirname(sys.executable), 'pip'), 'install', 'openpyxl'])
+    card: none
+
+  - name: python -c of a harmless literal through str of sys.executable
+    code: |-
+      import subprocess, sys
+      subprocess.run([str(sys.executable), '-c', 'print(1)'])
+    card: none
+
+  - name: python -c of a harmless literal through Path of sys.executable
+    code: |-
+      import subprocess, sys
+      from pathlib import Path
+      subprocess.run([Path(sys.executable), '-c', 'print(1)'])
+    card: none
+
+  - name: pip installs a package by name through the pip beside the interpreter's Path
+    code: |-
+      import subprocess, sys
+      from pathlib import Path
+      subprocess.run([Path(sys.executable).with_name('pip'), 'install', 'openpyxl'])
+    card: none
+
+  - name: pip installs a package by name through the pip under the interpreter's parent
+    code: |-
+      import subprocess, sys
+      from pathlib import Path
+      subprocess.run([str(Path(sys.executable).parent / 'pip'), 'install', 'openpyxl'])
+    card: none
+
+  - name: pip installs a package by name through the pip under sys.exec_prefix
+    code: |-
+      import subprocess, sys, os
+      subprocess.run([os.path.join(sys.exec_prefix, 'bin', 'pip'), 'install', 'openpyxl'])
+    card: none
+
+  - name: python -c of a harmless literal through a name bound to the interpreter's sibling python
+    code: |-
+      import subprocess, sys, os
+      py = os.path.join(os.path.dirname(sys.executable), 'python')
+      subprocess.run([py, '-c', 'print(1)'])
+    card: none
+
+  - name: a sibling tool asked for its version through the interpreter's folder
+    code: |-
+      import subprocess, sys, os
+      subprocess.run([os.path.join(os.path.dirname(sys.executable), 'streamlit'), '--version'])
+    card: none
+
+  - name: pip installs a package by name through an f-string of the interpreter's folder
+    code: |-
+      import subprocess, sys, os
+      subprocess.run(f"{os.path.dirname(sys.executable)}/pip install openpyxl", shell=True)
+    card: none
+
+  - name: pip installs a package by name through realpath of sys.executable
+    code: |-
+      import subprocess, sys, os
+      subprocess.run([os.path.realpath(sys.executable), '-m', 'pip', 'install', 'pandas'])
+    card: none
+
+  # site.addsitedir of a folder that holds no .pth file is a sys.path change,
+  # not a code run: a following installed-package import keeps no card.
+
+  - name: site adds a folder that holds no .pth file, then imports an installed package
+    files:
+      lib/helpers.txt: x
+    code: |-
+      import site
+      site.addsitedir('lib')
+      import pandas as pd
+      print(pd.__version__)
+    card: none
+
+  - name: site adds the project folder, which holds no .pth file
+    code: |-
+      import site
+      site.addsitedir(".")
+    card: none
+
+  # A setting in the environment that doesn't change what Python imports, and
+  # a runner flag that picks a Python, leave a harmless python -c none.
+
+  - name: python -c of a harmless literal after os.environ sets an API key
+    code: |-
+      import os, subprocess, sys
+      os.environ['OPENAI_API_KEY'] = 'x'
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: none
+
+  - name: python -c of a harmless literal after os.environ turns buffering off
+    code: |-
+      import os, subprocess, sys
+      os.environ['PYTHONUNBUFFERED'] = '1'
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: none
+
+  - name: python -c of a harmless literal under uv run with a Python version
+    code: |-
+      import subprocess
+      subprocess.run(['uv', 'run', '-p', '3.12', 'python', '-c', 'print(1)'])
+    card: none
+
+  # A console script asked only for its version or help runs nothing.
+
+  - name: a training launcher asked for its version
+    code: |-
+      import subprocess
+      subprocess.run(['torchrun', '--version'])
+    card: none
+
+  - name: a make command asked for its version
+    code: |-
+      import subprocess
+      subprocess.run(["make", "--version"])
+    card: none
+
+  - name: a crawler asked for its help
+    code: |-
+      import subprocess
+      subprocess.run(['scrapy', '--help'])
+    card: none
+
+  # A non-Python program handed to a caller as a value, an app runner given an
+  # app object, and an in-process pip install of a package by name: none.
+
+  - name: a non-Python program handed to an executor submit
+    code: |-
+      import subprocess
+      ex.submit(subprocess.run, ['git', 'status'])
+    card: none
+
+  - name: uvicorn runs an app object, not an import string
+    code: |-
+      import uvicorn
+      from myapp import app
+      uvicorn.run(app, port=8000)
+    card: none
+
+  - name: pip's in-process main installs a package by name through the cli main
+    code: |-
+      from pip._internal.cli.main import main
+      main(['install', 'pandas'])
+    card: none
+
+  # A .pth file read, not written, and a program that isn't Python after a
+  # startup hook was written: no later Python start runs new code here.
+
+  - name: a python -c after an earlier cell reads a .pth file
+    earlier:
+      - |-
+        print(open('x.pth').read())
+    files:
+      x.pth: import job
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: none
+
+  - name: a non-Python program after an earlier cell writes a sitecustomize module
+    earlier:
+      - |-
+        import site, os
+        open(os.path.join(site.getsitepackages()[0], 'sitecustomize.py'), 'w').write('import job')
+    code: |-
+      import subprocess
+      subprocess.run(['ls', '-la'])
     card: none
