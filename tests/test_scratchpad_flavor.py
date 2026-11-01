@@ -108,3 +108,47 @@ async def test_the_manager_leaves_the_flavor_off_a_factory_that_predates_it():
 
     pad = await _manager(factory, OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC).get_or_create("p")
     assert isinstance(pad, _Pad)
+
+
+def _routed_provider(flavor):
+    return OpenAIProvider(api_key="k", base_url="http://model-route:8000/v1", flavor=flavor)
+
+
+async def test_a_chat_session_hands_its_coding_providers_flavor_to_the_pad(tmp_path):
+    """ChatSession builds its manager from the coding provider's own export."""
+    from anton.core.session import ChatSession, ChatSessionConfig
+    from anton.workspace import Workspace
+    from tests.test_cloud_turn_session import _mock_llm
+
+    seen = {}
+
+    def factory(*, name, cells, coding_provider, coding_model, coding_api_key,
+                coding_base_url, workspace_path, coding_flavor=None):
+        seen["coding_flavor"] = coding_flavor
+        return _Pad()
+
+    llm = _mock_llm()
+    llm.coding_provider = _routed_provider(OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC)
+    workspace = Workspace(tmp_path)
+    workspace.initialize()
+    session = ChatSession(ChatSessionConfig(llm_client=llm, workspace=workspace, runtime_factory=factory))
+
+    await session._scratchpads.get_or_create("p")
+    assert seen == {"coding_flavor": OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC}
+
+
+def test_the_cli_builds_its_manager_with_the_coding_providers_flavor():
+    from unittest.mock import MagicMock, patch
+
+    import anton.cli as cli
+
+    captured = {}
+    llm = MagicMock()
+    llm.coding_provider = _routed_provider(OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC)
+    with (
+        patch.object(cli, "ScratchpadManager", lambda **kwargs: captured.update(kwargs)),
+        patch.object(cli, "get_runtime_factory", lambda _settings, *, cancel_ends_turn: None),
+    ):
+        cli._build_scratchpad_manager(MagicMock(), llm)
+
+    assert captured["coding_flavor"] == OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC
