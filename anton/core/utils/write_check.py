@@ -123,8 +123,9 @@ What it finds:
   install``, ``uv add`` into a project that builds), and a program the check
   can't name at all; a call to a name, or through a namespace, module or
   value, that such code may have filled, once such code ran and before read
-  code gave the name a value of its own, a name an errored cell may not
-  have bound among them; and a read a depth limit stopped where a write may
+  code surely gave the name a value of its own on every path to the call,
+  a name an errored cell may not have bound, or an if, loop or try may
+  skip binding, among them; and a read a depth limit stopped where a write may
   lie past it. A helper the pad's boot injects, such as ``progress`` or
   ``sample``, is a name read code binds, and a function nothing calls runs
   no program its parameters name.
@@ -2571,6 +2572,7 @@ class _Cell:
         self._run_nodes: dict[int, tuple[ast.AST, ...]] = {}
         self._loads_within: dict[tuple[int, str], tuple[ast.Name, ...]] = {}
         self._statements_at: dict[int, ast.stmt | None] = {}
+        self._first_sure: dict[tuple[int, str, frozenset[str], bool], int] = {}
         self._names_within: dict[int, frozenset[str]] = {}
         self._spread_args: dict[tuple[int, int], ast.Tuple] = {}
         # Every name the cell imports, by the name it binds; the functions and
@@ -2776,6 +2778,95 @@ class _Cell:
         return isinstance(stmt, (ast.With, ast.AsyncWith, ast.For, ast.AsyncFor)) and any(
             use is n or _inside(use, n, self) for n in stmt.body
         )
+
+    def binds_whole(self, name: str, *, setters: frozenset[str]) -> bool:
+        """Whether the cell's code, run to its end, surely binds `name` at
+        its top level (`_first_sure_binding`)."""
+        body = self.tree.body
+        return self._first_sure_binding(body, name, setters=setters, walrus=name in self.signs.bound_aside) < len(body)
+
+    def bound_on_the_way(self, node: ast.AST, name: str, *, setters: frozenset[str]) -> bool:
+        """Whether the code of the cell that runs before `node`, a read at
+        module level, surely binds `name` on every path to it: a walrus
+        before it in its own statement, then, in each block that holds it,
+        the statements before it there (`_binds_on_every_path`), and what
+        the statement that holds that block binds before the block runs: an
+        if's or while's test, a loop's target or iterable, a with's
+        targets or contexts, a handler's `as` name, a case's pattern or
+        guard, or a try's whole body before its else."""
+        walrus = name in self.signs.bound_aside
+        own = self.statement_of(node)
+        if walrus and any(
+            isinstance(n, ast.NamedExpr) and isinstance(n.target, ast.Name) and n.target.id == name
+            and _follows(node=node, value=n) for n in ast.walk(own)
+        ):
+            return True
+        child: ast.AST = node
+        current = self.parents.get(node)
+        while current is not None:
+            if isinstance(current, ast.match_case) and child is current.guard:
+                if _captures(current.pattern, name):
+                    return True
+            for field in ("body", "orelse", "finalbody"):
+                block = getattr(current, field, None)
+                if not (isinstance(block, list) and child in block):
+                    continue
+                if self._first_sure_binding(block, name, setters=setters, walrus=walrus) < block.index(child):
+                    return True
+                if _binds_before(current, field, name, setters=setters, walrus=walrus):
+                    return True
+                break
+            child, current = current, self.parents.get(current)
+        return False
+
+    def _first_sure_binding(
+        self, block: list[ast.stmt], name: str, *, setters: frozenset[str], walrus: bool,
+    ) -> int:
+        """The index of the first statement of `block`, a statement list of
+        the cell, that surely binds `name` when it runs to its end
+        (`_binds_on_every_path`), or the block's length where none does.
+        Read once per block and name, past each statement that can't bind
+        it (`_bound_under`), unless a call of one of `setters` may."""
+        key = (id(block), name, setters, walrus)
+        if key not in self._first_sure:
+            self._first_sure[key] = next((
+                i for i, stmt in enumerate(block)
+                if (setters or name in self.signs.bound_aside or name in self._bound_under.get(id(stmt), ()))
+                and _binds_on_every_path([stmt], name, setters=setters, walrus=walrus)
+            ), len(block))
+        return self._first_sure[key]
+
+    @cached_property
+    def _bound_under(self) -> dict[int, set[str]]:
+        """The names each statement of the cell may bind, in any scope, by
+        the statement's id, read from the lists the cell keeps (`bindings`,
+        `definitions`, `signs`, `stores`) rather than by walking it again:
+        what each binding, def, class, import or store into the cell's own
+        namespace by a literal key binds goes to every statement that holds
+        it. A name `_CodeSigns.bound_aside` holds may bind in places these
+        lists leave out, as a match capture does."""
+        out: dict[int, set[str]] = {}
+
+        def mark(node: ast.AST | None, name: str) -> None:
+            while node is not None:
+                if isinstance(node, ast.stmt):
+                    out.setdefault(id(node), set()).add(name)
+                node = self.parents.get(node)
+
+        for name, found in self.bindings.items():
+            for b in found:
+                mark(b.value, name)
+        for d in self.definitions:
+            mark(d, d.name)
+        for stmt in self.signs.imports:
+            for name in _import_names(stmt):
+                mark(stmt, name)
+        for node in self.stores:
+            for target in node.targets if isinstance(node, ast.Assign) else ():
+                key = _namespace_key(target)
+                if key is not None:
+                    mark(node, key)
+        return out
 
     def scope_of(self, node: ast.AST) -> ast.AST | None:
         """The def, lambda, class or comprehension `node` sits in; None at module level."""
@@ -3241,35 +3332,184 @@ def _cannot_raise(stmt: ast.stmt) -> bool:
     return isinstance(stmt, ast.Pass) or isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant)
 
 
-def _binds_on_every_path(block: Sequence[ast.stmt], name: str) -> bool:
+def _binds_on_every_path(
+    block: Sequence[ast.stmt], name: str, *, setters: AbstractSet[str] = frozenset(), walrus: bool = False,
+) -> bool:
     """Whether running `block`, a list of statements, to its end surely
     binds `name` in its scope: one of them assigns, imports, defines or
-    declares it as a class, or is a with whose body does, an if with an
-    else both of whose arms do, or a try whose body or else does and each
-    of whose handlers does too or ends in a raise, or whose finally does.
-    A loop may run no time, and a match may match no case."""
+    declares it as a class, or stores it as an entry of `globals()` or
+    `vars()`, or is a with one of whose targets is it or whose body does,
+    unless the with enters `suppress(...)`, which may stop its body short,
+    an if with an else both of whose arms do, or whose test is a constant
+    and whose arm that runs does, a loop that surely starts its body
+    (`_starts_its_body`) whose target is it or whose body does before its
+    first break or continue, a match each of whose cases does by its
+    pattern or its body and whose last case matches anything, or a try
+    whose body or else does and each of whose handlers does too or ends in
+    a raise, or whose finally does. A call of one of `setters`, functions
+    that set it as a global on every path, binds it too, and, with
+    `walrus`, so does a walrus the statement surely runs (`_walrus_runs`).
+    Any other loop may run no time."""
+    def every(stmts: Sequence[ast.stmt]) -> bool:
+        return _binds_on_every_path(stmts, name, setters=setters, walrus=walrus)
+
     for stmt in block:
         if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and stmt.name == name:
             return True
         if isinstance(stmt, (ast.Import, ast.ImportFrom)) and name in _import_names(stmt):
             return True
-        if isinstance(stmt, ast.Assign) and any(name in _stored_names(t) for t in stmt.targets):
+        if isinstance(stmt, ast.Assign) and any(_assigns(t, name) for t in stmt.targets):
             return True
-        if isinstance(stmt, ast.AnnAssign) and stmt.value is not None and name in _stored_names(stmt.target):
+        if isinstance(stmt, ast.AnnAssign) and stmt.value is not None and _assigns(stmt.target, name):
             return True
-        if isinstance(stmt, (ast.With, ast.AsyncWith)) and _binds_on_every_path(stmt.body, name):
-            return True
-        if isinstance(stmt, ast.If) and _binds_on_every_path(stmt.body, name) and _binds_on_every_path(
-            stmt.orelse, name,
+        if isinstance(stmt, (ast.With, ast.AsyncWith)) and (
+            any(item.optional_vars is not None and name in _stored_names(item.optional_vars) for item in stmt.items)
+            or every(stmt.body) and not any(
+                isinstance(item.context_expr, ast.Call) and _last_name(item.context_expr.func) == "suppress"
+                for item in stmt.items
+            )
         ):
             return True
-        if isinstance(stmt, (ast.Try, ast.TryStar)) and (_binds_on_every_path(stmt.finalbody, name) or (
-            _binds_on_every_path(stmt.body, name) or _binds_on_every_path(stmt.orelse, name)
-        ) and all(
-            _binds_on_every_path(h.body, name) or isinstance(h.body[-1], ast.Raise) for h in stmt.handlers
-        )):
+        if isinstance(stmt, ast.If) and (every(stmt.body) and every(stmt.orelse) or isinstance(
+            stmt.test, ast.Constant,
+        ) and every(stmt.body if stmt.test.value else stmt.orelse)):
+            return True
+        if _starts_its_body(stmt) and (
+            isinstance(stmt, (ast.For, ast.AsyncFor)) and name in _stored_names(stmt.target)
+            or every(stmt.body) and every(list(itertools.takewhile(
+                lambda s: not any(isinstance(n, (ast.Break, ast.Continue)) for n in ast.walk(s)), stmt.body,
+            )))
+        ):
+            return True
+        if isinstance(stmt, ast.Match) and stmt.cases and _matches_anything(stmt.cases[-1]) and all(
+            _captures(case.pattern, name) or every(case.body) for case in stmt.cases
+        ):
+            return True
+        if isinstance(stmt, (ast.Try, ast.TryStar)) and (every(stmt.finalbody) or (
+            every(stmt.body) or every(stmt.orelse)
+        ) and all(every(h.body) or isinstance(h.body[-1], ast.Raise) for h in stmt.handlers)):
+            return True
+        if (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call) and isinstance(stmt.value.func, ast.Name)
+                and stmt.value.func.id in setters):
+            return True
+        if walrus and _walrus_runs(stmt, name):
             return True
     return False
+
+
+def _assigns(target: ast.AST, name: str) -> bool:
+    """Whether an assignment to `target` binds `name`: the name itself, a
+    tuple or list that holds it, or an entry of the cell's own namespace
+    under it (`_namespace_key`)."""
+    if isinstance(target, ast.Name):
+        return target.id == name
+    if isinstance(target, ast.Subscript):
+        return _namespace_key(target) == name
+    return isinstance(target, (ast.Tuple, ast.List, ast.Starred)) and name in _stored_names(target)
+
+
+def _namespace_key(target: ast.AST) -> str | None:
+    """The name a store into the cell's own namespace by a literal key
+    binds, as `globals()["push"] = f` binds `push`; None for any other
+    target."""
+    if (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Call) and not target.value.args
+            and _last_name(target.value.func) in _GLOBALS_CALLS and isinstance(target.slice, ast.Constant)
+            and isinstance(target.slice.value, str)):
+        return target.slice.value
+    return None
+
+
+def _starts_its_body(stmt: ast.stmt) -> bool:
+    """Whether the loop `stmt` surely starts its body once: a `while` whose
+    test is a true constant, or a loop over a literal of items."""
+    if isinstance(stmt, ast.While):
+        return isinstance(stmt.test, ast.Constant) and bool(stmt.test.value)
+    if isinstance(stmt, (ast.For, ast.AsyncFor)):
+        items = stmt.iter
+        return isinstance(items, (ast.List, ast.Tuple, ast.Set)) and bool(items.elts) and not any(
+            isinstance(e, ast.Starred) for e in items.elts
+        )
+    return False
+
+
+def _matches_anything(case: ast.match_case) -> bool:
+    """Whether `case` matches any subject: a bare capture or `_`, with no guard."""
+    return case.guard is None and isinstance(case.pattern, ast.MatchAs) and case.pattern.pattern is None
+
+
+def _captures(pattern: ast.AST, name: str) -> bool:
+    """Whether the match pattern `pattern` binds `name` once it matches."""
+    return any(
+        isinstance(n, (ast.MatchAs, ast.MatchStar)) and n.name == name or isinstance(n, ast.MatchMapping)
+        and n.rest == name for n in ast.walk(pattern)
+    )
+
+
+def _walrus_runs(stmt: ast.stmt, name: str) -> bool:
+    """Whether running `stmt` surely runs a walrus that binds `name`
+    (`_walrus_binds`): anywhere in a simple statement, and in the part of a
+    compound one that always runs, an if's or while's test, a loop's
+    iterable, a with's contexts or a match's subject."""
+    if isinstance(stmt, (ast.If, ast.While)):
+        parts: list[ast.AST] = [stmt.test]
+    elif isinstance(stmt, (ast.For, ast.AsyncFor)):
+        parts = [stmt.iter]
+    elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+        parts = [item.context_expr for item in stmt.items]
+    elif isinstance(stmt, ast.Match):
+        parts = [stmt.subject]
+    elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Try, ast.TryStar)):
+        parts = []
+    else:
+        parts = [stmt]
+    return any(_walrus_binds(part, name) for part in parts)
+
+
+def _walrus_binds(node: ast.AST, name: str) -> bool:
+    """Whether running `node` surely runs a walrus that binds `name` in the
+    scope `node` is in: not past the first operand of `and` or `or`, nor in
+    a branch of an if-expression, a lambda or a generator, which may not
+    run it, and in a list, set or dict comprehension only where each of its
+    loops goes over a literal of items with no filter, so its element runs."""
+    if isinstance(node, ast.NamedExpr):
+        return isinstance(node.target, ast.Name) and node.target.id == name or _walrus_binds(node.value, name)
+    if isinstance(node, ast.BoolOp):
+        return _walrus_binds(node.values[0], name)
+    if isinstance(node, ast.IfExp):
+        return _walrus_binds(node.test, name)
+    if isinstance(node, (ast.Lambda, ast.GeneratorExp)):
+        return False
+    if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp)):
+        parts = [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
+        return all(
+            isinstance(g.iter, (ast.List, ast.Tuple, ast.Set)) and g.iter.elts and not g.ifs
+            and not any(isinstance(e, ast.Starred) for e in g.iter.elts) for g in node.generators
+        ) and any(_walrus_binds(part, name) for part in parts)
+    return any(_walrus_binds(child, name) for child in ast.iter_child_nodes(node))
+
+
+def _binds_before(
+    stmt: ast.AST, field: str, name: str, *, setters: AbstractSet[str], walrus: bool,
+) -> bool:
+    """Whether `stmt`, a statement, handler or case, surely binds `name`
+    before the block its `field` holds runs: a loop's target for its body,
+    a with's targets, a handler's `as` name, a case's pattern, a try's
+    whole body for its else (`_binds_on_every_path`), and, with `walrus`, a
+    walrus in a case's guard or in what the statement runs first
+    (`_walrus_runs`)."""
+    if isinstance(stmt, (ast.For, ast.AsyncFor)) and field == "body" and name in _stored_names(stmt.target):
+        return True
+    if isinstance(stmt, (ast.With, ast.AsyncWith)) and any(
+        item.optional_vars is not None and name in _stored_names(item.optional_vars) for item in stmt.items
+    ):
+        return True
+    if isinstance(stmt, ast.ExceptHandler):
+        return stmt.name == name
+    if isinstance(stmt, ast.match_case):
+        return _captures(stmt.pattern, name) or walrus and stmt.guard is not None and _walrus_binds(stmt.guard, name)
+    if isinstance(stmt, (ast.Try, ast.TryStar)):
+        return field == "orelse" and _binds_on_every_path(stmt.body, name, setters=setters, walrus=walrus)
+    return walrus and isinstance(stmt, ast.stmt) and _walrus_runs(stmt, name)
 
 
 def _ends_before(node: ast.AST, cell: _Cell, line: int) -> bool:
@@ -3506,6 +3746,7 @@ class _Reader:
         # name (`bound_before`).
         self._binders: dict[str, list[_Cell]] = {}
         self._first_binder_hosts: dict[str, int] = {}
+        self._setters: dict[str, frozenset[str]] = {}
         for cell in self.in_order:
             for name in cell.module_bound:
                 self._binders.setdefault(name, []).append(cell)
@@ -4431,15 +4672,54 @@ class _Reader:
         return False
 
     def bound_before(self, name: str, cell: _Cell) -> bool:
-        """Whether a module-level binding of `name`, in a cell that didn't
-        stop early, runs in a conversation's cell before the one whose run
-        runs `cell`: then `binds` holds with `surely` for a read of it in
-        `cell`, as a cheaper read of it for a name many cells read."""
+        """Whether a cell that didn't stop early, and surely binds `name` at
+        its top level when it runs (`_Cell.binds_whole`), runs in a
+        conversation's cell before the one whose run runs `cell`: then
+        `binds_surely` holds for a read of it in `cell`, as a cheaper read
+        of it for a name many cells read."""
         first = self._first_binder_hosts.get(name)
         if first is None:
-            hosts = [c.host for c in self._binders.get(name, []) if c.host not in self.stopped_early]
-            first = self._first_binder_hosts[name] = min(hosts, default=self.current.index + 1)
+            setters = self.global_setters(name)
+            first = self._first_binder_hosts[name] = next((
+                c.host for c in self._binders.get(name, []) if c.host < self.current.index
+                and c.host not in self.stopped_early and c.surely_run and c.binds_whole(name, setters=setters)
+            ), self.current.index + 1)
         return first < cell.host
+
+    def global_setters(self, name: str) -> frozenset[str]:
+        """The functions a cell defines that declare `name` global and bind
+        it on every path through their body (`_binds_on_every_path`), by
+        name: a call of one binds it at module level. Read once per name."""
+        if name not in self._setters:
+            self._setters[name] = frozenset(
+                scope.name for cell in self.cells for declared in cell.signs.globals_declared
+                if name in declared.names for scope in [cell.scope_of(declared)]
+                if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)) and _binds_on_every_path(scope.body, name)
+            )
+        return self._setters[name]
+
+    def binds_surely(self, node: ast.Name) -> bool:
+        """Whether read code surely gave the name `node`, a read at module
+        level of a conversation's cell, reads a value on every path to the
+        read: its own cell's code before it (`_Cell.bound_on_the_way`), or
+        a cell whose names land in the cell namespace that ran before it,
+        whole (`_Cell.binds_whole`) or, for one that stopped early, up to
+        its stop (`bound_before_stop`). Literal code counts only where the
+        call that runs it surely runs (`_Cell.surely_run`)."""
+        name = node.id
+        cell = self.cell_of(node)
+        setters = self.global_setters(name)
+        if cell.bound_on_the_way(node, name, setters=setters):
+            return True
+        for other in self.ran_ahead(node):
+            if other is cell:
+                continue
+            if other.host in self.stopped_early:
+                if self.bound_before_stop(other, name):
+                    return True
+            elif other.surely_run and other.binds_whole(name, setters=setters):
+                return True
+        return False
 
     def _bound_where(self, node: ast.Name, *, skip: frozenset[int]) -> bool:
         """Whether a binding of the name `node` reads is where it reads it
@@ -12295,13 +12575,20 @@ def _unvouched(reader: _Reader, node: ast.Name, defined: _Defined, tainted: _Tai
     (`_filled_again`), or one no read code gives a value (a builtin or a
     name the pad binds, a name `defined.bound` holds, or what
     `_Reader.binds` covers), unless a star import of a readable module ran
-    before it."""
+    before it. At module level of a conversation's cell, only a binding
+    that surely ran on every path to the read gives it a value
+    (`_Reader.binds_surely`): where an if, loop or try may skip it, the
+    name holds what such code put there."""
     if node.id in tainted and not _filled_again(reader, node, tainted):
         return True
-    if reader.bound_before(node.id, reader.cell_of(node)):
+    cell = reader.cell_of(node)
+    if reader.bound_before(node.id, cell):
         return False
-    return not (node.id in _BUILTIN_NAMES or node.id in defined.bound or reader.binds(node, surely=True)
-                or node in reader.cell_of(node).looked_up or _star_binds(reader, node, defined.stars))
+    if node.id in _BUILTIN_NAMES or node in cell.looked_up or _star_binds(reader, node, defined.stars):
+        return False
+    if cell.index == cell.host and not cell.scopes_around(node):
+        return not reader.binds_surely(node)
+    return not (node.id in defined.bound or reader.binds(node, surely=True))
 
 
 def _filled_again(reader: _Reader, node: ast.Name, tainted: _Tainted) -> bool:
@@ -12500,9 +12787,11 @@ def _stored_names(target: ast.AST) -> list[str]:
 def _stores(node: ast.AST) -> Iterator[_Store]:
     """The names `node` binds, each with the value it gives them: an
     assignment's (a tuple assigned a tuple of the same length pairs them up,
-    any other unpacking gives every name the whole value), a walrus's, a
-    loop's whole iterable, the context a with enters, and the defaults of a
-    function's or lambda's parameters."""
+    any other unpacking gives every name the whole value, and a store into
+    the cell's own namespace by a literal key gives that key, as
+    `globals()["push"] = f` does), a walrus's, a loop's whole iterable, the
+    context a with enters, and the defaults of a function's or lambda's
+    parameters."""
     if isinstance(node, (ast.For, ast.AsyncFor)):
         yield _Store(_stored_names(node.target), node.iter)
     elif isinstance(node, (ast.With, ast.AsyncWith)):
@@ -12523,6 +12812,8 @@ def _stores(node: ast.AST) -> Iterator[_Store]:
             elif isinstance(target, (ast.Tuple, ast.List)):
                 yield _Store([n.id for e in target.elts for n in [e.value if isinstance(e, ast.Starred) else e]
                               if isinstance(n, ast.Name)], value)
+            elif (key := _namespace_key(target)) is not None:
+                yield _Store([key], value)
     elif isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
         yield _Store([node.target.id], node.value)
     elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
@@ -12668,7 +12959,8 @@ def _plainly_read(node: ast.AST, reads: _FillReads, cell: _Cell, reader: _Reader
     `_Reader.runner_aliases`), each name it loads is untainted, read as
     itself, imports no `sys` (whose `sys.modules` holds every module), and
     is bound by read code at module level of a cell that runs before this
-    one (`_Reader.bound_before`), or of this one on an earlier line; and it
+    one (`_Reader.bound_before`), or of this one on an earlier line by an
+    assignment no if, loop or try holds; and it
     gives no function a code object (`_stores_code`). A cheaper read of
     most values a long conversation stores."""
     if reads.methods is None or any(_is_hint(m) or m in reader.runner_aliases for m in reads.methods):
@@ -12683,7 +12975,8 @@ def _plainly_read(node: ast.AST, reads: _FillReads, cell: _Cell, reader: _Reader
     return all(
         name not in tainted and name not in looked_up and (
             reader.bound_before(name, cell)
-            or own and any(b.scope is None and b.line < line for b in cell.bindings.get(name, ()))
+            or own and any(b.scope is None and b.line < line and not b.conditional and b.how != "element"
+                           for b in cell.bindings.get(name, ()))
         )
         for name in reads.names
     )

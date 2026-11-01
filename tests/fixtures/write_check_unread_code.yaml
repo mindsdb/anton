@@ -8449,6 +8449,1785 @@ cases:
       wb = openpyxl.Workbook()
     card: unchecked
 
+  # ── What a name holds after unread code ran ───────────────────────────────
+  # Each case follows a cell that execs a script read from helpers.py, whose
+  # push() sends the request. A call to a name the script may have defined
+  # holds the cell unless read code surely gave the name a value of its own
+  # on every path to the call: a binding an if, loop, try, match, suppress
+  # block or `and` may skip leaves the script's function there, and a
+  # binding in a function, class or comprehension binds a name of its own.
+  # Each binding form comes as a pair: the name rebound to a function read
+  # code defines (none), and not rebound on the path that runs (unchecked).
+  # The pad helper pair's script defines progress() too.
+
+  - name: a call after an assignment rebinds a name unread code defined to a function an earlier cell defines
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      push = quiet
+      push()
+    card: none
+
+  - name: a call after an assignment rebinds a name unread code defined to a function the cell defines
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+    code: |-
+      def quiet():
+          return len(open('stock.csv').read())
+      push = quiet
+      push()
+    card: none
+
+  - name: a call to a name unread code defined, which an earlier cell rebound by an assignment
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+      - |-
+        push = quiet
+    code: |-
+      push()
+    card: none
+
+  - name: a call before the assignment that rebinds a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      push()
+      push = quiet
+    card: unchecked
+
+  - name: a call after an augmented assignment to a name read code bound to its own object
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+      - |-
+        class Quiet:
+            def __iadd__(self, n):
+                return self
+            def __call__(self):
+                return 1
+    code: |-
+      push = Quiet()
+      push += 1
+      push()
+    card: none
+
+  - name: a call after an augmented assignment to a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      push += 1
+      push()
+    card: unchecked
+
+  - name: a call after a del and an assignment rebind a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      del push
+      push = quiet
+      push()
+    card: none
+
+  - name: a call while the function that deletes and rebinds a name unread code defined is never called
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      def reset():
+          global push
+          del push
+          push = quiet
+      push()
+    card: unchecked
+
+  - name: a call after both arms of an if rebind a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      rows = open('stock.csv').read().split()
+      if rows:
+          push = quiet
+      else:
+          push = len
+      push()
+    card: none
+
+  - name: a call after only an if arm rebinds a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      rows = open('stock.csv').read().split()
+      if rows:
+          push = quiet
+      push()
+    card: unchecked
+
+  - name: a call to a name unread code defined, which an earlier cell rebound in an if arm alone
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+      - |-
+        rows = open('stock.csv').read().split()
+        if rows:
+            push = quiet
+    code: |-
+      push()
+    card: unchecked
+
+  - name: a call after only an else arm rebinds a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      rows = open('stock.csv').read().split()
+      if rows:
+          pass
+      else:
+          push = quiet
+      push()
+    card: unchecked
+
+  - name: a call inside the if arm that rebinds a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      rows = open('stock.csv').read().split()
+      if rows:
+          push = quiet
+          push()
+    card: none
+
+  - name: a call through an alias of a name unread code defined that only an if arm rebinds
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      rows = open('stock.csv').read().split()
+      if rows:
+          push = quiet
+      task = push
+      task()
+    card: unchecked
+
+  - name: a call through an alias an earlier cell took of a name unread code defined that only an if arm rebinds
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+      - |-
+        rows = open('stock.csv').read().split()
+        if rows:
+            push = quiet
+      - |-
+        task = push
+    code: |-
+      task()
+    card: unchecked
+
+  - name: a call to a name unread code defined, which an earlier cell rebound under if True
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+      - |-
+        if True:
+            push = quiet
+    code: |-
+      push()
+    card: none
+
+  - name: a call after only an if arm defines a function by a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      rows = open('stock.csv').read().split()
+      if rows:
+          def push():
+              return 1
+      push()
+    card: unchecked
+
+  - name: a call after both arms of an if define a function by a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      rows = open('stock.csv').read().split()
+      if rows:
+          def push():
+              return 1
+      else:
+          def push():
+              return 0
+      push()
+    card: none
+
+  - name: a call inside a loop whose target, by a name unread code defined, is a function read code defines
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      for push in [quiet]:
+          push()
+    card: none
+
+  - name: a call after a loop over rows rebinds a name unread code defined in its body
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      rows = open('stock.csv').read().split()
+      for row in rows:
+          push = quiet
+      push()
+    card: unchecked
+
+  - name: a call after a loop that may not run binds a name unread code defined as its target
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      rows = open('stock.csv').read().split()
+      for push in [quiet for r in rows]:
+          pass
+      push()
+    card: unchecked
+
+  - name: a method call on a frame an earlier cell bound in a loop over a literal of one item
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+      - |-
+        import pandas as pd
+        for p in ['stock.csv']:
+            df = pd.read_csv(p)
+    code: |-
+      print(df.head())
+    card: none
+
+  - name: a call after a while True loop rebinds a name unread code defined before its break
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      while True:
+          push = quiet
+          break
+      push()
+    card: none
+
+  - name: a call after a while True loop that may break before it rebinds a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      rows = open('stock.csv').read().split()
+      while True:
+          if rows:
+              break
+          push = quiet
+          break
+      push()
+    card: unchecked
+
+  - name: a call after a while loop over rows rebinds a name unread code defined in its body
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      rows = open('stock.csv').read().split()
+      while rows:
+          push = quiet
+          rows.pop()
+      push()
+    card: unchecked
+
+  - name: a call after a finally rebinds a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      try:
+          rows = open('stock.csv').read().split()
+      finally:
+          push = quiet
+      push()
+    card: none
+
+  - name: a call after both a try body and its handler rebind a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      try:
+          rows = open('stock.csv').read().split()
+          push = quiet
+      except OSError:
+          push = quiet
+      push()
+    card: none
+
+  - name: a call after a try body rebinds a name unread code defined and its handler raises
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      try:
+          rows = open('stock.csv').read()
+          push = quiet
+      except OSError:
+          raise
+      push()
+    card: none
+
+  - name: a call after a try body that may stop before it rebinds a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      try:
+          rows = open('stock.csv').read().split()
+          push = quiet
+      except OSError:
+          rows = []
+      push()
+    card: unchecked
+
+  - name: a call after only the else of a try rebinds a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      try:
+          rows = open('stock.csv').read().split()
+      except OSError:
+          rows = []
+      else:
+          push = quiet
+      push()
+    card: unchecked
+
+  - name: a call after only a handler rebinds a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      try:
+          rows = open('stock.csv').read().split()
+      except OSError:
+          push = quiet
+      push()
+    card: unchecked
+
+  - name: a handler that names its exception by a name unread code defined and hands it on
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      import logging
+      try:
+          rows = open('stock.csv').read()
+      except OSError as push:
+          logging.warning(push)
+    card: none
+
+  - name: a call after a handler that names its exception by a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      try:
+          rows = open('stock.csv').read()
+      except OSError as push:
+          pass
+      push()
+    card: unchecked
+
+  - name: a call after a with binds a name unread code defined as its target
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      import contextlib
+      with contextlib.nullcontext(quiet) as push:
+          pass
+      push()
+    card: none
+
+  - name: a call after a with body rebinds a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      with open('stock.csv') as fh:
+          push = quiet
+      push()
+    card: none
+
+  - name: a call before the with that binds a name unread code defined as its target
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      import contextlib
+      push()
+      with contextlib.nullcontext(quiet) as push:
+          pass
+    card: unchecked
+
+  - name: a call after a suppress block that may stop before it rebinds a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      import contextlib
+      with contextlib.suppress(OSError):
+          rows = open('stock.csv').read().split()
+          push = quiet
+      push()
+    card: unchecked
+
+  - name: a call after a match whose catch-all case captures a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      match quiet:
+          case push:
+              pass
+      push()
+    card: none
+
+  - name: a call after a match case that may not match captures a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      rows = open('stock.csv').read().split()
+      match (len(rows), quiet):
+          case (0, push):
+              pass
+      push()
+    card: unchecked
+
+  - name: a call inside the match case that captures a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      rows = open('stock.csv').read().split()
+      match (len(rows), quiet):
+          case (0, push):
+              push()
+    card: none
+
+  - name: a call in the guard of the match case that captures a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      match quiet:
+          case push if push():
+              pass
+    card: none
+
+  - name: a call after a walrus rebinds a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      (push := quiet)
+      push()
+    card: none
+
+  - name: a call inside an if whose test rebinds a name unread code defined by a walrus
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      if (push := quiet):
+          push()
+    card: none
+
+  - name: a call after an if whose test rebinds a name unread code defined by a walrus
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      if (push := quiet):
+          pass
+      push()
+    card: none
+
+  - name: a method call later in the test on the name a walrus there binds
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      import re
+      if (m := re.match('a', 'a')) and m.group(0):
+          pass
+    card: none
+
+  - name: a call after a walrus past the first operand of an and rebinds a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      rows = open('stock.csv').read().split()
+      if rows and (push := quiet):
+          pass
+      push()
+    card: unchecked
+
+  - name: a call after a walrus in a comprehension over rows rebinds a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      rows = open('stock.csv').read().split()
+      [(push := quiet) for r in rows]
+      push()
+    card: unchecked
+
+  - name: a call after a walrus in a comprehension over a literal rebinds a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      [(push := quiet) for _ in [1]]
+      push()
+    card: none
+
+  - name: a call after a called function rebinds a name unread code defined through global
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      def setup():
+          global push
+          push = quiet
+      setup()
+      push()
+    card: none
+
+  - name: a call to a name unread code defined, which an earlier cell rebound by calling a function that sets it through global
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+      - |-
+        def setup():
+            global push
+            push = quiet
+      - |-
+        setup()
+    code: |-
+      push()
+    card: none
+
+  - name: a call while the function that rebinds a name unread code defined through global is never called
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      def setup():
+          global push
+          push = quiet
+      push()
+    card: unchecked
+
+  - name: a call after only an if arm calls the function that rebinds a name unread code defined through global
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      rows = open('stock.csv').read().split()
+      def setup():
+          global push
+          push = quiet
+      if rows:
+          setup()
+      push()
+    card: unchecked
+
+  - name: a call inside a function whose closure rebinds its own local through nonlocal
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      def run():
+          push = len
+          def pick():
+              nonlocal push
+              push = quiet
+          pick()
+          push()
+      run()
+    card: none
+
+  - name: a call at module level after a closure rebinds a function's local by a name unread code defined through nonlocal
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      def run():
+          push = len
+          def pick():
+              nonlocal push
+              push = quiet
+          pick()
+      run()
+      push()
+    card: unchecked
+
+  - name: a call inside a function to a parameter that defaults to a function read code defines
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      def run(push=quiet):
+          push()
+      run()
+    card: none
+
+  - name: a call at module level after a parameter by a name unread code defined defaults to a read function
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      def run(push=quiet):
+          return push
+      push()
+    card: unchecked
+
+  - name: a call through a parameter that defaults to a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      def run(task=push):
+          task()
+      run()
+    card: unchecked
+
+  - name: a call inside a comprehension to its variable, a function read code defines
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      [push() for push in [quiet]]
+    card: none
+
+  - name: a call after a comprehension whose variable is a name unread code defined, which doesn't leak
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      [push for push in [quiet]]
+      push()
+    card: unchecked
+
+  - name: a call in a class body to a class attribute bound to a read function
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      class Jobs:
+          push = quiet
+          count = push()
+    card: none
+
+  - name: a call in a method to a name unread code defined, which its class attribute of that name doesn't rebind
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      class Jobs:
+          push = quiet
+          def run(self):
+              return push()
+      Jobs().run()
+    card: unchecked
+
+  - name: a call at module level after a class binds an attribute by a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      class Jobs:
+          push = quiet
+      push()
+    card: unchecked
+
+  - name: a call after an import alias rebinds a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      from json import dumps as push
+      print(push({}))
+    card: none
+
+  - name: a call after an import alias rebinds a name unread code defined on both paths of a try
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      try:
+          from ujson import dumps as push
+      except ImportError:
+          from json import dumps as push
+      print(push({}))
+    card: none
+
+  - name: a call after an import alias that may fail rebinds a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      try:
+          from ujson import dumps as push
+      except ImportError:
+          pass
+      print(push({}))
+    card: unchecked
+
+  - name: a call to a name unread code defined, which an earlier cell rebound by an import alias in an if arm alone
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+      - |-
+        rows = open('stock.csv').read().split()
+        if rows:
+            from json import dumps as push
+    code: |-
+      push({})
+    card: unchecked
+
+  - name: a call at module level after a function imports an alias by a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      def dump(rows):
+          from json import dumps as push
+          return push(rows)
+      push()
+    card: unchecked
+
+  - name: a call to a name unread code defined after a star import of an installed library, which may bind any name
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      from math import *
+      push()
+    card: none
+
+  - name: a call to a name unread code defined after a star import that may fail
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      try:
+          from ujson import *
+      except ImportError:
+          pass
+      push()
+    card: unchecked
+
+  - name: a call to a name unread code defined after a star import in an if arm alone
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      rows = open('stock.csv').read().split()
+      if rows:
+          from math import *
+      push()
+    card: unchecked
+
+  - name: a call after only an if arm sets a name unread code defined on sys.modules[__name__]
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      import sys
+      rows = open('stock.csv').read().split()
+      if rows:
+          setattr(sys.modules[__name__], 'push', quiet)
+      push()
+    card: unchecked
+
+  - name: a call after a store into globals() rebinds a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      globals()['push'] = quiet
+      push()
+    card: none
+
+  - name: a call to a name unread code defined, which an earlier cell rebound by a store into globals()
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+      - |-
+        globals()['push'] = quiet
+    code: |-
+      push()
+    card: none
+
+  - name: a call while the function that stores a name unread code defined into globals() is never called
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      def setup():
+          globals()['push'] = quiet
+      push()
+    card: unchecked
+
+  - name: a call after only an if arm stores a name unread code defined into globals()
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      rows = open('stock.csv').read().split()
+      if rows:
+          globals()['push'] = quiet
+      push()
+    card: unchecked
+
+  - name: a call after a store into globals() of what an eval of unread code made
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+      - |-
+        SRC = open('helpers.py').read()
+    code: |-
+      globals()['push'] = eval(SRC)
+      push()
+    card: unchecked
+
+  - name: a call after an assignment rebinds a pad helper name unread code redefined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+        def progress(msg):
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      progress = quiet
+      progress()
+    card: none
+
+  - name: a call to a pad helper name read code rebinds to a function unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+        def progress(msg):
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      progress = push
+      progress('step 2')
+    card: unchecked
+
+  - name: a call after a literal exec rebinds a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      exec('push = quiet')
+      push()
+    card: none
+
+  - name: a call after a literal exec in an if arm alone rebinds a name unread code defined
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      rows = open('stock.csv').read().split()
+      if rows:
+          exec('push = quiet')
+      push()
+    card: unchecked
+
+  - name: a method call on a name only an if arm binds to a session
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      rows = open('stock.csv').read().split()
+      import requests
+      if rows:
+          push = requests.Session()
+      push.get('https://api.example.org/a')
+    card: unchecked
+
+  - name: a method call on a name both arms of an if bind to a session
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      rows = open('stock.csv').read().split()
+      import requests
+      if rows:
+          s = requests.Session()
+      else:
+          s = requests.Session()
+      s.get('https://api.example.org/a')
+    card: none
+
+  - name: a call in a function to a dict an errored cell built from its own import and a later cell rebuilt
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        import json
+        config = json.loads('{"a": 1}')
+        print(config['missing'])
+      - |-
+        import json
+        config = json.loads('{"a": 2}')
+    earlier_errored: [false, false, true, false]
+    code: |-
+      def show():
+          print(config.get('a'))
+      show()
+    card: none
+
   # ── Cells the check reads (read) ──────────────────────────────────────────
   # The source is a literal, a compiled literal, a builtin reached by a name
   # the check resolves, or a function a literal exec defined, and the read
