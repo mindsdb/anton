@@ -1008,18 +1008,20 @@ async def test_repeated_compaction_preserves_mixed_outcomes_past_unparsable_code
 
 
 def test_compaction_keeps_code_and_outcome_in_order(project):
-    """A compacted cell keeps its code, whether it failed, and the line it
-    stopped at, which the check uses to tell what it bound before it stopped."""
+    """A compacted cell keeps its code, whether it failed, the line it
+    stopped at, which the check uses to tell what it bound before it
+    stopped, and whether its process ended, so the pad started a new one."""
     pad = _runtime(project, *_FILLERS, "total_6 = 6")
     pad.cells[1].error = "ValueError"
     pad.cells[1].stopped_at = 1
+    pad.cells[2].ended_process = True
     assert pad._compact_cells()
     pad.cells.append(Cell(code="total_7 = 7", stdout="", stderr="", error=None))
     assert pad._compact_cells(), "a second compaction folds the first one's summary in too"
     assert pad.compacted_cells == (
         CompactedCell(code="total_0 = 0", errored=False),
         CompactedCell(code="total_1 = 1", errored=True, stopped_at=1),
-        CompactedCell(code="total_2 = 2", errored=False),
+        CompactedCell(code="total_2 = 2", errored=False, ended_process=True),
     )
 
 

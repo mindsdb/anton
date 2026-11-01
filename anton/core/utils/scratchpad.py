@@ -489,13 +489,16 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
         # whether the check can count a write as one that ran. Where each cell
         # that failed stopped is the line the boot read from the traceback, not
         # from its text, which the cell shapes; None where the runtime doesn't
-        # say. Built inside the try: a value `EarlierCell` refuses gets the
-        # card too.
+        # say. A cell whose process ended has the pad start a new one before
+        # the next cell. Built inside the try: a value `EarlierCell` refuses
+        # gets the card too.
         earlier = (
-            *(EarlierCell(code=cell.code, errored=cell.errored, stopped_at=cell.stopped_at)
+            *(EarlierCell(code=cell.code, errored=cell.errored, stopped_at=cell.stopped_at,
+                          ended_process=cell.ended_process)
               for cell in getattr(pad, "compacted_cells", ())),
             *(EarlierCell(code=cell.code, errored=bool(getattr(cell, "error", None)),
-                          stopped_at=getattr(cell, "stopped_at", None))
+                          stopped_at=getattr(cell, "stopped_at", None),
+                          ended_process=getattr(cell, "ended_process", False) is True)
               for cell in getattr(pad, "cells", ()) or ()),
         )
         writes = await asyncio.to_thread(

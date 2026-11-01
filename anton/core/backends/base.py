@@ -33,7 +33,9 @@ class Cell:
     as the boot read it from the traceback (`cell_stopped_at`); None where
     the runtime doesn't say. A cell whose process died, was killed or never
     got to run it says `wire.NOTHING_KEPT`: the namespace comes back as of
-    the last cell that completed, so it kept nothing it bound.
+    the last cell that completed, so it kept nothing it bound. Such a cell
+    also says `ended_process`: the pad starts a new process before the next
+    cell runs, which runs the startup hooks a cell wrote.
     """
 
     code: str
@@ -44,6 +46,7 @@ class Cell:
     estimated_time: str = ""
     logs: str = ""
     stopped_at: int | None = None
+    ended_process: bool = False
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,7 @@ class CompactedCell:
     code: str
     errored: bool
     stopped_at: int | None = None
+    ended_process: bool = False
 
 
 def stopped_line(value: object) -> int | None:
@@ -327,7 +331,8 @@ class ScratchpadRuntime(ABC):
         )
         self.compacted_cells = (
             *self.compacted_cells,
-            *(CompactedCell(code=cell.code, errored=bool(cell.error), stopped_at=cell.stopped_at)
+            *(CompactedCell(code=cell.code, errored=bool(cell.error), stopped_at=cell.stopped_at,
+                            ended_process=cell.ended_process)
               for cell in to_compact if cell.code != _COMPACTED_CELL_CODE),
         )
         summary_cell = Cell(

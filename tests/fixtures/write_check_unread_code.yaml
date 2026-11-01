@@ -12,6 +12,10 @@
 #              stopped_at  the line of its own code an errored cell stopped
 #                          at, as the pad's boot reads it from the
 #                          traceback; absent where the runtime doesn't say.
+#              ended_process
+#                          true for a cell whose process died, was killed
+#                          or never ran it, so the pad starts a new one
+#                          before the next cell.
 #   code     the cell the check runs before it runs for real.
 #   files    project files that exist when the turn begins, {path: text}
 #            (optional). The snapshot holds stock.csv besides these.
@@ -2699,6 +2703,230 @@ cases:
       IPython.start_ipython(argv=["job.py"])
     card: unchecked
 
+  # A lookup on a module by a name bound to the text of a class whose
+  # instances run code holds the cell, as the literal lookup does.
+
+  - name: a profiler class looked up by a name bound to its text runs a script read from a file
+    files:
+      job.txt: x = 1
+    code: |-
+      import cProfile
+      n = 'Profile'
+      prof = getattr(cProfile, n)()
+      prof.run(open('job.txt').read())
+    card: unchecked
+
+  - name: a debugger class looked up through a loop over its name runs a script read from a file
+    files:
+      job.txt: x = 1
+    code: |-
+      import pdb
+      for n in ['Pdb']:
+          getattr(pdb, n)().run(open('job.txt').read())
+    card: unchecked
+
+  - name: a timer class looked up by a name bound to its text runs a statement read from a file
+    files:
+      job.txt: x = 1
+    code: |-
+      import timeit
+      n = 'Timer'
+      getattr(timeit, n)(open('job.txt').read()).timeit(1)
+    card: unchecked
+
+  - name: a profiler class made by type() runs a script read from a file
+    files:
+      job.txt: x = 1
+    code: |-
+      import cProfile
+      Q = type('Q', (cProfile.Profile,), {})
+      Q().run(open('job.txt').read())
+    card: unchecked
+
+  - name: a function given code by setattr runs it
+    code: |-
+      import marshal
+      def f():
+          pass
+      setattr(f, '__code__', marshal.loads(open('f.bin', 'rb').read()))
+      f()
+    card: unchecked
+
+  # timeit's main reads its options as its getopt does: a setup glued to -s,
+  # or after --setup= or a unique prefix of it, is read too.
+
+  - name: timeit main of a setup glued to its short option is read
+    code: |-
+      import timeit
+      timeit.main(['-simport requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})', 'pass'])
+    card: read
+    kinds: [http]
+
+  - name: timeit main of a setup given after its long option and an equals sign is read
+    code: |-
+      import timeit
+      timeit.main(['--setup=import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})', 'pass'])
+    card: read
+    kinds: [http]
+
+  - name: timeit main of a setup given after a unique prefix of its long option is read
+    code: |-
+      import timeit
+      timeit.main(['--se=import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})', 'pass'])
+    card: read
+    kinds: [http]
+
+  - name: timeit main given an option its parser doesn't know
+    code: |-
+      import timeit
+      timeit.main(['-x', 'pass'])
+    card: unchecked
+
+  # unittest's main reads sys.argv when it is given no argv, and loads the
+  # tests a default names.
+
+  - name: unittest main after an earlier cell set sys.argv to discover tests
+    earlier:
+      - |-
+        import sys
+        sys.argv = ['t', 'discover', '-s', 'tests']
+    code: |-
+      import unittest
+      unittest.main(exit=False)
+    card: unchecked
+
+  - name: unittest main after the cell sets sys.argv to a test module's name
+    code: |-
+      import sys, unittest
+      sys.argv = ['t', 'tests.test_x']
+      unittest.main(exit=False)
+    card: unchecked
+
+  - name: unittest main given a default test to load
+    code: |-
+      import unittest
+      unittest.main(defaultTest='tests.test_x', exit=False)
+    card: unchecked
+
+  - name: the builtin help imports a module named in a file, after a cell put a written module's folder on sys.path
+    files:
+      mod.txt: job
+    earlier:
+      - |-
+        import os, sys
+        os.makedirs('lib', exist_ok=True)
+        open('lib/job.py', 'w').write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+        sys.path.insert(0, 'lib')
+    code: |-
+      name = open('mod.txt').read().strip()
+      help(name)
+    card: unchecked
+
+  # Stores into sys.modules spelled any way: a merge, operator's and dict's
+  # own setitem, and a name bound to it.
+
+  - name: an import of a module an earlier cell merged into sys.modules with |=
+    files:
+      job.txt: x = 1
+    earlier:
+      - |-
+        import types
+        mod = types.ModuleType('job')
+        exec(open('job.txt').read(), mod.__dict__)
+      - |-
+        import sys
+        sys.modules |= {'job': mod}
+    code: |-
+      import job
+      job.main()
+    card: unchecked
+
+  - name: an import of a module an earlier cell stored in sys.modules through operator.setitem
+    files:
+      job.txt: x = 1
+    earlier:
+      - |-
+        import types
+        mod = types.ModuleType('job')
+        exec(open('job.txt').read(), mod.__dict__)
+      - |-
+        import sys, operator
+        operator.setitem(sys.modules, 'job', mod)
+    code: |-
+      import job
+      job.main()
+    card: unchecked
+
+  - name: an import of a module an earlier cell stored in sys.modules through a name bound to it
+    files:
+      job.txt: x = 1
+    earlier:
+      - |-
+        import types
+        mod = types.ModuleType('job')
+        exec(open('job.txt').read(), mod.__dict__)
+      - |-
+        import sys
+        m = sys.modules
+        m['job'] = mod
+    code: |-
+      import job
+      job.main()
+    card: unchecked
+
+  - name: an import of a module an earlier cell stored in sys.modules through dict.__setitem__
+    files:
+      job.txt: x = 1
+    earlier:
+      - |-
+        import types
+        mod = types.ModuleType('job')
+        exec(open('job.txt').read(), mod.__dict__)
+      - |-
+        import sys
+        dict.__setitem__(sys.modules, 'job', mod)
+    code: |-
+      import job
+      job.main()
+    card: unchecked
+
+  # A module a literal exec filled and stored in sys.modules: an import of it
+  # before a later cell ran unread code still binds what that code reached.
+
+  - name: a call to a name imported from a module a literal exec filled, before a later cell ran unread code
+    files:
+      helpers.py: x = 1
+    earlier:
+      - |-
+        import sys, types
+        m = types.ModuleType('job')
+        exec("def go():\n    import requests\n    requests.post('https://erp.example.test/api/orders', json={'qty': 1})", m.__dict__)
+        sys.modules['job'] = m
+      - |-
+        from job import go
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      go()
+    card: unchecked
+
+  - name: a call through a module a literal exec filled, imported before a later cell ran unread code
+    files:
+      helpers.py: x = 1
+    earlier:
+      - |-
+        import sys, types
+        m = types.ModuleType('job')
+        exec("def go():\n    import requests\n    requests.post('https://erp.example.test/api/orders', json={'qty': 1})", m.__dict__)
+        sys.modules['job'] = m
+      - |-
+        import job
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      job.go()
+    card: unchecked
+
   - name: a notebook execute preprocessor is built and registered
     earlier:
       - |-
@@ -2972,6 +3200,25 @@ cases:
     code: |-
       import uvicorn
       uvicorn.run('app:app', port=8000)
+    card: unchecked
+
+  - name: uvicorn runs an app named by an environment setting
+    code: |-
+      import os, uvicorn
+      uvicorn.run(os.environ['APP_TARGET'])
+    card: unchecked
+
+  - name: uvicorn runs an app named in a mapping spread into its call
+    code: |-
+      import uvicorn
+      cfg = {'app': 'job:app'}
+      uvicorn.run(**cfg)
+    card: unchecked
+
+  - name: a uvicorn server runs a config of an app named by an import string
+    code: |-
+      import uvicorn
+      uvicorn.Server(uvicorn.Config('job:app')).run()
     card: unchecked
 
   - name: site adds a folder that holds a .pth file, then imports an installed package
@@ -4680,6 +4927,39 @@ cases:
       subprocess.run([sys.executable, '-c', 'print(1)'])
     card: unchecked
 
+  # A cell whose process ended has the pad start a new process before the
+  # next cell, and that start runs the startup hooks a cell wrote.
+
+  - name: a cell after one whose process ended, once an earlier cell wrote a .pth file into site-packages
+    earlier:
+      - |-
+        import site
+        open(site.getsitepackages()[0] + '/hook.pth', 'w').write('import job')
+      - code: |-
+          import os
+          os._exit(1)
+        errored: true
+        stopped_at: 1
+        ended_process: true
+    code: |-
+      print(1)
+    card: unchecked
+
+  - name: a cell after one killed at its timeout, once an earlier cell wrote a sitecustomize module into site-packages
+    earlier:
+      - |-
+        import site, os
+        open(os.path.join(site.getsitepackages()[0], 'sitecustomize.py'), 'w').write('import job')
+      - code: |-
+          import time
+          time.sleep(600)
+        errored: true
+        stopped_at: 1
+        ended_process: true
+    code: |-
+      print(1)
+    card: unchecked
+
   # python -c imports a project module when the launch runs in another folder
   # or with PYTHONPATH set, so the working folder reaches the module.
 
@@ -4831,12 +5111,6 @@ cases:
       subprocess.run(['scrapy', 'crawl', 'erp'])
     card: unchecked
 
-  - name: a target a make command runs
-    code: |-
-      import subprocess
-      subprocess.run(["make", "etl"])
-    card: unchecked
-
   - name: a migration django-admin runs
     code: |-
       import subprocess
@@ -4898,6 +5172,93 @@ cases:
     code: |-
       import subprocess
       subprocess.run(['ipython', '--profile=etl', '-c', 'print(1)'])
+    card: unchecked
+
+  # IPython runs the code its input gives it, and the options that load code
+  # as it starts; its -c text is read only where it parses as Python and
+  # names no get_ipython.
+
+  - name: ipython fed the request on its input
+    code: |-
+      import subprocess
+      subprocess.run(['ipython'], input='import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})', text=True)
+    card: unchecked
+
+  - name: ipython fed a script read from a file on its input
+    files:
+      job.txt: x = 1
+    code: |-
+      import subprocess
+      code = open('job.txt').read()
+      subprocess.run(['ipython', '--no-banner'], input=code, text=True)
+    card: unchecked
+
+  - name: ipython3 fed a script through a shell pipe
+    code: |-
+      import subprocess
+      subprocess.run('cat job.py | ipython3', shell=True)
+    card: unchecked
+
+  - name: ipython given a script to run through its file_to_run option
+    code: |-
+      import subprocess
+      subprocess.run(['ipython', '--TerminalIPythonApp.file_to_run=job.py'])
+    card: unchecked
+
+  - name: ipython given lines to run through its exec_lines option
+    code: |-
+      import subprocess
+      subprocess.run(['ipython', '--InteractiveShellApp.exec_lines=["import job"]'])
+    card: unchecked
+
+  - name: ipython that loads an extension module
+    code: |-
+      import subprocess
+      subprocess.run(['ipython', '--ext=job'])
+    card: unchecked
+
+  - name: ipython -c that binds what the run magic gives
+    code: |-
+      import subprocess
+      subprocess.run(['ipython', '-c', 'out = %run job.py'])
+    card: unchecked
+
+  - name: ipython -c that runs a script through the shell get_ipython gives
+    code: |-
+      import subprocess
+      subprocess.run(['ipython', '-c', "get_ipython().ex(open('job.py').read())"])
+    card: unchecked
+
+  - name: ipython from the interpreter's folder fed a script on its input
+    files:
+      job.txt: x = 1
+    code: |-
+      import sys, subprocess
+      from pathlib import Path
+      subprocess.run([str(Path(sys.executable).parent / 'ipython')], input=open('job.txt').read(), text=True)
+    card: unchecked
+
+  # A command a loop rebinds on a later line of its body reaches the run on
+  # the next pass.
+
+  - name: a python script a loop rebinds the command to on a later line of its body
+    code: |-
+      import os
+      cmd = 'ls'
+      for w in ['python3 job.py', 'ls']:
+          os.system(cmd)
+          cmd = w
+    card: unchecked
+
+  - name: a python script a while loop rebinds the command to on a later line of its body
+    code: |-
+      import os
+      cmd = 'ls'
+      n = 0
+      while n < 2:
+          os.system(cmd)
+          cmd = 'python3 job.py'
+          n += 1
     card: unchecked
 
   # Python under a non-bash shell, which runs the inner python command.
@@ -5073,6 +5434,54 @@ cases:
     code: |-
       import asyncio, subprocess, sys
       loop.run_in_executor(None, subprocess.run, [sys.executable, 'etl.py'])
+    card: unchecked
+
+  # A launcher handed to any caller that runs it later is read as the call
+  # the caller makes of it, with the keywords it forwards; a caller the check
+  # doesn't know holds the cell.
+
+  - name: a launcher handed to a thread by position runs a python script
+    code: |-
+      import subprocess, sys, threading
+      threading.Thread(None, subprocess.run, None, ([sys.executable, 'etl.py'],)).start()
+    card: unchecked
+
+  - name: a launcher handed to a process as its target runs a python script
+    code: |-
+      import subprocess, sys, multiprocessing
+      multiprocessing.Process(target=subprocess.run, args=([sys.executable, 'etl.py'],)).start()
+    card: unchecked
+
+  - name: a launcher handed to an executor submit with the interpreter as its executable
+    code: |-
+      import subprocess, sys
+      from concurrent.futures import ThreadPoolExecutor
+      with ThreadPoolExecutor() as ex:
+          ex.submit(subprocess.run, ['x', 'etl.py'], executable=sys.executable).result()
+    card: unchecked
+
+  - name: a launcher handed to a timer runs a python script
+    code: |-
+      import subprocess, sys, threading
+      threading.Timer(0, subprocess.run, args=([sys.executable, 'etl.py'],)).start()
+    card: unchecked
+
+  - name: a launcher handed to atexit runs a python script
+    code: |-
+      import subprocess, sys, atexit
+      atexit.register(subprocess.run, [sys.executable, 'etl.py'])
+    card: unchecked
+
+  - name: a launcher handed to a caller the check doesn't know
+    code: |-
+      import subprocess, sys
+      retry(subprocess.run, [sys.executable, 'etl.py'])
+    card: unchecked
+
+  - name: a launcher given the interpreter as its third argument runs a python script
+    code: |-
+      import subprocess, sys
+      subprocess.run(['x', 'etl.py'], -1, sys.executable)
     card: unchecked
 
   - name: a launcher mapped over a list of argument lists
@@ -10670,6 +11079,443 @@ cases:
       show()
     card: none
 
+  # A loop over items that may be none binds nothing, and a with that may
+  # swallow an error may stop its body short; a function that declares a name
+  # global, and a class body, read the module's name where their own binding
+  # may not have run; a setter returns before it binds; literal code in the
+  # cell namespace is read as its host's code is.
+
+  - name: a call to a name unread code defined, after an errored cell's loop over no items before its stop
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+      - code: |-
+          def quiet():
+              print('ok')
+          for push in []:
+              pass
+          x = int('a')
+        errored: true
+        stopped_at: 5
+    code: |-
+      push()
+    card: unchecked
+
+  - name: a call to a name unread code defined, after an errored cell's loop over rows before its stop
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+      - code: |-
+          def quiet():
+              print('ok')
+          import csv
+          for push in csv.reader(open('stock.csv')):
+              pass
+          x = int('a')
+        errored: true
+        stopped_at: 6
+    code: |-
+      push()
+    card: unchecked
+
+  - name: a call to a name unread code defined, after an errored cell's loop over one item before its stop
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+      - code: |-
+          def quiet():
+              print('ok')
+          for push in [quiet]:
+              pass
+          x = int('a')
+        errored: true
+        stopped_at: 5
+    code: |-
+      push()
+    card: none
+
+  - name: a call to a name an eval of unread code bound, after a later cell's loop over no items
+    files:
+      job.txt: x
+    earlier:
+      - |-
+        SRC = open('job.txt').read()
+        push = eval(SRC)
+      - |-
+        for push in []:
+            pass
+    code: |-
+      push()
+    card: unchecked
+
+  - name: a call to a name an eval of unread code bound, after a later cell rebinds it in a suppress block that may stop first
+    files:
+      job.txt: x
+    earlier:
+      - |-
+        SRC = open('job.txt').read()
+        push = eval(SRC)
+      - |-
+        from contextlib import suppress
+        def quiet():
+            pass
+        with suppress(Exception):
+            int('a')
+            push = quiet
+    code: |-
+      push()
+    card: unchecked
+
+  - name: a call to a name unread code defined, after a suppress block under another name that may stop first
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      from contextlib import suppress as quietly
+      def quiet():
+          print('ok')
+      with quietly(Exception):
+          int('a')
+          push = quiet
+      push()
+    card: unchecked
+
+  - name: a call to a name unread code defined, after a pytest raises block that may stop first
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      import pytest
+      def quiet():
+          print('ok')
+      with pytest.raises(ValueError):
+          int('a')
+          push = quiet
+      push()
+    card: unchecked
+
+  - name: a call to a name unread code defined, after an exit stack block that may stop first
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      from contextlib import ExitStack, suppress
+      def quiet():
+          print('ok')
+      with ExitStack() as stack:
+          stack.enter_context(suppress(ValueError))
+          int('a')
+          push = quiet
+      push()
+    card: unchecked
+
+  - name: a call to a name unread code defined, after a block of a context class the cell defines that may stop first
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      class Quiet:
+          def __enter__(self):
+              return self
+          def __exit__(self, *exc):
+              return True
+      def quiet():
+          print('ok')
+      with Quiet():
+          int('a')
+          push = quiet
+      push()
+    card: unchecked
+
+  - name: a call to a name unread code defined, after a walrus behind a chained comparison that may stop first
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      def quiet():
+          pass
+      if 2 < 1 < (push := quiet):
+          pass
+      push()
+    card: unchecked
+
+  - name: a call from a function that declares a name unread code defined global and rebinds it only under an if
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      def quiet():
+          pass
+      def go():
+          global push
+          if len('ab') > 5:
+              push = quiet
+          push()
+      go()
+    card: unchecked
+
+  - name: a call from a function that declares a name unread code defined global and rebinds it first
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      def quiet():
+          pass
+      def go():
+          global push
+          push = quiet
+          push()
+      go()
+    card: none
+
+  - name: a call in a class body to a name unread code defined that the body rebinds only under an if
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      def quiet():
+          pass
+      class C:
+          if len('ab') > 5:
+              push = quiet
+          push()
+    card: unchecked
+
+  - name: a call in a class body to a name unread code defined that the body rebinds first
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      def quiet():
+          pass
+      class C:
+          push = quiet
+          push()
+    card: none
+
+  - name: a call to a name unread code defined after a global setter that may return before it binds
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      def quiet():
+          pass
+      def setp():
+          global push
+          if len('ab') > 5:
+              return
+          push = quiet
+      setp()
+      push()
+    card: unchecked
+
+  - name: a call to a name unread code defined after an earlier cell's global setter, redefined to bind nothing
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+      - |-
+        def quiet():
+            pass
+        def setp():
+            global push
+            push = quiet
+    code: |-
+      def setp():
+          pass
+      setp()
+      push()
+    card: unchecked
+
+  - name: a call in literal code run in the cell namespace to a name unread code defined that it rebinds only under an if
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      exec("def quiet():\n    pass\nif len('ab') > 5:\n    push = quiet\npush()")
+    card: unchecked
+
+  - name: a call in literal code run in the cell namespace to a name unread code defined that it rebinds first
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      exec("def quiet():\n    pass\npush = quiet\npush()")
+    card: none
+
+  # After unread code ran, a function or method nothing in its cell runs can
+  # run only in a later cell, once the helpers below it are defined; a method
+  # may run at any call after its class.
+
+  - name: a define-only cell whose first function calls helpers defined below it, after a pip install from a requirements file
+    files:
+      requirements.txt: |
+        pandas
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'])
+    code: |-
+      import pandas as pd
+      def main():
+          df = load()
+          return clean(df)
+      def load():
+          return pd.read_csv('stock.csv')
+      def clean(df):
+          return df.dropna()
+    card: none
+
+  - name: a define-only class whose method calls a helper defined below it, after a pip install from a requirements file
+    files:
+      requirements.txt: |
+        pandas
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'])
+    code: |-
+      class Report:
+          def build(self, df):
+              return summarize(df)
+      def summarize(df):
+          return df.describe()
+    card: none
+
+  - name: a handler a decorator registers that calls a helper defined below it, after a pip install from a requirements file
+    files:
+      requirements.txt: |
+        pandas
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'])
+    code: |-
+      from fastapi import FastAPI
+      app = FastAPI()
+      @app.get('/')
+      def root():
+          return load()
+      def load():
+          return {'ok': 1}
+    card: none
+
+  - name: a method call on an earlier cell's class whose method calls a helper that cell defined, after a pip install from a requirements file
+    files:
+      requirements.txt: |
+        pandas
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'])
+      - |-
+        class Report:
+            def build(self, df):
+                return summarize(df)
+        def summarize(df):
+            return df.describe()
+    code: |-
+      import pandas as pd
+      print(Report().build(pd.read_csv('stock.csv')))
+    card: none
+
+  - name: a method call before the helper its method calls is defined, after unread code ran
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      class Report:
+          def build(self):
+              return push()
+      Report().build()
+      def push():
+          pass
+    card: unchecked
+
   # ── Cells the check reads (read) ──────────────────────────────────────────
   # The source is a literal, a compiled literal, a builtin reached by a name
   # the check resolves, or a function a literal exec defined, and the read
@@ -11902,6 +12748,59 @@ cases:
     card: read
     kinds: [delete]
 
+  # A statement a helper's starred parameter takes, a delete a launcher
+  # handed to a caller runs, and a delete of a path a loop rebinds after it.
+
+  - name: a delete statement through a helper's starred parameter on a project database
+    files:
+      db.sqlite: x
+    code: |-
+      import sqlite3
+      con = sqlite3.connect('db.sqlite')
+      def run(*stmts):
+          for s in stmts:
+              con.execute(s)
+      run('DELETE FROM orders')
+    card: read
+
+  - name: a delete statement through the first item of a helper's starred parameter on a project database
+    files:
+      db.sqlite: x
+    code: |-
+      import sqlite3
+      con = sqlite3.connect('db.sqlite')
+      def run(*stmts):
+          con.execute(stmts[0])
+      run('DELETE FROM orders')
+    card: read
+
+  - name: a delete a launcher handed to an executor submit runs
+    code: |-
+      import subprocess
+      from concurrent.futures import ThreadPoolExecutor
+      with ThreadPoolExecutor() as ex:
+          ex.submit(subprocess.run, ['rm', 'stock.csv']).result()
+    card: read
+    kinds: [delete]
+
+  - name: a delete a launcher handed to a thread runs
+    code: |-
+      import subprocess, threading
+      threading.Thread(target=subprocess.run, args=(['rm', 'stock.csv'],)).start()
+    card: read
+    kinds: [delete]
+
+  - name: a delete of a path a loop rebinds on a later line of its body
+    code: |-
+      import os
+      p = 'nothing.txt'
+      for w in ['stock.csv', 'x']:
+          if os.path.exists(p):
+              os.remove(p)
+          p = w
+    card: read
+    kinds: [delete]
+
   # ── Cells that must run with no card (none) ───────────────────────────────
   # A literal with no write, a call named like a builtin but shadowed or an
   # attribute, an installed-package import, a package install, a non-Python
@@ -12665,6 +13564,15 @@ cases:
       subprocess.run(["bash"], input="echo hi", text=True)
       subprocess.run([sys.executable, "-m", "pip", "install", "x"])
       subprocess.run(["bash", "run.sh"])
+    card: none
+
+  # A make target runs the commands its Makefile names, a shell script the
+  # check doesn't read, as bash runs run.sh: not Python.
+
+  - name: a target a make command runs
+    code: |-
+      import subprocess
+      subprocess.run(["make", "etl"])
     card: none
 
   - name: a shell script whose comment names python
@@ -15129,4 +16037,169 @@ cases:
       def clean(path):
           subprocess.run(['rm', '-rf', path])
       exec('x = 1', globals())
+    card: none
+
+  # IPython asked for its version, and plain Python after its -c.
+
+  - name: ipython asked for its version
+    code: |-
+      import subprocess
+      subprocess.run(['ipython', '--version'])
+    card: none
+
+  - name: ipython -c of plain Python
+    code: |-
+      import subprocess
+      subprocess.run(['ipython', '-c', 'print(1)'])
+    card: none
+
+  # A non-Python program a caller runs later, a type check against a
+  # launcher, and app runners given app objects.
+
+  - name: a non-Python program handed to a thread by position
+    code: |-
+      import subprocess, threading
+      threading.Thread(None, subprocess.run, None, (['git', 'status'],)).start()
+    card: none
+
+  - name: a non-Python program handed to a process with keywords
+    code: |-
+      import subprocess, multiprocessing
+      multiprocessing.Process(target=subprocess.run, args=(['git', 'status'],), kwargs={'check': True}).start()
+    card: none
+
+  - name: a delete of a missing file a launcher handed to an executor submit runs
+    code: |-
+      import subprocess
+      from concurrent.futures import ThreadPoolExecutor
+      with ThreadPoolExecutor() as ex:
+          ex.submit(subprocess.run, ['rm', 'nothing.txt']).result()
+    card: none
+
+  - name: a type check against a launcher class
+    code: |-
+      import subprocess
+      p = subprocess.Popen(['ls'])
+      print(isinstance(p, subprocess.Popen))
+    card: none
+
+  - name: a uvicorn server runs a config of the cell's own app
+    code: |-
+      import uvicorn
+      from fastapi import FastAPI
+      app = FastAPI()
+      uvicorn.Server(uvicorn.Config(app, port=8000)).run()
+    card: none
+
+  - name: uvicorn runs the app an imported factory makes
+    code: |-
+      import uvicorn
+      from myapp import create_app
+      uvicorn.run(create_app())
+    card: none
+
+  - name: a lookup on a module that holds no runner by a name bound to its text
+    code: |-
+      import json
+      n = 'dumps'
+      print(getattr(json, n)({}))
+    card: none
+
+  # A model saved as a .pth file, a binary file of that name, and a name
+  # that only holds .pth: none of them is a startup hook, so a later Python
+  # process runs no new code.
+
+  - name: a pip install by name after an earlier cell saves a model's weights as a .pth file
+    earlier:
+      - |-
+        import torch
+        model = torch.nn.Linear(2, 1)
+        torch.save(model.state_dict(), 'model.pth')
+    code: |-
+      import subprocess, sys
+      subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'rich'])
+    card: none
+
+  - name: a pip program install after an earlier cell saves a checkpoint in a folder
+    earlier:
+      - |-
+        import torch
+        model = torch.nn.Linear(2, 1)
+        torch.save(model.state_dict(), 'checkpoints/best.pth')
+    code: |-
+      import subprocess
+      subprocess.run(['pip', 'install', 'rich'])
+    card: none
+
+  - name: a python version check after an earlier cell saves a model into a folder a setting names
+    earlier:
+      - |-
+        import torch, os
+        out = os.environ.get('OUT', 'models')
+        model = torch.nn.Linear(2, 1)
+        torch.save(model, os.path.join(out, 'model.pth'))
+    code: |-
+      import subprocess, sys
+      print(subprocess.run([sys.executable, '--version'], capture_output=True).stdout)
+    card: none
+
+  - name: a python -c after an earlier cell writes bytes with no import line to a .pth file
+    earlier:
+      - |-
+        open('weights.pth', 'wb').write(b'x')
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'print(1)'])
+    card: none
+
+  - name: a pip install by name after an earlier cell writes a report whose name holds .pth
+    earlier:
+      - |-
+        import pandas as pd
+        pd.DataFrame({'a': [1]}).to_csv('depth.pth_report.csv')
+    code: |-
+      import subprocess, sys
+      subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'rich'])
+    card: none
+
+  - name: a cell after one whose process ended, with no startup hook written
+    earlier:
+      - code: |-
+          import os
+          os._exit(1)
+        errored: true
+        stopped_at: 1
+        ended_process: true
+    code: |-
+      print(1)
+    card: none
+
+  - name: a cell after one that raised on its first line, once an earlier cell wrote a .pth file into site-packages
+    earlier:
+      - |-
+        import site
+        open(site.getsitepackages()[0] + '/hook.pth', 'w').write('import job')
+      - code: |-
+          int('a')
+        errored: true
+        stopped_at: 1
+    code: |-
+      print(1)
+    card: none
+
+  # A pip helper nothing calls: pip's own "install" in its command spells no
+  # lookup of it.
+
+  - name: a define-only pip helper of a starred parameter
+    code: |-
+      import subprocess, sys
+      def install(*pkgs):
+          subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', *pkgs])
+    card: none
+
+  - name: a define-only pip helper of one parameter
+    code: |-
+      import subprocess, sys
+      def install(pkg):
+          subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', pkg])
     card: none

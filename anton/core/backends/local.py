@@ -1491,6 +1491,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     description=description,
                     estimated_time=estimated_time,
                     stopped_at=NOTHING_KEPT,
+                    ended_process=True,
                 ))
                 return
             # Grabbed once and cleared immediately: whatever happens to THIS
@@ -1527,6 +1528,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 estimated_time=estimated_time,
                 logs=recovery_note or "",
                 stopped_at=NOTHING_KEPT,
+                ended_process=True,
             ))
             return
 
@@ -1591,6 +1593,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 estimated_time=estimated_time,
                 logs=recovery_note or "",
                 stopped_at=NOTHING_KEPT,
+                ended_process=True,
             )
             cell = self._record_cell(cell)
             # A Stop or a host's watchdog cancels the task running this cell.
@@ -1636,6 +1639,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 "stderr": "",
                 "error": "Process exited unexpectedly.",
                 "stopped_at": NOTHING_KEPT,
+                "ended_process": True,
             }
 
         for pkg in result_data.get("auto_installed") or []:
@@ -1660,6 +1664,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             estimated_time=estimated_time,
             logs=logs,
             stopped_at=stopped_line(result_data.get("stopped_at")),
+            ended_process=result_data.get("ended_process") is True,
         )
         cell = self._record_cell(cell)
         # The process proved itself alive by completing this round trip —
@@ -1787,6 +1792,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     "stderr": "",
                     "error": error,
                     "stopped_at": NOTHING_KEPT,
+                    "ended_process": True,
                 }
                 return
 

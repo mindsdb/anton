@@ -115,14 +115,19 @@ class TestScratchpadBasicExecution:
         `os._exit()` do, kept nothing it bound: the next cell gets the
         namespace as of the last one that completed. So it says
         `NOTHING_KEPT`, and the write check reads none of its names as
-        bound, not the helper it defined first."""
+        bound, not the helper it defined first. It says it ended the
+        process too, since the pad starts a new one before the next cell;
+        a cell that raised on its first line ended nothing."""
         pad = make_scratchpad(name="test")
         await pad.start()
         try:
             exited = await pad.execute("def push():\n    print(1)\nimport sys\nsys.exit(0)\n")
             ended = await pad.execute("def push():\n    print(1)\nimport os\nos._exit(1)\n")
+            raised = await pad.execute("int('a')\n")
             assert (exited.stopped_at, ended.stopped_at) == (NOTHING_KEPT, NOTHING_KEPT)
             assert exited.error and ended.error
+            assert exited.ended_process and ended.ended_process
+            assert raised.stopped_at == NOTHING_KEPT and not raised.ended_process
         finally:
             await pad.close()
 
@@ -275,8 +280,9 @@ class TestScratchpadEdgeCases:
             cell = await pad.execute("import time; time.sleep(60)")
             assert cell.error is not None
             assert "timed out" in cell.error.lower() or "inactivity" in cell.error.lower()
-            # The kill takes what the cell bound with it.
+            # The kill takes what the cell bound with it, and the process.
             assert cell.stopped_at == NOTHING_KEPT
+            assert cell.ended_process
         finally:
             await pad.close()
 

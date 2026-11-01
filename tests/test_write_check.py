@@ -665,6 +665,19 @@ def test_literal_code_an_earlier_cell_runs_is_parsed_once_as_the_conversation_gr
     assert literal not in parsed
 
 
+def _nest_of_true_ifs(depth: int, inner: str) -> str:
+    """A cell of `depth` nested `if True:` blocks around `inner`."""
+    return "".join("    " * k + "if True:\n" for k in range(depth)) + "    " * depth + inner + "\n"
+
+
+def _elif_chain(arms: int, *, last: str) -> str:
+    """A cell that binds `push` in each of `arms` arms of an if and its
+    elifs, runs `last` in its else, then calls `push`."""
+    return "code = rows\n" + "\n".join(
+        ("if" if k == 0 else "elif") + f" code == {k}:\n    push = print" for k in range(arms)
+    ) + f"\nelse:\n    {last}\npush()"
+
+
 def _flags_under_ifs(start: str, flag: str, *, count: int) -> str:
     """A cell that builds `cmd` from `start` with `flag`, its `{i}` the if's
     number, added under each of `count` ifs, then runs it."""
@@ -718,6 +731,16 @@ def _flags_under_ifs(start: str, flag: str, *, count: int) -> str:
      "import json\nprint(json.dumps(1))", "none"),
     ([], "import os\ncmd = 'ls'; cmd = cmd + ' -a'; cmd = cmd + ' -l'\nos.system(cmd)", "none"),
     ([], "import os\ncmd = 'python3'; cmd = cmd + ' -u'; cmd = cmd + ' job.py'\nos.system(cmd)", "unchecked"),
+    (["exec(open('helpers.py').read())"], _nest_of_true_ifs(30, "push = print") + "push()", "none"),
+    (["exec(open('helpers.py').read())", "def setp():\n    global push\n    push = print"],
+     _nest_of_true_ifs(30, "x = 1") + "setp()\npush()", "none"),
+    (["import sys\nmake = eval(open('job.txt').read())\nsys.modules['m0'] = make()",
+      *(f"import sys, m{i}\nsys.modules['m{i + 1}'] = m{i}.make()" for i in range(150))],
+     "import m150\nm150.go()", "unchecked"),
+    ([f"import types, sys\nm{i} = types.ModuleType('m{i}')\nexec(open('job.txt').read(), m{i}.__dict__)\n"
+      f"sys.modules['m{i}'] = m{i}" for i in range(1000)], "print(1)", "none"),
+    (["def rows():\n" + "".join(f"    a{i} = {i}\n" for i in range(2000)) + "    return ['a', 'b']\n"],
+     "import subprocess\n" + "for v in rows():\n    subprocess.run(['echo', v])\n" * 300, "none"),
 ], ids=["recursion-with-two-literal-parameters", "recursive-state-machine", "recursive-state-machine-of-eighty-states",
         "command-list-rebuilt-sixteen-times",
         "command-list-rebuilt-three-hundred-times", "command-text-rebuilt-three-hundred-times",
@@ -729,7 +752,9 @@ def _flags_under_ifs(start: str, flag: str, *, count: int) -> str:
         "two-thousand-names-derived-from-unread-code-in-one-cell", "pip-install-loop-over-three-thousand-names",
         "command-joined-from-two-loops-over-a-thousand-names", "import-after-a-path-rebuilt-three-hundred-times",
         "import-after-a-module-stored-at-the-end-of-a-spec-alias-chain", "command-text-rebuilt-twice-on-its-first-line",
-        "python-command-text-rebuilt-twice-on-its-first-line"])
+        "python-command-text-rebuilt-twice-on-its-first-line", "call-after-thirty-nested-true-ifs-after-unread-code",
+        "call-after-thirty-nested-true-ifs-beside-a-global-setter", "import-at-the-end-of-150-stored-modules-each-from-the-last",
+        "a-thousand-cells-that-store-a-module-unread-code-filled", "loops-over-what-a-two-thousand-line-function-returns"])
 def test_a_recursion_or_a_rebuilt_command_is_read_in_well_under_a_second(earlier, code, card, snap):
     """A function the chain already reads is read again for other literals
     only so often (`_REREAD_LIMIT`); a name rebound from itself reads each
@@ -749,10 +774,35 @@ def test_a_recursion_or_a_rebuilt_command_is_read_in_well_under_a_second(earlier
     names, or the name a module was made under, read through a name
     rebuilt from itself reads each binding once (`_Reader.read_bindings`).
     A read sees only the bindings before it on its own line, so names
-    rebuilt on one line read down to their first value."""
+    rebuilt on one line read down to their first value. An if whose test is
+    a constant reads the arm that runs, once (`_if_binds`); a chain of
+    modules each stored in `sys.modules` from the one before reads where
+    each store reaches by name (`_StoredReach`); a name a cell binds by a
+    def, class or import is found by its name (`_Reader.makers`); and what
+    a function returns is read once per def (`_Cell.returns_of`)."""
     started = time.perf_counter()
     writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
     assert time.perf_counter() - started < 1
+    assert writes.unchecked is (card == "unchecked")
+    assert writes.needs_approval() is (card != "none")
+
+
+@pytest.mark.parametrize("earlier, code, card", [
+    (["exec(open('helpers.py').read())", "rows = 3"], _elif_chain(1000, last="push = len"), "none"),
+    (["exec(open('helpers.py').read())", "rows = 3"], _elif_chain(1000, last="pass"), "unchecked"),
+    (["exec(open('helpers.py').read())"], "x = 1" + " + 1" * 3000 + "\nif (push := print):\n    pass\npush()", "none"),
+    ([], "import os\nos.system('ls'" + " + ' -l'" * 1000 + ")", "none"),
+    ([], "import os, sys\nos.system(sys.executable" + " + ' -u'" * 1000 + " + ' job.py')", "unchecked"),
+], ids=["thousand-arm-elif-chain-that-binds-on-every-arm", "thousand-arm-elif-chain-with-an-arm-that-binds-nothing",
+        "walrus-after-a-three-thousand-term-sum", "command-text-of-a-thousand-parts",
+        "python-command-text-of-a-thousand-parts"])
+def test_a_long_chain_in_a_cell_is_read_with_no_deep_recursion(earlier, code, card, snap):
+    """An elif chain is read arm by arm (`_if_binds`), a walrus's reach with
+    a stack of parts (`_walrus_binds`), and a path or command joined from
+    many parts from its first part on (`_interpreter_text`), so a long one
+    neither exhausts the stack, which would hold the cell for no reason,
+    nor reads past what binds it."""
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
     assert writes.unchecked is (card == "unchecked")
     assert writes.needs_approval() is (card != "none")
 
@@ -1878,6 +1928,41 @@ async def test_the_gate_passes_each_earlier_cells_error_to_the_check(office, mon
         cells=[failed],
     )
     assert await scratchpad.hold_unapproved_write(session, pad=ran, code=rewrite) is None
+    assert len(asked) == 2
+
+
+async def test_the_gate_holds_the_first_cell_after_the_pad_starts_a_new_process_once_a_hook_was_written(
+    office, monkeypatch,
+):
+    """A cell whose process ended has the pad start a new one before the
+    next cell, and that start runs a startup hook an earlier cell wrote, so
+    the gate passes `ended_process` on and the next cell is held, from the
+    live cells and the compacted ones alike; a cell that only raised starts
+    nothing new."""
+    asked: list[CellWrites] = []
+
+    async def cancel(_session, writes):
+        asked.append(writes)
+        return "cancelled"
+
+    monkeypatch.setattr(scratchpad, "_ask_approval", cancel)
+    session = SimpleNamespace(_write_gate=scratchpad.WriteGate(snapshots=(office,)))
+    hook = Cell(code="import site\nopen(site.getsitepackages()[0] + '/hook.pth', 'w').write('import job')",
+                stdout="", stderr="", error=None)
+    died = Cell(code="import os\nos._exit(1)", stdout="", stderr="", error="Process exited unexpectedly.",
+                stopped_at=1, ended_process=True)
+    raised = Cell(code="int('a')", stdout="", stderr="", error="ValueError", stopped_at=1)
+    pad = SimpleNamespace(compacted_cells=(), cells=[hook, died])
+    assert await scratchpad.hold_unapproved_write(session, pad=pad, code="print(1)") is not None
+    assert asked[0].unchecked
+    compacted = SimpleNamespace(compacted_cells=(
+        CompactedCell(code=hook.code, errored=False),
+        CompactedCell(code=died.code, errored=True, stopped_at=1, ended_process=True),
+    ), cells=[])
+    assert await scratchpad.hold_unapproved_write(session, pad=compacted, code="print(1)") is not None
+    assert asked[1].unchecked
+    kept = SimpleNamespace(compacted_cells=(), cells=[hook, raised])
+    assert await scratchpad.hold_unapproved_write(session, pad=kept, code="print(1)") is None
     assert len(asked) == 2
 
 
