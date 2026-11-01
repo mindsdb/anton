@@ -2273,6 +2273,14 @@ _TEMP_PATH = "\x00temp"
 _RUN_TIME_PART = "\x01"
 # Stands in for a literal-command operand that isn't a literal.
 _NOT_LITERAL = "\x00"
+# Stands in, in a command's words, for words the check can't place, any
+# number of them in any order, drawn from the words after it, as one list
+# for many does (`_capped`). Read as a word the check can't read, it is no
+# runner's operand, and pip reads each word after it on its own.
+_SOME_WORDS = _NOT_LITERAL + "*"
+# Words the check can't read at all, any number of them, as a spread of a
+# sequence it can't read gives.
+_UNREAD_WORDS = (_SOME_WORDS, _NOT_LITERAL)
 # Names a read follows through their values, and parameters through the
 # calls that pass them, before it stops (`_Reader.stops`).
 _PARAM_DEPTH = 5
@@ -2564,6 +2572,7 @@ class _Cell:
         self._loads_within: dict[tuple[int, str], tuple[ast.Name, ...]] = {}
         self._statements_at: dict[int, ast.stmt | None] = {}
         self._names_within: dict[int, frozenset[str]] = {}
+        self._spread_args: dict[tuple[int, int], ast.Tuple] = {}
         # Every name the cell imports, by the name it binds; the functions and
         # classes it defines, by name, a method aside, since a bare name never
         # reaches one; every call, in walk order; the calls
@@ -2657,7 +2666,7 @@ class _Cell:
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
                 self.stores.append(node)
                 args = node.args
-                for a in (*args.posonlyargs, *args.args, *args.kwonlyargs):
+                for a in (*args.posonlyargs, *args.args, *args.kwonlyargs, *_spread_params(args)):
                     self.bindings.setdefault(a.arg, []).append(_Binding(
                         line=node.lineno, value=node, how="param", scope=node, conditional=False, cell=self,
                     ))
@@ -2899,6 +2908,16 @@ class _Cell:
         lo = bisect.bisect_left(found, first, key=lambda p: p[0])
         hi = bisect.bisect_right(found, last, key=lambda p: p[0])
         return [n for _, n in found[lo:hi] if n is node or _inside(n, node, self)]
+
+    def spread_args(self, call: ast.Call, start: int) -> ast.Tuple | None:
+        """The tuple a function's `*args` parameter gets from `call`, a call
+        in this cell: its positional arguments from `start` on, made once, so
+        every read of it reads the same node. None for a call the cell
+        doesn't hold."""
+        if call not in self.parents:
+            return None
+        made = ast.copy_location(ast.Tuple(elts=call.args[start:], ctx=ast.Load()), call)
+        return self._spread_args.setdefault((id(call), start), made)
 
     def names_within(self, value: ast.AST) -> frozenset[str]:
         """The names `value`, code of this cell, loads, found among the
@@ -4042,8 +4061,12 @@ class _Reader:
                     return hits
             return list(node.values)
         if isinstance(node, ast.Name):
+            found = self.bindings_of(node.id, node=node)
+            if not found:
+                # A name no read code binds holds what code the check can't read gave it.
+                return None
             out: list[ast.AST] = []
-            for b in self.bindings_of(node.id, node=node):
+            for b in found:
                 got = self.items_of(node=b.value, key=key, depth=depth + 1) if b.how == "value" else None
                 grown = self.list_growth(name=node.id, binding=b) if got is not None else _UNKNOWN
                 if got is None or isinstance(grown, _Unknown):
@@ -4831,9 +4854,10 @@ class _Reader:
     def looks_up_namespace(self) -> bool:
         """Whether a cell looks a name up in its own namespace (`globals()`,
         `vars()` or `locals()`) under a key the check can't read, as
-        `globals()["run_" + step]` or `globals().get(name)` do, or reads
-        every entry of it, as `globals().values()` does (`_ENTRY_READS`):
-        such a lookup may reach any function the cells define."""
+        `globals()["run_" + step]` or `globals().get(name)` do, reads every
+        entry of it, as `globals().values()` does (`_ENTRY_READS`), or hands
+        it on whole (`_hands_on_namespace`): such a lookup may reach any
+        function the cells define."""
         for cell in self.cells:
             for call in cell.calls:
                 if _last_name(call.func) not in _GLOBALS_CALLS or not _cell_namespace(call, self):
@@ -4845,6 +4869,8 @@ class _Reader:
                     used = cell.parents.get(parent)
                     if not (isinstance(used, ast.Call) and used.args and isinstance(used.args[0], ast.Constant)):
                         return True
+                if _hands_on_namespace(call, parent):
+                    return True
         return False
 
     def call_sites(self, func: Function, param: str) -> list[_Arg | None]:
@@ -5617,8 +5643,11 @@ def _call_arguments(
 ) -> dict[str, _Arg | None]:
     """What `call` passes for each of `func`'s parameters, a parameter's
     default when it passes nothing, None for one the check can't read: past
-    a `*args` or `**kwargs`, or with no call at all. With `bound`, a
-    method's first parameter gets it and the call's arguments fill the rest."""
+    a `*args` or `**kwargs`, or with no call at all. A `*args` parameter gets
+    the positional arguments past the others as one tuple
+    (`_Cell.spread_args`); a `**kwargs` one is one the check can't read.
+    With `bound`, a method's first parameter gets it and the call's
+    arguments fill the rest."""
     a = func.args
     positional = [*a.posonlyargs, *a.args]
     defaults = dict(zip([p.arg for p in positional][len(positional) - len(a.defaults):], a.defaults, strict=True))
@@ -5628,7 +5657,7 @@ def _call_arguments(
         out[positional[0].arg] = _Arg(node=bound, cell=call_cell)
         positional = positional[1:]
     if call is None:
-        return {**out, **{p.arg: None for p in (*positional, *a.kwonlyargs)}}
+        return {**out, **{p.arg: None for p in (*positional, *a.kwonlyargs, *_spread_params(a))}}
     starred = next((i for i, x in enumerate(call.args) if isinstance(x, ast.Starred)), len(call.args))
     spread = any(k.arg is None for k in call.keywords)
     keywords = {k.arg: k.value for k in call.keywords if k.arg is not None}
@@ -5643,7 +5672,19 @@ def _call_arguments(
             out[p.arg] = _Arg(node=defaults[p.arg], cell=func_cell)
         else:
             out[p.arg] = None
+    if a.vararg is not None:
+        # The positional arguments past the named ones, or from a spread one
+        # on where one comes sooner.
+        rest = call_cell.spread_args(call, min(len(positional), starred))
+        out[a.vararg.arg] = None if rest is None else _Arg(node=rest, cell=call_cell)
+    if a.kwarg is not None:
+        out[a.kwarg.arg] = None
     return out
+
+
+def _spread_params(args: ast.arguments) -> list[ast.arg]:
+    """A function's `*args` and `**kwargs` parameters, those it has."""
+    return [p for p in (args.vararg, args.kwarg) if p is not None]
 
 
 def _partial_call(*, partial: ast.Call, call: ast.Call) -> ast.Call:
@@ -8162,7 +8203,7 @@ def _node_commands(node: ast.AST, reader: _Reader, *, depth: int) -> list[str | 
                     grown = reader.list_growth_for_write(name=node.id, binding=b)
                     for words in _commands(b.value, reader, depth=here):
                         if isinstance(words, list) and (isinstance(grown, _Unknown) or grown):
-                            # The words the cell adds to the list, or one the check
+                            # The words the cell adds to the list, or words the check
                             # can't read, the program itself where a change may move it.
                             added = None if isinstance(grown, _Unknown) else _grown_words(words, grown, reader,
                                                                                           depth=depth)
@@ -8171,7 +8212,7 @@ def _node_commands(node: ast.AST, reader: _Reader, *, depth: int) -> list[str | 
                             elif not isinstance(grown, _Unknown) and any(_moves_program(g) for g, _ in grown):
                                 out.append([_NOT_LITERAL])
                             else:
-                                out.append([*words, _NOT_LITERAL])
+                                out.append([*words, *_UNREAD_WORDS])
                         else:
                             out.append(words)
                 elif b.how == "value" and isinstance(b.value, ast.Name):
@@ -8190,23 +8231,40 @@ def _node_commands(node: ast.AST, reader: _Reader, *, depth: int) -> list[str | 
 def _capped(commands: list[str | list[str]]) -> list[str | list[str]]:
     """`commands`, as a name's bindings give them, each once; past
     `_COMMAND_LIMIT` different word lists, those lists as one: the words
-    they all start with, then a word the check can't read, as a list a cell
-    adds to in place reads. A name rebuilt under many ifs, as `cmd = cmd +
-    ["-v"]` is, gives a list for each choice of them."""
+    they all start with, then `_SOME_WORDS` and every word any of them has
+    after those. A name rebuilt under many ifs, as `cmd = cmd + ["-v"]` is,
+    gives a list for each choice of them. Lists one word apart, as a loop
+    over a literal list of names gives, stay as they are: there are only as
+    many as the code writes out."""
     unique = list(dict.fromkeys(tuple(c) if isinstance(c, list) else c for c in commands))
     lists = [list(c) for c in unique if isinstance(c, tuple)]
-    if len(lists) <= _COMMAND_LIMIT:
+    if len(lists) <= _COMMAND_LIMIT or _one_word_apart(lists):
         return [list(c) if isinstance(c, tuple) else c for c in unique]
-    return [*(c for c in unique if isinstance(c, str)), [*os.path.commonprefix(lists), _NOT_LITERAL]]
+    return [*(c for c in unique if isinstance(c, str)), _collapsed(lists)]
+
+
+def _collapsed(lists: list[list[str]]) -> list[str]:
+    """`lists`, a command's word lists, as one: the words they all start
+    with, then `_SOME_WORDS` and every word any of them has after those."""
+    prefix = os.path.commonprefix(lists)
+    return [*prefix, _SOME_WORDS, *dict.fromkeys(word for words in lists for word in words[len(prefix):])]
+
+
+def _one_word_apart(lists: list[list[str]]) -> bool:
+    """Whether `lists`, a command's word lists, are the same length and
+    differ at one place at most."""
+    return len({len(words) for words in lists}) == 1 and sum(len(set(at)) > 1 for at in zip(*lists)) <= 1
 
 
 def _listed_commands(node: ast.List | ast.Tuple, reader: _Reader, *, depth: int) -> list[list[str]]:
     """The commands a list of words written out gives: each word as
-    `_command_word` reads it, a starred list's words in its place, and a
-    word read through a name as each literal text it can hold
-    (`_literal_texts`), up to `_COMMAND_LIMIT` commands; so none when the
-    program's word holds none. Code handed to a `-c` stays a word the
-    check can't read: code through a name isn't read as a literal."""
+    `_command_word` reads it, a starred list's words in its place, words
+    the check can't read (`_UNREAD_WORDS`) for a starred value it can't
+    read, and a word read through a name as each literal text it can hold
+    (`_literal_texts`): one command for each text of the first such word,
+    then up to `_COMMAND_LIMIT` commands; so none when the program's word
+    holds none. Code handed to a `-c` stays a word the check can't read:
+    code through a name isn't read as a literal."""
     commands: list[list[str]] = [[]]
     for at, e in enumerate(node.elts):
         if isinstance(e, ast.Starred):
@@ -8216,7 +8274,7 @@ def _listed_commands(node: ast.List | ast.Tuple, reader: _Reader, *, depth: int)
                 # Words spread from a sequence of literal texts, as a list
                 # of the packages a cell finds missing gives.
                 texts = _sequence_texts(e.value, reader)
-                words = texts if texts is not None else words or [_NOT_LITERAL]
+                words = texts if texts is not None else words or [*_UNREAD_WORDS]
             commands = [[*c, *words] for c in commands]
             continue
         word = _command_word(e, reader)
@@ -8226,7 +8284,10 @@ def _listed_commands(node: ast.List | ast.Tuple, reader: _Reader, *, depth: int)
             # A word a function nothing calls takes from its parameters: the
             # command never runs.
             return []
-        options = list(dict.fromkeys(texts)) if texts and len(commands) * len(texts) <= _COMMAND_LIMIT else [word]
+        # One command for each text of the first word that holds many, as a
+        # loop over a literal list of names gives; past that, up to the limit.
+        fits = texts and (len(commands) == 1 or len(commands) * len(texts) <= _COMMAND_LIMIT)
+        options = list(dict.fromkeys(texts)) if fits else [word]
         commands = [[*c, option] for c in commands for option in options]
     return commands
 
@@ -8234,10 +8295,11 @@ def _listed_commands(node: ast.List | ast.Tuple, reader: _Reader, *, depth: int)
 def _word_lists(*, node: ast.AST, reader: _Reader, depth: int) -> list[list[str]] | None:
     """The word lists an expression that builds one can give a command:
     `text.split()`, `shlex.split(text)`, or lists added with `+`, a part the
-    check can't read one word it can't read. The sides of a `+` chain are
-    this expression's own code, so reading them costs no depth. A part a
-    stop at the depth limit left empty gives none, and `_shell_commands`
-    holds one past the limit. None for any other expression."""
+    check can't read words it can't read (`_UNREAD_WORDS`). The sides of a
+    `+` chain are this expression's own code, so reading them costs no
+    depth. A part a stop at the depth limit left empty gives none, and
+    `_shell_commands` holds one past the limit. None for any other
+    expression."""
     shell_split = isinstance(node, ast.Call) and bool(node.args) and reader.dotted(node.func) == "shlex.split"
     if shell_split or isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "split":
         source = node.args[0] if shell_split else node.func.value
@@ -8282,7 +8344,12 @@ def _word_lists(*, node: ast.AST, reader: _Reader, depth: int) -> list[list[str]
                 # A sequence of literal texts, as a comprehension of the
                 # missing packages or `sorted(names)` gives.
                 texts = _sequence_texts(side, reader, depth=depth + 1)
-                lists = [[_NOT_LITERAL] if texts is None else texts]
+                lists = [[*_UNREAD_WORDS] if texts is None else texts]
+            if len(words) > 1 and len(lists) > 1:
+                # Many lists on both sides: a side past the limit, as a loop
+                # over a long literal list gives, joins the other as one list.
+                words = [_collapsed(words)] if len(words) > _COMMAND_LIMIT else words
+                lists = [_collapsed(lists)] if len(lists) > _COMMAND_LIMIT else lists
             words = [left + right for left in words for right in lists]
         return words
     return None
@@ -8950,9 +9017,12 @@ def _command_words(words: list[str]) -> tuple[list[str], bool]:
                     command = flag.partition("=")[2] if "=" in flag else out.pop(0) if out else ""
                     continue
                 takes = flag in _VALUE_FLAGS and flag not in _PREFIX_PLAIN_FLAGS.get(head, ())
-                if (takes or flag in _PREFIX_VALUE_FLAGS.get(head, ())) and out:
+                if (takes or flag in _PREFIX_VALUE_FLAGS.get(head, ())) and out and out[0] != _SOME_WORDS:
                     out.pop(0)
-            del out[:_PREFIX_OPERANDS.get(head, 0)]
+            operands = out[:_PREFIX_OPERANDS.get(head, 0)]
+            # Words the check can't place may hold the runner's operand and
+            # the program both, so the program is one it can't read.
+            del out[:operands.index(_SOME_WORDS) if _SOME_WORDS in operands else len(operands)]
             if head == "flock" and out and out[0].partition("=")[0] in _FLOCK_COMMAND_FLAGS:
                 flag = out.pop(0)
                 command = flag.partition("=")[2] if "=" in flag else out.pop(0) if out else ""
@@ -9556,6 +9626,10 @@ def _pip_unread(args: list[str]) -> bool:
         return False
     words = iter(rest[1:])
     for word in words:
+        if word == _SOME_WORDS:
+            # Words in any order: each read on its own, so a value flag's
+            # value counts as an operand.
+            return any(_pip_unread([command, w]) for w in words if w != _SOME_WORDS)
         if word == "--":
             return any(_pip_source_operand(operand) for operand in words)
         if word.startswith("--"):
@@ -9565,11 +9639,15 @@ def _pip_unread(args: list[str]) -> bool:
             if kind == "value" and "=" not in word:
                 next(words, None)
         elif word.startswith("-") and word != "-":
-            # A cluster of short flags: the first that takes a value takes the rest.
-            for letter in word[1:]:
+            # A cluster of short flags: the first that takes a value takes the
+            # rest of the word, or the next word when it ends the cluster, as
+            # `-t ./vendor` and `-qt ./vendor` do.
+            for at, letter in enumerate(word[1:], start=2):
                 if letter in _PIP_SOURCE_LETTERS:
                     return True
                 if letter in _PIP_VALUE_LETTERS:
+                    if at == len(word):
+                        next(words, None)
                     break
         elif _pip_source_operand(word):
             return True
@@ -11733,15 +11811,32 @@ def _pip_main_unread(call: ast.Call, reader: _Reader) -> bool:
     return any(word is None for word in words) or _pip_unread([word for word in words if word is not None])
 
 
-def _names_read_code(node: ast.AST, reader: _Reader) -> bool:
-    """Whether `node` is a lambda, or names a function or lambda a cell
-    defines that no other value of the name can stand for: code the check
-    reads where it is written or passed on."""
+def _names_read_code(node: ast.AST, reader: _Reader, *, depth: int = 0) -> bool:
+    """Whether `node` is a lambda, names a function or lambda a cell
+    defines that no other value of the name can stand for, in the code's own
+    namespace first (`_Reader.function_named`), is `functools.partial` of
+    one, or is a parameter that the call being read, else each call of its
+    function, passes such code for: code the check reads where it is written
+    or passed on. A function nothing calls passes nothing. Past
+    `_PARAM_DEPTH` parameters, no."""
     if isinstance(node, ast.Lambda):
         return True
-    if not isinstance(node, ast.Name) or node.id not in reader.function_names:
+    if isinstance(node, ast.Call) and node.args and reader.dotted(node.func) == "functools.partial":
+        return _names_read_code(node.args[0], reader, depth=depth + 1)
+    if not isinstance(node, ast.Name) or depth > _PARAM_DEPTH:
         return False
-    return all(b.how == "value" and isinstance(b.value, ast.Lambda) for b in reader.bindings_of(node.id, node=node))
+    found = reader.bindings_of(node.id, node=node)
+    if found and all(b.how == "param" for b in found):
+        for b in found:
+            passed = reader.args_for(b.value, node.id)
+            if not passed and not reader.uncalled(b.value):
+                return False
+            if any(arg is None or not _names_read_code(arg.node, reader, depth=depth + 1) for arg in passed):
+                return False
+        return True
+    if node.id not in reader.function_names and reader.function_named(node) is None:
+        return False
+    return all(b.how == "value" and isinstance(b.value, ast.Lambda) for b in found)
 
 
 def _launches_unread(call: ast.Call, reader: _Reader, *, read: _ExecRead, modules: _Modules) -> bool:
@@ -12918,6 +13013,21 @@ def _poisons_namespace(node: ast.AST, reader: _Reader) -> bool:
             literal = source is not None and _literal_source(source) is not None
             return not literal and any(_cell_namespace(a, reader) for a in args)
     return False
+
+
+def _hands_on_namespace(node: ast.Call, parent: ast.AST | None) -> bool:
+    """Whether `node`, a call that gives the cell's namespace, hands it on
+    whole where `parent` holds it: bound to a name, spread into a call or
+    passed to one, as `SimpleNamespace(**globals())` and
+    `obj.__dict__.update(globals())` do, so an object's members may reach
+    the functions in it. A lookup in it, a test of what it holds, exec() or
+    eval() given it as their namespace, and a call that only shows it
+    (`_HARMLESS_CALLS`), don't."""
+    if parent is None or isinstance(parent, (ast.Subscript, ast.Attribute, ast.Compare, ast.Expr)):
+        return False
+    if isinstance(parent, ast.Call) and node in parent.args:
+        return _last_name(parent.func) not in _EXEC_CALLS | _HARMLESS_CALLS
+    return True
 
 
 def _cell_namespace(node: ast.AST, reader: _Reader) -> bool:

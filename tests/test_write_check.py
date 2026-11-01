@@ -709,6 +709,11 @@ def _flags_under_ifs(start: str, flag: str, *, count: int) -> str:
      "print(1)", "none"),
     (["exec(open('helpers.py').read())", "d0 = load_orders()",
       "\n".join(f"d{k} = d{k - 1}.assign(c={k})" for k in range(1, 2001))], "print(1)", "none"),
+    ([], f"import subprocess, sys\nfor p in {[f'pkg{i}' for i in range(3000)]!r}:\n"
+     "    subprocess.check_call([sys.executable, '-m', 'pip', 'install', p])", "none"),
+    ([], f"import subprocess\nfor a in {[*(f'tool{i}' for i in range(999)), 'python3']!r}:\n"
+     f"    for b in {[f'arg{i}' for i in range(1000)]!r}:\n"
+     "        head = [a]\n        tail = [b]\n        subprocess.run(head + tail)", "unchecked"),
 ], ids=["recursion-with-two-literal-parameters", "recursive-state-machine", "recursive-state-machine-of-eighty-states",
         "command-list-rebuilt-sixteen-times",
         "command-list-rebuilt-three-hundred-times", "command-text-rebuilt-three-hundred-times",
@@ -717,7 +722,8 @@ def _flags_under_ifs(start: str, flag: str, *, count: int) -> str:
         "command-list-flag-under-thirty-ifs", "command-list-thirty-flags-under-thirty-ifs",
         "python-command-flag-under-thirty-ifs", "command-text-flag-under-thirty-ifs",
         "python-command-text-rebuilt-three-hundred-times", "names-derived-from-unread-code-over-a-hundred-cells",
-        "two-thousand-names-derived-from-unread-code-in-one-cell"])
+        "two-thousand-names-derived-from-unread-code-in-one-cell", "pip-install-loop-over-three-thousand-names",
+        "command-joined-from-two-loops-over-a-thousand-names"])
 def test_a_recursion_or_a_rebuilt_command_is_read_in_well_under_a_second(earlier, code, card, snap):
     """A function the chain already reads is read again for other literals
     only so often (`_REREAD_LIMIT`); a name rebound from itself reads each
@@ -731,7 +737,9 @@ def test_a_recursion_or_a_rebuilt_command_is_read_in_well_under_a_second(earlier
     with it. A path read from the interpreter's reads each name once
     (`_interpreter_text`). A chain of names, each built on the one before
     it from what code the check can't read made, reads each link again
-    once (`_names_tainted`)."""
+    once (`_names_tainted`). A loop over a long literal list gives one
+    command for each name in it, and two such lists joined with `+` join
+    as one list each (`_word_lists`), not one for each pair."""
     started = time.perf_counter()
     writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
     assert time.perf_counter() - started < 1

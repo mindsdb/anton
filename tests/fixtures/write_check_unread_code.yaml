@@ -856,6 +856,14 @@ cases:
       timeit.timeit(SCRIPT, number=1)
     card: unchecked
 
+  - name: timeit through a helper's parameter given input
+    code: |-
+      import timeit
+      def bench(fn, n=100):
+          return timeit.timeit(fn, number=n) / n
+      print(bench(input()))
+    card: unchecked
+
   - name: doctest runs a docstring example
     code: |-
       import doctest
@@ -3102,6 +3110,31 @@ cases:
       subprocess.run("$PYTHON job.py", shell=True)
     card: unchecked
 
+  # Words spread or added from a value the check can't read may hold any
+  # number of words, a runner's operand and the program among them: the
+  # program is one the check can't read.
+
+  - name: a timeout run of words spread from a value the check can't read
+    code: |-
+      import json, subprocess
+      rest = json.loads(input())
+      subprocess.run(['timeout', *rest])
+    card: unchecked
+
+  - name: a timeout run of words added from a value the check can't read
+    code: |-
+      import json, subprocess
+      subprocess.run(['timeout'] + json.loads(input()))
+    card: unchecked
+
+  - name: a timeout run of words a command's list is extended with from a value the check can't read
+    code: |-
+      import json, subprocess
+      cmd = ['timeout']
+      cmd.extend(json.loads(input()))
+      subprocess.run(cmd)
+    card: unchecked
+
   - name: pip install from a requirements file
     code: |-
       import subprocess
@@ -3305,6 +3338,32 @@ cases:
       globals()['sh']('python3 job.py')
     card: unchecked
 
+  - name: pip install of an editable project through a helper's starred parameter
+    code: |-
+      import subprocess, sys
+      def install(*pkgs):
+          subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', *pkgs])
+      install('-e', '.')
+    card: unchecked
+
+  - name: pip install from a requirements file through a helper's starred parameter
+    files:
+      requirements.txt: "-e .\n"
+    code: |-
+      import subprocess, sys
+      def install(*pkgs):
+          subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', *pkgs])
+      install('-r', 'requirements.txt')
+    card: unchecked
+
+  - name: pip install of a local wheel through a helper's starred parameter
+    code: |-
+      import subprocess, sys
+      def install(*pkgs):
+          subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', *pkgs])
+      install('./dist/pkg-1.0-py3-none-any.whl')
+    card: unchecked
+
   - name: pip install of each line of a requirements file
     code: |-
       import subprocess, sys
@@ -3363,6 +3422,36 @@ cases:
     code: |-
       import subprocess
       subprocess.run(["pip", "install", "--requireme", "requirements.txt"])
+    card: unchecked
+
+  - name: pip install into a folder a short flag names
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-m', 'pip', 'install', '-t', './vendor', 'requests'])
+    card: none
+
+  - name: pip download into a folder a short flag names after the package
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-m', 'pip', 'download', 'requests', '-d', './wheels'])
+    card: none
+
+  - name: pip install into a folder the last of a cluster of short flags names
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-m', 'pip', 'install', '-qt', './vendor', 'requests'])
+    card: none
+
+  - name: pip install into a folder a short flag names in a shell text
+    code: |-
+      import os
+      os.system('pip install -t ./vendor rich')
+    card: none
+
+  - name: pip install of a local wheel after a folder a short flag names
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-m', 'pip', 'install', '-t', './vendor', './dist/pkg-1.0-py3-none-any.whl'])
     card: unchecked
 
   - name: uv pip install from a requirements file after a uv flag
@@ -4193,6 +4282,112 @@ cases:
           subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg or name])
       ensure('cv2', 'opencv-python-headless')
       ensure('openpyxl')
+    card: none
+
+  - name: pip install of packages each of five ifs adds to the command
+    code: |-
+      import os, subprocess, sys
+      cmd = [sys.executable, '-m', 'pip', 'install', '-q']
+      if os.environ.get('A'):
+          cmd = cmd + ['openpyxl']
+      if os.environ.get('B'):
+          cmd = cmd + ['tabulate']
+      if os.environ.get('C'):
+          cmd = cmd + ['rich']
+      if os.environ.get('D'):
+          cmd = cmd + ['tqdm']
+      if os.environ.get('E'):
+          cmd = cmd + ['lxml']
+      subprocess.check_call(cmd)
+    card: none
+
+  - name: uv pip install of packages each of five ifs adds to the command
+    code: |-
+      import os, subprocess
+      cmd = ['uv', 'pip', 'install']
+      if os.environ.get('A'):
+          cmd = cmd + ['openpyxl']
+      if os.environ.get('B'):
+          cmd = cmd + ['tabulate']
+      if os.environ.get('C'):
+          cmd = cmd + ['rich']
+      if os.environ.get('D'):
+          cmd = cmd + ['tqdm']
+      if os.environ.get('E'):
+          cmd = cmd + ['lxml']
+      subprocess.check_call(cmd)
+    card: none
+
+  - name: pip uninstall of packages each of five ifs adds to the command
+    code: |-
+      import os, subprocess, sys
+      cmd = [sys.executable, '-m', 'pip', 'uninstall', '-y']
+      if os.environ.get('A'):
+          cmd = cmd + ['openpyxl']
+      if os.environ.get('B'):
+          cmd = cmd + ['tabulate']
+      if os.environ.get('C'):
+          cmd = cmd + ['rich']
+      if os.environ.get('D'):
+          cmd = cmd + ['tqdm']
+      if os.environ.get('E'):
+          cmd = cmd + ['lxml']
+      subprocess.check_call(cmd)
+    card: none
+
+  - name: pip install of packages and a local wheel each of five ifs adds to the command
+    code: |-
+      import os, subprocess, sys
+      cmd = [sys.executable, '-m', 'pip', 'install', '-q']
+      if os.environ.get('A'):
+          cmd = cmd + ['openpyxl']
+      if os.environ.get('B'):
+          cmd = cmd + ['tabulate']
+      if os.environ.get('C'):
+          cmd = cmd + ['rich']
+      if os.environ.get('D'):
+          cmd = cmd + ['tqdm']
+      if os.environ.get('E'):
+          cmd = cmd + ['./dist/pkg-1.0-py3-none-any.whl']
+      subprocess.check_call(cmd)
+    card: unchecked
+
+  - name: pip install one at a time of seventeen literal names
+    code: |-
+      import subprocess, sys
+      for p in ['pandas', 'numpy', 'scipy', 'matplotlib', 'seaborn', 'plotly', 'scikit-learn', 'statsmodels', 'openpyxl', 'xlsxwriter', 'requests', 'beautifulsoup4', 'lxml', 'tabulate', 'tqdm', 'pyarrow', 'polars']:
+          subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', p])
+    card: none
+
+  - name: pip install one at a time of seventeen literal names through a name for the command
+    code: |-
+      import subprocess, sys
+      for p in ['pandas', 'numpy', 'scipy', 'matplotlib', 'seaborn', 'plotly', 'scikit-learn', 'statsmodels', 'openpyxl', 'xlsxwriter', 'requests', 'beautifulsoup4', 'lxml', 'tabulate', 'tqdm', 'pyarrow', 'polars']:
+          cmd = [sys.executable, '-m', 'pip', 'install', '-q', p]
+          subprocess.check_call(cmd)
+    card: none
+
+  - name: pip install one at a time of the missing ones of twenty literal names
+    code: |-
+      import importlib.util, subprocess, sys
+      NAMES = ['pandas', 'numpy', 'scipy', 'matplotlib', 'seaborn', 'plotly', 'sklearn', 'statsmodels', 'openpyxl', 'xlsxwriter', 'requests', 'bs4', 'lxml', 'tabulate', 'tqdm', 'pyarrow', 'polars', 'rich', 'click', 'yaml']
+      need = [p for p in NAMES if importlib.util.find_spec(p) is None]
+      for p in need:
+          subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', p])
+    card: none
+
+  - name: pip install one at a time of sixteen literal names and a local wheel
+    code: |-
+      import subprocess, sys
+      for p in ['pandas', 'numpy', 'scipy', 'matplotlib', 'seaborn', 'plotly', 'scikit-learn', 'statsmodels', 'openpyxl', 'xlsxwriter', 'requests', 'beautifulsoup4', 'lxml', 'tabulate', 'tqdm', 'pyarrow', './dist/pkg.whl']:
+          subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', p])
+    card: unchecked
+
+  - name: a version check of each of twenty literal tools
+    code: |-
+      import subprocess
+      for t in ['git', 'ls', 'cat', 'grep', 'sed', 'awk', 'curl', 'wget', 'tar', 'gzip', 'zip', 'unzip', 'make', 'gcc', 'node', 'npm', 'java', 'rustc', 'go', 'jq']:
+          subprocess.run([t, '--version'])
     card: none
 
   - name: python -c with literal code appended to the command's list
@@ -5578,6 +5773,47 @@ cases:
     code: |-
       run_all(pending)
       nightly()
+    card: unchecked
+
+  # A command rebuilt under more ifs than the check reads as separate
+  # lists reads as the words they share, then words it can't place: a
+  # runner that takes an operand before the program leaves a program it
+  # can't read.
+
+  - name: a python script after timeout and five ifs of its flags
+    code: |-
+      import os, subprocess, sys
+      cmd = ['timeout']
+      if os.environ.get('A'):
+          cmd = cmd + ['-v']
+      if os.environ.get('B'):
+          cmd = cmd + ['-k5']
+      if os.environ.get('C'):
+          cmd = cmd + ['--preserve-status']
+      if os.environ.get('D'):
+          cmd = cmd + ['--foreground']
+      if os.environ.get('E'):
+          cmd = cmd + ['-sKILL']
+      cmd = cmd + ['60', 'python3', 'job.py']
+      subprocess.run(cmd, check=True)
+    card: unchecked
+
+  - name: a python script after flock and five ifs of its flags
+    code: |-
+      import os, subprocess, sys
+      cmd = ['flock']
+      if os.environ.get('A'):
+          cmd = cmd + ['-n']
+      if os.environ.get('B'):
+          cmd = cmd + ['-x']
+      if os.environ.get('C'):
+          cmd = cmd + ['-o']
+      if os.environ.get('D'):
+          cmd = cmd + ['-w5']
+      if os.environ.get('E'):
+          cmd = cmd + ['-E1']
+      cmd = cmd + ['/tmp/l', 'python3', 'job.py']
+      subprocess.run(cmd, check=True)
     card: unchecked
 
   # ── Code that unread code defined ─────────────────────────────────────────
@@ -9364,6 +9600,87 @@ cases:
     card: read
     kinds: [http]
 
+  # A helper's starred parameter holds what each call passes from its
+  # place on; a function nothing calls by name runs when a cell hands its
+  # namespace on whole, so an object's members reach it.
+
+  - name: a delete of the paths a helper's starred parameter takes
+    code: |-
+      import subprocess
+      def rm(*paths):
+          subprocess.run(['rm', '-f', *paths])
+      rm('stock.csv')
+    card: read
+    kinds: [delete]
+
+  - name: a delete of the paths an earlier helper's starred parameter takes
+    earlier:
+      - |-
+        import subprocess
+        def rm(*paths):
+            subprocess.run(['rm', '-f', *paths])
+    code: |-
+      rm('stock.csv')
+    card: read
+    kinds: [delete]
+
+  - name: a delete of the paths a helper's starred parameter with a keyword after it takes
+    code: |-
+      import subprocess
+      def clean(*paths, force=True):
+          subprocess.run(['rm', '-f', *paths])
+      clean('stock.csv')
+    card: read
+    kinds: [delete]
+
+  - name: a git rm through a helper's starred parameter
+    code: |-
+      import subprocess
+      def git(*args):
+          subprocess.run(['git', *args])
+      git('rm', 'stock.csv')
+    card: read
+    kinds: [delete]
+
+  - name: a delete of the names a helper's keyword parameters spread
+    code: |-
+      import subprocess
+      def rm(**names):
+          subprocess.run(['rm', '-f', *names])
+      rm(**{'stock.csv': 1})
+    card: read
+    kinds: [delete]
+
+  - name: a delete by a def called as a member of an object made from the cell's namespace
+    code: |-
+      import subprocess, types
+      def clean(path):
+          subprocess.run(['rm', '-rf', path])
+      ns = types.SimpleNamespace(**globals())
+      ns.clean('stock.csv')
+    card: read
+    kinds: [delete]
+
+  - name: a delete by a def looked up by getattr on an object made from the cell's namespace
+    code: |-
+      import subprocess, types
+      def clean(path):
+          subprocess.run(['rm', '-rf', path])
+      ns = types.SimpleNamespace(**globals())
+      getattr(ns, 'clean')('stock.csv')
+    card: read
+    kinds: [delete]
+
+  - name: a delete by a def looked up on a module whose dict a cell filled from the cell's namespace
+    code: |-
+      import subprocess, sys
+      def clean(path):
+          subprocess.run(['rm', '-rf', path])
+      sys.modules['__main__'].__dict__.update(globals())
+      getattr(sys.modules['__main__'], 'clean')('stock.csv')
+    card: read
+    kinds: [delete]
+
   # ── Cells that must run with no card (none) ───────────────────────────────
   # A literal with no write, a call named like a builtin but shadowed or an
   # attribute, an installed-package import, a package install, a non-Python
@@ -10789,6 +11106,61 @@ cases:
       timeit(lambda: 1 + 1, number=3)
     card: none
 
+  - name: timeit through a helper's parameter given a lambda
+    code: |-
+      import timeit
+      def bench(fn, n=100):
+          return timeit.timeit(fn, number=n) / n
+      print(bench(lambda: sorted(range(1000))))
+    card: none
+
+  - name: timeit through a helper's parameter given a function the cell defines
+    code: |-
+      import timeit
+      def bench(fn, n=100):
+          return timeit.timeit(fn, number=n) / n
+      def work():
+          return sorted(range(1000))
+      print(bench(work))
+    card: none
+
+  - name: timeit through an earlier helper's parameter given a lambda
+    earlier:
+      - |-
+        import timeit
+        def bench(fn, n=100):
+            return timeit.timeit(fn, number=n) / n
+    code: |-
+      print(bench(lambda: sorted(range(1000))))
+    card: none
+
+  - name: a timeit Timer through a helper's parameter given a lambda
+    code: |-
+      import timeit
+      def bench(fn):
+          return timeit.Timer(fn).autorange()
+      print(bench(lambda: sorted(range(1000))))
+    card: none
+
+  - name: timeit of functools.partial of a function the cell defines
+    code: |-
+      import functools, timeit
+      def f(n):
+          return sum(range(n))
+      print(timeit.timeit(functools.partial(f, 100), number=20))
+    card: none
+
+  - name: timeit of a function a literal exec into its own namespace defines
+    code: |-
+      exec("import timeit\ndef work():\n    return sum(range(100))\nprint(timeit.timeit(work, number=50))", {})
+    card: none
+
+  - name: timeit of a function python -c's literal code defines
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', "import timeit\ndef work():\n    return sum(range(100))\nprint(timeit.timeit(work, number=50))"])
+    card: none
+
   - name: timeit of a lambda, then a call to an unbound name
     earlier:
       - |-
@@ -11316,6 +11688,14 @@ cases:
       def ensure(pkgs):
           subprocess.check_call([sys.executable, '-m', 'pip', 'install', *pkgs])
       ensure(['openpyxl', 'tabulate'])
+    card: none
+
+  - name: pip install through a helper's starred parameter called with literal names
+    code: |-
+      import subprocess, sys
+      def install(*pkgs):
+          subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', *pkgs])
+      install('openpyxl', 'tabulate')
     card: none
 
   - name: uv pip install of a filtered literal list
@@ -12518,4 +12898,12 @@ cases:
     code: |-
       import subprocess
       subprocess.run(['ls', '-la'])
+    card: none
+
+  - name: a delete by a def nothing calls, beside a literal exec given the cell's namespace
+    code: |-
+      import subprocess
+      def clean(path):
+          subprocess.run(['rm', '-rf', path])
+      exec('x = 1', globals())
     card: none
