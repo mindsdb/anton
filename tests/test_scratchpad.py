@@ -339,6 +339,28 @@ class TestScratchpadEdgeCases:
             await pad.cancel()
             assert pad.cells[-1].error == "Cancelled by user."
             assert pad.cells[-1].ended_process
+            assert pad.cells[-1].stopped_at == NOTHING_KEPT
+            assert pad.process_running
+        finally:
+            await pad.close()
+
+    async def test_a_cancel_records_the_cell_it_stopped(self):
+        """A Stop while a cell runs cancels it as the session does, at the
+        cell's next progress: the cell the cancel records holds the stopped
+        cell's own code, so the write check reads what it wrote before it
+        stopped, and it kept none of its names."""
+        pad = make_scratchpad(name="test")
+        await pad.start()
+        code = "progress('started')\nimport time\ntime.sleep(60)\n"
+        try:
+            async for item in pad.execute_streaming(code):
+                if isinstance(item, str):
+                    await pad.cancel()
+                    break
+            cancelled = [c for c in pad.cells if c.error == "Cancelled by user."]
+            assert [c.code for c in cancelled] == [code]
+            assert cancelled[0].ended_process
+            assert cancelled[0].stopped_at == NOTHING_KEPT
             assert pad.process_running
         finally:
             await pad.close()

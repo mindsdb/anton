@@ -431,6 +431,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # disposed of its launch descriptors, including subprocess creation.
         self._pending_starts: set[asyncio.Future[object]] = set()
         self._proc: asyncio.subprocess.Process | None = None
+        # The code of the cell the process runs now, which a cancel records
+        # as the cell it stopped; None between cells.
+        self._running_code: str | None = None
         self._boot_path: str | None = None
         self._venv_dir: str | None = None
         self._venv_python: str | None = None
@@ -1434,14 +1437,19 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             await asyncio.wait_for(self._proc.wait(), timeout=5)
         except asyncio.TimeoutError:
             pass
+        running, self._running_code = self._running_code, None
         self._record_cell(
             Cell(
-                code="# (cancelled by user)",
+                # The cell the cancel stopped, so the write check reads what
+                # it may have written before it stopped.
+                code=running if running is not None else "# (cancelled by user)",
                 stdout="",
                 stderr="",
                 error="Cancelled by user.",
                 description="Cancelled",
-                # The start below runs the next cell in a new process.
+                # Its process is gone, so it kept none of its names, and the
+                # start below runs the next cell in a new process.
+                stopped_at=NOTHING_KEPT,
                 ended_process=True,
             )
         )
@@ -1521,8 +1529,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             payload = f"{CELL_TRACE_MARKER} {trace_context_to_json(trace)}\n" + payload
         try:
             self._proc.stdin.write(_encode_cell_payload(payload))  # type: ignore[union-attr]
+            self._running_code = code
             await self._proc.stdin.drain()  # type: ignore[union-attr]
         except (BrokenPipeError, ConnectionResetError):
+            self._running_code = None
             if self._cell_sandbox is None:
                 raise
             # The launcher refused and exited before the cell could run.
@@ -1603,6 +1613,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 stopped_at=NOTHING_KEPT,
                 ended_process=True,
             )
+            self._running_code = None
             cell = self._record_cell(cell)
             # A Stop or a host's watchdog cancels the task running this cell.
             # With the cell killed and recorded, that cancel goes on up and
@@ -1634,6 +1645,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 estimated_time=estimated_time,
                 logs=recovery_note or "",
             )
+            self._running_code = None
             cell = self._record_cell(cell)
             yield cell
             return
@@ -1674,6 +1686,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             stopped_at=stopped_line(result_data.get("stopped_at")),
             ended_process=result_data.get("ended_process") is True,
         )
+        self._running_code = None
         cell = self._record_cell(cell)
         # The process proved itself alive by completing this round trip —
         # whatever earlier death streak led here (if any) is over. This is

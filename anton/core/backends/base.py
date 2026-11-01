@@ -36,8 +36,8 @@ class Cell:
     the last cell that completed, so it kept nothing it bound. Such a cell
     also says `ended_process`: the pad starts a new process before the next
     cell runs, which runs the startup hooks a cell wrote. So does the cell a
-    cancel records, and a remote pad's error, whose service may have
-    started a new process.
+    cancel records, with the code of the cell it stopped, and a remote pad's
+    error, whose service may have started a new process.
     """
 
     code: str

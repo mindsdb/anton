@@ -7,11 +7,13 @@ it must hold and cells, often the same call shape, it must not.
 
 from __future__ import annotations
 
+import ast
 import errno
 import logging
 import os
 import re
 import time
+import warnings
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -548,6 +550,49 @@ def test_literal_code_too_deep_or_too_long_to_read(earlier, code, card, snap):
     writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
     assert writes.unchecked is (card == "unchecked")
     assert writes.needs_approval() is (card != "none")
+
+
+# A cell with an invalid escape sequence, which Python's parser warns about,
+# and one that sends the request after it.
+_WARNS = "import re\npat = re.compile('\\d+')\nprint(pat)"
+_WARNS_THEN_SENDS = (
+    _WARNS + "\nimport requests\nrequests.post('https://erp.example.test/api/orders', json={'qty': 1})"
+)
+
+
+def test_a_check_leaves_no_warning_filter_behind_beside_another_block_of_filters(snap, monkeypatch):
+    """Checks run in threads while other code saves and puts back the
+    process's warning filters. A block that begins while a check parses and
+    ends after it puts back the filters it saved: a check that changed them
+    around its parse would leave its own behind, quieting every
+    SyntaxWarning in the host for good."""
+    other = warnings.catch_warnings()
+    entered: list[bool] = []
+    parse = ast.parse
+
+    def parse_beside_another_block(*args, **kwargs):
+        if not entered:
+            entered.append(True)
+            other.__enter__()
+        return parse(*args, **kwargs)
+
+    monkeypatch.setattr(ast, "parse", parse_beside_another_block)
+    with warnings.catch_warnings():
+        find_cell_writes(code=_WARNS, earlier=_earlier([]), snapshots=(snap,))
+        assert entered
+        other.__exit__(None, None, None)
+        assert ("ignore", None, SyntaxWarning, None, 0) not in warnings.filters
+
+
+def test_a_check_reads_a_cell_its_parse_warns_about_where_warnings_are_errors(snap):
+    """The check's own parse of a cell Python warns about raises no warning
+    in the host, even where the host turns warnings into errors, so it
+    reads the cell the runner compiles."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        writes = find_cell_writes(code=_WARNS_THEN_SENDS, earlier=_earlier([]), snapshots=(snap,),
+                                  http_rules=parse_http_write_rules("POST https://erp.example.test/**"))
+    assert writes.needs_approval() and "http" in writes.kinds()
 
 
 # Two thousand names that name no member of `types`, as a cell may list them.
