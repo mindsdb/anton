@@ -18,7 +18,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
 
-from anton.core.backends.base import ApiKeySupplier, Cell, ScratchpadRuntime, scrub_cell, stopped_line
+from anton.core.backends.base import NOTHING_KEPT, ApiKeySupplier, Cell, ScratchpadRuntime, scrub_cell, stopped_line
 from anton.core.backends.sandbox import (
     CellSandbox,
     SandboxUnavailable,
@@ -1489,6 +1489,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     ),
                     description=description,
                     estimated_time=estimated_time,
+                    stopped_at=NOTHING_KEPT,
                 ))
                 return
             # Grabbed once and cleared immediately: whatever happens to THIS
@@ -1524,6 +1525,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 description=description,
                 estimated_time=estimated_time,
                 logs=recovery_note or "",
+                stopped_at=NOTHING_KEPT,
             ))
             return
 
@@ -1587,6 +1589,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 description=description,
                 estimated_time=estimated_time,
                 logs=recovery_note or "",
+                stopped_at=NOTHING_KEPT,
             )
             cell = self._record_cell(cell)
             # A Stop or a host's watchdog cancels the task running this cell.
@@ -1624,10 +1627,13 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return
 
         if result_data is None:
+            # The process died mid-cell: the next cell gets the namespace as
+            # of the last one that completed.
             result_data = {
                 "stdout": "",
                 "stderr": "",
                 "error": "Process exited unexpectedly.",
+                "stopped_at": NOTHING_KEPT,
             }
 
         for pkg in result_data.get("auto_installed") or []:
@@ -1771,10 +1777,13 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     refusal = await self._dead_cell_refusal()
                     if refusal is not None:
                         error = str(refusal)
+                # The next cell gets the namespace as of the last one that
+                # completed.
                 yield {
                     "stdout": _salvage_tail(self._salvage, self._salvage_dropped),
                     "stderr": "",
                     "error": error,
+                    "stopped_at": NOTHING_KEPT,
                 }
                 return
 

@@ -31,7 +31,9 @@ class Cell:
 
     `stopped_at` is the line of its own code a cell that failed stopped at,
     as the boot read it from the traceback (`cell_stopped_at`); None where
-    the runtime doesn't say.
+    the runtime doesn't say. A cell whose process died, was killed or never
+    got to run it says `NOTHING_KEPT`: the namespace comes back as of the
+    last cell that completed, so it kept nothing it bound.
     """
 
     code: str
@@ -51,6 +53,12 @@ class CompactedCell:
     code: str
     errored: bool
     stopped_at: int | None = None
+
+
+# The `stopped_at` of a cell that kept nothing it bound (`Cell`): no
+# statement ends before the first line, so the host's write check reads
+# none of its names as bound.
+NOTHING_KEPT = 1
 
 
 def stopped_line(value: object) -> int | None:

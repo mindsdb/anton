@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from anton.core.backends.base import Cell
+from anton.core.backends.base import NOTHING_KEPT, Cell
 from anton.core.backends.local import LocalScratchpadRuntime
 from anton.core.backends.utils import compute_timeouts as _compute_timeouts
 from anton.core.backends.manager import ScratchpadManager
@@ -106,6 +106,22 @@ class TestScratchpadBasicExecution:
             fine = await pad.execute("print('alive')")
             assert (inner.stopped_at, forged.stopped_at, broken.stopped_at, fine.stopped_at) == (4, 2, None, None)
             assert "line 99" in forged.error
+        finally:
+            await pad.close()
+
+    async def test_a_cell_that_ends_its_process_says_it_kept_nothing(self):
+        """A cell that ends the pad's process, as `sys.exit()` and
+        `os._exit()` do, kept nothing it bound: the next cell gets the
+        namespace as of the last one that completed. So it says
+        `NOTHING_KEPT`, and the write check reads none of its names as
+        bound, not the helper it defined first."""
+        pad = make_scratchpad(name="test")
+        await pad.start()
+        try:
+            exited = await pad.execute("def push():\n    print(1)\nimport sys\nsys.exit(0)\n")
+            ended = await pad.execute("def push():\n    print(1)\nimport os\nos._exit(1)\n")
+            assert (exited.stopped_at, ended.stopped_at) == (NOTHING_KEPT, NOTHING_KEPT)
+            assert exited.error and ended.error
         finally:
             await pad.close()
 
@@ -258,6 +274,8 @@ class TestScratchpadEdgeCases:
             cell = await pad.execute("import time; time.sleep(60)")
             assert cell.error is not None
             assert "timed out" in cell.error.lower() or "inactivity" in cell.error.lower()
+            # The kill takes what the cell bound with it.
+            assert cell.stopped_at == NOTHING_KEPT
         finally:
             await pad.close()
 

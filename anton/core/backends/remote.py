@@ -14,7 +14,7 @@ from typing import AsyncIterator
 
 import httpx2 as httpx
 
-from anton.core.backends.base import Cell, ScratchpadRuntime, stopped_line
+from anton.core.backends.base import NOTHING_KEPT, Cell, ScratchpadRuntime, stopped_line
 from anton.core.llm.tracing import get_trace_context, trace_context_to_json
 
 
@@ -171,6 +171,9 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
                     stderr="",
                     error=error_msg,
                     description=description,
+                    # The service sent no cell, so what it bound is unknown:
+                    # none of it counts as bound.
+                    stopped_at=NOTHING_KEPT,
                 )
                 cell = self._record_cell(cell)
                 yield cell
@@ -211,5 +214,3 @@ def remote_scratchpad_runtime_factory(
         cells=cells,
         workspace_path=workspace_path,
     )
-
-

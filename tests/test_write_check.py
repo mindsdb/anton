@@ -685,13 +685,22 @@ def _flags_under_ifs(start: str, flag: str, *, count: int) -> str:
     ([], _flags_under_ifs("['ls']", "['-a{i}']", count=30), "none"),
     ([], _flags_under_ifs("['python3', 'job.py']", "['-v']", count=30), "unchecked"),
     ([], _flags_under_ifs("'ls'", "' -l'", count=30), "unchecked"),
+    ([], "import os, sys\ncmd = sys.executable\n" + "".join(f"cmd = cmd + ' -v{i}'\n" for i in range(300))
+     + "os.system(cmd)", "unchecked"),
+    (["exec(open('helpers.py').read())", "d0 = load_orders()",
+      *("\n".join(f"d{k + j} = d{k + j - 1}.assign(c={k + j})" for j in range(10)) for k in range(1, 1000, 10))],
+     "print(1)", "none"),
+    (["exec(open('helpers.py').read())", "d0 = load_orders()",
+      "\n".join(f"d{k} = d{k - 1}.assign(c={k})" for k in range(1, 2001))], "print(1)", "none"),
 ], ids=["recursion-with-two-literal-parameters", "recursive-state-machine", "recursive-state-machine-of-eighty-states",
         "command-list-rebuilt-sixteen-times",
         "command-list-rebuilt-three-hundred-times", "command-text-rebuilt-three-hundred-times",
         "command-text-rebuilt-over-two-hundred-cells", "command-list-rebuilt-over-two-hundred-cells",
         "module-name-rebuilt-over-two-hundred-cells", "python-command-rebuilt-over-two-hundred-cells",
         "command-list-flag-under-thirty-ifs", "command-list-thirty-flags-under-thirty-ifs",
-        "python-command-flag-under-thirty-ifs", "command-text-flag-under-thirty-ifs"])
+        "python-command-flag-under-thirty-ifs", "command-text-flag-under-thirty-ifs",
+        "python-command-text-rebuilt-three-hundred-times", "names-derived-from-unread-code-over-a-hundred-cells",
+        "two-thousand-names-derived-from-unread-code-in-one-cell"])
 def test_a_recursion_or_a_rebuilt_command_is_read_in_well_under_a_second(earlier, code, card, snap):
     """A function the chain already reads is read again for other literals
     only so often (`_REREAD_LIMIT`); a name rebound from itself reads each
@@ -702,12 +711,29 @@ def test_a_recursion_or_a_rebuilt_command_is_read_in_well_under_a_second(earlier
     scanned once per set of arguments, and once in all when the scan reads
     none of them (`_CellRead.past_the_limit`). Past `_COMMAND_LIMIT`
     choices, a command's text is one the check can't read, and its program
-    with it."""
+    with it. A path read from the interpreter's reads each name once
+    (`_interpreter_text`). A chain of names, each built on the one before
+    it from what code the check can't read made, reads each link again
+    once (`_names_tainted`)."""
     started = time.perf_counter()
     writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,))
     assert time.perf_counter() - started < 1
     assert writes.unchecked is (card == "unchecked")
     assert writes.needs_approval() is (card != "none")
+
+
+def test_a_helper_many_errored_cells_redefine_is_read_once_per_call(snap):
+    """A def an errored cell runs before the line it stopped at replaced the
+    one before it (`_Reader.ran_before_stop`), so each call reads the latest
+    def alone, not every one before it that a cell that stopped early may
+    have left in place."""
+    earlier = [f"def helper(x):\n    print(x, {i})\nrows = int('a')" for i in range(200)]
+    code = "\n".join(f"helper({k})" for k in range(50))
+    started = time.perf_counter()
+    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,), earlier_errored=[True] * 200,
+                              earlier_stopped_at=[3] * 200)
+    assert time.perf_counter() - started < 1
+    assert not writes.needs_approval()
 
 
 def test_a_long_conversation_of_literal_execs_is_read_in_well_under_a_second(snap):
