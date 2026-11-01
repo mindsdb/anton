@@ -7,6 +7,7 @@ it must hold and cells, often the same call shape, it must not.
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import re
@@ -17,7 +18,7 @@ from typing import Literal
 
 import pytest
 import yaml
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from anton.core.backends.base import Cell, CompactedCell
 from anton.core.utils import scratchpad
@@ -446,7 +447,9 @@ def test_cells_that_write_a_database(code, snap):
 class _UnreadCase(BaseModel):
     """One row of the unread-code fixture. `extra="forbid"` so a typo'd key
     (`kind:` for `kinds:`) fails the run instead of being ignored, and `card`
-    is one of the three the test knows."""
+    is one of the three the test knows. `find_cell_writes` pairs
+    `earlier_errored` and `earlier_stopped_at` with `earlier` by position,
+    so each is empty or as long as `earlier`."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -460,6 +463,14 @@ class _UnreadCase(BaseModel):
     empty_project: bool = False
     kinds: list[str] = []
     not_kinds: list[str] = []
+
+    @model_validator(mode="after")
+    def _beside_earlier(self) -> "_UnreadCase":
+        """Each list beside `earlier` is empty or as long as it."""
+        for field, given in (("earlier_errored", self.earlier_errored), ("earlier_stopped_at", self.earlier_stopped_at)):
+            if given and len(given) != len(self.earlier):
+                raise ValueError(f"{field} has {len(given)} entries for {len(self.earlier)} earlier cells")
+        return self
 
 
 _UNREAD_CODE = yaml.safe_load(
@@ -544,16 +555,39 @@ def test_an_import_of_a_module_written_since_the_turn_began_is_unchecked(tmp_pat
     assert not find_cell_writes(code="import helpers", earlier_code=(), snapshots=(snap,)).needs_approval()
 
 
+@pytest.mark.parametrize("error, card", [(errno.EACCES, "unchecked"), (errno.EIO, "unchecked"),
+                                         (errno.ENAMETOOLONG, "none")])
+def test_a_module_the_system_cant_look_up_counts_as_one_a_cell_wrote(error, card, tmp_path, monkeypatch):
+    """Where the system refuses to say whether a module the snapshot lacks
+    is on disk now, a cell may have written it, so the import after a
+    `sys.path` change is unchecked; a name too long to be a file is no
+    module."""
+    (tmp_path / "stock.csv").write_text("x")
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    is_file = Path.is_file
+
+    def refusing(path: Path) -> bool:
+        if path.name == "helpers.py":
+            raise OSError(error, os.strerror(error))
+        return is_file(path)
+
+    monkeypatch.setattr(Path, "is_file", refusing)
+    writes = find_cell_writes(code="import sys\nsys.path.insert(0, '.')\nimport helpers", earlier_code=[],
+                              snapshots=(snap,))
+    assert writes.unchecked is (card == "unchecked")
+
+
 def test_an_import_of_a_module_written_since_the_turn_began_in_a_folder_on_sys_path_is_unchecked(
     tmp_path, monkeypatch,
 ):
     """A module a cell unpacks this turn into a folder the cells put on
     `sys.path`, or a generator writes there, is on disk but missing from the
     snapshot the turn began with, so an import of it after the change is
-    unchecked; so is any other import, of a module Python ships too, which
-    what the archive unpacked may shadow, but of one the pad's boot loaded
-    before any cell ran. Without the unpack, an installed package's import
-    through the folder runs no unread code."""
+    unchecked; so is any other import, even of a module Python ships, which
+    what the archive unpacked may shadow, but not of one the pad's boot
+    loaded before any cell ran. Without the unpack, an installed package's
+    import through the folder runs no unread code."""
     (tmp_path / "stock.csv").write_text("x")
     monkeypatch.chdir(tmp_path)
     snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
@@ -616,6 +650,10 @@ def _flags_under_ifs(start: str, flag: str, *, count: int) -> str:
         f"    if state == 's{i}':\n        step('s{i + 1}', retries)\n        step('s{i}', retries=1)\n"
         for i in range(40)
     ) + "    print(state)"], "step('s0')", "none"),
+    (["def step(state, retries=0):\n" + "".join(
+        f"    if state == 's{i}':\n        step('s{i + 1}', retries)\n        step('s{i}', retries=1)\n"
+        for i in range(80)
+    ) + "    print(state)"], "step('s0')", "none"),
     ([], "import subprocess\ncmd = ['ls']\n" + "".join(f"cmd = cmd + ['-{c}']\n" for c in "abcdefghijklmnop")
      + "subprocess.run(cmd)", "none"),
     ([], "import subprocess\ncmd = ['ls']\n" + "".join(f"cmd = cmd + ['-v{i}']\n" for i in range(300))
@@ -631,7 +669,8 @@ def _flags_under_ifs(start: str, flag: str, *, count: int) -> str:
     ([], _flags_under_ifs("['ls']", "['-a{i}']", count=30), "none"),
     ([], _flags_under_ifs("['python3', 'job.py']", "['-v']", count=30), "unchecked"),
     ([], _flags_under_ifs("'ls'", "' -l'", count=30), "unchecked"),
-], ids=["recursion-with-two-literal-parameters", "recursive-state-machine", "command-list-rebuilt-sixteen-times",
+], ids=["recursion-with-two-literal-parameters", "recursive-state-machine", "recursive-state-machine-of-eighty-states",
+        "command-list-rebuilt-sixteen-times",
         "command-list-rebuilt-three-hundred-times", "command-text-rebuilt-three-hundred-times",
         "command-text-rebuilt-over-two-hundred-cells", "command-list-rebuilt-over-two-hundred-cells",
         "module-name-rebuilt-over-two-hundred-cells", "python-command-rebuilt-over-two-hundred-cells",
@@ -643,7 +682,9 @@ def test_a_recursion_or_a_rebuilt_command_is_read_in_well_under_a_second(earlier
     binding once (`_Reader.recalled`), down a long chain of them in a loop
     (`_Reader.reading_ahead`), with no deep recursion; and the commands a
     name rebuilt under many ifs gives are capped (`_capped`): so none of
-    them stalls the turn or crashes the check. Past `_COMMAND_LIMIT`
+    them stalls the turn or crashes the check. A function past a limit is
+    scanned once per set of arguments, and once in all when the scan reads
+    none of them (`_CellRead.past_the_limit`). Past `_COMMAND_LIMIT`
     choices, a command's text is one the check can't read, and its program
     with it."""
     started = time.perf_counter()
@@ -651,6 +692,22 @@ def test_a_recursion_or_a_rebuilt_command_is_read_in_well_under_a_second(earlier
     assert time.perf_counter() - started < 1
     assert writes.unchecked is (card == "unchecked")
     assert writes.needs_approval() is (card != "none")
+
+
+def test_a_long_conversation_of_literal_execs_is_read_in_well_under_a_second(snap):
+    """What each cell adds to a name's list or dict is indexed once per
+    check (`_Reader.growth`), so each literal exec's namespace, read for
+    the calls through it, doesn't walk every earlier cell again."""
+    earlier = [
+        f"exec('def go{i}():\\n    return {i}')\ngo{i}()\nns{i} = {{}}\n"
+        f"exec('def f():\\n    return 1', ns{i})\nns{i}['f']()\n"
+        for i in range(1400)
+    ]
+    assert not find_cell_writes(code="go1399()", earlier_code=earlier, snapshots=(snap,)).needs_approval()
+    started = time.perf_counter()
+    writes = find_cell_writes(code="go1399()", earlier_code=earlier, snapshots=(snap,))
+    assert time.perf_counter() - started < 1
+    assert not writes.needs_approval()
 
 
 def test_a_large_literal_cell_after_unread_code_is_walked_no_more_than_with_none(snap, monkeypatch):

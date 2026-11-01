@@ -76,18 +76,21 @@ What it finds:
   class, a list or dict that holds it, a ``functools.partial`` of it, or a
   function that returns it. All of these, too, in **literal code the cell
   runs**: a str or bytes literal handed to ``exec``, ``eval`` or
-  ``compile``, a literal statement handed to ``timeit``, ``cProfile.run``,
+  ``compile``, bytes decoded by their coding comment as Python decodes them,
+  a literal statement handed to ``timeit``, ``cProfile.run``,
   ``profile.run``, ``pdb.run`` or ``pdb.runeval``, and the literal after
   ``python -c``, each read like one more cell, placed where the call that
   runs it runs, with its own imports; and in a function a literal exec in
   an earlier cell defined, where this cell calls it. A program's or
   module's name, or a package pip installs, held in a name bound only to
-  literal text, or in a list built from such text, reads as that text.
+  literal text, or in a list built from such text or grown in place with
+  it, reads as that text.
 - **Code the check can't read**, which holds the cell unchecked: its card
   ends "This step can't be checked before it runs." That is ``exec``,
   ``eval`` or ``compile`` reached through the builtins however the code
-  names them and handed anything but a literal (a name, a file read, a
-  decode, a join) or a literal too long to read, or passed or stored as a
+  names them (a builtin function's ``__self__`` and a frame's
+  ``f_builtins`` among them) and handed anything but a literal (a name, a
+  file read, a decode, a join) or a literal too long to read, or passed or stored as a
   value; code the pad's own process runs through ``runpy``, ``importlib``
   (``reload``, a spec or a loader from a file, an import by a name the code
   picks when it runs), ``zipimport``, ``site`` (the ``.pth`` files it reads),
@@ -106,9 +109,13 @@ What it finds:
   app server, a task worker, a migration tool, a profiler; what ``uv run``,
   ``poetry run`` and the like start; behind ``xvfb-run``, ``caffeinate``,
   ``flock -c``, ``eval`` or backticks; through ``anyio``, ``trio``,
-  ``pexpect`` or ``invoke``), pip or another installer building a package
-  from a file, folder, URL, repository or index, or from a word the check
-  can't read, or building the project itself (``uv sync``, ``poetry
+  ``pexpect`` or ``invoke``; under its Windows names too, as
+  ``python.exe``, the ``py`` launcher, ``cmd /c`` and PowerShell's
+  ``-Command``), pip or another installer building a package from a file,
+  folder, URL, repository or index, or from a word the check can't read,
+  or pointed at another index or a folder by a setting in its environment
+  (``PIP_INDEX_URL``, ``UV_FIND_LINKS`` and their kin, given to the call or
+  set in the pad's own), or building the project itself (``uv sync``, ``poetry
   install``, ``uv add`` into a project that builds), and a program the check
   can't name at all; a call to a name, or through a namespace, module or
   value, that such code may have filled, once such code ran and before read
@@ -141,10 +148,13 @@ import ast
 import bisect
 import builtins
 import copy
+import errno
 import fnmatch
 import importlib.machinery
+import importlib.util
 import itertools
 import logging
+import ntpath
 import os
 import posixpath
 import re
@@ -155,6 +165,7 @@ import sys
 import textwrap
 import threading
 import time
+import types
 import warnings
 from collections import OrderedDict, deque
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -1721,10 +1732,9 @@ _IMPORTERS = frozenset({
     "pkgutil.resolve_name", "pydoc.locate",
 })
 # The importers whose result is the module itself, so a name bound to one
-# reads as that module (`_Reader._importer_module_texts`).
-_MODULE_IMPORTERS = frozenset({
-    "importlib.import_module", "importlib.__import__", "__import__", "builtins.__import__",
-})
+# reads as that module (`_Reader._importer_module_texts`): all but the two
+# that return an attribute of the module they load.
+_MODULE_IMPORTERS = _IMPORTERS - {"pkgutil.resolve_name", "pydoc.locate"}
 _MODULE_IMPORTER_LAST_NAMES = frozenset(name.rpartition(".")[2] for name in _MODULE_IMPORTERS)
 # The last name of each call `_runs_unread` reads, so any other is passed by.
 _RUNNER_NAMES = frozenset(
@@ -1746,6 +1756,10 @@ _BUILTIN_NAMES = frozenset({*vars(builtins), *INJECTED_HELPER_NAMES, EXPLAINABIL
 # Runners and importers that run code the check can't read wherever they are
 # passed on or stored to be called later.
 _RUNNER_VALUES = frozenset({*_CODE_RUNNERS, *_STRING_RUNNERS, *_IMPORTERS})
+# The runners that are types: as the class `isinstance` checks, a side of a
+# comparison, a dict key or an annotation, nothing calls them
+# (`_type_runner_aside`).
+_RUNNER_TYPES = frozenset({"types.FunctionType", "types.CodeType"})
 # Runners whose return value is a namespace a later call reaches through.
 _NAMESPACE_RUNNERS = frozenset({"runpy.run_path", "runpy.run_module"})
 # The calls that hand out the cell's own namespace to fill or read by key.
@@ -1796,25 +1810,52 @@ _LAUNCH_NAMES = frozenset(name.rpartition(".")[2] for name in _LAUNCHERS)
 # The modules that hold a launcher, so a member looked up on one by a name
 # the check can't read may be a launcher.
 _LAUNCHER_MODULES = frozenset(name.rpartition(".")[0] for name in _LAUNCHERS)
+# The names the builtins module goes by in a cell.
+_BUILTINS_MODULE_NAMES = frozenset({"builtins", "__builtins__"})
+# The members that hold the builtins module, or its dict, on any holder, as
+# `sys.modules["__main__"].__builtins__`, a frame's `f_builtins` and a
+# builtin function's `__self__` do (`_Reader._builtins_module`).
+_BUILTINS_HOLDER_MEMBERS = frozenset({"__builtins__", "f_builtins", "__self__"})
+# The builtin functions, whose `__self__` is the builtins module.
+_BUILTIN_FUNCTIONS = frozenset(
+    name for name, value in vars(builtins).items() if isinstance(value, types.BuiltinFunctionType)
+)
+# The members of the builtins module that run no code the check can't read,
+# as `builtins.open` and `builtins.print`: every builtin but exec and its
+# kin, which `exec_builtin` reads, and those that reach code or the cell's
+# own namespace. A member that isn't a builtin is one a cell may have set
+# (`_Reader.loads_builtins_value`).
+_BUILTINS_HARMLESS = frozenset(vars(builtins)) - _EXEC_CALLS - frozenset({
+    "getattr", "setattr", "vars", "globals", "locals", "__import__", "__loader__", "__spec__", "breakpoint",
+    "__build_class__",
+})
 # The last names that hint a cell may run code the check can't read
 # (`_CodeSigns.hints`), and the calls `_names_a_runner` reads such a name as
 # through the imports. A conversation whose cells name none of these that
 # way, and write and import no module the check can't read, runs only code
 # it reads.
-_BUILTINS_MODULE_NAMES = frozenset({"builtins", "__builtins__"})
 _CODE_HINTS = frozenset({
     *_EXEC_CALLS, *_GLOBALS_CALLS, *_RUNNER_NAMES,
     *_RUNNER_METHODS, *_LOADER_METHODS, *_LAUNCH_NAMES, *_BUILTINS_MODULE_NAMES,
 })
 # Every call that runs code the check can't read, passed on or stored.
 _RUN_CALLS = frozenset({*_RUNNER_VALUES, *_LAUNCHERS})
+
+
+def _runners_by_module() -> dict[str, dict[str, str]]:
+    """The runners and launchers each module holds (`_RUN_CALLS`), by the
+    bare name a `from module import *` binds them to."""
+    out: dict[str, dict[str, str]] = {}
+    for full in _RUN_CALLS:
+        module, _, name = full.rpartition(".")
+        if module:
+            out.setdefault(module, {})[name] = full
+    return out
+
+
 # The runners and launchers each module holds, by the bare name a
 # `from module import *` binds them to (`_Reader.star_runners`).
-_RUNNERS_BY_MODULE: dict[str, dict[str, str]] = {}
-for _full in _RUN_CALLS:
-    _module, _, _name = _full.rpartition(".")
-    if _module:
-        _RUNNERS_BY_MODULE.setdefault(_module, {})[_name] = _full
+_RUNNERS_BY_MODULE = _runners_by_module()
 # The modules that hold something that runs code, so a member named off one
 # by a name the check can't read may run code (`_Reader._pick_runner`).
 _RUNNER_HOLDERS = frozenset({*_RUNNER_MODULES, *_LAUNCHER_MODULES, *_BUILTINS_MODULE_NAMES})
@@ -1832,7 +1873,7 @@ def _is_hint(last: str) -> bool:
 
 # The Python interpreter by any of its names, and the scripts it runs as a
 # program of their own.
-_PYTHON_PROGRAM = re.compile(r"(?:python|pypy|ipython)(?:\d+(?:\.\d+)*)?w?")
+_PYTHON_PROGRAM = re.compile(r"(?:python|pypy|ipython)(?:\d+(?:\.\d+)*t?)?w?")
 _PYTHON_SCRIPTS = (".py", ".pyw", ".pyz")
 # Python's long options that print and exit, as the short -V and -h do.
 _PYTHON_EXITS = frozenset({"--version", "--help", "--help-env", "--help-xoptions", "--help-all"})
@@ -1926,6 +1967,14 @@ _PIP_COMMANDS = frozenset({
 })
 _PIP_PACKAGE_COMMANDS = frozenset({"install", "download", "uninstall", "wheel"})
 _PIP_FILE_COMMANDS = frozenset({"sync"})
+# The commands that fetch the packages they take from an index (`_pip_launch`).
+_PIP_FETCH_COMMANDS = _PIP_PACKAGE_COMMANDS - {"uninstall"}
+# The settings, in a program's environment, that point pip or uv at another
+# index or a folder of links, or at a config file that may: as the source
+# flags do (`_PIP_SOURCE_FLAGS`), and the folders their config files lie in.
+_INSTALLER_SOURCE_SETTING = re.compile(
+    r"(?:PIP|UV)_\w*(?:INDEX|FIND_LINKS|CONFIG)\w*|HOME|XDG_CONFIG_\w+|APPDATA", re.IGNORECASE,
+)
 # pip's flags that name where a package comes from, the long ones matched by
 # unique prefix (`--req` is `--requirement`), and the short ones' letters.
 _PIP_SOURCE_FLAGS = frozenset({
@@ -1933,7 +1982,7 @@ _PIP_SOURCE_FLAGS = frozenset({
     "-f", "--find-links",
 })
 _PIP_SOURCE_LONG = frozenset(flag for flag in _PIP_SOURCE_FLAGS if flag.startswith("--"))
-_PIP_SOURCE_LETTERS = frozenset("reif")
+_PIP_SOURCE_LETTERS = frozenset(flag[1] for flag in _PIP_SOURCE_FLAGS if len(flag) == 2)
 # pip's flags that take a value, so their value isn't a source; the short
 # ones' letters; and the global ones that come before the command.
 _PIP_VALUE_FLAGS = frozenset({
@@ -1945,7 +1994,7 @@ _PIP_VALUE_FLAGS = frozenset({
     "--keyring-provider", "--config-file", "--local-log",
 })
 _PIP_VALUE_LONG = frozenset(flag for flag in _PIP_VALUE_FLAGS if flag.startswith("--"))
-_PIP_VALUE_LETTERS = frozenset("ctdwC")
+_PIP_VALUE_LETTERS = frozenset(flag[1] for flag in _PIP_VALUE_FLAGS if len(flag) == 2)
 # Endings of a file pip and uv install as a package from where it lies, with
 # the code it runs to build or install it, rather than from the index. Any
 # other name, `discord.py` or `job.egg` among them, is a name on the index.
@@ -1959,6 +2008,26 @@ _CHDIR_FUNCS = frozenset({"os.chdir", "contextlib.chdir"})
 _EXITS = frozenset({"sys.exit", "os._exit", "os.abort", "exit", "quit"})
 _SHELL_DELETE = frozenset({"rm", "unlink", "rmdir", "shred"})
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+# Windows' shells: cmd runs the text after `/c` or `/k` as a script, and
+# PowerShell the text after `-Command` (`_inner_script`).
+_CMD_SHELLS = frozenset({"cmd"})
+_POWERSHELLS = frozenset({"powershell", "pwsh"})
+# Commands that run a script in turn: a shell, and `eval`, which runs its words.
+_SCRIPT_RUNNERS = frozenset({*_SHELLS, *_CMD_SHELLS, *_POWERSHELLS, "eval"})
+# PowerShell's flags, by their lowercase names: those that take the script
+# itself, a script encoded in base64, a script file, or another value.
+_POWERSHELL_COMMAND_FLAGS = frozenset({"-command", "-c"})
+_POWERSHELL_ENCODED_FLAGS = frozenset({"-encodedcommand", "-enc", "-e", "-ec"})
+_POWERSHELL_FILE_FLAGS = frozenset({"-file", "-f"})
+_POWERSHELL_VALUE_FLAGS = frozenset({
+    "-executionpolicy", "-ep", "-ex", "-windowstyle", "-w", "-version", "-v", "-inputformat", "-if",
+    "-outputformat", "-of", "-o", "-configurationname", "-config", "-workingdirectory", "-wd",
+    "-psconsolefile", "-settingsfile", "-settings", "-custompipename",
+})
+# The Windows launcher `py`'s flags that pick the Python it runs, as `-3` or
+# `-V:3.12`, and those that list the Pythons it knows and run none.
+_PY_LAUNCHER_FLAG = re.compile(r"-(?:\d[\w.-]*|V:\S+)")
+_PY_LAUNCHER_LISTS = frozenset({"-0", "-0p", "--list", "--list-paths"})
 # Words that change the working folder, how many shells deep a script is read
 # before its commands count as unreadable, and the `find` flags that run a
 # command on each match: read the same way by the delete, move and launch walks.
@@ -1996,6 +2065,16 @@ _SHELL_KEYWORDS = frozenset({"if", "then", "else", "elif", "do", "while", "until
 _SHELL_SEPARATORS = frozenset({";", "&&", "||", "|", "&", "(", ")", "|&", ";;"})
 # Folders the pad changes into that the check tracks; past this many, any.
 _CWD_LIMIT = 16
+# Commands one call's words or text read through names may give; past this
+# many, a word stays one the check can't read.
+_COMMAND_LIMIT = 16
+# The flag a program takes code to run after, as `python -c` or `sh -uc`
+# does, as a word and at the end of a command's text.
+_CODE_FLAG = re.compile(r"-[A-Za-z]*c")
+_CODE_FLAG_BEFORE = re.compile(r"(?:^|\s)-[A-Za-z]*c\s+['\"]?$")
+# Calls that give back the text they're handed, or None: `shutil.which("ffmpeg")`
+# is the path of that same program.
+_SAME_TEXT_CALLS = frozenset({"shutil.which", "str", "os.fspath"})
 # Calls into earlier cells' functions followed from one call in this cell.
 _CALL_DEPTH = 4
 # How many times one check reads a function again for a recursive call that
@@ -2047,6 +2126,8 @@ _TEMP_PATH = "\x00temp"
 _RUN_TIME_PART = "\x01"
 # Stands in for a literal-command operand that isn't a literal.
 _NOT_LITERAL = "\x00"
+# Names a read follows through their values, and parameters through the
+# calls that pass them, before it stops (`_Reader.stops`).
 _PARAM_DEPTH = 5
 # How far a read that stopped at its depth limit is read on, each node once,
 # to tell whether it stopped short of what it looks for (`_Reader.read_past`).
@@ -2113,7 +2194,10 @@ class _Callee:
     is the code that names it, where the card reports what it changes. For a
     method, `bound` is what its first parameter gets: the instance or class
     it is called on, or the call that makes the instance. None for a plain
-    function, a static method, or a method called on its class.
+    function, a static method, or a method called on its class. `guessed`
+    marks a method of every class that defines its name, on a receiver the
+    check can't place; `past` one found only by reading on past a depth
+    limit (`_Reader.read_on`), which is read for whether it may write alone.
     """
 
     func: Function
@@ -2121,6 +2205,7 @@ class _Callee:
     use: ast.expr
     bound: ast.AST | None = None
     guessed: bool = False
+    past: bool = False
 
 
 class _Literal(NamedTuple):
@@ -2154,6 +2239,8 @@ class _Visit:
 
     @classmethod
     def of(cls, callee: _Callee, reader: _Reader) -> _Visit:
+        """The visit `callee` makes: its function, and what its call passes
+        for each parameter, a literal by its repr, other code by its node."""
         literals: list[_Literal] = []
         others: list[_Passed] = []
         if callee.call is not None:
@@ -2168,6 +2255,15 @@ class _Visit:
                 else:
                     others.append(_Passed(name, id(node)))
         return cls(func=id(callee.func), literals=tuple(sorted(literals)), passed=tuple(sorted(others)))
+
+
+class _ParamValues(NamedTuple):
+    """What a parameter can hold (`_Reader.param_values`): the arguments, None
+    for one the check can't read, and whether they are what the call being
+    read passes (`passed`) or what each call site passes."""
+
+    args: tuple[_Arg | None, ...]
+    passed: bool
 
 
 @dataclass(frozen=True, eq=False)
@@ -2268,7 +2364,7 @@ class _Cell:
         self.index = index
         # For code a cell runs through exec() or eval(): the line of that call
         # in the cell, which findings report; the index of the conversation's
-        # cell whose run runs it, which places it among them (`_Reader.before`);
+        # cell whose run runs it, which places it among them (`_Reader.position`);
         # whether what it binds lands in the cell namespace, as for an exec()
         # at a cell's top level given no namespace or `globals()`; and the
         # name of the namespace it fills otherwise, as `ns` for `exec(src, ns)`.
@@ -2444,11 +2540,15 @@ class _Cell:
             for n in (*self.augments.get(name, ()), *self.additions.get(name, ()))
         )
 
-    def _dead(self, node: ast.AST) -> bool:
-        """Whether `node` sits in a branch that never runs, as under `if False:`."""
+    def _dead(self, node: ast.AST, *, functions: bool = False) -> bool:
+        """Whether `node` sits in a branch that never runs, as under `if
+        False:`; with `functions`, or in a function or lambda, which runs
+        only when something calls it."""
         child, parent = node, self.parents.get(node)
         while parent is not None:
-            if _never_runs(parent=parent, child=child):
+            if functions and isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) or _never_runs(
+                parent=parent, child=child,
+            ):
                 return True
             child, parent = parent, self.parents.get(parent)
         return False
@@ -2641,15 +2741,8 @@ class _Cell:
 
     def _runs_with_cell(self, node: ast.AST) -> bool:
         """Whether `node` runs when the cell runs (`_nodes_that_run`): no
-        function or lambda holds it, and no branch that never runs."""
-        child, parent = node, self.parents.get(node)
-        while parent is not None:
-            if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) or _never_runs(
-                parent=parent, child=child,
-            ):
-                return False
-            child, parent = parent, self.parents.get(parent)
-        return True
+        function or lambda holds it, and no branch that never runs (`_dead`)."""
+        return not self._dead(node, functions=True)
 
     @cached_property
     def fill_reads(self) -> tuple[_FillReads, ...]:
@@ -2710,10 +2803,11 @@ class _Cell:
                     hints.append(node)
                 # A member `.exec` reaches the builtin where its holder is the
                 # builtins module, which a name may hold with no literal
-                # "builtins" in the cell, as `import_module("built" + "ins")`.
+                # "builtins" in the cell, as `import_module("built" + "ins")`,
+                # and so may a member that holds the module, as `__self__`.
                 names_builtins = names_builtins or (
                     node.id in _EXEC_CALLS or node.id in _BUILTINS_MODULE_NAMES
-                    if isinstance(node, ast.Name) else node.attr in _EXEC_CALLS
+                    if isinstance(node, ast.Name) else node.attr in _EXEC_CALLS or node.attr in _BUILTINS_HOLDER_MEMBERS
                 )
             elif isinstance(node, ast.Subscript):
                 key = node.slice.value if isinstance(node.slice, ast.Constant) else None
@@ -3115,6 +3209,14 @@ class _Reader:
         # for one it can't read; and the call its return value goes to.
         self.param_args: dict[tuple[int, str], _Arg | None] = {}
         self.returns_to: dict[int, ast.AST] = {}
+        # How many times a read asked what the call being read passes, or
+        # where its return value goes (`given`, `returned_to`): a scan that
+        # asked nothing reads alike at any call. While such a scan counts its
+        # asks (`afresh`), the cache key of its reads, which no read before
+        # it used.
+        self.call_asks = 0
+        self._fresh_key: tuple[tuple[int, str, int], ...] | None = None
+        self._fresh_scans = 0
         # What the pad's cells write (`_made`), for a snapshot past its cap.
         self.made: _Made | None = None
         # What this check read from disk for a glob, once per pattern and folder.
@@ -3240,8 +3342,29 @@ class _Reader:
         return self._held[key]
 
     def call_key(self) -> tuple[tuple[int, str, int], ...]:
-        """What the call being read passes for each parameter, as a cache key."""
+        """What the call being read passes for each parameter, as a cache key;
+        under `afresh`, that scan's own key."""
+        if self._fresh_key is not None:
+            return self._fresh_key
         return tuple(sorted((k[0], k[1], id(a.node) if a else 0) for k, a in self.param_args.items()))
+
+    @cached_property
+    def points_installers(self) -> bool:
+        """Whether a cell sets, in the pad's own environment, a setting that
+        points pip or uv at another index or a folder
+        (`_changes_point_installers`), as `os.environ["PIP_INDEX_URL"] = ...`
+        or `os.putenv(...)` does. Read once per check, where an install needs it."""
+
+        def environ(node: ast.AST) -> bool:
+            return self.dotted(node) == "os.environ"
+
+        return any(
+            _changes_point_installers(cell, self, holds=environ, depth=0) or any(
+                self.dotted(c.func) == "os.putenv" and (not c.args or _names_installer_setting(c.args[0]))
+                for c in cell.calls
+            )
+            for cell in self.cells
+        )
 
     @cached_property
     def project_builds(self) -> bool:
@@ -3366,12 +3489,45 @@ class _Reader:
 
     def argument_of(self, node: ast.Name) -> _Arg | None:
         """What the call being read passes for the parameter `node` reads."""
-        if not self.param_args:
+        if not self.param_args and self._fresh_key is None:
             return None
         for b in self.bindings_of(node.id, node=node):
-            if b.how == "param" and (id(b.value), node.id) in self.param_args:
+            if b.how == "param" and self.given(b.value, node.id):
                 return self.param_args[(id(b.value), node.id)]
         return None
+
+    def given(self, func: ast.AST, name: str) -> bool:
+        """Whether the call being read passes `func`'s parameter `name`
+        (`param_args`). Each ask counts (`call_asks`): what the read gives
+        may differ at another call."""
+        self.call_asks += 1
+        return (id(func), name) in self.param_args
+
+    def args_for(self, func: ast.AST, name: str) -> list[_Arg | None]:
+        """What the call being read passes for `func`'s parameter `name`,
+        else what each of its call sites passes (`call_sites`)."""
+        if self.given(func, name):
+            return [self.param_args[(id(func), name)]]
+        return self.call_sites(func, name)
+
+    def returned_to(self, func: ast.AST) -> ast.AST | None:
+        """The call `func`'s return value goes to while that call is read,
+        an ask `call_asks` counts as `given` does."""
+        self.call_asks += 1
+        return self.returns_to.get(id(func))
+
+    @contextmanager
+    def afresh(self) -> Iterator[None]:
+        """While a scan reads under it, every read under it reads afresh: its
+        cache key (`call_key`) is one no read before it used, so `call_asks`
+        counts each ask the scan makes, a read the cache would give included."""
+        saved = self._fresh_key
+        self._fresh_scans += 1
+        self._fresh_key = ((-self._fresh_scans, "", 0),)
+        try:
+            yield
+        finally:
+            self._fresh_key = saved
 
     def passed_node(self, node: ast.AST) -> ast.AST:
         """The code that gives `node` its value when `node` reads a parameter
@@ -3962,7 +4118,12 @@ class _Reader:
                 return None
             values: list[ast.AST] = [b.value for b in self.bindings_of(node.id, node=node) if b.how == "value"]
         elif isinstance(node, ast.Subscript):
-            values = self.items_of(node=node.value, key=node.slice, depth=0) or []
+            found = self.items_of(node=node.value, key=node.slice, depth=0)
+            key = node.slice.value if isinstance(node.slice, ast.Constant) else None
+            if found is None and key in _EXEC_CALLS:
+                # An entry named for the builtin, of a holder the check can't place.
+                return key
+            values = found or []
         else:
             return None
         return next(
@@ -4059,10 +4220,11 @@ class _Reader:
 
     def _builtins_module(self, node: ast.AST, *, depth: int = 0) -> bool:
         """Whether `node` holds the builtins module: `builtins` under any
-        import name, `__builtins__`, `sys.modules["builtins"]`,
-        `globals()["__builtins__"]`, or a name bound to one of them, as
-        `m = __import__("builtins")` is once `_parse` reads the import as
-        the plain name. It stops at the depth limit (`stops`)."""
+        import name, `__builtins__`, `sys.modules["builtins"]`, the
+        `__builtins__` of any holder (`_builtins_held`), a builtin
+        function's `__self__`, as `print.__self__`, or a name bound to one
+        of them, as `m = __import__("builtins")` is once `_parse` reads the
+        import as the plain name. It stops at the depth limit (`stops`)."""
         if self.stops("builtins", node, depth=depth, limit=_PARAM_DEPTH):
             return False
         if isinstance(node, ast.Name) and self.import_of(node) is None and node.id in self.bound_names:
@@ -4074,32 +4236,46 @@ class _Reader:
             # with `n` bound to that text.
             texts = self._importer_module_texts(node)
             return texts is not None and any(text == "builtins" for text in texts)
+        if self._builtins_held(node):
+            return True
         if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
-            key, holder = node.slice.value, node.value
-            return key == "builtins" and self.dotted(holder) == "sys.modules" or key == "__builtins__" and (
-                isinstance(holder, ast.Call) and self.dotted(holder.func) == "globals"
-            )
+            return node.slice.value == "builtins" and self.dotted(node.value) == "sys.modules"
+        if isinstance(node, ast.Attribute) and node.attr == "__self__" and isinstance(node.value, ast.Name):
+            return node.value.id in _BUILTIN_FUNCTIONS and self._builtin_kept(node.value)
         return self.dotted(node) in ("builtins", "__builtins__")
+
+    @staticmethod
+    def _builtins_held(node: ast.AST) -> bool:
+        """Whether `node` is the `__builtins__` of a holder, which holds the
+        builtins module or its dict: as a member (`m.__builtins__`), as an
+        entry of a namespace (`globals()["__builtins__"]`,
+        `f.__globals__["__builtins__"]`), or as a frame's `f_builtins`."""
+        if isinstance(node, ast.Attribute):
+            return node.attr in ("__builtins__", "f_builtins")
+        return (isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant)
+                and node.slice.value == "__builtins__")
 
     def _builtins_dict(self, node: ast.AST) -> bool:
         """Whether `node` holds the builtins module's dict: `__builtins__`
-        (the dict itself outside the main module), `vars(builtins)` or
-        `builtins.__dict__`."""
+        (the dict itself outside the main module) on its own or of any
+        holder (`_builtins_held`), `vars(builtins)` or `builtins.__dict__`."""
         if isinstance(node, ast.Call):
             return self.dotted(node.func) == "vars" and len(node.args) == 1 and self._builtins_module(node.args[0])
         if isinstance(node, ast.Attribute) and node.attr == "__dict__":
             return self._builtins_module(node.value)
-        return self.dotted(node) == "__builtins__"
+        return self._builtins_held(node) or self.dotted(node) == "__builtins__"
 
     def loads_builtins_value(self, node: ast.AST) -> bool:
         """Whether `node` loads the builtins module, or its dict, as a value
         anywhere the check doesn't already read as reaching a literal exec,
         eval or compile: handed to a call, held in a list or dict, returned,
-        or read through `.get`, `.__getattribute__` or another member. As
-        `exec` itself, the builtins module loaded as a value may run any code
-        the check can't read. Its safe uses are `builtins.exec` and its kin
-        (read by `exec_builtin`), `builtins.__dict__`, `vars(builtins)` and
-        an entry of either, and `getattr(builtins, ...)` (read by
+        or read through `.get`, `.__getattribute__` or another member that
+        reaches code or the cell's namespace, or one that isn't a builtin
+        (`_BUILTINS_HARMLESS`). As `exec` itself, the builtins module loaded as
+        a value may run any code the check can't read. Its safe uses are
+        `builtins.exec` and its kin (read by `exec_builtin`), any other
+        builtin, as `builtins.open`, `builtins.__dict__`, `vars(builtins)`
+        and an entry of either, and `getattr(builtins, ...)` (read by
         `builtins_lookup`)."""
         if not self.names_builtins:
             return False
@@ -4118,8 +4294,9 @@ class _Reader:
             # `__builtins__["exec"]`, read by `exec_builtin` or `builtins_lookup`.
             return False
         if as_module and isinstance(parent, ast.Attribute):
-            # `builtins.exec`, read by `exec_builtin`, or `builtins.__dict__`.
-            return not (parent.attr in _EXEC_CALLS or parent.attr == "__dict__")
+            # `builtins.exec`, read by `exec_builtin`, `builtins.__dict__`, or
+            # a builtin that reaches no code, as `builtins.open`.
+            return not (parent.attr in _EXEC_CALLS or parent.attr == "__dict__" or parent.attr in _BUILTINS_HARMLESS)
         if as_module and isinstance(parent, ast.Call) and node in parent.args[:1]:
             # `vars(builtins)` or `getattr(builtins, ...)`.
             return self.dotted(parent.func) not in ("vars", "getattr")
@@ -4299,17 +4476,24 @@ class _Reader:
 
     def read_past(self, mark: int, read: Callable[[], object]) -> None:
         """After a read that came back short: when a depth limit stopped it
-        (`cuts` past `mark`), `read` reads again with no limit, each node
-        once, and says whether that found what the first read missed. Then
-        a write may be past the limit, unread, and the check stops
-        (`stopped`). Nothing it finds goes on the card. The wide reading,
-        which only adds files to the first read's, doesn't read past."""
+        (`cuts` past `mark`), `read` reads again with no limit (`read_on`)
+        and says whether that found what the first read missed. Then a write
+        may be past the limit, unread, and the check stops (`stopped`).
+        Nothing it finds goes on the card."""
+        if self.read_on(mark, read):
+            self.stopped = True
+
+    def read_on(self, mark: int, read: Callable[[], _T]) -> _T | None:
+        """What `read` gives read again with no limit, each node once, after
+        a read a depth limit stopped (`cuts` past `mark`); None when no limit
+        stopped it, or while a read already goes on past its limits. The
+        wide reading, which only adds files to the first read's, doesn't
+        read on."""
         if self.cuts == mark or self._past is not None or self.wide:
-            return
+            return None
         self._past = set()
         try:
-            if read():
-                self.stopped = True
+            return read()
         finally:
             self._past = None
 
@@ -4545,19 +4729,30 @@ class _Reader:
             return _UNKNOWN
         return out
 
+    def param_values(self, name: str, binding: _Binding, *, depth: int) -> _ParamValues | None:
+        """What the parameter `name` of `binding`'s function can hold, as
+        `_param_paths` and `_param_texts` read it: what the call being read
+        passes for it, else what each call site passes, None for one the
+        check can't read. None past `_PARAM_DEPTH` names, where the read of
+        call sites stops (`stops`)."""
+        if self.given(binding.value, name):
+            return _ParamValues(args=(self.param_args[(id(binding.value), name)],), passed=True)
+        if self.stops(f"param {name}", binding.value, depth=depth, limit=_PARAM_DEPTH - 1):
+            return None
+        return _ParamValues(args=tuple(self.call_sites(binding.value, name)), passed=False)
+
     def _param_paths(self, name: str, binding: _Binding, *, depth: int) -> list[str] | _Unknown:
         """A parameter: what the call being read passes for it, else what
-        every call site passes. A parameter met at a call site is unknown."""
-        key = (id(binding.value), name)
-        if key in self.param_args:
-            arg = self.param_args[key]
-            return _UNKNOWN if arg is None else self.paths(arg.node, cell=arg.cell, depth=depth + 1)
-        sites = self.call_sites(binding.value, name) if depth < _PARAM_DEPTH else []
-        if not sites:
+        every call site passes (`param_values`). A parameter met at a call
+        site is unknown."""
+        values = self.param_values(name, binding, depth=depth)
+        if values is None or not values.args:
             return _UNKNOWN
+        # A call site's own parameters are not read on.
+        at = depth + 1 if values.passed else _PARAM_DEPTH
         out: list[str] = []
-        for site in sites:
-            got = _UNKNOWN if site is None else self.paths(site.node, cell=site.cell, depth=_PARAM_DEPTH)
+        for arg in values.args:
+            got = _UNKNOWN if arg is None else self.paths(arg.node, cell=arg.cell, depth=at)
             if isinstance(got, _Unknown):
                 return got
             out += got
@@ -4570,12 +4765,36 @@ class _Reader:
         binding (`_ran_before`) grew the value the name held then, so it
         doesn't count."""
         out = []
-        for cell in self.cells if binding.scope is None else [binding.cell]:
-            for grown in cell.grows.get(name, ()):
-                if self._binding_scope(cell, grown.site, name) is binding.scope and not _ran_before(
-                    grown.site, binding, cell=cell,
-                ):
-                    out.append((grown, cell))
+        found = self._name_changes.get(name, ()) if binding.scope is None else [
+            (binding.cell, change) for change in binding.cell.grows.get(name, ())
+        ]
+        for cell, grown in found:
+            if self._binding_scope(cell, grown.site, name) is binding.scope and not _ran_before(
+                grown.site, binding, cell=cell,
+            ):
+                out.append((grown, cell))
+        return out
+
+    @cached_property
+    def _name_changes(self) -> dict[str, list[tuple[_Cell, _Growth]]]:
+        """Each place any cell adds to what a name holds (`_Cell.grows`), by
+        the name, in the order of the cells: built once per check, so a read
+        of one name's additions doesn't walk every cell."""
+        out: dict[str, list[tuple[_Cell, _Growth]]] = {}
+        for cell in self.cells:
+            for name, changes in cell.grows.items():
+                out.setdefault(name, []).extend((cell, change) for change in changes)
+        return out
+
+    @cached_property
+    def _cells_naming(self) -> dict[str, list[_Cell]]:
+        """The cells that bind another name to a name's value or pass the name
+        to a call (`_Cell.aliases`, `_Cell.passed`), by the name, in the order
+        of the cells: built once per check (`list_growth`)."""
+        out: dict[str, list[_Cell]] = {}
+        for cell in self.cells:
+            for name in {*cell.aliases, *cell.passed}:
+                out.setdefault(name, []).append(cell)
         return out
 
     def list_growth(self, *, name: str, binding: _Binding, depth: int = 0) -> list[tuple[_Growth, _Cell]] | _Unknown:
@@ -4587,7 +4806,7 @@ class _Reader:
         out = self.growth(name, binding)
         if self.stops("growth", binding.value, depth=depth, limit=3):
             return out
-        for cell in self.cells if binding.scope is None else [binding.cell]:
+        for cell in self._cells_naming.get(name, ()) if binding.scope is None else [binding.cell]:
             for alias in cell.aliases.get(name, ()):
                 for b in cell.bindings.get(alias, ()):
                     if (b.how == "value" and isinstance(b.value, ast.Name) and b.value.id == name
@@ -5677,7 +5896,7 @@ def _reaches_a_runner(
         # for a function the checked cells define, to each call of it there;
         # and anywhere at all for any other.
         func = parent if isinstance(parent, ast.Lambda) else cell.scope_of(parent)
-        call = reader.returns_to.get(id(func)) or _mapping_call(func, cell, reader)
+        call = reader.returned_to(func) or _mapping_call(func, cell, reader)
         if call is not None:
             return on(call)
         calls = _own_calls(func, cell, reader)
@@ -6933,8 +7152,7 @@ def _written_statements(node: ast.AST, reader: _Reader, *, depth: int = 0) -> tu
         if b.how != "param":
             found += reader.statements_held(node.id, b, prose=False)
             continue
-        key = (id(b.value), node.id)
-        args = [reader.param_args[key]] if key in reader.param_args else reader.call_sites(b.value, node.id)
+        args = reader.args_for(b.value, node.id)
         for a in args:
             if a is not None:
                 found += _written_statements(a.node, reader, depth=depth + 1)
@@ -7039,7 +7257,7 @@ class _OwnedFiles:
             what it overwrites, with the literal code it passes to exec(),
             and each function either calls in turn."""
             func = callee.func
-            if callee.call is None or id(func) in chain or len(chain) >= _CALL_DEPTH:
+            if callee.call is None or callee.past or id(func) in chain or len(chain) >= _CALL_DEPTH:
                 return
             home = reader.cell_of(func)
             if not _defined_before(func, home=home, cell=cell, at=at):
@@ -7529,9 +7747,18 @@ def _node_commands(node: ast.AST, reader: _Reader, *, depth: int) -> list[str | 
                     grown = reader.list_growth_for_write(name=node.id, binding=b)
                     for words in _commands(b.value, reader, depth=here):
                         if isinstance(words, list) and (isinstance(grown, _Unknown) or grown):
-                            # Words the cell adds to the list.
-                            words = [*words, _NOT_LITERAL]
-                        out.append(words)
+                            # The words the cell adds to the list, or one the check
+                            # can't read, the program itself where a change may move it.
+                            added = None if isinstance(grown, _Unknown) else _grown_words(words, grown, reader,
+                                                                                          depth=depth)
+                            if added is not None:
+                                out += added
+                            elif not isinstance(grown, _Unknown) and any(_moves_program(g) for g, _ in grown):
+                                out.append([_NOT_LITERAL])
+                            else:
+                                out.append([*words, _NOT_LITERAL])
+                        else:
+                            out.append(words)
                 elif b.how == "value" and isinstance(b.value, ast.Name):
                     # Another name for the command, as `c1 = c0` gives one.
                     out += _commands(b.value, reader, depth=depth + 1)
@@ -7636,21 +7863,15 @@ def _word_lists(*, node: ast.AST, reader: _Reader, depth: int) -> list[list[str]
             lists = [c for c in _commands(side, reader, depth=depth) if isinstance(c, list)]
             if not lists and reader.cuts > mark:
                 return []
-            words = [left + right for left in words for right in lists or [[_NOT_LITERAL]]]
+            if not lists:
+                # A sequence of literal texts, as a comprehension of the
+                # missing packages or `sorted(names)` gives.
+                texts = _sequence_texts(side, reader, depth=depth + 1)
+                lists = [[_NOT_LITERAL] if texts is None else texts]
+            words = [left + right for left in words for right in lists]
         return words
     return None
 
-
-# Commands one call's words or text read through names may give; past this
-# many, a word stays one the check can't read.
-_COMMAND_LIMIT = 16
-# The flag a program takes code to run after, as `python -c` or `sh -uc`
-# does, as a word and at the end of a command's text.
-_CODE_FLAG = re.compile(r"-[A-Za-z]*c")
-_CODE_FLAG_BEFORE = re.compile(r"(?:^|\s)-[A-Za-z]*c\s+['\"]?$")
-# Calls that give back the text they're handed, or None: `shutil.which("ffmpeg")`
-# is the path of that same program.
-_SAME_TEXT_CALLS = frozenset({"shutil.which", "str", "os.fspath"})
 
 
 def _literal_texts(node: ast.AST, reader: _Reader, *, depth: int = 0) -> list[str] | None:
@@ -7660,9 +7881,9 @@ def _literal_texts(node: ast.AST, reader: _Reader, *, depth: int = 0) -> list[st
     of the other's, up to `_COMMAND_LIMIT`; the entries of a list or dict it
     looks up (`_Reader.items_of`); what `shutil.which` or `str` is handed;
     and any other value `_Reader.paths` reads whole. Empty when it holds
-    none: a parameter of a function nothing calls. None when a part is a
-    value the check can't read, or past the depth limit (`stops`). Read once
-    per check (`_Reader.remembered`)."""
+    none: a `None`, or a parameter of a function nothing calls. None when a
+    part is a value the check can't read, or past the depth limit (`stops`).
+    Read once per check (`_Reader.remembered`)."""
     return reader.remembered("texts", node, depth=depth, compute=lambda: _node_texts(node, reader, depth=depth))
 
 
@@ -7672,7 +7893,9 @@ def _node_texts(node: ast.AST, reader: _Reader, *, depth: int) -> list[str] | No
         return None
     parts: Sequence[ast.AST]
     if isinstance(node, ast.Constant):
-        return [node.value] if isinstance(node.value, str) else None
+        # A `None`, as a parameter's default, holds no text: `pkg or name`
+        # gives `name` where the call passes no `pkg`.
+        return [node.value] if isinstance(node.value, str) else [] if node.value is None else None
     if isinstance(node, ast.Name):
         return _name_texts(node, reader, depth=depth)
     if isinstance(node, ast.IfExp):
@@ -7799,6 +8022,68 @@ def _sequence_texts(node: ast.AST, reader: _Reader, *, depth: int = 0) -> list[s
     return None
 
 
+def _spreads(growth: _Growth) -> bool:
+    """Whether `growth` adds each element of its value, as `extend`,
+    `update`, `+=`, `|=` and a store into the list do, rather than the value
+    itself, as `append`, `add` and `insert` do."""
+    site = growth.site
+    return isinstance(site, (ast.AugAssign, ast.Assign)) or (
+        isinstance(site, ast.Call) and isinstance(site.func, ast.Attribute) and site.func.attr in ("extend", "update")
+    )
+
+
+def _moves_program(growth: _Growth) -> bool:
+    """Whether `growth`, a change to a command's list, may put another word
+    where its program is: an `insert`, or a store at an index, at the front
+    or where the check can't tell."""
+    site = growth.site
+    if isinstance(site, ast.Call) and isinstance(site.func, ast.Attribute) and site.func.attr == "insert":
+        where: list[ast.AST] = site.args[:1]
+    elif isinstance(site, ast.Assign):
+        where = [t.slice.lower if isinstance(t.slice, ast.Slice) else t.slice
+                 for t in site.targets if isinstance(t, ast.Subscript)]
+    else:
+        return False
+    return not where or any(
+        not (isinstance(w, ast.Constant) and isinstance(w.value, int) and w.value > 0) for w in where
+    )
+
+
+def _grown_words(
+    words: list[str], growth: Sequence[tuple[_Growth, _Cell]], reader: _Reader, *, depth: int,
+) -> list[list[str]] | None:
+    """The word lists `words`, a command's list where a name is bound to it,
+    can be with the words the cell adds to the list in place after them, in
+    the order they run: each element `extend` or `+=` adds
+    (`_sequence_texts`), and an element `append` or `add` adds, read as a
+    word of a list written out is (`_command_word`, `_literal_texts`), one
+    list for each text it can hold, up to `_COMMAND_LIMIT` lists. None when
+    an addition isn't literal texts; when it may move the program, as an
+    `insert` or a store at an index may; or when it hands code to a `-c`
+    through a name, which isn't read as a literal."""
+    out = [list(words)]
+    for grown, _ in sorted(growth, key=lambda g: reader.position(g[0].site)):
+        site, value = grown.site, grown.value
+        method = site.func.attr if isinstance(site, ast.Call) and isinstance(site.func, ast.Attribute) else None
+        if grown.how != "add" or isinstance(site, ast.Assign) or method == "insert":
+            return None
+        if _spreads(grown):
+            texts = _sequence_texts(value, reader, depth=depth + 1)
+            options = None if texts is None else [texts]
+        else:
+            word = _command_word(value, reader)
+            texts = [word] if not _unreadable_word(word) else _literal_texts(value, reader, depth=depth + 1)
+            options = [[t] for t in dict.fromkeys(texts)] if texts else None
+        literal = all(isinstance(n, (ast.Constant, ast.List, ast.Tuple, ast.Set)) for n in ast.walk(value)
+                      if isinstance(n, ast.expr))
+        if options is None or len(out) * len(options) > _COMMAND_LIMIT:
+            return None
+        out = [[*w, *option] for w in out for option in options]
+        if not literal and any(_CODE_FLAG.fullmatch(w) for w in out[0]):
+            return None
+    return out
+
+
 def _name_sequence_texts(node: ast.Name, reader: _Reader, *, depth: int) -> list[str] | None:
     """The literal texts the elements of the sequence the name `node` reads
     can be (`_sequence_texts`)."""
@@ -7827,12 +8112,8 @@ def _name_sequence_texts(node: ast.Name, reader: _Reader, *, depth: int) -> list
         if got is None or isinstance(grown, _Unknown):
             return None
         for growth, _ in grown:
-            site = growth.site
-            spread = (isinstance(site, (ast.AugAssign, ast.Assign))
-                      or isinstance(site, ast.Call) and isinstance(site.func, ast.Attribute)
-                      and site.func.attr in ("extend", "update"))
-            more = (None if growth.how != "add" else _sequence_texts(growth.value, reader, depth=depth + 1) if spread
-                    else _literal_texts(growth.value, reader, depth=depth + 1))
+            more = (None if growth.how != "add" else _sequence_texts(growth.value, reader, depth=depth + 1)
+                    if _spreads(growth) else _literal_texts(growth.value, reader, depth=depth + 1))
             if more is None:
                 return None
             got += more
@@ -7943,17 +8224,16 @@ def _changed_in_place(name: str, found: Sequence[_Binding], reader: _Reader) -> 
 
 
 def _param_texts(name: str, binding: _Binding, reader: _Reader, *, depth: int) -> list[str] | None:
-    """The literal texts a parameter can hold (`_name_texts`)."""
-    key = (id(binding.value), name)
-    if key in reader.param_args:
-        arg = reader.param_args[key]
-        return None if arg is None else _literal_texts(arg.node, reader, depth=depth + 1)
-    sites = reader.call_sites(binding.value, name)
-    if not sites:
+    """The literal texts a parameter can hold (`_name_texts`), read from what
+    `_Reader.param_values` gives: none for a function nothing calls."""
+    values = reader.param_values(name, binding, depth=depth)
+    if values is None:
+        return None
+    if not values.args:
         return [] if reader.uncalled(binding.value) else None
     out: list[str] = []
-    for site in sites:
-        texts = None if site is None else _literal_texts(site.node, reader, depth=depth + 1)
+    for arg in values.args:
+        texts = None if arg is None else _literal_texts(arg.node, reader, depth=depth + 1)
         if texts is None:
             return None
         out += texts
@@ -8021,17 +8301,20 @@ def _names_executable(node: ast.AST | None, reader: _Reader) -> bool:
     )
 
 
-def _script_commands(text: str) -> list[list[str]]:
+def _script_commands(text: str, *, escapes: bool = True) -> list[list[str]]:
     """A shell script's commands, each the list of its words: split where a
     separator such as `;`, `&&`, `|`, a parenthesis or a backtick, or a line
     break, ends one, so a command `$(...)` or backticks substitute is one of
     them. A quoted line break stays in its word, and a word that starts with
-    `#` starts a comment to the end of its line."""
+    `#` starts a comment to the end of its line. A backslash escapes the
+    character after it, as in sh, unless not `escapes`, as in cmd."""
     try:
         lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|()\n`")
         lexer.whitespace = " \t\r"
         lexer.commenters = ""
         lexer.whitespace_split = True
+        if not escapes:
+            lexer.escape = ""
         tokens = list(lexer)
     except ValueError:
         tokens = re.findall(r"\n|`|[^ \t\r\n`]+", text)
@@ -8050,16 +8333,63 @@ def _script_commands(text: str) -> list[list[str]]:
     return commands
 
 
-def _script_steps(text: str, *, cwds: Sequence[str] | _Unknown, depth: int) -> list[_ShellStep]:
-    """The deletes and moves a shell script runs, command by command, each
-    after the folders its `cd`s reach."""
-    out: list[_ShellStep] = []
-    for words in _script_commands(text):
+class _ScriptCommand(NamedTuple):
+    """One command of a shell script (`_script_walk`): its words, and the
+    folder it changes into when it is a `cd`, None for any other."""
+
+    words: list[str]
+    cd: str | None
+
+
+def _script_walk(text: str, *, escapes: bool = True) -> Iterator[_ScriptCommand]:
+    """Each command of a shell script (`_script_commands`), read the same way
+    by the delete and move walk and the launch walk: a `cd` or `pushd` with
+    the folder it changes into, `~` with none given."""
+    for words in _script_commands(text, escapes=escapes):
+        if not words:
+            continue
         bare, _ = _command_words(words)
-        if bare and bare[0] in _CD_WORDS:
-            cwds = _shell_cd(cwds, bare[1] if len(bare) > 1 else "~")
+        cd = (bare[1] if len(bare) > 1 else "~") if bare and bare[0] in _CD_WORDS else None
+        yield _ScriptCommand(words=words, cd=cd)
+
+
+class _FindCommand(NamedTuple):
+    """A command `find` runs on each match (`_find_exec_commands`): the flag
+    that runs it, as `-exec` or `-execdir`, and its words."""
+
+    flag: str
+    words: list[str]
+
+
+def _find_exec_commands(args: list[str]) -> list[_FindCommand]:
+    """Each command `find`, given `args`, runs on each match: the words after
+    one of `_FIND_EXEC_FLAGS`, up to the `;` or `+` that ends them. The
+    delete and move walk and the launch walk read them the same way."""
+    return [
+        _FindCommand(flag=word, words=list(itertools.takewhile(lambda w: w not in (";", "+"), args[i + 1:])))
+        for i, word in enumerate(args) if word in _FIND_EXEC_FLAGS
+    ]
+
+
+def _program_name(word: str) -> str:
+    """The program a command's first word names: its last part past a `/`
+    or a `\\`, and, for a Windows program, lowercase and without `.exe`, as
+    `venv\\Scripts\\python.exe` names `python`."""
+    name = ntpath.basename(word)
+    if "\\" in word or name.lower().endswith(".exe") or sys.platform == "win32":
+        name = name.lower().removesuffix(".exe")
+    return name
+
+
+def _script_steps(text: str, *, cwds: Sequence[str] | _Unknown, depth: int) -> list[_ShellStep]:
+    """The deletes and moves a shell script runs, command by command
+    (`_script_walk`), each after the folders its `cd`s reach."""
+    out: list[_ShellStep] = []
+    for command in _script_walk(text):
+        if command.cd is not None:
+            cwds = _shell_cd(cwds, command.cd)
         else:
-            out += _words_steps(words, cwds=cwds, depth=depth)
+            out += _words_steps(command.words, cwds=cwds, depth=depth)
     return out
 
 
@@ -8101,7 +8431,7 @@ def _command_words(words: list[str]) -> tuple[list[str], bool]:
         out.append(word)
     from_input = False
     while out:
-        head = out[0].rsplit("/", 1)[-1]
+        head = _program_name(out[0])
         if _SHELL_ASSIGNMENT.match(out[0]) or out[0] in _SHELL_KEYWORDS:
             out.pop(0)
         elif head in _SHELL_PREFIXES:
@@ -8136,7 +8466,7 @@ def _words_steps(
     words, from_input = _command_words(words)
     if not words:
         return []
-    verb, args = words[0].rsplit("/", 1)[-1], words[1:]
+    verb, args = _program_name(words[0]), words[1:]
     picked = [_ShellStep(action="delete", operands=(_NOT_LITERAL,), cwds=cwds, files_only=False)]
     if "$" in verb or "`" in verb:
         # A command the shell picks when it runs, as in $(which rm) or $RM.
@@ -8162,13 +8492,14 @@ def _words_steps(
                 return []
             return [_ShellStep(action="delete", operands=(_NOT_LITERAL,), cwds=cwds, files_only=False)]
     if verb == "find":
-        runs = [args[i + 1].rsplit("/", 1)[-1] for i, a in enumerate(args[:-1])
-                if a in _FIND_EXEC_FLAGS]
-        if "mv" in runs:
-            return [_ShellStep(action="move", operands=(_NOT_LITERAL,), cwds=cwds, files_only=False)]
-        if "-delete" in args or any(r in _SHELL_DELETE for r in runs):
-            return [_ShellStep(action="delete", operands=(_NOT_LITERAL,), cwds=cwds, files_only=False)]
-        return []
+        # Each command it runs on a match deletes or moves what it matched;
+        # `-execdir` runs it in the match's own folder.
+        steps = [_ShellStep(action="delete", operands=(_NOT_LITERAL,), cwds=cwds, files_only=False)] if (
+            "-delete" in args
+        ) else []
+        for command in _find_exec_commands(args):
+            steps += _words_steps(command.words, cwds=_UNKNOWN if "dir" in command.flag else cwds, depth=depth)
+        return steps
     flags, operands, target_dir = _split_flags(args, takes_target=verb == "mv")
     if from_input:
         operands.append(_NOT_LITERAL)
@@ -8184,15 +8515,55 @@ def _words_steps(
     return []
 
 
-# Commands that run a script in turn: a shell, and `eval`, which runs its words.
-_SCRIPT_RUNNERS = frozenset({*_SHELLS, "eval"})
-
-
 def _inner_script(verb: str, args: list[str], stdin: str | None) -> str | _Unknown | None:
     """The script `verb`, one of `_SCRIPT_RUNNERS`, runs given `args`: its
-    words joined for `eval`, the one a shell runs (`_shell_script`). The
-    delete and move walk and the launch walk read it the same way."""
-    return " ".join(args) if verb == "eval" else _shell_script(args, stdin)
+    words joined for `eval`, the one cmd or PowerShell runs
+    (`_cmd_script`, `_powershell_script`), or the one a POSIX shell runs
+    (`_shell_script`). The delete and move walk and the launch walk read it
+    the same way."""
+    if verb == "eval":
+        return " ".join(args)
+    if verb in _CMD_SHELLS:
+        return _cmd_script(args, stdin)
+    if verb in _POWERSHELLS:
+        return _powershell_script(verb, args, stdin)
+    return _shell_script(args, stdin)
+
+
+def _cmd_script(args: list[str], stdin: str | None) -> str | _Unknown:
+    """The script cmd runs, given its arguments `args`: the words after `/c`
+    or `/k`, joined; or, with neither, the text its input gives it, unknown
+    when the check can't read one."""
+    for i, word in enumerate(args):
+        if word.lower() in ("/c", "/k", "/r"):
+            return " ".join(args[i + 1:])
+    return _UNKNOWN if stdin is None else stdin
+
+
+def _powershell_script(verb: str, args: list[str], stdin: str | None) -> str | _Unknown | None:
+    """The script PowerShell runs, given its arguments `args`: the words
+    after `-Command`, joined, or, for Windows PowerShell, the words from its
+    first that isn't a flag or a flag's value; unknown for a script encoded
+    in base64. None for a script file, as `-File` and pwsh's first word name.
+    With no script, the text its input gives it, unknown when the check
+    can't read one."""
+    skip = False
+    for i, word in enumerate(args):
+        if skip:
+            skip = False
+            continue
+        flag = "-" + word[1:].lower() if word[:1] in ("-", "/") else None
+        if flag in _POWERSHELL_COMMAND_FLAGS:
+            return " ".join(args[i + 1:])
+        if flag in _POWERSHELL_ENCODED_FLAGS:
+            return _UNKNOWN
+        if flag in _POWERSHELL_FILE_FLAGS:
+            return None
+        if flag is not None:
+            skip = flag in _POWERSHELL_VALUE_FLAGS
+            continue
+        return None if verb == "pwsh" else " ".join(args[i:])
+    return _UNKNOWN if stdin is None else stdin
 
 
 def _shell_script(args: list[str], stdin: str | None) -> str | _Unknown | None:
@@ -8212,13 +8583,16 @@ def _shell_script(args: list[str], stdin: str | None) -> str | _Unknown | None:
 class _Launch:
     """The Python a command launches: whether it runs code the check can't
     read; whether it installs the project in the cell's folder, which runs
-    such code only where the project builds (`_Reader.project_builds`); and
-    the literal code it hands `python -c`, each read as one more cell
+    such code only where the project builds (`_Reader.project_builds`);
+    whether it installs packages by name, from an index a setting in its
+    environment may point elsewhere (`_INSTALLER_SOURCE_SETTING`); and the
+    literal code it hands `python -c`, each read as one more cell
     (`_exec_cells`)."""
 
     unread: bool = False
     sources: tuple[str, ...] = ()
     syncs: bool = False
+    installs: bool = False
 
     @classmethod
     def joined(cls, launches: Sequence[_Launch]) -> _Launch:
@@ -8227,7 +8601,13 @@ class _Launch:
             unread=any(launch.unread for launch in launches),
             sources=tuple(source for launch in launches for source in launch.sources),
             syncs=any(launch.syncs for launch in launches),
+            installs=any(launch.installs for launch in launches),
         )
+
+    def pointed(self, points: bool) -> _Launch:
+        """This launch where its environment may point an install elsewhere
+        (`points`): one that installs packages runs code the check can't read."""
+        return replace(self, unread=True) if points and self.installs else self
 
 
 def _python_launch(call: ast.Call, reader: _Reader) -> _Launch | None:
@@ -8270,12 +8650,18 @@ def _python_launch(call: ast.Call, reader: _Reader) -> _Launch | None:
         return _Launch(unread=arg is None or not _never_given(arg, reader))
     given = _keyword(call, "input")
     stdin = None if given is None else _sql_text(given, reader)
-    moved = _keyword(call, "cwd") is not None or _keyword(call, "env") is not None
-    return _Launch.joined([
+    env = _keyword(call, "env")
+    moved = _keyword(call, "cwd") is not None or env is not None
+    launch = _Launch.joined([
         _script_launch(c, depth=0, stdin=stdin, moved=moved) if isinstance(c, str)
         else _command_launch(c, depth=0, stdin=stdin, moved=moved)
         for c in commands
     ])
+    # An install where the call's environment, or the pad's own, may point
+    # it at another index or a folder of the cell's.
+    return launch.pointed(launch.installs and (
+        env is not None and _env_points_installers(env, reader) or reader.points_installers
+    ))
 
 
 def _never_given(node: ast.AST, reader: _Reader, *, depth: int = 0) -> bool:
@@ -8300,22 +8686,40 @@ def _uncalled_param(name: str, binding: _Binding, reader: _Reader) -> bool:
     """Whether `binding` makes `name` a parameter of a function nothing calls
     and the call being read doesn't pass (`_Reader.uncalled`), as
     `_param_texts` reads it."""
-    return (binding.how == "param" and (id(binding.value), name) not in reader.param_args
+    return (binding.how == "param" and not reader.given(binding.value, name)
             and not reader.call_sites(binding.value, name) and reader.uncalled(binding.value))
 
 
 def _script_launch(text: str, *, depth: int, stdin: str | None, moved: bool) -> _Launch:
-    """The Python a shell script launches, command by command
-    (`_command_launch`). After a `cd`, a command runs in another folder
-    than the cell's, as `moved` says it does from the start. Only the first
-    command reads `stdin`."""
+    """The Python a shell script launches, command by command (`_script_walk`,
+    `_command_launch`). After a `cd`, a command runs in another folder than
+    the cell's, as `moved` says it does from the start. Only the first
+    command reads `stdin`. A script with a backslash is read again as cmd,
+    the shell a Windows pad runs a command's text in, reads it, with each
+    backslash kept, as in `venv\\Scripts\\python job.py`: either reading
+    that runs code the check can't read counts."""
+    launch = _commands_launch(_script_walk(text), depth=depth, stdin=stdin, moved=moved)
+    if "\\" in text and not launch.unread:
+        kept = _commands_launch(_script_walk(text, escapes=False), depth=depth, stdin=stdin, moved=moved)
+        return replace(launch, unread=kept.unread)
+    return launch
+
+
+def _commands_launch(
+    commands: Iterable[_ScriptCommand], *, depth: int, stdin: str | None, moved: bool,
+) -> _Launch:
+    """The Python a script's `commands` launch together (`_script_launch`).
+    A setting that points installs elsewhere (`_points_installers`), as an
+    `export` sets one, holds for each command after it."""
     launches: list[_Launch] = []
-    for words in (c for c in _script_commands(text) if c):
-        bare, _ = _command_words(words)
-        if bare and bare[0] in _CD_WORDS:
+    points = False
+    for command in commands:
+        if command.cd is not None:
             moved = True
-        else:
-            launches.append(_command_launch(words, depth=depth, stdin=None if launches else stdin, moved=moved))
+            continue
+        points = points or _points_installers(command.words)
+        launch = _command_launch(command.words, depth=depth, stdin=None if launches else stdin, moved=moved)
+        launches.append(launch.pointed(points))
     return _Launch.joined(launches)
 
 
@@ -8327,7 +8731,8 @@ def _command_launch(words: list[str], *, depth: int, stdin: str | None, moved: b
     the check can't read (`_pip_unread`, `_install_unread`), and what a
     shell's script, an `eval` or a `find -exec` runs in turn. A program
     word the check can't read may be any program, and so may a shell's
-    script past four shells deep. `stdin` is the text the
+    script past `_SHELL_DEPTH` shells deep. The Windows launcher `py` runs
+    Python, past the flags that pick which. `stdin` is the text the
     call gives the command as its input, when the check can read it;
     `moved` says the command runs in another folder or environment than
     the cell's, as a `VAR=value` before the program makes it do."""
@@ -8339,7 +8744,7 @@ def _command_launch(words: list[str], *, depth: int, stdin: str | None, moved: b
     moved = moved or any(_SHELL_ASSIGNMENT.match(w) for w in before)
     if _unreadable_word(bare[0]):
         return _Launch(unread=True)
-    verb, args = bare[0].rsplit("/", 1)[-1], bare[1:]
+    verb, args = _program_name(bare[0]), bare[1:]
     if verb in _SCRIPT_RUNNERS:
         script = _inner_script(verb, args, stdin)
         if script is None:
@@ -8349,26 +8754,24 @@ def _command_launch(words: list[str], *, depth: int, stdin: str | None, moved: b
             return _Launch(unread=True)
         return _script_launch(script, depth=depth + 1, stdin=None, moved=moved)
     if verb == "find":
-        launches: list[_Launch] = []
-        for i, word in enumerate(args):
-            if word in _FIND_EXEC_FLAGS:
-                command: list[str] = []
-                for part in args[i + 1:]:
-                    if part in (";", "+"):
-                        break
-                    command.append(part)
-                launches.append(_command_launch(command, depth=depth, stdin=None, moved=moved or "dir" in word))
-        return _Launch.joined(launches)
+        return _Launch.joined([
+            _command_launch(command.words, depth=depth, stdin=None, moved=moved or "dir" in command.flag)
+            for command in _find_exec_commands(args)
+        ])
     target = _env_runner_target(verb, args)
     if target is not None:
         return _command_launch(target, depth=depth, stdin=stdin, moved=moved)
     installs = _install_unread(verb, args)
     if installs is not None:
         # In another folder, the project it installs may be any.
-        return _Launch(unread=True) if installs.syncs and moved else installs
+        return _Launch(unread=True) if installs.syncs and moved else installs.pointed(_points_installers(before))
     pip_args = _pip_arguments(verb, args)
     if pip_args is not None:
-        return _Launch(unread=_pip_unread(pip_args))
+        return _pip_launch(pip_args).pointed(_points_installers(before))
+    if verb == "py":
+        if args and args[0] in _PY_LAUNCHER_LISTS:
+            return _Launch()
+        return _python_arguments(list(itertools.dropwhile(_PY_LAUNCHER_FLAG.fullmatch, args)), moved=moved)
     if _PYTHON_PROGRAM.fullmatch(verb):
         return _python_arguments(args, moved=moved)
     first = args[0] if args else ""
@@ -8468,7 +8871,7 @@ def _install_unread(verb: str, args: list[str]) -> _Launch | None:
         operands.append(word)
     if not operands:
         return _Launch(unread=verb == "pipenv")
-    return _Launch(unread=any(_pip_source_operand(word) for word in operands), syncs=syncs)
+    return _Launch(unread=any(_pip_source_operand(word) for word in operands), syncs=syncs, installs=True)
 
 
 def _pip_arguments(verb: str, args: list[str]) -> list[str] | None:
@@ -8521,7 +8924,7 @@ def _python_arguments(args: list[str], *, moved: bool) -> _Launch:
                     if _unreadable_word(given):
                         return _Launch(unread=True)
                     if given == "pip":
-                        return _Launch(unread=_pip_unread(list(words)))
+                        return _pip_launch(list(words))
                     return _Launch(unread=given not in _SETUP_MODULES)
                 if _HOLE in given or _NOT_LITERAL in given or "$" in given or "`" in given:
                     return _Launch(unread=True)
@@ -8587,6 +8990,91 @@ def _pip_unread(args: list[str]) -> bool:
         elif _pip_source_operand(word):
             return True
     return False
+
+
+def _pip_launch(args: list[str]) -> _Launch:
+    """What pip, given `args`, launches (`_pip_unread`): an install,
+    download or wheel build of packages by name installs from an index."""
+    rest = _drop_leading_flags(args, _PIP_VALUE_FLAGS)
+    return _Launch(unread=_pip_unread(args), installs=bool(rest) and rest[0] in _PIP_FETCH_COMMANDS)
+
+
+def _points_installers(words: Iterable[str]) -> bool:
+    """Whether `words`, a command's, set a setting that points pip or uv at
+    another index or a folder (`_INSTALLER_SOURCE_SETTING`), as
+    `PIP_INDEX_URL=... pip install` or `export PIP_FIND_LINKS=...` does."""
+    return any(
+        _INSTALLER_SOURCE_SETTING.fullmatch(word.partition("=")[0].removeprefix("$env:"))
+        for word in words if "=" in word
+    )
+
+
+def _env_points_installers(env: ast.AST, reader: _Reader, *, depth: int = 0) -> bool:
+    """Whether `env`, the environment a call hands a program or the pad's
+    own takes, may hold a setting that points pip or uv at another index or
+    a folder (`_INSTALLER_SOURCE_SETTING`): a dict, or `dict()`'s keywords,
+    with such a key or a key the check can't read, or one the check can't
+    read whole. The pad's own environment, as `os.environ` or a copy of it,
+    holds what a cell set in it (`_Reader.points_installers`)."""
+    if depth > _PARAM_DEPTH:
+        return True
+    name = reader.dotted(env.func) if isinstance(env, ast.Call) else reader.dotted(env)
+    if name in ("os.environ", "os.environ.copy"):
+        return False
+    if isinstance(env, ast.Dict):
+        return any(
+            _env_points_installers(v, reader, depth=depth + 1) if k is None else _names_installer_setting(k)
+            for k, v in zip(env.keys, env.values)
+        )
+    if isinstance(env, ast.Call) and name == "dict":
+        return any(_env_points_installers(a, reader, depth=depth + 1) for a in env.args) or any(
+            _env_points_installers(k.value, reader, depth=depth + 1) if k.arg is None
+            else bool(_INSTALLER_SOURCE_SETTING.fullmatch(k.arg)) for k in env.keywords
+        )
+    if not isinstance(env, ast.Name):
+        return True
+    found = reader.bindings_of(env.id, node=env)
+    if not found or any(b.how != "value" or _env_points_installers(b.value, reader, depth=depth + 1) for b in found):
+        return True
+    name = env.id
+
+    def holds(node: ast.AST) -> bool:
+        return isinstance(node, ast.Name) and node.id == name
+
+    return any(_changes_point_installers(cell, reader, holds=holds, depth=depth) for cell in reader.cells)
+
+
+def _changes_point_installers(cell: _Cell, reader: _Reader, *, holds: Callable[[ast.AST], bool], depth: int) -> bool:
+    """Whether `cell` changes in place an environment's dict, the one each
+    node `holds` reads, to hold a setting that points pip or uv elsewhere
+    (`_names_installer_setting`): a store under such a key, a `setdefault`
+    of one, or an `update` with one (`_env_points_installers`)."""
+    for node in cell.stores:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Subscript) and holds(t.value) and _names_installer_setting(t.slice) for t in node.targets
+        ):
+            return True
+    for call in cell.calls:
+        func = call.func
+        if not (isinstance(func, ast.Attribute) and holds(func.value)):
+            continue
+        if func.attr == "update" and (
+            any(_env_points_installers(a, reader, depth=depth + 1) for a in call.args)
+            or any(k.arg is None or _INSTALLER_SOURCE_SETTING.fullmatch(k.arg) for k in call.keywords)
+        ):
+            return True
+        if func.attr in ("setdefault", "__setitem__") and (not call.args or _names_installer_setting(call.args[0])):
+            return True
+    return False
+
+
+def _names_installer_setting(key: ast.AST) -> bool:
+    """Whether `key`, an environment's key, names a setting that points pip
+    or uv elsewhere (`_INSTALLER_SOURCE_SETTING`), or is one the check can't
+    read."""
+    if isinstance(key, ast.Constant) and isinstance(key.value, str):
+        return bool(_INSTALLER_SOURCE_SETTING.fullmatch(key.value))
+    return True
 
 
 def _pip_source_operand(word: str) -> bool:
@@ -8675,8 +9163,7 @@ def _http_client(node: ast.AST, reader: _Reader, *, depth: int = 0) -> ast.Call 
             if b.how in ("value", "context"):
                 values.append(b.value)
             elif b.how == "param":
-                key = (id(b.value), node.id)
-                args = [reader.param_args[key]] if key in reader.param_args else reader.call_sites(b.value, node.id)
+                args = reader.args_for(b.value, node.id)
                 values += [a.node for a in args if a is not None]
     for value in values:
         client = _http_client(value, reader, depth=depth + 1)
@@ -8768,8 +9255,7 @@ def _http_methods(node: ast.AST, reader: _Reader, *, depth: int = 0) -> list[str
     out: list[str] = []
     for b in found:
         if b.how == "param":
-            key = (id(b.value), node.id)
-            args = [reader.param_args[key]] if key in reader.param_args else reader.call_sites(b.value, node.id)
+            args = reader.args_for(b.value, node.id)
             values: list[ast.AST | None] = [None if a is None else a.node for a in args]
         elif b.how == "value":
             values = [b.value]
@@ -8978,14 +9464,34 @@ def _plain_lookup(call: ast.Call) -> ast.expr:
 
 
 def _plain_import(call: ast.Call) -> ast.expr | None:
-    """`__import__("os")` or `importlib.import_module("os")` as `os`, and
-    `importlib.import_module("os.path")` as `os.path`; None for any other call."""
-    args = call.args
-    named = bool(args) and isinstance(args[-1], ast.Constant) and isinstance(args[-1].value, str)
-    importer = _last_name(call.func)
-    if not (importer in ("__import__", "import_module") and len(args) == 1 and named and args[0].value):
+    """`__import__("os")` or `importlib.import_module("os")` as `os`,
+    `importlib.import_module("os.path")` as `os.path`, and a relative
+    `importlib.import_module(".helpers", "pkg")` as `pkg.helpers`, with the
+    package given by position or as `package=`. None for any other call: an
+    `__import__` given more than the name, a relative name with no literal
+    package, or any other keyword."""
+    args, importer = call.args, _last_name(call.func)
+    if importer == "import_module":
+        given = [*args[1:2], *(k.value for k in call.keywords if k.arg == "package")]
+        if len(args) > 2 or len(given) > 1 or any(k.arg != "package" for k in call.keywords):
+            return None
+    elif importer != "__import__" or len(args) != 1 or call.keywords:
         return None
-    parts = args[0].value.split(".")
+    else:
+        given = []
+    texts = [a.value if isinstance(a, ast.Constant) and isinstance(a.value, str) else "" for a in (*args[:1], *given)]
+    name = texts[0] if texts else ""
+    if not name:
+        return None
+    if name.startswith("."):
+        package = texts[1] if len(texts) > 1 else ""
+        if not package:
+            return None
+        try:
+            name = importlib.util.resolve_name(name, package)
+        except (ImportError, ValueError):
+            return None
+    parts = name.split(".")
     parts = parts[:1] if importer == "__import__" else parts
     out: ast.expr = ast.copy_location(ast.Name(id=parts[0], ctx=ast.Load()), call)
     for part in parts[1:]:
@@ -9102,10 +9608,11 @@ class _EarlierCells:
 _EARLIER_CELLS = _EarlierCells(budget=1_000_000)
 
 
-# The place a cell of literal code takes among the cells (`_Cell.order`),
-# which a conversation fixes as it grows: the exec cache keys a parsed cell by
-# it and the source.
 class _ExecCellKey(NamedTuple):
+    """A cell of literal code by its source and the place it takes among the
+    cells (`_Cell.order`), which a conversation fixes as it grows: the exec
+    cache keys a parsed cell by it."""
+
     text: str
     order: tuple[int, ...]
     host_line: int | None
@@ -9192,13 +9699,43 @@ def _exec_source(call: ast.Call, builtin: str) -> ast.AST | None:
 
 
 def _literal_source(node: ast.AST) -> str | None:
-    """The text of a str or bytes literal, or of an f-string with nothing to
-    fill in; None for any other code."""
-    if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
-        return node.value if isinstance(node.value, str) else node.value.decode("utf-8", errors="replace")
+    """The text of a str or bytes literal (`_decoded_source`), or of an
+    f-string with nothing to fill in; None for any other code."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Constant) and isinstance(node.value, bytes):
+        return _decoded_source(node.value)
     if isinstance(node, ast.JoinedStr) and all(isinstance(v, ast.Constant) for v in node.values):
         return "".join(str(v.value) for v in node.values)
     return None
+
+
+# A coding comment, as Python reads one in a source's first two lines.
+_CODING_COMMENT = re.compile(rb"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)")
+
+
+def _decoded_source(value: bytes) -> str | None:
+    """Bytes of Python code decoded as exec() and compile() decode them: by
+    a byte order mark or a coding comment, else as UTF-8. "" for bytes that
+    don't decode, which fail when they run too, so they run nothing; None
+    for a coding comment that names an encoding Python doesn't ship, which a
+    cell may have registered, so the code is one the check can't read."""
+    import codecs
+
+    try:
+        return importlib.util.decode_source(value)
+    except (SyntaxError, UnicodeDecodeError):
+        pass
+    for line in value.splitlines()[:2]:
+        found = _CODING_COMMENT.match(line)
+        if found is None:
+            continue
+        try:
+            codecs.lookup(found.group(1).decode("ascii"))
+        except LookupError:
+            return None
+        break
+    return ""
 
 
 @dataclass(frozen=True, eq=False)
@@ -9255,30 +9792,62 @@ def _exec_cells(reader: _Reader, starts: Sequence[_Cell], *, ran_only: bool = Fa
     (`_runner_code`), or to `python -c` in a program it runs
     (`_python_launch`), each source read as one more cell placed where its
     call runs (`_Cell.order`), and the literal code those cells pass on in
-    turn. A call spelled with one of the builtins' names counts whatever
-    binds the name; any other counts where `_Reader.exec_builtin` reads it
-    as the builtin. When a function an earlier cell defined spells one, the
-    literal code each such function a start calls runs is read too, within
-    `_CALL_DEPTH` calls, under that function. Past `_EXEC_LIMIT` cells for
-    one start it stops. With `ran_only`, only the code that runs when its
-    cell runs counts (`_nodes_that_run`), and a function only passed on as
-    a value isn't followed."""
-    read = _ExecRead.empty()
-    # How many cells each start's literal code made, by the start's host.
-    made: dict[int, int] = {}
+    turn (`_ExecReading`). When a function an earlier cell defined spells
+    one, the literal code each such function a start calls runs is read
+    too, within `_CALL_DEPTH` calls, under that function. With `ran_only`,
+    only the code that runs when its cell runs counts (`_nodes_that_run`),
+    and a function only passed on as a value isn't followed."""
+    reading = _ExecReading(reader, ran_only=ran_only)
+    for start in starts:
+        reading.sources(start, start.tree, host=start.host)
+    if reading.follows():
+        for start in starts:
+            for code in reading.read.with_ran(start, start.tree):
+                reading.follow(code.cell, code.root, (), host=start.host)
+    return reading.read
 
-    def exec_named(func: ast.AST) -> str | None:
-        # A bare exec, eval or compile counts whatever binds the name, so a
-        # def that shadows one keeps the read it had.
+
+class _ExecReading:
+    """One read of the literal code a set of cells runs (`_exec_cells`),
+    with `reader`: what it read so far (`read`), how many cells each start's
+    literal code made, by the start's host (`made`), past `_EXEC_LIMIT` of
+    which it stops, and the shortest chain of calls each function was
+    followed at (`followed`)."""
+
+    def __init__(self, reader: _Reader, *, ran_only: bool) -> None:
+        self.reader = reader
+        self.ran_only = ran_only
+        self.read = _ExecRead.empty()
+        self.made: dict[int, int] = {}
+        self.followed: dict[int, int] = {}
+
+    def exec_named(self, func: ast.AST) -> str | None:
+        """The builtin exec, eval or compile a call to `func` runs. A bare
+        name counts whatever binds it, so a def that shadows one keeps the
+        read it had; any other counts where `_Reader.exec_builtin` reads it
+        as the builtin."""
         if isinstance(func, ast.Name) and func.id in _EXEC_CALLS:
             return func.id
-        return reader.exec_builtin(func)
+        return self.reader.exec_builtin(func)
 
-    def sources(cell: _Cell, root: ast.AST, *, host: int, at_call: tuple[int, ...] | None = None) -> None:
-        # Literal code a function runs is placed at the call that runs the
-        # function (`at_call`), not where the def sits, then by the def's
-        # cell, so two functions one call reaches place theirs apart; it runs
-        # at the line of that call in the host.
+    def nodes(self, code: _Code) -> Iterable[ast.AST]:
+        """The nodes of `code` read for the calls that run literal code: only
+        those that run when its cell runs with `ran_only`, else a cell's own
+        calls, listed in walk order already, or every node of a function."""
+        if self.ran_only:
+            return code.cell.nodes_run_by(code.root)
+        if code.root is code.cell.tree:
+            return code.cell.calls
+        return ast.walk(code.root)
+
+    def sources(self, cell: _Cell, root: ast.AST, *, host: int, at_call: tuple[int, ...] | None = None) -> None:
+        """Reads the literal code `root`, code of `cell`, runs, and the code
+        that code runs in turn, each as one more cell. Literal code a
+        function runs is placed at the call that runs the function
+        (`at_call`), not where the def sits, then by the def's cell, so two
+        functions one call reaches place theirs apart; it runs at the line
+        of that call in the host."""
+        reader, read, made = self.reader, self.read, self.made
         into = read.ran.setdefault(id(root), [])
         pending = [_Code(cell=cell, root=root)]
         while pending and made.get(host, 0) < _EXEC_LIMIT:
@@ -9286,13 +9855,10 @@ def _exec_cells(reader: _Reader, starts: Sequence[_Cell], *, ran_only: bool = Fa
             called = at_call is not None and code.root is root
             place_at = (*at_call, *code.cell.order) if at_call is not None and called else code.cell.order
             host_line = at_call[1] if at_call is not None and called else code.cell.host_line
-            # A cell's own calls are listed in walk order already.
-            whole = code.root is code.cell.tree
-            nodes = code.cell.nodes_run_by(code.root) if ran_only else code.cell.calls if whole else ast.walk(code.root)
-            for node in nodes:
+            for node in self.nodes(code):
                 if not isinstance(node, ast.Call):
                     continue
-                builtin = exec_named(node.func)
+                builtin = self.exec_named(node.func)
                 launch: _Launch | None = None
                 if builtin:
                     source = _exec_source(node, builtin)
@@ -9337,45 +9903,52 @@ def _exec_cells(reader: _Reader, starts: Sequence[_Cell], *, ran_only: bool = Fa
                     into.append(ran)
                     pending.append(_Code(cell=ran, root=ran.tree))
 
-    # The shortest chain of calls each function was followed at.
-    followed: dict[int, int] = {}
+    def follows(self) -> bool:
+        """Whether a function an earlier cell defined may run literal code: an
+        earlier cell's function hands exec() or a runner text
+        (`runs_text`), or hands `python -c` code (`hands_python_code`), or a
+        cell imports a member of the builtins module, which may be exec under
+        another name."""
+        reader = self.reader
+        earlier = [c for c in reader.cells if c.host < reader.current.index]
+        return (
+            any(self.runs_text(c) for e in earlier for c in e.function_execs)
+            or any(self.hands_python_code(c) for e in earlier for c in e.function_launches)
+            or any(full.startswith("builtins.") for cell in reader.cells for full in cell.imports.values())
+        )
+
+    def runs_text(self, call: ast.Call) -> bool:
+        """Whether `call` hands exec(), eval(), compile() or a runner of text its code."""
+        return self.exec_named(call.func) is not None or _runner_code(call, self.reader) is not None
+
+    def hands_python_code(self, call: ast.Call) -> bool:
+        """Whether `call` runs a program that hands `python -c` literal code."""
+        launch = _python_launch(call, self.reader)
+        return launch is not None and bool(launch.sources)
 
     def follow(
-        cell: _Cell, root: ast.AST, chain: tuple[int, ...], *, host: int, at_call: tuple[int, ...] | None = None,
+        self, cell: _Cell, root: ast.AST, chain: tuple[int, ...], *, host: int, at_call: tuple[int, ...] | None = None,
     ) -> None:
-        for callee in _earlier_function_uses(reader, root, cell, ran_only=ran_only):
+        """Reads the literal code each earlier function `root` calls runs
+        (`sources`), under that function, then the functions it calls in
+        turn, within `_CALL_DEPTH` calls, each at the shortest chain it is
+        reached at."""
+        reader = self.reader
+        for callee in _earlier_function_uses(reader, root, cell, ran_only=self.ran_only):
             func = callee.func
-            if (id(func) in chain or len(chain) >= _CALL_DEPTH or ran_only and callee.call is None
-                    or followed.get(id(func), _CALL_DEPTH) <= len(chain)):
+            if (id(func) in chain or len(chain) >= _CALL_DEPTH or self.ran_only and callee.call is None
+                    or self.followed.get(id(func), _CALL_DEPTH) <= len(chain)):
                 continue
-            followed[id(func)] = len(chain)
+            self.followed[id(func)] = len(chain)
             home = reader.cell_of(func)
             # Where the start's own call that leads here runs.
             use = callee.call or callee.use
             here = at_call or (*cell.order, use.lineno, use.col_offset)
             with reader.calling(func, callee.call, bound=callee.bound):
-                if id(func) not in read.ran:
-                    sources(home, func, host=host, at_call=here)
-                for code in read.with_ran(home, func):
-                    follow(code.cell, code.root, (*chain, id(func)), host=host, at_call=here)
-
-    def runs_text(call: ast.Call) -> bool:
-        return exec_named(call.func) is not None or _runner_code(call, reader) is not None
-
-    def hands_python_code(call: ast.Call) -> bool:
-        launch = _python_launch(call, reader)
-        return launch is not None and bool(launch.sources)
-
-    for start in starts:
-        sources(start, start.tree, host=start.host)
-    earlier = [c for c in reader.cells if c.host < reader.current.index]
-    if any(runs_text(c) for e in earlier for c in e.function_execs) or any(
-        hands_python_code(c) for e in earlier for c in e.function_launches
-    ) or any(full.startswith("builtins.") for cell in reader.cells for full in cell.imports.values()):
-        for start in starts:
-            for code in read.with_ran(start, start.tree):
-                follow(code.cell, code.root, (), host=start.host)
-    return read
+                if id(func) not in self.read.ran:
+                    self.sources(home, func, host=host, at_call=here)
+                for code in self.read.with_ran(home, func):
+                    self.follow(code.cell, code.root, (*chain, id(func)), host=host, at_call=here)
 
 
 @dataclass(frozen=True)
@@ -9655,13 +10228,15 @@ def _cloned_into(words: list[str]) -> str | None:
     return posixpath.basename(operands[0].rstrip("/")).removesuffix(".git")
 
 
-def _on_disk(path: Path, *, folder: bool = False) -> bool:
-    """Whether `path` is a file, or a folder with `folder`, on disk now;
-    False where the system can't say, as for a name too long for it."""
+def _exists_on_disk(path: Path, *, folder: bool = False) -> bool:
+    """Whether `path` is a file, or a folder with `folder`, on disk now, as
+    an import would find a module there. False for a name too long to be a
+    file; True where the system can't say otherwise, as when it refuses to
+    look, since a cell may have written it."""
     try:
         return path.is_dir() if folder else path.is_file()
-    except OSError:
-        return False
+    except OSError as exc:
+        return exc.errno != errno.ENAMETOOLONG
 
 
 def _literal_non_module_args(call: ast.Call) -> bool:
@@ -9911,7 +10486,8 @@ class _Modules:
             if f"{base}{top}" in snap.dirs and top not in sys.stdlib_module_names:
                 return True
             if (snap.failed or not snap.complete) and (
-                _on_disk(snap.root / base / f"{top}.py") or _on_disk(snap.root / base / top, folder=True)
+                _exists_on_disk(snap.root / base / f"{top}.py")
+                or _exists_on_disk(snap.root / base / top, folder=True)
             ):
                 return True
         return False
@@ -9924,7 +10500,7 @@ class _Modules:
         if top not in self._new:
             entries = self.path_entries or frozenset()
             self._new[top] = any(
-                rel not in snap.files and _on_disk(snap.root / rel)
+                rel not in snap.files and _exists_on_disk(snap.root / rel)
                 for snap in self._snapshots if snap.complete and not snap.failed
                 for base in ("", *(f"{e}/" for e in entries if e and snap.label == "project"))
                 for rel in (f"{base}{top}.py", f"{base}{top}/__init__.py")
@@ -9939,7 +10515,7 @@ class _Modules:
         if any(top in snap.module_names for snap in self._snapshots):
             return True
         return any(
-            _on_disk(snap.root / f"{top}.py") or _on_disk(snap.root / top / "__init__.py")
+            _exists_on_disk(snap.root / f"{top}.py") or _exists_on_disk(snap.root / top / "__init__.py")
             for snap in self._snapshots if snap.failed or not snap.complete
         )
 
@@ -10020,13 +10596,18 @@ def _imports_unread(call: ast.Call, reader: _Reader, cell: _Cell, *, modules: _M
     or one by a name the check can't read (`_literal_texts`). A
     `pkgutil.resolve_name` or `pydoc.locate` target names the module before
     its colon. A name read as no text at all imports nothing only where it
-    is a parameter of a function nothing calls (`_never_given`)."""
+    is a parameter of a function nothing calls (`_never_given`), and so
+    does a relative name given no package."""
     target = _target_arg(call, keywords=("name", "path"))
     if target is None:
         return False
     texts = _literal_texts(target, reader)
     if texts == []:
         return not _never_given(target, reader)
+    if texts and all(text.startswith(".") for text in texts) and len(call.args) < 2 and not call.keywords:
+        # A relative name with no package to read it in: the import fails
+        # before it loads anything.
+        return False
     return texts is None or any(modules.unread(text.partition(":")[0], cell=cell) for text in texts)
 
 
@@ -10101,8 +10682,11 @@ def _unread_run_at(node: ast.AST, reader: _Reader, cell: _Cell, *, read: _ExecRe
             return True
         # A runner or importer passed on or stored, as `map(runpy.run_path, paths)`.
         call = cell.parents.get(node)
-        return (isinstance(node.ctx, ast.Load) and not (isinstance(call, ast.Call) and call.func is node)
-                and _runner_named(node, reader) and reader.module_member(node) in _RUNNER_VALUES)
+        if not (isinstance(node.ctx, ast.Load) and not (isinstance(call, ast.Call) and call.func is node)
+                and _runner_named(node, reader)):
+            return False
+        member = reader.module_member(node)
+        return member in _RUNNER_VALUES and not (member in _RUNNER_TYPES and _type_runner_aside(node, cell))
     if not isinstance(node, ast.Call):
         return False
     if _looks_up_a_runner(node, reader) or (
@@ -10110,6 +10694,29 @@ def _unread_run_at(node: ast.AST, reader: _Reader, cell: _Cell, *, read: _ExecRe
     ):
         return True
     return _runs_unread(node, reader, cell, read=read, modules=modules) or _launches_unread(node, reader, read=read)
+
+
+def _type_runner_aside(node: ast.AST, cell: _Cell) -> bool:
+    """Whether `node`, code of `cell` that loads a runner that is a type
+    (`_RUNNER_TYPES`), sits where nothing calls it: the class, or one of a
+    tuple of them, `isinstance` or `issubclass` checks against, a side of a
+    comparison, a dict key or an index, or an annotation."""
+    parent = cell.parents.get(node)
+    while isinstance(parent, ast.Tuple):
+        node, parent = parent, cell.parents.get(parent)
+    if isinstance(parent, ast.Call):
+        return isinstance(parent.func, ast.Name) and parent.func.id in ("isinstance", "issubclass") and (
+            node in parent.args[1:2]
+        )
+    if isinstance(parent, ast.Dict):
+        return node in parent.keys
+    if isinstance(parent, ast.Subscript):
+        return parent.slice is node
+    if isinstance(parent, (ast.AnnAssign, ast.arg)):
+        return parent.annotation is node
+    if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return parent.returns is node
+    return isinstance(parent, ast.Compare)
 
 
 def _writes_a_pth_file(call: ast.Call, reader: _Reader, cell: _Cell) -> bool:
@@ -10849,7 +11456,9 @@ def _earlier_function_uses(
     defined, or passes one on as a value: by its name anywhere, or through
     whatever else `_Reader.callees` reads where it is called or passed to a
     call. With `ran_only`, only the calls in code that runs when `root` runs
-    (`_nodes_that_run`): a function passed on as a value may never run."""
+    (`_nodes_that_run`): a function passed on as a value may never run. One
+    a depth limit stopped `callees` short of comes with them, read on past
+    the limit (`_Callee.past`)."""
     for node in cell.nodes_run_by(root) if ran_only else ast.walk(root):
         if not (isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)) and isinstance(node.ctx, ast.Load)):
             continue
@@ -10869,11 +11478,13 @@ def _earlier_function_uses(
             mark = reader.cuts
             found = reader.callees(node=node, call=call, use=node)
             if reader.cuts > mark:
-                # A function the depth limit stopped short of, beside any it reached.
+                # A function the depth limit stopped short of, beside any it
+                # reached, read for whether it may write alone (`_Callee.past`).
                 ids = {id(c.func) for c in found}
-                reader.read_past(mark, lambda: any(
-                    id(c.func) not in ids for c in reader.callees(node=node, call=call, use=node)
-                ))
+                more = reader.read_on(mark, lambda: [
+                    c for c in reader.callees(node=node, call=call, use=node) if id(c.func) not in ids
+                ])
+                found = [*found, *(replace(c, past=True) for c in more or ())]
             yield from found
 
 
@@ -10926,6 +11537,15 @@ class _ReadInputs:
     http_rules: tuple[HttpWriteRule, ...]
 
 
+class _Scan(NamedTuple):
+    """What a scan of a function past a limit found (`_CellRead.scan`):
+    whether it writes or runs code the check can't read, and each place it
+    calls an earlier function, unread."""
+
+    writes: bool
+    calls: tuple[_Callee, ...]
+
+
 class _CellRead:
     """One read of the checked cell, and of each earlier function it calls,
     with `reader` (`find_cell_writes`): what it would change, into `files`,
@@ -10952,6 +11572,11 @@ class _CellRead:
         # function the chain already read was read again for other literals.
         self._read_at: dict[_Visit, int] = {}
         self._reread: dict[int, int] = {}
+        # What each scan past a limit found (`past_the_limit`): by the
+        # function's id where the scan asked nothing of the call, else by
+        # the visit, so a body is scanned once per set of arguments at most.
+        self._scanned: dict[int, _Scan] = {}
+        self._scanned_at: dict[_Visit, _Scan] = {}
 
     def run(self) -> None:
         """Reads the checked cell and the literal code it runs, then each
@@ -10991,16 +11616,18 @@ class _CellRead:
         in turn, unless it `skips` the call. Past `_CALL_DEPTH` calls, or
         past `_REREAD_LIMIT` reads again of a function the chain reads for
         other literals, it is read only for whether it may write or call on
-        (`past_the_limit`), which leaves the cell unchecked."""
+        (`past_the_limit`), which leaves the cell unchecked; so is one found
+        only past a depth limit (`_Callee.past`), unless the chain reads it
+        already."""
         func = callee.func
         reader, inputs = self.reader, self.inputs
         visit = _Visit.of(callee, reader)
         guessed = guessed or callee.guessed
-        if self.skips(visit, chain):
-            return
         again = any(v.func == visit.func for v in chain)
+        if self.skips(visit, chain) or callee.past and again:
+            return
         self._read_at[visit] = len(chain)
-        if len(chain) >= _CALL_DEPTH or self.reread_out(visit, chain):
+        if len(chain) >= _CALL_DEPTH or callee.past or self.reread_out(visit, chain):
             if self.files_only:
                 if self.past_the_limit(callee, report=report, chain=chain, guessed=guessed):
                     self.past_cap.append(func)
@@ -11038,32 +11665,53 @@ class _CellRead:
         check can't place (`_Callee.guessed`), holds only on what it finds:
         such a chain may be none the cell runs."""
         func = callee.func
+        reader = self.reader
+        visit = _Visit.of(callee, reader)
+        # The chain an inner call would be read at.
+        inner_chain = (*chain, visit)
+        with reader.calling(func, callee.call, bound=callee.bound):
+            scan = self._scanned.get(id(func)) or self._scanned_at.get(visit)
+            if scan is None:
+                asks = reader.call_asks
+                with reader.afresh():
+                    scan = self.scan(callee, report=report)
+                # A scan that asked nothing of the call reads alike at any call.
+                if reader.call_asks == asks:
+                    self._scanned[id(func)] = scan
+                else:
+                    self._scanned_at[visit] = scan
+            if scan.writes:
+                return True
+            return not guessed and any(
+                c.func is not func and not self.skips(inner := _Visit.of(c, reader), inner_chain)
+                and not self.reread_out(inner, inner_chain) for c in scan.calls
+            )
+
+    def scan(self, callee: _Callee, *, report: _Report) -> _Scan:
+        """What `past_the_limit` reads of `callee` at its call: whether it
+        writes or runs code the check can't read, and the earlier functions
+        it calls, none of them followed. With `files_only`, only a held file
+        change counts, and no call does."""
+        func = callee.func
         reader, inputs = self.reader, self.inputs
         home = reader.cell_of(func)
-        # The chain an inner call would be read at.
-        inner_chain = (*chain, _Visit.of(callee, reader))
-        with reader.calling(func, callee.call, bound=callee.bound):
-            for code in inputs.literal_code.with_ran(home, func):
-                cell, root = code.cell, func if code.cell is home else None
-                changes = _file_findings(reader, cell, inputs.snapshots, root=root, report=report, owned=inputs.owned)
-                if any(change.held for change in changes):
-                    return True
-                if self.files_only:
-                    continue
-                if (_sql_findings(reader, cell, root=root, report=report)
-                        or _call_findings(reader, cell, root=root, report=report)
-                        or _http_findings(reader, cell, rules=inputs.http_rules, root=root, report=report)
-                        or _unread_code(reader, code.root, cell, read=inputs.literal_code, modules=inputs.modules)):
-                    return True
-                uses = _defined_uses(reader, code.root, cell, inputs.defined, inputs.modules)
-                self.reaches_defined.extend(uses.sites)
-                inner = [*_earlier_function_uses(reader, code.root, cell), *uses.callees]
-                if not guessed and any(
-                    c.func is not func and not self.skips(visit := _Visit.of(c, reader), inner_chain)
-                    and not self.reread_out(visit, inner_chain) for c in inner
-                ):
-                    return True
-        return False
+        calls: list[_Callee] = []
+        for code in inputs.literal_code.with_ran(home, func):
+            cell, root = code.cell, func if code.cell is home else None
+            changes = _file_findings(reader, cell, inputs.snapshots, root=root, report=report, owned=inputs.owned)
+            if any(change.held for change in changes):
+                return _Scan(writes=True, calls=())
+            if self.files_only:
+                continue
+            if (_sql_findings(reader, cell, root=root, report=report)
+                    or _call_findings(reader, cell, root=root, report=report)
+                    or _http_findings(reader, cell, rules=inputs.http_rules, root=root, report=report)
+                    or _unread_code(reader, code.root, cell, read=inputs.literal_code, modules=inputs.modules)):
+                return _Scan(writes=True, calls=())
+            uses = _defined_uses(reader, code.root, cell, inputs.defined, inputs.modules)
+            self.reaches_defined.extend(uses.sites)
+            calls += [*_earlier_function_uses(reader, code.root, cell), *uses.callees]
+        return _Scan(writes=False, calls=tuple(calls))
 
     def reread_out(self, visit: _Visit, chain: tuple[_Visit, ...]) -> bool:
         """Whether the chain reads `visit`'s function already and has read

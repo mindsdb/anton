@@ -1009,7 +1009,7 @@ async def test_repeated_compaction_preserves_mixed_outcomes_past_unparsable_code
 
 def test_compaction_keeps_code_and_outcome_in_order(project):
     """A compacted cell keeps its code, whether it failed, and the line it
-    stopped at, which the check reads what it bound before by."""
+    stopped at, which the check uses to tell what it bound before it stopped."""
     pad = _runtime(project, *_FILLERS, "total_6 = 6")
     pad.cells[1].error = "ValueError"
     pad.cells[1].stopped_at = 1
