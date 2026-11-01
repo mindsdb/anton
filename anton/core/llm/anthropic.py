@@ -222,6 +222,62 @@ def _build_native_web_tools(
     return entries, beta
 
 
+# Anthropic caches only prefixes that end at a marked block, at most 4 marks
+# per request. Thinking blocks cannot carry a mark.
+_CACHE_CONTROL = {"type": "ephemeral"}
+_UNMARKABLE_BLOCKS = frozenset({"thinking", "redacted_thinking"})
+
+
+def _cached_system(system: str) -> str | list[dict]:
+    """The system prompt as text blocks that each end in a cache mark.
+
+    Split at the session marker so the shared part stays cached when the
+    per-conversation tail (memory, workspace listing) changes.
+    """
+    from .prompt_builder import SESSION_CONTEXT_MARKER
+
+    if not system:
+        return system
+    if system.count(SESSION_CONTEXT_MARKER) == 1:
+        static, session = system.split(SESSION_CONTEXT_MARKER, 1)
+        parts = [static, SESSION_CONTEXT_MARKER + session]
+    else:
+        parts = [system]
+    return [{"type": "text", "text": p, "cache_control": _CACHE_CONTROL} for p in parts if p]
+
+
+def _cached_messages(messages: list[dict]) -> list[dict]:
+    """A copy of ``messages`` with a cache mark on the last message.
+
+    The caller's history is not modified: a mark left on an old message would
+    count against the 4-mark limit on every later request.
+    """
+    if not messages:
+        return messages
+    last = messages[-1]
+    content = last.get("content")
+    if isinstance(content, str) and content:
+        blocks = [{"type": "text", "text": content, "cache_control": _CACHE_CONTROL}]
+    elif isinstance(content, list):
+        blocks = list(content)
+        for i in range(len(blocks) - 1, -1, -1):
+            block = blocks[i]
+            if isinstance(block, dict) and block.get("type") not in _UNMARKABLE_BLOCKS:
+                blocks[i] = {**block, "cache_control": _CACHE_CONTROL}
+                break
+        else:
+            return messages
+    else:
+        return messages
+    return [*messages[:-1], {**last, "content": blocks}]
+
+
+def _usage_count(usage: object, field: str) -> int:
+    """A cache token count from usage; 0 when absent (older SDKs) or not a number."""
+    value = getattr(usage, field, 0)
+    return value if isinstance(value, int) else 0
+
+
 # The SDK's own 600 s read timeout would end a call that thinks in silence for
 # longer, before anton's own deadline (`LLMClient._idle_timeout_for`) does.
 _SDK_TIMEOUT = anthropic.Timeout(LONGEST_SILENCE_S, connect=5.0)
@@ -283,8 +339,8 @@ class AnthropicProvider(LLMProvider):
         kwargs: dict = {
             "model": model,
             "max_tokens": max_tokens,
-            "system": system,
-            "messages": messages,
+            "system": _cached_system(system),
+            "messages": _cached_messages(messages),
         }
         if merged_tools:
             kwargs["tools"] = merged_tools
@@ -338,15 +394,19 @@ class AnthropicProvider(LLMProvider):
 
 
         input_tokens = response.usage.input_tokens
+        # Anthropic reports cache activity as separate fields and its
+        # input_tokens already excludes them — pass through as-is.
+        cache_read_tokens = _usage_count(response.usage, "cache_read_input_tokens")
+        cache_creation_tokens = _usage_count(response.usage, "cache_creation_input_tokens")
         usage = Usage(
             input_tokens=input_tokens,
             output_tokens=response.usage.output_tokens,
-            context_pressure=compute_context_pressure(model, input_tokens),
-            # Anthropic reports cache activity as separate fields and its
-            # input_tokens already excludes them — pass through as-is.
-            # getattr-guarded: absent on older SDK responses.
-            cache_read_tokens=getattr(response.usage, "cache_read_input_tokens", 0) or 0,
-            cache_creation_tokens=getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
+            # Cached tokens still fill the context window.
+            context_pressure=compute_context_pressure(
+                model, (input_tokens or 0) + cache_read_tokens + cache_creation_tokens
+            ),
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
         )
         self.log_usage(model=model, usage=usage, served_model=getattr(response, "model", None))
 
@@ -380,8 +440,8 @@ class AnthropicProvider(LLMProvider):
         kwargs: dict = {
             "model": model,
             "max_tokens": max_tokens,
-            "system": system,
-            "messages": messages,
+            "system": _cached_system(system),
+            "messages": _cached_messages(messages),
         }
         if merged_tools:
             kwargs["tools"] = merged_tools
@@ -420,8 +480,8 @@ class AnthropicProvider(LLMProvider):
                         usage = event.message.usage
                         input_tokens = usage.input_tokens
                         output_tokens = getattr(usage, "output_tokens", 0)
-                        cache_read_tokens = getattr(usage, "cache_read_input_tokens", 0) or 0
-                        cache_creation_tokens = getattr(usage, "cache_creation_input_tokens", 0) or 0
+                        cache_read_tokens = _usage_count(usage, "cache_read_input_tokens")
+                        cache_creation_tokens = _usage_count(usage, "cache_creation_input_tokens")
 
                     elif event.type == "content_block_start":
                         idx = event.index
@@ -519,7 +579,10 @@ class AnthropicProvider(LLMProvider):
             usage = Usage(
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
-                context_pressure=compute_context_pressure(model, input_tokens),
+                # Cached tokens still fill the context window.
+                context_pressure=compute_context_pressure(
+                    model, (input_tokens or 0) + cache_read_tokens + cache_creation_tokens
+                ),
                 cache_read_tokens=cache_read_tokens,
                 cache_creation_tokens=cache_creation_tokens,
             )
