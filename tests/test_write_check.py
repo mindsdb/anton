@@ -19,7 +19,7 @@ from typing import Literal
 
 import pytest
 import yaml
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict
 
 from anton.core.backends.base import Cell, CompactedCell
 from anton.core.utils import scratchpad
@@ -459,38 +459,35 @@ def test_cells_that_write_a_database(code, snap):
     assert _held(code, snap)
 
 
+class _EarlierRow(EarlierCell):
+    """An earlier cell a fixture row gives as a mapping, for one that stopped
+    on an error or at a line. `extra="forbid"` so a typo'd key fails the run."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
 class _UnreadCase(BaseModel):
     """One row of the unread-code fixture. `extra="forbid"` so a typo'd key
     (`kind:` for `kinds:`) fails the run instead of being ignored, and `card`
-    is one of the three the test knows. `earlier_errored` and
-    `earlier_stopped_at` pair with `earlier` by position, so each is empty
-    or as long as `earlier`, and `earlier_cells` reads the three as the
-    earlier cells `find_cell_writes` takes."""
+    is one of the three the test knows. Each `earlier` entry is a cell's
+    code, for one that ran to its end, or an earlier cell with its outcome,
+    and `earlier_cells` reads them as the earlier cells `find_cell_writes`
+    takes."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: str
     code: str
     card: Literal["unchecked", "read", "none"]
-    earlier: list[str] = []
-    earlier_errored: list[bool] = []
-    earlier_stopped_at: list[int | None] = []
+    earlier: list[str | _EarlierRow] = []
     files: dict[str, str] = {}
     empty_project: bool = False
     kinds: list[str] = []
     not_kinds: list[str] = []
 
-    @model_validator(mode="after")
-    def _beside_earlier(self) -> "_UnreadCase":
-        """Each list beside `earlier` is empty or as long as it."""
-        for field, given in (("earlier_errored", self.earlier_errored), ("earlier_stopped_at", self.earlier_stopped_at)):
-            if given and len(given) != len(self.earlier):
-                raise ValueError(f"{field} has {len(given)} entries for {len(self.earlier)} earlier cells")
-        return self
-
     def earlier_cells(self) -> list[EarlierCell]:
-        """The row's earlier cells, each with the outcome the lists beside them give."""
-        return _earlier(self.earlier, errored=self.earlier_errored, stopped_at=self.earlier_stopped_at)
+        """The row's earlier cells, oldest first."""
+        return [EarlierCell(code=cell) if isinstance(cell, str) else cell for cell in self.earlier]
 
 
 _UNREAD_CODE = yaml.safe_load(
@@ -714,6 +711,13 @@ def _flags_under_ifs(start: str, flag: str, *, count: int) -> str:
     ([], f"import subprocess\nfor a in {[*(f'tool{i}' for i in range(999)), 'python3']!r}:\n"
      f"    for b in {[f'arg{i}' for i in range(1000)]!r}:\n"
      "        head = [a]\n        tail = [b]\n        subprocess.run(head + tail)", "unchecked"),
+    (["import os\nimport pandas as pd\nout = 'reports'\n" + "".join(f"out = os.path.join(out, 'part{i}')\n" for i in range(300))
+      + "pd.DataFrame({'a': [1]}).to_csv(os.path.join(out, 'summary.csv'))"], "import requests", "none"),
+    (["import importlib.util, sys\nspec = importlib.util.spec_from_file_location('job', 'job.py')\n" + "spec = spec\n" * 200
+      + "m = importlib.util.module_from_spec(spec)\nsys.modules[spec.name] = m\nspec.loader.exec_module(m)"],
+     "import json\nprint(json.dumps(1))", "none"),
+    ([], "import os\ncmd = 'ls'; cmd = cmd + ' -a'; cmd = cmd + ' -l'\nos.system(cmd)", "none"),
+    ([], "import os\ncmd = 'python3'; cmd = cmd + ' -u'; cmd = cmd + ' job.py'\nos.system(cmd)", "unchecked"),
 ], ids=["recursion-with-two-literal-parameters", "recursive-state-machine", "recursive-state-machine-of-eighty-states",
         "command-list-rebuilt-sixteen-times",
         "command-list-rebuilt-three-hundred-times", "command-text-rebuilt-three-hundred-times",
@@ -723,7 +727,9 @@ def _flags_under_ifs(start: str, flag: str, *, count: int) -> str:
         "python-command-flag-under-thirty-ifs", "command-text-flag-under-thirty-ifs",
         "python-command-text-rebuilt-three-hundred-times", "names-derived-from-unread-code-over-a-hundred-cells",
         "two-thousand-names-derived-from-unread-code-in-one-cell", "pip-install-loop-over-three-thousand-names",
-        "command-joined-from-two-loops-over-a-thousand-names"])
+        "command-joined-from-two-loops-over-a-thousand-names", "import-after-a-path-rebuilt-three-hundred-times",
+        "import-after-a-module-stored-at-the-end-of-a-spec-alias-chain", "command-text-rebuilt-twice-on-its-first-line",
+        "python-command-text-rebuilt-twice-on-its-first-line"])
 def test_a_recursion_or_a_rebuilt_command_is_read_in_well_under_a_second(earlier, code, card, snap):
     """A function the chain already reads is read again for other literals
     only so often (`_REREAD_LIMIT`); a name rebound from itself reads each
@@ -739,7 +745,11 @@ def test_a_recursion_or_a_rebuilt_command_is_read_in_well_under_a_second(earlier
     it from what code the check can't read made, reads each link again
     once (`_names_tainted`). A loop over a long literal list gives one
     command for each name in it, and two such lists joined with `+` join
-    as one list each (`_word_lists`), not one for each pair."""
+    as one list each (`_word_lists`), not one for each pair. A path a write
+    names, or the name a module was made under, read through a name
+    rebuilt from itself reads each binding once (`_Reader.read_bindings`).
+    A read sees only the bindings before it on its own line, so names
+    rebuilt on one line read down to their first value."""
     started = time.perf_counter()
     writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
     assert time.perf_counter() - started < 1

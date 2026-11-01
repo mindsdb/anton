@@ -14,7 +14,8 @@ from typing import AsyncIterator
 
 import httpx2 as httpx
 
-from anton.core.backends.base import NOTHING_KEPT, Cell, ScratchpadRuntime, stopped_line
+from anton.core.backends.base import Cell, ScratchpadRuntime, stopped_line
+from anton.core.backends.wire import NOTHING_KEPT
 from anton.core.llm.tracing import get_trace_context, trace_context_to_json
 
 

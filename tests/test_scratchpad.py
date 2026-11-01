@@ -5,10 +5,11 @@ import os
 
 import pytest
 
-from anton.core.backends.base import NOTHING_KEPT, Cell
+from anton.core.backends.base import Cell
 from anton.core.backends.local import LocalScratchpadRuntime
 from anton.core.backends.utils import compute_timeouts as _compute_timeouts
 from anton.core.backends.manager import ScratchpadManager
+from anton.core.backends.wire import NOTHING_KEPT
 from anton.core.backends.local import local_scratchpad_runtime_factory
 
 # Alias for brevity in tests

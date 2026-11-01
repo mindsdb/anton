@@ -62,6 +62,13 @@ CELL_FILENAME = "<scratchpad>"
 BOOT_IMPORTS = frozenset({"anton", "contextlib", "dill", "io", "json", "logging", "os", "sys", "threading", "traceback"})
 
 
+# The `stopped_at` of a cell that kept nothing it bound, as one whose process
+# died, was killed or never got to run it: no statement ends before the first
+# line, so the host's write check (`_Reader.ran_before_stop`) reads none of
+# its names as bound, nor those of a cell that doesn't compile.
+NOTHING_KEPT = 1
+
+
 def cell_stopped_at(tb: TracebackType | None, code: CodeType | None) -> int | None:
     """The line of a cell's own code an error stopped it at: the line of
     the frame that runs `code`, the cell's compiled code, in the traceback

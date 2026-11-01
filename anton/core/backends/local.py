@@ -18,7 +18,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
 
-from anton.core.backends.base import NOTHING_KEPT, ApiKeySupplier, Cell, ScratchpadRuntime, scrub_cell, stopped_line
+from anton.core.backends.base import ApiKeySupplier, Cell, ScratchpadRuntime, scrub_cell, stopped_line
 from anton.core.backends.sandbox import (
     CellSandbox,
     SandboxUnavailable,
@@ -33,6 +33,7 @@ from anton.core.backends.wire import (
     INSTALL_END_MARKER,
     INSTALL_START_MARKER,
     MAX_OUTPUT,
+    NOTHING_KEPT,
     PROGRESS_MARKER,
     RESULT_END,
     RESULT_START,
@@ -1628,7 +1629,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
         if result_data is None:
             # The process died mid-cell: the next cell gets the namespace as
-            # of the last one that completed.
+            # of the last one that completed, from the snapshot
+            # `LocalScratchpadRuntime.resume` reloads.
             result_data = {
                 "stdout": "",
                 "stderr": "",
@@ -1778,7 +1780,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     if refusal is not None:
                         error = str(refusal)
                 # The next cell gets the namespace as of the last one that
-                # completed.
+                # completed, from the snapshot `LocalScratchpadRuntime.resume`
+                # reloads.
                 yield {
                     "stdout": _salvage_tail(self._salvage, self._salvage_dropped),
                     "stderr": "",

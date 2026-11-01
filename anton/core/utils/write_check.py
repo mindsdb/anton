@@ -189,6 +189,7 @@ from anton.core.backends.wire import (
     CELL_FILENAME,
     EXPLAINABILITY_QUERIES_NAME,
     INJECTED_HELPER_NAMES,
+    NOTHING_KEPT,
     heal_surrogate_source,
 )
 from anton.utils.datasources import scrub_output
@@ -456,6 +457,13 @@ class ProjectSnapshot(BaseModel):
             name for path in self.files if _PACKAGE_FOLDERS.isdisjoint(path.split("/"))
             for name in _module_names(path)
         )
+
+    @cached_property
+    def module_places(self) -> frozenset[str]:
+        """Where an import reaches each module file under the root
+        (`_module_place`), as `lib/erp` for `lib/erp.py`, read once per
+        snapshot."""
+        return frozenset(place for path in self.files for place in [_module_place(path)] if place is not None)
 
     def roots(self) -> tuple[str, ...]:
         """The root's spellings an absolute path may start with."""
@@ -1695,6 +1703,10 @@ _EXEC_LIMIT = 8
 # Characters of one literal source the check reads as one more cell; past
 # this, a cell that runs it is unchecked.
 _LITERAL_CODE_LIMIT = 100_000
+# The methods of a test loader that import the test modules they find or
+# are named: `unittest.defaultTestLoader`'s, and a `unittest.TestLoader`'s
+# (`_INSTANCE_RUNNERS`).
+_TEST_LOADER_RUNS = frozenset({"discover", "loadTestsFromName", "loadTestsFromNames"})
 # Calls that run code in this process that the check can't read: a script,
 # a module, a notebook, a code object, or what a console, debugger, profiler
 # or test runner is handed.
@@ -1712,8 +1724,7 @@ _CODE_RUNNERS = frozenset({
     "site.addsitedir", "site.addpackage", "site.main",
     # The default loader's own discovery, which imports the test modules it
     # finds. `unittest.TestLoader()` goes through `_INSTANCE_RUNNERS`.
-    "unittest.defaultTestLoader.discover", "unittest.defaultTestLoader.loadTestsFromName",
-    "unittest.defaultTestLoader.loadTestsFromNames",
+    *(f"unittest.defaultTestLoader.{run}" for run in _TEST_LOADER_RUNS),
     # Importers and loaders that run a module from a path or a name.
     "pydoc.importfile", "imp.load_source", "imp.load_module", "imp.load_compiled",
     "imp.load_package", "imp.reload", "importlib._bootstrap._load", "importlib._bootstrap._exec",
@@ -1764,8 +1775,8 @@ _INSTANCE_RUNNERS = {
     "trace.Trace": frozenset({"run", "runctx", "runfunc"}),
     "nbclient.NotebookClient": frozenset({"execute"}),
     "nbclient.client.NotebookClient": frozenset({"execute"}),
-    "unittest.TestLoader": frozenset({"discover", "loadTestsFromName", "loadTestsFromNames"}),
-    "unittest.loader.TestLoader": frozenset({"discover", "loadTestsFromName", "loadTestsFromNames"}),
+    "unittest.TestLoader": _TEST_LOADER_RUNS,
+    "unittest.loader.TestLoader": _TEST_LOADER_RUNS,
     "IPython.core.interactiveshell.InteractiveShell.instance": _IPYTHON_SHELL_RUNS,
     "IPython.terminal.interactiveshell.TerminalInteractiveShell.instance": _IPYTHON_SHELL_RUNS,
     "IPython.terminal.embed.InteractiveShellEmbed": _IPYTHON_SHELL_RUNS,
@@ -1778,7 +1789,7 @@ _LOADER_METHODS = frozenset({"exec_module", "load_module"})
 # Calls that import a module by its name. `pkgutil.resolve_name` and
 # `pydoc.locate` take the name as "pkg.mod:attr" or "pkg.mod"; the module
 # before the colon is the one they load. `pkgutil.walk_packages` imports
-# every package it finds under the folders it is given (`_walks_unread`).
+# every package it finds under the folders it is given (`_walk_packages_unread`).
 _IMPORTERS = frozenset({
     "importlib.import_module", "importlib.__import__", "__import__", "builtins.__import__",
     "pkgutil.resolve_name", "pydoc.locate", "pydoc.safeimport", "pydoc.render_doc", "pydoc.doc",
@@ -1791,8 +1802,8 @@ _STRING_IMPORTERS = frozenset({"help", "pydoc.render_doc", "pydoc.doc"})
 # The importers whose result is the module itself, so a name bound to one
 # reads as that module (`_Reader._importer_module_texts`): all but those that
 # return an attribute, a rendering or a walk rather than the module.
-_MODULE_IMPORTERS = _IMPORTERS - {
-    "pkgutil.resolve_name", "pydoc.locate", "pydoc.render_doc", "pydoc.doc", "help", "pkgutil.walk_packages",
+_MODULE_IMPORTERS = _IMPORTERS - _STRING_IMPORTERS - {
+    "pkgutil.resolve_name", "pydoc.locate", "pkgutil.walk_packages",
 }
 _MODULE_IMPORTER_LAST_NAMES = frozenset(name.rpartition(".")[2] for name in _MODULE_IMPORTERS)
 # The test-program entry points that load and run a module or the tests
@@ -1875,12 +1886,15 @@ _COPY_INTO_FOLDER = (_COPY_FUNCS - {"shutil.copyfile"}) | {"shutil.move"}
 _LOOKUP_MODULES = frozenset({
     "os", "shutil", "pathlib", "pathlib.Path", "pathlib.PosixPath", "send2trash", "subprocess",
 })
+# `os.startfile` opens a file with the program its type is bound to, running
+# a `.py` it names (`_python_launch`).
+_STARTFILE = "os.startfile"
 _SHELL_FUNCS = frozenset({
     "subprocess.run", "subprocess.call", "subprocess.check_call", "subprocess.check_output",
     "subprocess.Popen", "subprocess.getoutput", "subprocess.getstatusoutput", "os.system", "os.popen",
     "asyncio.create_subprocess_shell", "anyio.run_process", "anyio.open_process", "trio.run_process",
     "trio.lowlevel.open_process", "pexpect.run", "pexpect.spawn", "invoke.run", "IPython.utils.process.system",
-    "IPython.utils.process.getoutput", "psutil.Popen",
+    "IPython.utils.process.getoutput", "psutil.Popen", _STARTFILE,
 })
 # Calls that run a program from its words: where the words start, either
 # spread over the arguments (the l forms) or as one list (the v forms).
@@ -1894,15 +1908,12 @@ _LIST_ARGV_FUNCS = {
     "os.spawnv": 2, "os.spawnve": 2, "os.spawnvp": 2, "os.spawnvpe": 2,
     "os.posix_spawn": 1, "os.posix_spawnp": 1, "pty.spawn": 0,
 }
-# `os.startfile` opens a file with the program its type is bound to, running
-# a `.py` it names (`_python_launch`).
-_STARTFILE = "os.startfile"
-_SHELL_FUNCS |= {_STARTFILE}
 # An asyncio event loop's own launcher methods, placed by their name since
 # the loop `get_running_loop` or `get_event_loop` returns is one the check
 # can't read: one runs a program's words after the protocol, the other a
 # shell command (`_loop_launch`).
-_LOOP_LAUNCHERS = {"subprocess_exec": "exec", "subprocess_shell": "shell"}
+_LoopLaunch = Literal["exec", "shell"]
+_LOOP_LAUNCHERS: dict[str, _LoopLaunch] = {"subprocess_exec": "exec", "subprocess_shell": "shell"}
 # Every call that runs a program, and the last names they are called by.
 _LAUNCHERS = frozenset({*_SHELL_FUNCS, *_SPREAD_ARGV_FUNCS, *_LIST_ARGV_FUNCS})
 _LAUNCH_NAMES = frozenset(name.rpartition(".")[2] for name in _LAUNCHERS)
@@ -2248,10 +2259,9 @@ _PATH_MAKERS = frozenset({"glob", "rglob", "iterdir", "resolve", "absolute", "wi
                           "with_name", "with_stem", "joinpath", "expanduser"})
 _ITER_WRAPPERS = frozenset({"next", "sorted", "list", "max", "min", "reversed", "iter", "tuple", "set", "frozenset"})
 
-_SCOPES = (
-    ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef,
-    ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp,
-)
+# The comprehensions, each a scope of its own, and every scope a name may bind in.
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef, *_COMPREHENSIONS)
 # Statements that give a name a value: those with a value of their own, and
 # loops and withs, whose head gives it (`_stores`).
 _VALUE_STORES = (ast.Assign, ast.AnnAssign, ast.NamedExpr)
@@ -2450,7 +2460,7 @@ class _ListChange(NamedTuple):
     node: ast.AST
 
 
-class _ModuleStore(NamedTuple):
+class _ModuleStoreSite(NamedTuple):
     """One place a cell stores a module in a mapping spelled `.modules`
     (`_Cell.module_stores`): the mapping, which `_stored_modules` reads as
     `sys.modules` through the imports; the code of the name it stores the
@@ -2460,6 +2470,16 @@ class _ModuleStore(NamedTuple):
     holder: ast.AST
     key: ast.AST | None
     value: ast.AST
+
+
+class _AsideSite(NamedTuple):
+    """One place a cell gives a name a value that `_Cell.bindings` leaves
+    out (`_CodeSigns.aside_sites`): the name, and the node that gives it,
+    the handler of an `except ... as`, a `global` or `nonlocal` statement,
+    the function of a `*` or `**` parameter, a match pattern or a walrus."""
+
+    name: str
+    node: ast.AST
 
 
 @dataclass(frozen=True)
@@ -2488,8 +2508,9 @@ class _CodeSigns:
     # it starts (`_NAMES_A_STARTUP_HOOK`): a `.pth` file's import lines, or a
     # `sitecustomize` or `usercustomize` module.
     names_a_startup_hook: bool
-    # Whether a string names a program that unpacks an archive into a folder
-    # (`_NAMES_UNPACK`), as a write of a module the pad imports may land there.
+    # Whether a string names a program that unpacks an archive or copies a
+    # tree of files into a folder (`_NAMES_UNPACK`), as a write of a module
+    # the pad imports may land there.
     names_unpack: bool
     # Whether a string holds `-c`, as the code `python -c` runs follows.
     names_dash_c: bool
@@ -2509,8 +2530,10 @@ class _CodeSigns:
     hint_aliases: frozenset[str]
     # The names an `except ... as`, `global` or `nonlocal` statement, a `*`
     # or `**` parameter, a match pattern or a walrus gives, which
-    # `_Cell.bindings` doesn't hold where they bind.
+    # `_Cell.bindings` doesn't hold where they bind, and each place one
+    # gives one (`_AsideSite`).
     bound_aside: frozenset[str]
+    aside_sites: tuple[_AsideSite, ...]
     # Each `global` statement.
     globals_declared: tuple[ast.Global, ...]
     # The strings it holds that could be a name, as a lookup in the cell
@@ -2886,6 +2909,40 @@ class _Cell:
             scope = self.scope_of(scope)
         return out
 
+    def binds_in_scope(self, node: ast.AST, name: str) -> bool:
+        """Whether a def, lambda, class or comprehension around `node` binds
+        `name` in its own scope, so a read of it there never reaches the
+        module's names: an assignment, parameter, loop, with, comprehension
+        or walrus (`bindings`), a def or class, an import, or a place
+        `bindings` leaves out (`_aside_scopes`), a `global` or `nonlocal`
+        statement among them, so `_Reader.binds` reads the name there."""
+        scopes = self.scopes_around(node)
+        return bool(scopes) and (
+            any(b.scope in scopes for b in self.bindings.get(name, ()))
+            or any(d.name == name and self.scope_of(d) in scopes for d in self.definitions)
+            or any(name in _import_names(stmt) and self.scope_of(stmt) in scopes for stmt in self.signs.imports)
+            or name in self.signs.bound_aside and any(
+                scope in scopes for site in self.signs.aside_sites if site.name == name
+                for scope in self._aside_scopes(site)
+            )
+        )
+
+    def _aside_scopes(self, site: _AsideSite) -> list[ast.AST]:
+        """The scopes `site` binds its name in: a function's own for its `*`
+        or `**` parameter, else the scope around it, and, for a walrus in a
+        comprehension, each scope around that up to the first that isn't
+        one, where Python binds it."""
+        if isinstance(site.node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            return [site.node]
+        out: list[ast.AST] = []
+        scope = self.scope_of(site.node)
+        while scope is not None:
+            out.append(scope)
+            if not (isinstance(site.node, ast.NamedExpr) and isinstance(scope, _COMPREHENSIONS)):
+                break
+            scope = self.scope_of(scope)
+        return out
+
     @cached_property
     def module_bound(self) -> frozenset[str]:
         """The names the cell binds at its top level, outside any function,
@@ -3121,32 +3178,33 @@ class _Cell:
         return tuple(out)
 
     @cached_property
-    def module_stores(self) -> tuple[_ModuleStore, ...]:
+    def module_stores(self) -> tuple[_ModuleStoreSite, ...]:
         """Each store of a module in a mapping spelled `.modules`, in any
-        scope (`_ModuleStore`): `m[k] = v`, `m.setdefault(k, v)`,
+        scope (`_ModuleStoreSite`): `m[k] = v`, `m.setdefault(k, v)`,
         `m.__setitem__(k, v)`, and `m.update(...)` of a dict, keywords or a
         mapping it can't read. Read from the lists the cell keeps (`stores`,
         `calls`)."""
-        out: list[_ModuleStore] = []
+        out: list[_ModuleStoreSite] = []
         for node in self.stores:
             if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
                 for t in node.targets if isinstance(node, ast.Assign) else [node.target]:
                     if isinstance(t, ast.Subscript) and _last_name(t.value) == "modules":
-                        out.append(_ModuleStore(holder=t.value, key=t.slice, value=node.value))
+                        out.append(_ModuleStoreSite(holder=t.value, key=t.slice, value=node.value))
         for call in self.calls:
             func = call.func
             if not (isinstance(func, ast.Attribute) and _last_name(func.value) == "modules"):
                 continue
             if func.attr in ("setdefault", "__setitem__") and len(call.args) >= 2:
-                out.append(_ModuleStore(holder=func.value, key=call.args[0], value=call.args[1]))
+                out.append(_ModuleStoreSite(holder=func.value, key=call.args[0], value=call.args[1]))
             elif func.attr == "update":
                 for arg in call.args:
                     if isinstance(arg, ast.Dict):
-                        out += [_ModuleStore(holder=func.value, key=k, value=v) for k, v in zip(arg.keys, arg.values)]
+                        out += [_ModuleStoreSite(holder=func.value, key=k, value=v)
+                                for k, v in zip(arg.keys, arg.values)]
                     else:
-                        out.append(_ModuleStore(holder=func.value, key=None, value=arg))
-                out += [_ModuleStore(holder=func.value, key=None if k.arg is None else ast.Constant(value=k.arg),
-                                     value=k.value) for k in call.keywords]
+                        out.append(_ModuleStoreSite(holder=func.value, key=None, value=arg))
+                out += [_ModuleStoreSite(holder=func.value, key=None if k.arg is None else ast.Constant(value=k.arg),
+                                         value=k.value) for k in call.keywords]
         return tuple(out)
 
     @cached_property
@@ -3169,7 +3227,7 @@ class _Cell:
         list_changes: list[_ListChange] = []
         path_aliases: set[str] = set()
         hint_aliases: set[str] = set()
-        aside: set[str] = set()
+        aside: list[_AsideSite] = []
         declared: list[ast.Global] = []
         spelled: set[str] = set()
         deleted: set[str] = set()
@@ -3210,20 +3268,20 @@ class _Cell:
                 if isinstance(node, ast.ImportFrom) and node.module == "sys":
                     path_aliases.update(a.asname or a.name for a in node.names if a.name == "path")
             elif isinstance(node, ast.ExceptHandler) and node.name:
-                aside.add(node.name)
+                aside.append(_AsideSite(name=node.name, node=node))
             elif isinstance(node, (ast.Global, ast.Nonlocal)):
-                aside.update(node.names)
+                aside += [_AsideSite(name=name, node=node) for name in node.names]
                 if isinstance(node, ast.Global):
                     declared.append(node)
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                aside.update(a.arg for a in (node.args.vararg, node.args.kwarg) if a is not None)
+                aside += [_AsideSite(name=a.arg, node=node) for a in (node.args.vararg, node.args.kwarg) if a is not None]
             elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
-                aside.add(node.name)
+                aside.append(_AsideSite(name=node.name, node=node))
             elif isinstance(node, ast.MatchMapping) and node.rest:
-                aside.add(node.rest)
+                aside.append(_AsideSite(name=node.rest, node=node))
             elif isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
                 # A walrus in a comprehension binds in the scope around it.
-                aside.add(node.target.id)
+                aside.append(_AsideSite(name=node.target.id, node=node))
             elif isinstance(node, ast.Delete):
                 deleted.update(t.id for t in node.targets if isinstance(t, ast.Name))
             if isinstance(node, ast.Call):
@@ -3262,7 +3320,8 @@ class _Cell:
             names_a_py_file=names_a_py_file, names_a_startup_hook=names_a_startup_hook, names_unpack=names_unpack,
             names_dash_c=names_dash_c, path_changes=tuple(path_changes), list_changes=tuple(list_changes),
             path_aliases=frozenset(path_aliases), hint_aliases=frozenset(hint_aliases),
-            bound_aside=frozenset(aside), globals_declared=tuple(declared), spelled=frozenset(spelled),
+            bound_aside=frozenset(site.name for site in aside), aside_sites=tuple(aside),
+            globals_declared=tuple(declared), spelled=frozenset(spelled),
             deleted=frozenset(deleted), py_files=frozenset(py_files),
         )
 
@@ -3342,14 +3401,14 @@ def _binds_on_every_path(
     unless the with enters `suppress(...)`, which may stop its body short,
     an if with an else both of whose arms do, or whose test is a constant
     and whose arm that runs does, a loop that surely starts its body
-    (`_starts_its_body`) whose target is it or whose body does before its
-    first break or continue, a match each of whose cases does by its
-    pattern or its body and whose last case matches anything, or a try
-    whose body or else does and each of whose handlers does too or ends in
-    a raise, or whose finally does. A call of one of `setters`, functions
-    that set it as a global on every path, binds it too, and, with
-    `walrus`, so does a walrus the statement surely runs (`_walrus_runs`).
-    Any other loop may run no time."""
+    (`_runs_body_surely`) whose target is it or whose body does before its
+    first break or continue (`_before_a_jump`), a match each of whose
+    cases does by its pattern or its body and whose last case matches
+    anything, or a try whose body or else does and each of whose handlers
+    does too or ends in a raise, or whose finally does. A call of one of
+    `setters`, functions that set it as a global on every path, binds it
+    too, and, with `walrus`, so does a walrus the statement surely runs
+    (`_walrus_runs`). Any other loop may run no time."""
     def every(stmts: Sequence[ast.stmt]) -> bool:
         return _binds_on_every_path(stmts, name, setters=setters, walrus=walrus)
 
@@ -3374,11 +3433,9 @@ def _binds_on_every_path(
             stmt.test, ast.Constant,
         ) and every(stmt.body if stmt.test.value else stmt.orelse)):
             return True
-        if _starts_its_body(stmt) and (
+        if _runs_body_surely(stmt) and (
             isinstance(stmt, (ast.For, ast.AsyncFor)) and name in _stored_names(stmt.target)
-            or every(stmt.body) and every(list(itertools.takewhile(
-                lambda s: not any(isinstance(n, (ast.Break, ast.Continue)) for n in ast.walk(s)), stmt.body,
-            )))
+            or every(_before_a_jump(stmt.body))
         ):
             return True
         if isinstance(stmt, ast.Match) and stmt.cases and _matches_anything(stmt.cases[-1]) and all(
@@ -3419,17 +3476,27 @@ def _namespace_key(target: ast.AST) -> str | None:
     return None
 
 
-def _starts_its_body(stmt: ast.stmt) -> bool:
-    """Whether the loop `stmt` surely starts its body once: a `while` whose
-    test is a true constant, or a loop over a literal of items."""
-    if isinstance(stmt, ast.While):
-        return isinstance(stmt.test, ast.Constant) and bool(stmt.test.value)
-    if isinstance(stmt, (ast.For, ast.AsyncFor)):
-        items = stmt.iter
+def _runs_body_surely(node: ast.AST) -> bool:
+    """Whether `node`, an if, a loop or a comprehension's loop, surely
+    starts its body once it runs: an if or a while whose test is a true
+    constant, or a loop over a literal of items, none of them spread, with
+    no filter on a comprehension's."""
+    if isinstance(node, (ast.If, ast.While)):
+        return isinstance(node.test, ast.Constant) and bool(node.test.value)
+    if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+        items = node.iter
         return isinstance(items, (ast.List, ast.Tuple, ast.Set)) and bool(items.elts) and not any(
             isinstance(e, ast.Starred) for e in items.elts
-        )
+        ) and not getattr(node, "ifs", ())
     return False
+
+
+def _before_a_jump(body: Sequence[ast.stmt]) -> list[ast.stmt]:
+    """The statements of `body` before the first that holds a `break` or a
+    `continue`, which may end a loop's pass there."""
+    return list(itertools.takewhile(
+        lambda s: not any(isinstance(n, (ast.Break, ast.Continue)) for n in ast.walk(s)), body,
+    ))
 
 
 def _matches_anything(case: ast.match_case) -> bool:
@@ -3470,7 +3537,7 @@ def _walrus_binds(node: ast.AST, name: str) -> bool:
     scope `node` is in: not past the first operand of `and` or `or`, nor in
     a branch of an if-expression, a lambda or a generator, which may not
     run it, and in a list, set or dict comprehension only where each of its
-    loops goes over a literal of items with no filter, so its element runs."""
+    loops surely runs its element (`_runs_body_surely`)."""
     if isinstance(node, ast.NamedExpr):
         return isinstance(node.target, ast.Name) and node.target.id == name or _walrus_binds(node.value, name)
     if isinstance(node, ast.BoolOp):
@@ -3481,10 +3548,7 @@ def _walrus_binds(node: ast.AST, name: str) -> bool:
         return False
     if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp)):
         parts = [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
-        return all(
-            isinstance(g.iter, (ast.List, ast.Tuple, ast.Set)) and g.iter.elts and not g.ifs
-            and not any(isinstance(e, ast.Starred) for e in g.iter.elts) for g in node.generators
-        ) and any(_walrus_binds(part, name) for part in parts)
+        return all(_runs_body_surely(g) for g in node.generators) and any(_walrus_binds(part, name) for part in parts)
     return any(_walrus_binds(child, name) for child in ast.iter_child_nodes(node))
 
 
@@ -3661,7 +3725,8 @@ def _since_last_sure(bindings: list[_Binding], *, name: str) -> list[_Binding]:
 def _ran_before(node: ast.AST, binding: _Binding, *, cell: _Cell) -> bool:
     """Whether `node`, in `cell`, surely ran before `binding` gave its name a
     value: in the binding's scope, and in an earlier cell, or earlier in the
-    binding's cell (`_follows`) outside any loop around the binding. Code in
+    binding's cell (`_follows`) outside any loop around the binding
+    (`_loop_holds_both`). Code in
     a function runs when it is called, a function's body after its
     parameters get their values, and code a cell passes to exec() later than
     all, so none of those counts."""
@@ -3669,14 +3734,20 @@ def _ran_before(node: ast.AST, binding: _Binding, *, cell: _Cell) -> bool:
         return False
     if cell is not binding.cell:
         return cell.order < binding.cell.order
-    if binding.how == "param" or _follows(node=node, value=binding.value):
-        return False
+    return not (binding.how == "param" or _follows(node=node, value=binding.value) or _loop_holds_both(node, binding))
+
+
+def _loop_holds_both(node: ast.AST, binding: _Binding) -> bool:
+    """Whether a loop around `binding`, in its scope, holds `node` too, code
+    of the binding's cell, so each pass after the first runs `node` after
+    the binding gave its name a value."""
+    cell = binding.cell
     current = cell.parents.get(binding.value)
     while current is not None and current is not binding.scope:
         if isinstance(current, (ast.For, ast.AsyncFor, ast.While)) and _inside(node, current, cell):
-            return False
+            return True
         current = cell.parents.get(current)
-    return True
+    return False
 
 
 class _Reader:
@@ -4488,7 +4559,10 @@ class _Reader:
         the exec() and those after it. Each layer runs from its last binding
         that surely ran (`_since_last_sure`), or whole for an earlier cell in
         `stopped`. A read in the value a binding gives, as the right side of
-        `cmd = cmd + ["-l"]`, runs before that binding."""
+        `cmd = cmd + ["-l"]`, runs before that binding, and so does one
+        before a binding later on its line, as `cmd = cmd + " -a"; cmd = cmd
+        + " -l"` gives one, but for a loop's binding that a later pass of
+        the loop reads (`_loop_holds_both`)."""
         cell = self.cell_of(node)
         read_at = self.position(node)
         line = getattr(node, "lineno", 0)
@@ -4496,7 +4570,9 @@ class _Reader:
 
         def ran(c: _Cell) -> list[_Binding]:
             if c is cell:
-                return [b for b in self._module_bindings(c, name) if b.line <= line and not _in_value(node, b)]
+                return [b for b in self._module_bindings(c, name) if b.line <= line and not _in_value(node, b) and not (
+                    _follows(node=b.value, value=node) and not _loop_holds_both(node, b)
+                )]
             if c.host != cell.host:
                 return self._module_bindings(c, name)
             return [b for b in self._module_bindings(c, name) if (*c.order, b.line) < read_at]
@@ -4698,15 +4774,14 @@ class _Reader:
             )
         return self._setters[name]
 
-    def binds_surely(self, node: ast.Name) -> bool:
-        """Whether read code surely gave the name `node`, a read at module
-        level of a conversation's cell, reads a value on every path to the
-        read: its own cell's code before it (`_Cell.bound_on_the_way`), or
-        a cell whose names land in the cell namespace that ran before it,
-        whole (`_Cell.binds_whole`) or, for one that stopped early, up to
-        its stop (`bound_before_stop`). Literal code counts only where the
-        call that runs it surely runs (`_Cell.surely_run`)."""
-        name = node.id
+    def binds_surely(self, node: ast.AST, name: str) -> bool:
+        """Whether read code surely gave `name` a value on every path to
+        `node`, a place at module level of a conversation's cell: its own
+        cell's code before it (`_Cell.bound_on_the_way`), or a cell whose
+        names land in the cell namespace that ran before it, whole
+        (`_Cell.binds_whole`) or, for one that stopped early, up to its stop
+        (`bound_before_stop`). Literal code counts only where the call that
+        runs it surely runs (`_Cell.surely_run`)."""
         cell = self.cell_of(node)
         setters = self.global_setters(name)
         if cell.bound_on_the_way(node, name, setters=setters):
@@ -5256,6 +5331,28 @@ class _Reader:
         else:
             self.cuts += hit.cuts
         return hit.value
+
+    def read_bindings(
+        self, read: str, node: ast.Name, *, depth: int, compute: Callable[[_Binding, int], _T],
+    ) -> list[_T]:
+        """What `compute`, the read named `read`, gives for each binding the
+        name `node` reads (`bindings_of`), from each cell's last value that
+        surely ran (`_latest`), handed the depth to read the binding's value
+        at: the same for a value built on the one before it, as `out =
+        os.path.join(out, "a")` is (`_rebuilt`), so a chain of them reads to
+        its end, else one deeper. Read once per check and depth
+        (`remembered`), down a name rebuilt many times first, in a loop
+        (`reading_ahead`), so it recurses no deeper than the chain's other
+        names."""
+
+        def through() -> list[_T]:
+            found = _latest(self.bindings_of(node.id, node=node))
+            with self.reading_ahead(read, node, depth=depth, compute=lambda load: self.read_bindings(
+                read, load, depth=depth, compute=compute,
+            )):
+                return [compute(b, depth if _rebuilt(b, node.id) else depth + 1) for b in found]
+
+        return self.remembered(read, node, depth=depth, compute=through)
 
     @contextmanager
     def reading_ahead(
@@ -9533,7 +9630,7 @@ def _python_launch(call: ast.Call, reader: _Reader) -> _Launch | None:
     ))
 
 
-def _loop_launch(call: ast.Call, reader: _Reader, *, kind: str) -> _Launch:
+def _loop_launch(call: ast.Call, reader: _Reader, *, kind: _LoopLaunch) -> _Launch:
     """The Python an asyncio loop's launcher method runs (`_LOOP_LAUNCHERS`):
     `subprocess_exec` takes the program's words after its protocol factory,
     read as a command (`_command_launch`); `subprocess_shell` takes a shell
@@ -9542,15 +9639,14 @@ def _loop_launch(call: ast.Call, reader: _Reader, *, kind: str) -> _Launch:
     moved = reader.cwds != ["."] or reader.points_python
     if kind == "exec":
         words = [_command_word(w, reader) for w in call.args[1:]]
-        return _Launch() if not words else replace(
-            _command_launch(words, depth=0, stdin=None, moved=moved), starts_python=True)
+        return _command_launch(words, depth=0, stdin=None, moved=moved) if words else _Launch()
     command = call.args[1] if len(call.args) > 1 else None
     text = None if command is None else _command_text(command, reader)
     if command is None:
         return _Launch()
     if text is None or _HOLE in text:
         return _Launch(unread=True)
-    return replace(_script_launch(text, depth=0, stdin=None, moved=moved), starts_python=True)
+    return _script_launch(text, depth=0, stdin=None, moved=moved)
 
 
 def _never_given(node: ast.AST, reader: _Reader, *, depth: int = 0) -> bool:
@@ -11135,13 +11231,16 @@ def _holds_a_running_member(node: ast.AST, reader: _Reader) -> bool:
     return False
 
 
-# What follows a module's name in the path of a file an import loads it from,
-# in a folder on `sys.path`: its source, its bytecode with no source beside
-# it, or a package's `__init__.py`.
-_MODULE_FILE_ENDS = (".py", ".pyc", "/__init__.py")
 # The endings of a compiled extension module, which an import loads like a
 # `.py`: its name runs up to the first dot, as `erp.cpython-311.so` is `erp`.
 _EXTENSION_ENDS = (".so", ".pyd")
+# What follows a module's name in the path of a file an import loads it from,
+# in a folder on `sys.path`, for a lookup on disk by that name: its source,
+# its bytecode with no source beside it, a compiled extension by an ending
+# this Python loads (`importlib.machinery.EXTENSION_SUFFIXES`), each a module
+# file's ending `_module_stem` reads, or a package's `__init__` with one.
+_MODULE_ENDS = (".py", ".pyc", *importlib.machinery.EXTENSION_SUFFIXES)
+_MODULE_FILE_ENDS = (*_MODULE_ENDS, *(f"/__init__{end}" for end in _MODULE_ENDS))
 
 
 def _module_stem(path: str) -> str | None:
@@ -11161,6 +11260,21 @@ def _module_stem(path: str) -> str | None:
     return None
 
 
+def _module_place(path: str) -> str | None:
+    """Where an import reaches the module file at `path`, as a path with no
+    ending: its folder joined to its name (`_module_stem`), `lib/erp` for
+    `lib/erp.py`, `lib/erp.pyc` or `lib/erp.cpython-311-darwin.so`, and a
+    package's own folder for its `__init__`, `lib/erp` for
+    `lib/erp/__init__.py`. None for any other file."""
+    stem = _module_stem(path)
+    if stem is None:
+        return None
+    folder = path.rpartition("/")[0]
+    if stem == "__init__":
+        return folder or None
+    return f"{folder}/{stem}" if folder else stem
+
+
 def _module_names(path: str) -> set[str]:
     """The names an import may reach a Python file at `path` by: its stem
     (`_module_stem`), and each folder above it, as a package or a folder on
@@ -11178,32 +11292,39 @@ _PACKAGE_FOLDERS = frozenset({"site-packages", "dist-packages"})
 # The endings of an archive an import reads modules out of once it is on
 # `sys.path` (`_Modules.archive_on_path`).
 _ARCHIVE_PATH_ENDS = (".zip", ".whl", ".egg", ".pyz")
-# Calls that write files whose paths the check doesn't read, as an archive's
-# extraction does, or a copy of a folder.
-class _TreeDestination(NamedTuple):
-    """Where a call that writes a tree of files takes the folder it writes:
-    its place among the arguments, and its keyword."""
+
+
+class _ArgPlace(NamedTuple):
+    """Where a call takes one of its arguments: its place among the
+    arguments, and its keyword."""
 
     place: int
     keyword: str
 
+    def given(self, call: ast.Call) -> ast.AST | None:
+        """What `call` passes there: the argument at `place`, else the one
+        by `keyword`; None where it passes neither."""
+        return call.args[self.place] if len(call.args) > self.place else _keyword(call, self.keyword)
 
-# Each call that writes a tree of files, by its last name, with where it
-# takes the folder it writes; with neither, the working folder.
+
+# Calls that write files whose paths the check doesn't read, as an archive's
+# extraction does, or a copy of a folder: each by its last name, with where
+# it takes the folder it writes; with neither, the working folder.
 _TREE_DESTINATIONS = {
-    "extractall": _TreeDestination(0, "path"), "extract": _TreeDestination(1, "path"),
-    "unpack_archive": _TreeDestination(1, "extract_dir"), "copytree": _TreeDestination(1, "dst"),
+    "extractall": _ArgPlace(0, "path"), "extract": _ArgPlace(1, "path"),
+    "unpack_archive": _ArgPlace(1, "extract_dir"), "copytree": _ArgPlace(1, "dst"),
 }
 _TREE_WRITERS = frozenset(_TREE_DESTINATIONS)
-# Calls that may write the file one argument names, by that argument's place,
-# beyond those `_written_target` reads; `py_compile.compile` writes the
-# bytecode its `cfile` names, which Python loads with no source.
-_FILE_MAKERS = {"os.open": 0, "codecs.open": 0, "urllib.request.urlretrieve": 1, "py_compile.compile": 1}
-# The keyword each of `_FILE_MAKERS` takes that file by, where it isn't given by place.
-_FILE_MAKER_KEYWORDS = {
-    "os.open": "path", "codecs.open": "filename", "urllib.request.urlretrieve": "filename",
-    "py_compile.compile": "cfile",
+# Calls that may write the file one argument names, beyond those
+# `_written_target` reads, with where each takes that file;
+# `py_compile.compile` writes the bytecode its `cfile` names, which Python
+# loads with no source.
+_FILE_MAKERS = {
+    "os.open": _ArgPlace(0, "path"), "codecs.open": _ArgPlace(0, "filename"),
+    "urllib.request.urlretrieve": _ArgPlace(1, "filename"), "py_compile.compile": _ArgPlace(1, "cfile"),
 }
+# A zip archive's `writestr`, which writes a member under the name it takes first.
+_WRITESTR = _ArgPlace(0, "zinfo_or_arcname")
 _FILE_MAKER_NAMES = frozenset({*(name.rpartition(".")[2] for name in _FILE_MAKERS), "writestr"})
 _WRITER_CALL_NAMES = frozenset({*_FILE_WRITE_NAMES, *_FILE_MAKER_NAMES, *_TREE_WRITERS, *_LAUNCH_NAMES, "touch"})
 
@@ -11260,10 +11381,8 @@ def _written_modules(reader: _Reader, cells: Sequence[_Cell]) -> _WrittenModules
                 target = call.func.value
             if target is None and last in _FILE_MAKER_NAMES:
                 maker = reader.module_member(call.func) or reader.dotted(call.func)
-                index = 0 if last == "writestr" else _FILE_MAKERS.get(maker)
-                target = call.args[index] if index is not None and len(call.args) > index else (
-                    _keyword(call, _FILE_MAKER_KEYWORDS[maker]) if maker in _FILE_MAKER_KEYWORDS else None
-                )
+                where = _WRITESTR if last == "writestr" else _FILE_MAKERS.get(maker)
+                target = None if where is None else where.given(call)
             if target is not None:
                 got = reader.paths(target, cell=cell)
                 if isinstance(got, _Unknown) or _TEMP_PATH in got:
@@ -11288,8 +11407,7 @@ def _written_modules(reader: _Reader, cells: Sequence[_Cell]) -> _WrittenModules
                             unpacks.append(reader.position(call))
                             unpacked.add(posixpath.dirname(p.split(_RUN_TIME_PART, 1)[0] + "x") or ".")
             elif last in _TREE_WRITERS:
-                where = _TREE_DESTINATIONS[last]
-                dest = call.args[where.place] if len(call.args) > where.place else _keyword(call, where.keyword)
+                dest = _TREE_DESTINATIONS[last].given(call)
                 got = ["."] if dest is None else reader.paths(dest, cell=cell)
                 unpacks.append(reader.position(call))
                 if isinstance(got, _Unknown):
@@ -11337,7 +11455,8 @@ _UNPACK_PROGRAMS = frozenset({*_UNPACK_DEST_FLAGS, *_SEVENZIP})
 # Programs that copy files into a folder, keeping their own names, so a
 # module lands there (`_copied_tree_into`).
 _TREE_COPY_PROGRAMS = frozenset({"cp", "mv", "rsync", "install"})
-_NAMES_UNPACK = re.compile(r"\b(?:unzip|tar|bsdtar|unar|7z[ar]?|rsync|install)\b")
+# A word that names one of them, or a program that unpacks an archive.
+_NAMES_UNPACK = re.compile(r"\b(?:%s)\b" % "|".join(map(re.escape, sorted(_UNPACK_PROGRAMS | _TREE_COPY_PROGRAMS))))
 
 
 def _unpacked_into(words: list[str]) -> str | None:
@@ -11377,8 +11496,8 @@ def _writes_site_packages(target: ast.AST, reader: _Reader, *, depth: int = 0) -
     """Whether `target`, a path a write names, lands inside an environment's
     installed packages: it reads a folder lookup of `site` or `sysconfig`
     (`_SITE_PACKAGES_CALLS`), the origin or path of a spec or an imported
-    package (`_SITE_PACKAGES_MEMBERS`), there or through a name a value binds
-    to it, up to `_PARAM_DEPTH` names."""
+    package (`_SITE_PACKAGES_MEMBERS`), there or through a value a name is
+    bound to (`_Reader.read_bindings`), up to `_PARAM_DEPTH` names."""
     if depth > _PARAM_DEPTH:
         return False
     for node in ast.walk(target):
@@ -11386,10 +11505,11 @@ def _writes_site_packages(target: ast.AST, reader: _Reader, *, depth: int = 0) -
             return True
         if isinstance(node, ast.Call) and reader.module_member(node.func) in _SITE_PACKAGES_CALLS:
             return True
-        if isinstance(node, ast.Name):
-            if any(b.how == "value" and b.value is not target and _writes_site_packages(b.value, reader, depth=depth + 1)
-                   for b in reader.bindings_of(node.id, node=node)):
-                return True
+        if isinstance(node, ast.Name) and any(reader.read_bindings(
+            "site packages", node, depth=depth,
+            compute=lambda b, at: b.how == "value" and _writes_site_packages(b.value, reader, depth=at),
+        )):
+            return True
     return False
 
 
@@ -11475,7 +11595,7 @@ class _WrittenName(NamedTuple):
 
 
 @dataclass(frozen=True)
-class _StoredModule:
+class _UnreadModuleEntry:
     """A module a cell stores in `sys.modules` from code the check can't
     read (`_stored_modules`): the name it stores it under, None for a name
     the check can't read, and the place of that cell (`_Cell.order`)."""
@@ -11508,7 +11628,7 @@ class _Modules:
         # The modules cells store in `sys.modules` from code the check can't
         # read, which `_build_defined` sets once it reads what such code
         # filled (`_stored_modules`).
-        self.stored: tuple[_StoredModule, ...] = ()
+        self.stored: tuple[_UnreadModuleEntry, ...] = ()
 
     @cached_property
     def _naming(self) -> list[_Cell]:
@@ -11685,23 +11805,17 @@ class _Modules:
 
     def _names_under(self, folder: str) -> frozenset[str]:
         """The names an import reaches a module or package directly inside
-        `folder` by: a cell-written or snapshot `<name>.py` or
-        `<name>/__init__.py` there."""
+        `folder` by: a cell-written or snapshot module file there, or a
+        package's `__init__` (`_module_place`)."""
         base = folder.rstrip("/")
         prefix = "" if base in ("", ".") else f"{base}/"
-        out: set[str] = set()
-        paths = set(self._written.paths)
+        places = {place for path in self._written.paths for place in [_module_place(path)] if place is not None}
         for snap in self._snapshots:
-            paths |= set(snap.files)
-        for path in paths:
-            if not path.startswith(prefix):
-                continue
-            parts = path[len(prefix):].split("/")
-            if len(parts) == 1 and parts[0].endswith(".py"):
-                out.add(parts[0][:-3])
-            elif len(parts) == 2 and parts[1] == "__init__.py":
-                out.add(parts[0])
-        return frozenset(name for name in out if name.isidentifier())
+            places |= snap.module_places
+        return frozenset(
+            name for place in places if place.startswith(prefix)
+            for name in [place[len(prefix):]] if "/" not in name and name.isidentifier()
+        )
 
     @cached_property
     def path_changed(self) -> bool:
@@ -11808,15 +11922,16 @@ class _Modules:
     def _reachable(self, top: str, entries: AbstractSet[str]) -> bool:
         """Whether an import reaches a Python file in the project by the name
         `top` through one of `entries`, folders on `sys.path`: `top.py`, a
-        sourceless `top.pyc` (`_module_stem`) or a package `top/` there, or a
-        namespace portion `top/` but for a module Python ships. Where the walk
-        stopped short, the folders are read on disk."""
+        sourceless `top.pyc`, a compiled extension (`_module_place`) or a
+        package `top/` there, or a namespace portion `top/` but for a module
+        Python ships. Where the walk stopped short, the folders are read on
+        disk (`_MODULE_FILE_ENDS`)."""
         snap = self.project
         if snap is None:
             return False
         for entry in entries:
             base = f"{entry}/" if entry else ""
-            if any(f"{base}{top}{end}" in snap.files for end in _MODULE_FILE_ENDS):
+            if f"{base}{top}" in snap.module_places:
                 return True
             if f"{base}{top}" in snap.dirs and top not in sys.stdlib_module_names:
                 return True
@@ -11829,10 +11944,10 @@ class _Modules:
 
     def _new_on_disk(self, top: str) -> bool:
         """Whether the project or shared folder, or a folder under the
-        project the cells put on `sys.path` (`path_entries`), holds `top.py`,
-        `top.pyc` or `top/__init__.py` now, though the walk when the turn
-        began didn't: a cell this turn wrote it, however the check read its
-        write."""
+        project the cells put on `sys.path` (`path_entries`), holds a module
+        file or package by the name `top` now (`_MODULE_FILE_ENDS`), as
+        `top.py` or `top/__init__.py`, though the walk when the turn began
+        didn't: a cell this turn wrote it, however the check read its write."""
         if top not in self._new:
             entries = self.path_entries or frozenset()
             self._new[top] = any(
@@ -11961,7 +12076,7 @@ def _imports_unread(call: ast.Call, reader: _Reader, cell: _Cell, *, modules: _M
     read."""
     member = reader.module_member(call.func)
     if member == "pkgutil.walk_packages":
-        return _walks_unread(call, reader, cell, modules=modules)
+        return _walk_packages_unread(call, reader, cell, modules=modules)
     target = _target_arg(call, keywords=("name", "path"))
     if target is None:
         return any(k.arg is None for k in call.keywords)
@@ -11978,7 +12093,7 @@ def _imports_unread(call: ast.Call, reader: _Reader, cell: _Cell, *, modules: _M
     return texts is None or any(modules.unread(text.partition(":")[0], cell=cell) for text in texts)
 
 
-def _walks_unread(call: ast.Call, reader: _Reader, cell: _Cell, *, modules: _Modules) -> bool:
+def _walk_packages_unread(call: ast.Call, reader: _Reader, cell: _Cell, *, modules: _Modules) -> bool:
     """Whether `pkgutil.walk_packages` imports a module `modules` can't read:
     it imports every package it finds under the folders it is given, so it
     is held when the folders are absent, when the check can't read them, or
@@ -12132,11 +12247,10 @@ def _launches_unread(call: ast.Call, reader: _Reader, *, read: _ExecRead, module
     )
 
 
-# The callers that invoke a function value with the arguments that follow
-# it (`_value_call_args`): `executor.submit`, `asyncio.to_thread`, a thread's
-# `target`, `loop.run_in_executor`, and `map`/`executor.map` over each
-# element.
-_THREAD_MAKERS = frozenset({"threading.Thread", "Thread"})
+# The thread class, by its full name, which runs its `target` with its `args`
+# when the thread starts (`_value_call_args`); a call by the last name
+# `Thread` makes one too.
+_THREAD_MAKERS = frozenset({"threading.Thread"})
 
 
 def _passed_launch(node: ast.AST, cell: _Cell, reader: _Reader, *, read: _ExecRead, modules: _Modules) -> bool:
@@ -12282,9 +12396,9 @@ def _writes_a_startup_hook(call: ast.Call, reader: _Reader, cell: _Cell) -> bool
     if name not in _LAUNCHERS:
         return False
     return any(
-        _command_writes_a_hook(words, depth=0)
+        _command_writes_a_hook(command, depth=0) if isinstance(command, list)
+        else _script_writes_a_hook(command, depth=0)
         for command in _shell_commands(call, name, reader)
-        for words in ([command] if isinstance(command, list) else _script_commands(command))
     )
 
 
@@ -12305,12 +12419,20 @@ def _opens_by_unread_mode(call: ast.Call, reader: _Reader) -> bool:
 _FILE_WRITING_PROGRAMS = frozenset({"cp", "mv", "ln", "install", "rsync", "tee", "touch", "curl", "wget", "dd"})
 
 
+def _script_writes_a_hook(script: str, *, depth: int) -> bool:
+    """Whether a shell script may write a startup hook, command by command
+    (`_script_walk`, `_command_writes_a_hook`)."""
+    return any(_command_writes_a_hook(command.words, depth=depth) for command in _script_walk(script))
+
+
 def _command_writes_a_hook(words: list[str], *, depth: int) -> bool:
     """Whether a command, by its words, may write a startup hook
     (`_is_startup_hook`): a file a redirection writes, or an operand of a
     program that writes files (`_FILE_WRITING_PROGRAMS`), that names one or
-    that the check can't read; any, for a program the check can't read; and
-    what a shell's script writes in turn, up to `_SHELL_DEPTH` shells."""
+    that the check can't read; any, for a program the check can't read;
+    what a command `find` runs on each match writes (`_find_exec_commands`);
+    and what a shell's script writes in turn (`_script_writes_a_hook`), up
+    to `_SHELL_DEPTH` shells."""
     bare, _ = _command_words(words)
     if not bare:
         return False
@@ -12319,9 +12441,13 @@ def _command_writes_a_hook(words: list[str], *, depth: int) -> bool:
     verb = _program_name(bare[0])
     if verb in _SCRIPT_RUNNERS:
         script = _inner_script(verb, bare[1:], None)
-        return isinstance(script, _Unknown) or depth >= _SHELL_DEPTH or script is not None and any(
-            _command_writes_a_hook(inner, depth=depth + 1) for inner in _script_commands(script)
-        )
+        if isinstance(script, _Unknown) or depth >= _SHELL_DEPTH:
+            return True
+        return script is not None and _script_writes_a_hook(script, depth=depth + 1)
+    if verb == "find" and any(
+        _command_writes_a_hook(command.words, depth=depth) for command in _find_exec_commands(bare[1:])
+    ):
+        return True
     targets = bare[1:] if verb in _FILE_WRITING_PROGRAMS else []
     for at, word in enumerate(words):
         redirect = _REDIRECT.match(word)
@@ -12492,10 +12618,9 @@ def _star_binds(reader: _Reader, node: ast.Name, stars: Sequence[_StarImport]) -
 def _star_runs_surely(node: ast.ImportFrom, cell: _Cell) -> bool:
     """Whether the star import `node`, code of `cell`, surely runs whenever
     its scope does: no if, loop or try holds it (`_Cell.runs_surely`) but
-    one that surely runs it, as an if whose test is a true constant, a loop
-    over a literal of one item, a try whose handlers each end in a raise,
-    or a try that starts with it, of a module Python loads before it
-    searches any folder (`_loaded_first`), which can't fail to import."""
+    one that surely runs it (`_runs_its_body`), or a try that starts with
+    it, of a module Python loads before it searches any folder
+    (`_loaded_first`), which can't fail to import."""
     child, current = node, cell.parents.get(node)
     scope = cell.scope_of(node)
     while current is not None and current is not scope:
@@ -12510,47 +12635,101 @@ def _star_runs_surely(node: ast.ImportFrom, cell: _Cell) -> bool:
 
 def _runs_its_body(branch: ast.AST, child: ast.AST) -> bool:
     """Whether `branch`, an if, loop or try, surely runs `child`, a
-    statement of its body, whenever it runs: an if whose test is a true
-    constant, a loop over a literal of one item, or a try whose handlers
-    each end in a raise, so the body ran to its end once it is past."""
-    if child not in getattr(branch, "body", ()):
+    statement of its body, whenever it runs: an if or a loop that surely
+    starts its body (`_runs_body_surely`) with no break or continue before
+    `child` (`_before_a_jump`), or a try whose handlers each end in a
+    raise, so the body ran to its end once it is past."""
+    body = getattr(branch, "body", ())
+    if child not in body:
         return False
-    if isinstance(branch, ast.If):
-        return isinstance(branch.test, ast.Constant) and bool(branch.test.value)
-    if isinstance(branch, (ast.For, ast.AsyncFor)):
-        items = branch.iter
-        return isinstance(items, (ast.List, ast.Tuple, ast.Set)) and len(items.elts) == 1 and not isinstance(
-            items.elts[0], ast.Starred,
-        )
     if isinstance(branch, (ast.Try, ast.TryStar)):
         return all(h.body and isinstance(h.body[-1], ast.Raise) for h in branch.handlers)
-    return False
+    return _runs_body_surely(branch) and child in _before_a_jump(body)
 
 
-def _lines_that_run(node: ast.AST, cell: _Cell, reader: _Reader) -> list[int]:
-    """The lines of the top-level statements of `cell` that run the code
-    `node` is in (`_runs_from`). Empty for a function the cell doesn't name:
-    a later cell calls it, after every star import here."""
-    return [_top_line(n, cell) for n in _runs_from(node, cell, reader)]
+def _outer_function(node: ast.AST, cell: _Cell) -> Function | None:
+    """The outermost def or lambda of `cell` that holds `node`; None where
+    none does."""
+    outer: Function | None = None
+    scope = cell.scope_of(node)
+    while scope is not None:
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            outer = scope
+        scope = cell.scope_of(scope)
+    return outer
+
+
+def _function_names(func: Function, reader: _Reader) -> list[str]:
+    """The names `func` is bound to: a def's own, or each one a lambda is
+    assigned to, none for a lambda no name holds (`_Reader.lambda_names`)."""
+    if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return [func.name]
+    return reader.lambda_names.get(id(func), [])
 
 
 def _runs_from(node: ast.AST, cell: _Cell, reader: _Reader) -> list[ast.AST]:
     """The code of `cell` outside every def and named lambda that runs the
     code `node` is in: `node` itself, or, inside a def or a named lambda,
     each load outside it of a name the outermost such function is bound
-    to, which runs it when called, or hands it on to be called. Empty for a
-    function the cell doesn't name: a later cell calls it."""
-    outer: ast.AST | None = None
-    scope = cell.scope_of(node)
-    while scope is not None:
-        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            outer = scope
-        scope = cell.scope_of(scope)
-    names = ([outer.name] if isinstance(outer, (ast.FunctionDef, ast.AsyncFunctionDef))
-             else reader.lambda_names.get(id(outer), []) if outer is not None else [])
+    to (`_outer_function`, `_function_names`), which runs it when called,
+    or hands it on to be called. Empty for a function the cell doesn't
+    name: a later cell calls it."""
+    outer = _outer_function(node, cell)
+    names = [] if outer is None else _function_names(outer, reader)
     if outer is None or not names:
         return [node]
     return [load for name in names for load in cell.loads.get(name, ()) if not _inside(load, outer, cell)]
+
+
+def _module_runs(starts: Iterable[ast.AST], cell: _Cell, reader: _Reader) -> list[ast.AST]:
+    """The places of `cell` outside every def and named lambda that run the
+    code each of `starts`, code of `cell`, is in (`_runs_from`), through any
+    chain of the cell's functions that run one another: a start itself
+    outside them, else each place that runs the function holding it, read
+    the same way in turn. Empty where nothing in the cell runs them."""
+    out: list[ast.AST] = []
+    seen: set[int] = set()
+    todo = list(starts)
+    while todo:
+        current = todo.pop()
+        runs = _runs_from(current, cell, reader)
+        if len(runs) == 1 and runs[0] is current:
+            out.append(current)
+            continue
+        for run in runs:
+            if id(run) not in seen:
+                seen.add(id(run))
+                todo.append(run)
+    return out
+
+
+def _bound_where_run(reader: _Reader, node: ast.Name, cell: _Cell) -> bool:
+    """Whether read code surely gave the module's name `node` reads, from
+    inside a def, lambda, class or comprehension of `cell`, a
+    conversation's cell, a value wherever that code runs
+    (`_Reader.binds_surely`): at module level before the outermost of
+    them, so on every run after it; else before each place at module level
+    that runs it (`_module_runs`), in its own cell, or, for a function of
+    an earlier cell, in the current one, where a cell before it that bound
+    the name on every path (`_Reader.bound_before`) gave it one too. Where
+    nothing runs it, only the first counts. A binding an if, loop or try
+    may skip gives no value."""
+    name = node.id
+    outer: ast.AST = node
+    while (scope := cell.scope_of(outer)) is not None:
+        outer = scope
+    if reader.binds_surely(outer, name):
+        return True
+    current = reader.current
+    if cell is current:
+        runs = _module_runs([node], cell, reader)
+    elif reader.bound_before(name, current):
+        return True
+    else:
+        func = _outer_function(node, cell)
+        names = [] if func is None else _function_names(func, reader)
+        runs = _module_runs([load for n in names for load in current.loads.get(n, ())], current, reader)
+    return bool(runs) and all(reader.binds_surely(run, name) for run in runs)
 
 
 def _first_run_at(node: ast.AST, cell: _Cell, reader: _Reader) -> tuple[int, int]:
@@ -12575,10 +12754,13 @@ def _unvouched(reader: _Reader, node: ast.Name, defined: _Defined, tainted: _Tai
     (`_filled_again`), or one no read code gives a value (a builtin or a
     name the pad binds, a name `defined.bound` holds, or what
     `_Reader.binds` covers), unless a star import of a readable module ran
-    before it. At module level of a conversation's cell, only a binding
-    that surely ran on every path to the read gives it a value
-    (`_Reader.binds_surely`): where an if, loop or try may skip it, the
-    name holds what such code put there."""
+    before it. In a conversation's cell, a read of a module's name, at
+    module level or from inside a def, lambda, class or comprehension that
+    doesn't bind it in its own scope (`_Cell.binds_in_scope`), gets a value
+    only from a binding that surely ran on every path to the read
+    (`_Reader.binds_surely`) or to each place that runs that code
+    (`_bound_where_run`): where an if, loop or try may skip it, the name
+    holds what such code put there."""
     if node.id in tainted and not _filled_again(reader, node, tainted):
         return True
     cell = reader.cell_of(node)
@@ -12586,8 +12768,11 @@ def _unvouched(reader: _Reader, node: ast.Name, defined: _Defined, tainted: _Tai
         return False
     if node.id in _BUILTIN_NAMES or node in cell.looked_up or _star_binds(reader, node, defined.stars):
         return False
-    if cell.index == cell.host and not cell.scopes_around(node):
-        return not reader.binds_surely(node)
+    if cell.index == cell.host:
+        if not cell.scopes_around(node):
+            return not reader.binds_surely(node, node.id)
+        if not cell.binds_in_scope(node, node.id):
+            return not _bound_where_run(reader, node, cell)
     return not (node.id in defined.bound or reader.binds(node, surely=True))
 
 
@@ -13153,14 +13338,16 @@ def _made_under(node: ast.AST, reader: _Reader, *, depth: int = 0) -> list[str] 
     """The names the module or module spec `node` holds was made under: the
     first argument of a call that makes one (`_NAMED_MODULE_MAKERS`), read
     with `_literal_texts`, a spec's for a module made from it, there or
-    through each value a name is bound to. None where any of them can't be
-    read, or past `_PARAM_DEPTH` names."""
+    through each value a name is bound to (`_Reader.read_bindings`). None
+    where any of them can't be read, or past `_PARAM_DEPTH` names."""
     if isinstance(node, ast.Name) and depth < _PARAM_DEPTH:
-        bindings = reader.bindings_of(node.id, node=node)
-        if not bindings or any(b.how != "value" for b in bindings):
+        found = reader.read_bindings(
+            "made under", node, depth=depth,
+            compute=lambda b, at: _made_under(b.value, reader, depth=at) if b.how == "value" else None,
+        )
+        if not found or any(f is None for f in found):
             return None
-        found = [_made_under(b.value, reader, depth=depth + 1) for b in bindings]
-        return None if any(f is None for f in found) else [text for f in found if f is not None for text in f]
+        return [text for f in found if f is not None for text in f]
     if not (isinstance(node, ast.Call) and node.args):
         return None
     maker = reader.module_member(node.func)
@@ -13171,7 +13358,7 @@ def _made_under(node: ast.AST, reader: _Reader, *, depth: int = 0) -> list[str] 
 
 def _stored_modules(
     reader: _Reader, cells: Sequence[_Cell], modules: _Modules, defined: _Defined, *, start: tuple[int, ...] | None,
-) -> list[_StoredModule]:
+) -> list[_UnreadModuleEntry]:
     """The modules `cells` store in `sys.modules`, as the imports read it
     (`_Cell.module_stores`), from code the check can't read: in a cell from
     `start` on, the first place such code ran, a module `_from_unread`
@@ -13180,7 +13367,7 @@ def _stored_modules(
     exec filled (`_Defined.namespaces`), whose functions an import of it
     doesn't reach. Each under every name its key may hold
     (`_module_key_texts`), or under None where the check can't read the key."""
-    out: list[_StoredModule] = []
+    out: list[_UnreadModuleEntry] = []
     for cell in cells:
         stores = [s for s in cell.module_stores if reader.dotted(s.holder) == "sys.modules"]
         if not stores:
@@ -13193,8 +13380,8 @@ def _stored_modules(
             if not (literal or at is not None and _from_unread(store.value, at)):
                 continue
             texts = _module_key_texts(store.key, reader) if store.key is not None else None
-            out += [_StoredModule(name=None, order=cell.order)] if texts is None else [
-                _StoredModule(name=text, order=cell.order) for text in texts
+            out += [_UnreadModuleEntry(name=None, order=cell.order)] if texts is None else [
+                _UnreadModuleEntry(name=text, order=cell.order) for text in texts
             ]
     return out
 
@@ -13682,7 +13869,7 @@ def find_cell_writes(
             line = given.stopped_at
             if line is None and not parsed.compiles:
                 # Python refused it before any of it ran: it bound nothing.
-                line = 1
+                line = NOTHING_KEPT
             if line is not None:
                 stopped_at[parsed.index] = line
         cells.append(parsed)

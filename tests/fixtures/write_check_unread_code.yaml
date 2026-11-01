@@ -5,14 +5,13 @@
 #
 # Each case has:
 #   name     a short phrase saying what the cell does; the test's id.
-#   earlier  the conversation's earlier cells, oldest first (optional).
-#   earlier_errored
-#            beside `earlier`, true for each earlier cell that stopped on
-#            an error (optional).
-#   earlier_stopped_at
-#            beside `earlier`, the line of its own code each errored cell
-#            stopped at, as the pad's boot reads it from the traceback, null
-#            where the runtime doesn't say (optional).
+#   earlier  the conversation's earlier cells, oldest first (optional). Each
+#            is its code, for a cell that ran to its end, or a mapping:
+#              code        its code.
+#              errored     true for a cell that stopped on an error.
+#              stopped_at  the line of its own code an errored cell stopped
+#                          at, as the pad's boot reads it from the
+#                          traceback; absent where the runtime doesn't say.
 #   code     the cell the check runs before it runs for real.
 #   files    project files that exist when the turn begins, {path: text}
 #            (optional). The snapshot holds stock.csv besides these.
@@ -2073,6 +2072,26 @@ cases:
       import job
     card: unchecked
 
+  - name: an import after a sys.path change of a compiled extension module in the project
+    files:
+      erp.so: |
+        not read by the check
+    code: |-
+      import sys
+      sys.path.insert(0, '.')
+      import erp
+    card: unchecked
+
+  - name: an import after a sys.path change of a compiled extension module in the project with a platform tag
+    files:
+      erp.cpython-311-darwin.so: |
+        not read by the check
+    code: |-
+      import sys
+      sys.path.insert(0, '.')
+      import erp
+    card: unchecked
+
   - name: py_compile with no cfile, whose bytecode cache no import loads, then an import after sys.path changes
     earlier:
       - |-
@@ -2766,6 +2785,36 @@ cases:
     code: |-
       import subprocess, sys
       subprocess.run(['rsync', '-a', 'vendor/', 'lib/'])
+      sys.path.insert(0, 'lib')
+      import erp
+    card: unchecked
+
+  - name: a tree copied by cp -r into a folder then imported
+    code: |-
+      import subprocess, sys
+      subprocess.run(['cp', '-r', '/tmp/pkgs/', 'lib/'])
+      sys.path.insert(0, 'lib')
+      import erp
+    card: unchecked
+
+  - name: an import from a folder on sys.path after an earlier cell copies a tree into it with cp -r
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run(['cp', '-r', '/tmp/pkgs/', 'lib/'])
+    code: |-
+      import sys
+      sys.path.insert(0, 'lib')
+      import erp
+    card: unchecked
+
+  - name: an import from a folder on sys.path after an earlier cell moves a listing into it with mv
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run('mv /tmp/pkgs/* lib/', shell=True)
+    code: |-
+      import sys
       sys.path.insert(0, 'lib')
       import erp
     card: unchecked
@@ -3928,6 +3977,28 @@ cases:
       subprocess.run(cmd, shell=True)
     card: unchecked
 
+  # A read sees the bindings before it on its own line, not those after it,
+  # but for a binding in a loop around it, which an earlier pass ran.
+  - name: a python command run before a later statement on its line names another program
+    code: |-
+      import os
+      cmd = 'python3 job.py'; os.system(cmd); cmd = 'ls'
+    card: unchecked
+
+  - name: a python command a one-line loop names after the run, which its next pass runs
+    code: |-
+      import os
+      cmd = 'ls'
+      for w in ['python3 job.py', 'x']: os.system(cmd); cmd = w
+    card: unchecked
+
+  - name: a listing rebuilt twice through its own name on its first line
+    code: |-
+      import os
+      cmd = 'ls'; cmd = cmd + ' -a'; cmd = cmd + ' -l'
+      os.system(cmd)
+    card: none
+
   - name: a python script named by a dict a cell fills by key, run over its values
     code: |-
       import subprocess, sys
@@ -4544,6 +4615,26 @@ cases:
       subprocess.run(['cp', 'hook.txt', site.getsitepackages()[0] + '/hook.pth'])
     card: unchecked
 
+  - name: a python -c after an earlier cell copies a .pth file through cp
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run("cp h.txt hook.pth", shell=True)
+    code: |-
+      import subprocess
+      subprocess.run(['python3', '-c', 'print(1)'])
+    card: unchecked
+
+  - name: a python -c after an earlier cell copies a .pth file through find -exec cp
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run("find . -name h.txt -exec cp {} hook.pth \\;", shell=True)
+    code: |-
+      import subprocess
+      subprocess.run(['python3', '-c', 'print(1)'])
+    card: unchecked
+
   - name: a .pth file written by an echo redirect in a shell text
     code: |-
       import os
@@ -4873,6 +4964,42 @@ cases:
           await loop.subprocess_shell(asyncio.SubprocessProtocol, 'python3 job.py')
       asyncio.run(go())
     card: unchecked
+
+  - name: python -c run through an event loop's subprocess_exec after an earlier cell writes a .pth file
+    earlier:
+      - |-
+        open('hook.pth', 'w').write('import job')
+    code: |-
+      import asyncio, sys
+      async def main():
+          loop = asyncio.get_running_loop()
+          await loop.subprocess_exec(asyncio.SubprocessProtocol, sys.executable, '-c', 'print(1)')
+      asyncio.run(main())
+    card: unchecked
+
+  - name: ls run through an event loop's subprocess_exec after an earlier cell writes a .pth file
+    earlier:
+      - |-
+        open('hook.pth', 'w').write('import job')
+    code: |-
+      import asyncio
+      async def main():
+          loop = asyncio.get_running_loop()
+          await loop.subprocess_exec(asyncio.SubprocessProtocol, 'ls', '-la')
+      asyncio.run(main())
+    card: none
+
+  - name: ls run through an event loop's subprocess_shell after an earlier cell writes a .pth file
+    earlier:
+      - |-
+        open('hook.pth', 'w').write('import job')
+    code: |-
+      import asyncio
+      async def main():
+          loop = asyncio.get_running_loop()
+          await loop.subprocess_shell(asyncio.SubprocessProtocol, 'ls -la')
+      asyncio.run(main())
+    card: none
 
   - name: a script opened by os.startfile
     code: |-
@@ -5311,9 +5438,10 @@ cases:
     earlier:
       - |-
         P = 'stock.csv'
-      - |-
-        x = 1 / 0
-        P = 'tmp.csv'
+      - code: |-
+          x = 1 / 0
+          P = 'tmp.csv'
+        errored: true
       - |-
         import os
         def f5():
@@ -5326,7 +5454,6 @@ cases:
             f3()
         def f1():
             f2()
-    earlier_errored: [false, true, false]
     code: |-
       f1()
     card: unchecked
@@ -5536,14 +5663,12 @@ cases:
 
   - name: a call to a function an errored cell defines before nine earlier python -c cells
     earlier:
-      - |-
-        import pandas as pd
-        def load():
-            return pd.read_csv('stock.csv')
-        raise ValueError('x')
-      - |-
-        import subprocess, sys
-        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - code: |-
+          import pandas as pd
+          def load():
+              return pd.read_csv('stock.csv')
+          raise ValueError('x')
+        errored: true
       - |-
         import subprocess, sys
         subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
@@ -5568,7 +5693,9 @@ cases:
       - |-
         import subprocess, sys
         subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
-    earlier_errored: [true, false, false, false, false, false, false, false, false, false]
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
     code: |-
       df = load()
     card: none
@@ -6592,10 +6719,10 @@ cases:
         SCRIPT = make()
       - |-
         exec(SCRIPT)
-      - |-
-        1/0
-        from math import *
-    earlier_errored: [false, false, true]
+      - code: |-
+          1/0
+          from math import *
+        errored: true
     code: |-
       push()
     card: unchecked
@@ -6813,11 +6940,11 @@ cases:
         SCRIPT = make()
       - |-
         exec(SCRIPT)
-      - |-
-        1/0
-        def push():
-            pass
-    earlier_errored: [false, false, true]
+      - code: |-
+          1/0
+          def push():
+              pass
+        errored: true
     code: |-
       push()
     card: unchecked
@@ -6828,10 +6955,10 @@ cases:
         SCRIPT = make()
       - |-
         exec(SCRIPT)
-      - |-
-        1/0
-        push = print
-    earlier_errored: [false, false, true]
+      - code: |-
+          1/0
+          push = print
+        errored: true
     code: |-
       push()
     card: unchecked
@@ -6842,10 +6969,10 @@ cases:
         SCRIPT = make()
       - |-
         exec(SCRIPT)
-      - |-
-        1/0
-        from os import getcwd as push
-    earlier_errored: [false, false, true]
+      - code: |-
+          1/0
+          from os import getcwd as push
+        errored: true
     code: |-
       push()
     card: unchecked
@@ -7064,11 +7191,11 @@ cases:
       - |-
         import subprocess, sys
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'torch', '--index-url', 'https://download.pytorch.org/whl/cpu'])
-      - |-
-        import pandas as pd
-        df = pd.read_csv('sales.csv')
-        df['date'] = pd.to_datetime(df['Date'])
-    earlier_errored: [false, true]
+      - code: |-
+          import pandas as pd
+          df = pd.read_csv('sales.csv')
+          df['date'] = pd.to_datetime(df['Date'])
+        errored: true
     files:
       sales.csv: |
         order_date,amount
@@ -7084,15 +7211,15 @@ cases:
       - |-
         import subprocess, sys
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'torch', '--index-url', 'https://download.pytorch.org/whl/cpu'])
-      - |-
-        import pandas as pd
-        df = pd.read_csv('sales.csv')
-        df['date'] = pd.to_datetime(df['Date'])
+      - code: |-
+          import pandas as pd
+          df = pd.read_csv('sales.csv')
+          df['date'] = pd.to_datetime(df['Date'])
+        errored: true
       - |-
         import pandas as pd
         df = pd.read_csv('sales.csv')
         print(df.columns.tolist())
-    earlier_errored: [false, true, false]
     files:
       sales.csv: |
         order_date,amount
@@ -7154,12 +7281,12 @@ cases:
       - |-
         import subprocess, sys
         subprocess.run([sys.executable, 'scripts/clean.py'], check=True)
-      - |-
-        import pandas as pd
-        def top_n(d, n):
-            return d.nlargest(n, 'qty')
-        df = pd.read_csv('stock.xlsx')
-    earlier_errored: [false, true]
+      - code: |-
+          import pandas as pd
+          def top_n(d, n):
+              return d.nlargest(n, 'qty')
+          df = pd.read_csv('stock.xlsx')
+        errored: true
     files:
       scripts/clean.py: |
         x = 1
@@ -7174,11 +7301,11 @@ cases:
       - |-
         import subprocess, sys
         subprocess.run([sys.executable, 'scripts/clean.py'], check=True)
-      - |-
-        import numpy as np
-        import pandas as pd
-        df = pd.read_csv('stock.xlsx')
-    earlier_errored: [false, true]
+      - code: |-
+          import numpy as np
+          import pandas as pd
+          df = pd.read_csv('stock.xlsx')
+        errored: true
     files:
       scripts/clean.py: |
         x = 1
@@ -7191,13 +7318,13 @@ cases:
       - |-
         import subprocess, sys
         subprocess.run([sys.executable, 'scripts/clean.py'], check=True)
-      - |-
-        class Report:
-            def __init__(self, t):
-                self.t = t
-        import pandas as pd
-        df = pd.read_csv('stock.xlsx')
-    earlier_errored: [false, true]
+      - code: |-
+          class Report:
+              def __init__(self, t):
+                  self.t = t
+          import pandas as pd
+          df = pd.read_csv('stock.xlsx')
+        errored: true
     files:
       scripts/clean.py: |
         x = 1
@@ -7211,12 +7338,12 @@ cases:
       - |-
         import subprocess, sys
         subprocess.run([sys.executable, 'scripts/clean.py'], check=True)
-      - |-
-        import pandas as pd
-        df = pd.read_csv('stock.xlsx')
-        def late():
-            return 1
-    earlier_errored: [false, true]
+      - code: |-
+          import pandas as pd
+          df = pd.read_csv('stock.xlsx')
+          def late():
+              return 1
+        errored: true
     files:
       scripts/clean.py: |
         x = 1
@@ -7229,14 +7356,14 @@ cases:
       - |-
         import subprocess, sys
         subprocess.run([sys.executable, 'scripts/clean.py'], check=True)
-      - |-
-        import pandas as pd
-        orders = pd.read_csv('stock.csv')
-        def summarize_orders(o):
-            return o.groupby('sku').sum()
-        print(orders['amount'].sum())
-    earlier_errored: [false, true]
-    earlier_stopped_at: [null, 5]
+      - code: |-
+          import pandas as pd
+          orders = pd.read_csv('stock.csv')
+          def summarize_orders(o):
+              return o.groupby('sku').sum()
+          print(orders['amount'].sum())
+        errored: true
+        stopped_at: 5
     files:
       scripts/clean.py: "x = 1\n"
     code: |-
@@ -7249,14 +7376,14 @@ cases:
       - |-
         import subprocess, sys
         subprocess.run([sys.executable, 'scripts/clean.py'], check=True)
-      - |-
-        import pandas as pd
-        orders = pd.read_csv('stock.csv')
-        def summarize_orders(o):
-            return o.groupby('sku').sum()
-        print(orders['amount'].sum())
-    earlier_errored: [false, true]
-    earlier_stopped_at: [null, 2]
+      - code: |-
+          import pandas as pd
+          orders = pd.read_csv('stock.csv')
+          def summarize_orders(o):
+              return o.groupby('sku').sum()
+          print(orders['amount'].sum())
+        errored: true
+        stopped_at: 2
     files:
       scripts/clean.py: "x = 1\n"
     code: |-
@@ -7269,13 +7396,13 @@ cases:
       - |-
         import subprocess, sys
         subprocess.run([sys.executable, 'scripts/clean.py'], check=True)
-      - |-
-        import pandas as pd
-        orders = pd.read_csv('stock.csv')
-        def summarize_orders(o):
-            return o.groupby('sku').sum()
-        print(orders['amount'].sum())
-    earlier_errored: [false, true]
+      - code: |-
+          import pandas as pd
+          orders = pd.read_csv('stock.csv')
+          def summarize_orders(o):
+              return o.groupby('sku').sum()
+          print(orders['amount'].sum())
+        errored: true
     files:
       scripts/clean.py: "x = 1\n"
     code: |-
@@ -7585,11 +7712,11 @@ cases:
         SRC = open('helpers.py').read()
       - |-
         exec(SRC)
-      - |-
-        import not_a_real_module_xyz
-        def push():
-            print(1)
-    earlier_errored: [false, false, true]
+      - code: |-
+          import not_a_real_module_xyz
+          def push():
+              print(1)
+        errored: true
     files:
       helpers.py: |
         import requests
@@ -7605,10 +7732,10 @@ cases:
         SRC = open('helpers.py').read()
       - |-
         exec(SRC)
-      - |-
-        def push(x=undefined_default):
-            print(1)
-    earlier_errored: [false, false, true]
+      - code: |-
+          def push(x=undefined_default):
+              print(1)
+        errored: true
     files:
       helpers.py: |
         import requests
@@ -7624,11 +7751,11 @@ cases:
         SRC = open('helpers.py').read()
       - |-
         exec(SRC)
-      - |-
-        class Push(MissingBase):
-            def go(self):
-                print(1)
-    earlier_errored: [false, false, true]
+      - code: |-
+          class Push(MissingBase):
+              def go(self):
+                  print(1)
+        errored: true
     files:
       helpers.py: |
         import requests
@@ -7644,12 +7771,12 @@ cases:
         SRC = open('helpers.py').read()
       - |-
         exec(SRC)
-      - |-
-        def push(
-            x=undefined):
-            print(1)
-    earlier_errored: [false, false, true]
-    earlier_stopped_at: [null, null, 2]
+      - code: |-
+          def push(
+              x=undefined):
+              print(1)
+        errored: true
+        stopped_at: 2
     files:
       helpers.py: |
         import requests
@@ -7665,11 +7792,11 @@ cases:
         SRC = open('helpers.py').read()
       - |-
         exec(SRC)
-      - |-
-        push = (
-            print if undefined else print)
-    earlier_errored: [false, false, true]
-    earlier_stopped_at: [null, null, 2]
+      - code: |-
+          push = (
+              print if undefined else print)
+        errored: true
+        stopped_at: 2
     files:
       helpers.py: |
         import requests
@@ -7685,11 +7812,11 @@ cases:
         SRC = open('helpers.py').read()
       - |-
         exec(SRC)
-      - |-
-        from os import (path,
-            push)
-    earlier_errored: [false, false, true]
-    earlier_stopped_at: [null, null, 2]
+      - code: |-
+          from os import (path,
+              push)
+        errored: true
+        stopped_at: 2
     files:
       helpers.py: |
         import requests
@@ -7705,11 +7832,11 @@ cases:
         SRC = open('helpers.py').read()
       - |-
         exec(SRC)
-      - |-
-        x = undefined
-        exec('def push():\n    print(1)')
-    earlier_errored: [false, false, true]
-    earlier_stopped_at: [null, null, 1]
+      - code: |-
+          x = undefined
+          exec('def push():\n    print(1)')
+        errored: true
+        stopped_at: 1
     files:
       helpers.py: |
         import requests
@@ -8036,13 +8163,12 @@ cases:
     earlier:
       - |-
         exec(open('helpers.py').read())
-      - |-
-        def push():
-            print('dry run')
-        import asyncio
-        await asyncio.sleep(0)
-    earlier_errored: [false, true]
-    earlier_stopped_at: [null, null]
+      - code: |-
+          def push():
+              print('dry run')
+          import asyncio
+          await asyncio.sleep(0)
+        errored: true
     files:
       helpers.py: |
         import requests
@@ -8056,13 +8182,12 @@ cases:
     earlier:
       - |-
         exec(open('helpers.py').read())
-      - |-
-        def push():
-            print('dry run')
-        if True:
-            return
-    earlier_errored: [false, true]
-    earlier_stopped_at: [null, null]
+      - code: |-
+          def push():
+              print('dry run')
+          if True:
+              return
+        errored: true
     files:
       helpers.py: |
         import requests
@@ -8076,13 +8201,13 @@ cases:
     earlier:
       - |-
         exec(open('helpers.py').read())
-      - |-
-        def push():
-            print('dry run')
-        import sys
-        sys.exit(0)
-    earlier_errored: [false, true]
-    earlier_stopped_at: [null, 1]
+      - code: |-
+          def push():
+              print('dry run')
+          import sys
+          sys.exit(0)
+        errored: true
+        stopped_at: 1
     files:
       helpers.py: |
         import requests
@@ -8096,12 +8221,12 @@ cases:
     earlier:
       - |-
         push = eval(open('push_src.txt').read())
-      - |-
-        def push():
-            print('dry run')
-        import asyncio
-        await asyncio.sleep(0)
-    earlier_errored: [false, true]
+      - code: |-
+          def push():
+              print('dry run')
+          import asyncio
+          await asyncio.sleep(0)
+        errored: true
     files:
       push_src.txt: "lambda: __import__('requests').post('https://erp.example.test/api/orders', json={'qty': 1})"
     code: |-
@@ -8115,13 +8240,13 @@ cases:
     earlier:
       - |-
         exec(open('helpers.py').read())
-      - |-
-        import os
-        if os.environ.get('DRY_RUN'):
-            exec("def push():\n    print('dry')")
-        rows = int('a')
-    earlier_errored: [false, true]
-    earlier_stopped_at: [null, 4]
+      - code: |-
+          import os
+          if os.environ.get('DRY_RUN'):
+              exec("def push():\n    print('dry')")
+          rows = int('a')
+        errored: true
+        stopped_at: 4
     files:
       helpers.py: |
         import requests
@@ -8135,14 +8260,14 @@ cases:
     earlier:
       - |-
         exec(open('helpers.py').read())
-      - |-
-        try:
-            exec("raise ValueError('x')\ndef push():\n    print('dry')")
-        except ValueError:
-            pass
-        raise KeyError('k')
-    earlier_errored: [false, true]
-    earlier_stopped_at: [null, 5]
+      - code: |-
+          try:
+              exec("raise ValueError('x')\ndef push():\n    print('dry')")
+          except ValueError:
+              pass
+          raise KeyError('k')
+        errored: true
+        stopped_at: 5
     files:
       helpers.py: |
         import requests
@@ -8390,14 +8515,14 @@ cases:
       - |-
         import subprocess, sys
         subprocess.run([sys.executable, 'etl.py'])
-      - |-
-        import pandas as pd
-        df = pd.read_csv('orders.csv')
-        x = 1
-        print(df['nope'].sum())
-        clean = df.dropna()
-    earlier_errored: [false, true]
-    earlier_stopped_at: [null, 4]
+      - code: |-
+          import pandas as pd
+          df = pd.read_csv('orders.csv')
+          x = 1
+          print(df['nope'].sum())
+          clean = df.dropna()
+        errored: true
+        stopped_at: 4
     files:
       etl.py: |
         x = 1
@@ -8412,13 +8537,13 @@ cases:
     earlier:
       - |-
         exec(open('helpers.py').read())
-      - |-
-        import os
-        if os.path.exists('payload.json'):
-            items = {}['missing']
-            data = {'a': 1}
-    earlier_errored: [false, true]
-    earlier_stopped_at: [null, 3]
+      - code: |-
+          import os
+          if os.path.exists('payload.json'):
+              items = {}['missing']
+              data = {'a': 1}
+        errored: true
+        stopped_at: 3
     files:
       helpers.py: |
         x = 1
@@ -8431,15 +8556,15 @@ cases:
     earlier:
       - |-
         exec(open('helpers.py').read())
-      - |-
-        try:
-            import openpyxl
-        except ImportError:
-            pass
-        import pandas as pd
-        df = pd.read_csv('missing.csv')
-    earlier_errored: [false, true]
-    earlier_stopped_at: [null, 6]
+      - code: |-
+          try:
+              import openpyxl
+          except ImportError:
+              pass
+          import pandas as pd
+          df = pd.read_csv('missing.csv')
+        errored: true
+        stopped_at: 6
     files:
       helpers.py: |
         import requests
@@ -9665,7 +9790,7 @@ cases:
       push()
     card: unchecked
 
-  - name: a call through a parameter that defaults to a name unread code defined
+  - name: a parameter default that loads a name unread code defined
     files:
       helpers.py: |
         import requests
@@ -9952,7 +10077,44 @@ cases:
       push()
     card: unchecked
 
-  - name: a call after only an if arm sets a name unread code defined on sys.modules[__name__]
+  - name: a call after a star import in a loop over a literal of two items
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+    code: |-
+      for _ in (1, 2):
+          from math import *
+      sqrt(4)
+    card: none
+
+  - name: a call after a star import a loop over a literal of one item may break before
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+    code: |-
+      import os
+      for _ in (1,):
+          if os.environ.get('SKIP'):
+              break
+          from math import *
+      sqrt(4)
+    card: unchecked
+
+  - name: a setattr on sys.modules[__name__] after unread code ran
     files:
       helpers.py: |
         import requests
@@ -10070,10 +10232,290 @@ cases:
             return len(open('stock.csv').read())
       - |-
         SRC = open('helpers.py').read()
+      - |-
+        globals()['push'] = eval(SRC)
     code: |-
-      globals()['push'] = eval(SRC)
       push()
     card: unchecked
+
+  - name: a call from inside a function to a name unread code defined that only an if arm defines again
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+    code: |-
+      import random
+      if random.random() > 2:
+          def push():
+              pass
+      def run():
+          push()
+      run()
+    card: unchecked
+
+  - name: a call from inside a function to a name unread code defined that the cell defines again on every path
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+    code: |-
+      def push():
+          pass
+      def run():
+          push()
+      run()
+    card: none
+
+  - name: a call from inside a lambda to a name unread code defined that only an if arm defines again
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+    code: |-
+      import random
+      if random.random() > 2:
+          def push():
+              pass
+      go = lambda: push()
+      go()
+    card: unchecked
+
+  - name: a call from inside a lambda to a name unread code defined that the cell defines again on every path
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+    code: |-
+      def push():
+          pass
+      go = lambda: push()
+      go()
+    card: none
+
+  - name: a call from inside a comprehension to a name unread code defined that only an if arm defines again
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+    code: |-
+      import random
+      if random.random() > 2:
+          def push():
+              pass
+      [push() for _ in range(1)]
+    card: unchecked
+
+  - name: a call from inside a comprehension to a name unread code defined that the cell defines again on every path
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+    code: |-
+      def push():
+          pass
+      [push() for _ in range(1)]
+    card: none
+
+  - name: a call of an earlier function whose body calls a name unread code defined that only an if arm defined again
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        import random
+        if random.random() > 2:
+            def push():
+                pass
+        def run():
+            push()
+    code: |-
+      run()
+    card: unchecked
+
+  - name: a call of an earlier function whose body calls a name unread code defined that the cell defines again first
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        import random
+        if random.random() > 2:
+            def push():
+                pass
+        def run():
+            push()
+    code: |-
+      def push():
+          pass
+      run()
+    card: none
+
+  - name: a call from inside a function to a name unread code defined that only an if arm's walrus binds again
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      import random
+      if random.random() > 2:
+          if (push := quiet):
+              pass
+      def run():
+          push()
+      run()
+    card: unchecked
+
+  - name: a call from inside a function to a name unread code defined that a walrus binds again on every path
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      if (push := quiet):
+          pass
+      def run():
+          push()
+      run()
+    card: none
+
+  - name: a call from inside a function to a name unread code defined that a global setter only an if arm calls binds again
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      import random
+      def setup():
+          global push
+          push = quiet
+      if random.random() > 2:
+          setup()
+      def run():
+          push()
+      run()
+    card: unchecked
+
+  - name: a call from inside a function to a name unread code defined that a global setter binds again on every path
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      def setup():
+          global push
+          push = quiet
+      setup()
+      def run():
+          push()
+      run()
+    card: none
+
+  - name: a call from inside a function to its own except name after unread code ran
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        SCRIPT = open('helpers.py').read()
+      - |-
+        exec(SCRIPT)
+      - |-
+        def quiet():
+            return len(open('stock.csv').read())
+    code: |-
+      def run():
+          try:
+              quiet()
+          except Exception as push:
+              print(push)
+      run()
+    card: none
 
   - name: a call after an assignment rebinds a pad helper name unread code redefined
     files:
@@ -10214,14 +10656,14 @@ cases:
         SCRIPT = open('helpers.py').read()
       - |-
         exec(SCRIPT)
-      - |-
-        import json
-        config = json.loads('{"a": 1}')
-        print(config['missing'])
+      - code: |-
+          import json
+          config = json.loads('{"a": 1}')
+          print(config['missing'])
+        errored: true
       - |-
         import json
         config = json.loads('{"a": 2}')
-    earlier_errored: [false, false, true, false]
     code: |-
       def show():
           print(config.get('a'))
@@ -10818,13 +11260,13 @@ cases:
             for r in rows:
                 requests.post('https://erp.example.test/api/orders', json=r)
             return len(rows)
-      - |-
-        import pandas as pd
-        df = pd.read_csv('missing.csv')
-        def sync_orders(rows):
-            print('dry run', len(rows))
-            return 0
-    earlier_errored: [false, true]
+      - code: |-
+          import pandas as pd
+          df = pd.read_csv('missing.csv')
+          def sync_orders(rows):
+              print('dry run', len(rows))
+              return 0
+        errored: true
     code: |-
       result = sync_orders(rows)
     card: read
@@ -10837,12 +11279,12 @@ cases:
         class C:
             def __init__(self):
                 requests.post('https://erp.example.test/api/orders')
-      - |-
-        1/0
-        class C:
-            def __init__(self):
-                pass
-    earlier_errored: [false, true]
+      - code: |-
+          1/0
+          class C:
+              def __init__(self):
+                  pass
+        errored: true
     code: |-
       C()
     card: read
@@ -10854,10 +11296,10 @@ cases:
         import requests
         def go():
             requests.post('https://erp.example.test/api/orders')
-      - |-
-        1/0
-        exec('def go():\n    pass')
-    earlier_errored: [false, true]
+      - code: |-
+          1/0
+          exec('def go():\n    pass')
+        errored: true
     code: |-
       go()
     card: read
@@ -10887,9 +11329,10 @@ cases:
     earlier:
       - |-
         P = 'stock.csv'
-      - |-
-        x = 1 / 0
-        P = 'tmp.csv'
+      - code: |-
+          x = 1 / 0
+          P = 'tmp.csv'
+        errored: true
       - |-
         import os
         def f4():
@@ -10900,7 +11343,6 @@ cases:
             f3()
         def f1():
             f2()
-    earlier_errored: [false, true, false]
     code: |-
       f1()
     card: read
@@ -11018,11 +11460,11 @@ cases:
     earlier:
       - |-
         P = 'stock.csv'
-      - |-
-        import pandas as pd
-        df = pd.read_csv('missing.csv')
-        exec("P = 'tmp.csv'")
-    earlier_errored: [false, true]
+      - code: |-
+          import pandas as pd
+          df = pd.read_csv('missing.csv')
+          exec("P = 'tmp.csv'")
+        errored: true
     code: |-
       import os
       os.remove(P)
@@ -11033,11 +11475,11 @@ cases:
     earlier:
       - |-
         P = 'stock.csv'
-      - |-
-        import pandas as pd
-        df = pd.read_csv('missing.csv')
-        exec("P = 'tmp.csv'")
-    earlier_errored: [false, true]
+      - code: |-
+          import pandas as pd
+          df = pd.read_csv('missing.csv')
+          exec("P = 'tmp.csv'")
+        errored: true
     code: |-
       open(P, 'w').write('x')
     card: read
@@ -11047,15 +11489,15 @@ cases:
     earlier:
       - |-
         P = 'stock.csv'
-      - |-
-        import pandas as pd
-        df = pd.read_csv('missing.csv')
-        exec("P = 'tmp.csv'")
+      - code: |-
+          import pandas as pd
+          df = pd.read_csv('missing.csv')
+          exec("P = 'tmp.csv'")
+        errored: true
       - |-
         import os
         def clean():
             os.remove(P)
-    earlier_errored: [false, true, false]
     code: |-
       clean()
     card: read
@@ -11368,12 +11810,12 @@ cases:
         import requests
         def sync():
             requests.post("https://erp.example.test/api/orders", json={"qty": 1})
-      - |-
-        rows = int('a')
-        def sync():
-            print('dry run')
-    earlier_errored: [false, true]
-    earlier_stopped_at: [null, 1]
+      - code: |-
+          rows = int('a')
+          def sync():
+              print('dry run')
+        errored: true
+        stopped_at: 1
     code: |-
       sync()
     card: read
@@ -13923,11 +14365,11 @@ cases:
         SRC = open('helpers.py').read()
       - |-
         exec(SRC)
-      - |-
-        def push():
-            print(1)
-        x = undefined
-    earlier_errored: [false, false, true]
+      - code: |-
+          def push():
+              print(1)
+          x = undefined
+        errored: true
     files:
       helpers.py: |
         import requests
@@ -13943,11 +14385,11 @@ cases:
         SRC = open('helpers.py').read()
       - |-
         exec(SRC)
-      - |-
-        exec('def push():\n    print(1)')
-        x = undefined
-    earlier_errored: [false, false, true]
-    earlier_stopped_at: [null, null, 2]
+      - code: |-
+          exec('def push():\n    print(1)')
+          x = undefined
+        errored: true
+        stopped_at: 2
     files:
       helpers.py: |
         import requests
@@ -14146,12 +14588,12 @@ cases:
         import requests
         def sync():
             requests.post("https://erp.example.test/api/orders", json={"qty": 1})
-      - |-
-        def sync():
-            print('dry run')
-        rows = int('a')
-    earlier_errored: [false, true]
-    earlier_stopped_at: [null, 3]
+      - code: |-
+          def sync():
+              print('dry run')
+          rows = int('a')
+        errored: true
+        stopped_at: 3
     code: |-
       sync()
     card: none
@@ -14162,29 +14604,31 @@ cases:
         import os
         def helper():
             os.remove('stock.csv')
-      - |-
-        def helper():
-            print('dry run')
-        rows = int('a')
-    earlier_errored: [false, true]
-    earlier_stopped_at: [null, 3]
+      - code: |-
+          def helper():
+              print('dry run')
+          rows = int('a')
+        errored: true
+        stopped_at: 3
     code: |-
       helper()
     card: none
 
   - name: a call to a helper an errored cell redefines before the line it stopped at, over an errored one that deletes
     earlier:
-      - |-
-        import os
-        def helper():
-            os.remove('stock.csv')
-        x = int('a')
-      - |-
-        def helper():
-            print('dry run')
-        rows = int('a')
-    earlier_errored: [true, true]
-    earlier_stopped_at: [4, 3]
+      - code: |-
+          import os
+          def helper():
+              os.remove('stock.csv')
+          x = int('a')
+        errored: true
+        stopped_at: 4
+      - code: |-
+          def helper():
+              print('dry run')
+          rows = int('a')
+        errored: true
+        stopped_at: 3
     code: |-
       helper()
     card: none
@@ -14196,13 +14640,13 @@ cases:
         class Job:
             def __init__(self):
                 requests.post("https://erp.example.test/api/orders", json={"qty": 1})
-      - |-
-        class Job:
-            def __init__(self):
-                print('dry run')
-        rows = int('a')
-    earlier_errored: [false, true]
-    earlier_stopped_at: [null, 4]
+      - code: |-
+          class Job:
+              def __init__(self):
+                  print('dry run')
+          rows = int('a')
+        errored: true
+        stopped_at: 4
     code: |-
       Job()
     card: none
@@ -14211,15 +14655,15 @@ cases:
     earlier:
       - |-
         exec(open('helpers.py').read())
-      - |-
-        try:
-            import openpyxl
-        except ImportError:
-            openpyxl = None
-        import pandas as pd
-        df = pd.read_csv('missing.csv')
-    earlier_errored: [false, true]
-    earlier_stopped_at: [null, 6]
+      - code: |-
+          try:
+              import openpyxl
+          except ImportError:
+              openpyxl = None
+          import pandas as pd
+          df = pd.read_csv('missing.csv')
+        errored: true
+        stopped_at: 6
     files:
       helpers.py: |
         import requests
@@ -14235,13 +14679,13 @@ cases:
       - |-
         import subprocess, sys
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'])
-      - |-
-        import pandas as pd
-        df = pd.read_csv('orders.csv')
-        clean = df.dropna()
-        print(clean['nope'].sum())
-    earlier_errored: [false, true]
-    earlier_stopped_at: [null, 4]
+      - code: |-
+          import pandas as pd
+          df = pd.read_csv('orders.csv')
+          clean = df.dropna()
+          print(clean['nope'].sum())
+        errored: true
+        stopped_at: 4
     files:
       requirements.txt: |
         pandas
@@ -14257,13 +14701,13 @@ cases:
       - |-
         import subprocess, sys
         subprocess.run([sys.executable, 'etl.py'])
-      - |-
-        import pandas as pd
-        df = pd.read_csv('orders.csv')
-        clean = df.dropna()
-        print(clean['nope'].sum())
-    earlier_errored: [false, true]
-    earlier_stopped_at: [null, 4]
+      - code: |-
+          import pandas as pd
+          df = pd.read_csv('orders.csv')
+          clean = df.dropna()
+          print(clean['nope'].sum())
+        errored: true
+        stopped_at: 4
     files:
       etl.py: |
         x = 1
@@ -14278,13 +14722,13 @@ cases:
     earlier:
       - |-
         exec(open('helpers.py').read())
-      - |-
-        import os
-        if os.path.exists('payload.json'):
-            data = {'a': 1}
-            items = data['missing']
-    earlier_errored: [false, true]
-    earlier_stopped_at: [null, 4]
+      - code: |-
+          import os
+          if os.path.exists('payload.json'):
+              data = {'a': 1}
+              items = data['missing']
+        errored: true
+        stopped_at: 4
     files:
       helpers.py: |
         x = 1
@@ -14297,12 +14741,12 @@ cases:
     earlier:
       - |-
         exec(open('helpers.py').read())
-      - |-
-        for i in range(2):
-            data = {'a': i}
-            items = data['missing']
-    earlier_errored: [false, true]
-    earlier_stopped_at: [null, 3]
+      - code: |-
+          for i in range(2):
+              data = {'a': i}
+              items = data['missing']
+        errored: true
+        stopped_at: 3
     files:
       helpers.py: |
         x = 1
@@ -14314,11 +14758,11 @@ cases:
     earlier:
       - |-
         exec(open('helpers.py').read())
-      - |-
-        for name in ['a.csv']:
-            items = {}['missing']
-    earlier_errored: [false, true]
-    earlier_stopped_at: [null, 2]
+      - code: |-
+          for name in ['a.csv']:
+              items = {}['missing']
+        errored: true
+        stopped_at: 2
     files:
       helpers.py: |
         x = 1
@@ -14330,13 +14774,13 @@ cases:
     earlier:
       - |-
         exec(open('helpers.py').read())
-      - |-
-        n = 0
-        while n < 3:
-            data = {'a': n}
-            items = data['missing']
-    earlier_errored: [false, true]
-    earlier_stopped_at: [null, 4]
+      - code: |-
+          n = 0
+          while n < 3:
+              data = {'a': n}
+              items = data['missing']
+        errored: true
+        stopped_at: 4
     files:
       helpers.py: |
         x = 1
@@ -14348,14 +14792,14 @@ cases:
     earlier:
       - |-
         exec(open('helpers.py').read())
-      - |-
-        try:
-            data = {'a': 1}
-            items = data['missing']
-        except ValueError:
-            pass
-    earlier_errored: [false, true]
-    earlier_stopped_at: [null, 3]
+      - code: |-
+          try:
+              data = {'a': 1}
+              items = data['missing']
+          except ValueError:
+              pass
+        errored: true
+        stopped_at: 3
     files:
       helpers.py: |
         x = 1
@@ -14367,11 +14811,11 @@ cases:
     earlier:
       - |-
         exec(open('helpers.py').read())
-      - |-
-        with open('payload.json') as fh:
-            items = {}['missing']
-    earlier_errored: [false, true]
-    earlier_stopped_at: [null, 2]
+      - code: |-
+          with open('payload.json') as fh:
+              items = {}['missing']
+        errored: true
+        stopped_at: 2
     files:
       helpers.py: |
         x = 1
