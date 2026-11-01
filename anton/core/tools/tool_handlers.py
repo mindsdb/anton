@@ -9,6 +9,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, NamedTuple
 
+from anton.core.artifacts.geography import GeographyRequirement
+from anton.core.artifacts import geography_pages
 from anton.core.artifacts.page_copies import FULLSTACK_TYPES as _FULLSTACK_TYPES
 from anton.core.artifacts.page_copies import display_name as _display_name
 from anton.core.backends.base import Cell
@@ -478,6 +480,8 @@ def _check_pages(
     repairs_used: "dict[PageKey, int] | None" = None,
     failed_views: "dict[PageKey, tuple[CheckedView, ...]] | None" = None,
     turn_pages: "TurnPages | None" = None,
+    geography_request: str = "",
+    geography_requirements: dict[PageKey, GeographyRequirement] | None = None,
 ) -> ArtifactLint:
     """Load the changed artifacts' pages in a browser.
 
@@ -553,7 +557,7 @@ def _check_pages(
     comparisons: "dict[PageKey, Comparison]" = {}
     put_back: set[PageKey] = set()
     edited = frozenset(page.key(store) for page in pages if page.edited)
-    shown_as_text = _markup_shown_as_text(store, pages)
+    static_findings = _markup_shown_as_text(store, pages)
 
     def _repairs_left_after(page: _ChangedPage) -> int:
         """The repair cells PAGE has left this turn once this check is done.
@@ -599,16 +603,28 @@ def _check_pages(
         )
     ), key=_order)
 
+    geography = geography_pages.check_pages(
+        store, pages, request=geography_request,
+        requirements=geography_requirements if geography_requirements is not None else {},
+        size_limit=_ARTIFACT_LINT_SIZE_CEILING,
+    )
+    for key, finding in geography.items():
+        if finding.errors:
+            static_findings[key] = "; ".join(
+                ([static_findings[key]] if key in static_findings else []) + finding.errors
+            )
+        messages.extend(f"{key.slug}/{key.page} — {warning}" for warning in finding.warnings)
+
     if render_check.configured_url() is None:
         for page in to_check:
             label = f"{page.slug}/{page.path.name}"
-            if page.key(store) in shown_as_text:
+            if page.key(store) in static_findings:
                 left = _repairs_left_after(page)
                 page_checks[page.key(store)] = "failed"
                 if left <= 0:
                     messages.append(f"{label} — {_NO_REPAIRS_LEFT}")
                     continue
-                messages.append(f"{label} — {shown_as_text[page.key(store)]}")
+                messages.append(f"{label} — {static_findings[page.key(store)]}")
                 messages.append(f"{label} — {_repairs_left_line(left)}")
                 continue
             if cell_sandbox is not None:
@@ -652,7 +668,15 @@ def _check_pages(
         label = f"{page.slug}/{page.path.name}"
         if _type(page) in _FULLSTACK_TYPES:
             messages.append(f"{label} — {_FULLSTACK_PAGE_SKIP}")
-            page_checks[page.key(store)] = "unverified"
+            key = page.key(store)
+            page_checks[key] = "failed" if key in static_findings else "unverified"
+            if key in static_findings:
+                left = _repairs_left_after(page)
+                if left <= 0:
+                    messages.append(f"{label} — {_NO_REPAIRS_LEFT}")
+                else:
+                    messages.append(f"{label} — {static_findings[key]}")
+                    messages.append(f"{label} — {_repairs_left_line(left)}")
             continue
         key = page.key(store)
         remaining = deadline - time.monotonic()
@@ -674,7 +698,7 @@ def _check_pages(
             )
         left = _repairs_left_after(page)
         removed = _removed_views(failed_views.get(key, ()), outcome)
-        status: "RenderStatus" = "failed" if removed or key in shown_as_text else outcome.status
+        status: "RenderStatus" = "failed" if removed or key in static_findings else outcome.status
         page_checks[key] = status
         failed = status == "failed"
         if failed:
@@ -722,7 +746,7 @@ def _check_pages(
                 )
             messages += _comparison_lines(label, _notes(key, comparison))
             continue
-        if outcome.status == "unverified" and key not in shown_as_text:
+        if outcome.status == "unverified" and key not in static_findings:
             messages.append(f"{label} — not checked in a browser: {outcome.unverified_reason}")
             if page.key(store) in findings_listed_earlier:
                 # An earlier unverified check this turn already listed what
@@ -745,8 +769,8 @@ def _check_pages(
                     f"{render_check.view_coverage(views=removed).checked}. A repair fixes the code a "
                     "finding names and keeps every view: put them back"
                 ))
-            if key in shown_as_text:
-                lines.insert(0, shown_as_text[key])
+            if key in static_findings:
+                lines.insert(0, static_findings[key])
         messages += [f"{label} — {line}" for line in lines]
         if more:
             messages.append(f"{label} — and {more} more distinct findings, not listed")
@@ -771,6 +795,8 @@ def lint_changed_artifact_files(
     repairs_used: "dict[PageKey, int] | None" = None,
     failed_views: "dict[PageKey, tuple[CheckedView, ...]] | None" = None,
     turn_pages: "TurnPages | None" = None,
+    geography_request: str = "",
+    geography_requirements: dict[PageKey, GeographyRequirement] | None = None,
 ) -> ArtifactLint:
     """Run the format-appropriate checker on artifact folders this cell
     changed (any content file written, replaced, added or removed since
@@ -823,6 +849,7 @@ def lint_changed_artifact_files(
         store, pages, cell_sandbox=cell_sandbox, screenshot=screenshot,
         findings_listed_earlier=findings_listed_earlier,
         failing=failing, repairs_used=repairs_used, failed_views=failed_views, turn_pages=turn_pages,
+        geography_request=geography_request, geography_requirements=geography_requirements,
     )
     return replace(checked, messages=messages + checked.messages)
 
@@ -1067,6 +1094,8 @@ async def check_cell_artifacts(
             cell_sandbox=cell_sandbox_of(getattr(session, "_scratchpads", None)), screenshot=not refused,
             findings_listed_earlier=findings_listed_earlier,
             failing=failing, repairs_used=repairs_used, failed_views=failed_views, turn_pages=turn_pages,
+            geography_request=getattr(session, "_artifact_geography_request", ""),
+            geography_requirements=geography_pages.requirements_of(session),
         )
     except Exception:
         # Best-effort: a lint crash must never fail the cell's own result.

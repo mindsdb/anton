@@ -12,6 +12,8 @@ import copy
 import os
 import re
 
+from anton.core.artifacts.geography_guidance import GEOGRAPHY_GUIDANCE
+from anton.core.artifacts.geography_pages import generated_requirement
 from anton.core.llm.structured import looks_truncated
 from anton.utils.datasources import scrub_output
 from anton.utils.nofollow import read_bytes_nofollow
@@ -263,10 +265,11 @@ async def run(state):
         "legible phone tables and an explicit body. Fulfil requested map or 3D views as actual views. "
         "The preview is an opaque sandboxed iframe: no localStorage, cookies, relative asset files, "
         "backend, or external fonts. The allowed script CDN is https://cdn.jsdelivr.net; "
-        "pin exact library versions. Prefer SVG/CSS/native browser capabilities where suitable. "
+        "pin exact library versions. Prefer SVG/CSS/native browser capabilities for non-geographic presentation where suitable. "
         "Do not use placeholder data or print code as UI. When editing, make the requested change and "
         "keep existing correct figures, views and interactions. Do not claim a check you did not run."
     )
+    system += "\n\n" + GEOGRAPHY_GUIDANCE
     if bound_data:
         system += (
             "\nThe host inserts all observed JSON verbatim before your scripts run, at "
@@ -297,7 +300,14 @@ async def run(state):
         "D3 maps take routeMotion:true and globes take autoRotate:true with an optional "
         "rotationSpeed between -4 and 4. Motion respects the reader's reduced-motion setting."
     )
+    component_system += "\n\n" + GEOGRAPHY_GUIDANCE + (
+        "\nFor component output, satisfy this geography guidance through the supported map/globe "
+        "sections in CoworkPage(config). The runtime owns atlas loading and geographic rendering; "
+        "do not add script tags, imports, custom HTML or library setup. Preserve the component writer "
+        "API and use USE_HTML_WRITER when a required geographic feature cannot be expressed by it."
+    )
     messages = [{"role": "user", "content": context}]
+    initial_warnings = tuple(state.verify_warnings)
     attempt = 0
     while attempt < 2:
         if state.winding_down():
@@ -327,7 +337,10 @@ async def run(state):
                          {"role": "user", "content": str(exc)}]
             attempt += 1
             continue
-        verdict = await asyncio.to_thread(verifiers.verify_frontend, html, is_fullstack=False)
+        verdict = await asyncio.to_thread(
+            verifiers.verify_frontend, html, is_fullstack=False,
+            geography=generated_requirement(state, state.artifact_path / primary),
+        )
         if not verdict.ok:
             state.record("fast_static_check", "failed", "; ".join(verdict.errors))
             messages += [{"role": "assistant", "content": response.content},
@@ -337,6 +350,7 @@ async def run(state):
         written = sub_tools.write_file(state.artifact_path, primary, html)
         if not written.get("ok"):
             return written["message"]
+        state.verify_warnings = [*initial_warnings, *verdict.warnings]
         state.files_written = [written["written"]]
         if components:
             recovery = sub_tools.write_file(state.artifact_path, "presentation-program.js", response.content)
