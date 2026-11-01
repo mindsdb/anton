@@ -2031,6 +2031,433 @@ cases:
       m = importlib.import_module('.helpers', PKG)
     card: unchecked
 
+  - name: an import of bytecode a cell compiles from a written file under another name, after sys.path changes
+    earlier:
+      - |-
+        open('src_job.py', 'w').write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import py_compile, sys
+      py_compile.compile('src_job.py', cfile='job.pyc')
+      sys.path.insert(0, '.')
+      import job
+    card: unchecked
+
+  - name: an import of bytecode a cell compiles to a file named by position, after sys.path changes
+    earlier:
+      - |-
+        open('src_job.py', 'w').write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import py_compile, sys
+      py_compile.compile('src_job.py', 'job.pyc')
+      sys.path.insert(0, '.')
+      import job
+    card: unchecked
+
+  - name: an import of a project's sourceless bytecode in a folder put on sys.path
+    files:
+      build/job.pyc: |
+        not read by the check
+    code: |-
+      import sys
+      sys.path.insert(0, 'build')
+      import job
+    card: unchecked
+
+  - name: py_compile with no cfile, whose bytecode cache no import loads, then an import after sys.path changes
+    earlier:
+      - |-
+        open('src_job.py', 'w').write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import py_compile, sys
+      py_compile.compile('src_job.py')
+      sys.path.insert(0, '.')
+      import job
+    card: none
+
+  - name: an import Python ships beside a project's bytecode cache with no source
+    files:
+      __pycache__/job.cpython-312.pyc: |
+        not read by the check
+    code: |-
+      import sys
+      sys.path.insert(0, '.')
+      import json
+    card: none
+
+  - name: an import of a name only a project's bytecode cache holds, after sys.path changes
+    files:
+      __pycache__/job.cpython-312.pyc: |
+        not read by the check
+    code: |-
+      import sys
+      sys.path.insert(0, '.')
+      import job
+    card: none
+
+  - name: a script run by a subclass of cProfile.Profile
+    earlier:
+      - SCRIPT = open('job.py').read()
+    code: |-
+      import cProfile
+      class Quiet(cProfile.Profile):
+          pass
+      Quiet().run(SCRIPT)
+    card: unchecked
+
+  - name: a script run by a subclass of trace.Trace
+    earlier:
+      - SCRIPT = open('job.py').read()
+    code: |-
+      import trace
+      class T(trace.Trace):
+          pass
+      T(count=0, trace=0).run(SCRIPT)
+    card: unchecked
+
+  - name: a script run by a subclass of pdb.Pdb
+    earlier:
+      - SCRIPT = open('job.py').read()
+    code: |-
+      import pdb
+      class Dbg(pdb.Pdb):
+          pass
+      Dbg().run(SCRIPT)
+    card: unchecked
+
+  - name: a subclass of cProfile.Profile that only profiles the cell's own code
+    code: |-
+      import cProfile, pstats
+      class Quiet(cProfile.Profile):
+          pass
+      pr = Quiet()
+      pr.enable()
+      total = sum(range(1000))
+      pr.disable()
+      pstats.Stats(pr).sort_stats('cumulative').print_stats(5)
+    card: none
+
+  - name: a loader's exec_module bound to a name and called on a project module
+    files:
+      job.py: |
+        import requests
+        requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    code: |-
+      import importlib.machinery, importlib.util
+      spec = importlib.machinery.PathFinder.find_spec('job', ['.'])
+      mod = importlib.util.module_from_spec(spec)
+      run = spec.loader.exec_module
+      run(mod)
+    card: unchecked
+
+  - name: a loader's exec_module an earlier cell bound to a name, called now
+    files:
+      job.py: |
+        import requests
+        requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        import importlib.machinery, importlib.util
+        spec = importlib.machinery.PathFinder.find_spec('job', ['.'])
+        mod = importlib.util.module_from_spec(spec)
+        run = spec.loader.exec_module
+    code: |-
+      run(mod)
+    card: unchecked
+
+  - name: a loader's exec_module handed to map
+    files:
+      job.py: |
+        import requests
+        requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    code: |-
+      import importlib.util
+      spec = importlib.util.find_spec('job')
+      mods = [importlib.util.module_from_spec(spec)]
+      list(map(spec.loader.exec_module, mods))
+    card: unchecked
+
+  - name: a profiler's run handed to functools.partial with a script
+    earlier:
+      - SCRIPT = open('job.py').read()
+    code: |-
+      import cProfile, functools
+      pr = cProfile.Profile()
+      functools.partial(pr.run, SCRIPT)()
+    card: unchecked
+
+  - name: a profiler's run bound to a name and called with a script
+    earlier:
+      - SCRIPT = open('job.py').read()
+    code: |-
+      import cProfile
+      pr = cProfile.Profile()
+      go = pr.run
+      go(SCRIPT)
+    card: unchecked
+
+  - name: a profiler's method looked up by a name the check can't read
+    earlier:
+      - SCRIPT = open('job.py').read()
+    code: |-
+      import cProfile
+      pr = cProfile.Profile()
+      how = input()
+      getattr(pr, how)(SCRIPT)
+    card: unchecked
+
+  - name: run_path read from vars(runpy) under a name bound to text, stored and called
+    code: |-
+      import runpy
+      k = 'run_path'
+      f = vars(runpy)[k]
+      f('job.py')
+    card: unchecked
+
+  - name: run_path an earlier cell read from vars(runpy) under a name bound to text, called now
+    earlier:
+      - |-
+        import runpy
+        k = 'run_path'
+        f = vars(runpy)[k]
+    code: |-
+      f('job.py')
+    card: unchecked
+
+  - name: a runner read from vars(runpy) under a name bound to either of two texts, stored and called
+    code: |-
+      import runpy
+      k = 'run_path' if True else 'run_module'
+      f = vars(runpy)[k]
+      f('job.py')
+    card: unchecked
+
+  - name: run_path read from vars(runpy) under a name bound to text, handed to a thread
+    code: |-
+      import runpy, threading
+      k = 'run_path'
+      threading.Thread(target=vars(runpy)[k], args=('job.py',)).start()
+    card: unchecked
+
+  - name: a profiler's disable registered to run at exit
+    code: |-
+      import atexit, cProfile
+      pr = cProfile.Profile()
+      pr.enable()
+      atexit.register(pr.disable)
+    card: none
+
+  - name: a profiler's enable bound to a name and called
+    code: |-
+      import cProfile
+      pr = cProfile.Profile()
+      cb = pr.enable
+      cb()
+      total = sum(range(10))
+      pr.disable()
+    card: none
+
+  - name: run_path called through operator.methodcaller
+    code: |-
+      import operator, runpy
+      operator.methodcaller('run_path', 'job.py')(runpy)
+    card: unchecked
+
+  - name: run_path fetched through operator.attrgetter and called
+    code: |-
+      import operator, runpy
+      operator.attrgetter('run_path')(runpy)('job.py')
+    card: unchecked
+
+  - name: import_module of a module a cell wrote, called through operator.methodcaller after sys.path changes
+    earlier:
+      - |-
+        open('job.py', 'w').write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import importlib, operator, sys
+      sys.path.insert(0, '.')
+      operator.methodcaller('import_module', 'job')(importlib)
+    card: unchecked
+
+  - name: timeit of a script called through operator.methodcaller
+    earlier:
+      - SCRIPT = open('job.py').read()
+    code: |-
+      import operator, timeit
+      operator.methodcaller('timeit', SCRIPT, number=1)(timeit)
+    card: unchecked
+
+  - name: a loader's exec_module called through operator.methodcaller
+    files:
+      job.py: |
+        import requests
+        requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    code: |-
+      import importlib.machinery, importlib.util, operator
+      spec = importlib.machinery.PathFinder.find_spec('job', ['.'])
+      m = importlib.util.module_from_spec(spec)
+      operator.methodcaller('exec_module', m)(spec.loader)
+    card: unchecked
+
+  - name: a loader's exec_module fetched through a dotted operator.attrgetter and called
+    files:
+      job.py: |
+        import requests
+        requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    code: |-
+      import importlib.machinery, importlib.util, operator
+      spec = importlib.machinery.PathFinder.find_spec('job', ['.'])
+      m = importlib.util.module_from_spec(spec)
+      operator.attrgetter('loader.exec_module')(spec)(m)
+    card: unchecked
+
+  - name: a methodcaller of run_path an earlier cell bound to a name, called now on runpy
+    earlier:
+      - |-
+        import operator
+        go = operator.methodcaller('run_path', 'job.py')
+    code: |-
+      import runpy
+      go(runpy)
+    card: unchecked
+
+  - name: rows sorted by operator.itemgetter
+    code: |-
+      import operator
+      rows = [{'qty': 2}, {'qty': 1}]
+      print(sorted(rows, key=operator.itemgetter('qty')))
+    card: none
+
+  - name: texts upper-cased through operator.methodcaller
+    code: |-
+      import operator
+      print(list(map(operator.methodcaller('upper'), ['a', 'b'])))
+    card: none
+
+  - name: numbers' real parts read through operator.attrgetter
+    code: |-
+      import operator
+      print(list(map(operator.attrgetter('real'), [1, 2])))
+    card: none
+
+  - name: a function given a code object compiled from a file, then called
+    earlier:
+      - CO = compile(open('job.py').read(), 'job', 'exec')
+    code: |-
+      def run():
+          pass
+      run.__code__ = CO
+      run()
+    card: unchecked
+
+  - name: a function given the code a path finder's loader reads from a project file, then called
+    files:
+      job.py: |
+        import requests
+        requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    code: |-
+      import importlib.machinery
+      def run():
+          pass
+      run.__code__ = importlib.machinery.PathFinder.find_spec('job', ['.']).loader.get_code('job')
+      run()
+    card: unchecked
+
+  - name: a function's code object read for its argument count
+    code: |-
+      def f(a, b):
+          return a + b
+      print(f.__code__.co_argcount)
+    card: none
+
+  - name: a function given the code of another function the cell defines
+    code: |-
+      def f():
+          return 1
+      def g():
+          return 2
+      g.__code__ = f.__code__
+      print(g())
+    card: none
+
+  - name: import_module given its name only through a mapping the check can't read
+    earlier:
+      - |-
+        CFG = {'name': input()}
+    code: |-
+      import importlib
+      importlib.import_module(**CFG)
+    card: unchecked
+
+  - name: a relative import_module of an installed package's module
+    code: |-
+      import importlib
+      lm = importlib.import_module('.linear_model', package='sklearn')
+      print(lm)
+    card: none
+
+  - name: a DataLoader's settings read by getattr over a list of names
+    code: |-
+      import torch
+      loader = torch.utils.data.DataLoader(list(range(10)), batch_size=2)
+      for attr in ['batch_size', 'num_workers', 'drop_last']:
+          print(attr, getattr(loader, attr))
+    card: none
+
+  - name: a dict of a held loader's settings read by getattr over a list of names
+    code: |-
+      class Reader:
+          def __init__(self, loader):
+              self.loader = loader
+          def info(self):
+              return {f: getattr(self.loader, f, None) for f in ['path', 'sep']}
+    card: none
+
+  - name: members of types read by getattr over a list of names that run nothing
+    code: |-
+      import types
+      for n in ['SimpleNamespace', 'MappingProxyType']:
+          print(getattr(types, n))
+    card: none
+
+  - name: submodules of importlib read by getattr over a list of names that run nothing
+    code: |-
+      import importlib
+      for n in ['metadata', 'resources']:
+          print(getattr(importlib, n, None))
+    card: none
+
+  - name: a runner read by getattr over a list that names it
+    code: |-
+      import runpy
+      for name in ['run_path']:
+          getattr(runpy, name)('job.py')
+    card: unchecked
+
+  - name: a loader method read by getattr over a list that names it
+    code: |-
+      import importlib.util
+      spec = importlib.util.find_spec('job')
+      mod = importlib.util.module_from_spec(spec)
+      for name in ['exec_module']:
+          getattr(spec.loader, name)(mod)
+    card: unchecked
+
+  - name: a loader member looked up by a name the check can't read
+    code: |-
+      import importlib.util
+      spec = importlib.util.find_spec('job')
+      name = input()
+      getattr(spec.loader, name)(None)
+    card: unchecked
+
+  - name: a submodule of importlib that holds runners read by getattr over a list that names it
+    code: |-
+      import importlib
+      for n in ['util']:
+          m = getattr(importlib, n)
+          spec = m.spec_from_file_location('job', 'job.py')
+    card: unchecked
+
   # ── Python processes ──────────────────────────────────────────────────────
   # A subprocess, os.system, os.exec/spawn, pty or asyncio launch of a Python
   # program runs a file the check never reads. The program may be python, a
@@ -6012,6 +6439,313 @@ cases:
     code: |-
       push()
     card: unchecked
+
+  - name: an import from a module an earlier cell loaded from a file and stored in sys.modules
+    files:
+      etl/job.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("erp_job", "etl/job.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["erp_job"] = module
+        spec.loader.exec_module(module)
+    code: |-
+      from erp_job import push
+      push()
+    card: unchecked
+
+  - name: an import of a module an earlier cell's helper loaded from a file and stored in sys.modules
+    files:
+      etl/job.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        import importlib.util, sys
+        def load(name, path):
+            spec = importlib.util.spec_from_file_location(name, path)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+            return module
+        load("erp_job", "etl/job.py")
+    code: |-
+      import erp_job
+      erp_job.push()
+    card: unchecked
+
+  - name: an import of a project module an earlier cell loaded and stored in sys.modules, with no sys.path change
+    files:
+      job.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("job", "job.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["job"] = module
+        spec.loader.exec_module(module)
+    code: |-
+      import job
+      job.push()
+    card: unchecked
+
+  - name: a call through the sys.modules entry of a module an earlier cell loaded from a file
+    files:
+      etl/job.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("erp_job", "etl/job.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["erp_job"] = module
+        spec.loader.exec_module(module)
+    code: |-
+      import sys
+      sys.modules["erp_job"].push()
+    card: unchecked
+
+  - name: a call through import_module of a module an earlier cell loaded from a file and stored in sys.modules
+    files:
+      etl/job.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("erp_job", "etl/job.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["erp_job"] = module
+        spec.loader.exec_module(module)
+    code: |-
+      import importlib
+      importlib.import_module("erp_job").push()
+    card: unchecked
+
+  - name: an import from a module literal code an earlier cell ran loaded from a file and stored in sys.modules
+    files:
+      etl/job.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec('import importlib.util, sys\nspec = importlib.util.spec_from_file_location("erp_job", "etl/job.py")\nmodule = importlib.util.module_from_spec(spec)\nsys.modules["erp_job"] = module\nspec.loader.exec_module(module)\n')
+    code: |-
+      from erp_job import push
+      push()
+    card: unchecked
+
+  - name: an import from a module an earlier cell stored in sys.modules under its spec's name
+    files:
+      etl/job.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("erp_job", "etl/job.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+    code: |-
+      import erp_job
+      erp_job.push()
+    card: unchecked
+
+  - name: a call to a name an earlier cell imported from a module stored in sys.modules before it
+    files:
+      etl/job.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("erp_job", "etl/job.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["erp_job"] = module
+        spec.loader.exec_module(module)
+      - |-
+        from erp_job import push
+    code: |-
+      push()
+    card: unchecked
+
+  - name: an import of a module stored in sys.modules under a name the check can't read
+    files:
+      etl/job.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        import importlib.util, sys
+        NAME = input()
+        spec = importlib.util.spec_from_file_location(NAME, "etl/job.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[NAME] = module
+        spec.loader.exec_module(module)
+    code: |-
+      import erp_job
+      erp_job.push()
+    card: unchecked
+
+  - name: an import of a module an earlier cell filled with a script read from a file and stored in sys.modules
+    earlier:
+      - |-
+        import sys, types
+        SCRIPT = open("helpers_src.txt").read()
+        m = types.ModuleType("helpers")
+        exec(SCRIPT, m.__dict__)
+        sys.modules["helpers"] = m
+    code: |-
+      import helpers
+      helpers.go()
+    card: unchecked
+
+  - name: an import from a module an earlier cell filled with a script read from a file, stored by sys.modules.update
+    earlier:
+      - |-
+        import sys, types
+        SCRIPT = open("helpers_src.txt").read()
+        m = types.ModuleType("helpers")
+        exec(SCRIPT, m.__dict__)
+        sys.modules.update({"helpers": m})
+    code: |-
+      from helpers import go
+      go()
+    card: unchecked
+
+  - name: an import of a module an earlier cell filled with a script read from a file, stored by sys.modules.setdefault
+    earlier:
+      - |-
+        import sys, types
+        SCRIPT = open("helpers_src.txt").read()
+        m = types.ModuleType("helpers")
+        exec(SCRIPT, m.__dict__)
+        sys.modules.setdefault("helpers", m)
+    code: |-
+      import helpers
+      helpers.go()
+    card: unchecked
+
+  - name: an import of json after an earlier cell stored a module filled with a script read from a file as json
+    earlier:
+      - |-
+        import sys, types
+        SCRIPT = open("helpers_src.txt").read()
+        m = types.ModuleType("json")
+        exec(SCRIPT, m.__dict__)
+        sys.modules["json"] = m
+    code: |-
+      import json
+      json.dumps({"qty": 1})
+    card: unchecked
+
+  - name: an import of a module a literal exec filled with the request and an earlier cell stored in sys.modules
+    earlier:
+      - |-
+        import sys, types
+        m = types.ModuleType("helpers")
+        exec('import requests\ndef go():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n', m.__dict__)
+        sys.modules["helpers"] = m
+    code: |-
+      import helpers
+      helpers.go()
+    card: unchecked
+
+  - name: a call through a module a literal exec filled, which an earlier cell stored in sys.modules and another imported
+    earlier:
+      - |-
+        import sys, types
+        m = types.ModuleType("helpers")
+        exec('import requests\ndef go():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n', m.__dict__)
+        sys.modules["helpers"] = m
+      - |-
+        import helpers
+    code: |-
+      helpers.go()
+    card: unchecked
+
+  - name: a call to a function an earlier cell gave a code object compiled from a file
+    earlier:
+      - |-
+        CO = compile(open('job.py').read(), 'job', 'exec')
+        def run():
+            pass
+        run.__code__ = CO
+    code: |-
+      run()
+    card: unchecked
+
+  - name: an import of json after an earlier cell stored a module loaded from a file under its spec's name
+    files:
+      etl/job.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("erp_job", "etl/job.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+    code: |-
+      import json
+      print(json.dumps({"qty": 1}))
+    card: none
+
+  - name: an import of json after an earlier cell loaded a module from a file and stored it in sys.modules
+    files:
+      etl/job.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("erp_job", "etl/job.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["erp_job"] = module
+        spec.loader.exec_module(module)
+    code: |-
+      import json
+      print(json.dumps({"qty": 1}))
+    card: none
+
+  - name: an import of json stored in sys.modules under another name
+    code: |-
+      import json, sys
+      sys.modules["json_alias"] = json
+      import json_alias
+      print(json_alias.dumps({"qty": 1}))
+    card: none
+
+  - name: an import of a stub module stored in sys.modules after an unread exec
+    earlier:
+      - |-
+        SCRIPT = open("job.txt").read()
+        exec(SCRIPT)
+    code: |-
+      import sys
+      from unittest import mock
+      sys.modules["torch"] = mock.MagicMock()
+      import pandas
+    card: none
 
   # ── Cells the check reads (read) ──────────────────────────────────────────
   # The source is a literal, a compiled literal, a builtin reached by a name

@@ -94,13 +94,17 @@ What it finds:
   value; code the pad's own process runs through ``runpy``, ``importlib``
   (``reload``, a spec or a loader from a file, an import by a name the code
   picks when it runs), ``zipimport``, ``site`` (the ``.pth`` files it reads),
-  a code object, an interactive console, a debugger, a profiler, ``trace``,
-  ``doctest``, ``pytest.main``, a notebook runner, IPython's ``run_cell``,
-  the C API's ``PyRun_`` functions, or a runner of text handed code that
-  isn't a literal or a function it reads, each under any name or lookup and
-  also passed or stored as a value; a write of a ``.pth`` file; an import of
-  a module a cell wrote (to the project, or to a temporary folder), or one
-  new since the turn began in the project or a folder a cell put on
+  a code object, or one a function is given as its ``__code__``, an
+  interactive console, a debugger, a profiler or a subclass of one,
+  ``trace``, ``doctest``, ``pytest.main``, a notebook runner, IPython's
+  ``run_cell``, the C API's ``PyRun_`` functions, or a runner of text handed
+  code that isn't a literal or a function it reads, each under any name or
+  lookup (``getattr``, ``operator.methodcaller`` and ``attrgetter`` among
+  them) and also passed or stored as a value, a loader's or a runner's own
+  method too; a write of a ``.pth`` file; an import of a module a cell wrote
+  (to the project, or to a temporary folder, as source or as bytecode with
+  no source), or one code the check can't read stored in ``sys.modules``,
+  or one new since the turn began in the project or a folder a cell put on
   ``sys.path``, or of a project module a folder on ``sys.path`` reaches once
   a cell changed it or wrote where the check can't place; a Python program
   the cell starts (``python`` with a script, a module, code from its input
@@ -1749,7 +1753,9 @@ _LIST_CHANGES = frozenset({"insert", "append", "extend", "__setitem__", "__iadd_
 _SYS_PATH_CHANGES = frozenset({
     "sys.path", "site.addsitedir", *(f"sys.path.{method}" for method in _LIST_CHANGES),
 })
-_PY_FILE = re.compile(r"\.py\b")
+# A word that names a Python file: its source, or bytecode Python loads
+# with no source (`_module_stem`).
+_PY_FILE = re.compile(r"\.pyc?\b")
 # Every name Python, or the pad's boot, binds before a cell runs, so a call
 # to one is no sign that code the check couldn't read defined it.
 _BUILTIN_NAMES = frozenset({*vars(builtins), *INJECTED_HELPER_NAMES, EXPLAINABILITY_QUERIES_NAME})
@@ -1859,10 +1865,26 @@ _RUNNERS_BY_MODULE = _runners_by_module()
 # The modules that hold something that runs code, so a member named off one
 # by a name the check can't read may run code (`_Reader._pick_runner`).
 _RUNNER_HOLDERS = frozenset({*_RUNNER_MODULES, *_LAUNCHER_MODULES, *_BUILTINS_MODULE_NAMES})
+# Calls that make a getter of a member by its name, called later on any
+# holder: `methodcaller("run_path", "job.py")(runpy)` runs `runpy.run_path`.
+_MEMBER_GETTERS = frozenset({"operator.methodcaller", "operator.attrgetter"})
+_MEMBER_GETTER_NAMES = frozenset(name.rpartition(".")[2] for name in _MEMBER_GETTERS)
+# The last names of the members that run code on what holds them, as a
+# getter of members may name them: a runner, an importer, a launcher, a
+# loader's or an instance runner's method, exec and its kin, and the members
+# that hold the builtins module.
+_RUNNING_MEMBERS = frozenset({
+    *_RUNNER_NAMES, *_LOADER_METHODS, *_RUNNER_METHODS, *_LAUNCH_NAMES, *_EXEC_CALLS,
+    *_BUILTINS_MODULE_NAMES, *_BUILTINS_HOLDER_MEMBERS,
+})
+# The last names of the calls that look a member up by its name: `getattr`
+# and the getters of members.
+_LOOKUP_CALL_NAMES = frozenset({"getattr", *_MEMBER_GETTER_NAMES})
 # The last names of the calls that may run code the check can't read, however
 # the imports name them (`_Cell.unread_candidates`): every hint that names a
-# call, not the cell's own namespace or the builtins module, and `getattr`.
-_UNREAD_CALL_NAMES = frozenset({*(_CODE_HINTS - _GLOBALS_CALLS - _BUILTINS_MODULE_NAMES), "getattr"})
+# call, not the cell's own namespace or the builtins module, `getattr`, and
+# the getters of members.
+_UNREAD_CALL_NAMES = frozenset({*(_CODE_HINTS - _GLOBALS_CALLS - _BUILTINS_MODULE_NAMES), *_LOOKUP_CALL_NAMES})
 
 
 def _is_hint(last: str) -> bool:
@@ -2294,6 +2316,18 @@ class _ListChange(NamedTuple):
     node: ast.AST
 
 
+class _ModuleStore(NamedTuple):
+    """One place a cell stores a module in a mapping spelled `.modules`
+    (`_Cell.module_stores`): the mapping, which `_stored_modules` reads as
+    `sys.modules` through the imports; the code of the name it stores the
+    module under, None where the cell hands over a mapping of them the
+    check can't read; and the code of the module."""
+
+    holder: ast.AST
+    key: ast.AST | None
+    value: ast.AST
+
+
 @dataclass(frozen=True)
 class _CodeSigns:
     """What one walk of a cell reads for the check of code it can't read
@@ -2301,8 +2335,10 @@ class _CodeSigns:
 
     # The nodes that may name something that runs such code, by their last
     # name (`_CODE_HINTS`, and the C API's PyRun_ functions), each entry
-    # looked up under a key one of those names, and each import of the
-    # builtins module.
+    # looked up under a key one of those names or, on a module's own dict,
+    # under a key that isn't a literal (`_module_entry_by_name`), each
+    # function's `__code__` an assignment stores to (`_stores_code`), and
+    # each import of the builtins module.
     hints: tuple[ast.AST, ...]
     # The cell's import statements, in walk order.
     imports: tuple[ast.Import | ast.ImportFrom, ...]
@@ -2311,8 +2347,8 @@ class _CodeSigns:
     # cell can't reach those builtins (`_Reader.names_builtins`), since
     # `x.exec` reaches one only where `x` holds the builtins module.
     names_builtins: bool
-    # Whether a string names a Python file, `.py` at the end of a word, as a
-    # write of a module the pad imports needs.
+    # Whether a string names a Python file, `.py` or `.pyc` at the end of a
+    # word (`_PY_FILE`), as a write of a module the pad imports needs.
     names_a_py_file: bool
     # Whether a string names a `.pth` file, whose import lines Python runs
     # as it starts.
@@ -2329,7 +2365,9 @@ class _CodeSigns:
     list_changes: tuple[_ListChange, ...]
     # The names an assignment binds to a `path`, or `from sys import path` does.
     path_aliases: frozenset[str]
-    # The names an assignment binds to a hint, as `rp = runpy.run_path` binds `rp`.
+    # The names an assignment binds to a hint, as `rp = runpy.run_path` binds
+    # `rp`, or to a lookup of a member by name (`_LOOKUP_CALL_NAMES`), as
+    # `go = operator.methodcaller("run_path")` binds `go`.
     hint_aliases: frozenset[str]
     # The names an `except ... as`, `global` or `nonlocal` statement, a `*`
     # or `**` parameter, a match pattern or a walrus gives, which
@@ -2773,6 +2811,35 @@ class _Cell:
         return tuple(out)
 
     @cached_property
+    def module_stores(self) -> tuple[_ModuleStore, ...]:
+        """Each store of a module in a mapping spelled `.modules`, in any
+        scope (`_ModuleStore`): `m[k] = v`, `m.setdefault(k, v)`,
+        `m.__setitem__(k, v)`, and `m.update(...)` of a dict, keywords or a
+        mapping it can't read. Read from the lists the cell keeps (`stores`,
+        `calls`)."""
+        out: list[_ModuleStore] = []
+        for node in self.stores:
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+                for t in node.targets if isinstance(node, ast.Assign) else [node.target]:
+                    if isinstance(t, ast.Subscript) and _last_name(t.value) == "modules":
+                        out.append(_ModuleStore(holder=t.value, key=t.slice, value=node.value))
+        for call in self.calls:
+            func = call.func
+            if not (isinstance(func, ast.Attribute) and _last_name(func.value) == "modules"):
+                continue
+            if func.attr in ("setdefault", "__setitem__") and len(call.args) >= 2:
+                out.append(_ModuleStore(holder=func.value, key=call.args[0], value=call.args[1]))
+            elif func.attr == "update":
+                for arg in call.args:
+                    if isinstance(arg, ast.Dict):
+                        out += [_ModuleStore(holder=func.value, key=k, value=v) for k, v in zip(arg.keys, arg.values)]
+                    else:
+                        out.append(_ModuleStore(holder=func.value, key=None, value=arg))
+                out += [_ModuleStore(holder=func.value, key=None if k.arg is None else ast.Constant(value=k.arg),
+                                     value=k.value) for k in call.keywords]
+        return tuple(out)
+
+    @cached_property
     def writer_calls(self) -> list[ast.Call]:
         """The calls spelled as one that may write a module: a write, copy
         or move of a file (`_FILE_WRITE_NAMES`), a call that makes a file
@@ -2799,7 +2866,7 @@ class _Cell:
         py_files: set[str] = set()
         for node in ast.walk(self.tree):
             if isinstance(node, (ast.Name, ast.Attribute)):
-                if _is_hint(_last_name(node)):
+                if _is_hint(_last_name(node)) or _stores_code(node):
                     hints.append(node)
                 # A member `.exec` reaches the builtin where its holder is the
                 # builtins module, which a name may hold with no literal
@@ -2811,7 +2878,7 @@ class _Cell:
                 )
             elif isinstance(node, ast.Subscript):
                 key = node.slice.value if isinstance(node.slice, ast.Constant) else None
-                if key in _CODE_HINTS:
+                if key in _CODE_HINTS or _module_entry_by_name(node):
                     hints.append(node)
                     names_builtins = names_builtins or key in _EXEC_CALLS or key in _BUILTINS_MODULE_NAMES
             elif isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -2873,6 +2940,12 @@ class _Cell:
                         path_aliases.update(names)
                     if _is_hint(last):
                         hint_aliases.update(names)
+                elif isinstance(node, ast.Assign) and (
+                    isinstance(value, ast.Subscript) and _module_entry_by_name(value)
+                    or isinstance(value, ast.Call) and _last_name(value.func) in _LOOKUP_CALL_NAMES
+                ):
+                    # `f = vars(runpy)[k]`, `go = operator.methodcaller(k)`, `f = getattr(m, k)`.
+                    hint_aliases.update(t.id for t in targets if isinstance(t, ast.Name))
         return _CodeSigns(
             hints=tuple(hints), imports=tuple(imports), names_builtins=names_builtins,
             names_a_py_file=names_a_py_file, names_a_pth_file=names_a_pth_file, names_dash_c=names_dash_c,
@@ -2894,6 +2967,37 @@ class _Cell:
             return ""
         text = textwrap.dedent("\n".join(self.lines[first - 1:last]))
         return "\n".join(line.rstrip() for line in text.strip("\n").splitlines())
+
+
+def _stores_code(node: ast.AST) -> bool:
+    """Whether `node` is an assignment's target that gives a function a
+    code object as its own, `f.__code__`: calling `f` then runs that code."""
+    return isinstance(node, ast.Attribute) and node.attr == "__code__" and isinstance(node.ctx, ast.Store)
+
+
+def _swaps_in_unread_code(target: ast.AST, cell: _Cell) -> bool:
+    """Whether `target`, code of `cell`, gives a function code the check
+    can't read (`_stores_code`): any code object but the `__code__` of a
+    function the cell defines, which the check reads with the cell, as
+    `g.__code__ = f.__code__` gives."""
+    if not _stores_code(target):
+        return False
+    store = cell.parents.get(target)
+    value = store.value if isinstance(store, (ast.Assign, ast.AnnAssign)) else None
+    return not (isinstance(value, ast.Attribute) and value.attr == "__code__"
+                and isinstance(value.value, ast.Name) and value.value.id in cell.functions)
+
+
+def _module_entry_by_name(node: ast.Subscript) -> bool:
+    """Whether `node` is spelled as an entry of a module's own dict under a
+    key that isn't a literal: of `vars(m)`, `m.__dict__` or `sys.modules`,
+    which `_Reader.module_member` reads through a name bound to literal
+    texts, as `vars(runpy)[k]` with `k = "run_path"`."""
+    if isinstance(node.slice, ast.Constant):
+        return False
+    holder = node.value
+    return (isinstance(holder, ast.Call) and _last_name(holder.func) == "vars" and len(holder.args) == 1
+            or isinstance(holder, ast.Attribute) and holder.attr in ("__dict__", "modules"))
 
 
 def _cannot_raise(stmt: ast.stmt) -> bool:
@@ -10069,27 +10173,89 @@ def _runner_code(call: ast.Call, reader: _Reader) -> _RunnerCode | None:
 def _runner_methods(node: ast.AST, reader: _Reader) -> frozenset[str]:
     """The methods that run code on what `node` holds: those of the runner
     whose call made it (`_INSTANCE_RUNNERS`), there or through the names a
-    value or a with-statement binds to it."""
+    value or a with-statement binds to it, and those of a runner a class
+    read code defines is made from (`_class_runner_methods`)."""
     out: set[str] = set()
     todo = [node]
     seen: set[int] = set()
     while todo:
         node = todo.pop()
         if isinstance(node, ast.Call):
-            out |= _INSTANCE_RUNNERS.get(reader.module_member(node.func) or "", frozenset())
+            out |= _class_runner_methods(node.func, reader)
         elif isinstance(node, ast.Name) and node.id in reader.bound_names and id(node) not in seen:
             seen.add(id(node))
             todo += [b.value for b in reader.bindings_of(node.id, node=node) if b.how in ("value", "context")]
     return frozenset(out)
 
 
+def _class_runner_methods(cls: ast.AST, reader: _Reader) -> frozenset[str]:
+    """The methods that run code on what calling `cls` makes: those of the
+    runner it names (`_INSTANCE_RUNNERS`), or, for a class read code
+    defines, those of each runner among its bases, and their bases in turn,
+    as `class Quiet(cProfile.Profile)` makes a profiler."""
+    out: set[str] = set()
+    todo = [cls]
+    seen: set[int] = set()
+    while todo:
+        node = todo.pop()
+        out |= _INSTANCE_RUNNERS.get(reader.module_member(node) or "", frozenset())
+        defined = reader.classes.get(node.id) if isinstance(node, ast.Name) else None
+        if defined is not None and id(defined) not in seen:
+            seen.add(id(defined))
+            todo += defined.bases
+    return frozenset(out)
+
+
+def _holds_a_running_member(node: ast.AST, reader: _Reader) -> bool:
+    """Whether `node` holds a member that runs code on what holds it: a
+    loader's method (`_LOADER_METHODS`), a runner's own on what an instance
+    runner made (`_runner_methods`), or what a lookup of a member that may
+    run code gives (`_looks_up_a_runner`), there or through the names a
+    value binds to it, as `run = spec.loader.exec_module` binds `run`."""
+    todo = [node]
+    seen: set[int] = set()
+    while todo:
+        node = todo.pop()
+        if isinstance(node, ast.Attribute) and (
+            node.attr in _LOADER_METHODS
+            or node.attr in _RUNNER_METHODS and node.attr in _runner_methods(node.value, reader)
+        ) or isinstance(node, ast.Call) and _looks_up_a_runner(node, reader):
+            return True
+        if isinstance(node, ast.Name) and node.id in reader.bound_names and id(node) not in seen:
+            seen.add(id(node))
+            todo += [b.value for b in reader.bindings_of(node.id, node=node) if b.how == "value"]
+    return False
+
+
+# What follows a module's name in the path of a file an import loads it from,
+# in a folder on `sys.path`: its source, its bytecode with no source beside
+# it, or a package's `__init__.py`.
+_MODULE_FILE_ENDS = (".py", ".pyc", "/__init__.py")
+
+
+def _module_stem(path: str) -> str | None:
+    """The name an import reaches a module file at `path` by, in the folder
+    that holds it: the stem of a `.py` file, or of a `.pyc` file outside
+    `__pycache__`, which Python loads with no source beside it. None for any
+    other file, a `.pyc` in `__pycache__` among them: Python reads one only
+    for the source it was compiled from."""
+    folders, _, name = path.rpartition("/")
+    if name.endswith(".py"):
+        return name[: -len(".py")]
+    if name.endswith(".pyc") and "__pycache__" not in folders.split("/"):
+        return name[: -len(".pyc")]
+    return None
+
+
 def _module_names(path: str) -> set[str]:
-    """The names an import may reach a Python file at `path` by: its stem,
-    and each folder above it, as a package or a folder on `sys.path`."""
-    if not path.endswith(".py"):
+    """The names an import may reach a Python file at `path` by: its stem
+    (`_module_stem`), and each folder above it, as a package or a folder on
+    `sys.path`."""
+    stem = _module_stem(path)
+    if stem is None:
         return set()
-    *folders, name = path.split("/")
-    return {part for part in (*folders, name[: -len(".py")]) if part.isidentifier()}
+    *folders, _ = path.split("/")
+    return {part for part in (*folders, stem) if part.isidentifier()}
 
 
 # Folders an environment installs packages into: what an import reaches in
@@ -10113,8 +10279,14 @@ _TREE_DESTINATIONS = {
 }
 _TREE_WRITERS = frozenset(_TREE_DESTINATIONS)
 # Calls that may write the file one argument names, by that argument's place,
-# beyond those `_written_target` reads.
-_FILE_MAKERS = {"os.open": 0, "codecs.open": 0, "urllib.request.urlretrieve": 1}
+# beyond those `_written_target` reads; `py_compile.compile` writes the
+# bytecode its `cfile` names, which Python loads with no source.
+_FILE_MAKERS = {"os.open": 0, "codecs.open": 0, "urllib.request.urlretrieve": 1, "py_compile.compile": 1}
+# The keyword each of `_FILE_MAKERS` takes that file by, where it isn't given by place.
+_FILE_MAKER_KEYWORDS = {
+    "os.open": "path", "codecs.open": "filename", "urllib.request.urlretrieve": "filename",
+    "py_compile.compile": "cfile",
+}
 _FILE_MAKER_NAMES = frozenset({*(name.rpartition(".")[2] for name in _FILE_MAKERS), "writestr"})
 _WRITER_CALL_NAMES = frozenset({*_FILE_WRITE_NAMES, *_FILE_MAKER_NAMES, *_TREE_WRITERS, *_LAUNCH_NAMES, "touch"})
 
@@ -10170,15 +10342,17 @@ def _written_modules(reader: _Reader, cells: Sequence[_Cell]) -> _WrittenModules
             elif last == "touch" and isinstance(call.func, ast.Attribute):
                 target = call.func.value
             if target is None and last in _FILE_MAKER_NAMES:
-                index = 0 if last == "writestr" else _FILE_MAKERS.get(
-                    reader.module_member(call.func) or reader.dotted(call.func))
-                target = call.args[index] if index is not None and len(call.args) > index else None
+                maker = reader.module_member(call.func) or reader.dotted(call.func)
+                index = 0 if last == "writestr" else _FILE_MAKERS.get(maker)
+                target = call.args[index] if index is not None and len(call.args) > index else (
+                    _keyword(call, _FILE_MAKER_KEYWORDS[maker]) if maker in _FILE_MAKER_KEYWORDS else None
+                )
             if target is not None:
                 got = reader.paths(target, cell=cell)
                 if isinstance(got, _Unknown) or _TEMP_PATH in got:
                     unplaced = True
                 else:
-                    paths.update(path.replace("\\", "/") for path in got if path.endswith(".py"))
+                    paths.update(p for p in (path.replace("\\", "/") for path in got) if _module_stem(p) is not None)
             elif last in _TREE_WRITERS:
                 where = _TREE_DESTINATIONS[last]
                 dest = call.args[where.place] if len(call.args) > where.place else _keyword(call, where.keyword)
@@ -10198,7 +10372,7 @@ def _written_modules(reader: _Reader, cells: Sequence[_Cell]) -> _WrittenModules
                     commands = [command] if isinstance(command, list) else _script_commands(command)
                     for words in commands:
                         paths.update(path for w in words for path in [_REDIRECT.sub("", w).replace("\\", "/")]
-                                     if path.endswith(".py"))
+                                     if _module_stem(path) is not None)
                         cloned = _cloned_into(words)
                         if cloned is not None:
                             unpacks.append(reader.position(call))
@@ -10245,7 +10419,8 @@ def _literal_non_module_args(call: ast.Call) -> bool:
     no module."""
     given = [*call.args, *(k.value for k in call.keywords)]
     return all(
-        isinstance(a, ast.Constant) and not (isinstance(a.value, str) and a.value.endswith(".py")) for a in given
+        isinstance(a, ast.Constant) and not (isinstance(a.value, str) and _module_stem(a.value) is not None)
+        for a in given
     )
 
 
@@ -10257,6 +10432,16 @@ class _WrittenName(NamedTuple):
 
     name: str
     package: bool
+
+
+@dataclass(frozen=True)
+class _StoredModule:
+    """A module a cell stores in `sys.modules` from code the check can't
+    read (`_stored_modules`): the name it stores it under, None for a name
+    the check can't read, and the place of that cell (`_Cell.order`)."""
+
+    name: str | None
+    order: tuple[int, ...]
 
 
 class _Modules:
@@ -10280,6 +10465,10 @@ class _Modules:
         self._reader = reader
         self._snapshots = snapshots
         self._new: dict[str, bool] = {}
+        # The modules cells store in `sys.modules` from code the check can't
+        # read, which `_build_defined` sets once it reads what such code
+        # filled (`_stored_modules`).
+        self.stored: tuple[_StoredModule, ...] = ()
 
     @cached_property
     def _naming(self) -> list[_Cell]:
@@ -10337,7 +10526,7 @@ class _Modules:
         out: list[_WrittenName] = []
         for path in written:
             parts = path.split("/")
-            out.append(_WrittenName(parts[-1][: -len(".py")], package=True))
+            out.append(_WrittenName(_module_stem(path) or "", package=True))
             for i, folder in enumerate(parts[:-1]):
                 init = posixpath.normpath("/".join([*parts[: i + 1], "__init__.py"]))
                 rel = _relative(init, project) if project is not None else None
@@ -10348,8 +10537,16 @@ class _Modules:
         """Whether importing `module` in `cell` may run code the check can't
         read. A relative name counts, since the check can't place its
         package. Code `python -c` runs (`_Cell.launched`) has its working
-        folder on `sys.path`, as if a cell had put it there."""
+        folder on `sys.path`, as if a cell had put it there. So does a
+        module a cell up to this one stored in `sys.modules` from such code
+        (`stored`), which an import gets before it looks anywhere else, or a
+        package or a module under one stored so; any module, where the
+        check can't read the name it was stored under."""
         if module.startswith("."):
+            return True
+        if any(s.order <= cell.order and (
+            s.name is None or module == s.name or module.startswith(f"{s.name}.") or s.name.startswith(f"{module}.")
+        ) for s in self.stored):
             return True
         top = module.partition(".")[0]
         if not top:
@@ -10472,21 +10669,21 @@ class _Modules:
 
     def _reachable(self, top: str, entries: AbstractSet[str]) -> bool:
         """Whether an import reaches a Python file in the project by the name
-        `top` through one of `entries`, folders on `sys.path`: `top.py` or a
-        package `top/` there, or a namespace portion `top/` but for a module
-        Python ships. Where the walk stopped short, the folders are read on
-        disk."""
+        `top` through one of `entries`, folders on `sys.path`: `top.py`, a
+        sourceless `top.pyc` (`_module_stem`) or a package `top/` there, or a
+        namespace portion `top/` but for a module Python ships. Where the walk
+        stopped short, the folders are read on disk."""
         snap = self.project
         if snap is None:
             return False
         for entry in entries:
             base = f"{entry}/" if entry else ""
-            if f"{base}{top}.py" in snap.files or f"{base}{top}/__init__.py" in snap.files:
+            if any(f"{base}{top}{end}" in snap.files for end in _MODULE_FILE_ENDS):
                 return True
             if f"{base}{top}" in snap.dirs and top not in sys.stdlib_module_names:
                 return True
             if (snap.failed or not snap.complete) and (
-                _exists_on_disk(snap.root / base / f"{top}.py")
+                any(_exists_on_disk(snap.root / base / f"{top}{end}") for end in _MODULE_FILE_ENDS)
                 or _exists_on_disk(snap.root / base / top, folder=True)
             ):
                 return True
@@ -10494,16 +10691,17 @@ class _Modules:
 
     def _new_on_disk(self, top: str) -> bool:
         """Whether the project or shared folder, or a folder under the
-        project the cells put on `sys.path` (`path_entries`), holds `top.py`
-        or `top/__init__.py` now, though the walk when the turn began didn't:
-        a cell this turn wrote it, however the check read its write."""
+        project the cells put on `sys.path` (`path_entries`), holds `top.py`,
+        `top.pyc` or `top/__init__.py` now, though the walk when the turn
+        began didn't: a cell this turn wrote it, however the check read its
+        write."""
         if top not in self._new:
             entries = self.path_entries or frozenset()
             self._new[top] = any(
                 rel not in snap.files and _exists_on_disk(snap.root / rel)
                 for snap in self._snapshots if snap.complete and not snap.failed
                 for base in ("", *(f"{e}/" for e in entries if e and snap.label == "project"))
-                for rel in (f"{base}{top}.py", f"{base}{top}/__init__.py")
+                for rel in (f"{base}{top}{end}" for end in _MODULE_FILE_ENDS)
             )
         return self._new[top]
 
@@ -10515,8 +10713,8 @@ class _Modules:
         if any(top in snap.module_names for snap in self._snapshots):
             return True
         return any(
-            _exists_on_disk(snap.root / f"{top}.py") or _exists_on_disk(snap.root / top / "__init__.py")
-            for snap in self._snapshots if snap.failed or not snap.complete
+            _exists_on_disk(snap.root / f"{top}{end}")
+            for snap in self._snapshots if snap.failed or not snap.complete for end in _MODULE_FILE_ENDS
         )
 
 
@@ -10568,27 +10766,50 @@ def _runner_named(node: ast.AST, reader: _Reader) -> bool:
 
 
 def _looks_up_a_runner(call: ast.Call, reader: _Reader) -> bool:
-    """Whether `call` looks a member up by a name the check can't read on a
-    loader, or on a module that holds something that runs code:
-    `getattr(runpy, name)` may be `runpy.run_path`. A runner module's
-    members mostly run code, so any name there holds; a launcher module
-    (`os`, `subprocess`) holds only when the key names a launcher member
-    (`_RUNNERS_BY_MODULE`), read with `_literal_texts`, or can't be read."""
+    """Whether `call` looks up a member that may run code, by a key read
+    with `_literal_texts`. A `getattr` holds on a loader, on a module that
+    holds a runner or a launcher, or on what an instance runner made
+    (`_runner_methods`), where the key can't be read or a text names a
+    member there that runs code (`_runs_on_holder`): `getattr(runpy, name)`
+    may be `runpy.run_path`, while `getattr(types, n)` over a list of
+    harmless names holds nothing. An `operator.methodcaller` or
+    `operator.attrgetter` holds where a key can't be read or a part of one
+    is named as a member that runs code (`_RUNNING_MEMBERS`): the holder it
+    is later called on may be any."""
+    last = _last_name(call.func)
+    if last in _MEMBER_GETTER_NAMES and reader.module_member(call.func) in _MEMBER_GETTERS:
+        keys = call.args[:1] if last == "methodcaller" else call.args
+        found = [_literal_texts(key, reader) for key in keys]
+        return any(texts is None or any(_member_runs_code(text) for text in texts) for texts in found)
     if not (isinstance(call.func, ast.Name) and call.func.id == "getattr" and len(call.args) >= 2):
         return False
     key = call.args[1]
     if isinstance(key, ast.Constant) and isinstance(key.value, str):
         return False
     held = call.args[0]
+    texts = _literal_texts(key, reader)
     if _last_name(held) == "loader":
-        return True
+        return texts is None or any(text in _LOADER_METHODS for text in texts)
     module = reader.module_member(held)
-    if module in _RUNNER_MODULES:
-        return True
-    if module in _LAUNCHER_MODULES:
-        texts = _literal_texts(key, reader)
-        return texts is None or any(text in _RUNNERS_BY_MODULE.get(module, {}) for text in texts)
-    return False
+    if module in _RUNNER_MODULES or module in _LAUNCHER_MODULES:
+        return texts is None or any(_runs_on_holder(module, text) for text in texts)
+    methods = _runner_methods(held, reader)
+    return bool(methods) and (texts is None or any(text in methods for text in texts))
+
+
+def _runs_on_holder(module: str, text: str) -> bool:
+    """Whether the member `text` of `module`, a module that holds a runner
+    or a launcher, runs code or holds what does: one of its runners or
+    launchers (`_RUNNERS_BY_MODULE`), or a module below it that holds one,
+    as `importlib.util` does."""
+    return text in _RUNNERS_BY_MODULE.get(module, {}) or f"{module}.{text}" in _RUNNER_HOLDERS
+
+
+def _member_runs_code(text: str) -> bool:
+    """Whether `text`, a member's name as a getter of members takes it, a
+    dotted path for `attrgetter`, names in any part a member that runs code
+    on what holds it (`_RUNNING_MEMBERS`) or a PyRun_ function."""
+    return any(part in _RUNNING_MEMBERS or part.startswith(_PYRUN_PREFIX) for part in text.split("."))
 
 
 def _imports_unread(call: ast.Call, reader: _Reader, cell: _Cell, *, modules: _Modules) -> bool:
@@ -10597,10 +10818,12 @@ def _imports_unread(call: ast.Call, reader: _Reader, cell: _Cell, *, modules: _M
     `pkgutil.resolve_name` or `pydoc.locate` target names the module before
     its colon. A name read as no text at all imports nothing only where it
     is a parameter of a function nothing calls (`_never_given`), and so
-    does a relative name given no package."""
+    does a relative name given no package. A call given no name but a
+    `**` mapping takes its name from that mapping, which the check doesn't
+    read."""
     target = _target_arg(call, keywords=("name", "path"))
     if target is None:
-        return False
+        return any(k.arg is None for k in call.keywords)
     texts = _literal_texts(target, reader)
     if texts == []:
         return not _never_given(target, reader)
@@ -10620,6 +10843,10 @@ def _runs_unread(call: ast.Call, reader: _Reader, cell: _Cell, *, read: _ExecRea
     if isinstance(func, ast.Attribute) and last in _LOADER_METHODS:
         return True
     if isinstance(func, ast.Call) and _looks_up_a_runner(func, reader):
+        return True
+    if isinstance(func, ast.Name) and func.id in reader.runner_aliases and _holds_a_running_member(func, reader):
+        # A name bound to a loader's or a runner's method, as `go = pr.run`,
+        # or to a lookup of one, as `go = operator.methodcaller("run_path")`.
         return True
     name = reader.module_member(func) if _runner_named(func, reader) else None
     if name in _CODE_RUNNERS or name is not None and name.startswith(_PYRUN_FUNCS):
@@ -10668,10 +10895,14 @@ def _unread_run_at(node: ast.AST, reader: _Reader, cell: _Cell, *, read: _ExecRe
     isn't a literal, or a literal `read` left unread at `_EXEC_LIMIT`; an
     import by a name that isn't a literal; an import of a module `modules`
     can't read, whether by an import statement or a literal
-    `importlib.import_module` or `__import__` (`_Cell.looked_up`); and a
-    program it runs that runs Python the check can't read
-    (`_launches_unread`). Each name a runner, importer or launcher is called
-    by resolves through the imports (`_Reader.module_member`)."""
+    `importlib.import_module` or `__import__` (`_Cell.looked_up`); a runner,
+    an importer, or a loader's or a runner's own method, passed on or
+    stored (`_holds_a_running_member`), and a lookup of a member that may
+    run code (`_looks_up_a_runner`); a function given code the check can't
+    read (`_swaps_in_unread_code`); and a program it runs that runs Python
+    the check can't read (`_launches_unread`). Each name a runner, importer
+    or launcher is called by resolves through the imports
+    (`_Reader.module_member`)."""
     if isinstance(node, ast.Import):
         return any(modules.unread(a.name, cell=cell) for a in node.names)
     if isinstance(node, ast.ImportFrom):
@@ -10680,10 +10911,18 @@ def _unread_run_at(node: ast.AST, reader: _Reader, cell: _Cell, *, read: _ExecRe
     if isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)):
         if node in cell.looked_up and modules.unread(node.id, cell=cell):
             return True
-        # A runner or importer passed on or stored, as `map(runpy.run_path, paths)`.
+        if _swaps_in_unread_code(node, cell):
+            return True
+        # A runner or importer passed on or stored, as `map(runpy.run_path, paths)`,
+        # and a loader's or a runner's method, as `go = pr.run`.
         call = cell.parents.get(node)
-        if not (isinstance(node.ctx, ast.Load) and not (isinstance(call, ast.Call) and call.func is node)
-                and _runner_named(node, reader)):
+        if not (isinstance(node.ctx, ast.Load) and not (isinstance(call, ast.Call) and call.func is node)):
+            return False
+        if (isinstance(node, ast.Attribute) or isinstance(node, ast.Name) and node.id in reader.runner_aliases) and (
+            _holds_a_running_member(node, reader)
+        ):
+            return True
+        if not _runner_named(node, reader):
             return False
         member = reader.module_member(node)
         return member in _RUNNER_VALUES and not (member in _RUNNER_TYPES and _type_runner_aside(node, cell))
@@ -10743,9 +10982,15 @@ def _names_a_runner(node: ast.AST, reader: _Reader) -> bool:
         return True
     if isinstance(node, ast.Subscript):
         key = node.slice.value if isinstance(node.slice, ast.Constant) else None
-        return key in _BUILTINS_MODULE_NAMES or reader.exec_builtin(node) is not None
+        if key in _BUILTINS_MODULE_NAMES or reader.exec_builtin(node) is not None:
+            return True
+        # An entry of a module's dict, as `vars(runpy)[k]` is `runpy.run_path`.
+        name = reader.module_member(node)
+        return name is not None and (name in _RUN_CALLS or name.startswith(_PYRUN_FUNCS))
     last = _last_name(node)
     if last in _LOADER_METHODS or last in _BUILTINS_MODULE_NAMES or reader.dotted(node) in _GLOBALS_CALLS:
+        return True
+    if _stores_code(node):
         return True
     if last in _EXEC_CALLS:
         return reader.exec_builtin(node) is not None
@@ -10975,8 +11220,9 @@ class _Unread:
 def _from_unread(value: ast.AST, at: _Unread) -> bool:
     """Whether `value` holds what code the check can't read made: a tainted
     name or one no read code binds (`_unvouched`), a member or entry of one,
-    or what calling one returns; a module an import loads unread, or that
-    `sys.modules` holds by a name the check can't read; what exec(), eval()
+    or what calling one returns; a module an import loads unread, or an
+    entry of `sys.modules`, or a member of one, under a name the check
+    can't read or of such a module (`_module_entry_unread`); what exec(), eval()
     or compile() makes of a source that isn't a literal; the namespace a
     runner returns (`_NAMESPACE_RUNNERS`), and what any other runner makes
     (`_CODE_RUNNERS`), as a spec or a loader; a module an importer loads
@@ -10999,10 +11245,10 @@ def _from_unread(value: ast.AST, at: _Unread) -> bool:
         return _from_unread(value.body, at) or _from_unread(value.orelse, at)
     if isinstance(value, ast.BoolOp):
         return any(_from_unread(v, at) for v in value.values)
-    if isinstance(value, ast.Subscript) and reader.dotted(value.value) == "sys.modules":
-        key = value.slice.value if isinstance(value.slice, ast.Constant) else None
-        return not isinstance(key, str) or at.modules.unread(key, cell=at.cell)
     if isinstance(value, (ast.Attribute, ast.Subscript)):
+        entry = _sys_modules_entry(value, reader)
+        if entry is not None:
+            return _module_entry_unread(entry, at)
         return _from_unread(_root_of(value), at)
     if isinstance(value, ast.Name):
         if value in at.cell.looked_up:
@@ -11030,6 +11276,25 @@ def _from_unread(value: ast.AST, at: _Unread) -> bool:
         # Handed on, as `functools.partial(push)`, `getattr(job, "main")` or `dict(ns)` are.
         return True
     return _returns_unread(value, at) or _from_unread(_root_of(func), at)
+
+
+def _sys_modules_entry(node: ast.AST, reader: _Reader) -> ast.Subscript | None:
+    """The entry of `sys.modules`, as the imports read it, that a chain of
+    members and entries starts from: `sys.modules["job"]` for
+    `sys.modules["job"].main`; None for any other chain."""
+    while isinstance(node, (ast.Attribute, ast.Subscript)):
+        if isinstance(node, ast.Subscript) and reader.dotted(node.value) == "sys.modules":
+            return node
+        node = node.value
+    return None
+
+
+def _module_entry_unread(entry: ast.Subscript, at: _Unread) -> bool:
+    """Whether `entry`, an entry of `sys.modules`, may hold a module code
+    the check can't read made: one under a name the check can't read, or
+    one an import of that name loads unread (`_Modules.unread`)."""
+    key = entry.slice.value if isinstance(entry.slice, ast.Constant) else None
+    return not isinstance(key, str) or at.modules.unread(key, cell=at.cell)
 
 
 def _returns_unread(call: ast.Call, at: _Unread) -> bool:
@@ -11121,6 +11386,23 @@ def _stores(node: ast.AST) -> Iterator[_Store]:
                 yield _Store([param.arg], default)
 
 
+def _tainted_in(
+    reader: _Reader, nodes: Iterable[ast.AST], cell: _Cell, defined: _Defined, modules: _Modules,
+) -> _Unread:
+    """What `_from_unread` reads code of `cell` against, with each name one
+    of `nodes` binds, in any scope, to what code the check can't read made
+    tainted beside `defined.tainted`, in the order of `nodes`, so a name
+    bound to one tainted before it is tainted too."""
+    tainted = {name: set(taints) for name, taints in defined.tainted.items()}
+    at = _Unread(reader=reader, cell=cell, modules=modules, defined=defined, tainted=tainted)
+    for node in nodes:
+        for names, value in _stores(node):
+            if names and _from_unread(value, at):
+                for name in names:
+                    tainted.setdefault(name, set()).add(_taint_at(node, cell))
+    return at
+
+
 def _defined_uses(
     reader: _Reader, root: ast.AST, cell: _Cell, defined: _Defined | None, modules: _Modules,
 ) -> _DefinedUses:
@@ -11141,17 +11423,16 @@ def _defined_uses(
     nodes: Sequence[ast.AST] = (
         (*cell.stores, *cell.definitions, *cell.calls) if root is cell.tree else list(ast.walk(root))
     )
-    tainted = {name: set(taints) for name, taints in defined.tainted.items()}
-    at = _Unread(reader=reader, cell=cell, modules=modules, defined=defined, tainted=tainted)
-    for node in nodes:
-        for names, value in _stores(node):
-            if names and _from_unread(value, at):
-                for name in names:
-                    tainted.setdefault(name, set()).add(_taint_at(node, cell))
+    at = _tainted_in(reader, nodes, cell, defined, modules)
+    tainted = at.tainted
     sites: list[ast.AST] = []
     callees: list[_Callee] = []
 
     def unvouched(node: ast.AST) -> bool:
+        entry = _sys_modules_entry(node, reader)
+        if entry is not None:
+            # `sys.modules["job"].main`, for a module unread code stored there.
+            return _module_entry_unread(entry, at)
         head = _root_of(node)
         return isinstance(head, ast.Name) and _unvouched(reader, head, defined, tainted)
 
@@ -11198,9 +11479,12 @@ def _plainly_read(node: ast.AST, reads: _FillReads, cell: _Cell, reader: _Reader
     `_Reader.runner_aliases`), each name it loads is untainted, read as
     itself, imports no `sys` (whose `sys.modules` holds every module), and
     is bound by read code at module level of a cell that runs before this
-    one (`_Reader.bound_before`), or of this one on an earlier line. A
-    cheaper read of most values a long conversation stores."""
+    one (`_Reader.bound_before`), or of this one on an earlier line; and it
+    gives no function a code object (`_stores_code`). A cheaper read of
+    most values a long conversation stores."""
     if reads.methods is None or any(_is_hint(m) or m in reader.runner_aliases for m in reads.methods):
+        return False
+    if isinstance(node, ast.Assign) and any(_stores_code(t) for t in node.targets):
         return False
     if any(reader.imports.get(name) in _SYS_MODULE_NAMES for name in reads.names):
         return False
@@ -11237,8 +11521,9 @@ def _filled_names(node: ast.AST, at: _Unread) -> set[str]:
     """The names `node`, code that runs in a cell, fills with what code the
     check can't read made: those an import of a module `_Modules` can't
     read binds, those an assignment or walrus binds to such a value
-    (`_from_unread`), and the namespace a non-literal exec() or eval() is
-    handed."""
+    (`_from_unread`), a function an assignment gives code the check can't
+    read (`_swaps_in_unread_code`), and the namespace a non-literal exec()
+    or eval() is handed."""
     if isinstance(node, ast.Import):
         return {a.asname or a.name.partition(".")[0] for a in node.names if at.modules.unread(a.name, cell=at.cell)}
     if isinstance(node, ast.ImportFrom):
@@ -11252,7 +11537,10 @@ def _filled_names(node: ast.AST, at: _Unread) -> set[str]:
         namespace = node.args[1] if len(node.args) > 1 else _keyword(node, "globals")
         root = _namespace_root(namespace)
         return {root} if source is not None and _literal_source(source) is None and root is not None else set()
-    return {name for names, value in _stores(node) if _from_unread(value, at) for name in names}
+    # A function given code the check can't read, as `run.__code__ = co`.
+    swapped = {t.value.id for t in node.targets if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name)
+               and _swaps_in_unread_code(t, at.cell)} if isinstance(node, ast.Assign) else set()
+    return swapped | {name for names, value in _stores(node) if _from_unread(value, at) for name in names}
 
 
 def _build_defined(
@@ -11271,27 +11559,44 @@ def _build_defined(
     the first cell where such code ran (`_first_unread`): before it a name
     no read code bound held nothing yet. With no such cell, nothing is
     tainted. After the first pass, only code that reads a name the pass
-    before tainted more is read again (`_Cell.fill_reads`)."""
+    before tainted more is read again (`_Cell.fill_reads`). Then the
+    modules such code stored in `sys.modules` (`_stored_modules`) go to
+    `modules`, and the whole read runs again while more turn up, since an
+    import of one fills what it binds."""
     namespaces = tuple(sorted(
         (c for c in literal.cells if c.namespace is not None and c.host < reader.current.index), key=lambda c: c.order,
     ))
     values = _literal_exec_values(reader, cells, literal, namespaces, errored=errored)
-    stars: list[_StarImport] = []
-    for cell in cells:
-        if cell.host in errored:
-            continue
-        lines = [n.lineno for n in cell.signs.imports if isinstance(n, ast.ImportFrom) and n.module
-                 and any(a.name == "*" for a in n.names) and cell.runs_surely(n)
-                 and not modules.unread(n.module, cell=cell)]
-        if lines:
-            stars.append(_StarImport(cell=cell, line=min(lines)))
-    base = _Defined(
-        tainted={}, namespaces=namespaces, values=values, stars=tuple(stars),
-        bound=frozenset(name for cell in cells if cell.host not in errored for name in cell.signs.bound_aside),
-    )
-    tainted: dict[str, set[_Taint]] = {}
     start = None if taint_from is None else taint_from.order
     tainting = [c for c in cells if start is not None and c.order >= start]
+    while True:
+        stars: list[_StarImport] = []
+        for cell in cells:
+            if cell.host in errored:
+                continue
+            lines = [n.lineno for n in cell.signs.imports if isinstance(n, ast.ImportFrom) and n.module
+                     and any(a.name == "*" for a in n.names) and cell.runs_surely(n)
+                     and not modules.unread(n.module, cell=cell)]
+            if lines:
+                stars.append(_StarImport(cell=cell, line=min(lines)))
+        base = _Defined(
+            tainted={}, namespaces=namespaces, values=values, stars=tuple(stars),
+            bound=frozenset(name for cell in cells if cell.host not in errored for name in cell.signs.bound_aside),
+        )
+        defined = replace(base, tainted=_names_tainted(reader, tainting, modules, base))
+        known = set(modules.stored)
+        more = [s for s in _stored_modules(reader, cells, modules, defined, start=start) if s not in known]
+        if not more:
+            return defined
+        modules.stored = (*modules.stored, *dict.fromkeys(more))
+
+
+def _names_tainted(reader: _Reader, tainting: Sequence[_Cell], modules: _Modules, base: _Defined) -> _Tainted:
+    """The names code the check couldn't read filled in `tainting`, the
+    cells from the first where such code ran on (`_build_defined`): read in
+    order until no more turn up, each pass after the first reading only the
+    code that reads a name the pass before tainted more."""
+    tainted: dict[str, set[_Taint]] = {}
     # The names the last pass tainted more; None before the first pass.
     grown: set[str] | None = None
     while tainting and (grown is None or grown):
@@ -11308,7 +11613,78 @@ def _build_defined(
                 if taint not in tainted.setdefault(name, set()):
                     tainted[name].add(taint)
                     grown.add(name)
-    return replace(base, tainted={name: frozenset(taints) for name, taints in tainted.items()})
+    return {name: frozenset(taints) for name, taints in tainted.items()}
+
+
+# Calls that make a module, or a module's spec, under the name their first
+# argument gives, which its `.name` or `.__name__` reads back; and the call
+# that makes a module from a spec, under the spec's name.
+_NAMED_MODULE_MAKERS = frozenset({
+    "importlib.util.spec_from_file_location", "importlib.util.spec_from_loader", "importlib.util.find_spec",
+    "importlib.machinery.PathFinder.find_spec", "importlib.machinery.ModuleSpec", "types.ModuleType",
+})
+_MODULE_FROM_SPEC = "importlib.util.module_from_spec"
+
+
+def _module_key_texts(key: ast.AST, reader: _Reader) -> list[str] | None:
+    """The names `key`, the key a module is stored under in `sys.modules`,
+    may hold (`_literal_texts`); for `spec.name` or `module.__name__`, the
+    name the spec or module was made under (`_made_under`). None where the
+    check can't read it."""
+    texts = _literal_texts(key, reader)
+    if texts is None and isinstance(key, ast.Attribute) and key.attr in ("name", "__name__"):
+        return _made_under(key.value, reader)
+    return texts
+
+
+def _made_under(node: ast.AST, reader: _Reader, *, depth: int = 0) -> list[str] | None:
+    """The names the module or module spec `node` holds was made under: the
+    first argument of a call that makes one (`_NAMED_MODULE_MAKERS`), read
+    with `_literal_texts`, a spec's for a module made from it, there or
+    through each value a name is bound to. None where any of them can't be
+    read, or past `_PARAM_DEPTH` names."""
+    if isinstance(node, ast.Name) and depth < _PARAM_DEPTH:
+        bindings = reader.bindings_of(node.id, node=node)
+        if not bindings or any(b.how != "value" for b in bindings):
+            return None
+        found = [_made_under(b.value, reader, depth=depth + 1) for b in bindings]
+        return None if any(f is None for f in found) else [text for f in found if f is not None for text in f]
+    if not (isinstance(node, ast.Call) and node.args):
+        return None
+    maker = reader.module_member(node.func)
+    if maker == _MODULE_FROM_SPEC:
+        return _made_under(node.args[0], reader, depth=depth + 1)
+    return _literal_texts(node.args[0], reader) if maker in _NAMED_MODULE_MAKERS else None
+
+
+def _stored_modules(
+    reader: _Reader, cells: Sequence[_Cell], modules: _Modules, defined: _Defined, *, start: tuple[int, ...] | None,
+) -> list[_StoredModule]:
+    """The modules `cells` store in `sys.modules`, as the imports read it
+    (`_Cell.module_stores`), from code the check can't read: in a cell from
+    `start` on, the first place such code ran, a module `_from_unread`
+    reads as such code's, with each name the cell binds to one, in any
+    scope, tainted too (`_tainted_in`); in any cell, a module a literal
+    exec filled (`_Defined.namespaces`), whose functions an import of it
+    doesn't reach. Each under every name its key may hold
+    (`_module_key_texts`), or under None where the check can't read the key."""
+    out: list[_StoredModule] = []
+    for cell in cells:
+        stores = [s for s in cell.module_stores if reader.dotted(s.holder) == "sys.modules"]
+        if not stores:
+            continue
+        tainting = start is not None and cell.order >= start
+        at = _tainted_in(reader, cell.stores, cell, defined, modules) if tainting else None
+        for store in stores:
+            filled = _namespace_root(store.value)
+            literal = filled is not None and any(c.namespace == filled for c in defined.namespaces)
+            if not (literal or at is not None and _from_unread(store.value, at)):
+                continue
+            texts = _module_key_texts(store.key, reader) if store.key is not None else None
+            out += [_StoredModule(name=None, order=cell.order)] if texts is None else [
+                _StoredModule(name=text, order=cell.order) for text in texts
+            ]
+    return out
 
 
 class _NameValue(NamedTuple):
@@ -11836,6 +12212,13 @@ def find_cell_writes(
         _build_defined(reader, everything, modules, literal_code, errored=frozenset(errored), taint_from=first_unread)
         if may_run_unread else None
     )
+    if first_unread is None and modules.stored:
+        # A module a literal exec filled, stored in `sys.modules`: an earlier
+        # import of it ran code the check didn't read through that import.
+        first_unread = _first_unread(reader, everything, modules, literal_code)
+        if first_unread is not None:
+            defined = _build_defined(reader, everything, modules, literal_code, errored=frozenset(errored),
+                                     taint_from=first_unread)
     inputs = _ReadInputs(
         current=current, ran=tuple(ran), literal_code=literal_code, defined=defined, modules=modules,
         snapshots=tuple(snapshots), owned=owned, http_rules=tuple(http_rules),

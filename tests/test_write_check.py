@@ -536,6 +536,22 @@ def test_literal_code_too_deep_or_too_long_to_read(earlier, code, card, snap):
     assert writes.needs_approval() is (card != "none")
 
 
+# Two thousand names that name no member of `types`, as a cell may list them.
+_MANY_NAMES = ", ".join(repr(f"Name{n}") for n in range(2000))
+
+
+@pytest.mark.parametrize("last, card", [("SimpleNamespace", "none"), ("FunctionType", "unchecked")],
+                         ids=["no-name-runs-code", "the-last-name-runs-code"])
+def test_a_lookup_over_many_literal_names_reads_each_name(last, card, snap):
+    """A getattr on a module that holds a runner, over a long list of
+    literal names, reads every one of them: none that runs code holds
+    nothing, and one at the end that does holds the cell."""
+    code = f"import types\nfor n in [{_MANY_NAMES}, {last!r}]:\n    print(getattr(types, n, None))"
+    writes = find_cell_writes(code=code, earlier_code=[], snapshots=(snap,))
+    assert writes.unchecked is (card == "unchecked")
+    assert writes.needs_approval() is (card != "none")
+
+
 def test_an_import_of_a_module_written_since_the_turn_began_is_unchecked(tmp_path, monkeypatch):
     """A module on disk now but missing from the snapshot the turn began with
     is one a cell wrote where the check couldn't place it; one the snapshot
