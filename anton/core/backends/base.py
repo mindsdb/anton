@@ -35,7 +35,9 @@ class Cell:
     got to run it says `wire.NOTHING_KEPT`: the namespace comes back as of
     the last cell that completed, so it kept nothing it bound. Such a cell
     also says `ended_process`: the pad starts a new process before the next
-    cell runs, which runs the startup hooks a cell wrote.
+    cell runs, which runs the startup hooks a cell wrote. So does the cell a
+    cancel records, and a remote pad's error, whose service may have
+    started a new process.
     """
 
     code: str
@@ -124,6 +126,16 @@ class ScratchpadRuntime(ABC):
         The manager refuses a runtime built for a policy that reports another.
         """
         return None
+
+    @property
+    def process_running(self) -> bool:
+        """Whether the runtime's process is up now, so the next cell runs in
+        it. False where the runtime starts a new process before the next
+        cell (`execute_streaming`), as after a death between cells: that
+        start runs the startup hooks a cell wrote, so the write check holds
+        the cell (`hold_unapproved_write`). True here: a runtime that starts
+        its own process again between cells says otherwise."""
+        return True
 
     @abstractmethod
     async def start(self) -> None:

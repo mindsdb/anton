@@ -311,6 +311,38 @@ class TestScratchpadEdgeCases:
         assert cell.stdout.strip() == "1"
         await pad.close()
 
+    async def test_the_pad_says_whether_its_process_is_running(self):
+        """A process that died between cells is found only as the next cell
+        runs, which starts a new one first. Until then the pad says its
+        process isn't running, so the write check knows the next cell runs
+        in a new process."""
+        pad = make_scratchpad(name="test")
+        await pad.start()
+        try:
+            assert pad.process_running
+            pad._proc.kill()
+            await pad._proc.wait()
+            assert not pad.process_running
+            cell = await pad.execute("print(1)")
+            assert cell.error is None, cell.error
+            assert pad.process_running
+        finally:
+            await pad.close()
+
+    async def test_a_cancel_says_it_ended_the_process(self):
+        """A cancel kills the pad's process and starts a new one, which runs
+        the startup hooks a cell wrote before the next cell: the cell it
+        records says it ended the process."""
+        pad = make_scratchpad(name="test")
+        await pad.start()
+        try:
+            await pad.cancel()
+            assert pad.cells[-1].error == "Cancelled by user."
+            assert pad.cells[-1].ended_process
+            assert pad.process_running
+        finally:
+            await pad.close()
+
     async def test_stderr_captured(self):
         """stderr output is captured separately."""
         pad = make_scratchpad(name="test")

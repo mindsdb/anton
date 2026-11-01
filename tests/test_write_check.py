@@ -737,6 +737,9 @@ def _flags_under_ifs(start: str, flag: str, *, count: int) -> str:
     (["import sys\nmake = eval(open('job.txt').read())\nsys.modules['m0'] = make()",
       *(f"import sys, m{i}\nsys.modules['m{i + 1}'] = m{i}.make()" for i in range(150))],
      "import m150\nm150.go()", "unchecked"),
+    (["import sys\nmake = eval(open('job.txt').read())\nsys.modules['m0'] = make()",
+      *(f"import sys, m{i}\nsys.modules['m{i + 1}'] = m{i}.make()" for i in range(300))],
+     "import m300\nm300.go()", "unchecked"),
     ([f"import types, sys\nm{i} = types.ModuleType('m{i}')\nexec(open('job.txt').read(), m{i}.__dict__)\n"
       f"sys.modules['m{i}'] = m{i}" for i in range(1000)], "print(1)", "none"),
     (["def rows():\n" + "".join(f"    a{i} = {i}\n" for i in range(2000)) + "    return ['a', 'b']\n"],
@@ -754,6 +757,7 @@ def _flags_under_ifs(start: str, flag: str, *, count: int) -> str:
         "import-after-a-module-stored-at-the-end-of-a-spec-alias-chain", "command-text-rebuilt-twice-on-its-first-line",
         "python-command-text-rebuilt-twice-on-its-first-line", "call-after-thirty-nested-true-ifs-after-unread-code",
         "call-after-thirty-nested-true-ifs-beside-a-global-setter", "import-at-the-end-of-150-stored-modules-each-from-the-last",
+        "import-at-the-end-of-300-stored-modules-each-from-the-last",
         "a-thousand-cells-that-store-a-module-unread-code-filled", "loops-over-what-a-two-thousand-line-function-returns"])
 def test_a_recursion_or_a_rebuilt_command_is_read_in_well_under_a_second(earlier, code, card, snap):
     """A function the chain already reads is read again for other literals
@@ -777,9 +781,11 @@ def test_a_recursion_or_a_rebuilt_command_is_read_in_well_under_a_second(earlier
     rebuilt on one line read down to their first value. An if whose test is
     a constant reads the arm that runs, once (`_if_binds`); a chain of
     modules each stored in `sys.modules` from the one before reads where
-    each store reaches by name (`_StoredReach`); a name a cell binds by a
-    def, class or import is found by its name (`_Reader.makers`); and what
-    a function returns is read once per def (`_Cell.returns_of`)."""
+    each store reaches by name (`_StoredReach`), each store read in the
+    same worklist as the names it fills (`_names_tainted`); a name a cell
+    binds by a def, class or import is found by its name
+    (`_Reader.makers`); and what a function returns is read once per def
+    (`_Cell.returns_of`)."""
     started = time.perf_counter()
     writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
     assert time.perf_counter() - started < 1

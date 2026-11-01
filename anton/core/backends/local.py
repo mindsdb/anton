@@ -1305,6 +1305,12 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 "The Python venv has been deleted and will be recreated on next attempt."
             ) from exc
 
+    @property
+    def process_running(self) -> bool:
+        """Whether the pad's process is up: `execute_streaming` starts a new
+        one first when it isn't (`_auto_resume`)."""
+        return self._proc is not None and self._proc.returncode is None
+
     async def resume(self) -> None:
         """Restart a dead process WITHOUT discarding its namespace snapshot.
 
@@ -1435,6 +1441,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 stderr="",
                 error="Cancelled by user.",
                 description="Cancelled",
+                # The start below runs the next cell in a new process.
+                ended_process=True,
             )
         )
         self._proc = None

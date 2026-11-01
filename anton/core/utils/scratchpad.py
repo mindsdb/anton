@@ -501,6 +501,11 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
                           ended_process=getattr(cell, "ended_process", False) is True)
               for cell in getattr(pad, "cells", ()) or ()),
         )
+        if earlier and getattr(pad, "process_running", True) is False:
+            # The pad starts a new process before this cell, as after a death
+            # between cells, which the runtime finds only as this cell runs:
+            # the last cell before it is one whose process ended.
+            earlier = (*earlier[:-1], earlier[-1].model_copy(update={"ended_process": True}))
         writes = await asyncio.to_thread(
             find_cell_writes, code=code, earlier=earlier, snapshots=gate.snapshots, http_rules=gate.http_rules,
         )

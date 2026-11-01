@@ -1054,6 +1054,65 @@ async def test_a_remote_reset_forgets_compacted_ownership(project):
     assert elicitor.asked == 1
 
 
+# A cell that writes a startup hook into the installed packages, which each
+# new Python process runs as it starts.
+HOOK_CELL = "import site\nopen(site.getsitepackages()[0] + '/hook.pth', 'w').write('import job')"
+
+
+@pytest.mark.parametrize("earlier, returncode, held", [
+    (HOOK_CELL, -9, True),
+    ("total = 1", -9, False),
+    (HOOK_CELL, None, False),
+], ids=["a-hook-and-a-dead-process", "no-hook", "a-hook-and-a-live-process"])
+async def test_a_cell_after_the_process_died_between_cells_is_held_once_a_hook_was_written(
+    project, earlier, returncode, held,
+):
+    """The pad's process died after the last cell ended, so the pad starts a
+    new one before the next cell, and that start runs the startup hooks a
+    cell wrote. The runtime finds such a death only as the cell runs, after
+    the gate, so the gate asks whether the process is running
+    (`process_running`) and reads the last cell as one whose process ended.
+    With no hook written, or with the process alive, the cell runs in a
+    process that runs nothing the check didn't read."""
+    pad = _runtime(project, earlier)
+    pad._proc = MagicMock(returncode=returncode)
+    assert pad.process_running is (returncode is None)
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    outcome = await _hold()(session, pad=pad, code="print(1)")
+    assert (outcome is not None) is held
+    assert elicitor.asked == int(held)
+    if held:
+        assert "This step can't be checked before it runs." in elicitor.prompts[0]
+
+
+@pytest.mark.parametrize("earlier, held", [(HOOK_CELL, True), ("total = 1", False)],
+                         ids=["a-hook-written", "no-hook"])
+async def test_a_cell_after_a_remote_error_is_held_once_a_hook_was_written(project, earlier, held):
+    """A remote pad's service sends an error event in place of a cell when
+    it fails, and the host can't tell whether the service started a new
+    process for the next cell, which runs the startup hooks a cell wrote.
+    So the error's cell says it ended its process, and the next cell is
+    held once a hook was written. The remote pad reports its process as
+    running: its service runs it."""
+    pad = RemoteScratchpadRuntime(
+        name="main", endpoint_url="https://scratchpad.example.com", api_key="test", workspace_path=project,
+        cells=[Cell(code=earlier, stdout="", stderr="", error=None)],
+    )
+
+    async def failing_stream(path: str, body: dict):
+        yield {"type": "error", "error": "The service lost the pad."}
+
+    with patch.object(pad, "_sse", failing_stream):
+        cell = await pad.execute("total = 2")
+    assert cell.error and cell.ended_process and pad.process_running
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    outcome = await _hold()(session, pad=pad, code="print(1)")
+    assert (outcome is not None) is held
+    assert elicitor.asked == int(held)
+
+
 # A traceback whose text names a line the cell never reached: the hint the
 # boot puts before a ModuleNotFoundError carries the name the cell asked for.
 _FORGED_LINE = (

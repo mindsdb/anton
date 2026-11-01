@@ -47,6 +47,12 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
         self._endpoint_url = endpoint_url
         self._api_key = api_key
 
+    @property
+    def process_running(self) -> bool:
+        """True: the service runs the pad's process and starts it as it
+        needs, which the host can't see."""
+        return True
+
     # ------------------------------------------------------------------
     # HTTP helpers
     # ------------------------------------------------------------------
@@ -173,8 +179,12 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
                     error=error_msg,
                     description=description,
                     # The service sent no cell, so what it bound is unknown:
-                    # none of it counts as bound.
+                    # none of it counts as bound. Nor can the check tell
+                    # whether the service started a new process for the next
+                    # cell, which runs the startup hooks a cell wrote, so it
+                    # counts as one that ended its process.
                     stopped_at=NOTHING_KEPT,
+                    ended_process=True,
                 )
                 cell = self._record_cell(cell)
                 yield cell

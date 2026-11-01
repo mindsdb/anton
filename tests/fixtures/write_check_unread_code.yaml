@@ -2734,6 +2734,49 @@ cases:
       getattr(timeit, n)(open('job.txt').read()).timeit(1)
     card: unchecked
 
+
+  - name: a timer class looked up by a name bound to its text, stored before its call
+    code: |-
+      import timeit
+      n = 'Timer'
+      t = getattr(timeit, n)
+      t('pass').timeit(1)
+    card: unchecked
+
+  - name: two runners of text looked up through a loop over their names
+    code: |-
+      import timeit
+      for n in ['timeit', 'repeat']:
+          getattr(timeit, n)('pass')
+    card: unchecked
+
+  - name: a tracer class looked up by a name bound to its text runs a script read from a file
+    files:
+      job.txt: x = 1
+    code: |-
+      import trace
+      n = 'Trace'
+      getattr(trace, n)().run(open('job.txt').read())
+    card: unchecked
+
+  - name: a profiler class looked up by a name bound to its text runs a script read from a file in a with
+    files:
+      job.txt: x = 1
+    code: |-
+      import cProfile
+      n = 'Profile'
+      with getattr(cProfile, n)() as p:
+          p.run(open('job.txt').read())
+    card: unchecked
+
+  - name: a profile runner looked up by a name bound to its text runs a script read from a file
+    files:
+      job.txt: x = 1
+    code: |-
+      import cProfile
+      n = 'run'
+      getattr(cProfile, n)(open('job.txt').read())
+    card: unchecked
   - name: a profiler class made by type() runs a script read from a file
     files:
       job.txt: x = 1
@@ -3108,6 +3151,14 @@ cases:
       subprocess.run([sys.executable, '-c', 'import requests'])
     card: unchecked
 
+
+  - name: an installed package imported after an earlier cell writes a module into a folder with a site-packages part
+    earlier:
+      - |-
+        open('env/lib/python3.12/site-packages/erp_patch.py', 'w').write('import job')
+    code: |-
+      import pandas
+    card: unchecked
   # A link, a compiled module, a write under a name the check can't read, or
   # an archive on sys.path each reaches a module the check didn't read.
 
@@ -3239,6 +3290,16 @@ cases:
       site.addsitedir('lib')
     card: unchecked
 
+
+  - name: site adds a folder an earlier cell's shell cp wrote a .pth file into
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run(['cp', 'h.txt', 'lib/x.pth'])
+    code: |-
+      import site
+      site.addsitedir('lib')
+    card: unchecked
   - name: site adds a folder outside the project
     code: |-
       import site
@@ -4833,8 +4894,13 @@ cases:
     card: none
 
 
-  # A startup hook a cell writes (a sitecustomize or usercustomize module, or
-  # a .pth file) runs as each later Python process starts.
+  # A startup hook a cell writes runs as each later Python process starts: a
+  # sitecustomize or usercustomize module in any folder, since that process
+  # may put the folder on PYTHONPATH, and a .pth file in the installed
+  # packages, the user site, a folder with a site-packages or dist-packages
+  # part, or a folder the check can't place. The cell that writes one is
+  # held for any of them; a later process runs nothing from a .pth file in
+  # the project folder.
 
   - name: a sitecustomize module written into site-packages before a pip subprocess
     code: |-
@@ -4870,8 +4936,59 @@ cases:
     code: |-
       import subprocess
       subprocess.run(['python3', '-c', 'print(1)'])
+    card: none
+
+
+  - name: a python -c after an earlier cell copies a .pth file into the installed packages through cp
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run("cp h.txt /usr/lib/python3/dist-packages/hook.pth", shell=True)
+    code: |-
+      import subprocess
+      subprocess.run(['python3', '-c', 'print(1)'])
     card: unchecked
 
+  - name: a python -c after an earlier cell copies a .pth file into a dist-packages folder, keeping its name
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run(['cp', 'hook.pth', '/usr/lib/python3/dist-packages/'])
+    code: |-
+      import subprocess
+      subprocess.run(['python3', '-c', 'print(1)'])
+    card: unchecked
+
+  - name: a python -c after an earlier cell copies a .pth file once a cd moved into the installed packages
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run("cd /usr/lib/python3/dist-packages && cp /tmp/h.txt hook.pth", shell=True)
+    code: |-
+      import subprocess
+      subprocess.run(['python3', '-c', 'print(1)'])
+    card: unchecked
+
+  - name: a python -c after an earlier cell copies a .pth file into a folder its cwd names from site
+    earlier:
+      - |-
+        import subprocess, site
+        subprocess.run(['cp', 'h.txt', 'hook.pth'], cwd=site.getsitepackages()[0])
+    code: |-
+      import subprocess
+      subprocess.run(['python3', '-c', 'print(1)'])
+    card: unchecked
+
+  - name: a python -c after an earlier cell writes a .pth file once it changed into the installed packages
+    earlier:
+      - |-
+        import os, site
+        os.chdir(site.getsitepackages()[0])
+        open('hook.pth', 'w').write('import job')
+    code: |-
+      import subprocess
+      subprocess.run(['python3', '-c', 'print(1)'])
+    card: unchecked
   - name: a python -c after an earlier cell copies a .pth file through find -exec cp
     earlier:
       - |-
@@ -4880,8 +4997,18 @@ cases:
     code: |-
       import subprocess
       subprocess.run(['python3', '-c', 'print(1)'])
-    card: unchecked
+    card: none
 
+
+  - name: a python -c after an earlier cell copies a .pth file into each match's folder through find -execdir cp
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run("find / -name site-packages -execdir cp /tmp/h.txt hook.pth \\;", shell=True)
+    code: |-
+      import subprocess
+      subprocess.run(['python3', '-c', 'print(1)'])
+    card: unchecked
   - name: a .pth file written by an echo redirect in a shell text
     code: |-
       import os
@@ -4927,6 +5054,46 @@ cases:
       subprocess.run([sys.executable, '-c', 'print(1)'])
     card: unchecked
 
+
+  - name: a python version check after an earlier cell writes a .pth file into site-packages
+    earlier:
+      - |-
+        import site
+        open(site.getsitepackages()[0] + '/hook.pth', 'w').write('import job')
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-V'])
+    card: unchecked
+
+  - name: a virtual environment's python after an earlier cell writes a .pth file into its site-packages
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-m', 'venv', 'env'], check=True)
+        open('env/lib/python3.12/site-packages/hook.pth', 'w').write('import job')
+    code: |-
+      import subprocess
+      subprocess.run(['env/bin/python', '-V'])
+    card: unchecked
+
+  - name: a python version check after an earlier cell writes a .pth file to a path the check can't place
+    earlier:
+      - |-
+        import os
+        open(os.path.join(os.environ['HOOK_DIR'], 'hook.pth'), 'w').write('import job')
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-V'])
+    card: unchecked
+
+  - name: a python version check after an earlier cell writes a sitecustomize module into the project
+    earlier:
+      - |-
+        open('sitecustomize.py', 'w').write('import job')
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-V'])
+    card: unchecked
   # A cell whose process ended has the pad start a new process before the
   # next cell, and that start runs the startup hooks a cell wrote.
 
@@ -4960,6 +5127,20 @@ cases:
       print(1)
     card: unchecked
 
+
+  - name: a cell after one whose process ended, once an earlier cell wrote a sitecustomize module into the project
+    earlier:
+      - |-
+        open('sitecustomize.py', 'w').write('import job')
+      - code: |-
+          import os
+          os._exit(1)
+        errored: true
+        stopped_at: 1
+        ended_process: true
+    code: |-
+      print(1)
+    card: unchecked
   # python -c imports a project module when the launch runs in another folder
   # or with PYTHONPATH set, so the working folder reaches the module.
 
@@ -5336,8 +5517,21 @@ cases:
           loop = asyncio.get_running_loop()
           await loop.subprocess_exec(asyncio.SubprocessProtocol, sys.executable, '-c', 'print(1)')
       asyncio.run(main())
-    card: unchecked
+    card: none
 
+
+  - name: python -c run through an event loop's subprocess_exec after an earlier cell writes a .pth file into site-packages
+    earlier:
+      - |-
+        import site
+        open(site.getsitepackages()[0] + '/hook.pth', 'w').write('import job')
+    code: |-
+      import asyncio, sys
+      async def main():
+          loop = asyncio.get_running_loop()
+          await loop.subprocess_exec(asyncio.SubprocessProtocol, sys.executable, '-c', 'print(1)')
+      asyncio.run(main())
+    card: unchecked
   - name: ls run through an event loop's subprocess_exec after an earlier cell writes a .pth file
     earlier:
       - |-
@@ -11080,10 +11274,13 @@ cases:
     card: none
 
   # A loop over items that may be none binds nothing, and a with that may
-  # swallow an error may stop its body short; a function that declares a name
-  # global, and a class body, read the module's name where their own binding
-  # may not have run; a setter returns before it binds; literal code in the
-  # cell namespace is read as its host's code is.
+  # swallow an error may stop its body short: a known swallower under any
+  # name a cell binds to it, a class a cell defines with __exit__ or an
+  # instance of one, or a context unread code bound or a module a cell wrote
+  # gives. A function that declares a name global, and a class body, read
+  # the module's name where their own binding may not have run; a setter
+  # returns before it binds; literal code in the cell namespace is read as
+  # its host's code is.
 
   - name: a call to a name unread code defined, after an errored cell's loop over no items before its stop
     files:
@@ -11262,6 +11459,243 @@ cases:
       push()
     card: unchecked
 
+
+  - name: a call to a name unread code defined, after a suppress block under a name an earlier cell imports it as that may stop first
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+      - |-
+        from contextlib import suppress as quietly
+    code: |-
+      def quiet():
+          print('ok')
+      with quietly(Exception):
+          int('a')
+          push = quiet
+      push()
+    card: unchecked
+
+  - name: a call to a name unread code defined, after a block of a suppress bound to a name that may stop first
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      from contextlib import suppress
+      cm = suppress(Exception)
+      def quiet():
+          print('ok')
+      with cm:
+          int('a')
+          push = quiet
+      push()
+    card: unchecked
+
+  - name: a call to a name unread code defined, after a block of a suppress an earlier cell bound to a name that may stop first
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+      - |-
+        import contextlib
+        cm = contextlib.suppress(Exception)
+    code: |-
+      def quiet():
+          print('ok')
+      with cm:
+          int('a')
+          push = quiet
+      push()
+    card: unchecked
+
+  - name: a call to a name unread code defined, after a block of a context class an earlier cell defines that may stop first
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+      - |-
+        class Quiet:
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                return True
+    code: |-
+      def quiet():
+          print('ok')
+      with Quiet():
+          int('a')
+          push = quiet
+      push()
+    card: unchecked
+
+  - name: a call to a name unread code defined, after a block of an instance of a context class an earlier cell defines that may stop first
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+      - |-
+        class Quiet:
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                return True
+        q = Quiet()
+    code: |-
+      def quiet():
+          print('ok')
+      with q:
+          int('a')
+          push = quiet
+      push()
+    card: unchecked
+
+  - name: a call to a name unread code defined, after a block of a context unread code bound that may stop first
+    files:
+      helpers.py: |
+        import requests, contextlib
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+        guard = contextlib.suppress(Exception)
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      def quiet():
+          print('ok')
+      with guard:
+          int('a')
+          push = quiet
+      push()
+    card: unchecked
+
+  - name: a call to a name unread code defined, after a block of a context imported from a module a cell wrote that may stop first
+    files:
+      ctx.txt: x
+    earlier:
+      - |-
+        open('ctxmod.py', 'w').write(open('ctx.txt').read())
+      - |-
+        from ctxmod import guard, push
+    code: |-
+      def quiet():
+          print('ok')
+      with guard:
+          int('a')
+          push = quiet
+      push()
+    card: unchecked
+
+  - name: a call to a name unread code defined, after an earlier cell's block of a context unread code bound that may stop first
+    files:
+      helpers.py: |
+        import requests, contextlib
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+        guard = contextlib.suppress(Exception)
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+      - |-
+        def quiet():
+            print('ok')
+        with guard:
+            int('a')
+            push = quiet
+    code: |-
+      push()
+    card: unchecked
+
+  - name: a call to a name unread code defined, after an earlier cell's block of a context imported from a module a cell wrote that may stop first
+    files:
+      ctx.txt: x
+    earlier:
+      - |-
+        open('ctxmod.py', 'w').write(open('ctx.txt').read())
+      - |-
+        from ctxmod import guard, push
+      - |-
+        def quiet():
+            print('ok')
+        with guard:
+            int('a')
+            push = quiet
+    code: |-
+      push()
+    card: unchecked
+
+  - name: a call to a name unread code defined, after an earlier cell's block of a context an eval of unread code made that may stop first
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+      ctx.txt: x
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+      - |-
+        cm = eval(open('ctx.txt').read())
+      - |-
+        def quiet():
+            print('ok')
+        with cm:
+            int('a')
+            push = quiet
+    code: |-
+      push()
+    card: unchecked
+
+  # A with runs the enter and exit methods of the context it enters, so a
+  # context unread code bound runs that code.
+
+  - name: a with that enters a context unread code bound
+    files:
+      helpers.py: |
+        import requests, contextlib
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+        guard = contextlib.suppress(Exception)
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      with guard:
+          print('ok')
+    card: unchecked
+
+  - name: a with that enters a member of a module a cell wrote
+    files:
+      ctx.txt: x
+    earlier:
+      - |-
+        open('ctxmod.py', 'w').write(open('ctx.txt').read())
+      - |-
+        import ctxmod
+    code: |-
+      with ctxmod.lock:
+          print('ok')
+    card: unchecked
   - name: a call to a name unread code defined, after a walrus behind a chained comparison that may stop first
     files:
       helpers.py: |
@@ -11768,6 +12202,14 @@ cases:
     card: read
     kinds: [http]
 
+
+  - name: a timer class looked up by a name bound to its text runs the request as its literal statement, which is read
+    code: |-
+      import timeit
+      n = 'Timer'
+      getattr(timeit, n)('import requests; requests.post("https://erp.example.test/api/orders", json={"qty": 1})').timeit(1)
+    card: read
+    kinds: [http]
   - name: an earlier function that times a literal request is read
     earlier:
       - |-
@@ -16105,6 +16547,43 @@ cases:
       print(getattr(json, n)({}))
     card: none
 
+
+  # A runner of text or a class whose instances run code, looked up by a
+  # name bound to its text and called right away, reads as the literal
+  # lookup does: a literal statement runs nothing new, and a profiler only
+  # enabled runs nothing.
+
+  - name: a timer class looked up by a name bound to its text runs a literal statement
+    code: |-
+      import timeit
+      n = 'Timer'
+      print(getattr(timeit, n)('pass').timeit(1))
+    card: none
+
+  - name: a timing runner looked up by a name an earlier cell bound to its text runs a literal statement
+    earlier:
+      - n = 'timeit'
+    code: |-
+      import timeit
+      print(getattr(timeit, n)('pass', number=1))
+    card: none
+
+  - name: a profile runner looked up by a name bound to its text runs a literal statement
+    code: |-
+      import cProfile
+      n = 'run'
+      getattr(cProfile, n)('x = 1')
+    card: none
+
+  - name: a profiler class looked up by a name bound to its text is only enabled
+    code: |-
+      import cProfile
+      n = 'Profile'
+      prof = getattr(cProfile, n)()
+      prof.enable()
+      x = sum(range(10))
+      prof.disable()
+    card: none
   # A model saved as a .pth file, a binary file of that name, and a name
   # that only holds .pth: none of them is a startup hook, so a later Python
   # process runs no new code.
@@ -16162,6 +16641,94 @@ cases:
       subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'rich'])
     card: none
 
+
+  # A .pth file in the project folder runs nothing as Python starts: only
+  # site.addsitedir of its own folder runs it.
+
+  - name: a pip install by name after an earlier cell writes a .pth file with an import line into the project
+    earlier:
+      - |-
+        open('hook.pth', 'w').write('import job')
+    code: |-
+      import subprocess, sys
+      subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'rich'])
+    card: none
+
+  - name: a python version check after an earlier cell writes downloaded bytes to a weights.pth file in the project
+    earlier:
+      - |-
+        import requests
+        r = requests.get('https://models.example.test/weights')
+        open('weights.pth', 'wb').write(r.content)
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-V'])
+    card: none
+
+  - name: a python -c after an earlier cell copies a .pth file into a project folder once a cd moved there
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run("cd lib && cp /tmp/h.txt hook.pth", shell=True)
+    code: |-
+      import subprocess
+      subprocess.run(['python3', '-c', 'print(1)'])
+    card: none
+
+  - name: a python -c after an earlier cell copies a .pth file into the project folder its cwd names
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run(['cp', 'h.txt', 'hook.pth'], cwd='lib')
+    code: |-
+      import subprocess
+      subprocess.run(['python3', '-c', 'print(1)'])
+    card: none
+
+  - name: a python -c after an earlier cell writes a .pth file into a project folder through tee
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run('echo import job | tee lib/hook.pth', shell=True)
+    code: |-
+      import subprocess
+      subprocess.run(['python3', '-c', 'print(1)'])
+    card: none
+
+  - name: a python -c after an earlier cell writes a project .pth file by a mode the check can't read
+    earlier:
+      - |-
+        m = input()
+        open('lib/hook.pth', m).write('import job')
+    code: |-
+      import subprocess
+      subprocess.run(['python3', '-c', 'print(1)'])
+    card: none
+
+  - name: a cell after one whose process ended, once an earlier cell wrote a .pth file into the project
+    earlier:
+      - |-
+        open('hook.pth', 'w').write('import job')
+      - code: |-
+          import os
+          os._exit(1)
+        errored: true
+        stopped_at: 1
+        ended_process: true
+    code: |-
+      print(1)
+    card: none
+
+  - name: site adds a folder other than the one an earlier cell wrote a .pth file into
+    files:
+      other/a.txt: x
+    earlier:
+      - |-
+        open('lib/x.pth', 'w').write('import job')
+    code: |-
+      import site
+      site.addsitedir('other')
+    card: none
   - name: a cell after one whose process ended, with no startup hook written
     earlier:
       - code: |-
@@ -16202,4 +16769,103 @@ cases:
       import subprocess, sys
       def install(pkg):
           subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', pkg])
+    card: none
+
+  # A with of a context from the standard library or an installed package
+  # lets an error its body raises through, so a binding in its body surely
+  # ran once the code after it runs.
+
+  - name: a call to a name unread code defined, after a block of an open file that rebinds it
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      def quiet():
+          print('ok')
+      with open('stock.csv') as fh:
+          rows = fh.read().split()
+          push = quiet
+      push()
+    card: none
+
+  - name: a call to a name unread code defined, after a block of a sqlite3 connection that rebinds it
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      import sqlite3
+      def quiet():
+          print('ok')
+      with sqlite3.connect('local.db') as con:
+          rows = con.execute('select 1').fetchall()
+          push = quiet
+      push()
+    card: none
+
+  - name: a call to a name unread code defined, after a block of a SQLAlchemy engine's begin that rebinds it
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      from sqlalchemy import create_engine, text
+      engine = create_engine('sqlite:///local.db')
+      def quiet():
+          print('ok')
+      with engine.begin() as conn:
+          rows = conn.execute(text('select 1')).fetchall()
+          push = quiet
+      push()
+    card: none
+
+  - name: a call to a name unread code defined, after a block of a thread pool that rebinds it
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+    code: |-
+      from concurrent.futures import ThreadPoolExecutor
+      def quiet():
+          print('ok')
+      with ThreadPoolExecutor() as ex:
+          rows = list(ex.map(len, ['a', 'bb']))
+          push = quiet
+      push()
+    card: none
+
+  - name: a call to a name unread code defined, after an earlier cell's block of an open file that rebinds it
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - |-
+        exec(open('helpers.py').read())
+      - |-
+        def quiet():
+            print('ok')
+        with open('stock.csv') as fh:
+            rows = fh.read().split()
+            push = quiet
+    code: |-
+      push()
     card: none
