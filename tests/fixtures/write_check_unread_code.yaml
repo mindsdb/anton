@@ -2458,6 +2458,264 @@ cases:
           spec = m.spec_from_file_location('job', 'job.py')
     card: unchecked
 
+  # The loaders, test loaders, doctest suites, importers, command-line mains
+  # and in-process shells below each import or run a module, a script or a
+  # text the check can't read, so the check holds the cell unchecked. Its
+  # none rows sit with the other controls at the end of the file.
+
+  - name: the default test loader discovers and imports test modules
+    earlier:
+      - |-
+        open("test_job.py", "w").write('import requests\nimport unittest\nclass T(unittest.TestCase):\n    def test_post(self):\n        requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import unittest
+      suite = unittest.defaultTestLoader.discover(".", pattern="test_*.py")
+      unittest.TextTestRunner(verbosity=2).run(suite)
+    card: unchecked
+
+  - name: a test loader discovers and imports a project test module
+    files:
+      tests/test_sync.py: |
+        import requests
+        requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    code: |-
+      import unittest
+      unittest.TestLoader().discover("tests")
+    card: unchecked
+
+  - name: a test loader loads tests from a module name
+    earlier:
+      - |-
+        open("test_job.py", "w").write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import unittest, sys
+      sys.path.insert(0, ".")
+      unittest.TestLoader().loadTestsFromName("test_job")
+    card: unchecked
+
+  - name: the default test loader loads tests from a list of module names
+    earlier:
+      - |-
+        open("test_job.py", "w").write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import unittest, sys
+      sys.path.insert(0, ".")
+      unittest.defaultTestLoader.loadTestsFromNames(["test_job"])
+    card: unchecked
+
+  - name: unittest main loads a named module's tests
+    earlier:
+      - |-
+        open("test_job.py", "w").write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import unittest, sys
+      sys.path.insert(0, ".")
+      unittest.main(module="test_job", argv=["x"], exit=False)
+    card: unchecked
+
+  - name: unittest main discovers tests through its argv
+    earlier:
+      - |-
+        open("test_job.py", "w").write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import unittest
+      unittest.main(module=None, argv=["x", "discover", "-s", "."], exit=False)
+    card: unchecked
+
+  - name: pydoc imports a cell-written file by path
+    earlier:
+      - |-
+        open("job.py", "w").write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import pydoc
+      job = pydoc.importfile("job.py")
+    card: unchecked
+
+  - name: pydoc safely imports a cell-written module by name
+    earlier:
+      - |-
+        open("job.py", "w").write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import pydoc, sys
+      sys.path.insert(0, ".")
+      pydoc.safeimport("job")
+    card: unchecked
+
+  - name: the builtin help imports a cell-written module named as a string
+    earlier:
+      - |-
+        open("job.py", "w").write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import sys
+      sys.path.insert(0, ".")
+      help("job")
+    card: unchecked
+
+  - name: imp loads a cell-written module from source
+    earlier:
+      - |-
+        open("job.py", "w").write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import imp
+      imp.load_source("job", "job.py")
+    card: unchecked
+
+  - name: importlib's bootstrap loads a project module from a spec
+    earlier:
+      - |-
+        open("job.py", "w").write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import importlib._bootstrap, importlib.machinery
+      spec = importlib.machinery.PathFinder.find_spec("job", ["."])
+      importlib._bootstrap._load(spec)
+    card: unchecked
+
+  - name: the C API imports a cell-written module by name
+    earlier:
+      - |-
+        open("job.py", "w").write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import ctypes, sys
+      sys.path.insert(0, ".")
+      ctypes.pythonapi.PyImport_ImportModule(b"job")
+    card: unchecked
+
+  - name: a doctest file suite runs the examples in a project file
+    files:
+      README.md: |
+        >>> import requests
+        >>> requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    code: |-
+      import doctest, unittest
+      unittest.TextTestRunner().run(doctest.DocFileSuite("README.md", module_relative=False))
+    card: unchecked
+
+  - name: a doctest suite runs the examples in a cell-written module
+    earlier:
+      - |-
+        open("job.py", "w").write('def go():\n    """\n    >>> import requests\n    >>> requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n    """\n')
+    code: |-
+      import doctest, unittest, sys
+      sys.path.insert(0, ".")
+      unittest.TextTestRunner().run(doctest.DocTestSuite("job"))
+    card: unchecked
+
+  - name: doctest debugs a script an earlier cell set
+    earlier:
+      - |-
+        SCRIPT = 'import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'
+    code: |-
+      import doctest
+      doctest.debug_script(SCRIPT)
+    card: unchecked
+
+  - name: timeit main runs a statement an earlier cell read from a file
+    earlier:
+      - |-
+        SCRIPT = open("job.py").read()
+    code: |-
+      import timeit
+      timeit.main(["-n", "1", "-r", "1", SCRIPT])
+    card: unchecked
+
+  - name: cProfile main profiles a cell-written script named on argv
+    earlier:
+      - |-
+        open("job.py", "w").write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import cProfile, sys
+      sys.argv = ["cProfile", "job.py"]
+      cProfile.main()
+    card: unchecked
+
+  - name: pdb main debugs a cell-written script named on argv
+    earlier:
+      - |-
+        open("job.py", "w").write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import pdb, sys
+      sys.argv = ["pdb", "job.py"]
+      pdb.main()
+    card: unchecked
+
+  - name: walking a folder imports a cell-written package
+    earlier:
+      - |-
+        import os
+        os.makedirs("plugins/erp", exist_ok=True)
+        open("plugins/erp/__init__.py", "w").write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import pkgutil, sys
+      sys.path.insert(0, "plugins")
+      for info in pkgutil.walk_packages(["plugins"]):
+          print(info.name)
+    card: unchecked
+
+  - name: an IPython shell instance runs a script an earlier cell read
+    earlier:
+      - |-
+        SCRIPT = open("job.py").read()
+    code: |-
+      from IPython.core.interactiveshell import InteractiveShell
+      sh = InteractiveShell.instance()
+      sh.run_cell(SCRIPT)
+    card: unchecked
+
+  - name: IPython starts on a cell-written script
+    earlier:
+      - |-
+        open("job.py", "w").write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import IPython
+      IPython.start_ipython(argv=["job.py"])
+    card: unchecked
+
+  - name: a notebook execute preprocessor is built and registered
+    earlier:
+      - |-
+        import nbformat
+    code: |-
+      from nbconvert.preprocessors import ExecutePreprocessor
+      ep = ExecutePreprocessor(timeout=60)
+      from nbconvert import HTMLExporter
+      HTMLExporter().register_preprocessor(ep, enabled=True)
+    card: unchecked
+
+  - name: a subinterpreter runs a script an earlier cell read
+    earlier:
+      - |-
+        SCRIPT = open("job.py").read()
+    code: |-
+      import _xxsubinterpreters as interpreters
+      interp = interpreters.create()
+      interpreters.run_string(interp, SCRIPT)
+    card: unchecked
+
+  - name: the site hook imports a cell-written customize module
+    earlier:
+      - |-
+        open("sitecustomize.py", "w").write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      import site, sys
+      sys.path.insert(0, ".")
+      site.execsitecustomize()
+    card: unchecked
+
+  - name: a build runs a cell-written setup script
+    earlier:
+      - |-
+        open("setup.py", "w").write('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})\n')
+    code: |-
+      from distutils.core import run_setup
+      run_setup("setup.py", script_args=["build"])
+    card: unchecked
+
+  - name: pip's in-process main installs from a local path
+    code: |-
+      from pip._internal.cli.main import main as pip_main
+      pip_main(["install", "./vendor/erp_sync"])
+    card: unchecked
+
   # ── Python processes ──────────────────────────────────────────────────────
   # A subprocess, os.system, os.exec/spawn, pty or asyncio launch of a Python
   # program runs a file the check never reads. The program may be python, a
@@ -7866,6 +8124,13 @@ cases:
     card: read
     kinds: [http]
 
+  - name: timeit main of a literal statement is read
+    code: |-
+      import timeit
+      timeit.main(["-n", "1", "-r", "1", "-s", "import requests", 'requests.post("https://erp.example.test/api/orders", json={"qty": 1})'])
+    card: read
+    kinds: [http]
+
   # ── Cells that must run with no card (none) ───────────────────────────────
   # A literal with no write, a call named like a builtin but shadowed or an
   # attribute, an installed-package import, a package install, a non-Python
@@ -10400,4 +10665,79 @@ cases:
             f(8)
     code: |-
       f(0)
+    card: none
+
+  - name: unittest main runs the cell's own test case
+    code: |-
+      import unittest
+      class TestTotals(unittest.TestCase):
+          def test_ok(self):
+              self.assertEqual(1, 1)
+      unittest.main(argv=["ignored"], exit=False)
+    card: none
+
+  - name: a test loader loads the cell's own test case
+    code: |-
+      import unittest
+      class TestTotals(unittest.TestCase):
+          def test_ok(self):
+              self.assertEqual(1, 1)
+      unittest.TestLoader().loadTestsFromTestCase(TestTotals)
+    card: none
+
+  - name: a test suite the cell builds is run by a text runner
+    code: |-
+      import unittest
+      class TestTotals(unittest.TestCase):
+          def test_ok(self):
+              self.assertEqual(1, 1)
+      s = unittest.TestSuite()
+      s.addTest(TestTotals("test_ok"))
+      unittest.TextTestRunner().run(s)
+    card: none
+
+  - name: the builtin help describes an installed package
+    code: |-
+      help("pandas")
+    card: none
+
+  - name: the builtin help describes a method object
+    code: |-
+      import pandas as pd
+      help(pd.DataFrame.merge)
+    card: none
+
+  - name: doctest parses examples without running them
+    earlier:
+      - |-
+        TEXT = ">>> 1 + 1\n2\n"
+    code: |-
+      import doctest
+      doctest.DocTestParser().get_examples(TEXT)
+    card: none
+
+  - name: timeit main of a harmless literal statement
+    code: |-
+      import timeit
+      timeit.main(["-n", "100", "sorted(range(100))"])
+    card: none
+
+  - name: walking a package's path imports nothing
+    code: |-
+      import pkgutil, json
+      for info in pkgutil.iter_modules(json.__path__):
+          print(info.name)
+    card: none
+
+  - name: a notebook is exported to html without executing
+    code: |-
+      import nbformat
+      from nbconvert import HTMLExporter
+      HTMLExporter().from_notebook_node(nbformat.read("report.ipynb", as_version=4))
+    card: none
+
+  - name: pip's in-process main installs a package by name
+    code: |-
+      import pip
+      pip.main(["install", "pandas"])
     card: none

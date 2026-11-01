@@ -1692,16 +1692,37 @@ _CODE_RUNNERS = frozenset({
     "runpy._run_code", "runpy._run_module_code", "runpy._run_module_as_main",
     # Each runs the import lines of the .pth files in the folders it adds.
     "site.addsitedir", "site.addpackage", "site.main",
+    # The default loader's own discovery, which imports the test modules it
+    # finds. `unittest.TestLoader()` goes through `_INSTANCE_RUNNERS`.
+    "unittest.defaultTestLoader.discover", "unittest.defaultTestLoader.loadTestsFromName",
+    "unittest.defaultTestLoader.loadTestsFromNames",
+    # Importers and loaders that run a module from a path or a name.
+    "pydoc.importfile", "imp.load_source", "imp.load_module", "imp.load_compiled",
+    "imp.load_package", "imp.reload", "importlib._bootstrap._load", "importlib._bootstrap._exec",
+    # The doctest suites a test runner runs, and its own debuggers.
+    "doctest.DocFileSuite", "doctest.DocTestSuite", "doctest.DebugRunner", "doctest.debug_src",
+    "doctest.debug_script", "doctest.debug",
+    # The command-line mains that run the script or module named on sys.argv.
+    "cProfile.main", "profile.main", "trace.main", "pdb.main",
+    # IPython shells and notebook runners made outside `get_ipython`.
+    "IPython.start_ipython", "IPython.embed", "testbook.testbook",
+    "nbconvert.preprocessors.ExecutePreprocessor", "nbconvert.preprocessors.execute.ExecutePreprocessor",
+    # Subinterpreters that run a text, the site hooks that import a
+    # customize module, and setup scripts a build runs.
+    "_xxsubinterpreters.run_string", "_interpreters.run_string", "_interpreters.exec",
+    "site.execsitecustomize", "site.execusercustomize",
+    "distutils.core.run_setup", "setuptools._distutils.core.run_setup",
 })
 # Modules whose members run code the check can't read, so a member looked up
 # by a name it can't read may be one.
 _RUNNER_MODULES = frozenset(
     name.rpartition(".")[0] for name in (*_CODE_RUNNERS, "importlib.util.module_from_spec")
 )
-# The C API's PyRun_* functions run the text they're handed: the start of
-# their names, and of their full names.
-_PYRUN_PREFIX = "PyRun_"
-_PYRUN_FUNCS = f"ctypes.pythonapi.{_PYRUN_PREFIX}"
+# The C API functions that run code the check can't read: PyRun_* run the
+# text they're handed, PyImport_* import a module by its name. The start of
+# their bare names, and of their full names on `ctypes.pythonapi`.
+_PYAPI_PREFIXES = ("PyRun_", "PyImport_")
+_PYAPI_FUNCS = tuple(f"ctypes.pythonapi.{prefix}" for prefix in _PYAPI_PREFIXES)
 # Calls that run text as code, by the parameters that take it, in order: a
 # literal text is read as one more cell, as exec()'s is.
 _STRING_RUNNERS = {
@@ -1712,6 +1733,11 @@ _STRING_RUNNERS = {
 _STRING_RUNNER_NAMES = frozenset(name.rpartition(".")[2] for name in _STRING_RUNNERS)
 # Methods that run code, by the call that makes the object they're called on.
 _IPYTHON_RUNS = frozenset({"run_cell", "run_line_magic", "run_cell_magic"})
+# The methods that run code on an IPython shell `.instance()` makes, beyond
+# those a magic reaches: it runs a cell, a line, a module or a code object.
+_IPYTHON_SHELL_RUNS = _IPYTHON_RUNS | {
+    "ex", "ev", "safe_execfile", "safe_run_module", "run_code", "runcode", "run_cell_async",
+}
 _INSTANCE_RUNNERS = {
     "cProfile.Profile": frozenset({"run", "runctx", "runcall"}),
     "profile.Profile": frozenset({"run", "runctx", "runcall"}),
@@ -1720,8 +1746,11 @@ _INSTANCE_RUNNERS = {
     "trace.Trace": frozenset({"run", "runctx", "runfunc"}),
     "nbclient.NotebookClient": frozenset({"execute"}),
     "nbclient.client.NotebookClient": frozenset({"execute"}),
-    "nbconvert.preprocessors.ExecutePreprocessor": frozenset({"preprocess"}),
-    "nbconvert.preprocessors.execute.ExecutePreprocessor": frozenset({"preprocess"}),
+    "unittest.TestLoader": frozenset({"discover", "loadTestsFromName", "loadTestsFromNames"}),
+    "unittest.loader.TestLoader": frozenset({"discover", "loadTestsFromName", "loadTestsFromNames"}),
+    "IPython.core.interactiveshell.InteractiveShell.instance": _IPYTHON_SHELL_RUNS,
+    "IPython.terminal.interactiveshell.TerminalInteractiveShell.instance": _IPYTHON_SHELL_RUNS,
+    "IPython.terminal.embed.InteractiveShellEmbed": _IPYTHON_SHELL_RUNS,
     "get_ipython": _IPYTHON_RUNS, "IPython.get_ipython": _IPYTHON_RUNS,
     "IPython.core.getipython.get_ipython": _IPYTHON_RUNS,
 }
@@ -1730,23 +1759,39 @@ _RUNNER_METHODS = frozenset().union(*_INSTANCE_RUNNERS.values())
 _LOADER_METHODS = frozenset({"exec_module", "load_module"})
 # Calls that import a module by its name. `pkgutil.resolve_name` and
 # `pydoc.locate` take the name as "pkg.mod:attr" or "pkg.mod"; the module
-# before the colon is the one they load.
+# before the colon is the one they load. `pkgutil.walk_packages` imports
+# every package it finds under the folders it is given (`_walks_unread`).
 _IMPORTERS = frozenset({
     "importlib.import_module", "importlib.__import__", "__import__", "builtins.__import__",
-    "pkgutil.resolve_name", "pydoc.locate",
+    "pkgutil.resolve_name", "pydoc.locate", "pydoc.safeimport", "pydoc.render_doc", "pydoc.doc",
+    "help", "pkgutil.walk_packages",
 })
+# The importers that import only a string argument, so an object given to one
+# imports nothing: the builtin `help` and pydoc's renderers take a thing or
+# its name, and a thing is no import the check reads.
+_STRING_IMPORTERS = frozenset({"help", "pydoc.render_doc", "pydoc.doc"})
 # The importers whose result is the module itself, so a name bound to one
-# reads as that module (`_Reader._importer_module_texts`): all but the two
-# that return an attribute of the module they load.
-_MODULE_IMPORTERS = _IMPORTERS - {"pkgutil.resolve_name", "pydoc.locate"}
+# reads as that module (`_Reader._importer_module_texts`): all but those that
+# return an attribute, a rendering or a walk rather than the module.
+_MODULE_IMPORTERS = _IMPORTERS - {
+    "pkgutil.resolve_name", "pydoc.locate", "pydoc.render_doc", "pydoc.doc", "help", "pkgutil.walk_packages",
+}
 _MODULE_IMPORTER_LAST_NAMES = frozenset(name.rpartition(".")[2] for name in _MODULE_IMPORTERS)
+# The test-program entry points that load and run a module or the tests
+# named on their argv (`_unittest_main_unread`), held unless they run the
+# cell's own TestCase from `__main__` with no argv past the program word.
+_UNITTEST_MAINS = frozenset({"unittest.main", "unittest.TestProgram", "unittest.main.TestProgram"})
+# The command-line main that runs the statements on its argv list, read as a
+# runner of text (`_timeit_main_code`).
+_TIMEIT_MAIN = "timeit.main"
 # The last name of each call `_runs_unread` reads, so any other is passed by.
 _RUNNER_NAMES = frozenset(
-    name.rpartition(".")[2] for name in (*_CODE_RUNNERS, *_STRING_RUNNERS, *_IMPORTERS)
+    name.rpartition(".")[2]
+    for name in (*_CODE_RUNNERS, *_STRING_RUNNERS, *_IMPORTERS, *_UNITTEST_MAINS, _TIMEIT_MAIN)
 )
-# Names that reach a runner or an importer with no import: the builtin
-# `__import__`, and `get_ipython`, which an IPython shell binds.
-_PAD_BUILTINS = frozenset({"__import__", "get_ipython"})
+# Names that reach a runner or an importer with no import: the builtins
+# `__import__` and `help`, and `get_ipython`, which an IPython shell binds.
+_PAD_BUILTINS = frozenset({"__import__", "help", "get_ipython"})
 # What changes the folders `import` looks in, and the methods that add to a
 # list, as `sys.path` is one.
 _LIST_CHANGES = frozenset({"insert", "append", "extend", "__setitem__", "__iadd__"})
@@ -1890,7 +1935,7 @@ _UNREAD_CALL_NAMES = frozenset({*(_CODE_HINTS - _GLOBALS_CALLS - _BUILTINS_MODUL
 def _is_hint(last: str) -> bool:
     """Whether `last`, the last name of a node, may name something that runs
     code the check can't read: a hint (`_CODE_HINTS`) or a PyRun_ function."""
-    return last in _CODE_HINTS or last.startswith(_PYRUN_PREFIX)
+    return last in _CODE_HINTS or last.startswith(_PYAPI_PREFIXES)
 
 
 # The Python interpreter by any of its names, and the scripts it runs as a
@@ -1989,6 +2034,9 @@ _PIP_COMMANDS = frozenset({
 })
 _PIP_PACKAGE_COMMANDS = frozenset({"install", "download", "uninstall", "wheel"})
 _PIP_FILE_COMMANDS = frozenset({"sync"})
+# pip's own entry points, which run a command in this process from an argv
+# list read the way `-m pip`'s is (`_pip_main_unread`).
+_PIP_MAINS = frozenset({"pip.main", "pip._internal.main", "pip._internal.cli.main.main"})
 # The commands that fetch the packages they take from an index (`_pip_launch`).
 _PIP_FETCH_COMMANDS = _PIP_PACKAGE_COMMANDS - {"uninstall"}
 # The settings, in a program's environment, that point pip or uv at another
@@ -2738,7 +2786,7 @@ class _Cell:
         out: list[ast.Call] = []
         for call in self.calls:
             name = _member_name(call.func)
-            if (isinstance(call.func, ast.Call) or name in _UNREAD_CALL_NAMES or name.startswith(_PYRUN_PREFIX)
+            if (isinstance(call.func, ast.Call) or name in _UNREAD_CALL_NAMES or name.startswith(_PYAPI_PREFIXES)
                     or self.signs.names_a_pth_file and name in _FILE_WRITE_NAMES):
                 out.append(call)
         return tuple(out)
@@ -10157,17 +10205,58 @@ class _RunnerCode:
 
 def _runner_code(call: ast.Call, reader: _Reader) -> _RunnerCode | None:
     """The code `call` hands a runner of text, such as `timeit.timeit`'s
-    statement and setup; None when it calls none. A runner given nothing
-    runs its default, `pass`."""
+    statement and setup, or `timeit.main`'s argv (`_timeit_main_code`);
+    None when it calls none. A runner given nothing runs its default,
+    `pass`."""
     if not _runner_named(call.func, reader):
         return None
-    params = _STRING_RUNNERS.get(reader.module_member(call.func) or "")
+    member = reader.module_member(call.func)
+    if member == _TIMEIT_MAIN:
+        return _timeit_main_code(call, reader)
+    params = _STRING_RUNNERS.get(member or "")
     if params is None:
         return None
     given = {**dict(zip(params, call.args)), **{k.arg: k.value for k in call.keywords if k.arg in params}}
     sources = [given[p] for p in reversed(params) if p in given]
     spread = any(isinstance(a, ast.Starred) for a in call.args) or any(k.arg is None for k in call.keywords)
     return _RunnerCode(sources=tuple(sources), spread=spread)
+
+
+# The options `timeit.main` takes a value after, so the words that follow
+# them aren't statements: the repeats, the count, the unit, and the setup,
+# which runs before the statements. `-s`/`--setup` may repeat.
+_TIMEIT_MAIN_VALUE_FLAGS = frozenset({"-n", "--number", "-r", "--repeat", "-u", "--unit"})
+_TIMEIT_MAIN_SETUP_FLAGS = frozenset({"-s", "--setup"})
+
+
+def _timeit_main_code(call: ast.Call, reader: _Reader) -> _RunnerCode:
+    """The code `timeit.main` runs: the setups and statements in its argv
+    list, setups first, as they share one namespace. `spread` is set when
+    the argv isn't a readable list, or a word in it isn't a literal, so the
+    cell is held unchecked; a readable argv of literal statements is read."""
+    argv = call.args[0] if call.args else _keyword(call, "args")
+    items = reader.items_of(node=argv, key=None, depth=0) if argv is not None else None
+    if items is None:
+        return _RunnerCode(sources=(), spread=True)
+    setups: list[ast.AST] = []
+    statements: list[ast.AST] = []
+    words = iter(items)
+    spread = False
+    for word in words:
+        text = _literal_source(word)
+        if text in _TIMEIT_MAIN_SETUP_FLAGS:
+            setup = next(words, None)
+            if setup is not None:
+                setups.append(setup)
+        elif text in _TIMEIT_MAIN_VALUE_FLAGS:
+            next(words, None)
+        elif isinstance(text, str) and text.startswith("-"):
+            continue
+        elif text is None:
+            spread = True
+        else:
+            statements.append(word)
+    return _RunnerCode(sources=(*setups, *statements), spread=spread)
 
 
 def _runner_methods(node: ast.AST, reader: _Reader) -> frozenset[str]:
@@ -10573,6 +10662,35 @@ class _Modules:
             for cell in cells for node in cell.signs.imports
         ) or any(self.unread(node.id, cell=cell) for cell in cells for node in cell.looked_up)
 
+    def walks_unread(self, folders: Sequence[str] | None, *, cell: _Cell) -> bool:
+        """Whether walking `folders` imports a module the check can't read:
+        the folders absent or unreadable (None) holds, since the walk may
+        reach any; else a folder holds when a module or package directly
+        under it is one `unread` can't read (`_names_under`)."""
+        if folders is None:
+            return True
+        return any(self.unread(name, cell=cell) for folder in folders for name in self._names_under(folder))
+
+    def _names_under(self, folder: str) -> frozenset[str]:
+        """The names an import reaches a module or package directly inside
+        `folder` by: a cell-written or snapshot `<name>.py` or
+        `<name>/__init__.py` there."""
+        base = folder.rstrip("/")
+        prefix = "" if base in ("", ".") else f"{base}/"
+        out: set[str] = set()
+        paths = set(self._written.paths)
+        for snap in self._snapshots:
+            paths |= set(snap.files)
+        for path in paths:
+            if not path.startswith(prefix):
+                continue
+            parts = path[len(prefix):].split("/")
+            if len(parts) == 1 and parts[0].endswith(".py"):
+                out.add(parts[0][:-3])
+            elif len(parts) == 2 and parts[1] == "__init__.py":
+                out.add(parts[0])
+        return frozenset(name for name in out if name.isidentifier())
+
     @cached_property
     def path_changed(self) -> bool:
         """Whether any cell changes `sys.path` (`_CodeSigns.path_changes`),
@@ -10759,7 +10877,7 @@ def _runner_named(node: ast.AST, reader: _Reader) -> bool:
     entry read under a name the check resolves, as `vars(runpy)[k]` is.
     `_Reader.module_member` says which of them is one."""
     last = _member_name(node)
-    if last in _RUNNER_NAMES or last.startswith(_PYRUN_PREFIX) or last in reader.runner_aliases:
+    if last in _RUNNER_NAMES or last.startswith(_PYAPI_PREFIXES) or last in reader.runner_aliases:
         return True
     return (isinstance(node, ast.Subscript) and not isinstance(node.slice, ast.Constant)
             and reader.module_member(node) is not None)
@@ -10809,7 +10927,7 @@ def _member_runs_code(text: str) -> bool:
     """Whether `text`, a member's name as a getter of members takes it, a
     dotted path for `attrgetter`, names in any part a member that runs code
     on what holds it (`_RUNNING_MEMBERS`) or a PyRun_ function."""
-    return any(part in _RUNNING_MEMBERS or part.startswith(_PYRUN_PREFIX) for part in text.split("."))
+    return any(part in _RUNNING_MEMBERS or part.startswith(_PYAPI_PREFIXES) for part in text.split("."))
 
 
 def _imports_unread(call: ast.Call, reader: _Reader, cell: _Cell, *, modules: _Modules) -> bool:
@@ -10821,10 +10939,16 @@ def _imports_unread(call: ast.Call, reader: _Reader, cell: _Cell, *, modules: _M
     does a relative name given no package. A call given no name but a
     `**` mapping takes its name from that mapping, which the check doesn't
     read."""
+    member = reader.module_member(call.func)
+    if member == "pkgutil.walk_packages":
+        return _walks_unread(call, reader, cell, modules=modules)
     target = _target_arg(call, keywords=("name", "path"))
     if target is None:
         return any(k.arg is None for k in call.keywords)
     texts = _literal_texts(target, reader)
+    if texts is None and member in _STRING_IMPORTERS:
+        # A thing, not its name: `help(df.merge)` imports nothing.
+        return False
     if texts == []:
         return not _never_given(target, reader)
     if texts and all(text.startswith(".") for text in texts) and len(call.args) < 2 and not call.keywords:
@@ -10832,6 +10956,17 @@ def _imports_unread(call: ast.Call, reader: _Reader, cell: _Cell, *, modules: _M
         # before it loads anything.
         return False
     return texts is None or any(modules.unread(text.partition(":")[0], cell=cell) for text in texts)
+
+
+def _walks_unread(call: ast.Call, reader: _Reader, cell: _Cell, *, modules: _Modules) -> bool:
+    """Whether `pkgutil.walk_packages` imports a module `modules` can't read:
+    it imports every package it finds under the folders it is given, so it
+    is held when the folders are absent, when the check can't read them, or
+    when one holds a module a cell wrote or a project module a `sys.path`
+    change reaches (`_Modules.walks_unread`)."""
+    target = _target_arg(call, keywords=("path",))
+    folders = _literal_texts(target, reader) if target is not None else None
+    return modules.walks_unread(folders, cell=cell)
 
 
 def _runs_unread(call: ast.Call, reader: _Reader, cell: _Cell, *, read: _ExecRead, modules: _Modules) -> bool:
@@ -10849,11 +10984,15 @@ def _runs_unread(call: ast.Call, reader: _Reader, cell: _Cell, *, read: _ExecRea
         # or to a lookup of one, as `go = operator.methodcaller("run_path")`.
         return True
     name = reader.module_member(func) if _runner_named(func, reader) else None
-    if name in _CODE_RUNNERS or name is not None and name.startswith(_PYRUN_FUNCS):
+    if name in _CODE_RUNNERS or name is not None and name.startswith(_PYAPI_FUNCS):
         return True
+    if name in _UNITTEST_MAINS:
+        return _unittest_main_unread(call, reader)
+    if name in _PIP_MAINS:
+        return _pip_main_unread(call, reader)
     if name in _IMPORTERS:
         return _imports_unread(call, reader, cell, modules=modules)
-    if name in _STRING_RUNNERS:
+    if name in _STRING_RUNNERS or name == _TIMEIT_MAIN:
         code = _runner_code(call, reader)
         if code is None:
             return False
@@ -10862,6 +11001,42 @@ def _runs_unread(call: ast.Call, reader: _Reader, cell: _Cell, *, read: _ExecRea
             _literal_source(s) is None and not _names_read_code(s, reader) for s in code.sources
         ) or bool(literal) and id(call) not in read.tried
     return isinstance(func, ast.Attribute) and last in _RUNNER_METHODS and last in _runner_methods(func.value, reader)
+
+
+def _unittest_main_unread(call: ast.Call, reader: _Reader) -> bool:
+    """Whether `unittest.main` or `unittest.TestProgram` loads code the check
+    can't read: a `module=` that names anything but `__main__`, or that the
+    check can't read, loads that module; an `argv` the check can't read, or
+    with a test name or `discover` past the program word, loads tests from
+    disk. With no such argument it runs the cell's own TestCase from
+    `__main__`, which read code holds already."""
+    module = _keyword(call, "module")
+    if module is not None:
+        texts = _literal_texts(module, reader)
+        if texts is None or any(text != "__main__" for text in texts):
+            return True
+    argv = _keyword(call, "argv") or (call.args[0] if call.args else None)
+    if argv is None:
+        return False
+    items = reader.items_of(node=argv, key=None, depth=0)
+    if items is None:
+        return True
+    return any(
+        (word := _literal_source(item)) is None or word == "discover" or not word.startswith("-")
+        for item in items[1:]
+    )
+
+
+def _pip_main_unread(call: ast.Call, reader: _Reader) -> bool:
+    """Whether pip's in-process main, given an argv list, installs from a
+    source the check can't read (`_pip_unread`), as `-m pip` does. An argv
+    the check can't read, or a word in it that isn't a literal, is held."""
+    argv = call.args[0] if call.args else _keyword(call, "args")
+    items = reader.items_of(node=argv, key=None, depth=0) if argv is not None else None
+    if items is None:
+        return True
+    words = [_literal_source(item) for item in items]
+    return any(word is None for word in words) or _pip_unread([word for word in words if word is not None])
 
 
 def _names_read_code(node: ast.AST, reader: _Reader) -> bool:
@@ -10890,7 +11065,7 @@ def _unread_run_at(node: ast.AST, reader: _Reader, cell: _Cell, *, read: _ExecRe
     Python process it launches, that the check can't read (`_unread_code`):
     a call that runs a script, a module, a notebook, a code object, or text
     a console, debugger or test runner gets (`_CODE_RUNNERS`,
-    `_PYRUN_FUNCS`, `_INSTANCE_RUNNERS`, and any `.exec_module()` or
+    `_PYAPI_FUNCS`, `_INSTANCE_RUNNERS`, and any `.exec_module()` or
     `.load_module()`); a runner of text (`_STRING_RUNNERS`) handed code that
     isn't a literal, or a literal `read` left unread at `_EXEC_LIMIT`; an
     import by a name that isn't a literal; an import of a module `modules`
@@ -10986,7 +11161,7 @@ def _names_a_runner(node: ast.AST, reader: _Reader) -> bool:
             return True
         # An entry of a module's dict, as `vars(runpy)[k]` is `runpy.run_path`.
         name = reader.module_member(node)
-        return name is not None and (name in _RUN_CALLS or name.startswith(_PYRUN_FUNCS))
+        return name is not None and (name in _RUN_CALLS or name.startswith(_PYAPI_FUNCS))
     last = _last_name(node)
     if last in _LOADER_METHODS or last in _BUILTINS_MODULE_NAMES or reader.dotted(node) in _GLOBALS_CALLS:
         return True
@@ -10995,7 +11170,7 @@ def _names_a_runner(node: ast.AST, reader: _Reader) -> bool:
     if last in _EXEC_CALLS:
         return reader.exec_builtin(node) is not None
     name = reader.module_member(node)
-    if name is not None and (name in _RUN_CALLS or name.startswith(_PYRUN_FUNCS)):
+    if name is not None and (name in _RUN_CALLS or name.startswith(_PYAPI_FUNCS)):
         return True
     return isinstance(node, ast.Attribute) and last in _RUNNER_METHODS and last in _runner_methods(node.value, reader)
 
