@@ -2385,4 +2385,3 @@ def test_the_stop_line_is_the_frame_of_the_cells_own_code(code, line) -> None:
     else:
         raise AssertionError("the cell ran to its end")
     assert cell_stopped_at(None, compiled) is None
-
