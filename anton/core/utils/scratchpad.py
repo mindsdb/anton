@@ -17,6 +17,7 @@ from anton.core.tools.registry import ToolOutcome
 from anton.core.utils.write_check import (
     PACKAGE_FILE_SUFFIXES,
     CellWrites,
+    EarlierCell,
     FileChange,
     HttpWrite,
     HttpWriteRule,
@@ -482,22 +483,23 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
     gate = getattr(session, "_write_gate", None)
     if not isinstance(gate, WriteGate):
         return None
-    # The cells compaction folded away come first: the pad's process still
-    # holds what they imported and bound. Their outcomes still decide whether
-    # the check can count a write as one that ran.
-    compacted = tuple(getattr(pad, "compacted_cells", ()))
-    cells = tuple(getattr(pad, "cells", ()) or ())
-    earlier = (*(cell.code for cell in compacted), *(cell.code for cell in cells))
-    errored = (*(cell.errored for cell in compacted), *(bool(getattr(cell, "error", None)) for cell in cells))
-    # Where each cell that failed stopped, as the boot read it from the
-    # traceback, not from its text, which the cell shapes; None where the
-    # runtime doesn't say.
-    stopped = tuple(getattr(cell, "stopped_at", None) for cell in (*compacted, *cells))
     try:
+        # The cells compaction folded away come first: the pad's process still
+        # holds what they imported and bound. Their outcomes still decide
+        # whether the check can count a write as one that ran. Where each cell
+        # that failed stopped is the line the boot read from the traceback, not
+        # from its text, which the cell shapes; None where the runtime doesn't
+        # say. Built inside the try: a value `EarlierCell` refuses gets the
+        # card too.
+        earlier = (
+            *(EarlierCell(code=cell.code, errored=cell.errored, stopped_at=cell.stopped_at)
+              for cell in getattr(pad, "compacted_cells", ())),
+            *(EarlierCell(code=cell.code, errored=bool(getattr(cell, "error", None)),
+                          stopped_at=getattr(cell, "stopped_at", None))
+              for cell in getattr(pad, "cells", ()) or ()),
+        )
         writes = await asyncio.to_thread(
-            find_cell_writes,
-            code=code, earlier_code=earlier, snapshots=gate.snapshots, http_rules=gate.http_rules,
-            earlier_errored=errored, earlier_stopped_at=stopped,
+            find_cell_writes, code=code, earlier=earlier, snapshots=gate.snapshots, http_rules=gate.http_rules,
         )
     except Exception as exc:
         # The type only, as for a failed question.

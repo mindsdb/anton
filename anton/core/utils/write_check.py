@@ -196,6 +196,7 @@ __all__ = [
     "CallVia",
     "CallWrite",
     "CellWrites",
+    "EarlierCell",
     "FileChange",
     "HttpWrite",
     "HttpWriteRule",
@@ -396,6 +397,20 @@ class CellWrites(BaseModel):
         if self.unchecked:
             kinds.append("unchecked")
         return tuple(kinds)
+
+
+class EarlierCell(BaseModel):
+    """One earlier cell of the conversation, as `find_cell_writes` reads it:
+    its code, whether it stopped on an error (`errored`), and, for one that
+    did, the line of its own code it stopped at, as the pad's boot read it
+    from the traceback (`cell_stopped_at`); None where the runtime doesn't
+    say."""
+
+    model_config = ConfigDict(frozen=True)
+
+    code: str
+    errored: bool = False
+    stopped_at: int | None = None
 
 
 # What one check read from disk under folders the walk didn't walk: the
@@ -13215,30 +13230,24 @@ class _CellRead:
 def find_cell_writes(
     *,
     code: str,
-    earlier_code: Sequence[str],
+    earlier: Sequence[EarlierCell],
     snapshots: Sequence[ProjectSnapshot],
     http_rules: Sequence[HttpWriteRule] = (),
-    earlier_errored: Sequence[bool] = (),
-    earlier_stopped_at: Sequence[int | None] = (),
 ) -> CellWrites:
-    """What `code` would change, read against the conversation's earlier cells.
+    """What `code` would change, read against the conversation's `earlier` cells.
 
     A function or lambda an earlier cell defined is read again at each place
     this cell calls it or passes it on, with its parameters read from that
     call, and what it would change is reported at that place. A request that
     matches one of `http_rules` counts as a write, whatever its method.
-    `earlier_errored`, beside `earlier_code`, marks each earlier cell that
-    stopped on an error: its writes make no file the agent's own
-    (`_OwnedFiles`), and a path read through a name it binds may hold any
-    value it gives the name, or the one before it: each file those name is
-    held too (`_added_holds`), up to `_PATH_LIMIT` paths for one value. A
-    cell with no entry ran to its end. `earlier_stopped_at`, beside it too,
-    gives the line of the cell's own code each errored cell stopped at, as
-    the pad's boot read it from the traceback (`cell_stopped_at`), None
-    where the runtime doesn't say: the names it surely bound before that
-    line are names read code binds (`_Reader.bound_before_stop`). One that
-    doesn't compile ran none of its code (`_Cell.compiles`), as one stopped
-    at its first line.
+    An earlier cell that stopped on an error (`EarlierCell.errored`) makes
+    no file the agent's own with its writes (`_OwnedFiles`), and a path read
+    through a name it binds may hold any value it gives the name, or the
+    one before it: each file those name is held too (`_added_holds`), up to
+    `_PATH_LIMIT` paths for one value. The names it surely bound before the
+    line it stopped at (`EarlierCell.stopped_at`) are names read code binds
+    (`_Reader.bound_before_stop`). One that doesn't compile ran none of its
+    code (`_Cell.compiles`), as one stopped at its first line.
 
     Literal code the cell, or an earlier function it calls, hands exec(),
     a runner of text or `python -c` is read as one more cell, and so is a
@@ -13261,18 +13270,19 @@ def find_cell_writes(
     cells: list[_Cell] = []
     errored: set[int] = set()
     stopped_at: dict[int, int] = {}
-    for i, text in enumerate(earlier_code):
-        earlier = _EARLIER_CELLS.get(code=text, index=len(cells))
-        if earlier is not None:
-            if i < len(earlier_errored) and earlier_errored[i]:
-                errored.add(earlier.index)
-                line = earlier_stopped_at[i] if i < len(earlier_stopped_at) else None
-                if line is None and not earlier.compiles:
-                    # Python refused it before any of it ran: it bound nothing.
-                    line = 1
-                if line is not None:
-                    stopped_at[earlier.index] = line
-            cells.append(earlier)
+    for given in earlier:
+        parsed = _EARLIER_CELLS.get(code=given.code, index=len(cells))
+        if parsed is None:
+            continue
+        if given.errored:
+            errored.add(parsed.index)
+            line = given.stopped_at
+            if line is None and not parsed.compiles:
+                # Python refused it before any of it ran: it bound nothing.
+                line = 1
+            if line is not None:
+                stopped_at[parsed.index] = line
+        cells.append(parsed)
     current = _Cell(tree, code, len(cells))
     cells.append(current)
     project = next((s for s in snapshots if s.label == "project"), None)

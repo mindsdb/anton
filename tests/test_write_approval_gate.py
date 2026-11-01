@@ -555,9 +555,9 @@ async def test_a_cell_that_runs_code_the_check_cant_read_waits_and_says_so(proje
         assert "Not run: this step would run code the check couldn't read." in _history_text(harness.session)
     # The same card comes from an exception in the check (`CellWrites(unchecked=True)`),
     # so pin that the check itself reads this cell as unchecked, without raising.
-    from anton.core.utils.write_check import find_cell_writes, snapshot_project_files
+    from anton.core.utils.write_check import EarlierCell, find_cell_writes, snapshot_project_files
     snap = snapshot_project_files(root=project, label="project", taken_at=10**10)
-    writes = find_cell_writes(code=EXEC_SCRIPT_CELL, earlier_code=[SCRIPT_CELL], snapshots=(snap,))
+    writes = find_cell_writes(code=EXEC_SCRIPT_CELL, earlier=[EarlierCell(code=SCRIPT_CELL)], snapshots=(snap,))
     assert writes.unchecked and writes.needs_approval()
 
 

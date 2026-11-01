@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
@@ -26,6 +27,7 @@ from anton.core.utils.scratchpad import _card_prompt, _code_span, _fence, _refus
 from anton.core.utils.write_check import (
     CallWrite,
     CellWrites,
+    EarlierCell,
     FileChange,
     HttpWrite,
     HttpWriteRule,
@@ -57,16 +59,29 @@ def snap(tmp_path: Path, monkeypatch):
     return snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
 
 
+def _earlier(
+    codes: Iterable[str], *, errored: Sequence[bool] = (), stopped_at: Sequence[int | None] = (),
+) -> list[EarlierCell]:
+    """The earlier cells `codes` give, oldest first: each that `errored`
+    marks stopped on an error, at the line `stopped_at` gives beside it.
+    A list left empty says each cell ran to its end."""
+    codes = list(codes)
+    errored = list(errored) or [False] * len(codes)
+    stopped_at = list(stopped_at) or [None] * len(codes)
+    return [EarlierCell(code=code, errored=failed, stopped_at=line)
+            for code, failed, line in zip(codes, errored, stopped_at, strict=True)]
+
+
 def _held(code: str, snap, *, earlier=()) -> bool:
-    return find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,)).needs_approval()
+    return find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,)).needs_approval()
 
 
 def _statements(code: str, snap, *, earlier=()) -> list[str]:
-    return [w.statement for w in find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,)).sql]
+    return [w.statement for w in find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,)).sql]
 
 
 def _card(code: str, snap, *, earlier=()) -> str:
-    return _card_prompt(find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,)))
+    return _card_prompt(find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,)))
 
 
 def _fenced(card: str) -> list[str]:
@@ -447,9 +462,10 @@ def test_cells_that_write_a_database(code, snap):
 class _UnreadCase(BaseModel):
     """One row of the unread-code fixture. `extra="forbid"` so a typo'd key
     (`kind:` for `kinds:`) fails the run instead of being ignored, and `card`
-    is one of the three the test knows. `find_cell_writes` pairs
-    `earlier_errored` and `earlier_stopped_at` with `earlier` by position,
-    so each is empty or as long as `earlier`."""
+    is one of the three the test knows. `earlier_errored` and
+    `earlier_stopped_at` pair with `earlier` by position, so each is empty
+    or as long as `earlier`, and `earlier_cells` reads the three as the
+    earlier cells `find_cell_writes` takes."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -472,6 +488,10 @@ class _UnreadCase(BaseModel):
                 raise ValueError(f"{field} has {len(given)} entries for {len(self.earlier)} earlier cells")
         return self
 
+    def earlier_cells(self) -> list[EarlierCell]:
+        """The row's earlier cells, each with the outcome the lists beside them give."""
+        return _earlier(self.earlier, errored=self.earlier_errored, stopped_at=self.earlier_stopped_at)
+
 
 _UNREAD_CODE = yaml.safe_load(
     (Path(__file__).parent / "fixtures" / "write_check_unread_code.yaml").read_text())
@@ -491,12 +511,9 @@ def test_cells_that_run_code_the_check_cant_read(case: "_UnreadCase", tmp_path, 
         (tmp_path / rel).write_text(text)
     monkeypatch.chdir(tmp_path)
     snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
-    # Passed only where a row gives it, so the same rows run against a check
-    # that takes no stop lines.
-    stopped = {"earlier_stopped_at": case.earlier_stopped_at} if case.earlier_stopped_at else {}
     writes = find_cell_writes(
-        code=case.code, earlier_code=case.earlier, snapshots=(snap,),
-        http_rules=parse_http_write_rules(_UNREAD_CODE_RULE), earlier_errored=case.earlier_errored, **stopped)
+        code=case.code, earlier=case.earlier_cells(), snapshots=(snap,),
+        http_rules=parse_http_write_rules(_UNREAD_CODE_RULE))
     if case.card == "none":
         assert not writes.needs_approval()
     elif case.card == "unchecked":
@@ -531,7 +548,7 @@ def test_literal_code_too_deep_or_too_long_to_read(earlier, code, card, snap):
     """Literal code Python's parser can't take runs nothing, so it gets no
     card, and the check doesn't crash on it; literal code past the length
     the check reads is code it can't read."""
-    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,))
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
     assert writes.unchecked is (card == "unchecked")
     assert writes.needs_approval() is (card != "none")
 
@@ -547,7 +564,7 @@ def test_a_lookup_over_many_literal_names_reads_each_name(last, card, snap):
     literal names, reads every one of them: none that runs code holds
     nothing, and one at the end that does holds the cell."""
     code = f"import types\nfor n in [{_MANY_NAMES}, {last!r}]:\n    print(getattr(types, n, None))"
-    writes = find_cell_writes(code=code, earlier_code=[], snapshots=(snap,))
+    writes = find_cell_writes(code=code, earlier=_earlier([]), snapshots=(snap,))
     assert writes.unchecked is (card == "unchecked")
     assert writes.needs_approval() is (card != "none")
 
@@ -567,8 +584,8 @@ def test_an_import_of_a_module_written_since_the_turn_began_is_unchecked(tmp_pat
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "__init__.py").write_text("")
     for code in ("import job", "from pkg import run"):
-        assert find_cell_writes(code=code, earlier_code=(), snapshots=(snap,)).unchecked
-    assert not find_cell_writes(code="import helpers", earlier_code=(), snapshots=(snap,)).needs_approval()
+        assert find_cell_writes(code=code, earlier=_earlier(()), snapshots=(snap,)).unchecked
+    assert not find_cell_writes(code="import helpers", earlier=_earlier(()), snapshots=(snap,)).needs_approval()
 
 
 @pytest.mark.parametrize("error, card", [(errno.EACCES, "unchecked"), (errno.EIO, "unchecked"),
@@ -589,7 +606,7 @@ def test_a_module_the_system_cant_look_up_counts_as_one_a_cell_wrote(error, card
         return is_file(path)
 
     monkeypatch.setattr(Path, "is_file", refusing)
-    writes = find_cell_writes(code="import sys\nsys.path.insert(0, '.')\nimport helpers", earlier_code=[],
+    writes = find_cell_writes(code="import sys\nsys.path.insert(0, '.')\nimport helpers", earlier=_earlier([]),
                               snapshots=(snap,))
     assert writes.unchecked is (card == "unchecked")
 
@@ -619,13 +636,13 @@ def test_an_import_of_a_module_written_since_the_turn_began_in_a_folder_on_sys_p
         ([], "import sys\nsys.path.insert(0, '.anton/artifacts/sales')\nfrom backend import refresh\nrefresh()"),
         ([], f"{unpack}\nimport sys\nsys.path.insert(0, 'vendor')\nimport erp_sync\nerp_sync.refresh()"),
     ]:
-        assert find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,)).unchecked, code
+        assert find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,)).unchecked, code
     shadowing = "import sys\nsys.path.insert(0, 'vendor')\nimport pandas"
-    assert find_cell_writes(code=shadowing, earlier_code=[unpack], snapshots=(snap,)).unchecked
+    assert find_cell_writes(code=shadowing, earlier=_earlier([unpack]), snapshots=(snap,)).unchecked
     shipped = "import sys\nsys.path.insert(0, 'vendor')\nimport csv"
-    assert find_cell_writes(code=shipped, earlier_code=[unpack], snapshots=(snap,)).unchecked
+    assert find_cell_writes(code=shipped, earlier=_earlier([unpack]), snapshots=(snap,)).unchecked
     for earlier, code in [([unpack], "import sys\nsys.path.insert(0, 'vendor')\nimport json"), ([], shadowing)]:
-        assert not find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,)).needs_approval(), code
+        assert not find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,)).needs_approval(), code
 
 
 def test_literal_code_an_earlier_cell_runs_is_parsed_once_as_the_conversation_grows(snap, monkeypatch):
@@ -637,7 +654,7 @@ def test_literal_code_an_earlier_cell_runs_is_parsed_once_as_the_conversation_gr
     monkeypatch.setattr(write_check, "_EXEC_CELLS", write_check._ExecCells(budget=1_000_000))
     literal = "\n".join(f"rows_{n} = [r for r in range({n})]" for n in range(40))
     earlier = [f"exec({literal!r})", "print(0)"]
-    assert not find_cell_writes(code="print(1)", earlier_code=earlier, snapshots=(snap,)).needs_approval()
+    assert not find_cell_writes(code="print(1)", earlier=_earlier(earlier), snapshots=(snap,)).needs_approval()
     parsed: list[str] = []
     parse = write_check._parse_ran
 
@@ -647,7 +664,7 @@ def test_literal_code_an_earlier_cell_runs_is_parsed_once_as_the_conversation_gr
 
     monkeypatch.setattr(write_check, "_parse_ran", counting)
     earlier.append("print(1)")
-    assert not find_cell_writes(code="print(2)", earlier_code=earlier, snapshots=(snap,)).needs_approval()
+    assert not find_cell_writes(code="print(2)", earlier=_earlier(earlier), snapshots=(snap,)).needs_approval()
     assert literal not in parsed
 
 
@@ -716,7 +733,7 @@ def test_a_recursion_or_a_rebuilt_command_is_read_in_well_under_a_second(earlier
     it from what code the check can't read made, reads each link again
     once (`_names_tainted`)."""
     started = time.perf_counter()
-    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,))
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
     assert time.perf_counter() - started < 1
     assert writes.unchecked is (card == "unchecked")
     assert writes.needs_approval() is (card != "none")
@@ -730,8 +747,7 @@ def test_a_helper_many_errored_cells_redefine_is_read_once_per_call(snap):
     earlier = [f"def helper(x):\n    print(x, {i})\nrows = int('a')" for i in range(200)]
     code = "\n".join(f"helper({k})" for k in range(50))
     started = time.perf_counter()
-    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,), earlier_errored=[True] * 200,
-                              earlier_stopped_at=[3] * 200)
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier, errored=[True] * 200, stopped_at=[3] * 200), snapshots=(snap,))
     assert time.perf_counter() - started < 1
     assert not writes.needs_approval()
 
@@ -745,9 +761,9 @@ def test_a_long_conversation_of_literal_execs_is_read_in_well_under_a_second(sna
         f"exec('def f():\\n    return 1', ns{i})\nns{i}['f']()\n"
         for i in range(1400)
     ]
-    assert not find_cell_writes(code="go1399()", earlier_code=earlier, snapshots=(snap,)).needs_approval()
+    assert not find_cell_writes(code="go1399()", earlier=_earlier(earlier), snapshots=(snap,)).needs_approval()
     started = time.perf_counter()
-    writes = find_cell_writes(code="go1399()", earlier_code=earlier, snapshots=(snap,))
+    writes = find_cell_writes(code="go1399()", earlier=_earlier(earlier), snapshots=(snap,))
     assert time.perf_counter() - started < 1
     assert not writes.needs_approval()
 
@@ -775,7 +791,7 @@ def test_a_large_literal_cell_after_unread_code_is_walked_no_more_than_with_none
     counts = {}
     for seed, earlier in seeds.items():
         walks.clear()
-        assert not find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,)).needs_approval()
+        assert not find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,)).needs_approval()
         counts[seed] = len(walks)
     assert counts["a script ran"] == counts["none"]
 
@@ -800,7 +816,7 @@ def test_a_long_conversation_after_unread_code_reads_few_stores_for_what_it_fill
         return filled_names(node, at)
 
     monkeypatch.setattr(write_check, "_filled_names", counting)
-    writes = find_cell_writes(code="print(agg_3.total.sum())", earlier_code=earlier, snapshots=(snap,))
+    writes = find_cell_writes(code="print(agg_3.total.sum())", earlier=_earlier(earlier), snapshots=(snap,))
     assert not writes.needs_approval()
     assert len(read) < 30
 
@@ -1322,7 +1338,7 @@ def test_cells_that_change_no_existing_file(code, snap):
 def test_an_overwrite_of_a_file_the_turn_began_with_is_held_and_named_once(code, snap):
     """A delete that a write always follows is the overwrite, and the write
     after it names the same file, so the card names it once."""
-    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(snap,))
+    writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(snap,))
     assert writes.needs_approval()
     assert [(c.action, c.paths) for c in writes.held_files] == [("overwrite", ("summary.md",))]
     assert "This step would overwrite:\n\n```\nsummary.md\n```" in _card_prompt(writes)
@@ -1343,7 +1359,7 @@ def office(tmp_path: Path, monkeypatch):
 
 
 def _changes(code: str, snapshot, *, earlier=()) -> list[tuple[str, tuple[str, ...], bool]]:
-    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(snapshot,))
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snapshot,))
     return [(c.action, c.paths, c.held) for c in writes.files]
 
 
@@ -1392,7 +1408,7 @@ PD = "import pandas as pd\ndf = pd.read_csv('stock.csv')\n"
         "rename-onto", "move-onto", "json-dump", "pickle-dump",
         "openpyxl-save", "docx-save", "pptx-save", "glob-rewrite-in-place", "after-chdir"])
 def test_every_write_that_replaces_a_file_the_turn_began_with_is_held(code, path, office):
-    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(office,))
+    writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(office,))
     assert ("overwrite", (path,)) in [(c.action, c.paths) for c in writes.held_files]
     assert f"This step would overwrite:\n\n```\n{path}\n```" in _card_prompt(writes)
 
@@ -1406,7 +1422,7 @@ def test_every_write_that_replaces_a_file_the_turn_began_with_is_held(code, path
     PD + "with pd.ExcelWriter('budget.xlsx', mode='a', if_sheet_exists='new') as w:\n    df.to_excel(w)",
 ], ids=["a", "a+", "ab", "path-open-a", "to_csv-append", "excel-writer-append"])
 def test_an_append_is_reported_but_not_held(code, office):
-    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(office,))
+    writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(office,))
     assert not writes.needs_approval()
     assert [(c.action, c.held) for c in writes.files] == [("append", False)]
 
@@ -1507,8 +1523,7 @@ def test_a_write_in_an_earlier_cell_that_stopped_on_an_error_makes_no_file_the_a
     """The earlier cell may have stopped before its write ran, as `1 / 0`
     does here, so rewriting the user's stock.csv still waits for approval."""
     earlier = ("x = 1 / 0\nopen('stock.csv', 'w').write('z')",)
-    writes = find_cell_writes(code="open('stock.csv', 'w').write('y')", earlier_code=earlier, snapshots=(office,),
-                              earlier_errored=errored)
+    writes = find_cell_writes(code="open('stock.csv', 'w').write('y')", earlier=_earlier(earlier, errored=errored), snapshots=(office,))
     assert [(c.action, c.paths, c.held) for c in writes.files] == [("overwrite", ("stock.csv",), held)]
 
 
@@ -1516,8 +1531,7 @@ def test_a_name_an_errored_cell_binds_after_its_error_points_no_later_write_at_a
     """The errored cell may have stopped before it bound `out` again, so the
     later cell's write may have gone to draft.csv: stock.csv isn't the agent's."""
     earlier = ("out = 'draft.csv'", "x = 1 / 0\nout = 'stock.csv'", "open(out, 'w').write('x')")
-    writes = find_cell_writes(code="open('stock.csv', 'w').write('y')", earlier_code=earlier, snapshots=(office,),
-                              earlier_errored=(False, True, False))
+    writes = find_cell_writes(code="open('stock.csv', 'w').write('y')", earlier=_earlier(earlier, errored=(False, True, False)), snapshots=(office,))
     assert [(c.action, c.paths, c.held) for c in writes.files] == [("overwrite", ("stock.csv",), True)]
 
 
@@ -1525,16 +1539,13 @@ def test_a_write_through_a_name_an_errored_cell_binds_makes_no_file_the_agents(o
     """The errored cell may have stopped with `p` still on stock.csv, so the
     later cell's write may have gone there rather than to log.txt."""
     earlier = ("p = 'log.txt'", "p = 'stock.csv'\nx = 1 / 0\np = 'log.txt'", "open(p, 'w').write('x')")
-    writes = find_cell_writes(code="open('log.txt', 'w').write('y')", earlier_code=earlier, snapshots=(office,),
-                              earlier_errored=(False, True, False))
+    writes = find_cell_writes(code="open('log.txt', 'w').write('y')", earlier=_earlier(earlier, errored=(False, True, False)), snapshots=(office,))
     assert [(c.action, c.paths, c.held) for c in writes.files] == [("overwrite", ("log.txt",), True)]
     built = ("out = 'stock.csv'", "x = 1 / 0\nout += '.bak'", "open(out, 'w').write('x')")
-    writes = find_cell_writes(code="open('stock.csv', 'w').write('y')", earlier_code=built, snapshots=(office,),
-                              earlier_errored=(False, True, False))
+    writes = find_cell_writes(code="open('stock.csv', 'w').write('y')", earlier=_earlier(built, errored=(False, True, False)), snapshots=(office,))
     assert [(c.action, c.paths, c.held) for c in writes.files] == [("overwrite", ("stock.csv",), True)]
     rebound = (*earlier[:2], "p = 'log.txt'\nopen(p, 'w').write('x')")
-    writes = find_cell_writes(code="open('log.txt', 'w').write('y')", earlier_code=rebound, snapshots=(office,),
-                              earlier_errored=(False, True, False))
+    writes = find_cell_writes(code="open('log.txt', 'w').write('y')", earlier=_earlier(rebound, errored=(False, True, False)), snapshots=(office,))
     assert [(c.action, c.paths, c.held) for c in writes.files] == [("overwrite", ("log.txt",), False)]
 
 
@@ -1550,8 +1561,7 @@ def test_a_file_stays_the_users_when_an_errored_cell_may_have_pointed_the_write_
     delete of stock.csv may never have been followed by a write to it; or
     with `p` still a Path, so the rename may never have replaced it. Either
     way stock.csv may still be the user's."""
-    writes = find_cell_writes(code="open('stock.csv', 'w').write('y')", earlier_code=earlier, snapshots=(office,),
-                              earlier_errored=(False, True, False))
+    writes = find_cell_writes(code="open('stock.csv', 'w').write('y')", earlier=_earlier(earlier, errored=(False, True, False)), snapshots=(office,))
     assert [(c.action, c.paths, c.held) for c in writes.files] == [("overwrite", ("stock.csv",), True)]
 
 
@@ -1568,8 +1578,7 @@ def test_a_chdir_through_a_name_an_errored_cell_binds_makes_only_the_file_it_nam
     snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
     earlier = ("d = '.'\nx = 1 / 0", "import os\nos.chdir(d)\nopen('draft.csv', 'w').write('x')")
     for path, held in (("archive/2024/draft.csv", True), ("draft.csv", False)):
-        writes = find_cell_writes(code=f"open({path!r}, 'w').write('y')", earlier_code=earlier, snapshots=(snap,),
-                                  earlier_errored=(True, False))
+        writes = find_cell_writes(code=f"open({path!r}, 'w').write('y')", earlier=_earlier(earlier, errored=(True, False)), snapshots=(snap,))
         assert [(c.action, c.paths, c.held) for c in writes.files] == [("overwrite", (path,), held)], path
 
 
@@ -1579,12 +1588,11 @@ def test_a_name_an_errored_cell_binds_may_still_hold_the_value_before_its_error(
     and bound `out` again leaves no doubt."""
     earlier = ("out = 'stock.csv'\nx = 1 / 0\nout = 'new_out.csv'",)
     code = "open(out, 'w').write('x')"
-    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(office,), earlier_errored=(True,))
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier, errored=(True,)), snapshots=(office,))
     assert [(c.action, c.paths) for c in writes.held_files] == [("overwrite", ("stock.csv",))]
-    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(office,), earlier_errored=(False,))
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier, errored=(False,)), snapshots=(office,))
     assert not writes.needs_approval()
-    writes = find_cell_writes(code=code, earlier_code=(*earlier, "out = 'new_out.csv'"), snapshots=(office,),
-                              earlier_errored=(True, False))
+    writes = find_cell_writes(code=code, earlier=_earlier((*earlier, "out = 'new_out.csv'"), errored=(True, False)), snapshots=(office,))
     assert not writes.needs_approval()
 
 
@@ -1596,8 +1604,7 @@ def test_a_name_an_errored_cell_binds_still_names_the_file_it_names_when_run_to_
     """What the errored cell may have left in `out` only adds paths: an older
     value the check can't read, or more candidates than it keeps, still
     leaves the stock.csv the cell names when read as having run to its end."""
-    writes = find_cell_writes(code="open(out, 'w').write('x')", earlier_code=earlier, snapshots=(office,),
-                              earlier_errored=(False, True))
+    writes = find_cell_writes(code="open(out, 'w').write('x')", earlier=_earlier(earlier, errored=(False, True)), snapshots=(office,))
     assert [(c.action, c.paths) for c in writes.held_files] == [("overwrite", ("stock.csv",))]
 
 
@@ -1622,9 +1629,9 @@ def test_a_write_through_a_name_an_errored_cell_binds_holds_each_file_it_may_nam
     earlier, code, action, paths, office,
 ):
     errored = (*(False,) * (len(earlier) - 1), True)
-    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(office,), earlier_errored=errored)
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier, errored=errored), snapshots=(office,))
     assert sorted((c.action, p) for c in writes.held_files for p in c.paths) == sorted((action, p) for p in paths)
-    ran = find_cell_writes(code=code, earlier_code=earlier, snapshots=(office,))
+    ran = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(office,))
     assert "stock.csv" not in {p for c in ran.held_files for p in c.paths}
 
 
@@ -1700,7 +1707,7 @@ def test_what_an_errored_cell_may_have_bound_never_frees_a_file_its_run_to_end_r
     read again only for the files that wider reading adds: an older value the
     check can't read, a temporary folder, more working folders than it keeps
     or a name that may be a path never drop a file the first reading holds."""
-    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=beside_shared, earlier_errored=errored)
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier, errored=errored), snapshots=beside_shared)
     assert path in {p for c in writes.held_files for p in c.paths}
 
 
@@ -1709,8 +1716,7 @@ def test_a_name_read_inside_an_errored_cell_holds_what_that_cell_bound_before_th
     `base` ran too: `out` may name tmp_out/stock.csv, or nothing, but never
     the data/stock.csv the older `base` would give."""
     earlier = ("base = 'data'", "base = 'tmp_out'\nout = base + '/stock.csv'\nx = 1 / 0")
-    writes = find_cell_writes(code="open(out, 'w').write('x')", earlier_code=earlier, snapshots=beside_shared,
-                              earlier_errored=(False, True))
+    writes = find_cell_writes(code="open(out, 'w').write('x')", earlier=_earlier(earlier, errored=(False, True)), snapshots=beside_shared)
     assert not writes.needs_approval()
 
 
@@ -1726,8 +1732,8 @@ def test_an_older_value_the_check_cant_read_leaves_the_files_an_errored_cell_nam
     """`out` may still hold the value from `cfg`, which the check can't
     read, or either value the errored cell gives it: each file those two
     name is held."""
-    writes = find_cell_writes(code=code, earlier_code=("cfg = {}\nout = cfg['path']", stopped),
-                              snapshots=beside_shared, earlier_errored=(False, True))
+    writes = find_cell_writes(code=code, earlier=_earlier(("cfg = {}\nout = cfg['path']", stopped), errored=(False, True)),
+                              snapshots=beside_shared)
     assert sorted((c.action, p) for c in writes.held_files for p in c.paths) == expected
 
 
@@ -1736,8 +1742,8 @@ def test_a_folder_the_wide_reading_cant_place_is_held_beside_the_whole_project(b
     so rmtree('.') deletes all of it. It may have stopped with `d` naming any
     of 18 folders, more than the check keeps, so the folder deleted is also
     one the code picks when it runs."""
-    writes = find_cell_writes(code="import shutil\nshutil.rmtree('.')", earlier_code=CHDIR_PAST_THE_LIMIT,
-                              snapshots=beside_shared, earlier_errored=(True, False))
+    writes = find_cell_writes(code="import shutil\nshutil.rmtree('.')", earlier=_earlier(CHDIR_PAST_THE_LIMIT, errored=(True, False)),
+                              snapshots=beside_shared)
     assert sorted((c.whole_project, c.paths) for c in writes.held_files) == [(False, ()), (True, ())]
 
 
@@ -1773,8 +1779,7 @@ def test_a_run_of_failed_retries_is_read_in_well_under_a_second(retry, code, hel
     retries = [PD + retry.format(i=i) + "\ndf['r'] = df['a'] / df['b']\n" + plain for i in range(12)]
     earlier = (PD + plain, *retries, "p = f'{folder}/{name}.{ext}'")
     started = time.perf_counter()
-    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=beside_shared,
-                              earlier_errored=(False, *(True,) * len(retries), False))
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier, errored=(False, *(True,) * len(retries), False)), snapshots=beside_shared)
     assert time.perf_counter() - started < 1
     assert sorted((c.action, c.paths) for c in writes.held_files) == held
     assert largest < 50
@@ -1793,8 +1798,7 @@ def test_a_long_chain_of_failed_retries_is_read_in_well_under_a_second(c0, step,
     for _ in range(retries):
         earlier += [step.format(j=j, p=j - 1) + "\nx = 1 / 0" for j in range(1, levels + 1)]
     started = time.perf_counter()
-    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,),
-                              earlier_errored=(False, *(True,) * (len(earlier) - 1)))
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier, errored=(False, *(True,) * (len(earlier) - 1))), snapshots=(snap,))
     assert time.perf_counter() - started < 1
     if c0 == "'stock.csv'":
         assert [c.paths for c in writes.held_files] == [("stock.csv",)]
@@ -1815,13 +1819,11 @@ def test_an_errored_history_is_read_again_only_for_a_file_an_earlier_cell_wrote(
 
     monkeypatch.setattr(write_check._OwnedFiles, "_writes_read_from", counting)
     earlier = ("open('log.txt', 'w').write('z')", "x = 1 / 0")
-    writes = find_cell_writes(code="open('stock.csv', 'w').write('y')", earlier_code=earlier, snapshots=(office,),
-                              earlier_errored=(False, True))
+    writes = find_cell_writes(code="open('stock.csv', 'w').write('y')", earlier=_earlier(earlier, errored=(False, True)), snapshots=(office,))
     assert [(c.paths, c.held) for c in writes.files] == [(("stock.csv",), True)]
     assert reads == 1
     reads = 0
-    writes = find_cell_writes(code="open('log.txt', 'w').write('y')", earlier_code=earlier, snapshots=(office,),
-                              earlier_errored=(False, True))
+    writes = find_cell_writes(code="open('log.txt', 'w').write('y')", earlier=_earlier(earlier, errored=(False, True)), snapshots=(office,))
     assert [(c.paths, c.held) for c in writes.files] == [(("log.txt",), False)]
     assert reads == 2
 
@@ -1830,8 +1832,7 @@ def test_an_errored_cell_lines_up_with_its_code_past_one_that_does_not_parse(off
     """A cell that doesn't parse is dropped, and the flags still name the right cells."""
     earlier = ("def (", "open('log.txt', 'w').write('z')", "x = 1 / 0\nopen('stock.csv', 'w').write('z')")
     code = "open('log.txt', 'w').write('y')\nopen('stock.csv', 'w').write('y')"
-    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(office,),
-                              earlier_errored=(False, False, True))
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier, errored=(False, False, True)), snapshots=(office,))
     assert [(c.paths, c.held) for c in writes.files] == [(("log.txt",), False), (("stock.csv",), True)]
 
 
@@ -1948,7 +1949,7 @@ def test_a_listing_still_names_files_that_exist_and_a_delete_any_it_could_name(c
 def test_a_write_to_a_database_file_the_turn_began_with_is_held_as_its_overwrite(code, path, statements, office):
     """The overwrite carries each statement it runs, with its values, so the
     card can quote them beside the file."""
-    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(office,))
+    writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(office,))
     assert [(c.action, c.paths) for c in writes.held_files] == [("overwrite", (path,))]
     assert [(w.statement, w.values) for w in writes.held_files[0].statements] == statements
     assert writes.sql == (), "the SQL check still lets an in-process handle through"
@@ -1964,7 +1965,7 @@ def test_a_write_to_a_database_file_the_turn_began_with_is_held_as_its_overwrite
     "import duckdb\nduckdb.sql(\"CREATE TABLE s AS SELECT * FROM 'stock.csv'\")",
 ], ids=["select", "memory", "new-file", "duckdb-memory", "duckdb-read-only", "sqlite-read-only-uri", "duckdb-module"])
 def test_a_database_handle_that_writes_no_file_the_turn_began_with_is_free(code, office):
-    assert not find_cell_writes(code=code, earlier_code=(), snapshots=(office,)).needs_approval()
+    assert not find_cell_writes(code=code, earlier=_earlier(()), snapshots=(office,)).needs_approval()
 
 
 @pytest.fixture
@@ -2037,7 +2038,7 @@ def test_every_write_to_one_database_file_is_on_its_one_change(office):
     """One Approve runs both statements, so the card quotes both, under the
     file named once."""
     code = SHIP + "con.execute('DELETE FROM orders WHERE id = 1')\ncon.execute(\"UPDATE orders SET status = 'x' WHERE id = 2\")"
-    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(office,))
+    writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(office,))
     assert [(c.paths, len(c.statements)) for c in writes.held_files] == [(("warehouse.db",), 2)]
     assert _fenced(_card_prompt(writes)) == [
         "warehouse.db", "DELETE FROM orders WHERE id = 1", "UPDATE orders SET status = 'x' WHERE id = 2",
@@ -2088,7 +2089,7 @@ def test_a_secret_in_a_database_file_s_statement_is_scrubbed_on_the_card(office)
 # ── HTTP ──────────────────────────────────────────────────────────────────
 
 def _requests(code: str, *, earlier=(), rules=()) -> list[tuple[str, str]]:
-    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(), http_rules=rules)
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(), http_rules=rules)
     return [(w.method, w.url) for w in writes.http]
 
 
@@ -2144,7 +2145,7 @@ def test_a_read_or_a_plain_post_is_no_write(code):
 def test_the_card_names_the_method_the_url_and_the_call():
     code = ("import requests\nBASE = 'https://erp.example.com/api'\n"
             "for r in rows:\n    requests.put(f'{BASE}/orders/{r.id}', json={'qty': r.qty})")
-    writes = find_cell_writes(code=code, earlier_code=(), snapshots=())
+    writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=())
     card = _card_prompt(writes)
     assert "This step would send PUT to:" in card
     assert _fenced(card) == ["https://erp.example.com/api/orders/{r.id}",
@@ -2157,7 +2158,7 @@ def test_a_method_the_code_picks_when_it_runs_is_held_and_said_in_words():
     placeholder standing where the method would. It says in words that the
     code decides the method, and shows that code."""
     writes = find_cell_writes(code=f"import requests\nrequests.request(row['verb'], {URL!r})",
-                              earlier_code=(), snapshots=())
+                              earlier=_earlier(()), snapshots=())
     assert [(w.method, w.url) for w in writes.http] == [("{row['verb']}", URL)]
     card = _card_prompt(writes)
     assert "This step would send a request to:" in card
@@ -2176,7 +2177,7 @@ def test_a_helper_parameter_is_shown_as_what_the_call_passes():
     names the call's `verb`, the code the person wrote in this step, not the
     helper's own `{method}`."""
     writes = find_cell_writes(code="for verb in verbs:\n    api(verb, '/orders/42')",
-                              earlier_code=_API_HELPER, snapshots=())
+                              earlier=_earlier(_API_HELPER), snapshots=())
     card = _card_prompt(writes)
     assert "The code decides the request's method when it runs, from `verb`." in card
     assert "{method}" not in card and "`method`" not in card
@@ -2187,7 +2188,7 @@ def test_an_address_the_code_picks_whole_is_said_in_words():
     """A URL that is nothing but run-time code used to show as a bare
     `{u}` fence, as if it were the address."""
     writes = find_cell_writes(code="import requests\nfor u in urls:\n    requests.delete(u)",
-                              earlier_code=(), snapshots=())
+                              earlier=_earlier(()), snapshots=())
     card = _card_prompt(writes)
     assert "This step would send DELETE to an address the code decides when it runs, from `u`:" in card
     assert _fenced(card) == ["requests.delete(u)"]
@@ -2197,7 +2198,7 @@ def test_an_address_the_code_picks_whole_is_said_in_words():
 
 def test_the_refusal_says_a_run_time_method_in_words_too():
     writes = find_cell_writes(code=f"import requests\nrequests.request(row['verb'], {URL!r})",
-                              earlier_code=(), snapshots=())
+                              earlier=_earlier(()), snapshots=())
     text = _refusal(writes, "cancelled").content
     assert f"send a request to `{URL}` (the code decides its method when it runs, from `row['verb']`)" in text
     assert "send {row" not in text
@@ -2214,7 +2215,7 @@ def test_a_helper_that_reassigns_its_parameter_names_its_own_variable():
         "    return requests.request(method, BASE + path)",
     )
     writes = find_cell_writes(code="for verb in verbs:\n    api(verb, '/orders/42')",
-                              earlier_code=helper, snapshots=())
+                              earlier=_earlier(helper), snapshots=())
     card = _card_prompt(writes)
     assert "The code decides the request's method when it runs, from `method`." in card
     assert "from `verb`" not in card
@@ -2231,7 +2232,7 @@ def test_a_written_out_method_cannot_hide_a_held_request_from_the_card():
         "requests.delete('https://erp.example.com/api/orders/1')\n"
         "requests.request('-->', U)\n"
     )
-    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(), http_rules=rules)
+    writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(), http_rules=rules)
     assert [w.method for w in writes.http] == ["<!--", "DELETE", "-->"]
 
     card = _card_prompt(writes)
@@ -2264,7 +2265,7 @@ def test_the_card_wording_holds_the_same_requests_as_before(code, earlier, held)
     """Presentation only: each cell holds exactly the requests, lines and
     addresses the check held before the card said run-time parts in words
     (values read from the check at anton v2.26.10.19.3)."""
-    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=())
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=())
     assert [(w.line, w.call, w.url) for w in writes.http] == held
     assert writes.kinds() == (("http",) if held else ())
 
@@ -2277,21 +2278,21 @@ def test_a_client_base_url_is_joined_to_a_relative_path():
 def test_a_request_in_an_earlier_function_is_held_at_the_call():
     earlier = ("import requests\ndef cancel(order_id):\n"
                "    requests.delete(f'https://erp.example.com/api/orders/{order_id}')",)
-    writes = find_cell_writes(code="cancel(42)", earlier_code=earlier, snapshots=())
+    writes = find_cell_writes(code="cancel(42)", earlier=_earlier(earlier), snapshots=())
     assert [(w.method, w.url, w.line, w.call) for w in writes.http] == [("DELETE", URL, 1, "cancel(42)")]
 
 
 def test_a_token_in_the_url_is_scrubbed():
     token = "ya29." + "a" * 30
     writes = find_cell_writes(code=f"import requests\nrequests.delete('https://x.example.com/a?access_token={token}')",
-                              earlier_code=(), snapshots=())
+                              earlier=_earlier(()), snapshots=())
     assert token not in writes.http[0].url and token not in _card_prompt(writes)
 
 
 def test_a_url_with_a_character_that_does_not_show_as_itself_is_named_with_escapes():
     """As a path is: a text direction override in the URL can't reorder what the card shows."""
     writes = find_cell_writes(code="import requests\nrequests.put('https://x.example.com/a\\u202eb')",
-                              earlier_code=(), snapshots=())
+                              earlier=_earlier(()), snapshots=())
     card = _card_prompt(writes)
     assert "'https://x.example.com/a\\u202eb'" in card and "A name in quotes is written with escapes" in card
     assert "`'https://x.example.com/a\\u202eb'`" in _refusal(writes, "cancelled").content
@@ -2385,7 +2386,7 @@ def test_http_write_rules_parse_entries_and_skip_bad_ones_with_a_warning(caplog)
         "write-after-return", "write-under-if", "write-after-sys-exit", "write-after-os-exit",
         "write-after-quit", "write-after-assert"])
 def test_a_delete_counts_as_an_overwrite_only_when_a_write_always_follows(code, snap):
-    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(snap,))
+    writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(snap,))
     assert writes.needs_approval()
     assert "delete" in {c.action for c in writes.held_files}
 
@@ -2397,19 +2398,19 @@ def test_a_delete_counts_as_an_overwrite_only_when_a_write_surely_hits_the_file(
     earlier = ("open('stock.csv', 'w').write('z')", "out = 'stock.csv'\nx = 1 / 0\nout = 'new_out.csv'")
     for target, held in (("out", [("delete", ("stock.csv",))]), ("'stock.csv'", [])):
         writes = find_cell_writes(code=f"import os\nos.remove('stock.csv')\nopen({target}, 'w').write('x')",
-                                  earlier_code=earlier, snapshots=(snap,), earlier_errored=(False, True))
+                                  earlier=_earlier(earlier, errored=(False, True)), snapshots=(snap,))
         assert [(c.action, c.paths) for c in writes.held_files] == held, target
 
 
 def test_cards_name_the_files(snap):
     writes = find_cell_writes(code="import glob, os\nfor f in glob.glob('*.pdf'):\n    os.remove(f)",
-                              earlier_code=(), snapshots=(snap,))
+                              earlier=_earlier(()), snapshots=(snap,))
     assert writes.held_files[0].paths == ("report.pdf",), "a root glob doesn't reach docs/"
     picked = find_cell_writes(code="import os\nos.remove(os.environ['X'])",
-                              earlier_code=(), snapshots=(snap,))
+                              earlier=_earlier(()), snapshots=(snap,))
     assert picked.held_files[0].paths == () and "os.environ['X']" in picked.held_files[0].call
     whole = find_cell_writes(code="import shutil\nshutil.rmtree('.')",
-                             earlier_code=(), snapshots=(snap,))
+                             earlier=_earlier(()), snapshots=(snap,))
     assert whole.held_files[0].whole_project
 
 
@@ -2467,7 +2468,7 @@ def test_an_earlier_cell_that_does_not_parse_is_skipped(snap):
 
 
 def _files(code: str, snapshots, *, earlier=()) -> list[tuple[str, tuple[str, ...]]]:
-    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=snapshots)
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=snapshots)
     return [(c.action, c.paths) for c in writes.held_files]
 
 
@@ -2510,7 +2511,7 @@ WIPE = "import os\ndef wipe(p):\n    os.remove(p)"
         "list-of-lambdas", "partial", "partial-of-helper", "closure-factory", "dict-call-of-lambdas",
         "method-through-super", "lambda-in-a-class-body"])
 def test_a_function_an_earlier_cell_defined_is_read_at_each_call(earlier, code, expected, snap):
-    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,))
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
     assert [(c.action, c.paths) for c in writes.held_files] == expected
     assert {(c.line, c.call) for c in writes.held_files} == {(1, code)}, "reported at the call"
 
@@ -2547,7 +2548,7 @@ def test_an_earlier_function_on_the_turns_own_files_raises_no_card(earlier, code
      "UPDATE suppliers SET a = 1"),
 ], ids=["literal-body", "parameter-filled-in", "returned-to-execute"])
 def test_a_statement_inside_an_earlier_function_is_held_at_the_call(earlier, code, statement, snap):
-    writes = find_cell_writes(code=code, earlier_code=(PG, earlier), snapshots=(snap,))
+    writes = find_cell_writes(code=code, earlier=_earlier((PG, earlier)), snapshots=(snap,))
     assert [(w.statement, w.line) for w in writes.sql] == [(statement, 1)]
 
 
@@ -2716,7 +2717,7 @@ def shared(tmp_path_factory):
     ("import os\nos.rename({root!r}, {root!r} + '.old')", "rename"),
 ], ids=["rmtree", "rmtree-slash", "rm-rf", "move", "rename"])
 def test_the_shared_folder_itself_is_held_whole(code, action, snap, shared):
-    writes = find_cell_writes(code=code.format(root=str(shared.root)), earlier_code=(), snapshots=(snap, shared))
+    writes = find_cell_writes(code=code.format(root=str(shared.root)), earlier=_earlier(()), snapshots=(snap, shared))
     assert writes.needs_approval()
     held = writes.held_files[0]
     assert (held.action, held.whole_shared, held.whole_project) == (action, True, False)
@@ -2746,7 +2747,7 @@ def test_a_path_spelled_through_a_link_is_held(tmp_path):
     snap = snapshot_project_files(root=real / "proj", label="project", taken_at=time.time() + 60)
     linked = tmp_path / "link" / "proj"
     assert _files(f"import os\nos.remove({str(linked / 'report.pdf')!r})", (snap,)) == [("delete", ("report.pdf",))]
-    whole = find_cell_writes(code=f"import shutil\nshutil.rmtree({str(linked)!r})", earlier_code=(), snapshots=(snap,))
+    whole = find_cell_writes(code=f"import shutil\nshutil.rmtree({str(linked)!r})", earlier=_earlier(()), snapshots=(snap,))
     assert whole.held_files[0].whole_project
     given = snapshot_project_files(root=linked, label="project", taken_at=time.time() + 60)
     assert given.given_root == linked
@@ -2803,7 +2804,7 @@ def test_the_card_text_holds_the_whole_statement_and_scrubs_it(snap):
         'cur.execute("""UPDATE suppliers\n   SET lead_time_days = 21, note = \'' + token + "'\n"
         '   WHERE supplier_id = %s""", ("' + token + '",))'
     )
-    write = find_cell_writes(code=code, earlier_code=(), snapshots=(snap,)).sql[0]
+    write = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(snap,)).sql[0]
     assert write.statement == (
         "UPDATE suppliers\nSET lead_time_days = 21, note = '[REDACTED_TOKEN]'\nWHERE supplier_id = %s"
     )
@@ -2878,12 +2879,12 @@ def test_file_names_and_the_quoted_code_reach_the_card_as_code(tmp_path, monkeyp
 
 def test_a_call_split_across_lines_is_quoted_whole(snap):
     call = "shutil.rmtree(\n    os.environ['TARGET'],\n    ignore_errors=True,\n)"
-    writes = find_cell_writes(code="import os, shutil\n" + call, earlier_code=(), snapshots=(snap,))
+    writes = find_cell_writes(code="import os, shutil\n" + call, earlier=_earlier(()), snapshots=(snap,))
     assert writes.held_files[0].call == call
     assert _fenced(_card_prompt(writes)) == [call]
     nested = "import os\nfor d in os.environ['DIRS'].split():\n    os.remove(\n        d)"
-    assert find_cell_writes(code=nested, earlier_code=(), snapshots=(snap,)).held_files[0].call == "os.remove(\n    d)"
-    helper = find_cell_writes(code="wipe(\n    os.environ['X'],\n)", earlier_code=(WIPE,), snapshots=(snap,))
+    assert find_cell_writes(code=nested, earlier=_earlier(()), snapshots=(snap,)).held_files[0].call == "os.remove(\n    d)"
+    helper = find_cell_writes(code="wipe(\n    os.environ['X'],\n)", earlier=_earlier((WIPE,)), snapshots=(snap,))
     assert helper.held_files[0].call == "wipe(\n    os.environ['X'],\n)", "reported at the whole call"
 
 
@@ -2960,7 +2961,7 @@ def test_the_card_quotes_a_statement_through_its_end(snap):
     stays, a carriage return ends a `--` comment as Postgres ends it, a `#`
     line stays, and a literal keeps its line breaks and spaces."""
     def statement(code: str) -> str:
-        return find_cell_writes(code=PG + code, earlier_code=(), snapshots=(snap,)).sql[0].statement
+        return find_cell_writes(code=PG + code, earlier=_earlier(()), snapshots=(snap,)).sql[0].statement
 
     assert statement('cur.execute("DELETE FROM t WHERE id = 5 -- one row\\rOR 1 = 1")') == (
         "DELETE FROM t WHERE id = 5 -- one row\nOR 1 = 1"
@@ -3002,7 +3003,7 @@ def test_a_format_shows_the_code_that_fills_each_field(code, fenced, snap):
 ], ids=["vars-keyword", "parameters-keyword", "tuple-name", "list-name"])
 def test_the_values_a_statement_runs_with_are_on_the_card(code, values, snap):
     code = PG + "from sqlalchemy import text\n" + code
-    assert find_cell_writes(code=code, earlier_code=(), snapshots=(snap,)).sql[0].values == values
+    assert find_cell_writes(code=code, earlier=_earlier(()), snapshots=(snap,)).sql[0].values == values
 
 
 def test_a_literal_that_looks_like_a_placeholder_is_quoted_as_written(snap):
@@ -3056,7 +3057,7 @@ def test_a_token_in_a_dict_the_address_is_built_from_is_scrubbed_on_the_card():
     dict colon, so the token stands as a word of its own there."""
     token = "abcdefghijklmnopqrstuvwxyz0123456789"
     writes = find_cell_writes(code=f"import requests\nrequests.delete(make_url({{'access_token': '{token}'}}))",
-                              earlier_code=(), snapshots=())
+                              earlier=_earlier(()), snapshots=())
     [request] = writes.http
     assert request.url_code == "make_url({'access_token': '[REDACTED_TOKEN]'})"
     assert token not in _card_prompt(writes)
@@ -3084,7 +3085,7 @@ def test_a_name_that_does_not_show_as_itself_is_escaped(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     snapshot = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
     writes = find_cell_writes(code="import os\nfor f in os.listdir('.'):\n    os.remove(f)",
-                              earlier_code=(), snapshots=(snapshot,))
+                              earlier=_earlier(()), snapshots=(snapshot,))
     card = _card_prompt(writes)
     [listed] = _fenced(card)
     assert sorted(listed.split("\n")) == sorted(["'a\\nb.csv'", "'rlo\\u202efdp.exe'", "\"'quoted'.csv\"", "plain.csv"])
@@ -3321,8 +3322,8 @@ def test_past_the_cap_a_write_through_a_name_an_errored_cell_binds_makes_only_it
     capped, touched, new = _capped_with_touched(tmp_path=tmp_path, monkeypatch=monkeypatch)
     earlier = (f"out = {touched!r}\nx = 1 / 0\nout = {new!r}", "open(out, 'w').write('x')")
     for path, held in ((touched, [("delete", (touched,))]), (new, [])):
-        writes = find_cell_writes(code=f"import os\nos.remove({path!r})", earlier_code=earlier,
-                                  snapshots=(capped,), earlier_errored=(True, False))
+        writes = find_cell_writes(code=f"import os\nos.remove({path!r})", earlier=_earlier(earlier, errored=(True, False)),
+                                  snapshots=(capped,))
         assert [(c.action, c.paths) for c in writes.held_files] == held, path
 
 
@@ -3346,8 +3347,8 @@ def test_past_the_cap_a_user_file_an_errored_cell_may_have_pointed_a_write_at_is
     capped, touched, new = _capped_with_touched(tmp_path=tmp_path, monkeypatch=monkeypatch)
     folder, name = touched.split("/")
     fill = {"folder": folder, "name": name, "touched": touched, "new": new}
-    writes = find_cell_writes(code=code.format(**fill), earlier_code=tuple(c.format(**fill) for c in earlier),
-                              snapshots=(capped,), earlier_errored=errored)
+    writes = find_cell_writes(code=code.format(**fill), earlier=_earlier(tuple(c.format(**fill) for c in earlier), errored=errored),
+                              snapshots=(capped,))
     assert touched in {p for c in writes.held_files for p in c.paths}
 
 
@@ -3482,7 +3483,7 @@ def test_a_read_only_sql_file_raises_no_card(sql_files):
 
 def test_a_sql_file_past_the_cap_is_held_unchecked(sql_files):
     writes = find_cell_writes(code=PG + "cur.execute(open('big.sql').read())",
-                              earlier_code=(), snapshots=(sql_files,))
+                              earlier=_earlier(()), snapshots=(sql_files,))
     assert writes.needs_approval()
     assert [c.via for c in writes.calls] == ["sql_file"]
     assert writes.sql == ()
@@ -3531,7 +3532,7 @@ def test_a_sql_file_past_the_cap_is_held_unchecked(sql_files):
         "redis-set", "redis-from-url-delete", "redis-flushall", "es-delete-by-query",
         "es-indices-delete", "es-index"])
 def test_a_write_with_no_sql_text_is_held(code, via, snap):
-    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(snap,))
+    writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(snap,))
     assert writes.needs_approval()
     assert [c.via for c in writes.calls] == [via]
 
@@ -3552,7 +3553,7 @@ FUNC = "cur.callfunc('refresh_totals', int, [1, 2])"
 def test_stored_function_calls_are_held_and_quote_the_call(code, earlier, call, line, fences, snap):
     """The card quotes the call, and for a helper an earlier cell defined,
     the routine call inside it too."""
-    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,))
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
     assert writes.needs_approval()
     assert [(c.via, c.call, c.line) for c in writes.calls] == [("procedure", call, line)]
     assert _fenced(_card_prompt(writes)) == fences
@@ -3570,7 +3571,7 @@ KEY = "sk-ant-api03-" + "A" * 40
 def test_a_secret_in_the_code_a_call_runs_is_scrubbed_on_the_card(earlier, code, snap):
     """The card's "That call runs:" block quotes an earlier cell's code, so
     it is scrubbed the same way the call is."""
-    card = _card_prompt(find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,)))
+    card = _card_prompt(find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,)))
     assert "That call runs:" in card
     assert KEY not in card and "[REDACTED_API_KEY]" in card
 
@@ -3586,7 +3587,7 @@ def test_a_secret_in_the_code_a_call_runs_is_scrubbed_on_the_card(earlier, code,
 def test_a_routine_call_handed_on_as_a_value_is_held(code, earlier, snap):
     """A stored procedure or function bound, wrapped or passed on still runs
     the routine, so the card holds the cell."""
-    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,))
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
     assert writes.needs_approval()
     assert {c.via for c in writes.calls} == {"procedure"}
 
@@ -3653,7 +3654,7 @@ def test_a_routine_bound_in_an_earlier_cell_is_held_where_it_runs(earlier, code,
     """A stored procedure or function an earlier cell binds runs in the cell
     that calls it or hands it on: the card holds that cell, quotes the call
     and shows the code that bound it. On an in-process handle nothing is held."""
-    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,))
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
     assert [(c.via, c.call, c.runs) for c in writes.calls] == [("procedure", call, runs)]
     local = [e.replace(ORA, SQLITE) for e in earlier]
     assert not _held(code, snap, earlier=local)
@@ -3684,7 +3685,7 @@ def test_a_name_that_may_hold_a_routine_past_the_follow_limit_is_held(earlier, c
     """The check follows a chain of aliases only so far. A name past that
     limit that may still hold a routine is held where it is called or
     handed on, even when the chain's last links are in the same cell."""
-    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,))
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
     assert [(c.via, c.call) for c in writes.calls] == [("procedure", call)]
 
 
@@ -3692,7 +3693,7 @@ def test_a_routine_reached_first_past_the_limit_is_held_where_it_is_read_directl
     """`g(d4)` reaches `v`'s routine only past the depth limit; the next
     line reads `v` directly. Each read is held on its own path."""
     earlier = ORA + "x1 = cur.callfunc\nx2 = x1\nx3 = x2\nv = [x3, 0]\nd1 = v\nd2 = d1\nd3 = d2\nd4 = d3"
-    writes = find_cell_writes(code="g(d4)\nv[0]('purge_suppliers', int, [1])", earlier_code=(earlier,),
+    writes = find_cell_writes(code="g(d4)\nv[0]('purge_suppliers', int, [1])", earlier=_earlier((earlier,)),
                               snapshots=(snap,))
     assert ("procedure", "v[0]('purge_suppliers', int, [1])", "x1 = cur.callfunc\nx2 = x1\nx3 = x2\nv = [x3, 0]") in [
         (c.via, c.call, c.runs) for c in writes.calls
@@ -3716,7 +3717,7 @@ def test_a_routine_bound_and_called_in_one_cell_is_quoted_at_each_call(code, cal
     """The card shows each call once, with the binding that says which
     routine and fixed arguments it runs. The binding keeps its own block
     when the method is also handed on where the check can't follow it."""
-    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(snap,))
+    writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(snap,))
     assert [(c.call, c.runs) for c in writes.calls] == calls
 
 
@@ -3773,7 +3774,7 @@ def test_a_stored_function_name_is_not_a_call(snap):
 def test_a_routine_bound_and_not_run_here_is_held_where_it_is_bound(code, snap):
     """A later cell may run the routine where the check can't follow it,
     so the cell that binds it holds."""
-    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(snap,))
+    writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(snap,))
     assert [(c.via, c.call) for c in writes.calls] == [("procedure", code.removeprefix(ORA))]
 
 
@@ -3785,7 +3786,7 @@ def test_a_routine_bound_and_not_run_here_is_held_where_it_is_bound(code, snap):
 def test_a_driver_routine_looked_at_where_it_stands_is_held(code, snap):
     """A driver cursor's routine method read anywhere but as the called
     function is held where it is read."""
-    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(snap,))
+    writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(snap,))
     assert writes.needs_approval() and [c.via for c in writes.calls] == ["procedure"]
 
 
@@ -3801,7 +3802,7 @@ def test_a_driver_routine_looked_at_where_it_stands_is_held(code, snap):
 def test_a_routine_looked_at_where_it_may_still_run_is_held(code, earlier, snap):
     """A routine an earlier cell binds, handed to a builtin or any other
     call, may run there: the cell that hands it on holds."""
-    writes = find_cell_writes(code=code, earlier_code=(ORA + "f = cur.callfunc", *earlier), snapshots=(snap,))
+    writes = find_cell_writes(code=code, earlier=_earlier((ORA + "f = cur.callfunc", *earlier)), snapshots=(snap,))
     assert [(c.via, c.runs) for c in writes.calls] == [("procedure", "f = cur.callfunc")]
 
 
@@ -3837,14 +3838,14 @@ def test_read_only_calls_on_the_same_libraries_stay_free(code, snap):
 
 
 def test_a_sqlalchemy_write_quotes_the_code_line_on_the_card(snap):
-    writes = find_cell_writes(code="conn.execute(suppliers.delete())", earlier_code=(), snapshots=(snap,))
+    writes = find_cell_writes(code="conn.execute(suppliers.delete())", earlier=_earlier(()), snapshots=(snap,))
     card = _card_prompt(writes)
     assert "This step would change data through SQLAlchemy:" in card
     assert _fenced(card) == ["conn.execute(suppliers.delete())"]
 
 
 def test_a_store_write_quotes_the_code_line_on_the_card(snap):
-    writes = find_cell_writes(code="db.users.insert_one({'id': 1})", earlier_code=(), snapshots=(snap,))
+    writes = find_cell_writes(code="db.users.insert_one({'id': 1})", earlier=_earlier(()), snapshots=(snap,))
     card = _card_prompt(writes)
     assert "This step would change data in MongoDB:" in card
     assert _fenced(card) == ["db.users.insert_one({'id': 1})"]
@@ -3874,7 +3875,7 @@ def test_a_table_call_is_named_for_the_client_it_traces_to(code, via, snap):
     """DynamoDB's and BigQuery's clients both have `delete_table` and
     `create_table`: the card names the store the receiver traces to, and
     neither for one the check can't trace."""
-    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(snap,))
+    writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(snap,))
     assert writes.needs_approval()
     assert [c.via for c in writes.calls] == [via]
 
@@ -3888,7 +3889,7 @@ def test_a_bigquery_table_delete_names_bigquery_on_the_card(snap):
 
 def test_a_call_write_inside_an_earlier_function_is_held_at_the_call(snap):
     earlier = ("def wipe(coll):\n    coll.delete_many({})",)
-    writes = find_cell_writes(code="wipe(users)", earlier_code=earlier, snapshots=(snap,))
+    writes = find_cell_writes(code="wipe(users)", earlier=_earlier(earlier), snapshots=(snap,))
     assert [(c.via, c.line, c.call) for c in writes.calls] == [("mongodb", 1, "wipe(users)")]
 
 
