@@ -89,8 +89,8 @@ class ArtifactOwnedByOtherUserError(RuntimeError):
 
 # The upload service's 403 code for a publish that newly shares an artifact
 # with everyone in its organization from an account without the
-# artifacts.share_org permission. cowork-server's sharing contract module
-# (cowork/services/sharing_contract.py) and the Cowork app's
+# artifacts.share_org permission. MindsHub, cowork-server's sharing contract
+# module (cowork/services/sharing_contract.py) and the Cowork app's
 # (src/renderer/cowork/lib/sharingContract.js) hold the same code under this
 # name.
 SHARE_ORG_REQUIRED_CODE = "share_org_required"
