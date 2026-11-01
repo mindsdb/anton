@@ -430,6 +430,11 @@ cells without ever appearing in code strings or the LLM transcript. Workspace
 The subprocess env also carries the coding model/provider configuration
 (`ANTON_SCRATCHPAD_MODEL`, `ANTON_SCRATCHPAD_PROVIDER`, plus the appropriate
 SDK key/base-URL variables) so the in-pad LLM bridge works without extra setup.
+For an OpenAI-compatible coding provider, `ANTON_SCRATCHPAD_FLAVOR` carries the
+API the provider sends on (`openai` for the Responses API, `minds-passthrough`,
+or `openai-compatible-generic` for chat completions), so a cell's model calls
+use the same API as the agent's. A host that passes no flavor leaves the pad to
+infer one from the provider name and base URL (`OpenAIProvider.resolve_web_flavor`).
 
 ## The in-pad LLM bridge: `_ScratchpadLLM`
 
