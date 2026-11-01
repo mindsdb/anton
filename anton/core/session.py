@@ -2117,6 +2117,11 @@ class ChatSession:
         # Seconds spent waiting on humans during the current tool dispatch,
         # subtracted from the tool's reported elapsed time.
         self.answer_wait_s = 0.0
+        # The write relay's control address (`write_relay_url`). With it, and
+        # an elicitor that can ask, the session offers `approve_held_write`.
+        # `isinstance` so a MagicMock settings object reads unset.
+        relay_url = getattr(s, "write_relay_url", None)
+        self._write_relay_url: str | None = (relay_url.strip() or None) if isinstance(relay_url, str) else None
         # Holds a cell that changes a database, existing files, or data behind
         # an HTTP API until the user approves it (`hold_unapproved_write`).
         # Only when the host turns `write_approval` on; `is True` so a
@@ -2124,16 +2129,13 @@ class ChatSession:
         self._write_gate: WriteGate | None = None
         if getattr(s, "write_approval", False) is True:
             listed = getattr(s, "write_approval_http", "")
-            relayed = getattr(s, "write_relay_hosts", "")
+            # The relayed hosts count only with a relay to hold their writes,
+            # so a stray hosts setting never drops a card.
+            relayed = getattr(s, "write_relay_hosts", "") if self._write_relay_url else ""
             self._write_gate = WriteGate(
                 http_rules=parse_http_write_rules(listed if isinstance(listed, str) else ""),
                 relayed_hosts=parse_relay_hosts(relayed if isinstance(relayed, str) else ""),
             )
-        # The write relay's control address (`write_relay_url`). With it, and
-        # an elicitor that can ask, the session offers `approve_held_write`.
-        # `isinstance` so a MagicMock settings object reads unset.
-        relay_url = getattr(s, "write_relay_url", None)
-        self._write_relay_url: str | None = (relay_url.strip() or None) if isinstance(relay_url, str) else None
 
         coding_provider = config.llm_client.coding_provider
         coding_conn = coding_provider.export_connection_info()

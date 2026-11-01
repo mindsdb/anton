@@ -15,7 +15,9 @@ session's stream as a host would.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 
 import httpx2 as httpx
@@ -294,6 +296,71 @@ async def test_no_way_to_ask_cancels_and_refuses(held_session):
     outcome = await _approve(session, relay)
     assert outcome.content == _refused("there is no way to ask them here")
     assert relay.cancels == 1
+
+
+@pytest.mark.parametrize("elicitor, why", [
+    (_Elicitor(answer=TIMEOUT), "no one answered in time"),
+    (_Elicitor(raises=RuntimeError("stream broke")), "the approval request failed"),
+], ids=["timeout", "error"])
+async def test_a_request_the_relay_sent_before_the_cancel_is_reported_as_sent(held_session, elicitor, why):
+    relay = _Relay(reads=[_held("pending")], cancel=(409, {"state": "sent"}))
+    outcome = await _approve(held_session(elicitor), relay)
+    assert outcome.ok is True and outcome.reason == "", "the request went out, so the step did something"
+    assert outcome.content == (
+        f"anton saw no approval for the held POST request to {HOST} ({why}), but the write relay had already "
+        'taken one. The write relay sent it once, and the host answered 201 (application/json):\n\n{"order": 9}'
+    )
+    assert relay.cancels == 1
+
+
+async def test_a_failed_question_whose_cancel_fails_too_is_unconfirmed(held_session):
+    relay = _Relay(reads=[_held("pending")], cancel=(500, {"error": "boom"}))
+    outcome = await _approve(held_session(_Elicitor(raises=RuntimeError("stream broke"))), relay)
+    assert outcome.reason == "", "Cowork may have taken an Approve, so it isn't known that nothing was sent"
+    assert outcome.content.startswith(
+        f"Not confirmed: anton saw no approval for the held POST request to {HOST} (the approval request "
+        "failed), and couldn't confirm the cancel with the write relay. The write records show whether it was sent",
+    )
+
+
+async def test_stopping_the_turn_with_the_card_open_cancels_the_held_request(held_session):
+    class _Waits(_Elicitor):
+        async def ask(self, question_id: str, request: AskRequest) -> AskAnswer:
+            self.requests.append(request)
+            await asyncio.Event().wait()
+
+    elicitor = _Waits()
+    relay = _Relay(reads=[_held("pending")])
+    task = asyncio.create_task(_approve(held_session(elicitor), relay))
+    while not elicitor.requests:
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert relay.cancels == 1, "the request doesn't hold a relay slot until it expires"
+
+
+async def test_a_held_request_that_expires_before_a_card_could_be_answered_is_cancelled_unasked(held_session):
+    elicitor = _Elicitor(answer=APPROVE)
+    session = held_session(elicitor)
+    relay = _Relay(reads=[_held("pending", expires_at=int(time.time()) + 200)])
+    outcome = await _approve(session, relay)
+    assert outcome.content == (
+        f"Not asked: the held POST request to {HOST} expires before the user could answer a card and the write "
+        "relay send it, so anton cancelled it. Nothing was sent. Send the request again for a fresh pending_id, "
+        "then call approve_held_write with that one."
+    )
+    assert elicitor.requests == [] and _cards(session) == []
+    assert relay.cancels == 1
+
+
+async def test_with_no_answer_time_limit_only_the_send_wait_must_fit_before_expiry(held_session):
+    class _NoLimit(_Elicitor):
+        timeout_s = None
+
+    relay = _Relay(reads=[_held("pending", expires_at=int(time.time()) + 200), _held("sent")])
+    outcome = await _approve(held_session(_NoLimit(answer=APPROVE)), relay)
+    assert "The write relay sent it once" in outcome.content
 
 
 async def test_a_cancel_the_relay_doesn_t_take_still_refuses(held_session, caplog):

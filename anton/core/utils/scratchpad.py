@@ -506,8 +506,9 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
     if gate.relayed_hosts and writes.http:
         # The write relay holds a request to a host it relays and raises its
         # own card through approve_held_write, so a second card here would
-        # ask twice. `held_by_relay` counts only a request whose `http://`
-        # host and port the code writes out.
+        # ask twice. `held_by_relay` counts only a request whose method,
+        # other than GET or HEAD, and `http://` host and port the code
+        # writes out.
         from anton.core.utils.write_hold import held_by_relay
 
         kept = tuple(w for w in writes.http if not held_by_relay(w, gate.relayed_hosts))

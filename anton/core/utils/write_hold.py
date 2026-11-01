@@ -16,7 +16,7 @@ for byte. So the card's prompt is the relay's text exactly: nothing added,
 removed or scrubbed.
 
 A cell's own check (`scratchpad.hold_unapproved_write`) leaves out a request
-to a relayed host (`held_by_relay`), so one request raises one card.
+the relay holds (`held_by_relay`), so one request raises one card.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
 import httpx2 as httpx
@@ -64,6 +65,8 @@ _HTTP_URL = re.compile(r"http://" + _AUTHORITY + r"(?=[/?#]|\Z)", re.IGNORECASE)
 HeldState = Literal["pending", "sending", "sent", "failed", "unknown", "cancelled", "expired"]
 # The states after which the relay never sends the request.
 _DONE: frozenset[str] = frozenset({"sent", "failed", "unknown", "cancelled", "expired"})
+# What `_cancel` returns when the relay gave no answer to the cancel.
+_UNCONFIRMED = "unconfirmed"
 
 
 def _host_key(host: str, port: str | None) -> str | None:
@@ -98,10 +101,16 @@ def relayed_host(url: str) -> str | None:
 
 
 def held_by_relay(write: HttpWrite, hosts: frozenset[str]) -> bool:
-    """Whether the write relay holds `write`: it writes out an `http://` URL
-    to one of `hosts`. An address the code picks when it runs could be any
-    host, so the cell's check keeps it."""
-    return write.url_code is None and relayed_host(write.url) in hosts
+    """Whether the write relay holds `write`: it writes out a method other
+    than GET or HEAD, which the relay forwards, and an `http://` URL to one
+    of `hosts`. A method or an address the code picks when it runs could be
+    any, so the cell's check keeps it."""
+    return (
+        write.method_code is None
+        and write.method not in {"GET", "HEAD"}
+        and write.url_code is None
+        and relayed_host(write.url) in hosts
+    )
 
 
 class _Wire(BaseModel):
@@ -252,18 +261,94 @@ async def approve_held_write(
         return _outcome(
             f"The {_request(held)} isn't waiting for approval any more. {_state_text(held)}",
         )
-    choice = await ask_approval_choice(
-        session, held.card_text,
-        options=(AskOption(value="approve", label="Approve", detail="Send this request once"),),
-        cancel_detail="Drop the request, and nothing is sent",
-        log_label="held write approval",
-        question_id=f"write:held:{held.pending_id}:{held.sha256}",
-    )
+    if held.expires_at < time.time() + _answer_window(session, poll_limit_s):
+        return await _too_late_to_ask(relay, held)
+    try:
+        choice = await ask_approval_choice(
+            session, held.card_text,
+            options=(AskOption(value="approve", label="Approve", detail="Send this request once"),),
+            cancel_detail="Drop the request, and nothing is sent",
+            log_label="held write approval",
+            question_id=f"write:held:{held.pending_id}:{held.sha256}",
+        )
+    except asyncio.CancelledError:
+        # The turn stopped with the card open. Drop the request now rather
+        # than let it hold one of the relay's slots until it expires; a late
+        # answer reaches no open question, so nothing can approve it.
+        await asyncio.shield(_cancel(relay, pending_id))
+        raise
     if choice.cause is not None:
-        await _cancel_quietly(relay, pending_id)
         _log(pending_id, choice.cause)
-        return _refusal(held, choice.cause)
+        return await _drop_unapproved(relay, held, choice.cause)
     return await _await_send(relay, held, poll_interval_s=poll_interval_s, poll_limit_s=poll_limit_s)
+
+
+def _answer_window(session: ChatSession, poll_limit_s: float) -> float:
+    """The seconds a held request must stay pending for its card: the time
+    the user has to answer, when the elicitor sets one, and the wait for
+    the relay to send it."""
+    timeout = getattr(getattr(session, "elicitor", None), "timeout_s", None)
+    return (timeout if isinstance(timeout, (int, float)) else 0) + poll_limit_s
+
+
+async def _too_late_to_ask(relay: WriteRelay, held: HeldRequest) -> ToolOutcome:
+    """Cancel a held request that would expire before the user could answer
+    its card and the relay send it, so an Approve can't come too late."""
+    state = await _cancel(relay, held.pending_id)
+    _log(held.pending_id, "expires before a card could be answered, cancelled")
+    if state not in (None, "cancelled", "expired", _UNCONFIRMED):
+        return await _moved_on(relay, held, f"The {_request(held)} isn't waiting for approval any more.")
+    return _outcome(
+        f"Not asked: the {_request(held)} expires before the user could answer a card and the write relay "
+        "send it, so anton cancelled it. Nothing was sent. Send the request again for a fresh pending_id, "
+        "then call approve_held_write with that one.",
+    )
+
+
+async def _drop_unapproved(relay: WriteRelay, held: HeldRequest, cause: RefusalCause) -> ToolOutcome:
+    """Cancel a held request whose card closed with no approval, and report
+    it. Cowork may have taken an Approve just before the question failed,
+    so a relay that answers with a later state is reported as it stands."""
+    state = await _cancel(relay, held.pending_id)
+    if state in (None, "cancelled", "expired"):
+        return _refusal(held, cause)
+    if state == _UNCONFIRMED:
+        # Only a question that failed can have failed after Cowork took an
+        # Approve; on any other cause no approval exists to send it.
+        return _uncancelled(held, cause) if cause == "error" else _refusal(held, cause)
+    return await _moved_on(
+        relay, held,
+        f"anton saw no approval for the {_request(held)} ({refusal_why(cause)}), but the write relay had "
+        "already taken one.",
+    )
+
+
+async def _moved_on(relay: WriteRelay, held: HeldRequest, lead: str) -> ToolOutcome:
+    """A held request the relay moved past pending, read again for what came of it."""
+    try:
+        current = await relay.held(held.pending_id)
+    except RelayUnavailable:
+        current = None
+    if current is None or current.state == "pending":
+        _log(held.pending_id, "the relay can't say what came of it")
+        return _outcome(
+            f"{lead} The write relay can't say what came of it now. The write records show whether it was "
+            "sent. Don't send it again: tell the user.",
+        )
+    _log(held.pending_id, current.state)
+    return _outcome(f"{lead} {_state_text(current)}")
+
+
+def _uncancelled(held: HeldRequest, cause: RefusalCause) -> ToolOutcome:
+    """A held request with no approval anton saw, which the relay may still
+    have taken, and whose cancel failed."""
+    _log(held.pending_id, f"{cause}, the cancel failed")
+    return _outcome(
+        f"Not confirmed: anton saw no approval for the {_request(held)} ({refusal_why(cause)}), and couldn't "
+        "confirm the cancel with the write relay. The write records show whether it was sent; the relay drops "
+        "a held request no approval reaches when it expires. Don't send it again or make the change another "
+        "way: tell the user.",
+    )
 
 
 async def _await_send(
@@ -395,14 +480,15 @@ def _outcome(content: str) -> ToolOutcome:
     return ToolOutcome(content=content, ok=True)
 
 
-async def _cancel_quietly(relay: WriteRelay, pending_id: str) -> None:
-    """Cancel a held request the user didn't approve. A cancel that fails
-    changes nothing: no approval can come for a card that is closed, and
-    the relay drops the request when it expires."""
+async def _cancel(relay: WriteRelay, pending_id: str) -> str | None:
+    """Cancel a held request: the relay's answer (`cancelled`, or the state
+    the request was already in), None when it holds none by that id, or
+    `_UNCONFIRMED` when the cancel failed, which is logged."""
     try:
-        await relay.cancel(pending_id)
+        return await relay.cancel(pending_id)
     except RelayUnavailable as exc:
         logger.warning("write approval: held request %s: the cancel failed (%s)", pending_id, exc)
+        return _UNCONFIRMED
 
 
 def _log(pending_id: str, outcome: str) -> None:

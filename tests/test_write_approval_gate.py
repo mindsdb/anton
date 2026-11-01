@@ -233,7 +233,10 @@ def _session(
     session = ChatSession(ChatSessionConfig(
         llm_client=_llm(*cells, packages=packages),
         workspace=workspace,
-        settings=CoreSettings(write_approval=write_approval, write_approval_http=http, write_relay_hosts=relay_hosts),
+        settings=CoreSettings(
+            write_approval=write_approval, write_approval_http=http, write_relay_hosts=relay_hosts,
+            write_relay_url="http://write-relay:8090" if relay_hosts else None,
+        ),
     ))
     pad = _Pad()
     session._scratchpads.get_or_create = AsyncMock(return_value=pad)
@@ -541,7 +544,8 @@ async def test_a_bad_entry_in_the_setting_is_skipped_with_one_warning(project, c
 #
 # The relay is the only network path to such a host. It holds every request
 # but a GET or HEAD and raises its own card through approve_held_write, so the
-# cell's check leaves a request to it out: one request, one card.
+# cell's check leaves a request it holds out: one request, one card. A GET or
+# HEAD it forwards keeps the cell's card.
 
 RELAYED = "gw.example.internal:8765"
 RELAY_RULE = f"POST http://{RELAYED}/**"
@@ -589,6 +593,40 @@ async def test_a_url_that_only_looks_like_a_relayed_host_still_waits(project, ur
     assert harness.pad.ran == []
 
 
+@pytest.mark.parametrize("rule, call", [
+    (f"GET http://{RELAYED}/**", "requests.get"),
+    (f"HEAD http://{RELAYED}/**", "requests.head"),
+    (f"* http://{RELAYED}/**", "requests.get"),
+], ids=["get", "head", "any-method"])
+async def test_a_listed_get_or_head_to_a_relayed_host_still_waits(project, rule, call):
+    code = f"import requests\n{call}('http://{RELAYED}/trigger')\n"
+    harness = _session(project, code, http=rule, relay_hosts=RELAYED)
+    seen = await _run(harness=harness, answers=[CANCEL])
+    assert len(seen.cards) == 1, "the relay forwards a GET or HEAD unheld, so the cell's card holds it"
+    assert harness.pad.ran == []
+
+
+async def test_a_method_the_code_picks_when_it_runs_still_waits(project):
+    code = f"import requests, os\nrequests.request(os.environ['VERB'], 'http://{RELAYED}/api/orders')\n"
+    harness = _session(project, code, http=f"* http://{RELAYED}/**", relay_hosts=RELAYED)
+    seen = await _run(harness=harness, answers=[CANCEL])
+    assert len(seen.cards) == 1, "the method could be a GET, which the relay forwards"
+    assert harness.pad.ran == []
+
+
+async def test_relay_hosts_without_a_relay_url_keep_the_card(project):
+    workspace = MagicMock(base=project)
+    workspace.artifacts_dir = project / "artifacts"
+    session = ChatSession(ChatSessionConfig(
+        llm_client=_llm(), workspace=workspace,
+        settings=CoreSettings(write_approval=True, write_approval_http=RELAY_RULE, write_relay_hosts=RELAYED),
+    ))
+    try:
+        assert session._write_gate.relayed_hosts == frozenset(), "no relay holds the writes, so none is left out"
+    finally:
+        await session.close()
+
+
 async def test_an_address_the_code_picks_when_it_runs_still_waits(project):
     code = "import requests, os\nrequests.put(os.environ['ORDERS_URL'], json={'qty': 5})\n"
     harness = _session(project, code, relay_hosts=RELAYED)
@@ -611,6 +649,7 @@ async def test_data_and_file_changes_beside_a_relayed_request_still_wait(project
 
 async def test_the_relay_hosts_setting_reads_its_environment_variable(project, monkeypatch, caplog):
     monkeypatch.setenv("ANTON_WRITE_RELAY_HOSTS", "GW.example.internal:8765, planner.example.internal\nbad/entry")
+    monkeypatch.setenv("ANTON_WRITE_RELAY_URL", "http://write-relay:8090")
     workspace = MagicMock(base=project)
     workspace.artifacts_dir = project / "artifacts"
     with caplog.at_level(logging.WARNING, logger="anton.core.utils.write_hold"):
