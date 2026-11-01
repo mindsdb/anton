@@ -489,11 +489,15 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
     cells = tuple(getattr(pad, "cells", ()) or ())
     earlier = (*(cell.code for cell in compacted), *(cell.code for cell in cells))
     errored = (*(cell.errored for cell in compacted), *(bool(getattr(cell, "error", None)) for cell in cells))
+    # Where each cell that failed stopped, as the boot read it from the
+    # traceback, not from its text, which the cell shapes; None where the
+    # runtime doesn't say.
+    stopped = tuple(getattr(cell, "stopped_at", None) for cell in (*compacted, *cells))
     try:
         writes = await asyncio.to_thread(
             find_cell_writes,
             code=code, earlier_code=earlier, snapshots=gate.snapshots, http_rules=gate.http_rules,
-            earlier_errored=errored,
+            earlier_errored=errored, earlier_stopped_at=stopped,
         )
     except Exception as exc:
         # The type only, as for a failed question.

@@ -4,6 +4,8 @@ These delimiter strings must be identical on both sides of the subprocess pipe.
 Neither side should redefine them — import from here.
 """
 
+from types import CodeType, TracebackType
+
 CELL_DELIM = "__ANTON_CELL_END__"
 # Optional first line of a cell: the running turn's trace context as JSON, so
 # the cell's model calls carry the same session and question ids. Per cell,
@@ -50,6 +52,32 @@ INJECTED_HELPER_NAMES = frozenset(
 # The list the boot binds in the cell namespace for the data helpers to
 # record their queries in.
 EXPLAINABILITY_QUERIES_NAME = "_anton_explainability_queries"
+# The file name the boot compiles each cell under, which a cell's traceback
+# names its own frames by.
+CELL_FILENAME = "<scratchpad>"
+# The top-level packages scratchpad_boot.py imports before any cell runs. A
+# cell's import of one gets the module the boot loaded, whatever folder a
+# cell puts on `sys.path`, so the host's write check reads it as no module
+# a cell wrote.
+BOOT_IMPORTS = frozenset({"anton", "contextlib", "dill", "io", "json", "logging", "os", "sys", "threading", "traceback"})
+
+
+def cell_stopped_at(tb: TracebackType | None, code: CodeType | None) -> int | None:
+    """The line of a cell's own code an error stopped it at: the line of
+    the frame that runs `code`, the cell's compiled code, in the traceback
+    `tb`. Read from the traceback itself, not its text, which the error's
+    message, or the hint put before it, can shape. A failure inside a
+    function the cell defines stops it at the line that called it. None
+    when the cell's code never ran, as for a cell that doesn't compile.
+
+    The boot sends it beside the error (`stopped_at`), and the host's write
+    check reads what the cell bound before that line as bound.
+    """
+    while tb is not None:
+        if tb.tb_frame.f_code is code:
+            return tb.tb_lineno
+        tb = tb.tb_next
+    return None
 
 
 def heal_surrogate_source(code: str) -> str:

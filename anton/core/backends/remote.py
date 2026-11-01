@@ -14,7 +14,7 @@ from typing import AsyncIterator
 
 import httpx2 as httpx
 
-from anton.core.backends.base import Cell, ScratchpadRuntime
+from anton.core.backends.base import Cell, ScratchpadRuntime, stopped_line
 from anton.core.llm.tracing import get_trace_context, trace_context_to_json
 
 
@@ -158,6 +158,7 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
                     description=cell_data.get("description", description),
                     estimated_time=cell_data.get("estimated_time", estimated_time),
                     logs=cell_data.get("logs", ""),
+                    stopped_at=stopped_line(cell_data.get("stopped_at")),
                 )
                 cell = self._record_cell(cell)
                 yield cell

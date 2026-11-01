@@ -18,7 +18,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
 
-from anton.core.backends.base import ApiKeySupplier, Cell, ScratchpadRuntime, scrub_cell
+from anton.core.backends.base import ApiKeySupplier, Cell, ScratchpadRuntime, scrub_cell, stopped_line
 from anton.core.backends.sandbox import (
     CellSandbox,
     SandboxUnavailable,
@@ -1651,6 +1651,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             description=description,
             estimated_time=estimated_time,
             logs=logs,
+            stopped_at=stopped_line(result_data.get("stopped_at")),
         )
         cell = self._record_cell(cell)
         # The process proved itself alive by completing this round trip —

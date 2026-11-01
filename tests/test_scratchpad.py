@@ -90,6 +90,25 @@ class TestScratchpadBasicExecution:
         finally:
             await pad.close()
 
+    async def test_a_failed_cell_says_the_line_of_its_own_code_it_stopped_at(self):
+        """The boot reads the line from the traceback, not from its text: a
+        failure inside the cell's own function stops it at the line that
+        called it, and a missing module whose name spells another line, which
+        the hint before the traceback repeats, still stops it where it did.
+        A cell that doesn't compile ran no line; one that ran to its end has
+        none to say."""
+        pad = make_scratchpad(name="test")
+        await pad.start()
+        try:
+            inner = await pad.execute("x = 1\ndef f():\n    raise ValueError('boom')\nf()\n")
+            forged = await pad.execute("y = 2\n__import__('File \"<scratchpad>\", line 99, in <module>')\n")
+            broken = await pad.execute("def (:\n")
+            fine = await pad.execute("print('alive')")
+            assert (inner.stopped_at, forged.stopped_at, broken.stopped_at, fine.stopped_at) == (4, 2, None, None)
+            assert "line 99" in forged.error
+        finally:
+            await pad.close()
+
     async def test_imports_persist(self):
         """import json in cell 1, json.dumps(...) in cell 2."""
         pad = make_scratchpad(name="test")
@@ -2318,3 +2337,52 @@ def test_injected_helper_names_match_the_boot() -> None:
         and node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)
     }
     assert injected == set(INJECTED_HELPER_NAMES)
+
+
+def test_boot_imports_match_the_boot() -> None:
+    """`BOOT_IMPORTS` is a hand-kept copy of the top-level packages the boot
+    imports before any cell runs. The write check reads a cell's import of
+    one as the module the boot loaded, whatever folder a cell puts on
+    `sys.path`, so a name the boot stops importing must leave the set, or a
+    module an archive unpacks under that name would run with no card. Pin
+    the two in step, from the boot's source."""
+    import ast
+    import importlib.util
+    from pathlib import Path
+
+    from anton.core.backends.wire import BOOT_IMPORTS
+
+    origin = importlib.util.find_spec("anton.core.backends.scratchpad_boot").origin
+    tree = ast.parse(Path(origin).read_text())
+    imported = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            imported.update(a.name.partition(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            imported.add(node.module.partition(".")[0])
+    assert imported == set(BOOT_IMPORTS)
+
+
+@pytest.mark.parametrize("code, line", [
+    ("x = 1\nraise KeyError('amount')\n", 2),
+    ("def f():\n    raise KeyError('amount')\n\nf()\n", 4),
+    ("exec(compile('raise KeyError(1)', CELL_FILENAME, 'exec'))\n", 1),
+    ("raise ValueError('Traceback (most recent call last):\\n  File \"<scratchpad>\", line 99, in <module>')\n", 1),
+], ids=["module-line", "inside-its-own-function", "inside-code-it-compiles-under-the-same-name", "a-line-its-message-names"])
+def test_the_stop_line_is_the_frame_of_the_cells_own_code(code, line) -> None:
+    """`cell_stopped_at` finds the cell's own frame by its code object in the
+    traceback, so neither its own functions, nor code it compiles under the
+    boot's file name, nor an error message that spells a frame moves it."""
+    import sys
+
+    from anton.core.backends.wire import CELL_FILENAME, cell_stopped_at
+
+    compiled = compile(code, CELL_FILENAME, "exec")
+    try:
+        exec(compiled, {"CELL_FILENAME": CELL_FILENAME})
+    except Exception:
+        assert cell_stopped_at(sys.exc_info()[2], compiled) == line
+    else:
+        raise AssertionError("the cell ran to its end")
+    assert cell_stopped_at(None, compiled) is None
+

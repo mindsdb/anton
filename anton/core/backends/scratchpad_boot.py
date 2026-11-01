@@ -9,6 +9,7 @@ import dill
 
 from anton.core.backends.wire import (
     CELL_DELIM,
+    CELL_FILENAME,
     CELL_TRACE_MARKER,
     EXPLAINABILITY_QUERIES_NAME,
     MISSING_MODULE_HINT,
@@ -16,6 +17,7 @@ from anton.core.backends.wire import (
     RESULT_END,
     USAGE_MARKER,
     USAGE_MARKER_ENV,
+    cell_stopped_at,
     heal_surrogate_source,
 )
 
@@ -1520,13 +1522,17 @@ while True:
         _cell_out["shipped"] = 0
         _cell_out["buf"] = out_buf
         error = None
+        # The line of its own code the cell stopped at, read from the
+        # traceback rather than from the error's text, which the cell shapes.
+        stopped_at = None
+        compiled = None
         namespace[EXPLAINABILITY_QUERIES_NAME] = []
         _cell_log_handler.buf = log_buf
 
         sys.stdout = out_buf
         sys.stderr = err_buf
         try:
-            compiled = compile(code, "<scratchpad>", "exec")
+            compiled = compile(code, CELL_FILENAME, "exec")
             exec(compiled, namespace)
         except ModuleNotFoundError as _mnf:
             # Don't pip-install a name pulled from an exception — it may be a
@@ -1536,8 +1542,10 @@ while True:
             if _mnf.name:
                 hint = MISSING_MODULE_HINT.format(name=_mnf.name)
             error = hint + traceback.format_exc()
-        except Exception:
+            stopped_at = cell_stopped_at(_mnf.__traceback__, compiled)
+        except Exception as _exc:
             error = traceback.format_exc()
+            stopped_at = cell_stopped_at(_exc.__traceback__, compiled)
         finally:
             sys.stdout = _real_stdout
             sys.stderr = sys.__stderr__
@@ -1597,6 +1605,7 @@ while True:
         "stderr": err_buf.getvalue(),
         "logs": logs_val,
         "error": error,
+        "stopped_at": stopped_at,
         "explainability_queries": list(namespace.get(EXPLAINABILITY_QUERIES_NAME, [])),
     }
     if len(stdout_full) > MAX_OUTPUT:

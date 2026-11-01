@@ -27,7 +27,12 @@ _COMPACTED_CELL_CODE = "# (compacted — see summary above)"
 
 @dataclass
 class Cell:
-    """A single scratchpad execution unit — code in, outputs out."""
+    """A single scratchpad execution unit — code in, outputs out.
+
+    `stopped_at` is the line of its own code a cell that failed stopped at,
+    as the boot read it from the traceback (`cell_stopped_at`); None where
+    the runtime doesn't say.
+    """
 
     code: str
     stdout: str
@@ -36,6 +41,7 @@ class Cell:
     description: str = ""
     estimated_time: str = ""
     logs: str = ""
+    stopped_at: int | None = None
 
 
 @dataclass(frozen=True)
@@ -44,6 +50,13 @@ class CompactedCell:
 
     code: str
     errored: bool
+    stopped_at: int | None = None
+
+
+def stopped_line(value: object) -> int | None:
+    """A cell result's `stopped_at` when it is a line of the cell's code; None
+    for anything else, as from a runtime that doesn't send one."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
 def scrub_cell(cell: Cell) -> Cell:
@@ -312,7 +325,7 @@ class ScratchpadRuntime(ABC):
         )
         self.compacted_cells = (
             *self.compacted_cells,
-            *(CompactedCell(code=cell.code, errored=bool(cell.error))
+            *(CompactedCell(code=cell.code, errored=bool(cell.error), stopped_at=cell.stopped_at)
               for cell in to_compact if cell.code != _COMPACTED_CELL_CODE),
         )
         summary_cell = Cell(

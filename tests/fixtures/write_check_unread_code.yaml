@@ -9,6 +9,10 @@
 #   earlier_errored
 #            beside `earlier`, true for each earlier cell that stopped on
 #            an error (optional).
+#   earlier_stopped_at
+#            beside `earlier`, the line of its own code each errored cell
+#            stopped at, as the pad's boot reads it from the traceback, null
+#            where the runtime doesn't say (optional).
 #   code     the cell the check runs before it runs for real.
 #   files    project files that exist when the turn begins, {path: text}
 #            (optional). The snapshot holds stock.csv besides these.
@@ -28,10 +32,10 @@
 #   not_kinds
 #            kinds the card must not show, e.g. [sql] (optional).
 #
-# The rule: literal code the check can read keeps today's read; code the cell
-# runs that the check can't read makes the cell unchecked; a cell with
-# nothing that runs unread code gets no new card. The HTTP rule below holds
-# any POST to erp.example.test. "The request" throughout is
+# The rule: the check reads literal code it can read; code the cell runs that
+# the check can't read makes the cell unchecked; a cell that runs no unread
+# code gets a card only for what the check reads in it. The HTTP rule below
+# holds any POST to erp.example.test. "The request" throughout is
 #   import requests
 #   requests.post("https://erp.example.test/api/orders", json={"qty": 1})
 #
@@ -189,7 +193,10 @@ cases:
   # ── exec, eval and compile ────────────────────────────────────────────────
   # The source the builtin runs is a name, a build, a decode, a file read, a
   # parameter or the builtin loaded as a value: none of it is a literal the
-  # check can read, so each cell is unchecked.
+  # check can read, so the cell is unchecked. The read and none rows here are
+  # the controls beside them: a literal the check reads through another name
+  # for the builtin or a function a literal exec defined, with the request or
+  # with no write.
 
   - name: exec aliased by assignment then called with a literal
     code: |-
@@ -557,12 +564,88 @@ cases:
       exec(SCRIPT)
     card: unchecked
 
+  - name: a literal exec through the builtins module bound to its own name
+    code: |-
+      import importlib
+      builtins = importlib.import_module('builtins')
+      builtins.exec('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})')
+    card: read
+    kinds: [http]
+
+  - name: a literal exec through vars of the builtins module bound to its own name
+    code: |-
+      import importlib
+      builtins = importlib.import_module('builtins')
+      vars(builtins)['exec']('import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})')
+    card: read
+    kinds: [http]
+
+  - name: exec of a script through the builtins module bound to its own name
+    earlier:
+      - |-
+        SCRIPT = open('job.py').read()
+    files:
+      job.py: |
+        import requests
+        requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      builtins = __import__('builtins')
+      builtins.exec(SCRIPT)
+    card: unchecked
+
+  - name: exec looked up by a computed name on the builtins module bound to its own name
+    earlier:
+      - |-
+        SCRIPT = open('job.py').read()
+    files:
+      job.py: |
+        import requests
+        requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      import importlib
+      builtins = importlib.import_module('builtins')
+      getattr(builtins, 'ex' + 'ec')(SCRIPT)
+    card: unchecked
+
+  - name: a compile after an import of re only under a branch
+    earlier:
+      - |-
+        x = 1
+    code: |-
+      if x:
+          from re import compile
+      rx = compile(input())
+    card: unchecked
+
+  - name: a compile after an import of re in a try that may not have run
+    code: |-
+      try:
+          from re import compile
+      except ImportError:
+          pass
+      rx = compile(input())
+    card: unchecked
+
+  - name: a call before a literal exec into globals defines the name, after unread code
+    earlier:
+      - |-
+        exec(open('job.py').read())
+    files:
+      job.py: |
+        import requests
+        requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      print(helper(3))
+      exec('def helper(x):\n    return x * 2', globals())
+    card: unchecked
+
   # ── Code run in the same process, and imports ─────────────────────────────
   # runpy, importlib loaders and reload, the interpreter and tracer modules,
   # an import by a name the check can't read, and an import of a module a
   # cell wrote or a project module reached through a sys.path change: the
   # check has no reader for any of it, whether the cell, a literal it execs
-  # or an earlier function it calls makes the call.
+  # or an earlier function it calls makes the call. Its none row is the
+  # control: an import by a name an earlier cell bound to a literal.
 
   - name: import of a module a cell wrote then call it
     earlier:
@@ -1257,6 +1340,449 @@ cases:
       run(["python3", "job.py"])
     card: unchecked
 
+  - name: exec in a def of a literal that runs a script
+    files:
+      job.py: |
+        import requests
+        requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      def go():
+          exec('import runpy\nrunpy.run_path("job.py")')
+      go()
+    card: unchecked
+
+  - name: exec into a fresh dict of a literal that runs a script
+    files:
+      job.py: |
+        import requests
+        requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      exec('import runpy\nrunpy.run_path("job.py")', {})
+    card: unchecked
+
+  - name: exec into a namespace of a literal that runs a script
+    files:
+      job.py: |
+        import requests
+        requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      ns = {}
+      exec('import runpy\nrunpy.run_path("job.py")', ns)
+    card: unchecked
+
+  - name: exec in a lambda of a literal that runs a script
+    files:
+      job.py: |
+        import requests
+        requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      (lambda: exec('import runpy\nrunpy.run_path("job.py")'))()
+    card: unchecked
+
+  - name: exec in a method of a literal that runs a script
+    files:
+      job.py: |
+        import requests
+        requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      class A:
+          def m(self):
+              exec('import runpy\nrunpy.run_path("job.py")')
+      A().m()
+    card: unchecked
+
+  - name: an earlier def whose literal exec runs a script, called now
+    earlier:
+      - |-
+        def _wrapped():
+            exec('import runpy\nrunpy.run_path("job.py")')
+    files:
+      job.py: |
+        import requests
+        requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      _wrapped()
+    card: unchecked
+
+  - name: exec in a def of a literal that imports a module the input names
+    code: |-
+      def go():
+          exec('import importlib\nimportlib.import_module(input())')
+      go()
+    card: unchecked
+
+  - name: exec in a def of a literal that reloads a module
+    code: |-
+      def go():
+          exec('import importlib, json\nimportlib.reload(json)')
+      go()
+    card: unchecked
+
+  - name: python -c of a literal that runs a script
+    files:
+      job.py: |
+        import requests
+        requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      import subprocess
+      subprocess.run(['python3', '-c', 'import runpy\nrunpy.run_path("job.py")'])
+    card: unchecked
+
+  - name: python -Ic of a literal that runs a script
+    files:
+      job.py: |
+        import requests
+        requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      import subprocess
+      subprocess.run(['python3', '-Ic', 'import runpy\nrunpy.run_path("job.py")'])
+    card: unchecked
+
+  - name: python -c of a literal that runs a script through a from-import
+    files:
+      job.py: |
+        import requests
+        requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      import subprocess
+      subprocess.run(['python3', '-c', "from runpy import run_path; run_path('job.py')"])
+    card: unchecked
+
+  - name: python -c of a literal that imports the module its argument names
+    files:
+      job.py: |
+        import requests
+        requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      import subprocess
+      subprocess.run(['python3', '-c', 'import importlib, sys; importlib.import_module(sys.argv[1])', 'job'])
+    card: unchecked
+
+  - name: python -c of a literal that runs a doctest file
+    code: |-
+      import subprocess
+      subprocess.run(['python3', '-c', "import doctest; doctest.testfile('README.md')"])
+    card: unchecked
+
+  - name: python -c of a literal that runs pytest
+    code: |-
+      import subprocess
+      subprocess.run(['python3', '-c', "import pytest; pytest.main(['-q'])"])
+    card: unchecked
+
+  - name: a shell string's python -c of a literal that runs a script
+    files:
+      job.py: |
+        import requests
+        requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      import os
+      os.system('python3 -c "import runpy; runpy.run_path(\'job.py\')"')
+    card: unchecked
+
+  - name: a timeit setup of a literal that runs a script
+    files:
+      job.py: |
+        import requests
+        requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      import timeit
+      timeit.timeit('pass', setup='import runpy\nrunpy.run_path("job.py")')
+    card: unchecked
+
+  - name: a timeit statement that runs a script its setup imports a runner for
+    files:
+      job.py: |
+        import requests
+        requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      import timeit
+      timeit.timeit("runpy.run_path('job.py')", setup='import runpy', number=1)
+    card: unchecked
+
+  - name: a profile run of a literal that imports a runner and runs a script
+    files:
+      job.py: |
+        import requests
+        requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      import cProfile
+      cProfile.run("import runpy; runpy.run_path('job.py', run_name='__main__')", sort='cumtime')
+    card: unchecked
+
+  - name: a debugger run of a literal that runs a script
+    files:
+      job.py: |
+        import requests
+        requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      import pdb
+      pdb.run('import runpy\nrunpy.run_path("job.py")')
+    card: unchecked
+
+  - name: an import of a module the cell writes to a temporary folder it puts on sys.path
+    code: |-
+      import os, sys, tempfile
+      SRC = 'import requests\ndef sync():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'
+      td = tempfile.mkdtemp()
+      with open(os.path.join(td, 'erp_sync.py'), 'w') as f:
+          f.write(SRC)
+      sys.path.insert(0, td)
+      import erp_sync
+      erp_sync.sync()
+    card: unchecked
+
+  - name: an import of a module the cell writes to a temporary directory
+    code: |-
+      import sys
+      from pathlib import Path
+      from tempfile import TemporaryDirectory
+      SRC = 'import requests\ndef sync():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'
+      with TemporaryDirectory() as td:
+          (Path(td) / 'erp_sync.py').write_text(SRC)
+          sys.path.insert(0, td)
+          import erp_sync
+          erp_sync.sync()
+    card: unchecked
+
+  - name: import_module of a module the cell writes to the temporary folder
+    code: |-
+      import importlib, os, sys, tempfile
+      SRC = 'import requests\ndef sync():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'
+      open(os.path.join(tempfile.gettempdir(), 'erp_sync.py'), 'w').write(SRC)
+      sys.path.append(tempfile.gettempdir())
+      importlib.import_module('erp_sync').sync()
+    card: unchecked
+
+  - name: an import of a module an earlier cell wrote to a temporary folder
+    earlier:
+      - |-
+        import os, sys, tempfile
+        SRC = 'import requests\ndef sync():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'
+        td = tempfile.mkdtemp()
+        with open(os.path.join(td, 'erp_sync.py'), 'w') as f:
+            f.write(SRC)
+        sys.path.insert(0, td)
+    code: |-
+      import erp_sync
+      erp_sync.sync()
+    card: unchecked
+
+  - name: an import of a module the cell writes into a zip it puts on sys.path
+    code: |-
+      import sys, zipfile
+      SRC = 'import requests\ndef sync():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'
+      zipfile.ZipFile('bundle.zip', 'w').writestr('erp_sync.py', SRC)
+      sys.path.insert(0, 'bundle.zip')
+      import erp_sync
+      erp_sync.sync()
+    card: unchecked
+
+  - name: an import of a project package after a folder above it goes on sys.path
+    earlier:
+      - |-
+        import sys
+        sys.path.insert(0, 'src')
+    files:
+      src/myapp/__init__.py: ''
+      src/myapp/loaders.py: |
+        def load():
+            pass
+    code: |-
+      from myapp.loaders import load
+      load()
+    card: unchecked
+
+  - name: an import of a project module in a folder that goes on sys.path
+    earlier:
+      - |-
+        import sys
+        sys.path.insert(0, 'src/myapp')
+    files:
+      src/myapp/__init__.py: ''
+      src/myapp/loaders.py: |
+        def load():
+            pass
+    code: |-
+      import loaders
+      loaders.load()
+    card: unchecked
+
+  - name: an import of a namespace folder a cell wrote, once sys.path changes
+    earlier:
+      - |-
+        from pathlib import Path
+        Path('mypkg').mkdir(exist_ok=True)
+        Path('mypkg/mod.py').write_text('def go(): pass')
+    code: |-
+      import sys
+      sys.path.insert(0, '.')
+      import mypkg.mod
+      mypkg.mod.go()
+    card: unchecked
+
+  - name: an import of a project package named like a standard module, after sys.path changes
+    earlier:
+      - |-
+        import sys
+        sys.path.insert(0, 'src')
+    files:
+      src/logging/__init__.py: |
+        x = 1
+    code: |-
+      import logging
+      logging.info('x')
+    card: unchecked
+
+  - name: an import of a project namespace folder after sys.path changes
+    earlier:
+      - |-
+        import sys
+        sys.path.insert(0, 'src')
+    files:
+      src/myns/x.py: |
+        x = 1
+    code: |-
+      import myns
+      print(myns)
+    card: unchecked
+
+  - name: a method that calls an earlier function by its own name, which runs a script
+    earlier:
+      - |-
+        import runpy
+        def main():
+            runpy.run_path('job.py')
+    files:
+      job.py: |
+        import requests
+        requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      class App:
+          def main(self):
+              main()
+      App().main()
+    card: unchecked
+
+  - name: an import of a package a cell writes with an empty init a touch makes
+    code: |-
+      from pathlib import Path
+      SRC = 'import requests\ndef sync():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'
+      Path('erp').mkdir(exist_ok=True)
+      (Path('erp') / '__init__.py').touch()
+      (Path('erp') / 'core.py').write_text(SRC)
+      from erp.core import sync
+      sync()
+    card: unchecked
+
+  - name: an import after the cell clones a repository into a folder it puts on sys.path
+    code: |-
+      import subprocess, sys
+      subprocess.run(['git', 'clone', 'https://github.com/acme/erp_sync.git', 'vendor/erp_sync'])
+      sys.path.insert(0, 'vendor/erp_sync')
+      import erp_sync
+      erp_sync.sync()
+    card: unchecked
+
+  - name: an import after an earlier cell clones a repository into a folder on sys.path
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run(['git', 'clone', 'https://github.com/acme/erp_sync.git', 'vendor/erp_sync'])
+        sys.path.insert(0, 'vendor/erp_sync')
+    code: |-
+      import erp_sync
+      erp_sync.sync()
+    card: unchecked
+
+  - name: an import after the cell extracts a tar into a folder it puts on sys.path
+    files:
+      bundle.tar.gz: "x"
+      bundle.zip: "x"
+    code: |-
+      import sys, tarfile
+      tarfile.open('bundle.tar.gz').extractall('vendor')
+      sys.path.insert(0, 'vendor')
+      import erp_sync
+      erp_sync.sync()
+    card: unchecked
+
+  - name: an import after the cell unpacks an archive into a folder it puts on sys.path
+    files:
+      bundle.tar.gz: "x"
+      bundle.zip: "x"
+    code: |-
+      import shutil, sys
+      shutil.unpack_archive('bundle.zip', 'vendor')
+      sys.path.insert(0, 'vendor')
+      import erp_sync
+      erp_sync.sync()
+    card: unchecked
+
+  - name: an import after an earlier cell unpacks an archive into a folder above one on sys.path
+    earlier:
+      - |-
+        import shutil, sys
+        shutil.unpack_archive('bundle.zip', 'vendor')
+        sys.path.insert(0, 'vendor/src')
+    files:
+      bundle.tar.gz: "x"
+      bundle.zip: "x"
+    code: |-
+      from erp_sync.core import sync
+      sync()
+    card: unchecked
+
+  - name: import_module over a dict a cell fills by key with input
+    code: |-
+      import importlib
+      mods = {}
+      mods['x'] = input()
+      for m in mods.values():
+          importlib.import_module(m)
+    card: unchecked
+
+  - name: an import of a module Python ships after an unpack into a folder put on sys.path
+    code: |-
+      import zipfile
+      zipfile.ZipFile('bundle.zip').extractall('vendor')
+      import sys
+      sys.path.insert(0, 'vendor')
+      import csv
+    card: unchecked
+
+  - name: an import of another module Python ships after an unpack into a folder put on sys.path
+    code: |-
+      import zipfile
+      zipfile.ZipFile('bundle.zip').extractall('vendor')
+      import sys
+      sys.path.insert(0, 'vendor')
+      import statistics
+    card: unchecked
+
+  - name: an import of a module Python ships after a clone into a folder put on sys.path
+    code: |-
+      import subprocess
+      subprocess.run(['git', 'clone', 'https://example.test/r.git', 'vendor'])
+      import sys
+      sys.path.insert(0, 'vendor')
+      import csv
+    card: unchecked
+
+  - name: an import of a module Python ships that a cell imported only after an unpack into a folder put on sys.path
+    earlier:
+      - |
+        import zipfile
+        zipfile.ZipFile('bundle.zip').extractall('vendor')
+        import sys
+        sys.path.insert(0, 'vendor')
+      - |-
+        import csv
+    code: |-
+      import csv
+      print(csv.QUOTE_ALL)
+    card: unchecked
+
   # ── Python processes ──────────────────────────────────────────────────────
   # A subprocess, os.system, os.exec/spawn, pty or asyncio launch of a Python
   # program runs a file the check never reads. The program may be python, a
@@ -1720,10 +2246,556 @@ cases:
       subprocess.run(["poetry", "-q", "run", "python", "job.py"])
     card: unchecked
 
+  - name: alembic upgrade, a Python tool that runs project code
+    code: |-
+      import subprocess
+      subprocess.run(['alembic', 'upgrade', 'head'], check=True)
+    card: unchecked
+
+  - name: flask run, a Python tool that runs project code
+    code: |-
+      import subprocess
+      subprocess.run(['flask', '--app', 'backend', 'run'], check=True)
+    card: unchecked
+
+  - name: fastapi dev, a Python tool that runs project code
+    code: |-
+      import subprocess
+      subprocess.run(['fastapi', 'dev', 'backend.py'], check=True)
+    card: unchecked
+
+  - name: fastapi run, a Python tool that runs project code
+    code: |-
+      import subprocess
+      subprocess.run(['fastapi', 'run', 'backend.py'], check=True)
+    card: unchecked
+
+  - name: hypercorn, a Python tool that runs project code
+    code: |-
+      import subprocess
+      subprocess.run(['hypercorn', 'backend:app'], check=True)
+    card: unchecked
+
+  - name: a celery worker, a Python tool that runs project code
+    code: |-
+      import subprocess
+      subprocess.run(['celery', '-A', 'tasks', 'worker'], check=True)
+    card: unchecked
+
+  - name: panel serve, a Python tool that runs project code
+    code: |-
+      import subprocess
+      subprocess.run(['panel', 'serve', 'app.py'], check=True)
+    card: unchecked
+
+  - name: bokeh serve, a Python tool that runs project code
+    code: |-
+      import subprocess
+      subprocess.run(['bokeh', 'serve', 'app.py'], check=True)
+    card: unchecked
+
+  - name: gradio, a Python tool that runs project code
+    code: |-
+      import subprocess
+      subprocess.run(['gradio', 'app.py'], check=True)
+    card: unchecked
+
+  - name: marimo run, a Python tool that runs project code
+    code: |-
+      import subprocess
+      subprocess.run(['marimo', 'run', 'nb.py'], check=True)
+    card: unchecked
+
+  - name: marimo edit, a Python tool that runs project code
+    code: |-
+      import subprocess
+      subprocess.run(['marimo', 'edit', 'nb.py'], check=True)
+    card: unchecked
+
+  - name: dagster dev, a Python tool that runs project code
+    code: |-
+      import subprocess
+      subprocess.run(['dagster', 'dev', '-f', 'defs.py'], check=True)
+    card: unchecked
+
+  - name: coverage run, a Python tool that runs project code
+    code: |-
+      import subprocess
+      subprocess.run(['coverage', 'run', 'job.py'], check=True)
+    card: unchecked
+
+  - name: pyinstrument, a Python tool that runs project code
+    code: |-
+      import subprocess
+      subprocess.run(['pyinstrument', 'job.py'], check=True)
+    card: unchecked
+
+  - name: scalene, a Python tool that runs project code
+    code: |-
+      import subprocess
+      subprocess.run(['scalene', 'job.py'], check=True)
+    card: unchecked
+
+  - name: jupyter run, a Python tool that runs project code
+    code: |-
+      import subprocess
+      subprocess.run(['jupyter', 'run', 'job.py'], check=True)
+    card: unchecked
+
+  - name: tox, a Python tool that runs project code
+    code: |-
+      import subprocess
+      subprocess.run(['tox'], check=True)
+    card: unchecked
+
+  - name: nox, a Python tool that runs project code
+    code: |-
+      import subprocess
+      subprocess.run(['nox'], check=True)
+    card: unchecked
+
+  - name: dbt run, a Python tool that runs project code
+    code: |-
+      import subprocess
+      subprocess.run(['dbt', 'run'], check=True)
+    card: unchecked
+
+  - name: sphinx-build, a Python tool that runs project code
+    code: |-
+      import subprocess
+      subprocess.run(['sphinx-build', 'docs', 'out'], check=True)
+    card: unchecked
+
+  - name: pytest asked for its version, which loads the project's conftest files
+    code: |-
+      import subprocess
+      subprocess.run(['pytest', '--version'], check=True)
+    card: unchecked
+
+  - name: alembic upgrade in a shell string
+    code: |-
+      import subprocess
+      subprocess.run('alembic upgrade head', shell=True)
+    card: unchecked
+
+  - name: a python script behind xvfb-run
+    code: |-
+      import subprocess
+      subprocess.run(['xvfb-run', '-a', 'python3', 'scrape.py'], check=True)
+    card: unchecked
+
+  - name: a python script behind caffeinate
+    code: |-
+      import subprocess
+      subprocess.run(['caffeinate', '-i', 'python3', 'job.py'], check=True)
+    card: unchecked
+
+  - name: a python script behind flock
+    code: |-
+      import subprocess
+      subprocess.run(['flock', '/tmp/l', 'python3', 'job.py'], check=True)
+    card: unchecked
+
+  - name: a python script behind watch
+    code: |-
+      import subprocess
+      subprocess.run(['watch', '-n', '5', 'python3', 'job.py'], check=True)
+    card: unchecked
+
+  - name: a python script behind chrt
+    code: |-
+      import subprocess
+      subprocess.run(['chrt', '-f', '10', 'python3', 'job.py'], check=True)
+    card: unchecked
+
+  - name: a python script behind taskset
+    code: |-
+      import subprocess
+      subprocess.run(['taskset', '-c', '0', 'python3', 'job.py'], check=True)
+    card: unchecked
+
+  - name: a python script behind unbuffer
+    code: |-
+      import subprocess
+      subprocess.run(['unbuffer', 'python3', 'job.py'], check=True)
+    card: unchecked
+
+  - name: a python script behind mamba run
+    code: |-
+      import subprocess
+      subprocess.run(['mamba', 'run', '-n', 'x', 'python', 'job.py'], check=True)
+    card: unchecked
+
+  - name: a python script behind micromamba run
+    code: |-
+      import subprocess
+      subprocess.run(['micromamba', 'run', '-n', 'x', 'python', 'job.py'], check=True)
+    card: unchecked
+
+  - name: a python script behind pixi run
+    code: |-
+      import subprocess
+      subprocess.run(['pixi', 'run', 'python', 'job.py'], check=True)
+    card: unchecked
+
+  - name: a python script behind rye run
+    code: |-
+      import subprocess
+      subprocess.run(['rye', 'run', 'python', 'job.py'], check=True)
+    card: unchecked
+
+  - name: the pad's python behind xvfb-run
+    code: |-
+      import subprocess, sys
+      subprocess.run(['xvfb-run', '-a', sys.executable, 'scrape.py'], check=True)
+    card: unchecked
+
+  - name: python scripts behind parallel
+    code: |-
+      import subprocess
+      subprocess.run('parallel python3 ::: scripts/*.py', shell=True)
+    card: unchecked
+
+  - name: a python script an eval runs
+    code: |-
+      import subprocess
+      subprocess.run("eval 'python3 job.py'", shell=True)
+    card: unchecked
+
+  - name: a python script in backticks
+    code: |-
+      import subprocess
+      subprocess.run('echo `python3 job.py`', shell=True)
+    card: unchecked
+
+  - name: uv sync, which builds the project
+    files:
+      pyproject.toml: |
+        [project]
+        name = 'x'
+      setup.py: |
+        x = 1
+    code: |-
+      import subprocess
+      subprocess.run(['uv', 'sync'], check=True)
+    card: unchecked
+
+  - name: poetry install, which builds the project
+    files:
+      pyproject.toml: |
+        [project]
+        name = 'x'
+      setup.py: |
+        x = 1
+    code: |-
+      import subprocess
+      subprocess.run(['poetry', 'install'], check=True)
+    card: unchecked
+
+  - name: pdm install, which builds the project
+    files:
+      pyproject.toml: |
+        [project]
+        name = 'x'
+      setup.py: |
+        x = 1
+    code: |-
+      import subprocess
+      subprocess.run(['pdm', 'install'], check=True)
+    card: unchecked
+
+  - name: pipenv install with no package, which builds the project
+    files:
+      pyproject.toml: |
+        [project]
+        name = 'x'
+      setup.py: |
+        x = 1
+    code: |-
+      import subprocess
+      subprocess.run(['pipenv', 'install'], check=True)
+    card: unchecked
+
+  - name: hatch env create, which builds the project
+    files:
+      pyproject.toml: |
+        [project]
+        name = 'x'
+      setup.py: |
+        x = 1
+    code: |-
+      import subprocess
+      subprocess.run(['hatch', 'env', 'create'], check=True)
+    card: unchecked
+
+  - name: pipx install of the project folder
+    files:
+      pyproject.toml: |
+        [project]
+        name = 'x'
+      setup.py: |
+        x = 1
+    code: |-
+      import subprocess
+      subprocess.run(['pipx', 'install', '.'], check=True)
+    card: unchecked
+
+  - name: uv tool install of the project folder
+    files:
+      pyproject.toml: |
+        [project]
+        name = 'x'
+      setup.py: |
+        x = 1
+    code: |-
+      import subprocess
+      subprocess.run(['uv', 'tool', 'install', '.'], check=True)
+    card: unchecked
+
+  - name: uv add of a local folder
+    files:
+      pyproject.toml: |
+        [project]
+        name = 'x'
+      setup.py: |
+        x = 1
+    code: |-
+      import subprocess
+      subprocess.run(['uv', 'add', './libs/x'], check=True)
+    card: unchecked
+
+  - name: conda install of a local archive
+    files:
+      pyproject.toml: |
+        [project]
+        name = 'x'
+      setup.py: |
+        x = 1
+    code: |-
+      import subprocess
+      subprocess.run(['conda', 'install', '-y', './x-1.0.tar.bz2'], check=True)
+    card: unchecked
+
+  - name: uv add of a requirements file
+    files:
+      pyproject.toml: |
+        [project]
+        name = 'x'
+      setup.py: |
+        x = 1
+    code: |-
+      import subprocess
+      subprocess.run(['uv', 'add', '-r', 'requirements.txt'], check=True)
+    card: unchecked
+
+  - name: a python script pexpect.run launches
+    code: |-
+      import pexpect
+      print(pexpect.run('python3 job.py'))
+    card: unchecked
+
+  - name: a python script pexpect.spawn launches
+    code: |-
+      import pexpect
+      p = pexpect.spawn('python3 job.py')
+    card: unchecked
+
+  - name: a python script anyio.run_process launches
+    code: |-
+      import anyio
+      async def main():
+          await anyio.run_process(['python3', 'job.py'])
+      anyio.run(main)
+    card: unchecked
+
+  - name: a python script trio.run_process launches
+    code: |-
+      import trio
+      async def main():
+          await trio.run_process(['python3', 'job.py'])
+      trio.run(main)
+    card: unchecked
+
+  - name: a python script invoke.run launches
+    code: |-
+      import invoke
+      invoke.run('python3 job.py')
+    card: unchecked
+
+  - name: a python script IPython's system launches
+    code: |-
+      from IPython.utils.process import system
+      system('python3 job.py')
+    card: unchecked
+
+  - name: pip install of a filtered list of options that names a requirements file
+    code: |-
+      import subprocess, sys
+      args = [a for a in ['-r', 'requirements.txt'] if a]
+      subprocess.check_call([sys.executable, '-m', 'pip', 'install', *args])
+    card: unchecked
+
+  - name: pip install of the words of a requirements file
+    code: |-
+      import subprocess, sys
+      subprocess.check_call([sys.executable, '-m', 'pip', 'install', *open('requirements.txt').read().split()])
+    card: unchecked
+
+  - name: a pip helper called with a requirements file
+    code: |-
+      import subprocess, sys
+      def pip_install(pkg):
+          subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-r', pkg])
+      pip_install('requirements.txt')
+    card: unchecked
+
+  - name: a pip helper called with the input
+    code: |-
+      import subprocess, sys
+      def pip_install(pkg):
+          subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg])
+      pip_install(input())
+    card: unchecked
+
+  - name: a python command rebuilt through its own name
+    code: |-
+      import subprocess
+      cmd = 'python3'
+      cmd = cmd + ' job.py'
+      cmd = cmd + ' -v'
+      subprocess.run(cmd, shell=True)
+    card: unchecked
+
+  - name: a python script named by a dict a cell fills by key, run over its values
+    code: |-
+      import subprocess, sys
+      jobs = {}
+      jobs['etl'] = 'etl.py'
+      for s in jobs.values():
+          subprocess.run([sys.executable, s])
+    card: unchecked
+
+  - name: a python script named by a dict a cell fills by key, run over its items
+    code: |-
+      import subprocess, sys
+      jobs = {}
+      jobs['etl'] = 'etl.py'
+      for name, s in jobs.items():
+          subprocess.run([sys.executable, s])
+    card: unchecked
+
+  - name: a python script named by a dict a cell fills with update
+    code: |-
+      import subprocess, sys
+      jobs = {}
+      jobs.update(etl='etl.py')
+      for s in jobs.values():
+          subprocess.run([sys.executable, s])
+    card: unchecked
+
+  - name: a python script named by a dict an earlier cell fills by key
+    earlier:
+      - |-
+        jobs = {}
+        jobs['etl'] = 'etl.py'
+    code: |-
+      import subprocess, sys
+      for s in jobs.values():
+          subprocess.run([sys.executable, s])
+    card: unchecked
+
+  - name: a python script named by a dict a cell fills by key, run as an f-string shell
+    code: |-
+      import subprocess, sys
+      jobs = {}
+      jobs['etl'] = 'etl.py'
+      for s in jobs.values():
+          subprocess.run(f'python3 {s}', shell=True)
+    card: unchecked
+
+  - name: a pip install of a path named by a dict a cell fills by key
+    code: |-
+      import subprocess, sys
+      pk = {}
+      pk['a'] = './vendor/pkg'
+      for p in pk.values():
+          subprocess.run([sys.executable, '-m', 'pip', 'install', p])
+    card: unchecked
+
+  - name: a python script named by a dict a loop fills
+    code: |-
+      import subprocess, sys
+      jobs = {}
+      for n in ['etl']:
+          jobs[n] = n + '.py'
+      for s in jobs.values():
+          subprocess.run([sys.executable, s])
+    card: unchecked
+
+  - name: a python program word named by a dict a cell fills by key
+    code: |-
+      import subprocess, sys
+      progs = {}
+      progs['py'] = 'python3'
+      for p in progs.values():
+          subprocess.run([p, 'job.py'])
+    card: unchecked
+
+  - name: a python program word a cell adds by key to a dict of literal programs
+    code: |-
+      import subprocess, sys
+      progs = {'ls': 'ls'}
+      progs['py'] = 'python3'
+      for p in progs.values():
+          subprocess.run([p, 'job.py'])
+    card: unchecked
+
+  - name: uv add of a package into a project that builds
+    files:
+      pyproject.toml: |
+        [project]
+        name = 'x'
+
+        [build-system]
+        requires = ['setuptools']
+        build-backend = 'setuptools.build_meta'
+      setup.py: |
+        x = 1
+    code: |-
+      import subprocess
+      subprocess.run(['uv', 'add', 'pandas'], check=True)
+    card: unchecked
+
+  - name: uv add of a package after a cd into a folder the check can't read
+    code: |-
+      import subprocess
+      subprocess.run('cd app && uv add pandas', shell=True)
+    card: unchecked
+
+  - name: conda install of a local archive past a switch
+    code: |-
+      import subprocess
+      subprocess.run(['conda', 'install', '--override-channels', './job.tar.bz2'], check=True)
+    card: unchecked
+
+  - name: a python script flock runs as a shell command
+    code: |-
+      import subprocess
+      subprocess.run("flock /tmp/l -c 'python3 job.py'", shell=True)
+    card: unchecked
+
+  - name: a python script flock runs as a shell command given before the lock
+    code: |-
+      import subprocess
+      subprocess.run(['flock', '--command', 'python3 job.py', '/tmp/l'])
+    card: unchecked
+
   # ── Caps ──────────────────────────────────────────────────────────────────
   # A depth or count guard stops the reader with a write still unread. Where
   # the dropped read could have produced a write finding, the cell is
-  # unchecked rather than silently clean.
+  # unchecked rather than silently clean. The read and none rows here are the
+  # controls: literal code an earlier cell runs past the count the check reads
+  # for the cell itself, which it still reads.
 
   - name: a request in the ninth literal exec nested inside earlier ones
     code: |-
@@ -2115,10 +3187,212 @@ cases:
       show(data)
     card: unchecked
 
+  - name: an earlier literal exec after nine earlier python -c cells is read
+    earlier:
+      - |-
+        def push():
+            print('dry run')
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        exec('def push():\n    import requests\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})')
+    code: |-
+      push()
+    card: read
+    kinds: [http]
+
+  - name: a path an earlier literal exec rebinds after nine earlier python -c cells
+    earlier:
+      - |-
+        P = 'tmp.csv'
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        exec("P = 'stock.csv'")
+    code: |-
+      import os
+      os.remove(P)
+    card: read
+    kinds: [delete]
+
+  - name: a call to what an earlier literal exec defines after nine earlier python -c cells
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        exec('def helper(): return 1')
+    code: |-
+      print(helper())
+    card: none
+
+  - name: a call to a function an errored cell defines before nine earlier python -c cells
+    earlier:
+      - |-
+        import pandas as pd
+        def load():
+            return pd.read_csv('stock.csv')
+        raise ValueError('x')
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, '-c', 'import pandas; print(pandas.__version__)'])
+    earlier_errored: [true, false, false, false, false, false, false, false, false, false]
+    code: |-
+      df = load()
+    card: none
+
+  - name: a recursion past the call limit that passes a new literal
+    earlier:
+      - |-
+        import os
+        def a(p):
+            b(p)
+        def b(p):
+            c(p)
+        def c(p):
+            d(p)
+        def d(p):
+            if p == 'x':
+                a('stock.csv')
+            else:
+                os.remove(p)
+    code: |-
+      a('x')
+    card: unchecked
+
+  - name: a recursion an earlier cell defines that deletes a file at its third literal
+    earlier:
+      - |-
+        import os
+        def f(p):
+            if p == 'a':
+                f('b')
+            elif p == 'b':
+                f('stock.csv')
+            else:
+                os.remove(p)
+    code: |-
+      f('a')
+    card: unchecked
+
+  - name: a recursion an earlier cell defines that sends the request at its third literal
+    earlier:
+      - |-
+        import requests
+        def f(p):
+            if p == 'a':
+                f('b')
+            elif p == 'b':
+                f('https://erp.example.test/api/orders')
+            else:
+                requests.post(p, json={'qty': 1})
+    code: |-
+      f('a')
+    card: unchecked
+
   # ── Code that unread code defined ─────────────────────────────────────────
   # Once a cell runs code the check can't read, a later cell that calls a name
   # only that code bound, or reaches through a namespace or module it filled,
-  # is itself unchecked.
+  # is itself unchecked. The read and none rows here are the controls: a name
+  # read code binds, a pad helper, or a function a literal exec defined.
 
   - name: call to a name a non-literal exec defined
     earlier:
@@ -3178,6 +4452,845 @@ cases:
     card: read
     kinds: [http]
 
+  - name: a call after unread code to a name only a function's import binds
+    earlier:
+      - |-
+        exec(open('job.py').read())
+      - |-
+        def helper():
+            from json import dumps as push
+            return push({})
+    files:
+      job.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      push()
+    card: unchecked
+
+  - name: a call after unread code to a name an import later in the cell binds
+    earlier:
+      - |-
+        exec(open('job.py').read())
+    files:
+      job.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      push()
+      from json import dumps as push
+    card: unchecked
+
+  - name: a call after unread code to a name only a def's import in the cell binds
+    earlier:
+      - |-
+        exec(open('job.py').read())
+    files:
+      job.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      def helper():
+          from json import dumps as push
+      push()
+    card: unchecked
+
+  - name: a call after unread code to a name only a class body imports
+    earlier:
+      - |-
+        exec(open('job.py').read())
+    files:
+      job.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      class Tools:
+          from json import dumps as push
+      push()
+    card: unchecked
+
+  - name: a call after unread code to a name a literal exec later in the cell imports
+    earlier:
+      - |-
+        exec(open('job.py').read())
+    files:
+      job.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      push()
+      exec('from json import dumps as push')
+    card: unchecked
+
+  - name: a call after unread code to a name the cell imports first
+    earlier:
+      - |-
+        exec(open('job.py').read())
+    files:
+      job.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      from json import dumps as push
+      push({})
+    card: none
+
+  - name: a call in a function run before a later star import
+    earlier:
+      - |-
+        SCRIPT = 'import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'
+      - |-
+        exec(SCRIPT)
+    code: |-
+      def g():
+          push()
+      g()
+      from math import *
+    card: unchecked
+
+  - name: a call in a lambda run before a later star import
+    earlier:
+      - |-
+        SCRIPT = 'import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'
+      - |-
+        exec(SCRIPT)
+    code: |-
+      f = lambda: push()
+      f()
+      from math import *
+    card: unchecked
+
+  - name: a call in a comprehension before a later star import
+    earlier:
+      - |-
+        SCRIPT = 'import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'
+      - |-
+        exec(SCRIPT)
+    code: |-
+      [push() for _ in [0]]
+      from math import *
+    card: unchecked
+
+  - name: a call in a class body before a later star import
+    earlier:
+      - |-
+        SCRIPT = 'import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'
+      - |-
+        exec(SCRIPT)
+    code: |-
+      class C:
+          push()
+      from math import *
+    card: unchecked
+
+  - name: a call in a function before a star import that never runs
+    earlier:
+      - |-
+        SCRIPT = 'import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'
+      - |-
+        exec(SCRIPT)
+    code: |-
+      def g():
+          push()
+      g()
+      if False:
+          from math import *
+    card: unchecked
+
+  - name: a call in a function run after a star import
+    earlier:
+      - |-
+        SCRIPT = 'import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'
+      - |-
+        exec(SCRIPT)
+    code: |-
+      from math import *
+      def g():
+          print(sqrt(2))
+      g()
+    card: none
+
+  - name: a call in a function a literal exec runs after its own star import
+    earlier:
+      - |-
+        exec(open('job.py').read())
+    files:
+      job.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      def _step():
+          exec('from math import *\nprint(sqrt(4))')
+      _step()
+    card: none
+
+  - name: a frame the cell reads again after an errored cell read it, past an install from an index
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'torch', '--index-url', 'https://download.pytorch.org/whl/cpu'])
+      - |-
+        import pandas as pd
+        df = pd.read_csv('sales.csv')
+        df['date'] = pd.to_datetime(df['Date'])
+    earlier_errored: [false, true]
+    files:
+      sales.csv: |
+        order_date,amount
+        2024-01-01,3
+    code: |-
+      import pandas as pd
+      df = pd.read_csv('sales.csv')
+      print(df.columns.tolist())
+    card: none
+
+  - name: a frame a clean cell read again after an errored cell read it
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'torch', '--index-url', 'https://download.pytorch.org/whl/cpu'])
+      - |-
+        import pandas as pd
+        df = pd.read_csv('sales.csv')
+        df['date'] = pd.to_datetime(df['Date'])
+      - |-
+        import pandas as pd
+        df = pd.read_csv('sales.csv')
+        print(df.columns.tolist())
+    earlier_errored: [false, true, false]
+    files:
+      sales.csv: |
+        order_date,amount
+        2024-01-01,3
+    code: |-
+      df['date'] = 1
+      print(df.head())
+    card: none
+
+  - name: a call to a def the cell gives a name an eval of unread code bound earlier
+    earlier:
+      - |-
+        push = eval(open('job.py').read())
+    files:
+      job.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      def push():
+          print('x')
+      push()
+    card: none
+
+  - name: a frame the cell reads again after it was taken from a namespace unread code filled
+    earlier:
+      - |-
+        ns = {}
+        exec(open('job.py').read(), ns)
+        df = ns['df']
+    files:
+      job.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      import pandas as pd
+      df = pd.read_csv('stock.csv')
+      df.head()
+    card: none
+
+  - name: a call through a frame taken from a namespace unread code filled
+    earlier:
+      - |-
+        ns = {}
+        exec(open('job.py').read(), ns)
+        df = ns['df']
+    files:
+      job.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      df.head()
+    card: unchecked
+
+  - name: a call to a helper an errored cell defines after its imports, with no line it stopped at, after a script ran
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, 'scripts/clean.py'], check=True)
+      - |-
+        import pandas as pd
+        def top_n(d, n):
+            return d.nlargest(n, 'qty')
+        df = pd.read_csv('stock.xlsx')
+    earlier_errored: [false, true]
+    files:
+      scripts/clean.py: |
+        x = 1
+    code: |-
+      import pandas as pd
+      frame = pd.read_csv('stock.csv')
+      print(top_n(frame, 5))
+    card: unchecked
+
+  - name: a call through a module an errored cell imports, with no line it stopped at, after a script ran
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, 'scripts/clean.py'], check=True)
+      - |-
+        import numpy as np
+        import pandas as pd
+        df = pd.read_csv('stock.xlsx')
+    earlier_errored: [false, true]
+    files:
+      scripts/clean.py: |
+        x = 1
+    code: |-
+      print(np.mean([1, 2]))
+    card: unchecked
+
+  - name: a call to a class an errored cell defines at its top, after a script ran
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, 'scripts/clean.py'], check=True)
+      - |-
+        class Report:
+            def __init__(self, t):
+                self.t = t
+        import pandas as pd
+        df = pd.read_csv('stock.xlsx')
+    earlier_errored: [false, true]
+    files:
+      scripts/clean.py: |
+        x = 1
+    code: |-
+      r = Report('x')
+      print(r)
+    card: none
+
+  - name: a call to a helper an errored cell defines after its first call, after a script ran
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, 'scripts/clean.py'], check=True)
+      - |-
+        import pandas as pd
+        df = pd.read_csv('stock.xlsx')
+        def late():
+            return 1
+    earlier_errored: [false, true]
+    files:
+      scripts/clean.py: |
+        x = 1
+    code: |-
+      print(late())
+    card: unchecked
+
+  - name: a call to a helper an errored cell defines before the line it stopped at, after a script ran
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, 'scripts/clean.py'], check=True)
+      - |-
+        import pandas as pd
+        orders = pd.read_csv('stock.csv')
+        def summarize_orders(o):
+            return o.groupby('sku').sum()
+        print(orders['amount'].sum())
+    earlier_errored: [false, true]
+    earlier_stopped_at: [null, 5]
+    files:
+      scripts/clean.py: "x = 1\n"
+    code: |-
+      res = summarize_orders(orders)
+      print(res)
+    card: none
+
+  - name: a call to a helper an errored cell defines past the line it stopped at, after a script ran
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, 'scripts/clean.py'], check=True)
+      - |-
+        import pandas as pd
+        orders = pd.read_csv('stock.csv')
+        def summarize_orders(o):
+            return o.groupby('sku').sum()
+        print(orders['amount'].sum())
+    earlier_errored: [false, true]
+    earlier_stopped_at: [null, 2]
+    files:
+      scripts/clean.py: "x = 1\n"
+    code: |-
+      res = summarize_orders(orders)
+      print(res)
+    card: unchecked
+
+  - name: a call to a helper an errored cell defines after a frame it reads, with no line it stopped at
+    earlier:
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, 'scripts/clean.py'], check=True)
+      - |-
+        import pandas as pd
+        orders = pd.read_csv('stock.csv')
+        def summarize_orders(o):
+            return o.groupby('sku').sum()
+        print(orders['amount'].sum())
+    earlier_errored: [false, true]
+    files:
+      scripts/clean.py: "x = 1\n"
+    code: |-
+      res = summarize_orders(orders)
+      print(res)
+    card: unchecked
+
+  - name: a call to a name an eval of unread code bound, rebound through a one-item list
+    earlier:
+      - |-
+        SRC = open('helpers.py').read()
+      - |-
+        push = eval(SRC)
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      push = [push][0]
+      push()
+    card: unchecked
+
+  - name: a call to a name an eval of unread code bound, rebound through next and iter
+    earlier:
+      - |-
+        SRC = open('helpers.py').read()
+      - |-
+        push = eval(SRC)
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      push = next(iter([push]))
+      push()
+    card: unchecked
+
+  - name: a call to a name an eval of unread code bound, rebound through a dict entry
+    earlier:
+      - |-
+        SRC = open('helpers.py').read()
+      - |-
+        push = eval(SRC)
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      push = {'f': push}['f']
+      push()
+    card: unchecked
+
+  - name: a call to a name an eval of unread code bound, rebound through functools.partial earlier
+    earlier:
+      - |-
+        SRC = open('helpers.py').read()
+      - |-
+        push = eval(SRC)
+      - |-
+        import functools
+        push = functools.partial(push, timeout=5)
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      push()
+    card: unchecked
+
+  - name: a call through a namespace unread code filled, copied by a dict display
+    earlier:
+      - |-
+        SRC = open('helpers.py').read()
+      - |-
+        ns = {}
+        exec(SRC, ns)
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      ns = {**ns}
+      ns['push']()
+    card: unchecked
+
+  - name: a call through a cell-written module, rebound from sys.modules
+    earlier:
+      - |-
+        open('job.py', 'w').write("import requests\ndef push():\n    requests.post('https://erp.example.test/api/orders', json={'qty': 1})\n")
+      - |-
+        import job
+    code: |-
+      import sys
+      job = sys.modules['job']
+      job.push()
+    card: unchecked
+
+  - name: a call to a loop variable over an eval of unread code
+    earlier:
+      - |-
+        SRC = open('helpers.py').read()
+      - |-
+        for push in [eval(SRC)]:
+            pass
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      push()
+    card: unchecked
+
+  - name: a call to a with target that holds an eval of unread code
+    earlier:
+      - |-
+        SRC = open('helpers.py').read()
+      - |-
+        import contextlib
+        with contextlib.nullcontext(eval(SRC)) as push:
+            pass
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      push()
+    card: unchecked
+
+  - name: a call to what an immediately called lambda returns from an eval of unread code
+    earlier:
+      - |-
+        SRC = open('helpers.py').read()
+      - |-
+        push = (lambda: eval(SRC))()
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      push()
+    card: unchecked
+
+  - name: a call to what a read function returns from an eval of unread code
+    earlier:
+      - |-
+        SRC = open('helpers.py').read()
+      - |-
+        def make():
+            return eval(SRC)
+        push = make()
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      push()
+    card: unchecked
+
+  - name: a call to functools.partial of a name unread code bound, made in an earlier cell
+    earlier:
+      - |-
+        SRC = open('helpers.py').read()
+      - |-
+        exec(SRC)
+      - |-
+        import functools
+        push = functools.partial(push, timeout=5)
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      push()
+    card: unchecked
+
+  - name: a call through a module the importlib loader recipe ran
+    earlier:
+      - |-
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('job', 'job.py')
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    files:
+      job.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      mod.push()
+    card: unchecked
+
+  - name: a call through a module the importlib loader recipe ran over three cells
+    earlier:
+      - |-
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('job', 'job.py')
+      - |-
+        mod = importlib.util.module_from_spec(spec)
+      - |-
+        spec.loader.exec_module(mod)
+    files:
+      job.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      mod.push()
+    card: unchecked
+
+  - name: a call through sys.modules' entry for a cell-written module, taken earlier
+    earlier:
+      - |-
+        open('job.py', 'w').write("import requests\ndef push():\n    requests.post('https://erp.example.test/api/orders', json={'qty': 1})\n")
+      - |-
+        import sys
+        import job
+      - |-
+        g = sys.modules['job']
+    code: |-
+      g.push()
+    card: unchecked
+
+  - name: a call through vars of a cell-written module, taken earlier
+    earlier:
+      - |-
+        open('job.py', 'w').write("import requests\ndef push():\n    requests.post('https://erp.example.test/api/orders', json={'qty': 1})\n")
+      - |-
+        import job
+      - |-
+        d = vars(job)
+    code: |-
+      d['push']()
+    card: unchecked
+
+  - name: a call through dict of a namespace unread code filled, taken earlier
+    earlier:
+      - |-
+        SRC = open('helpers.py').read()
+      - |-
+        ns = {}
+        exec(SRC, ns)
+      - |-
+        n2 = dict(ns)
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      n2['push']()
+    card: unchecked
+
+  - name: a call to a name unread code bound, before a call to an earlier function whose literal exec redefines it
+    earlier:
+      - |-
+        SRC = open('helpers.py').read()
+      - |-
+        exec(SRC)
+      - |-
+        def reset():
+            exec("def push():\n    print('stub')", globals())
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      push()
+      reset()
+    card: unchecked
+
+  - name: a call to a name unread code bound, before an earlier function that calls one whose literal exec redefines it
+    earlier:
+      - |-
+        SRC = open('helpers.py').read()
+      - |-
+        exec(SRC)
+      - |-
+        def reset():
+            exec("def push():\n    print('stub')", globals())
+      - |-
+        def tidy():
+            reset()
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      push()
+      tidy()
+    card: unchecked
+
+  - name: a call to a helper an errored cell defines after an import that may have failed, with no line it stopped at
+    earlier:
+      - |-
+        SRC = open('helpers.py').read()
+      - |-
+        exec(SRC)
+      - |-
+        import not_a_real_module_xyz
+        def push():
+            print(1)
+    earlier_errored: [false, false, true]
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      push()
+    card: unchecked
+
+  - name: a call to a helper an errored cell defines with a default that may have failed, with no line it stopped at
+    earlier:
+      - |-
+        SRC = open('helpers.py').read()
+      - |-
+        exec(SRC)
+      - |-
+        def push(x=undefined_default):
+            print(1)
+    earlier_errored: [false, false, true]
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      push()
+    card: unchecked
+
+  - name: a call to a class an errored cell defines on a base that may be missing, with no line it stopped at
+    earlier:
+      - |-
+        SRC = open('helpers.py').read()
+      - |-
+        exec(SRC)
+      - |-
+        class Push(MissingBase):
+            def go(self):
+                print(1)
+    earlier_errored: [false, false, true]
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      Push().go()
+    card: unchecked
+
+  - name: a call to a helper whose def an errored cell stopped in, on its second line
+    earlier:
+      - |-
+        SRC = open('helpers.py').read()
+      - |-
+        exec(SRC)
+      - |-
+        def push(
+            x=undefined):
+            print(1)
+    earlier_errored: [false, false, true]
+    earlier_stopped_at: [null, null, 2]
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      push()
+    card: unchecked
+
+  - name: a call to a name an errored cell assigns over two lines, stopped on the second
+    earlier:
+      - |-
+        SRC = open('helpers.py').read()
+      - |-
+        exec(SRC)
+      - |-
+        push = (
+            print if undefined else print)
+    earlier_errored: [false, false, true]
+    earlier_stopped_at: [null, null, 2]
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      push()
+    card: unchecked
+
+  - name: a call to a name an errored cell imports over two lines, stopped on the second
+    earlier:
+      - |-
+        SRC = open('helpers.py').read()
+      - |-
+        exec(SRC)
+      - |-
+        from os import (path,
+            push)
+    earlier_errored: [false, false, true]
+    earlier_stopped_at: [null, null, 2]
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      push()
+    card: unchecked
+
+  - name: a call to a helper literal code an errored cell runs defines, past the line it stopped at
+    earlier:
+      - |-
+        SRC = open('helpers.py').read()
+      - |-
+        exec(SRC)
+      - |-
+        x = undefined
+        exec('def push():\n    print(1)')
+    earlier_errored: [false, false, true]
+    earlier_stopped_at: [null, null, 1]
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      push()
+    card: unchecked
+
   # ── Cells the check reads (read) ──────────────────────────────────────────
   # The source is a literal, a compiled literal, a builtin reached by a name
   # the check resolves, or a function a literal exec defined, and the read
@@ -3882,6 +5995,418 @@ cases:
             requests.request(m, 'https://erp.example.test/api/orders')
     code: |-
       b('GET')
+    card: read
+    kinds: [http]
+
+  - name: two names passed to one earlier delete helper are each read
+    earlier:
+      - |-
+        import os
+        def clean(path):
+            os.remove(path)
+    code: |-
+      P = 'tmp.csv'
+      Q = 'stock.csv'
+      clean(P)
+      clean(Q)
+    card: read
+    kinds: [delete]
+
+  - name: two names passed to one earlier overwrite helper are each read
+    earlier:
+      - |-
+        def save(df, path):
+            df.to_csv(path)
+    code: |-
+      import pandas as pd
+      clean_df = pd.DataFrame()
+      OUT = 'out.csv'
+      SRC = 'stock.csv'
+      save(clean_df, OUT)
+      save(clean_df, SRC)
+    card: read
+    kinds: [overwrite]
+
+  - name: two names passed to one earlier post helper are each read
+    earlier:
+      - |-
+        import requests
+        def post(url, body):
+            requests.post(url, json=body)
+    code: |-
+      url_a = 'https://other.example.test/x'
+      url_b = 'https://erp.example.test/api/orders'
+      post(url_a, {})
+      post(url_b, {'qty': 1})
+    card: read
+    kinds: [http]
+
+  - name: two names passed on through an earlier helper are each read
+    earlier:
+      - |-
+        import os
+        def clean(path):
+            os.remove(path)
+      - |-
+        def tidy(x):
+            clean(x)
+    code: |-
+      P = 'tmp.csv'
+      Q = 'stock.csv'
+      tidy(P)
+      tidy(Q)
+    card: read
+    kinds: [delete]
+
+  - name: two earlier callers of one delete helper are each read
+    earlier:
+      - |-
+        import os
+        def clean(path):
+            os.remove(path)
+      - |-
+        TMP = 'tmp.csv'
+        MAIN = 'stock.csv'
+        def tidy_tmp():
+            clean(TMP)
+        def tidy_main():
+            clean(MAIN)
+    code: |-
+      tidy_tmp()
+      tidy_main()
+    card: read
+    kinds: [delete]
+
+  - name: a delete of a path an errored cell's literal exec may not have rebound
+    earlier:
+      - |-
+        P = 'stock.csv'
+      - |-
+        import pandas as pd
+        df = pd.read_csv('missing.csv')
+        exec("P = 'tmp.csv'")
+    earlier_errored: [false, true]
+    code: |-
+      import os
+      os.remove(P)
+    card: read
+    kinds: [delete]
+
+  - name: an overwrite of a path an errored cell's literal exec may not have rebound
+    earlier:
+      - |-
+        P = 'stock.csv'
+      - |-
+        import pandas as pd
+        df = pd.read_csv('missing.csv')
+        exec("P = 'tmp.csv'")
+    earlier_errored: [false, true]
+    code: |-
+      open(P, 'w').write('x')
+    card: read
+    kinds: [overwrite]
+
+  - name: an earlier function's delete of a path an errored cell's literal exec may not have rebound
+    earlier:
+      - |-
+        P = 'stock.csv'
+      - |-
+        import pandas as pd
+        df = pd.read_csv('missing.csv')
+        exec("P = 'tmp.csv'")
+      - |-
+        import os
+        def clean():
+            os.remove(P)
+    earlier_errored: [false, true, false]
+    code: |-
+      clean()
+    card: read
+    kinds: [delete]
+
+  - name: a delete of the path the later of two literal execs binds, the first under a try
+    earlier:
+      - |-
+        try:
+            exec("P = 'tmp.csv'")
+        except Exception:
+            pass
+        exec("P = 'stock.csv'")
+    code: |-
+      import os
+      os.remove(P)
+    card: read
+    kinds: [delete]
+
+  - name: a delete of the path a literal exec binds after a nested one
+    earlier:
+      - |-
+        exec("exec(\"P = 'tmp.csv'\")")
+        exec("P = 'stock.csv'")
+    code: |-
+      import os
+      os.remove(P)
+    card: read
+    kinds: [delete]
+
+  - name: a call to the later of two literal defs, the first under a with
+    earlier:
+      - |-
+        with open('stock.csv') as f:
+            exec("def push():\n    print('dry run')")
+        exec('def push():\n    import requests\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})')
+    code: |-
+      push()
+    card: read
+    kinds: [http]
+
+  - name: a call to the later of two literal defs, the first inside a print
+    earlier:
+      - |-
+        print(exec("def push():\n    print('dry run')"))
+        exec('def push():\n    import requests\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})')
+    code: |-
+      push()
+    card: read
+    kinds: [http]
+
+  - name: a call to a function taken from a namespace before a later cell fills one by that name
+    earlier:
+      - |-
+        ns = {}
+        exec('def go():\n    import requests\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})', ns)
+        go = ns['go']
+      - |-
+        ns = {}
+        exec("def go():\n    print('dry run')", ns)
+        check = ns['go']
+    code: |-
+      go()
+    card: read
+    kinds: [http]
+
+  - name: a call to a function taken from a namespace a later cell fills again
+    earlier:
+      - |-
+        ns = {}
+        exec('def go():\n    import requests\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})', ns)
+        run = ns['go']
+      - |-
+        ns = {}
+        exec("def go():\n    print('dry run')", ns)
+    code: |-
+      run()
+    card: read
+    kinds: [http]
+
+  - name: a delete of a path a literal exec rebinds earlier in the cell
+    code: |-
+      import os
+      P = 'tmp.csv'
+      exec("P = 'stock.csv'")
+      os.remove(P)
+    card: read
+    kinds: [delete]
+
+  - name: a request to a URL a literal exec rebinds earlier in the cell
+    code: |-
+      import requests
+      U = 'https://other.example.test/x'
+      exec("U = 'https://erp.example.test/api/orders'")
+      requests.post(U, json={})
+    card: read
+    kinds: [http]
+
+  - name: a call before a literal exec redefines the earlier function
+    earlier:
+      - |-
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      push()
+      exec('def push(): print(1)')
+    card: read
+    kinds: [http]
+
+  - name: a literal exec's call before the cell redefines the earlier function
+    earlier:
+      - |-
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      exec('push()')
+      def push():
+          print('dry run')
+    card: read
+    kinds: [http]
+
+  - name: a literal exec's delete before the cell rebinds the path
+    earlier:
+      - |-
+        P = 'stock.csv'
+    code: |-
+      import os
+      exec("os.remove(P)")
+      P = 'tmp.csv'
+    card: read
+    kinds: [delete]
+
+  - name: a literal exec into globals of a request, then its call
+    code: |-
+      exec('import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})', globals())
+      push()
+    card: read
+    kinds: [http]
+
+  - name: exec into a fresh dict of a from-import delete
+    files:
+      output/old.png: "x"
+    code: |-
+      exec("from shutil import rmtree\nrmtree('output')", {})
+    card: read
+    kinds: [delete]
+
+  - name: exec in a def of a from-import overwrite
+    code: |-
+      def go():
+          exec("from pathlib import Path\nPath('stock.csv').write_text('x')")
+      go()
+    card: read
+    kinds: [overwrite]
+
+  - name: exec in a lambda of a delete through an import alias
+    files:
+      report.pdf: "x"
+    code: |-
+      (lambda: exec("import os as o\no.remove('report.pdf')"))()
+    card: read
+    kinds: [delete]
+
+  - name: exec into a namespace of a request through a from-import
+    code: |-
+      ns = {}
+      exec('from requests import post\npost("https://erp.example.test/api/orders", json={})', ns)
+    card: read
+    kinds: [http]
+
+  - name: python -c of a from-import delete
+    files:
+      output/old.png: "x"
+    code: |-
+      import subprocess
+      subprocess.run(['python3', '-c', "from shutil import rmtree; rmtree('output')"])
+    card: read
+    kinds: [delete]
+
+  - name: python -c of a from-import overwrite
+    code: |-
+      import subprocess
+      subprocess.run(['python3', '-c', "from pathlib import Path; Path('stock.csv').write_text('x')"])
+    card: read
+    kinds: [overwrite]
+
+  - name: a method that calls the earlier function its own name names
+    earlier:
+      - |-
+        import requests
+        def run():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      class Job:
+          def run(self):
+              run()
+      Job().run()
+    card: read
+    kinds: [http]
+
+  - name: a method that calls the earlier delete its own name names
+    earlier:
+      - |-
+        import os
+        def clean():
+            os.remove('stock.csv')
+    code: |-
+      class Cleaner:
+          def clean(self):
+              clean()
+      Cleaner().clean()
+    card: read
+    kinds: [delete]
+
+  - name: a delete in backticks
+    code: |-
+      import subprocess
+      subprocess.run('echo `rm stock.csv`', shell=True)
+    card: read
+    kinds: [delete]
+
+  - name: a delete pexpect runs
+    code: |-
+      import pexpect
+      pexpect.run('rm stock.csv')
+    card: read
+    kinds: [delete]
+
+  - name: a delete command rebuilt through its own name
+    code: |-
+      import subprocess
+      cmd = 'rm'
+      cmd = cmd + ' -f'
+      cmd = cmd + ' stock.csv'
+      subprocess.run(cmd, shell=True)
+    card: read
+    kinds: [delete]
+
+  - name: a call to a function before a call to an earlier function whose literal exec redefines it
+    earlier:
+      - |-
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+      - |-
+        def reset():
+            exec("def push():\n    print('stub')", globals())
+    code: |-
+      push()
+      reset()
+    card: read
+    kinds: [http]
+
+  - name: a call through a namespace two literal execs filled, to the first one's function
+    earlier:
+      - |-
+        ns = {}
+        exec("import requests\ndef a():\n    requests.post('https://erp.example.test/api/orders', json={'qty': 1})", ns)
+        exec("def b():\n    pass", ns)
+    code: |-
+      ns['a']()
+    card: read
+    kinds: [http]
+
+  - name: a call through a namespace literal execs in two cells filled, to the first one's function
+    earlier:
+      - |-
+        ns = {}
+        exec("import requests\ndef a():\n    requests.post('https://erp.example.test/api/orders', json={'qty': 1})", ns)
+      - |-
+        exec("def b():\n    pass", ns)
+    code: |-
+      ns['a']()
+    card: read
+    kinds: [http]
+
+  - name: a call through a module two literal execs filled, to the first one's function
+    earlier:
+      - |-
+        import types
+        m = types.ModuleType('m')
+        exec("import requests\ndef a():\n    requests.post('https://erp.example.test/api/orders', json={'qty': 1})", m.__dict__)
+      - |-
+        exec("def b():\n    pass", m.__dict__)
+    code: |-
+      m.a()
     card: read
     kinds: [http]
 
@@ -5643,4 +8168,773 @@ cases:
     code: |-
       exec = print
       exec(SCRIPT)
+    card: none
+
+  - name: a read-only check through a seventy-deep alias chain
+    code: |-
+      import os
+      p0 = 'stock.csv'
+      p1 = p0
+      p2 = p1
+      p3 = p2
+      p4 = p3
+      p5 = p4
+      p6 = p5
+      p7 = p6
+      p8 = p7
+      p9 = p8
+      p10 = p9
+      p11 = p10
+      p12 = p11
+      p13 = p12
+      p14 = p13
+      p15 = p14
+      p16 = p15
+      p17 = p16
+      p18 = p17
+      p19 = p18
+      p20 = p19
+      p21 = p20
+      p22 = p21
+      p23 = p22
+      p24 = p23
+      p25 = p24
+      p26 = p25
+      p27 = p26
+      p28 = p27
+      p29 = p28
+      p30 = p29
+      p31 = p30
+      p32 = p31
+      p33 = p32
+      p34 = p33
+      p35 = p34
+      p36 = p35
+      p37 = p36
+      p38 = p37
+      p39 = p38
+      p40 = p39
+      p41 = p40
+      p42 = p41
+      p43 = p42
+      p44 = p43
+      p45 = p44
+      p46 = p45
+      p47 = p46
+      p48 = p47
+      p49 = p48
+      p50 = p49
+      p51 = p50
+      p52 = p51
+      p53 = p52
+      p54 = p53
+      p55 = p54
+      p56 = p55
+      p57 = p56
+      p58 = p57
+      p59 = p58
+      p60 = p59
+      p61 = p60
+      p62 = p61
+      p63 = p62
+      p64 = p63
+      p65 = p64
+      p66 = p65
+      p67 = p66
+      p68 = p67
+      p69 = p68
+      p70 = p69
+      print(os.path.exists(p70))
+    card: none
+
+  - name: a builtin called through a seventy-deep alias chain
+    code: |-
+      h0 = print
+      h1 = h0
+      h2 = h1
+      h3 = h2
+      h4 = h3
+      h5 = h4
+      h6 = h5
+      h7 = h6
+      h8 = h7
+      h9 = h8
+      h10 = h9
+      h11 = h10
+      h12 = h11
+      h13 = h12
+      h14 = h13
+      h15 = h14
+      h16 = h15
+      h17 = h16
+      h18 = h17
+      h19 = h18
+      h20 = h19
+      h21 = h20
+      h22 = h21
+      h23 = h22
+      h24 = h23
+      h25 = h24
+      h26 = h25
+      h27 = h26
+      h28 = h27
+      h29 = h28
+      h30 = h29
+      h31 = h30
+      h32 = h31
+      h33 = h32
+      h34 = h33
+      h35 = h34
+      h36 = h35
+      h37 = h36
+      h38 = h37
+      h39 = h38
+      h40 = h39
+      h41 = h40
+      h42 = h41
+      h43 = h42
+      h44 = h43
+      h45 = h44
+      h46 = h45
+      h47 = h46
+      h48 = h47
+      h49 = h48
+      h50 = h49
+      h51 = h50
+      h52 = h51
+      h53 = h52
+      h54 = h53
+      h55 = h54
+      h56 = h55
+      h57 = h56
+      h58 = h57
+      h59 = h58
+      h60 = h59
+      h61 = h60
+      h62 = h61
+      h63 = h62
+      h64 = h63
+      h65 = h64
+      h66 = h65
+      h67 = h66
+      h68 = h67
+      h69 = h68
+      h70 = h69
+      h70('hi')
+    card: none
+
+  - name: pip install of the missing ones of a literal list
+    code: |-
+      import importlib.util, subprocess, sys
+      need = [p for p in ['openpyxl', 'tabulate'] if importlib.util.find_spec(p) is None]
+      if need:
+          subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', *need])
+    card: none
+
+  - name: pip install of literal names appended in a loop
+    code: |-
+      import importlib.util, subprocess, sys
+      need = []
+      for p in ['openpyxl', 'tabulate']:
+          if importlib.util.find_spec(p) is None:
+              need.append(p)
+      if need:
+          subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', *need])
+    card: none
+
+  - name: pip install of a literal dict's values
+    code: |-
+      import subprocess, sys
+      DISTS = {'xl': 'openpyxl', 'tab': 'tabulate'}
+      subprocess.check_call([sys.executable, '-m', 'pip', 'install', *DISTS.values()])
+    card: none
+
+  - name: pip install through a helper called with a literal list
+    code: |-
+      import subprocess, sys
+      def ensure(pkgs):
+          subprocess.check_call([sys.executable, '-m', 'pip', 'install', *pkgs])
+      ensure(['openpyxl', 'tabulate'])
+    card: none
+
+  - name: uv pip install of a filtered literal list
+    code: |-
+      import subprocess
+      need = [p for p in ['openpyxl', 'tabulate'] if p]
+      subprocess.check_call(['uv', 'pip', 'install', *need])
+    card: none
+
+  - name: pip install of a joined literal list in an f-string shell
+    code: |-
+      import subprocess
+      pkgs = ['openpyxl', 'tabulate']
+      subprocess.check_call(f"pip install -q {' '.join(pkgs)}", shell=True)
+    card: none
+
+  - name: pip install of a filter of literal names
+    code: |-
+      import subprocess, sys
+      need = list(filter(None, ['openpyxl', 'tabulate']))
+      subprocess.check_call([sys.executable, '-m', 'pip', 'install', *need])
+    card: none
+
+  - name: pip install of a sorted set difference of literal names
+    code: |-
+      import subprocess, sys
+      need = sorted({'openpyxl', 'tabulate'} - {'tabulate'})
+      subprocess.check_call([sys.executable, '-m', 'pip', 'install', *need])
+    card: none
+
+  - name: pip install of pins made from a literal dict
+    code: |-
+      import subprocess, sys
+      D = {'openpyxl': '3.1', 'tabulate': '0.9'}
+      need = [f'{k}=={v}' for k, v in D.items() if k]
+      subprocess.check_call([sys.executable, '-m', 'pip', 'install', *need])
+    card: none
+
+  - name: a pip helper nothing calls
+    code: |-
+      import subprocess, sys
+      def pip_install(pkg):
+          subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', pkg])
+    card: none
+
+  - name: a pip3 helper nothing calls
+    code: |-
+      import subprocess
+      def pip_install(pkg):
+          subprocess.check_call(['pip3', 'install', pkg])
+    card: none
+
+  - name: a uv pip helper nothing calls
+    code: |-
+      import subprocess
+      def pip_install(pkg):
+          subprocess.check_call(['uv', 'pip', 'install', pkg])
+    card: none
+
+  - name: an os.system pip helper nothing calls
+    code: |-
+      import os
+      def pip_install(pkg):
+          os.system(f'pip install {pkg}')
+    card: none
+
+  - name: a pip helper with a default nothing calls
+    code: |-
+      import subprocess, sys
+      def pip_install(pkg='openpyxl'):
+          subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg])
+    card: none
+
+  - name: an import-or-install helper nothing calls
+    code: |-
+      import importlib, subprocess, sys
+      def ensure(pkg):
+          try:
+              importlib.import_module(pkg)
+          except ImportError:
+              subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg])
+    card: none
+
+  - name: a pip helper nothing calls, then a print
+    code: |-
+      import subprocess, sys
+      def pip_install(pkg):
+          subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', pkg])
+      print('ready')
+    card: none
+
+  - name: coverage report, which runs no project code
+    code: |-
+      import subprocess
+      subprocess.run(['coverage', 'report'], check=True)
+    card: none
+
+  - name: alembic asked for its version, which runs no project code
+    code: |-
+      import subprocess
+      subprocess.run(['alembic', '--version'], check=True)
+    card: none
+
+  - name: flask asked for its version, which runs no project code
+    code: |-
+      import subprocess
+      subprocess.run(['flask', '--version'], check=True)
+    card: none
+
+  - name: uv add of a package from the index
+    files:
+      pyproject.toml: |
+        [project]
+        name = 'x'
+      setup.py: |
+        x = 1
+    code: |-
+      import subprocess
+      subprocess.run(['uv', 'add', 'pandas'], check=True)
+    card: none
+
+  - name: pipx install of a package from the index
+    files:
+      pyproject.toml: |
+        [project]
+        name = 'x'
+      setup.py: |
+        x = 1
+    code: |-
+      import subprocess
+      subprocess.run(['pipx', 'install', 'black'], check=True)
+    card: none
+
+  - name: conda install of a package from a channel from the index
+    files:
+      pyproject.toml: |
+        [project]
+        name = 'x'
+      setup.py: |
+        x = 1
+    code: |-
+      import subprocess
+      subprocess.run(['conda', 'install', '-c', 'conda-forge', '-y', 'numpy'], check=True)
+    card: none
+
+  - name: poetry add of a package from the index
+    files:
+      pyproject.toml: |
+        [project]
+        name = 'x'
+      setup.py: |
+        x = 1
+    code: |-
+      import subprocess
+      subprocess.run(['poetry', 'add', 'pandas'], check=True)
+    card: none
+
+  - name: pipenv install of a package from the index
+    files:
+      pyproject.toml: |
+        [project]
+        name = 'x'
+      setup.py: |
+        x = 1
+    code: |-
+      import subprocess
+      subprocess.run(['pipenv', 'install', 'requests'], check=True)
+    card: none
+
+  - name: node behind caffeinate
+    code: |-
+      import subprocess
+      subprocess.run(['caffeinate', '-i', 'node', 'job.js'])
+    card: none
+
+  - name: a browser behind xvfb-run
+    code: |-
+      import subprocess
+      subprocess.run(['xvfb-run', '-a', 'chromium', '--headless'])
+    card: none
+
+  - name: a date in backticks
+    code: |-
+      import subprocess
+      subprocess.run('echo `date`', shell=True)
+    card: none
+
+  - name: a listing an eval runs
+    code: |-
+      import subprocess
+      subprocess.run("eval 'ls -l'", shell=True)
+    card: none
+
+  - name: a listing behind watch
+    code: |-
+      import subprocess
+      subprocess.run(['watch', '-n', '5', 'ls'])
+    card: none
+
+  - name: a listing anyio runs
+    code: |-
+      import anyio
+      async def main():
+          await anyio.run_process(['ls', '-l'])
+      anyio.run(main)
+    card: none
+
+  - name: a logging import after a folder holding a nested logging.py goes on sys.path
+    earlier:
+      - |-
+        import sys
+        sys.path.insert(0, 'src')
+        from myapp.loaders import load
+    files:
+      src/myapp/__init__.py: ''
+      src/myapp/loaders.py: |
+        def load():
+            pass
+      src/myapp/utils/logging.py: |
+        x = 1
+    code: |-
+      import logging
+      logging.basicConfig(level=logging.INFO)
+      logging.getLogger('report').info('start')
+    card: none
+
+  - name: an openai import after a folder holding a nested openai.py goes on sys.path
+    earlier:
+      - |-
+        import sys
+        sys.path.insert(0, 'src')
+        from myapp.loaders import load
+    files:
+      src/myapp/__init__.py: ''
+      src/myapp/loaders.py: |
+        def load():
+            pass
+      src/myapp/clients/openai.py: |
+        x = 1
+    code: |-
+      import openai
+      print(openai)
+    card: none
+
+  - name: a pandas import after a cell writes examples under a pandas folder
+    earlier:
+      - |-
+        from pathlib import Path
+        Path('examples/pandas').mkdir(parents=True, exist_ok=True)
+        Path('examples/pandas/basics.py').write_text('print(1)')
+    code: |-
+      import pandas as pd
+      print(pd)
+    card: none
+
+  - name: a requests import after a cell writes an artifact under a requests folder
+    earlier:
+      - |-
+        from pathlib import Path
+        Path('.anton/artifacts/requests').mkdir(parents=True, exist_ok=True)
+        Path('.anton/artifacts/requests/fetch_orders.py').write_text('print(1)')
+    code: |-
+      import requests
+      print(requests.get('https://x.example.test').status_code)
+    card: none
+
+  - name: a written namespace folder imported with no sys.path change
+    earlier:
+      - |-
+        from pathlib import Path
+        Path('mypkg').mkdir(exist_ok=True)
+        Path('mypkg/mod.py').write_text('def go(): pass')
+    code: |-
+      import mypkg.mod
+      mypkg.mod.go()
+    card: none
+
+  - name: an ffmpeg command rebuilt twice through its own name
+    code: |-
+      import subprocess
+      cmd = 'ffmpeg -y -i in.mp4'
+      cmd = cmd + ' -t 30'
+      cmd = cmd + ' out.mp3'
+      subprocess.run(cmd, shell=True)
+    card: none
+
+  - name: an os.system command rebuilt twice through its own name
+    code: |-
+      import os
+      cmd = 'ffmpeg -y -i in.mp4'
+      cmd = cmd + ' -t 30'
+      cmd = cmd + ' out.mp3'
+      os.system(cmd)
+    card: none
+
+  - name: a command list an earlier cell starts, rebuilt through its own name
+    earlier:
+      - |-
+        cmd = ['ls']
+    code: |-
+      import subprocess
+      cmd = cmd + ['-l']
+      subprocess.run(cmd)
+    card: none
+
+  - name: a command text an earlier cell starts, rebuilt through its own name
+    earlier:
+      - |-
+        cmd = 'ffmpeg -y -i in.mp4'
+    code: |-
+      import subprocess
+      cmd = cmd + ' -t 30 out.mp4'
+      subprocess.run(cmd, shell=True)
+    card: none
+
+  - name: an ffmpeg command rebuilt seven times through its own name
+    code: |-
+      import subprocess
+      cmd = 'ffmpeg -y -i in.mp4'
+      cmd = cmd + ' -a 1'
+      cmd = cmd + ' -b 1'
+      cmd = cmd + ' -c 1'
+      cmd = cmd + ' -d 1'
+      cmd = cmd + ' -e 1'
+      cmd = cmd + ' -f 1'
+      cmd = cmd + ' out.mp3'
+      subprocess.run(cmd, shell=True)
+    card: none
+
+  - name: a compile imported from re in a try before its use
+    earlier:
+      - |-
+        pattern = input()
+    code: |-
+      try:
+          from re import compile
+          rx = compile(pattern)
+      except ImportError:
+          raise
+    card: none
+
+  - name: a compile imported from re under an if True before its use
+    earlier:
+      - |-
+        pattern = input()
+    code: |-
+      if True:
+          from re import compile
+          rx = compile(pattern)
+    card: none
+
+  - name: a dict named eval in a loop body before its use
+    code: |-
+      for epoch in range(2):
+          eval = {'acc': 0.9}
+          print(eval)
+    card: none
+
+  - name: an executor named exec in a with inside a try
+    code: |-
+      from concurrent.futures import ThreadPoolExecutor
+      try:
+          with ThreadPoolExecutor() as exec:
+              exec.submit(print, 1)
+      except Exception:
+          raise
+    card: none
+
+  - name: a compile imported from re in a match case before its use
+    earlier:
+      - |-
+        pattern = input()
+    code: |-
+      match 1:
+          case 1:
+              from re import compile
+              rx = compile(pattern)
+    card: none
+
+  - name: a compile an earlier cell imports from re under an if True
+    earlier:
+      - |-
+        if True:
+            from re import compile
+    code: |-
+      rx = compile(input())
+    card: none
+
+  - name: a literal exec into globals of a helper, then its call
+    code: |-
+      exec('def helper(x):\n    return x * 2', globals())
+      print(helper(3))
+    card: none
+
+  - name: pip install one at a time of the missing ones of a literal list
+    code: |-
+      import importlib.util, subprocess, sys
+      for p in [p for p in ['openpyxl', 'tabulate'] if importlib.util.find_spec(p) is None]:
+          subprocess.check_call([sys.executable, '-m', 'pip', 'install', p])
+    card: none
+
+  - name: an installed package's import after data is unpacked apart from the folder on sys.path
+    earlier:
+      - |-
+        import sys, zipfile
+        zipfile.ZipFile('bundle.zip').extractall('data')
+        sys.path.insert(0, 'src')
+    files:
+      bundle.tar.gz: "x"
+      bundle.zip: "x"
+    code: |-
+      import pandas as pd
+      print(pd)
+    card: none
+
+  - name: a class body that calls a def above it, after an exec of a file
+    earlier:
+      - |-
+        SRC = open('helpers.py').read()
+      - |-
+        exec(SRC)
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      class Cfg:
+          def env(name):
+              return name.upper()
+          HOST = env('host')
+    card: none
+
+  - name: a python script named by a parameter of a function nothing calls, through a loop and a name
+    code: |-
+      import subprocess, sys
+      def run_all(jobs):
+          for s in jobs:
+              cmd = [sys.executable, s]
+              subprocess.run(cmd)
+    card: none
+
+  - name: a call to a helper an errored cell defines first, with no line it stopped at
+    earlier:
+      - |-
+        SRC = open('helpers.py').read()
+      - |-
+        exec(SRC)
+      - |-
+        def push():
+            print(1)
+        x = undefined
+    earlier_errored: [false, false, true]
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      push()
+    card: none
+
+  - name: a call to a helper literal code an errored cell runs defines, before the line it stopped at
+    earlier:
+      - |-
+        SRC = open('helpers.py').read()
+      - |-
+        exec(SRC)
+      - |-
+        exec('def push():\n    print(1)')
+        x = undefined
+    earlier_errored: [false, false, true]
+    earlier_stopped_at: [null, null, 2]
+    files:
+      helpers.py: |
+        import requests
+        def push():
+            requests.post('https://erp.example.test/api/orders', json={'qty': 1})
+    code: |-
+      push()
+    card: none
+
+  - name: uv add of a package into a project that builds, with no sync
+    files:
+      pyproject.toml: |
+        [project]
+        name = 'x'
+
+        [build-system]
+        requires = ['setuptools']
+        build-backend = 'setuptools.build_meta'
+      setup.py: |
+        x = 1
+    code: |-
+      import subprocess
+      subprocess.run(['uv', 'add', '--no-sync', 'pandas'], check=True)
+    card: none
+
+  - name: uv add of a package into a project that builds, without the project
+    files:
+      pyproject.toml: |
+        [project]
+        name = 'x'
+
+        [build-system]
+        requires = ['setuptools']
+        build-backend = 'setuptools.build_meta'
+      setup.py: |
+        x = 1
+    code: |-
+      import subprocess
+      subprocess.run(['uv', 'add', '--no-install-project', 'pandas'], check=True)
+    card: none
+
+  - name: a listing flock runs as a shell command
+    code: |-
+      import subprocess
+      subprocess.run("flock /tmp/l -c 'ls -l'", shell=True)
+    card: none
+
+  - name: an import of a module the pad loads first after an unpack into a folder put on sys.path
+    code: |-
+      import zipfile
+      zipfile.ZipFile('bundle.zip').extractall('vendor')
+      import sys
+      sys.path.insert(0, 'vendor')
+      import json
+    card: none
+
+  - name: an import of a module Python ships that a cell imported before an unpack into a folder put on sys.path
+    earlier:
+      - |-
+        import csv
+      - |
+        import zipfile
+        zipfile.ZipFile('bundle.zip').extractall('vendor')
+        import sys
+        sys.path.insert(0, 'vendor')
+    code: |-
+      import csv
+      print(csv.QUOTE_ALL)
+    card: none
+
+  - name: a recursion an earlier cell defines that only prints at its third literal
+    earlier:
+      - |-
+        def f(p):
+            if p == 'a':
+                f('b')
+            elif p == 'b':
+                f('c')
+            else:
+                print(p)
+    code: |-
+      f('a')
+    card: none
+
+  - name: two functions an earlier cell defines that call each other with eight literals and only print
+    earlier:
+      - |-
+        def f(x):
+            print(x)
+            g(1)
+            g(2)
+            g(3)
+            g(4)
+            g(5)
+            g(6)
+            g(7)
+            g(8)
+        def g(y):
+            print(y)
+            f(1)
+            f(2)
+            f(3)
+            f(4)
+            f(5)
+            f(6)
+            f(7)
+            f(8)
+    code: |-
+      f(0)
     card: none

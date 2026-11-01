@@ -1008,14 +1008,17 @@ async def test_repeated_compaction_preserves_mixed_outcomes_past_unparsable_code
 
 
 def test_compaction_keeps_code_and_outcome_in_order(project):
+    """A compacted cell keeps its code, whether it failed, and the line it
+    stopped at, which the check reads what it bound before by."""
     pad = _runtime(project, *_FILLERS, "total_6 = 6")
     pad.cells[1].error = "ValueError"
+    pad.cells[1].stopped_at = 1
     assert pad._compact_cells()
     pad.cells.append(Cell(code="total_7 = 7", stdout="", stderr="", error=None))
     assert pad._compact_cells(), "a second compaction folds the first one's summary in too"
     assert pad.compacted_cells == (
         CompactedCell(code="total_0 = 0", errored=False),
-        CompactedCell(code="total_1 = 1", errored=True),
+        CompactedCell(code="total_1 = 1", errored=True, stopped_at=1),
         CompactedCell(code="total_2 = 2", errored=False),
     )
 
@@ -1047,6 +1050,42 @@ async def test_a_remote_reset_forgets_compacted_ownership(project):
     session = await _gated_session(project, elicitor=elicitor)
     assert await _hold()(session, pad=pad, code="open('stock.csv', 'w').write('final')") is not None
     assert elicitor.asked == 1
+
+
+# A traceback whose text names a line the cell never reached: the hint the
+# boot puts before a ModuleNotFoundError carries the name the cell asked for.
+_FORGED_LINE = (
+    "'File \"<scratchpad>\", line 99, in <module>' is not installed, and imports never install anything.\n"
+    'Traceback (most recent call last):\n  File "<scratchpad>", line 2, in <module>\nModuleNotFoundError: x\n'
+)
+
+
+@pytest.mark.parametrize("error, stopped_at, held", [
+    ("KeyError: 'amount'", 5, False),
+    ("FileNotFoundError: x", 2, True),
+    ("KeyError: 'amount'", None, True),
+    (_FORGED_LINE, 2, True),
+], ids=["stopped-after-the-def", "stopped-before-the-def", "no-stop-line", "a-line-the-error-text-names"])
+async def test_a_helper_a_failed_cell_defined_before_it_stopped_is_bound(project, error, stopped_at, held):
+    """After a script ran, a call to a name no read code binds holds the
+    cell. A cell that failed bound what it ran before the line the boot read
+    from its traceback (`Cell.stopped_at`), so a later call to a helper it
+    defined there runs with no card; one it defined past that line, or with
+    no line to go by, may never have been bound. A line the error's text
+    names, which the cell can shape, counts for nothing."""
+    pad = _runtime(
+        project,
+        "import subprocess, sys\nsubprocess.run([sys.executable, 'scripts/clean.py'], check=True)",
+        "import pandas as pd\norders = pd.read_csv('stock.csv')\ndef summarize_orders(o):\n"
+        "    return o.groupby('site').sum()\nprint(orders['amount'].sum())",
+    )
+    pad.cells[1].error = error
+    pad.cells[1].stopped_at = stopped_at
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    outcome = await _hold()(session, pad=pad, code="print(summarize_orders(orders))")
+    assert (outcome is not None) is held
+    assert elicitor.asked == int(held)
 
 
 def test_a_refused_cell_is_not_working_code_for_the_artifact_pipeline():

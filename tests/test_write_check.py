@@ -455,6 +455,7 @@ class _UnreadCase(BaseModel):
     card: Literal["unchecked", "read", "none"]
     earlier: list[str] = []
     earlier_errored: list[bool] = []
+    earlier_stopped_at: list[int | None] = []
     files: dict[str, str] = {}
     empty_project: bool = False
     kinds: list[str] = []
@@ -479,9 +480,12 @@ def test_cells_that_run_code_the_check_cant_read(case: "_UnreadCase", tmp_path, 
         (tmp_path / rel).write_text(text)
     monkeypatch.chdir(tmp_path)
     snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    # Passed only where a row gives it, so the same rows run against a check
+    # that takes no stop lines.
+    stopped = {"earlier_stopped_at": case.earlier_stopped_at} if case.earlier_stopped_at else {}
     writes = find_cell_writes(
         code=case.code, earlier_code=case.earlier, snapshots=(snap,),
-        http_rules=parse_http_write_rules(_UNREAD_CODE_RULE), earlier_errored=case.earlier_errored)
+        http_rules=parse_http_write_rules(_UNREAD_CODE_RULE), earlier_errored=case.earlier_errored, **stopped)
     if case.card == "none":
         assert not writes.needs_approval()
     elif case.card == "unchecked":
@@ -538,6 +542,168 @@ def test_an_import_of_a_module_written_since_the_turn_began_is_unchecked(tmp_pat
     for code in ("import job", "from pkg import run"):
         assert find_cell_writes(code=code, earlier_code=(), snapshots=(snap,)).unchecked
     assert not find_cell_writes(code="import helpers", earlier_code=(), snapshots=(snap,)).needs_approval()
+
+
+def test_an_import_of_a_module_written_since_the_turn_began_in_a_folder_on_sys_path_is_unchecked(
+    tmp_path, monkeypatch,
+):
+    """A module a cell unpacks this turn into a folder the cells put on
+    `sys.path`, or a generator writes there, is on disk but missing from the
+    snapshot the turn began with, so an import of it after the change is
+    unchecked; so is any other import, of a module Python ships too, which
+    what the archive unpacked may shadow, but of one the pad's boot loaded
+    before any cell ran. Without the unpack, an installed package's import
+    through the folder runs no unread code."""
+    (tmp_path / "stock.csv").write_text("x")
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    job = "import requests\ndef refresh():\n    requests.post('https://erp.example.test/api/orders')\n"
+    for rel in ("vendor/erp_sync.py", "vendor/src/erp_pkg/core.py", ".anton/artifacts/sales/backend.py"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(job)
+    (tmp_path / "vendor/src/erp_pkg/__init__.py").write_text("")
+    unpack = "import zipfile\nzipfile.ZipFile('bundle.zip').extractall('vendor')"
+    for earlier, code in [
+        ([unpack], "import sys\nsys.path.insert(0, 'vendor')\nimport erp_sync\nerp_sync.refresh()"),
+        ([unpack], "import sys\nsys.path.insert(0, 'vendor/src')\nfrom erp_pkg.core import refresh\nrefresh()"),
+        ([], "import sys\nsys.path.insert(0, '.anton/artifacts/sales')\nfrom backend import refresh\nrefresh()"),
+        ([], f"{unpack}\nimport sys\nsys.path.insert(0, 'vendor')\nimport erp_sync\nerp_sync.refresh()"),
+    ]:
+        assert find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,)).unchecked, code
+    shadowing = "import sys\nsys.path.insert(0, 'vendor')\nimport pandas"
+    assert find_cell_writes(code=shadowing, earlier_code=[unpack], snapshots=(snap,)).unchecked
+    shipped = "import sys\nsys.path.insert(0, 'vendor')\nimport csv"
+    assert find_cell_writes(code=shipped, earlier_code=[unpack], snapshots=(snap,)).unchecked
+    for earlier, code in [([unpack], "import sys\nsys.path.insert(0, 'vendor')\nimport json"), ([], shadowing)]:
+        assert not find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,)).needs_approval(), code
+
+
+def test_literal_code_an_earlier_cell_runs_is_parsed_once_as_the_conversation_grows(snap, monkeypatch):
+    """Literal code an earlier cell runs is cached by where it runs
+    (`_Cell.order`), which a growing conversation doesn't move, so the next
+    turn's check, with one more earlier cell, parses it no more."""
+    from anton.core.utils import write_check
+
+    monkeypatch.setattr(write_check, "_EXEC_CELLS", write_check._ExecCells(budget=1_000_000))
+    literal = "\n".join(f"rows_{n} = [r for r in range({n})]" for n in range(40))
+    earlier = [f"exec({literal!r})", "print(0)"]
+    assert not find_cell_writes(code="print(1)", earlier_code=earlier, snapshots=(snap,)).needs_approval()
+    parsed: list[str] = []
+    parse = write_check._parse_ran
+
+    def counting(text: str):
+        parsed.append(text)
+        return parse(text)
+
+    monkeypatch.setattr(write_check, "_parse_ran", counting)
+    earlier.append("print(1)")
+    assert not find_cell_writes(code="print(2)", earlier_code=earlier, snapshots=(snap,)).needs_approval()
+    assert literal not in parsed
+
+
+def _flags_under_ifs(start: str, flag: str, *, count: int) -> str:
+    """A cell that builds `cmd` from `start` with `flag`, its `{i}` the if's
+    number, added under each of `count` ifs, then runs it."""
+    adds = "".join(f"if os.environ.get('F{i}'):\n    cmd = cmd + {flag.format(i=i)}\n" for i in range(count))
+    run = "subprocess.run(cmd)" if start.startswith("[") else "os.system(cmd)"
+    return f"import os, subprocess\ncmd = {start}\n{adds}{run}"
+
+
+@pytest.mark.parametrize("earlier, code, card", [
+    (["def f(a, b):\n    print(a, b)\n" + "".join(f"    f({i}, b)\n" for i in range(1, 16))
+      + "".join(f"    f(a, {i})\n" for i in range(1, 16))], "f(0, 0)", "none"),
+    (["def step(state, retries=0):\n" + "".join(
+        f"    if state == 's{i}':\n        step('s{i + 1}', retries)\n        step('s{i}', retries=1)\n"
+        for i in range(40)
+    ) + "    print(state)"], "step('s0')", "none"),
+    ([], "import subprocess\ncmd = ['ls']\n" + "".join(f"cmd = cmd + ['-{c}']\n" for c in "abcdefghijklmnop")
+     + "subprocess.run(cmd)", "none"),
+    ([], "import subprocess\ncmd = ['ls']\n" + "".join(f"cmd = cmd + ['-v{i}']\n" for i in range(300))
+     + "subprocess.run(cmd)", "none"),
+    ([], "import os\ncmd = 'ls'\n" + "".join(f"cmd = cmd + ' -v{i}'\n" for i in range(300)) + "os.system(cmd)", "none"),
+    (["cmd = 'ls'", *(f"cmd = cmd + ' -v{i}'" for i in range(200))], "import os\nos.system(cmd)", "none"),
+    (["cmd = ['ls']", *(f"cmd = cmd + ['-v{i}']" for i in range(200))], "import subprocess\nsubprocess.run(cmd)", "none"),
+    (["m = 'js'", *("m = m + ''" for _ in range(200)), "m = m + 'on'"], "import importlib\nimportlib.import_module(m)",
+     "none"),
+    (["cmd = ['python3', 'job.py']", *(f"cmd = cmd + ['-v{i}']" for i in range(200))],
+     "import subprocess\nsubprocess.run(cmd)", "unchecked"),
+    ([], _flags_under_ifs("['ls']", "['-l']", count=30), "none"),
+    ([], _flags_under_ifs("['ls']", "['-a{i}']", count=30), "none"),
+    ([], _flags_under_ifs("['python3', 'job.py']", "['-v']", count=30), "unchecked"),
+    ([], _flags_under_ifs("'ls'", "' -l'", count=30), "unchecked"),
+], ids=["recursion-with-two-literal-parameters", "recursive-state-machine", "command-list-rebuilt-sixteen-times",
+        "command-list-rebuilt-three-hundred-times", "command-text-rebuilt-three-hundred-times",
+        "command-text-rebuilt-over-two-hundred-cells", "command-list-rebuilt-over-two-hundred-cells",
+        "module-name-rebuilt-over-two-hundred-cells", "python-command-rebuilt-over-two-hundred-cells",
+        "command-list-flag-under-thirty-ifs", "command-list-thirty-flags-under-thirty-ifs",
+        "python-command-flag-under-thirty-ifs", "command-text-flag-under-thirty-ifs"])
+def test_a_recursion_or_a_rebuilt_command_is_read_in_well_under_a_second(earlier, code, card, snap):
+    """A function the chain already reads is read again for other literals
+    only so often (`_REREAD_LIMIT`); a name rebound from itself reads each
+    binding once (`_Reader.recalled`), down a long chain of them in a loop
+    (`_Reader.reading_ahead`), with no deep recursion; and the commands a
+    name rebuilt under many ifs gives are capped (`_capped`): so none of
+    them stalls the turn or crashes the check. Past `_COMMAND_LIMIT`
+    choices, a command's text is one the check can't read, and its program
+    with it."""
+    started = time.perf_counter()
+    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,))
+    assert time.perf_counter() - started < 1
+    assert writes.unchecked is (card == "unchecked")
+    assert writes.needs_approval() is (card != "none")
+
+
+def test_a_large_literal_cell_after_unread_code_is_walked_no_more_than_with_none(snap, monkeypatch):
+    """What code the check can't read may have filled is read from the lists
+    a cell keeps (`_Cell.stores`, `_Cell.calls`), not by walking the cell
+    again, so a cell of literal rows costs about the same after unread code
+    as with none."""
+    import ast
+
+    rows = "rows = [" + ", ".join(f"{{'id': {i}, 'tags': ['a', 'b']}}" for i in range(300)) + "]\n"
+    code = rows + "import pandas as pd\nprint(pd.DataFrame(rows).shape)\n"
+    walk = ast.walk
+    walks: list[ast.AST] = []
+
+    def counting(node: ast.AST):
+        top = node.body[0] if isinstance(node, ast.Module) and node.body else node
+        if isinstance(top, ast.Assign) and isinstance(top.value, ast.List) and len(top.value.elts) == 300:
+            walks.append(node)
+        return walk(node)
+
+    monkeypatch.setattr(ast, "walk", counting)
+    seeds = {"none": [], "a script ran": ["import subprocess, sys\nsubprocess.run([sys.executable, 'job.py'])"]}
+    counts = {}
+    for seed, earlier in seeds.items():
+        walks.clear()
+        assert not find_cell_writes(code=code, earlier_code=earlier, snapshots=(snap,)).needs_approval()
+        counts[seed] = len(walks)
+    assert counts["a script ran"] == counts["none"]
+
+
+def test_a_long_conversation_after_unread_code_reads_few_stores_for_what_it_filled(snap, monkeypatch):
+    """A store whose value reads only names read code bound before it,
+    through methods that run no code, holds nothing code the check can't
+    read made (`_plainly_read`), and a pass after the first reads again only
+    stores that read a name the pass before filled more; so a long
+    conversation after unread code reads few of its stores for that."""
+    from anton.core.utils import write_check
+
+    earlier = ["import pandas as pd\ndf = pd.read_csv('stock.csv')", "SCRIPT = open('helpers.py').read()",
+               "exec(SCRIPT)"]
+    earlier += [f"part_{i} = df[df.qty > {i}].copy()\nagg_{i} = part_{i}.groupby('sku').agg(total=('qty', 'sum'))\n"
+                f"agg_{i}.to_csv('agg_{i}.csv')\nprint(agg_{i}.total.sum())" for i in range(300)]
+    read: list[object] = []
+    filled_names = write_check._filled_names
+
+    def counting(node, at):
+        read.append(node)
+        return filled_names(node, at)
+
+    monkeypatch.setattr(write_check, "_filled_names", counting)
+    writes = find_cell_writes(code="print(agg_3.total.sum())", earlier_code=earlier, snapshots=(snap,))
+    assert not writes.needs_approval()
+    assert len(read) < 30
 
 
 @pytest.mark.parametrize("code", [
