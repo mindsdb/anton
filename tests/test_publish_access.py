@@ -13,6 +13,7 @@ import pytest
 from anton import publisher
 from anton.publisher import (
     ArtifactOwnedByOtherUserError,
+    ArtifactShareOrgRequiredError,
     build_access_payload,
     hash_access_password,
     publish,
@@ -338,3 +339,73 @@ def test_an_upload_error_without_a_readable_reason_keeps_the_status_line(tmp_pat
         _publish_with(tmp_path, reject, report_id="r")
     assert str(err.value) == "HTTP Error 502: Rejected"
     assert err.value.read() == body
+
+
+# ---------------------------------------------------------------------------
+# 403 share_org_required
+# ---------------------------------------------------------------------------
+
+# The reason the upload service gives when it refuses an org-wide share.
+_SHARE_ORG_REASON = (
+    "Sharing an artifact with everyone in the organization needs the "
+    "artifacts.share_org permission."
+)
+
+
+def test_the_share_org_refusal_keeps_the_names_others_match():
+    """The upload service answers with this code, and cowork-server's publish
+    tool tells its agent this sentence word for word."""
+    assert publisher.SHARE_ORG_REQUIRED_CODE == "share_org_required"
+    assert publisher.SHARE_ORG_REQUIRED_INSTRUCTION == (
+        "Do not publish it publicly or to a wider audience instead. Tell the user that "
+        "an organization admin can share it with everyone, or offer to share it with "
+        "specific people by email."
+    )
+
+
+def test_publish_raises_a_typed_error_when_the_account_may_not_share_with_the_organization(
+    tmp_path: Path,
+):
+    body = {"error": _SHARE_ORG_REASON, "code": "share_org_required"}
+    original = _http_error(403, body)
+
+    def reject(url, api_key, **kwargs):
+        raise original
+
+    with pytest.raises(ArtifactShareOrgRequiredError) as err:
+        _publish_with(
+            tmp_path, reject, access={"mode": "restricted", "emails": [], "org_allowed": True},
+        )
+    assert err.value.reason == _SHARE_ORG_REASON
+    assert err.value.__cause__ is original
+    # Still the 403 a caller that reads the body itself, as cowork-server does, expects.
+    assert isinstance(err.value, urllib.error.HTTPError)
+    assert err.value.code == 403
+    assert err.value.read() == json.dumps(body).encode()
+
+
+def test_a_share_org_refusal_without_a_reason_is_still_the_share_org_error(tmp_path: Path):
+    def reject(url, api_key, **kwargs):
+        raise _http_error(403, {"code": "share_org_required"})
+
+    with pytest.raises(ArtifactShareOrgRequiredError) as err:
+        _publish_with(tmp_path, reject, report_id="r")
+    assert err.value.reason == "Rejected"
+
+
+@pytest.mark.parametrize(
+    "status, body",
+    [
+        (403, {"error": "Permission denied", "code": "permission_denied"}),
+        (403, {"error": _SHARE_ORG_REASON}),
+        (500, {"error": "boom", "code": "share_org_required"}),
+    ],
+)
+def test_only_a_403_share_org_required_is_the_share_org_error(tmp_path: Path, status, body):
+    def reject(url, api_key, **kwargs):
+        raise _http_error(status, body)
+
+    with pytest.raises(urllib.error.HTTPError) as err:
+        _publish_with(tmp_path, reject, report_id="r")
+    assert type(err.value) is urllib.error.HTTPError
+    assert err.value.code == status

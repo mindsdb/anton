@@ -87,6 +87,36 @@ class ArtifactOwnedByOtherUserError(RuntimeError):
         super().__init__(message)
 
 
+# The upload service's 403 code for a publish that newly shares an artifact
+# with everyone in its organization from an account without the
+# artifacts.share_org permission. cowork-server's sharing contract module
+# (cowork/services/sharing_contract.py) and the Cowork app's
+# (src/renderer/cowork/lib/sharingContract.js) hold the same code under this
+# name.
+SHARE_ORG_REQUIRED_CODE = "share_org_required"
+
+# What the agent is told after a SHARE_ORG_REQUIRED_CODE refusal, so it does
+# not pick a wider audience on its own. The publish tool names people only by
+# email and has no teams, so the sentence offers only that. cowork-server's
+# sharing contract module (cowork/services/sharing_contract.py) holds the same
+# sentence under this name.
+SHARE_ORG_REQUIRED_INSTRUCTION = (
+    "Do not publish it publicly or to a wider audience instead. Tell the user "
+    "that an organization admin can share it with everyone, or offer to share "
+    "it with specific people by email."
+)
+
+
+class ArtifactShareOrgRequiredError(urllib.error.HTTPError):
+    """The upload service refused to share the artifact with everyone in its organization.
+
+    ``reason`` is the body's ``error``, or the HTTP status text when the body
+    has none. Callers must not retry with a wider audience, such as public:
+    tell the user instead. It stays an HTTPError with the 403 and its body, so
+    a caller that reads the body itself still can.
+    """
+
+
 #: Bytes of an upload error's body that publish reads. The service's JSON
 #: answers are far smaller.
 _ERROR_BODY_MAX_BYTES = 65_536
@@ -105,11 +135,12 @@ def _upload_error(err: urllib.error.HTTPError) -> Exception:
     """The error publish raises for the upload's *err*, from one read of its body.
 
     A 409 ``artifact_owned_by_other_user`` is ArtifactOwnedByOtherUserError.
-    Every other answer stays an HTTPError with the same status and headers.
-    Its reason is the body's ``error`` when the body has one, so the message a
-    caller shows says why ("HTTP Error 500: <error>"), and its body can be
-    read again by a caller that reads it itself. A body that can't be read
-    leaves *err* as it is.
+    Every other answer stays an HTTPError with the same status and headers,
+    and a 403 ``share_org_required`` is the HTTPError subclass
+    ArtifactShareOrgRequiredError. Its reason is the body's ``error`` when the
+    body has one, so the message a caller shows says why ("HTTP Error 500:
+    <error>"), and its body can be read again by a caller that reads it
+    itself. A body that can't be read leaves *err* as it is.
     """
     try:
         body = err.read(_ERROR_BODY_MAX_BYTES)
@@ -121,6 +152,10 @@ def _upload_error(err: urllib.error.HTTPError) -> Exception:
         answer = _UploadErrorBody()
     if err.code == 409 and answer.code == OWNED_BY_OTHER_USER_CODE:
         return ArtifactOwnedByOtherUserError()
+    if err.code == 403 and answer.code == SHARE_ORG_REQUIRED_CODE:
+        return ArtifactShareOrgRequiredError(
+            err.filename, err.code, answer.error or err.msg, err.hdrs, io.BytesIO(body)
+        )
     return urllib.error.HTTPError(
         err.filename, err.code, answer.error or err.msg, err.hdrs, io.BytesIO(body)
     )
@@ -564,6 +599,10 @@ def publish(
         ArtifactOwnedByOtherUserError: the service answered 409
                   `artifact_owned_by_other_user` — another owner holds
                   `report_id`. Do not retry without `report_id`.
+        ArtifactShareOrgRequiredError: the service answered 403
+                  `share_org_required`: this account may not newly share
+                  the artifact with everyone in its organization. Do not
+                  retry with a wider audience.
         urllib.error.HTTPError: any other answer the service refused the
                   upload with. Its reason is the body's `error` when it has
                   one, and its body reads again (`_upload_error`).

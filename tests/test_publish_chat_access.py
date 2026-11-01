@@ -169,6 +169,44 @@ async def test_publish_says_why_the_upload_service_refused(tmp_path, status, rea
     assert not (root / "sales" / ".published.json").exists()
 
 
+@pytest.mark.parametrize("reason", [
+    # The reason the upload service gives when it refuses an org-wide share.
+    pytest.param(
+        "Sharing an artifact with everyone in the organization needs the "
+        "artifacts.share_org permission.",
+        id="service-reason",
+    ),
+    pytest.param("Sharing needs the [bold]artifacts.share_org[/bold] permission.", id="brackets"),
+])
+@pytest.mark.asyncio
+async def test_publish_says_once_why_the_account_may_not_share_with_the_organization(
+    tmp_path, reason,
+):
+    root = _make_artifact(tmp_path)
+    refusal = urllib.error.HTTPError(
+        "https://view.test/upload", 403, "Forbidden", {},
+        io.BytesIO(json.dumps({"error": reason, "code": "share_org_required"}).encode()),
+    )
+
+    async def fake_prompt_access(*a, **k):
+        return {"mode": "restricted", "emails": [], "org_allowed": True}
+
+    console = Console(record=True, width=200)
+    settings = _settings(root, tmp_path)
+    with mock.patch("anton.publisher.minds_request", side_effect=refusal), \
+         mock.patch("anton.publish_access.prompt_access", side_effect=fake_prompt_access), \
+         mock.patch("webbrowser.open"):
+        await chat._handle_publish(console, settings, file_arg="sales/report.html")
+
+    text = console.export_text()
+    assert f"Publish failed: {reason}" in text
+    assert text.count(reason) == 1
+    assert "HTTP Error" not in text
+    assert not (root / "sales" / ".published.json").exists()
+    # Not an auth failure: the key stays in place.
+    assert settings.minds_api_key == "key"
+
+
 @pytest.mark.asyncio
 async def test_publish_reports_an_artifact_owned_by_another_account(tmp_path):
     from anton.publisher import ArtifactOwnedByOtherUserError
