@@ -20,6 +20,7 @@ import uuid
 
 from pydantic import BaseModel, Field, field_validator
 
+from anton.core.artifacts.geography import GeographyRequirement
 from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
@@ -104,7 +105,9 @@ from anton.core.turn_cost import UNKNOWN_ROLE, TurnCost
 from anton.core.tools.tool_defs import (
     ASK_USER_TOOL,
     CREATE_ARTIFACT_TOOL,
+    CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
     GENERATE_ARTIFACT_TOOL,
+    GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
@@ -115,7 +118,9 @@ from anton.core.tools.tool_defs import (
     SELECT_PATH_TOOL,
     SELECT_PATH_TOOL_PICK_ONLY,
     STATIC_CREATE_ARTIFACT_TOOL,
+    STATIC_CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
     STATIC_GENERATE_ARTIFACT_TOOL,
+    STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
     STATIC_UPDATE_ARTIFACT_METADATA_TOOL,
     UPDATE_ARTIFACT_METADATA_TOOL,
     ToolDef,
@@ -2137,6 +2142,7 @@ class ChatSession:
             coding_api_key=coding_conn.api_key or "",
             coding_api_key_supplier=key_supplier,
             coding_base_url=coding_conn.base_url or "",
+            coding_flavor=coding_conn.flavor,
             cells=config.cells,
             workspace_path=config.workspace.base if config.workspace else None,
             session_id=config.session_id,
@@ -2176,6 +2182,8 @@ class ChatSession:
         # ends with a line for each artifact with a page that did not pass.
         # Reset every turn.
         self._page_checks: dict[PageKey, RenderStatus] = {}
+        self._geography_requirements: dict[PageKey, GeographyRequirement] = {}
+        self._artifact_geography_request = ""
         # The pages whose findings an unverified check already listed for
         # the agent this turn, in a cell's result or in generate_artifact's
         # `checks_skipped`. A later unverified check of such a page lists
@@ -2189,7 +2197,9 @@ class ChatSession:
         # The pages a check this turn left with no repair cells and failed, or
         # unverified after an edit, put back or not. Never cleared within the
         # turn: while it is non-empty the completion check is skipped, since
-        # its rounds would edit such a page again. Reset every turn.
+        # its rounds would edit such a page again. generate_artifact refuses
+        # such a page's artifact, and a cell's change to the page is written
+        # back (`tool_handlers.check_cell_artifacts`). Reset every turn.
         self._out_of_repairs: set[PageKey] = set()
         # The views the check that failed a page this turn measured, kept
         # until the page passes. Until then, a check of the page that no
@@ -2937,6 +2947,15 @@ class ChatSession:
             getattr(cell, "code", "")
         )
 
+    def _direct_reports_enabled(self) -> bool:
+        """`direct_reports` from the settings the host passed; True without
+        them. Read from the settings object, not a config field: a host that
+        builds `ChatSessionConfig` itself still passes its settings."""
+        settings = getattr(self, "_settings", None)
+        if settings is None:
+            return True
+        return bool(getattr(settings, "direct_reports", True))
+
     async def _build_system_prompt(self, user_message: str = "") -> str:
         import datetime as _dt
 
@@ -3025,6 +3044,7 @@ class ChatSession:
             ),
             deployment_identity=getattr(self, "_deployment_identity", None),
             fullstack_offered=getattr(self, "_fullstack_offered", True),
+            direct_reports=self._direct_reports_enabled(),
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
             output_dir=self._output_dir,
@@ -3284,14 +3304,22 @@ class ChatSession:
         # entirely so the LLM doesn't try to use them.
         if self._workspace is not None:
             fullstack = self._fullstack_offered
-            self.tool_registry.register_tool(CREATE_ARTIFACT_TOOL if fullstack else STATIC_CREATE_ARTIFACT_TOOL)
+            direct = self._direct_reports_enabled()
+            if fullstack:
+                create = CREATE_ARTIFACT_TOOL if direct else CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS
+                generate = GENERATE_ARTIFACT_TOOL if direct else GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS
+            else:
+                create = STATIC_CREATE_ARTIFACT_TOOL if direct else STATIC_CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS
+                generate = (STATIC_GENERATE_ARTIFACT_TOOL if direct
+                            else STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS)
+            self.tool_registry.register_tool(create)
             self.tool_registry.register_tool(LIST_ARTIFACTS_TOOL)
             self.tool_registry.register_tool(
                 UPDATE_ARTIFACT_METADATA_TOOL if fullstack else STATIC_UPDATE_ARTIFACT_METADATA_TOOL
             )
             if fullstack:
                 self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
-            self.tool_registry.register_tool(GENERATE_ARTIFACT_TOOL if fullstack else STATIC_GENERATE_ARTIFACT_TOOL)
+            self.tool_registry.register_tool(generate)
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""
@@ -5581,6 +5609,8 @@ class ChatSession:
         # session per turn get the same result either way.
         self._artifacts_touched = set()
         self._page_checks = {}
+        self._geography_requirements = {}
+        self._artifact_geography_request = ""
         self._unverified_findings_listed = set()
         self._repair_cells = {}
         self._out_of_repairs = set()
@@ -5639,6 +5669,10 @@ class ChatSession:
         (e.g. an eval-run id) without any change to Anton.
         """
         user_input = _scrub_user_input(user_input)
+        self._artifact_geography_request = (
+            user_input if isinstance(user_input, str)
+            else "\n".join(block.get("text", "") for block in user_input if block.get("type") == "text")
+        )
         # Stamp the inbound user turn here, not in _append_history: tool_result
         # and synthetic user-role messages also flow through append and must
         # NOT be stamped.

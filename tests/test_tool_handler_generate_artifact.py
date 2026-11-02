@@ -60,6 +60,81 @@ def _make_artifact(tmp_path: Path, type: str = "fullstack-stateless-app") -> str
     return store.create(name="Clock", description="d", type=type).slug
 
 
+async def test_new_page_single_call_registers_then_uses_the_same_generator(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTON_STATIC_SINGLE_CALL", "on")
+    captured = []
+
+    async def generate(**kw):
+        captured.append(kw)
+        return {"status": "generated", "files_written": ["index.html"], "summary": "ok", "trace": []}
+
+    monkeypatch.setattr(gen_pkg, "generate", generate)
+    session = _session(tmp_path)
+    request = {"name": "Regional sales", "user_request": "Show regional sales", "agent_understanding": "A sales report"}
+    _, result = await _collect(session, request)
+    assert captured[0]["artifact_type"] == "html-app"
+    assert captured[0]["primary"] == "index.html"
+    store = ArtifactStore(tmp_path / "artifacts")
+    assert store.open(captured[0]["slug"]).name == "Regional sales"
+    assert '"status": "generated"' in result
+    # A follow-up with the existing slug edits the same resource, even if a
+    # caller also supplies a name. It must not create a duplicate artifact.
+    _, _ = await _collect(session, {**request, "slug": captured[0]["slug"]})
+    assert captured[1]["slug"] == captured[0]["slug"]
+    assert len(list((tmp_path / "artifacts").glob("*/metadata.json"))) == 1
+
+
+async def test_new_page_single_call_validates_before_creating_resource(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTON_STATIC_SINGLE_CALL", "on")
+    _, result = await _collect(_session(tmp_path), {"name": "Sales", "user_request": "Show sales"})
+    assert "agent_understanding" in result
+    assert not list((tmp_path / "artifacts").glob("*/metadata.json"))
+
+
+async def test_new_page_single_call_is_disabled_by_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("ANTON_STATIC_SINGLE_CALL", raising=False)
+    _, result = await _collect(_session(tmp_path), {"name": "Sales", "user_request": "Show sales", "agent_understanding": "Sales"})
+    assert "`slug` is required" in result
+    assert not list((tmp_path / "artifacts").glob("*/metadata.json"))
+
+
+async def test_new_page_failure_keeps_identity_and_authoritative_data_for_retry(tmp_path, monkeypatch):
+    import json
+    monkeypatch.setenv("ANTON_STATIC_SINGLE_CALL", "on")
+    async def generate(**kw):
+        (kw["artifact_path"] / "observed-data.json").write_text('{"revenue":42}')
+        (kw["artifact_path"] / "presentation-program.js").write_text("await CoworkPage({title:'Revenue'});")
+        return "Frontend verification failed: repair the actual page"
+    monkeypatch.setattr(gen_pkg,"generate",generate)
+    session=_session(tmp_path)
+    _,outcome=await _collect_raw(session,{"name":"Revenue","user_request":"Show revenue","agent_understanding":"Revenue report"})
+    result=json.loads(outcome.content)
+    assert not outcome.ok and result["status"]=="failed"
+    store=ArtifactStore(tmp_path/"artifacts")
+    assert store.open(result["slug"]).name=="Revenue"
+    assert Path(result["observed_data_file"]).read_text()=='{"revenue":42}'
+    assert Path(result["last_saved_component_program"]).is_file()
+    assert len(list((tmp_path/"artifacts").glob("*/metadata.json")))==1
+    assert result["message"].count("Error: artifact generation failed") == 1
+    assert "slug" in result["if_the_user_asks_to_retry"]
+
+
+def test_single_call_schema_has_no_top_level_combinator_and_covers_both_deployments(monkeypatch):
+    import importlib
+    import anton.core.tools.tool_defs as tool_defs
+
+    monkeypatch.setenv("ANTON_STATIC_SINGLE_CALL", "on")
+    try:
+        importlib.reload(tool_defs)
+        for tool in (tool_defs.GENERATE_ARTIFACT_TOOL, tool_defs.STATIC_GENERATE_ARTIFACT_TOOL):
+            schema = tool.input_schema
+            assert not {"anyOf", "oneOf", "allOf"} & set(schema)
+            assert "name" in schema["properties"] and "slug" not in schema["required"]
+    finally:
+        monkeypatch.delenv("ANTON_STATIC_SINGLE_CALL")
+        importlib.reload(tool_defs)
+
+
 async def test_fsm_failure_is_wrapped_with_report_instruction(tmp_path: Path, monkeypatch):
     slug = _make_artifact(tmp_path)
 
@@ -1108,6 +1183,27 @@ async def test_a_rebuild_that_failed_its_browser_check_reports_the_repair_cells_
         assert body["instruction"].endswith(
             "do not call it or any view in it browser-verified, tested or working."
         )
+
+
+async def test_an_artifact_with_a_page_out_of_repair_cells_is_not_rebuilt(tmp_path: Path, monkeypatch):
+    """A rebuild would write a page the turn must leave as its last check
+    left it: the call is refused before any run."""
+    from anton.core.tools import tool_handlers
+
+    slug = _make_artifact(tmp_path, type="html-app")
+    runs = []
+
+    async def fake_generate(**kw):
+        runs.append(kw)
+        return _browser_check_failed()
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    session = _session(tmp_path)
+    session._out_of_repairs = {tool_handlers.PageKey(slug, "dashboard.html")}
+    _, result = await _collect_raw(session, {"slug": slug, "user_request": "rebuild it", "agent_understanding": "a page"})
+
+    assert runs == []
+    assert result == tool_handlers._OUT_OF_REPAIRS_REFUSED.format(slug=slug, pages=f"`{slug}/dashboard.html`")
 
 
 async def test_a_view_whose_script_did_not_parse_comes_back_to_repair_in_its_own_script(tmp_path: Path, monkeypatch):

@@ -26,14 +26,17 @@ import hmac
 import json
 import logging
 import os
+import shutil
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
-from anton.cloud_turn.contract import TurnRequestV1
+from anton.cloud_turn.contract import TurnRequestV1, TurnSkillEntry, parse_turn_skills
 from anton.core.llm.tracing import HARNESS_ANTON
+from anton.core.memory.always_on_skills import AlwaysOnSkill, render_always_on_skills
 from anton.core.tools.skill_format import SKILL_FILE
 
 if TYPE_CHECKING:
@@ -131,13 +134,22 @@ _MEMORY_GLOBAL_ROOT_ENV = "ANTON_CLOUD_MEMORY_GLOBAL_ROOT"
 
 #: Per-turn skills staging: a FRESH mkdtemp each turn (unlike _MEMORY_DIR).
 #: Skills carry no cross-turn state, and the unpredictable path stops prior-turn
-#: cell code planting a symlink or two turns wiping each other's tree. Used only
-#: as a fallback when no shared mount is configured; see _SKILLS_ROOT_ENV below.
+#: cell code planting a symlink or two turns wiping each other's tree. Used for
+#: every turn except one that takes the mount fallback (_SKILLS_ROOT_ENV
+#: below). The name carries the staging process's pid. A turn's SkillStore
+#: reads only its own folder (settings.skills_root). remove_staged_skills
+#: deletes the folder when the turn ends, or, for a turn killed before then,
+#: when a later turn stages. A folder whose pid names another running process
+#: stays: usually a turn still running, and rarely a process that reused a
+#: killed turn's pid.
 _SKILLS_DIR_PREFIX = "anton-cloud-skills-"
 
-#: Pod-side mount of the org's skills tree. When set, skills are read from it
-#: directly and the wire payload's `skills` block is ignored: cowork-server owns
-#: that tree and the pod sees the live copy, not a per-turn snapshot.
+#: Pod-side mount of the org's whole skills tree. Only a pod whose controller
+#: mounts that tree has it set. It holds every member's skills, so it is
+#: read only as a rollout fallback, for a request with no `skills` block at
+#: all, which comes from a cowork-server that does not send the block. A
+#: request that carries a block names the complete set this turn may see and
+#: never reads the mount.
 _SKILLS_ROOT_ENV = "ANTON_CLOUD_SKILLS_ROOT"
 _CLOUD_TURN_ENV = "ANTON_CLOUD_TURN"
 _DATASOURCE_CORRELATION_ENV = "ANTON_CLOUD_DATASOURCE_CORRELATION_ID"
@@ -210,46 +222,140 @@ def _safe_skill_file(skill_dir: Path, rel: str) -> Path | None:
     return candidate
 
 
-def _stage_skills(skills: dict | None) -> Path:
+def _staged_pid(path: Path) -> int | None:
+    """The pid staging wrote into `path`'s name (``<prefix><pid>-``), or None.
+
+    Staging always writes the pid, so a name with none came from somewhere
+    else: in a pod, from cell code, since a new image starts with an empty
+    temp dir.
+    """
+    head, sep, _ = path.name.removeprefix(_SKILLS_DIR_PREFIX).partition("-")
+    if not sep or not (head.isascii() and head.isdigit()):
+        return None
+    return int(head)
+
+
+def _running_elsewhere(pid: int) -> bool:
+    """Whether `pid` is a running process other than this one.
+
+    The entrypoint (``__main__.main``) runs one turn per process, so a folder
+    carrying this process's pid belongs to this turn or an earlier one, never
+    to a turn running beside it. A pid with no process behind it is a turn
+    killed before its own cleanup ran.
+    """
+    if pid == os.getpid():
+        return False
+    # Signal 0 is CTRL_C_EVENT on Windows, and cloud turns run only on Linux.
+    if sys.platform == "win32":
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (OSError, OverflowError):
+        # PermissionError is another user's live process. Anything else can't
+        # be told apart from one, so the folder stays.
+        return True
+    return True
+
+
+def remove_staged_skills() -> None:
+    """Delete every staged skills folder that no running turn owns.
+
+    Staging calls it first, which clears what a killed turn left behind, and
+    the entrypoint calls it when the turn ends, which clears the turn's own
+    folder. A runner can exec several turns in one pod, each in its own
+    process, and those turns share one temp dir. They can overlap, and nothing
+    stops an earlier turn when the next one starts. So an entry whose name
+    carries another running process's pid stays, whatever kind of entry it
+    is, and nothing is logged for it.
+
+    Staging makes only folders, and names each with its pid. So a symlink,
+    file or FIFO under the prefix came from cell code and holds no skills. It
+    is unlinked, which removes a symlink itself and never its target, and a
+    failure to unlink it logs only at debug level, since it would otherwise
+    warn on every turn. A folder whose name carries no pid was not staged here
+    either, and it stays, with a debug line. Cell code can write anywhere in
+    the temp dir, so deleting its folder protects nothing, and a folder it
+    locked would warn on every turn.
+
+    Best-effort: nothing here fails the turn. A staged folder that can't be
+    deleted logs a warning on every call, on purpose, because it may still
+    hold skills that a later turn's cells can read.
+    """
+    try:
+        staged = list(Path(tempfile.gettempdir()).glob(f"{_SKILLS_DIR_PREFIX}*"))
+    except OSError:
+        logger.warning("skills: could not list staged skills folders", exc_info=True)
+        return
+    for path in staged:
+        pid = _staged_pid(path)
+        if pid is not None and _running_elsewhere(pid):
+            continue
+        if os.path.islink(path) or not os.path.isdir(path):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.debug(
+                    "skills: could not remove a planted entry under the staging prefix",
+                    exc_info=True,
+                )
+            continue
+        if pid is None:
+            logger.debug(
+                "skills: skipped %r, a folder whose name carries no staging pid", path.name
+            )
+            continue
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            pass  # another process removed it first
+        except OSError:
+            logger.warning("skills: could not remove a staged skills folder", exc_info=True)
+
+
+def _stage_skills(skills: dict[str, TurnSkillEntry] | None) -> Path:
     """The session's skills_root.
 
-    With the org tree mounted (_SKILLS_ROOT_ENV set), this is the mount itself
-    and nothing is staged: cowork-server owns that tree and the pod reads it
-    live, so the wire payload's `skills` block is ignored entirely.
+    *skills* is the request's block as parse_turn_skills read it, which already
+    dropped bad slugs and files that are not text. When present, it is the
+    complete set of skills this turn may recall or list: they are materialized
+    into a fresh per-turn dir for SkillStore to read, and the org mount
+    (_SKILLS_ROOT_ENV) is never used, since it holds every member's private and
+    team skills. An empty block means no skills. A path that escapes its
+    skill's folder, or a file that can't be written, is dropped, and no single
+    bad entry fails the turn. Builtins resolve via SkillStore regardless; a
+    wire skill shadowing one is logged (the prompt mandates some).
 
-    Without a mount (desktop, CI), the request's skills are materialized into a
-    fresh per-turn dir for SkillStore to read, as before. Wire data is
-    untrusted (like memory): bad slugs and escaping paths are dropped, no
-    single bad entry fails the turn. Builtins resolve via SkillStore
-    regardless; a wire skill shadowing one is logged (the prompt mandates some).
+    Only a request with no block at all takes the rollout fallback: it reads
+    the mount, with a warning, on a pod that has one, and stages no skills on
+    any other.
+
+    Either way, staged folders that no running turn owns are deleted first
+    (remove_staged_skills), which clears what a turn killed before its own
+    cleanup left behind.
     """
+    remove_staged_skills()
     mounted = os.environ.get(_SKILLS_ROOT_ENV, "").strip()
-    if mounted:
+    # The rollout fallback described at _SKILLS_ROOT_ENV.
+    if skills is None and mounted:
+        logger.warning(
+            "skills: request has no skills block; reading the whole mounted "
+            "org skills tree (rollout fallback)"
+        )
         root = Path(mounted)
         root.mkdir(parents=True, exist_ok=True)
         return root
 
     from anton.core.memory import skills as skills_memory
-    from anton.core.tools.skill_format import validate_name
 
-    dest = Path(tempfile.mkdtemp(prefix=_SKILLS_DIR_PREFIX))
+    dest = Path(tempfile.mkdtemp(prefix=f"{_SKILLS_DIR_PREFIX}{os.getpid()}-"))
 
-    entries = skills if isinstance(skills, dict) else {}
-    for slug, entry in entries.items():
-        try:
-            validate_name(str(slug))
-        except ValueError:
-            logger.warning("skills: dropping invalid slug %r", slug)
-            continue
-        if (skills_memory._BUILTIN_SKILLS_ROOT / str(slug)).is_dir():
+    for slug, entry in (skills or {}).items():
+        if (skills_memory._BUILTIN_SKILLS_ROOT / slug).is_dir():
             logger.warning("skills: %r overrides the packaged builtin skill", slug)
-        files = entry.get("files") if isinstance(entry, dict) else None
-        if not isinstance(files, dict):
-            continue
-        skill_dir = dest / str(slug)
-        for rel, text in files.items():
-            if not isinstance(rel, str) or not isinstance(text, str):
-                continue
+        skill_dir = dest / slug
+        for rel, text in entry.files.items():
             path = _safe_skill_file(skill_dir, rel)
             if path is None:
                 logger.warning("skills: dropping unsafe path %r in %r", rel, slug)
@@ -265,6 +371,38 @@ def _stage_skills(skills: dict | None) -> Path:
                     path.unlink(missing_ok=True)
                 logger.warning("skills: could not stage %r in %r", rel, slug, exc_info=True)
     return dest
+
+
+def _always_on_skills(skills: dict[str, TurnSkillEntry] | None) -> list[AlwaysOnSkill]:
+    """The request's skills marked ``always_on``, each read once for the prompt.
+
+    *skills* is the same parsed block _stage_skills writes, which still stages
+    these for recall. An entry whose SKILL.md is missing or does not parse is
+    skipped, never fails the turn. Always read from the request, since only it
+    says which skills apply to this person.
+    """
+    from anton.core.tools.skill_format import parse_skill_text, validate_name
+
+    out: list[AlwaysOnSkill] = []
+    for slug, entry in (skills or {}).items():
+        if not entry.always_on:
+            continue
+        text = entry.files.get(SKILL_FILE)
+        parsed = parse_skill_text(text, slug) if text is not None else None
+        body = parsed.instructions.strip() if parsed is not None else ""
+        if not body:
+            logger.warning("skills: always-on %r has no readable SKILL.md body", slug)
+            continue
+        # parse_skill_text skips validation, so a frontmatter name can be
+        # arbitrarily long; parse_turn_skills already checked the slug with
+        # validate_name.
+        name = parsed.name or slug
+        try:
+            validate_name(name)
+        except ValueError:
+            name = slug
+        out.append(AlwaysOnSkill(name=name, body=body))
+    return out
 
 
 #: Per-file cap on a reported draft. Skills are small text, so the cap only
@@ -758,15 +896,18 @@ def build_cloud_chat_session(
     settings.resolve_workspace(str(base))
     if request.model:
         settings.planning_model = request.model
-    # Mounted (_SKILLS_ROOT_ENV set): the organization's own live skills tree,
-    # owned by cowork-server, read directly. Unmounted (desktop, CI): the
-    # request's skills are staged outside the workspace instead, since that PVC
-    # outlives the turn and cells could read anything left under it. Builtins
-    # resolve via SkillStore's package root regardless.
-    settings.skills_root = _stage_skills(request.skills)
-    # That tree holds every member's skills, and the pod can't tell the
-    # asker's own apart, so an artifact build here follows only anton's
-    # built-ins (SkillStore.list_for_artifacts) until the host names folders.
+    # The request's skills block is the complete set this turn may recall or
+    # list, read once here and staged outside the workspace (that PVC outlives
+    # the turn and cells could read anything left under it). Only a request
+    # with no block takes the rollout fallback to the org mount
+    # (_SKILLS_ROOT_ENV), which holds every member's skills. Builtins resolve
+    # via SkillStore's package root regardless.
+    turn_skills = parse_turn_skills(request.skills)
+    settings.skills_root = _stage_skills(turn_skills)
+    # The pod can't tell the asker's own skills apart from ones shared with
+    # them (and the mount fallback holds everyone's), so an artifact build
+    # here follows only anton's built-ins (SkillStore.list_for_artifacts)
+    # until the host names folders.
     settings.skills_artifact_roots = []
     # Skills the agent builds stage here instead of the store, and the entrypoint
     # reports them for cowork to surface. ON the workspace, unlike everything
@@ -865,7 +1006,9 @@ def build_cloud_chat_session(
             runtime_context=build_runtime_context(settings, cloud_datasource=request.datasource),
             # The delivery half and the credential half of the prompt context;
             # the desktop harness injects its own via `_turn_style_context`.
-            suffix=_POD_PROMPT_SUFFIX,
+            # Org and team skills cowork marks always-on follow, so they hold
+            # on every turn rather than only when recalled.
+            suffix=_POD_PROMPT_SUFFIX + render_always_on_skills(_always_on_skills(turn_skills)),
         ),
         # WHERE the user was, which this pod cannot know on its own — only the
         # deployment does, so cowork sends it (ENG-1459). Absent when the pod is

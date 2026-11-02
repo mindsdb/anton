@@ -314,12 +314,20 @@ When a page the turn's edits made worse fails with no repair cells left,
 anton puts the copy back. Once a check leaves a page with no repair cells
 and failed, or unverified after the cell edited it, put back or not, the
 turn skips the completion check (`ChatSession._out_of_repairs`): its
-continuation rounds would only edit that page again. A `generate_artifact` run on an existing
+continuation rounds would only edit that page again. For the rest of the
+turn such a page stays as that check left it (`TurnPages.hold`): a later
+cell's change to it is written back unchecked
+(`TurnPages.put_held_back`), and `generate_artifact` refuses to rebuild
+its artifact. Files the page loads, such as its scripts, data and
+stylesheets, are not held. A `generate_artifact` run on an existing
 artifact that fails, stops over budget, crashes or is abandoned by the
 turn puts the main page back as it was when the run started: as the turn
 found it, when the run was the first to change it. A build that fails only
 its browser check comes back to repair with the same comparison
-(`changes_from_previous`). A run that never wrote (cancelled, needs
+(`changes_from_previous`), unless the page has no repair cells left: then
+the result asks for no repair and carries no comparison, the page is out
+of repair cells, and a page the build made worse goes back to how the
+turn found it. A run that never wrote (cancelled, needs
 confirmation) puts nothing back. On a sandboxed
 deployment the turn ends with a line for each page put back as the turn
 found it and for each view broken, blanked, removed or shrunk
@@ -433,6 +441,11 @@ cells without ever appearing in code strings or the LLM transcript. Workspace
 The subprocess env also carries the coding model/provider configuration
 (`ANTON_SCRATCHPAD_MODEL`, `ANTON_SCRATCHPAD_PROVIDER`, plus the appropriate
 SDK key/base-URL variables) so the in-pad LLM bridge works without extra setup.
+For an OpenAI-compatible coding provider, `ANTON_SCRATCHPAD_FLAVOR` carries the
+API the provider sends on (`openai` for the Responses API, `minds-passthrough`,
+or `openai-compatible-generic` for chat completions), so a cell's model calls
+use the same API as the agent's. A host that passes no flavor leaves the pad to
+infer one from the provider name and base URL (`OpenAIProvider.resolve_web_flavor`).
 
 ## The in-pad LLM bridge: `_ScratchpadLLM`
 

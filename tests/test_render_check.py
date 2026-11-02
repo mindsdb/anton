@@ -1878,8 +1878,11 @@ async def test_what_an_unverified_check_found_reaches_the_agent_once_per_page(se
         "#world-map has no drawn content (it may still have been drawing)"
     )
     first, second = (result["content"] for result in _tool_results(session))
-    assert first.endswith(f"[artifact lint]\n{unchecked}\n{blank}")
-    assert second.endswith(f"[artifact lint]\n{unchecked}")
+    # The unspecified map request also gets static advice; it does not change
+    # the browser's unavailable status or repeat its earlier blank finding.
+    assert "[artifact lint]\n" in first and "Geography check:" in first
+    assert first.endswith(f"{unchecked}\n{blank}")
+    assert second.endswith(unchecked)
     assert streamed.endswith(_LINE)
 
 
@@ -1993,8 +1996,9 @@ async def test_a_check_that_listed_nothing_leaves_the_next_one_free_to_list(serv
     results = [result["content"] for result in _tool_results(session)]
     assert len(pad.ran) == 3 and len(service.requests) == 3
     unchecked = f"{slug}/index.html — not checked in a browser: the check ran out of time"
+    assert "[artifact lint]\n" in results[0] and "Geography check:" in results[0]
     assert results[0].endswith(
-        f"[artifact lint]\n{slug}/index.html — not checked in a browser: "
+        f"{slug}/index.html — not checked in a browser: "
         "the render-check service is busy or not ready (HTTP 503)"
     )
     assert unchecked in results[1] and unchecked in results[2]
@@ -2232,7 +2236,9 @@ def _llm_response(text: str, tool_input: dict | None = None, tool_id: str = "tc_
     )
 
 
-def _session_for(project: Path, replies: list | Callable[[str], list], *, verdicts=()):
+def _session_for(
+    project: Path, replies: list | Callable[[str], list], *, verdicts=(), artifact_type: str = "html-app"
+):
     """A ChatSession whose model plays `replies` in order and whose pad writes
     the artifact's page. `replies` may be a function of the artifact's slug,
     for a reply that names it. Returns (session, pad, slug)."""
@@ -2245,7 +2251,7 @@ def _session_for(project: Path, replies: list | Callable[[str], list], *, verdic
     workspace = MagicMock(base=project)
     workspace.artifacts_dir = project / "artifacts"
     slug = ArtifactStore(workspace.artifacts_dir).create(
-        name="Shipments map", description="d", type="html-app", primary="index.html"
+        name="Shipments map", description="d", type=artifact_type, primary="index.html"
     ).slug
     pad = _PagePad(workspace.artifacts_dir / slug / "index.html")
 
@@ -2291,8 +2297,9 @@ async def test_the_cell_result_carries_the_screenshot_on_the_streaming_path(serv
 
     assert [r["body"]["html"] for r in service.requests] == [_PAGE.replace("hi", "cell 1")]
     text, caption, image = _tool_results(session)[0]["content"]
+    assert "[artifact lint]\n" in text["text"] and "Geography check:" in text["text"]
     assert text["text"].endswith(
-        f"[artifact lint]\n{slug}/index.html — loaded in a browser the way the app preview loads it, as it opens: no problems found"
+        f"{slug}/index.html — loaded in a browser the way the app preview loads it, as it opens: no problems found"
     )
     assert caption["text"].startswith(render_check.SCREENSHOT_CAPTION)
     assert image["source"]["data"] == _SHOT
@@ -3562,6 +3569,25 @@ async def test_the_second_failed_repair_lists_no_findings_and_says_none_are_left
     ]
 
 
+async def test_a_page_out_of_repair_cells_gets_no_geography_repair_warning(service, tmp_path):
+    """"draw the map" asks for a map the page lacks, which only warns: the
+    warning says how to repair the page. Once the page has no repair cells
+    left, its result says only that."""
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    session = _repair_session()
+    session._artifact_geography_request = "draw the map"
+    session._geography_requirements = {}
+    _failed_build(session, slug, "index.html")
+    service.answer(_FAILED_ROUTES)
+    label = f"{slug}/index.html"
+
+    first = await _repair_cell(session, store, slug, "index.html", "first repair")
+    second = await _repair_cell(session, store, slug, "index.html", "second repair")
+
+    assert first.messages[0].startswith(f"{label} — Geography check: no recognized map implementation")
+    assert second.messages == [f"{label} — {tool_handlers._NO_REPAIRS_LEFT}"]
+
+
 async def test_a_repair_that_drops_a_view_the_failed_check_measured_fails(service, tmp_path):
     """The failed build's check measured the page as it opens and behind
     "Map" and "3D Globe". The repair's check passes, but finds no "3D
@@ -3801,6 +3827,48 @@ async def test_a_page_out_of_repair_cells_ends_the_turn_without_the_completion_c
     assert session._out_of_repairs == {tool_handlers.PageKey(slug, "index.html")}
     (turn,) = [c for c in send.call_args_list if c.args[1] == "turn_completed"]
     assert (turn.kwargs["verification_skipped"], turn.kwargs["verifier_failure"]) == ("true", "out_of_repairs")
+
+
+async def test_a_fullstack_page_out_of_repair_cells_ends_the_turn_without_the_completion_check(
+    service, project, policy
+):
+    """The render check doesn't load a fullstack app's page, but the request
+    needs a map the page lacks, so each check fails it. Past its two repair
+    cells, a completion check that keeps asking for more work is not asked."""
+    service.answer(_FAILED_ROUTES)
+    session, pad, slug = _session_for(project, [
+        _write(1), _write(2), _write(3), _llm_response("The map failed its check."),
+        _write(4), _llm_response("Fixed it."),
+    ], verdicts=_keeps_asking_for_more(), artifact_type="fullstack-stateless-app")
+    session._scratchpads._cell_sandbox = policy
+
+    await _final_text(session, prompt="Show a world map of sites")
+
+    assert service.requests == []
+    assert session._llm.generate_object_code.await_count == 0
+    assert len(pad.ran) == 3
+    assert session._out_of_repairs == {tool_handlers.PageKey(slug, "index.html")}
+
+
+async def test_a_cell_that_edits_a_page_out_of_repair_cells_is_written_back(service, project, policy):
+    """The model ignores the result that says not to edit the page again and
+    runs a fourth cell: the page goes back to how the last check left it,
+    unchecked, and the result says so."""
+    service.answer(_FAILED_ROUTES)
+    session, pad, slug = _session_for(project, [
+        _write(1), _write(2), _write(3), _write(4), _llm_response("The globe failed its browser check."),
+    ])
+    session._scratchpads._cell_sandbox = policy
+
+    streamed, _ = await _final_text(session)
+
+    assert len(pad.ran) == 4
+    assert len(service.requests) == 3
+    assert pad.page.read_text() == _PAGE.replace("hi", "cell 3")
+    last = _tool_results(session)[-1]["content"]
+    text = last if isinstance(last, str) else "".join(b.get("text", "") for b in last if isinstance(b, dict))
+    assert text.endswith(f"{slug}/index.html — {tool_handlers._HELD_BACK}")
+    assert streamed.endswith(_FAILED_LINE)
 
 
 async def test_a_latched_verifier_still_books_its_own_skip_with_a_page_out_of_repair_cells(
