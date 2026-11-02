@@ -34,6 +34,10 @@ counted against your account rather than your machine. They are random
 identifiers, not your email address or name. The standalone `anton` CLI never
 sends them.
 
+An operator running Anton for others can label their deployment with
+`ANTON_DEPLOYMENT_ENV` (for example `staging`); the measurement events then
+carry it as `environment`. Unset, the label is empty.
+
 **No query content is ever sent** — no prompts, no message
 text, no tool output, no file contents, no file paths, no credentials, no
 hostnames, no email addresses. The installation ID is a one-way SHA-256 hash of
