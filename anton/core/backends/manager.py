@@ -76,6 +76,7 @@ class ScratchpadManager:
         cell_sandbox: CellSandbox | None = None,
         coding_api_key_supplier: ApiKeySupplier | None = None,
         coding_flavor: str | None = None,
+        internet_research_enabled: bool = True,
     ) -> None:
         self._pads: dict[str, ScratchpadRuntime] = {}
         self._runtime_factory = runtime_factory
@@ -112,6 +113,15 @@ class ScratchpadManager:
         self._factory_takes_coding_flavor = self._probe_factory_kwarg(
             runtime_factory, "coding_flavor"
         )
+        self._internet_research_enabled = internet_research_enabled
+        self._factory_takes_internet_research = self._probe_factory_kwarg(
+            runtime_factory, "internet_research_enabled"
+        )
+        if not internet_research_enabled and not self._factory_takes_internet_research:
+            logger.warning(
+                "this scratchpad runtime factory takes no internet_research_enabled, so "
+                "its pads keep web_search() although internet research is off"
+            )
         # Unlike the kwargs above, a policy is never dropped: a factory that
         # cannot take it would run agent code unlocked. It must name the
         # parameter, since a bare **kwargs can swallow it, and get_or_create
@@ -340,6 +350,12 @@ class ScratchpadManager:
                     else {}
                 ),
                 **({"cell_sandbox": self._cell_sandbox} if self._cell_sandbox is not None else {}),
+                # Passed only when off, so a factory that predates it keeps working.
+                **(
+                    {"internet_research_enabled": False}
+                    if not self._internet_research_enabled and self._factory_takes_internet_research
+                    else {}
+                ),
             )
             if self._cell_sandbox is not None and getattr(pad, "cell_sandbox", None) != self._cell_sandbox:
                 raise TypeError(

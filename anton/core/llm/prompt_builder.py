@@ -19,6 +19,7 @@ from .prompts import (
     NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT,
     NO_DIRECT_REPORTS_VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
     NO_DIRECT_REPORTS_VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
+    NO_INTERNET_CHAT_SYSTEM_PROMPT,
     STATIC_ARTIFACTS_PROMPT,
     VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
     VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
@@ -96,6 +97,7 @@ class ChatSystemPromptBuilder:
         direct_generation: bool = False,
         fullstack_offered: bool = True,
         direct_reports: bool = True,
+        internet_research: bool = True,
     ) -> str:
         """Build the '## Procedural memory' section listing available skills.
 
@@ -105,6 +107,8 @@ class ChatSystemPromptBuilder:
         or no skills are saved — the caller skips the section entirely.
         ``fullstack_offered`` False leaves out `build-fullstack-backend`,
         whose line offers the fullstack types the tools leave out.
+        ``internet_research`` False leaves out `public-data-sources`, a
+        catalog of internet endpoints the session must not use.
         """
         if skill_store is None:
             return ""
@@ -137,6 +141,8 @@ class ChatSystemPromptBuilder:
             if not direct_reports:
                 when = DIRECT_REPORTS_SKILL_NOTE.sub("", when).strip()
             if not label or (not fullstack_offered and label == "build-fullstack-backend"):
+                continue
+            if not internet_research and label == "public-data-sources":
                 continue
             if when:
                 lines.append(f"- `{label}` — {when}")
@@ -185,11 +191,15 @@ class ChatSystemPromptBuilder:
         deployment_identity: DeploymentIdentity | None = None,
         fullstack_offered: bool = True,
         direct_reports: bool = True,
+        internet_research: bool = True,
     ) -> str:
         """``fullstack_offered`` False (`live_app_slots.fullstack_offered`)
         leaves out the fullstack types, the backend section and the backend
         skill's line: nothing on this deployment would start the app's
-        backend."""
+        backend. ``internet_research`` False
+        (`ChatSessionConfig.internet_research_enabled`) swaps the internet
+        guidance for "use the connected data only" and leaves out the
+        public-data-sources skill's line."""
         direct_generation = (os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on"
                              and any(getattr(tool, "name", "") == "generate_artifact"
                                      and "name" in tool.input_schema.get("properties", {})
@@ -231,7 +241,8 @@ class ChatSystemPromptBuilder:
             configured_block=system_prompt_context.runtime_context,
             product_block=list(product_lines) if product_lines else None,
         )
-        prompt += CHAT_SYSTEM_PROMPT.format(
+        chat_prompt = CHAT_SYSTEM_PROMPT if internet_research else NO_INTERNET_CHAT_SYSTEM_PROMPT
+        prompt += chat_prompt.format(
             # PRODUCT carries the configured name. An explicit deployment must
             # not also introduce itself as Anton in the prompt's opening line.
             identity_lead="You are an AI coworker" if deployment_identity is not None else "You are Anton",
@@ -267,7 +278,7 @@ class ChatSystemPromptBuilder:
         # they stay in the shared part ahead of anything project-specific.
         procedural_memory = self._build_procedural_memory_section(
             skill_store, direct_generation=direct_generation, fullstack_offered=fullstack_offered,
-            direct_reports=direct_reports,
+            direct_reports=direct_reports, internet_research=internet_research,
         )
         if procedural_memory:
             prompt += procedural_memory

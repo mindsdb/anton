@@ -135,6 +135,14 @@ SCRATCHPAD_TOOL = ToolDef(
     handler=handle_scratchpad,
 )
 
+# With internet research off the pad's web_search() only raises, so the
+# description doesn't offer it.
+NO_INTERNET_SCRATCHPAD_TOOL = replace(SCRATCHPAD_TOOL, description=cut_spans(
+    SCRATCHPAD_TOOL.description,
+    ("web_search(query) routes", "sample(var) inspects", ""),
+    ("get_llm, agentic_loop, web_search, sample, and progress", " are already", "get_llm, agentic_loop, sample, and progress"),
+))
+
 
 MEMORIZE_TOOL = ToolDef(
     name="memorize",

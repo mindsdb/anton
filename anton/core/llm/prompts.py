@@ -646,3 +646,55 @@ SCRATCHPAD_SILENT_TIMEOUT_NUDGE = (
     "If it dies silently again, treat the code as stuck (find the blocking "
     "call) rather than too big. Reuse the SAME scratchpad; do not rename it."
 )
+
+
+# ---------------------------------------------------------------------------
+# Internet research off (`ChatSessionConfig.internet_research_enabled`): the
+# agent answers from the connected data only. Every passage that sends it to
+# the internet, or names the scratchpad's web_search() helper, is cut. This is
+# a rule for the agent, not a network block: scratchpad code can still reach
+# the internet, for package installs among other things.
+# ---------------------------------------------------------------------------
+
+NO_INTERNET_DATA_SOURCES = """\
+DATA SOURCES:
+- Internet research is turned off for this session. Work only with the data \
+sources the user connected and the files they gave you. Do not download \
+datasets, call public APIs, or look anything up on the internet, whether \
+through a tool or from scratchpad code.
+- If that data cannot answer the question, say so instead of looking elsewhere.
+
+"""
+
+NO_INTERNET_CHAT_SYSTEM_PROMPT = cut_spans(
+    CHAT_SYSTEM_PROMPT,
+    ("- **Internet access**: You DO have access", "- **Scratchpad execution**", ""),
+    ("INTERNET & LIVE INFORMATION:\n", "PROACTIVE FOLLOW-UP SUGGESTIONS:", NO_INTERNET_DATA_SOURCES),
+    ("web scraping, ", "plotting", ""),
+    ("- web_search(query) answers", "- get_llm, agentic_loop, and web_search", ""),
+    (
+        "- get_llm, agentic_loop, and web_search are already available",
+        " as globals",
+        "- get_llm and agentic_loop are already available",
+    ),
+    ("(HTTP 403, import error", ", pause", "(an error, a timeout, an empty result, etc.)"),
+    (
+        "- Try creative workarounds first:",
+        "\n- Exhaust",
+        "- Try creative workarounds first: a different query, join or parsing approach, "
+        "alternate libraries, another of the connected data sources, retrying with backoff, etc.",
+    ),
+)
+
+NO_INTERNET_RESILIENCE_NUDGE = cut_spans(
+    RESILIENCE_NUDGE,
+    (
+        "different headers/user-agent",
+        ". If those also fail",
+        "a different query, an alternate library, or another of the connected data sources",
+    ),
+)
+
+NO_INTERNET_SCRATCHPAD_INSTALL_NUDGE = cut_spans(
+    SCRATCHPAD_INSTALL_NUDGE, ("web_search, ", "sample and progress", "")
+)
