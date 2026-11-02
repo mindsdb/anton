@@ -75,6 +75,7 @@ class ScratchpadManager:
         workspace_env_overlay: dict[str, str] | None = None,
         cell_sandbox: CellSandbox | None = None,
         coding_api_key_supplier: ApiKeySupplier | None = None,
+        coding_flavor: str | None = None,
     ) -> None:
         self._pads: dict[str, ScratchpadRuntime] = {}
         self._runtime_factory = runtime_factory
@@ -83,6 +84,7 @@ class ScratchpadManager:
         self._coding_api_key = coding_api_key
         self._coding_api_key_supplier = coding_api_key_supplier
         self._coding_base_url = coding_base_url
+        self._coding_flavor = coding_flavor
         self._cells = cells
         self._workspace_path = workspace_path
         # Conversation id, forwarded to each runtime so its namespace snapshot is
@@ -106,6 +108,9 @@ class ScratchpadManager:
         )
         self._factory_takes_api_key_supplier = self._probe_factory_kwarg(
             runtime_factory, "coding_api_key_supplier"
+        )
+        self._factory_takes_coding_flavor = self._probe_factory_kwarg(
+            runtime_factory, "coding_flavor"
         )
         # Unlike the kwargs above, a policy is never dropped: a factory that
         # cannot take it would run agent code unlocked. It must name the
@@ -327,6 +332,11 @@ class ScratchpadManager:
                 **(
                     {"coding_api_key_supplier": self._coding_api_key_supplier}
                     if self._factory_takes_api_key_supplier and self._coding_api_key_supplier is not None
+                    else {}
+                ),
+                **(
+                    {"coding_flavor": self._coding_flavor}
+                    if self._factory_takes_coding_flavor and self._coding_flavor is not None
                     else {}
                 ),
                 **({"cell_sandbox": self._cell_sandbox} if self._cell_sandbox is not None else {}),

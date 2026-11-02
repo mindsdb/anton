@@ -16,6 +16,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from anton.core.artifacts import geography as geography_mod
 from anton.core.tools.generate_artifact import orchestrator as orchestrator_mod
 from anton.core.tools.generate_artifact import prompts
 from anton.core.tools.generate_artifact import verifiers as verifiers_mod
@@ -363,6 +364,12 @@ def _both(prompt_keys: tuple[str, ...], marker: str) -> tuple[tuple[str, str], .
 
 
 RULES: tuple[Rule, ...] = (
+    Rule("errors", "Geography check: no recognized ",
+         _both(_FRONT_BOTH, "Never invent or hand-transcribe coastlines")),
+    Rule("warnings", "Geography check: no recognized ",
+         _both(_FRONT_BOTH, "Earth geography only")),
+    Rule("warnings", "Geography check: custom ",
+         _both(_FRONT_BOTH, "Authentic user-supplied GeoJSON")),
     # ── verify_frontend: applies to html-app and the fullstack frontend alike ──
     Rule("errors", "Frontend must be a valid HTML document with an explicit <body>...</body>.",
          _both(_FRONT_BOTH, "explicit `<body>`")),
@@ -504,6 +511,7 @@ def _extract_all() -> ExtractResult:
     for module, funcs in (
         (verifiers_mod, _VERIFIER_FUNCS),
         (orchestrator_mod, _ORCHESTRATOR_FUNCS),
+        (geography_mod, ("check_geography",)),
     ):
         src = Path(module.__file__).read_text(encoding="utf-8")
         part = extract_rules(src, funcs)
