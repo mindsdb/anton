@@ -668,6 +668,7 @@ def test_with_live_apps_on_the_verifier_fails_a_script_from_another_host():
 @pytest.mark.parametrize("markup, blocked", [
     ('<script type="importmap">{"imports": {"a": "https://unpkg.com/a.js", "b": "./b.js"}}</script>',
      "https://unpkg.com/a.js"),
+    ('<script type="importmap">{"imports": {"a": "https://unpkg.com/a.js"}}</script foo>', "https://unpkg.com/a.js"),
     ('<script type="module">export { x } from "https://esm.sh/x";</script>', "https://esm.sh/x"),
     ("<script type=module>import(`https://esm.sh/y`)</script>", "https://esm.sh/y"),
     ('<script src="https://cdn.jsdelivr.net.evil.com/x.js"></script>', "cdn.jsdelivr.net.evil.com"),

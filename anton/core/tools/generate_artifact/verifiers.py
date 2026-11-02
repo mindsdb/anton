@@ -276,7 +276,7 @@ _HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
 # `<script type="importmap">`: the addresses its `imports` and `scopes` map
 # modules to load under `script-src` too.
 _IMPORT_MAP = re.compile(
-    r"""<script\b[^>]*\btype\s*=\s*['"]?importmap['"]?[^>]*>(?P<body>.*?)</script\s*>""", re.I | re.S
+    r"""<script\b[^>]*\btype\s*=\s*['"]?importmap['"]?[^>]*>(?P<body>.*?)</script\b[^>]*>""", re.I | re.S
 )
 # `_MODULE_IMPORT`, plus `export ... from` and backtick quotes, which a live
 # app's script rule fails and the preview's advisory warning never needed.
