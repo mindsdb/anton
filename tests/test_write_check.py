@@ -526,6 +526,46 @@ def test_cells_that_run_code_the_check_cant_read(case: "_UnreadCase", tmp_path, 
         assert kind not in writes.kinds()
 
 
+class _EverydayContext(BaseModel):
+    """What ran before an everyday cell (`write_check_everyday_cells.yaml`)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    earlier: list[str]
+
+
+class _EverydayCell(BaseModel):
+    """An everyday cell that changes nothing the card holds."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    code: str
+
+
+_EVERYDAY = yaml.safe_load((Path(__file__).parent / "fixtures" / "write_check_everyday_cells.yaml").read_text())
+_EVERYDAY_RULE = _EVERYDAY["rule"]
+_EVERYDAY_CONTEXTS = [_EverydayContext.model_validate(c) for c in _EVERYDAY["contexts"]]
+_EVERYDAY_CELLS = [_EverydayCell.model_validate(c) for c in _EVERYDAY["cells"]]
+
+
+@pytest.mark.parametrize("cell", _EVERYDAY_CELLS, ids=[c.name for c in _EVERYDAY_CELLS])
+@pytest.mark.parametrize("context", _EVERYDAY_CONTEXTS, ids=[c.name for c in _EVERYDAY_CONTEXTS])
+def test_everyday_cells_raise_no_card(context: "_EverydayContext", cell: "_EverydayCell", tmp_path, monkeypatch):
+    """A cell that changes nothing the card holds, as plots, reads, GETs,
+    exports to new files and archives don't, raises no card, in a fresh
+    conversation and after earlier cells that ran code the check can't
+    read or defined helpers."""
+    (tmp_path / "stock.csv").write_text("x")
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    writes = find_cell_writes(
+        code=cell.code, earlier=[EarlierCell(code=code) for code in context.earlier], snapshots=(snap,),
+        http_rules=parse_http_write_rules(_EVERYDAY_RULE))
+    assert not writes.needs_approval(), _card_prompt(writes)
+
+
 # Literal code too deep for Python's parser fails when it runs, so it runs
 # nothing: the parser runs out of stack on each.
 _TOO_DEEP = "1" + "+1" * 20_000
@@ -789,6 +829,8 @@ def _flags_under_ifs(start: str, flag: str, *, count: int) -> str:
       f"sys.modules['m{i}'] = m{i}" for i in range(1000)], "print(1)", "none"),
     (["def rows():\n" + "".join(f"    a{i} = {i}\n" for i in range(2000)) + "    return ['a', 'b']\n"],
      "import subprocess\n" + "for v in rows():\n    subprocess.run(['echo', v])\n" * 300, "none"),
+    ([], "def h0(x):\n    help(x)\n" + "".join(
+        f"def h{i}(x):\n" + f"    h{i - 1}(x)\n" * 12 for i in range(1, 7)) + "h6(open('stock.csv').read())\n", "none"),
 ], ids=["recursion-with-two-literal-parameters", "recursive-state-machine", "recursive-state-machine-of-eighty-states",
         "command-list-rebuilt-sixteen-times",
         "command-list-rebuilt-three-hundred-times", "command-text-rebuilt-three-hundred-times",
@@ -803,7 +845,8 @@ def _flags_under_ifs(start: str, flag: str, *, count: int) -> str:
         "python-command-text-rebuilt-twice-on-its-first-line", "call-after-thirty-nested-true-ifs-after-unread-code",
         "call-after-thirty-nested-true-ifs-beside-a-global-setter", "import-at-the-end-of-150-stored-modules-each-from-the-last",
         "import-at-the-end-of-300-stored-modules-each-from-the-last",
-        "a-thousand-cells-that-store-a-module-unread-code-filled", "loops-over-what-a-two-thousand-line-function-returns"])
+        "a-thousand-cells-that-store-a-module-unread-code-filled", "loops-over-what-a-two-thousand-line-function-returns",
+        "a-parameter-handed-down-six-helpers-each-called-twelve-times"])
 def test_a_recursion_or_a_rebuilt_command_is_read_in_well_under_a_second(earlier, code, card, snap):
     """A function the chain already reads is read again for other literals
     only so often (`_REREAD_LIMIT`); a name rebound from itself reads each

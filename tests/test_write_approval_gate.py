@@ -692,6 +692,28 @@ async def test_a_cell_that_runs_code_the_check_cant_read_waits_and_says_so(proje
     assert writes.unchecked and writes.needs_approval()
 
 
+@pytest.mark.parametrize("answer", [APPROVE, CANCEL], ids=["approve", "cancel"])
+@pytest.mark.parametrize("exec_cell", [
+    EXEC_SCRIPT_CELL,
+    EXEC_SCRIPT_CELL + RELAYED_POST,
+], ids=["post-in-the-script", "post-beside-the-exec"])
+async def test_a_cell_the_check_cant_read_that_posts_to_a_relayed_host_raises_one_card(project, answer, exec_cell):
+    """The relay holds a POST to a host it relays, so the cell's own card
+    leaves that request out. A cell the check can't read still waits on the
+    one "can't be checked" card before it runs: no second card from the gate
+    for the relayed request, and the request it shows is not the relayed
+    one. On Approve the cell runs, and its POST then raises the relay's own
+    card through approve_held_write; on Cancel nothing runs, so it never
+    reaches the relay."""
+    harness = _session(project, SCRIPT_CELL, exec_cell, http=RELAY_RULE, relay_hosts=RELAYED)
+    seen = await _run(harness=harness, answers=[answer])
+    assert len(seen.cards) == 1 and seen.ran_before == [1]
+    prompt = seen.cards[0].request.prompt
+    assert "This step can't be checked before it runs." in prompt
+    assert RELAYED not in prompt, "the relay holds the request, so the card leaves it out"
+    assert harness.pad.ran == ([SCRIPT_CELL, exec_cell] if answer == APPROVE else [SCRIPT_CELL])
+
+
 # ── One unanswered card ───────────────────────────────────────────────────
 
 async def test_after_a_timeout_later_cells_in_the_turn_are_refused_without_a_card(project):
@@ -1290,6 +1312,45 @@ async def test_a_cell_after_a_remote_cancel_is_held_once_a_hook_was_written(proj
     assert (stopped.code, stopped.stopped_at, stopped.ended_process) == (
         "import time\ntime.sleep(999)", NOTHING_KEPT, True,
     )
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    outcome = await _hold()(session, pad=pad, code="print(1)")
+    assert (outcome is not None) is held
+    assert elicitor.asked == int(held)
+
+
+@pytest.mark.parametrize("earlier, held", [(HOOK_CELL, True), ("total = 1", False)],
+                         ids=["a-hook-written", "no-hook"])
+async def test_a_cell_after_a_remote_cell_whose_task_was_cancelled_is_held_once_a_hook_was_written(
+    project, earlier, held,
+):
+    """A host that stops a turn cancels its task, and never calls the
+    remote pad's `cancel()`. The pad still records the stopped cell's own
+    code as one that ended its process, as `cancel()` does, so the next
+    cell is held once a hook was written."""
+    pad = RemoteScratchpadRuntime(
+        name="main", endpoint_url="https://scratchpad.example.com", api_key="test", workspace_path=project,
+        cells=[Cell(code=earlier, stdout="", stderr="", error=None)],
+    )
+    started = asyncio.Event()
+
+    async def endless_stream(path: str, body: dict):
+        yield {"type": "progress", "message": "running"}
+        started.set()
+        await asyncio.Event().wait()
+        yield {}
+
+    with patch.object(pad, "_sse", endless_stream):
+        task = asyncio.create_task(pad.execute("import time\ntime.sleep(999)"))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    stopped = pad.cells[-1]
+    assert (stopped.code, stopped.stopped_at, stopped.ended_process) == (
+        "import time\ntime.sleep(999)", NOTHING_KEPT, True,
+    )
+    assert pad._running_code is None
     elicitor = _AnswersAtOnce(answer=CANCEL)
     session = await _gated_session(project, elicitor=elicitor)
     outcome = await _hold()(session, pad=pad, code="print(1)")

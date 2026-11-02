@@ -8,6 +8,7 @@ all execution to the remote service via REST + SSE.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import AsyncIterator
@@ -213,6 +214,24 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
                     self._running_code = None
                     cell = self._record_cell(cell)
                     yield cell
+        except asyncio.CancelledError:
+            # A host that stops a turn by cancelling its task never calls
+            # `cancel()`, so record the stopped cell here the same way, unless
+            # `cancel()` already did (it clears `_running_code` first).
+            if self._running_code is not None:
+                self._running_code = None
+                self._record_cell(
+                    Cell(
+                        code=code,
+                        stdout="",
+                        stderr="",
+                        error="Cancelled by user.",
+                        description="Cancelled",
+                        stopped_at=NOTHING_KEPT,
+                        ended_process=True,
+                    )
+                )
+            raise
         finally:
             self._running_code = None
 

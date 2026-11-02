@@ -45,11 +45,13 @@ class Cell:
     stdout: str
     stderr: str
     error: str | None
+    # Before `logs`, the field a host that cuts a saved result short cuts
+    # most often, so a result cut there keeps them.
+    stopped_at: int | None = None
+    ended_process: bool = False
     description: str = ""
     estimated_time: str = ""
     logs: str = ""
-    stopped_at: int | None = None
-    ended_process: bool = False
 
 
 @dataclass(frozen=True)

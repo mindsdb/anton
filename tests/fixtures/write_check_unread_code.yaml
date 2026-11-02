@@ -1147,10 +1147,10 @@ cases:
       subprocess.run(['pip', 'list'])
     card: unchecked
 
-  - name: write of a pth file
+  - name: write of a pth file into the project, which no process runs as it starts
     code: |-
       open('extra.pth', 'w').write('import job')
-    card: unchecked
+    card: none
 
   - name: import of a project module after sys.path changes through an alias
     code: |-
@@ -4900,7 +4900,8 @@ cases:
   # packages, the user site, a folder with a site-packages or dist-packages
   # part, or a folder the check can't place. The cell that writes one is
   # held for any of them; a later process runs nothing from a .pth file in
-  # the project folder.
+  # the project folder, so a cell that writes one there, as PyTorch saves
+  # weights, raises no card (`site.addsitedir` on its folder is held).
 
   - name: a sitecustomize module written into site-packages before a pip subprocess
     code: |-
@@ -5021,17 +5022,17 @@ cases:
       subprocess.run(['sh', '-c', 'echo "import job" > /usr/lib/python3/site-packages/hook.pth'])
     card: unchecked
 
-  - name: a .pth file written by tee in a shell text
+  - name: a .pth file written into the project by tee in a shell text
     code: |-
       import subprocess
       subprocess.run('echo import job | tee lib/hook.pth', shell=True)
-    card: unchecked
+    card: none
 
-  - name: a .pth file written by an open whose mode the check can't read
+  - name: a .pth file written into the project by an open whose mode the check can't read
     code: |-
       m = input()
       open('lib/hook.pth', m).write('import job')
-    card: unchecked
+    card: none
 
   - name: a pip subprocess after an earlier cell writes a sitecustomize module into site-packages
     earlier:
@@ -19530,3 +19531,68 @@ cases:
           return subprocess.run(list(args), capture_output=True, text=True, **kw)
       print(run('python3', 'job.py').stdout)
     card: unchecked
+
+  # ── Values that only look like a package's place or an unpack ─────────────
+  # An `origin` column of data is no spec's origin, and an archive tar makes
+  # or unzip lists unpacks nothing, so neither holds a later import; tar's
+  # extract mode still does. Literal code an exec() inside a def runs reads
+  # the names of the namespace the def's code runs in.
+
+  - name: an import after an earlier cell exports a csv per row named by an origin column
+    earlier:
+      - |-
+        import pandas as pd
+        df = pd.DataFrame({'origin': ['JFK', 'SFO']})
+        for row in df.itertuples():
+            df[df['origin'] == row.origin].to_csv(f'out_{row.origin}.csv')
+    code: |-
+      import matplotlib.pyplot as plt
+      plt.plot([1, 2])
+    card: none
+
+  - name: an import after a sys.path change once an earlier cell made an archive with tar
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run(['tar', 'czf', 'results.tgz', 'out'])
+    code: |-
+      import sys
+      sys.path.append('helpers')
+      import pandas as pd
+      print(pd.__version__)
+    card: none
+
+  - name: an import after a sys.path change once an earlier cell listed an archive with unzip
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run(['unzip', '-l', 'bundle.zip'])
+    code: |-
+      import sys
+      sys.path.append('helpers')
+      import pandas as pd
+      print(pd.__version__)
+    card: none
+
+  - name: an import after a sys.path change once an earlier cell extracted an archive with tar
+    earlier:
+      - |-
+        import subprocess
+        subprocess.run(['tar', '-xzf', 'bundle.tgz'])
+    code: |-
+      import sys
+      sys.path.append('helpers')
+      import pandas as pd
+      print(pd.__version__)
+    card: unchecked
+
+  - name: a listed request through an exec inside a def that exec ran in its own namespace
+    code: |-
+      exec("import requests\nURL = 'https://erp.example.test/api/orders'\ndef go():\n    exec('requests.post(URL)')\ngo()\n", {})
+    card: read
+    kinds: [http]
+
+  - name: a request to an unlisted host through an exec inside a def that exec ran in its own namespace
+    code: |-
+      exec("import requests\nURL = 'https://other.example.test/api/orders'\ndef go():\n    exec('requests.post(URL)')\ngo()\n", {})
+    card: none
