@@ -1,10 +1,15 @@
 import json
+import logging
 
 import pytest
+from pydantic import ValidationError
 
+from anton.cloud_turn import contract
 from anton.cloud_turn.contract import (
     DatasourceBlockV1,
     TurnRequestV1,
+    TurnSkillEntry,
+    parse_turn_skills,
 )
 
 
@@ -107,8 +112,82 @@ def test_turn_request_carries_the_always_on_skill_flag():
 
 
 def test_an_empty_skills_block_is_kept_apart_from_none():
-    """{} names no recallable skills; only an absent block (an older sender)
-    lets the pod fall back to the mounted org tree."""
+    """{} names no recallable skills; only an absent block lets the pod take
+    the rollout fallback to the mounted org tree."""
     base = {"protocol_version": 1, "conversation_id": "c", "input": "query"}
     assert TurnRequestV1.from_json(json.dumps(base)).skills is None
     assert TurnRequestV1.from_json(json.dumps({**base, "skills": {}})).skills == {}
+
+
+def test_the_skills_block_parses_into_entries_by_slug():
+    block = {
+        "tone": {"files": {"SKILL.md": "Be brief.", "references/x.md": "Ref."}, "always_on": True},
+        "recall-only": {"files": {"SKILL.md": "x"}},
+        "off": {"files": {"SKILL.md": "x"}, "always_on": False},
+    }
+    assert parse_turn_skills(block) == {
+        "tone": TurnSkillEntry(
+            files={"SKILL.md": "Be brief.", "references/x.md": "Ref."}, always_on=True
+        ),
+        "recall-only": TurnSkillEntry(files={"SKILL.md": "x"}),
+        "off": TurnSkillEntry(files={"SKILL.md": "x"}),
+    }
+
+
+@pytest.mark.parametrize("block", ["x", ["tone"], 7, True])
+def test_a_skills_block_that_is_not_an_object_names_no_skills(block):
+    """Not None: a malformed block must not take the absent block's fallback."""
+    assert parse_turn_skills(block) == {}
+
+
+def test_an_absent_skills_block_stays_none():
+    assert parse_turn_skills(None) is None
+    assert parse_turn_skills({}) == {}
+
+
+@pytest.mark.parametrize("always_on", ["true", 1, "yes", [True], {"on": True}, None])
+def test_only_a_json_true_marks_a_skill_always_on(always_on):
+    """pydantic's lax bool would read "true", 1 and "yes" as True."""
+    block = {"tone": {"files": {"SKILL.md": "x"}, "always_on": always_on}}
+    assert parse_turn_skills(block) == {"tone": TurnSkillEntry(files={"SKILL.md": "x"})}
+
+
+def test_entries_and_files_that_cannot_be_read_are_dropped_and_the_rest_kept(caplog):
+    block = {
+        "Bad Slug": {"files": {"SKILL.md": "x"}},
+        "UPPER": {"files": {"SKILL.md": "x"}},
+        "../escape": {"files": {"SKILL.md": "x"}},
+        "a--b": {"files": {"SKILL.md": "x"}},
+        "a" * 65: {"files": {"SKILL.md": "x"}},
+        "not-an-object": ["x"],
+        "no-files": {"always_on": True},
+        "files-not-an-object": {"files": ["SKILL.md"]},
+        "mixed": {"files": {"SKILL.md": "Body.", "bad.md": 3, "worse.md": None}},
+    }
+    caplog.set_level(logging.DEBUG, logger=contract.logger.name)
+
+    assert parse_turn_skills(block) == {
+        "no-files": TurnSkillEntry(files={}, always_on=True),
+        "files-not-an-object": TurnSkillEntry(files={}),
+        "mixed": TurnSkillEntry(files={"SKILL.md": "Body."}),
+    }
+    dropped = [r for r in caplog.records if r.name == contract.logger.name]
+    assert [r.levelno for r in dropped] == [logging.WARNING] * 5
+    assert [r.args[0] for r in dropped] == ["Bad Slug", "UPPER", "../escape", "a--b", "a" * 65]
+
+
+def test_a_parsed_skill_entry_is_frozen():
+    entry = parse_turn_skills({"tone": {"files": {"SKILL.md": "x"}}})["tone"]
+
+    with pytest.raises(ValidationError):
+        entry.always_on = True
+    with pytest.raises(ValidationError):
+        entry.files = {}
+    assert entry == TurnSkillEntry(files={"SKILL.md": "x"})
+
+
+def test_a_slug_that_is_not_a_string_is_dropped():
+    """JSON keys are always strings; a request built in process may not be."""
+    assert parse_turn_skills({7: {"files": {"SKILL.md": "x"}}, "ok": {"files": {}}}) == {
+        "ok": TurnSkillEntry(files={}),
+    }
