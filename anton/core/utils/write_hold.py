@@ -16,7 +16,9 @@ for byte. So the card's prompt is the relay's text exactly: nothing added,
 removed or scrubbed.
 
 A cell's own check (`scratchpad.hold_unapproved_write`) leaves out a request
-the relay holds (`held_by_relay`), so one request raises one card.
+the relay holds (`held_by_relay`), so one request raises one card. The
+exception is a cell the check can't read: it keeps the cell's "can't be
+checked" card, and its request then raises the relay's card as well.
 """
 
 from __future__ import annotations
@@ -295,27 +297,36 @@ async def _too_late_to_ask(relay: WriteRelay, held: HeldRequest) -> ToolOutcome:
     """Cancel a held request that would expire before the user could answer
     its card and the relay send it, so an Approve can't come too late."""
     state = await _cancel(relay, held.pending_id)
-    _log(held.pending_id, "expires before a card could be answered, cancelled")
     if state not in (None, "cancelled", "expired", _UNCONFIRMED):
         return await _moved_on(relay, held, f"The {_request(held)} isn't waiting for approval any more.")
+    if state == _UNCONFIRMED:
+        # No card was streamed, so no approval exists to send it.
+        _log(held.pending_id, "expires before a card could be answered, the cancel failed")
+        dropped = ". anton asked the write relay to cancel it and got no answer, so it expires unsent"
+    else:
+        _log(held.pending_id, "expires before a card could be answered, cancelled")
+        dropped = ", so anton cancelled it"
     return _outcome(
         f"Not asked: the {_request(held)} expires before the user could answer a card and the write relay "
-        "send it, so anton cancelled it. Nothing was sent. Send the request again for a fresh pending_id, "
-        "then call approve_held_write with that one.",
+        f"send it{dropped}. Nothing was sent. Send the request again for a fresh pending_id, then call "
+        "approve_held_write with that one.",
     )
 
 
 async def _drop_unapproved(relay: WriteRelay, held: HeldRequest, cause: RefusalCause) -> ToolOutcome:
     """Cancel a held request whose card closed with no approval, and report
-    it. Cowork may have taken an Approve just before the question failed,
-    so a relay that answers with a later state is reported as it stands."""
+    it. Cowork may have taken an Approve just before the question failed or
+    timed out, so a relay that answers with a later state is reported as it
+    stands."""
     state = await _cancel(relay, held.pending_id)
     if state in (None, "cancelled", "expired"):
         return _refusal(held, cause)
     if state == _UNCONFIRMED:
-        # Only a question that failed can have failed after Cowork took an
-        # Approve; on any other cause no approval exists to send it.
-        return _uncancelled(held, cause) if cause == "error" else _refusal(held, cause)
+        # A question that failed or timed out can have ended after Cowork
+        # took an Approve: a host's elicitor may report a timeout while the
+        # tester's answer is accepted. On any other cause no approval exists
+        # to send it.
+        return _uncancelled(held, cause) if cause in ("error", "timeout") else _refusal(held, cause)
     return await _moved_on(
         relay, held,
         f"anton saw no approval for the {_request(held)} ({refusal_why(cause)}), but the write relay had "

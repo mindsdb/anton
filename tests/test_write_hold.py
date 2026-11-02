@@ -313,13 +313,19 @@ async def test_a_request_the_relay_sent_before_the_cancel_is_reported_as_sent(he
     assert relay.cancels == 1
 
 
-async def test_a_failed_question_whose_cancel_fails_too_is_unconfirmed(held_session):
+@pytest.mark.parametrize("elicitor, why", [
+    (_Elicitor(answer=TIMEOUT), "no one answered in time"),
+    (_Elicitor(raises=RuntimeError("stream broke")), "the approval request failed"),
+], ids=["timeout", "error"])
+async def test_a_question_that_ended_unanswered_whose_cancel_fails_too_is_unconfirmed(held_session, elicitor, why):
+    # A host's elicitor can report a timeout while Cowork takes the tester's
+    # Approve, and the recording proxy then signs it.
     relay = _Relay(reads=[_held("pending")], cancel=(500, {"error": "boom"}))
-    outcome = await _approve(held_session(_Elicitor(raises=RuntimeError("stream broke"))), relay)
+    outcome = await _approve(held_session(elicitor), relay)
     assert outcome.reason == "", "Cowork may have taken an Approve, so it isn't known that nothing was sent"
     assert outcome.content.startswith(
-        f"Not confirmed: anton saw no approval for the held POST request to {HOST} (the approval request "
-        "failed), and couldn't confirm the cancel with the write relay. The write records show whether it was sent",
+        f"Not confirmed: anton saw no approval for the held POST request to {HOST} ({why}), and couldn't "
+        "confirm the cancel with the write relay. The write records show whether it was sent",
     )
 
 
@@ -352,6 +358,19 @@ async def test_a_held_request_that_expires_before_a_card_could_be_answered_is_ca
     )
     assert elicitor.requests == [] and _cards(session) == []
     assert relay.cancels == 1
+
+
+async def test_a_too_late_request_whose_cancel_fails_says_it_expires_unsent(held_session):
+    elicitor = _Elicitor(answer=APPROVE)
+    session = held_session(elicitor)
+    relay = _Relay(reads=[_held("pending", expires_at=int(time.time()) + 200)], cancel=(500, {"error": "boom"}))
+    outcome = await _approve(session, relay)
+    assert outcome.content == (
+        f"Not asked: the held POST request to {HOST} expires before the user could answer a card and the write "
+        "relay send it. anton asked the write relay to cancel it and got no answer, so it expires unsent. "
+        "Nothing was sent. Send the request again for a fresh pending_id, then call approve_held_write with that one."
+    )
+    assert elicitor.requests == [] and _cards(session) == [], "no card was streamed, so nothing can approve it"
 
 
 async def test_with_no_answer_time_limit_only_the_send_wait_must_fit_before_expiry(held_session):

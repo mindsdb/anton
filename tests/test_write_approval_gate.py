@@ -545,7 +545,8 @@ async def test_a_bad_entry_in_the_setting_is_skipped_with_one_warning(project, c
 # The relay is the only network path to such a host. It holds every request
 # but a GET or HEAD and raises its own card through approve_held_write, so the
 # cell's check leaves a request it holds out: one request, one card. A GET or
-# HEAD it forwards keeps the cell's card.
+# HEAD it forwards keeps the cell's card. So does a cell the check can't read,
+# whose request then raises the relay's card as well.
 
 RELAYED = "gw.example.internal:8765"
 RELAY_RULE = f"POST http://{RELAYED}/**"

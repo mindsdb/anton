@@ -1098,6 +1098,9 @@ APPROVE_HELD_WRITE_TOOL = ToolDef(
         "behind a write relay: a GET or HEAD reaches them, but any other request is held, and "
         "the host answers HTTP 428 with JSON such as "
         '{"error": "held_for_approval", "pending_id": "<32 hex characters>", "sha256": "..."}. '
+        "The reply's Write-Relay-Pending-Id header and its status text carry the same pending_id, "
+        "so an error raised for the reply, such as raise_for_status()'s, names it too: read it "
+        "there rather than sending the request again. "
         "A 428 held_for_approval reply means nothing was written. Call this tool with its "
         "pending_id: the user sees the exact request and picks Approve or Cancel, and only "
         "their Approve sends it, once. The result gives the host's answer, or says why nothing "
@@ -1111,8 +1114,8 @@ APPROVE_HELD_WRITE_TOOL = ToolDef(
         "properties": {
             "pending_id": {
                 "type": "string",
-                "description": "The pending_id from the host's 428 held_for_approval reply: "
-                "32 lowercase hex characters.",
+                "description": "The pending_id from the host's 428 held_for_approval reply, in its "
+                "JSON, its Write-Relay-Pending-Id header or its status text: 32 lowercase hex characters.",
             },
         },
         "required": ["pending_id"],
