@@ -4309,6 +4309,9 @@ class _Reader:
     ) -> None:
         self.cells = cells
         self.current = current
+        # What each name holds where a node reads it, by the name, the node's
+        # id and `partly_run`, read once per check (`bindings_of`).
+        self._bindings_read: dict[tuple[str, int, bool], tuple[_Binding, ...]] = {}
         # The names a with's context may start from that hold what code the
         # check can't read made (`_tainted_contexts`): such a with may
         # swallow an error its body raises (`swallowers`).
@@ -5093,8 +5096,18 @@ class _Reader:
         A cell that binds the name only under an if, loop or try doesn't hide
         an older binding: both count. With `partly_run`, an earlier cell in
         `errored` may have stopped before any of its bindings, or after any:
-        each of them counts, and so do the older ones.
+        each of them counts, and so do the older ones. Read once per check:
+        a loop that reads a name many earlier loops bind asks it again and
+        again.
         """
+        key = (name, id(node), partly_run)
+        found = self._bindings_read.get(key)
+        if found is None:
+            found = self._bindings_read[key] = tuple(self._bindings_afresh(name, node=node, partly_run=partly_run))
+        return list(found)
+
+    def _bindings_afresh(self, name: str, *, node: ast.AST, partly_run: bool) -> list[_Binding]:
+        """`bindings_of`, read afresh."""
         cell = self.cell_of(node)
         scopes = cell.scopes_around(node)
         for scope in scopes:
