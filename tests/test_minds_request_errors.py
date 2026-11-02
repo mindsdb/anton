@@ -158,6 +158,18 @@ def test_the_error_body_is_left_for_the_callers_reader(tmp_path, server, status,
     assert json.loads(caught.value.read(65_536)) == body
 
 
+@pytest.mark.asyncio
+async def test_a_share_org_refusal_keeps_its_own_instruction(tmp_path, server):
+    from anton.publisher import SHARE_ORG_REQUIRED_INSTRUCTION
+
+    base, answer = server
+    answer("/upload", 403, {"code": "share_org_required", "error": "Needs artifacts.share_org."})
+
+    out = await _tool_publish(tmp_path, base)
+
+    assert out == f"PUBLISH FAILED: Needs artifacts.share_org. {SHARE_ORG_REQUIRED_INSTRUCTION}"
+
+
 def test_status_line_and_reason_are_unchanged(server):
     base, answer = server
     answer("/list", 401, {"error": "Invalid token"})
