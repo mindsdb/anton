@@ -503,7 +503,11 @@ async def _handle_publish(
         resolve_access,
         resolve_publish_target,
     )
-    from anton.publisher import ArtifactOwnedByOtherUserError, publish
+    from anton.publisher import (
+        ArtifactOwnedByOtherUserError,
+        ArtifactShareOrgRequiredError,
+        publish,
+    )
 
     console.print()
 
@@ -795,6 +799,8 @@ async def _handle_publish(
                     "to another account. Run /publish again and choose 'new' to "
                     "publish your own copy.[/]"
                 )
+            elif isinstance(e, ArtifactShareOrgRequiredError):
+                console.print(f"  [anton.error]Publish failed: {escape(e.reason)}[/]")
             elif isinstance(e, urllib.error.HTTPError) and e.code == 401:
                 rejected = settings.minds_api_key
                 settings.minds_api_key = None
@@ -826,7 +832,7 @@ async def _handle_publish(
                         "ANTON_MINDS_API_KEY.[/]"
                     )
             else:
-                console.print(f"  [anton.error]Publish failed: {e}[/]")
+                console.print(f"  [anton.error]Publish failed: {escape(str(e))}[/]")
             console.print()
             return
 
