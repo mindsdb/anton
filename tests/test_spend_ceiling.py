@@ -32,7 +32,9 @@ from anton.core.session import (
     ChatSessionConfig,
     _SPEND_CEILING_RESERVE,
     _VerifierVerdict,
+    _render_verify_transcript,
 )
+from anton.core.llm.prompts import ANTON_NOTE
 
 CEILING = 1_000_000
 # Sized so the trip needs SEVERAL rounds. The first version used 500_000, which
@@ -216,6 +218,8 @@ async def test_handback_asks_the_user_and_is_persisted_as_streamed(workspace):
     assert "ask if they'd like you to continue" in text
     # A stop mid-search must not fill the gap with a guess.
     assert "do not estimate, extrapolate or state a figure you did not retrieve" in text
+    # ...but a result the tools did compute is kept, not withdrawn at the limit.
+    assert "A result your tools did compute is not a guess" in text
     # The streamed diagnosis, not the pre-stop reply, is the tail of history.
     assert session._history[-1]["role"] == "assistant"
 
@@ -659,3 +663,65 @@ async def test_filtered_handback_at_the_continuation_gate_sends_anton_s_own_repo
     assert len(handbacks) == 2
     assert ended_by == "content_filter"
     assert events[-1] == StreamTurnEnded(ended_by="content_filter")
+
+
+def _budget_notes(session) -> list[tuple[int, str]]:
+    """(history index, text) of every budget checkpoint note in history."""
+    return [
+        (i, b["text"])
+        for i, m in enumerate(session._history)
+        if m["role"] == "user" and isinstance(m["content"], list)
+        for b in m["content"]
+        if b.get("type") == "text" and "Take stock" in b.get("text", "")
+    ]
+
+
+async def test_budget_checkpoint_is_sent_once_at_half_the_ceiling(workspace):
+    """Past half the ceiling the turn is asked, once, whether it already has
+    its answer, riding with that round's tool results."""
+    # 7 calls (700k) stays under the gate (CEILING minus the 200k reserve).
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 7)])
+    with patch("anton.analytics.send_event") as send:
+        await _run(session)
+    notes = _budget_notes(session)
+    assert len(notes) == 1
+    i, text = notes[0]
+    assert text.startswith(ANTON_NOTE)
+    # 5 calls of PER_CALL is the first total at or past half of CEILING.
+    assert "500,000 of its 1,000,000-token limit" in text
+    assert any(b.get("type") == "tool_result" for b in session._history[i]["content"])
+    # It asks; it does not stop the turn.
+    assert send.call_args.kwargs["ended_by"] != "spend_ceiling"
+
+
+async def test_no_budget_checkpoint_below_half_the_ceiling(workspace):
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 4)])
+    with patch("anton.analytics.send_event"):
+        await _run(session)
+    assert _budget_notes(session) == []
+
+
+async def test_no_budget_checkpoint_without_a_ceiling(workspace):
+    session = _session(workspace, ceiling=0, responses=[_tool_call(i) for i in range(1, 12)])
+    with patch("anton.analytics.send_event"):
+        await _run(session)
+    assert _budget_notes(session) == []
+
+
+def test_verifier_transcript_leaves_out_a_note_beside_tool_results():
+    """The completion verifier must not read anton's own note as the user
+    asking it to wrap up."""
+    history = [
+        {"role": "user", "content": "total the fees"},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "scratchpad", "input": {}},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "12.91"},
+            {"type": "text", "text": f"{ANTON_NOTE} Take stock before the next step."},
+        ]},
+        {"role": "assistant", "content": "The total is 12.91."},
+    ]
+    rendered = _render_verify_transcript(history)
+    assert "Take stock" not in rendered
+    assert "USER: total the fees" in rendered

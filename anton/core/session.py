@@ -1047,8 +1047,16 @@ _NOTE_PREFIXES = ("SYSTEM:", _CHECK_NOTE, ANTON_NOTE)
 _NO_GUESS_AT_LIMIT = (
     "Report only what your tool results actually showed. If you have not found the "
     "answer, say plainly that you could not find it; do not estimate, extrapolate or "
-    "state a figure you did not retrieve."
+    "state a figure you did not retrieve. A result your tools did compute is not a "
+    "guess: if you have one, give it with the assumptions it rests on, rather than "
+    "withholding it because something is still unexplained."
 )
+
+# Share of `max_turn_tokens` at which the turn is told, once, to take stock
+# (`_budget_checkpoint_note`). Turns that hit the ceiling had often had an
+# answer for most of it, then spent the rest doubting a property of the data
+# they never tested, and withheld the answer at the limit.
+_BUDGET_CHECKPOINT_SHARE = 0.5
 
 
 def _safe_error_detail(exc: BaseException) -> str:
@@ -1518,7 +1526,7 @@ def _render_verify_transcript(
                 btype = block.get("type")
                 if btype == "text":
                     text = (block.get("text") or "").strip()
-                    if not text:
+                    if not text or (role == "user" and text.startswith(_NOTE_PREFIXES)):
                         continue
                     if preamble:
                         # A tool_use rides with this text, so it is never the
@@ -1927,6 +1935,9 @@ class ChatSession:
         # limit. Reset per turn in turn_stream.
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
+        # Whether this turn has had its budget checkpoint note. Reset per turn
+        # in turn_stream.
+        self._budget_checkpoint_sent = False
         # The tool calls this turn ran, for the report `_stream_handback_diagnosis`
         # writes when the content filter stops every hand-back. Reset per turn in
         # turn_stream.
@@ -4875,6 +4886,40 @@ class ChatSession:
             + _HANDBACK_NOT_USER_CLAUSE
         )
 
+    def _budget_checkpoint_note(self) -> str | None:
+        """The one-time note sent when the turn passes `_BUDGET_CHECKPOINT_SHARE`
+        of its token ceiling, or None.
+
+        The ceiling's hand-back comes too late to save the answer: by then the
+        turn has spent its budget, and the hand-back is told not to guess. This
+        asks earlier, while there is room, whether the turn already has its
+        answer, so a long turn ends on a result rather than on "I could not
+        find it". It does not stop the turn: work that still needs doing goes
+        on. Off with the ceiling (0), and once per turn.
+        """
+        if (
+            self._budget_checkpoint_sent
+            or self._max_turn_tokens <= 0
+            or self._turn_cost is None
+        ):
+            return None
+        spent = self._turn_cost.total_tokens
+        if spent < self._max_turn_tokens * _BUDGET_CHECKPOINT_SHARE:
+            return None
+        self._budget_checkpoint_sent = True
+        ceiling = self._max_turn_tokens + self._spend_ceiling_continued_tokens
+        return (
+            f"{ANTON_NOTE} This request has used {spent:,} of its {ceiling:,}-token "
+            "limit. Take stock before the next step. If you already have a result "
+            "that answers the request, give it now, and say in a line or two what "
+            "it assumes that you could not settle. Keep working only on a specific "
+            "error you can name or on work the request still needs. If something "
+            "in the data surprised you, test it once against the data or its "
+            "documentation; if that does not settle it, state it as an assumption "
+            "and go on. This note comes from an automatic budget check, not from "
+            "the user."
+        )
+
     async def _jev_verdict(self, user_message: str | None) -> "_jev.JevVerdict | None":
         """Ask Jev for the verdict; None when it is off or the verifier isn't on MindsHub."""
         if not self._jev_enabled:
@@ -5670,6 +5715,7 @@ class ChatSession:
         self._round_cap_grace_used = False
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
+        self._budget_checkpoint_sent = False
         self._turn_steps = []
         self._finish_authorized = None
         self._limits_passed_by_message = set()
@@ -7334,6 +7380,9 @@ class ChatSession:
                 # fire, the lesson text appears inline alongside tool_results
                 # so the LLM sees the alarm before its next decision.
                 self._acc_maybe_nudge(tool_results)
+                budget_note = self._budget_checkpoint_note()
+                if budget_note:
+                    tool_results.append({"type": "text", "text": budget_note})
 
                 self._append_history({"role": "user", "content": tool_results})
                 # Every model call resends the whole history: one render
