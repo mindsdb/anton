@@ -568,7 +568,8 @@ def _check_pages(
     A page in `held_back` was out of repair cells, and anton wrote this
     cell's change to it back as its last check left it
     (`TurnPages.put_held_back`): it is not checked again, its line says so,
-    and it does not count as edited or repaired. A geography warning on a
+    it does not count as edited or repaired, and no other page of its
+    artifact is checked in its place. A geography warning on a
     page left out of repair cells is dropped: it says how to repair a page
     the agent must not edit again.
     """
@@ -576,11 +577,9 @@ def _check_pages(
     from anton.core.artifacts.html_lint import discover_browser, lint_html
     from anton.core.artifacts.page_copies import page_order
 
-    held_lines = [
-        f"{page.slug}/{page.path.name} — {_HELD_BACK}"
-        for page in pages if page.edited and page.key(store) in held_back
-    ]
-    pages = [page for page in pages if not (page.edited and page.key(store) in held_back)]
+    held = [page for page in pages if page.edited and page.key(store) in held_back]
+    held_lines = [f"{page.slug}/{page.path.name} — {_HELD_BACK}" for page in held]
+    pages = [page for page in pages if page not in held]
     messages: list[str] = []
     page_checks: "dict[PageKey, RenderStatus]" = {}
     findings_listed: set[PageKey] = set()
@@ -626,7 +625,9 @@ def _check_pages(
             return render_check.comparison_notes(comparison)
         return turn_pages.notes_to_show(key, comparison)
 
-    edited_slugs = {page.slug for page in pages if page.edited}
+    # A page written back still counts as its artifact's edit, so no other
+    # page of the artifact is checked in its place.
+    edited_slugs = {page.slug for page in pages if page.edited} | {page.slug for page in held}
     # Each artifact's main page, its first by `_order`: its primary, else
     # `index.html`, else its first page by name.
     main_page: dict[str, _ChangedPage] = {}

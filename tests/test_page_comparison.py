@@ -267,6 +267,24 @@ async def test_a_cell_that_edits_a_page_put_back_past_its_repair_cells_writes_it
     assert again.edited == frozenset()
 
 
+async def test_a_cell_that_edits_a_held_main_page_checks_no_other_page_in_its_place(service, tmp_path):
+    """The main page went back as the turn found it. A fourth cell edits it
+    anyway: it goes back again, and the artifact's other page, which the cell
+    left alone, is not checked in its place."""
+    store, slug = _artifact(tmp_path)
+    (store.root / slug / "report.html").write_text(_PAGE.replace("hi", "report"))
+    session = _session(_out_of_repairs=set())
+    service.answer(_FAILED_MAP)
+
+    for text in ("breaks the map", "first repair", "second repair"):
+        await _cell(session, store, slug, text)
+    again = await _cell(session, store, slug, "edits it anyway")
+
+    assert len(service.requests) == 3
+    assert again.messages == [f"{slug}/index.html — {tool_handlers._HELD_BACK}"]
+    assert again.page_checks == {}
+
+
 async def test_a_rebuild_with_no_repair_cells_left_puts_back_the_page_the_turn_found(service, tmp_path, monkeypatch):
     """The turn breaks the page, which passes only on its second repair, so
     both repair cells are spent. A later rebuild fails only its browser

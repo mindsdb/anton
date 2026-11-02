@@ -318,7 +318,8 @@ continuation rounds would only edit that page again. For the rest of the
 turn such a page stays as that check left it (`TurnPages.hold`): a later
 cell's change to it is written back unchecked
 (`TurnPages.put_held_back`), and `generate_artifact` refuses to rebuild
-its artifact. A `generate_artifact` run on an existing
+its artifact. Files the page loads, such as its scripts, data and
+stylesheets, are not held. A `generate_artifact` run on an existing
 artifact that fails, stops over budget, crashes or is abandoned by the
 turn puts the main page back as it was when the run started: as the turn
 found it, when the run was the first to change it. A build that fails only
