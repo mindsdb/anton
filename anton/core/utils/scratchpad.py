@@ -15,7 +15,9 @@ from pydantic import BaseModel, ConfigDict
 from anton.core.backends.sandbox import cell_sandbox_of, validate_pad_name
 from anton.core.tools.registry import ToolOutcome
 from anton.core.utils.write_check import (
+    PACKAGE_FILE_SUFFIXES,
     CellWrites,
+    EarlierCell,
     FileChange,
     HttpWrite,
     HttpWriteRule,
@@ -486,18 +488,31 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
     gate = getattr(session, "_write_gate", None)
     if not isinstance(gate, WriteGate):
         return None
-    # The cells compaction folded away come first: the pad's process still
-    # holds what they imported and bound. Their outcomes still decide whether
-    # the check can count a write as one that ran.
-    compacted = tuple(getattr(pad, "compacted_cells", ()))
-    cells = tuple(getattr(pad, "cells", ()) or ())
-    earlier = (*(cell.code for cell in compacted), *(cell.code for cell in cells))
-    errored = (*(cell.errored for cell in compacted), *(bool(getattr(cell, "error", None)) for cell in cells))
     try:
+        # The cells compaction folded away come first: the pad's process still
+        # holds what they imported and bound. Their outcomes still decide
+        # whether the check can count a write as one that ran. Where each cell
+        # that failed stopped is the line the boot read from the traceback, not
+        # from its text, which the cell shapes; None where the runtime doesn't
+        # say. A cell whose process ended has the pad start a new one before
+        # the next cell. Built inside the try: a value `EarlierCell` refuses
+        # gets the card too.
+        earlier = (
+            *(EarlierCell(code=cell.code, errored=cell.errored, stopped_at=cell.stopped_at,
+                          ended_process=cell.ended_process)
+              for cell in getattr(pad, "compacted_cells", ())),
+            *(EarlierCell(code=cell.code, errored=bool(getattr(cell, "error", None)),
+                          stopped_at=getattr(cell, "stopped_at", None),
+                          ended_process=getattr(cell, "ended_process", False) is True)
+              for cell in getattr(pad, "cells", ()) or ()),
+        )
+        if earlier and getattr(pad, "process_running", True) is False:
+            # The pad starts a new process before this cell, as after a death
+            # between cells, which the runtime finds only as this cell runs:
+            # the last cell before it is one whose process ended.
+            earlier = (*earlier[:-1], earlier[-1].model_copy(update={"ended_process": True}))
         writes = await asyncio.to_thread(
-            find_cell_writes,
-            code=code, earlier_code=earlier, snapshots=gate.snapshots, http_rules=gate.http_rules,
-            earlier_errored=errored,
+            find_cell_writes, code=code, earlier=earlier, snapshots=gate.snapshots, http_rules=gate.http_rules,
         )
     except Exception as exc:
         # The type only, as for a failed question.
@@ -574,14 +589,19 @@ def invalid_package_spec(entry: str) -> bool:
     call — dependency confusion through the one install path this ticket
     leaves open. Direct-URL requirements ("name @ https://…") are refused
     for the same reason: installs come from the configured index or not
-    at all.
+    at all. So is a name ending like a local archive
+    (`PACKAGE_FILE_SUFFIXES`, any case), such as "job.tar.gz" or
+    "job-1.0-py3-none-any.whl": pip and uv install that file from where it
+    lies, with the code it runs to build or install it. A name such as
+    "discord.py" is a name on the index, as any other is.
     """
     from packaging.requirements import InvalidRequirement, Requirement
 
     try:
-        return Requirement(str(entry)).url is not None
+        requirement = Requirement(str(entry))
     except InvalidRequirement:
         return True
+    return requirement.url is not None or requirement.name.lower().endswith(PACKAGE_FILE_SUFFIXES)
 
 
 def reject_invalid_packages(packages: list[str]) -> str | None:

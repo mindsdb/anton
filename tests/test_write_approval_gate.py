@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -30,6 +30,7 @@ from anton.core.backends.base import Cell, CompactedCell
 from anton.core.backends.local import LocalScratchpadRuntime
 from anton.core.backends.remote import RemoteScratchpadRuntime
 from anton.core.backends.sandbox import CellSandbox
+from anton.core.backends.wire import NOTHING_KEPT
 from anton.core.interaction.elicit import AskAnswer, AskRequest
 from anton.core.interaction.emitter import TurnEmitter
 from anton.core.llm.provider import (
@@ -65,6 +66,9 @@ PUT_CELL = (
     "r = requests.put('https://erp.example.com/api/suppliers/S005', json={'lead_time_days': 21})\n"
     "print(r.status_code)\n"
 )
+# Code the check can't read: the script comes from a file when the cell runs.
+SCRIPT_CELL = "SCRIPT = open('job.py').read()\n"
+EXEC_SCRIPT_CELL = 'exec(compile(SCRIPT, "job", "exec"))\n'
 PLANNER_RULE = "POST https://planner.example.com/api/*/orders/*"
 PLANNER_POST = "import requests\nrequests.post('https://planner.example.com/api/v2/orders/9', json={'qty': 5})\n"
 
@@ -666,6 +670,50 @@ async def test_the_relay_hosts_setting_reads_its_environment_variable(project, m
         await session.close()
 
 
+# ── Code the check can't read ─────────────────────────────────────────────
+
+@pytest.mark.parametrize("answer", [APPROVE, CANCEL], ids=["approve", "cancel"])
+async def test_a_cell_that_runs_code_the_check_cant_read_waits_and_says_so(project, answer):
+    """The script the cell runs is read from a file when it runs, so the
+    check can't see what it changes. The cell waits on a card that says so,
+    and runs only on Approve; the cell that read the file needs none."""
+    harness = _session(project, SCRIPT_CELL, EXEC_SCRIPT_CELL)
+    seen = await _run(harness=harness, answers=[answer])
+    assert len(seen.cards) == 1 and seen.ran_before == [1]
+    assert "This step can't be checked before it runs." in seen.cards[0].request.prompt
+    assert harness.pad.ran == ([SCRIPT_CELL, EXEC_SCRIPT_CELL] if answer == APPROVE else [SCRIPT_CELL])
+    if answer != APPROVE:
+        assert "Not run: this step would run code the check couldn't read." in _history_text(harness.session)
+    # The same card comes from an exception in the check (`CellWrites(unchecked=True)`),
+    # so pin that the check itself reads this cell as unchecked, without raising.
+    from anton.core.utils.write_check import EarlierCell, find_cell_writes, snapshot_project_files
+    snap = snapshot_project_files(root=project, label="project", taken_at=10**10)
+    writes = find_cell_writes(code=EXEC_SCRIPT_CELL, earlier=[EarlierCell(code=SCRIPT_CELL)], snapshots=(snap,))
+    assert writes.unchecked and writes.needs_approval()
+
+
+@pytest.mark.parametrize("answer", [APPROVE, CANCEL], ids=["approve", "cancel"])
+@pytest.mark.parametrize("exec_cell", [
+    EXEC_SCRIPT_CELL,
+    EXEC_SCRIPT_CELL + RELAYED_POST,
+], ids=["post-in-the-script", "post-beside-the-exec"])
+async def test_a_cell_the_check_cant_read_that_posts_to_a_relayed_host_raises_one_card(project, answer, exec_cell):
+    """The relay holds a POST to a host it relays, so the cell's own card
+    leaves that request out. A cell the check can't read still waits on the
+    one "can't be checked" card before it runs: no second card from the gate
+    for the relayed request, and the request it shows is not the relayed
+    one. On Approve the cell runs, and its POST then raises the relay's own
+    card through approve_held_write; on Cancel nothing runs, so it never
+    reaches the relay."""
+    harness = _session(project, SCRIPT_CELL, exec_cell, http=RELAY_RULE, relay_hosts=RELAYED)
+    seen = await _run(harness=harness, answers=[answer])
+    assert len(seen.cards) == 1 and seen.ran_before == [1]
+    prompt = seen.cards[0].request.prompt
+    assert "This step can't be checked before it runs." in prompt
+    assert RELAYED not in prompt, "the relay holds the request, so the card leaves it out"
+    assert harness.pad.ran == ([SCRIPT_CELL, exec_cell] if answer == APPROVE else [SCRIPT_CELL])
+
+
 # ── One unanswered card ───────────────────────────────────────────────────
 
 async def test_after_a_timeout_later_cells_in_the_turn_are_refused_without_a_card(project):
@@ -746,12 +794,13 @@ async def test_read_only_work_and_new_files_raise_no_card(project, code):
 # ── Off ───────────────────────────────────────────────────────────────────
 
 async def test_with_the_setting_off_the_same_cells_run_with_no_card(project):
-    harness = _session(project, UPDATE_CELL, RENAME_CELL, write_approval=False)
+    cells = (UPDATE_CELL, RENAME_CELL, SCRIPT_CELL, EXEC_SCRIPT_CELL)
+    harness = _session(project, *cells, write_approval=False)
     assert getattr(harness.session, "_write_gate", None) is None
     drained = _spy_on_draining(harness.session)
     seen = await _run(harness=harness, answers=[])
     assert seen.cards == []
-    assert harness.pad.ran == [UPDATE_CELL, RENAME_CELL]
+    assert harness.pad.ran == list(cells), "code the check can't read runs with no card too"
     assert "prepare_scratchpad_exec" not in drained, "the inline exec keeps its plain await"
 
 
@@ -1112,15 +1161,20 @@ async def test_repeated_compaction_preserves_mixed_outcomes_past_unparsable_code
 
 
 def test_compaction_keeps_code_and_outcome_in_order(project):
+    """A compacted cell keeps its code, whether it failed, the line it
+    stopped at, which the check uses to tell what it bound before it
+    stopped, and whether its process ended, so the pad started a new one."""
     pad = _runtime(project, *_FILLERS, "total_6 = 6")
     pad.cells[1].error = "ValueError"
+    pad.cells[1].stopped_at = 1
+    pad.cells[2].ended_process = True
     assert pad._compact_cells()
     pad.cells.append(Cell(code="total_7 = 7", stdout="", stderr="", error=None))
     assert pad._compact_cells(), "a second compaction folds the first one's summary in too"
     assert pad.compacted_cells == (
         CompactedCell(code="total_0 = 0", errored=False),
-        CompactedCell(code="total_1 = 1", errored=True),
-        CompactedCell(code="total_2 = 2", errored=False),
+        CompactedCell(code="total_1 = 1", errored=True, stopped_at=1),
+        CompactedCell(code="total_2 = 2", errored=False, ended_process=True),
     )
 
 
@@ -1151,6 +1205,290 @@ async def test_a_remote_reset_forgets_compacted_ownership(project):
     session = await _gated_session(project, elicitor=elicitor)
     assert await _hold()(session, pad=pad, code="open('stock.csv', 'w').write('final')") is not None
     assert elicitor.asked == 1
+
+
+# A cell that writes a startup hook into the installed packages, which each
+# new Python process runs as it starts.
+HOOK_CELL = "import site\nopen(site.getsitepackages()[0] + '/hook.pth', 'w').write('import job')"
+
+
+@pytest.mark.parametrize("earlier, returncode, held", [
+    (HOOK_CELL, -9, True),
+    ("total = 1", -9, False),
+    (HOOK_CELL, None, False),
+], ids=["a-hook-and-a-dead-process", "no-hook", "a-hook-and-a-live-process"])
+async def test_a_cell_after_the_process_died_between_cells_is_held_once_a_hook_was_written(
+    project, earlier, returncode, held,
+):
+    """The pad's process died after the last cell ended, so the pad starts a
+    new one before the next cell, and that start runs the startup hooks a
+    cell wrote. The runtime finds such a death only as the cell runs, after
+    the gate, so the gate asks whether the process is running
+    (`process_running`) and reads the last cell as one whose process ended.
+    With no hook written, or with the process alive, the cell runs in a
+    process that runs nothing the check didn't read."""
+    pad = _runtime(project, earlier)
+    pad._proc = MagicMock(returncode=returncode)
+    assert pad.process_running is (returncode is None)
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    outcome = await _hold()(session, pad=pad, code="print(1)")
+    assert (outcome is not None) is held
+    assert elicitor.asked == int(held)
+    if held:
+        assert "This step can't be checked before it runs." in elicitor.prompts[0]
+
+
+@pytest.mark.parametrize("earlier, held", [(HOOK_CELL, True), ("total = 1", False)],
+                         ids=["a-hook-written", "no-hook"])
+async def test_a_cell_after_a_remote_error_is_held_once_a_hook_was_written(project, earlier, held):
+    """A remote pad's service sends an error event in place of a cell when
+    it fails, and the host can't tell whether the service started a new
+    process for the next cell, which runs the startup hooks a cell wrote.
+    So the error's cell says it ended its process, and the next cell is
+    held once a hook was written. The remote pad reports its process as
+    running: its service runs it."""
+    pad = RemoteScratchpadRuntime(
+        name="main", endpoint_url="https://scratchpad.example.com", api_key="test", workspace_path=project,
+        cells=[Cell(code=earlier, stdout="", stderr="", error=None)],
+    )
+
+    async def failing_stream(path: str, body: dict):
+        yield {"type": "error", "error": "The service lost the pad."}
+
+    with patch.object(pad, "_sse", failing_stream):
+        cell = await pad.execute("total = 2")
+    assert cell.error and cell.ended_process and pad.process_running
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    outcome = await _hold()(session, pad=pad, code="print(1)")
+    assert (outcome is not None) is held
+    assert elicitor.asked == int(held)
+
+
+@pytest.mark.parametrize("ended, held", [(True, True), (False, False)], ids=["process-ended", "process-kept"])
+async def test_a_cell_after_a_remote_cell_whose_process_ended_is_held_once_a_hook_was_written(project, ended, held):
+    """A remote pad's service ends the pad's process during a cell, as a
+    timeout kill does, and says so in the cell it sends. The next cell runs
+    in a new process, which runs the startup hooks a cell wrote, so it is
+    held once a hook was written. A cell whose process the service kept
+    runs the next one in that process."""
+    pad = RemoteScratchpadRuntime(
+        name="main", endpoint_url="https://scratchpad.example.com", api_key="test", workspace_path=project,
+        cells=[Cell(code=HOOK_CELL, stdout="", stderr="", error=None)],
+    )
+
+    async def killed_stream(path: str, body: dict):
+        yield {"type": "cell", "cell": {"code": body["code"], "stdout": "", "stderr": "",
+                                        "error": "Timed out after 60s.", "stopped_at": NOTHING_KEPT,
+                                        "ended_process": ended}}
+
+    with patch.object(pad, "_sse", killed_stream):
+        cell = await pad.execute("import time\ntime.sleep(999)")
+    assert cell.ended_process is ended and cell.stopped_at == NOTHING_KEPT
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    outcome = await _hold()(session, pad=pad, code="print(1)")
+    assert (outcome is not None) is held
+    assert elicitor.asked == int(held)
+
+
+@pytest.mark.parametrize("earlier, held", [(HOOK_CELL, True), ("total = 1", False)],
+                         ids=["a-hook-written", "no-hook"])
+async def test_a_cell_after_a_remote_cancel_is_held_once_a_hook_was_written(project, earlier, held):
+    """A Stop on a remote pad asks its service to stop the running cell and
+    restart the pad. The cancel records the stopped cell's own code as one
+    that ended its process, as the local runtime's does, so the next cell,
+    which runs in a new process, is held once a hook was written."""
+    pad = RemoteScratchpadRuntime(
+        name="main", endpoint_url="https://scratchpad.example.com", api_key="test", workspace_path=project,
+        cells=[Cell(code=earlier, stdout="", stderr="", error=None)],
+    )
+    pad._running_code = "import time\ntime.sleep(999)"
+    with patch.object(pad, "_post", AsyncMock(return_value={})) as post:
+        await pad.cancel()
+    post.assert_awaited_once_with("/scratchpad/cancel", {"name": "main"})
+    stopped = pad.cells[-1]
+    assert (stopped.code, stopped.stopped_at, stopped.ended_process) == (
+        "import time\ntime.sleep(999)", NOTHING_KEPT, True,
+    )
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    outcome = await _hold()(session, pad=pad, code="print(1)")
+    assert (outcome is not None) is held
+    assert elicitor.asked == int(held)
+
+
+@pytest.mark.parametrize("earlier, held", [(HOOK_CELL, True), ("total = 1", False)],
+                         ids=["a-hook-written", "no-hook"])
+async def test_a_cell_after_a_remote_cell_whose_task_was_cancelled_is_held_once_a_hook_was_written(
+    project, earlier, held,
+):
+    """A host that stops a turn cancels its task, and never calls the
+    remote pad's `cancel()`. The pad still records the stopped cell's own
+    code as one that ended its process, as `cancel()` does, so the next
+    cell is held once a hook was written."""
+    pad = RemoteScratchpadRuntime(
+        name="main", endpoint_url="https://scratchpad.example.com", api_key="test", workspace_path=project,
+        cells=[Cell(code=earlier, stdout="", stderr="", error=None)],
+    )
+    started = asyncio.Event()
+
+    async def endless_stream(path: str, body: dict):
+        yield {"type": "progress", "message": "running"}
+        started.set()
+        await asyncio.Event().wait()
+        yield {}
+
+    with patch.object(pad, "_sse", endless_stream):
+        task = asyncio.create_task(pad.execute("import time\ntime.sleep(999)"))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    stopped = pad.cells[-1]
+    assert (stopped.code, stopped.stopped_at, stopped.ended_process) == (
+        "import time\ntime.sleep(999)", NOTHING_KEPT, True,
+    )
+    assert pad._running_code is None
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    outcome = await _hold()(session, pad=pad, code="print(1)")
+    assert (outcome is not None) is held
+    assert elicitor.asked == int(held)
+
+
+async def _closed_at_a_progress_yield(pad: RemoteScratchpadRuntime, code: str) -> None:
+    """A turn closed at its own yield, as a CLI Stop leaves it: the pad's
+    stream gives one progress line and is then closed there."""
+    run = pad.execute_streaming(code)
+    assert isinstance(await run.__anext__(), str)
+    await run.aclose()
+
+
+async def _failed_mid_stream(pad: RemoteScratchpadRuntime, code: str) -> None:
+    """A stream that fails after one progress line, as a dropped connection does."""
+    with pytest.raises(ConnectionError):
+        async for _ in pad.execute_streaming(code):
+            pass
+
+
+@pytest.mark.parametrize("earlier, held", [(HOOK_CELL, True), ("total = 1", False)],
+                         ids=["a-hook-written", "no-hook"])
+@pytest.mark.parametrize("stop, error", [
+    (_closed_at_a_progress_yield, "Cancelled."),
+    (_failed_mid_stream, "The scratchpad service's stream failed (ConnectionError)."),
+], ids=["closed-at-a-progress-yield", "failed-mid-stream"])
+async def test_a_cell_after_a_remote_stream_that_ended_with_no_cell_is_held_once_a_hook_was_written(
+    project, earlier, held, stop, error,
+):
+    """A remote stream that ends with no cell stopped it: the turn was
+    closed at a progress yield, or the stream failed. The pad records the
+    stopped cell's own code as one that ended its process, with its own
+    description, so the next cell is held once a hook was written."""
+    pad = RemoteScratchpadRuntime(
+        name="main", endpoint_url="https://scratchpad.example.com", api_key="test", workspace_path=project,
+        cells=[Cell(code=earlier, stdout="", stderr="", error=None)],
+    )
+
+    async def stream(path: str, body: dict):
+        yield {"type": "progress", "message": "running"}
+        raise ConnectionError("dropped")
+
+    with patch.object(pad, "_sse", stream):
+        await stop(pad, "import time\ntime.sleep(999)")
+    stopped = pad.cells[-1]
+    assert (stopped.code, stopped.error, stopped.stopped_at, stopped.ended_process) == (
+        "import time\ntime.sleep(999)", error, NOTHING_KEPT, True,
+    )
+    assert pad._running_code is None
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    outcome = await _hold()(session, pad=pad, code="print(1)")
+    assert (outcome is not None) is held
+    assert elicitor.asked == int(held)
+
+
+async def test_a_remote_cancel_and_then_a_task_cancel_record_the_stopped_cell_once(project):
+    """A host that calls the pad's `cancel()` and cancels the turn's task
+    while the cancel request is still out records the stopped cell once:
+    `cancel()` takes the running cell before its request, so the stream the
+    task cancel ends records nothing more."""
+    pad = RemoteScratchpadRuntime(
+        name="main", endpoint_url="https://scratchpad.example.com", api_key="test", workspace_path=project,
+    )
+    started, posting, answered = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def endless_stream(path: str, body: dict):
+        yield {"type": "progress", "message": "running"}
+        started.set()
+        await asyncio.Event().wait()
+        yield {}
+
+    async def slow_post(path: str, body: dict) -> dict:
+        posting.set()
+        await answered.wait()
+        return {}
+
+    with patch.object(pad, "_sse", endless_stream), patch.object(pad, "_post", slow_post):
+        task = asyncio.create_task(pad.execute("import time\ntime.sleep(999)"))
+        await started.wait()
+        cancelling = asyncio.create_task(pad.cancel())
+        await posting.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        answered.set()
+        await cancelling
+    assert [(c.code, c.ended_process) for c in pad.cells] == [("import time\ntime.sleep(999)", True)]
+
+
+def test_a_cells_process_fields_come_before_the_fields_a_host_cuts():
+    """A host that keeps a saved result cut short, as a stream that stores at
+    most 65,536 characters of it does, still reads the fields before the
+    cut. `json.dumps(asdict(cell))` writes them in the order `Cell` declares,
+    so `stopped_at` and `ended_process` come before `description`,
+    `estimated_time` and `logs`, the long fields such a cut falls in."""
+    names = [f.name for f in fields(Cell)]
+    assert max(names.index("stopped_at"), names.index("ended_process")) < min(
+        names.index("description"), names.index("estimated_time"), names.index("logs"),
+    )
+
+
+# A traceback whose text names a line the cell never reached: the hint the
+# boot puts before a ModuleNotFoundError carries the name the cell asked for.
+_FORGED_LINE = (
+    "'File \"<scratchpad>\", line 99, in <module>' is not installed, and imports never install anything.\n"
+    'Traceback (most recent call last):\n  File "<scratchpad>", line 2, in <module>\nModuleNotFoundError: x\n'
+)
+
+
+@pytest.mark.parametrize("error, stopped_at, held", [
+    ("KeyError: 'amount'", 5, False),
+    ("FileNotFoundError: x", 2, True),
+    ("KeyError: 'amount'", None, True),
+    (_FORGED_LINE, 2, True),
+], ids=["stopped-after-the-def", "stopped-before-the-def", "no-stop-line", "a-line-the-error-text-names"])
+async def test_a_helper_a_failed_cell_defined_before_it_stopped_is_bound(project, error, stopped_at, held):
+    """After a script ran, a call to a name no read code binds holds the
+    cell. A cell that failed bound what it ran before the line the boot read
+    from its traceback (`Cell.stopped_at`), so a later call to a helper it
+    defined there runs with no card; one it defined past that line, or with
+    no line to go by, may never have been bound. A line the error's text
+    names, which the cell can shape, counts for nothing."""
+    pad = _runtime(
+        project,
+        "import subprocess, sys\nsubprocess.run([sys.executable, 'scripts/clean.py'], check=True)",
+        "import pandas as pd\norders = pd.read_csv('stock.csv')\ndef summarize_orders(o):\n"
+        "    return o.groupby('site').sum()\nprint(orders['amount'].sum())",
+    )
+    pad.cells[1].error = error
+    pad.cells[1].stopped_at = stopped_at
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    outcome = await _hold()(session, pad=pad, code="print(summarize_orders(orders))")
+    assert (outcome is not None) is held
+    assert elicitor.asked == int(held)
 
 
 def test_a_refused_cell_is_not_working_code_for_the_artifact_pipeline():
