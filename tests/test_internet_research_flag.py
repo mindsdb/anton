@@ -21,6 +21,8 @@ from anton.core.llm.prompts import (
 )
 from anton.core.memory import skills as skills_mod
 from anton.core.session import ChatSession, ChatSessionConfig
+from anton.core.tools.generate_artifact.orchestrator import _public_data_sources_skill
+from anton.core.tools.generate_artifact.state import GenState
 from anton.workspace import Workspace
 from tests.conftest import make_mock_llm, run_turn
 
@@ -125,3 +127,59 @@ def test_nudges_drop_internet_advice_only_without_internet_research(tool_name, e
     assert _nudges(internet_research=True, tool_name=tool_name, error=error).endswith(online)
     # A session object that predates the flag keeps today's nudge.
     assert _nudges(internet_research=None, tool_name=tool_name, error=error).endswith(online)
+
+
+def test_the_prompt_variant_drops_the_public_dataset_follow_ups():
+    assert "PROACTIVE FOLLOW-UP SUGGESTIONS" not in NO_INTERNET_CHAT_SYSTEM_PROMPT
+    assert "DATA SOURCES:" in NO_INTERNET_CHAT_SYSTEM_PROMPT
+
+
+# --- generate_artifact's own gathering loop ---------------------------------
+
+def _gen_state(tmp_path: Path, **session) -> GenState:
+    return GenState(
+        session=SimpleNamespace(**session), artifact_type="html-app",
+        artifact_path=tmp_path, slug="demo", brief="b",
+    )
+
+
+@pytest.mark.parametrize("session", [{}, {"_internet_research_enabled": True}], ids=["predates-flag", "on"])
+def test_the_gathering_loop_keeps_its_web_tools_with_internet_research(tmp_path, session):
+    state = _gen_state(tmp_path, **session)
+    tools = {tool["name"]: tool for tool in state.pipeline_tools}
+
+    assert state.internet_research is True
+    assert {"web_search", "web_fetch"} <= set(tools)
+    assert "web_search(query)" in tools["scratchpad"]["description"]
+
+
+def test_the_gathering_loop_offers_no_web_tools_without_internet_research(tmp_path):
+    state = _gen_state(tmp_path, _internet_research_enabled=False)
+    tools = {tool["name"]: tool for tool in state.pipeline_tools}
+
+    assert state.internet_research is False
+    assert "web_search" not in tools and "web_fetch" not in tools
+    assert "web_search" not in tools["scratchpad"]["description"]
+
+
+def test_the_public_data_sources_catalog_is_not_read_without_internet_research():
+    store = SimpleNamespace(load_for_artifacts=lambda label: pytest.fail("the catalog was read"))
+    session = SimpleNamespace(_internet_research_enabled=False, _skill_store=store)
+    assert _public_data_sources_skill(session) == ""
+
+
+def test_the_unsupported_factory_warning_is_logged_once(monkeypatch, caplog):
+    from anton.core.backends import manager as manager_mod
+
+    def old_factory(*, name, coding_provider, coding_model, coding_api_key, coding_base_url, cells, workspace_path):
+        raise AssertionError("not called")
+
+    monkeypatch.setattr(manager_mod, "_warned_no_internet_research_kwarg", False)
+    monkeypatch.setattr(manager_mod.ScratchpadManager, "probe_packages", lambda self: [])
+    with caplog.at_level("WARNING", logger=manager_mod.logger.name):
+        for _ in range(3):
+            manager_mod.ScratchpadManager(
+                runtime_factory=old_factory, coding_provider="x", coding_model="x",
+                coding_api_key="", coding_base_url="", internet_research_enabled=False,
+            )
+    assert sum("internet_research_enabled" in r.getMessage() for r in caplog.records) == 1

@@ -3225,7 +3225,7 @@ class ChatSession:
         # Copy — SCRATCHPAD_TOOL is a module-level singleton; mutating its
         # .description in place would leak across every session/user sharing
         # this process instead of resetting per session.
-        scratchpad_tool = replace(SCRATCHPAD_TOOL if self._internet_research_enabled
+        scratchpad_tool = replace(SCRATCHPAD_TOOL if getattr(self, "_internet_research_enabled", True)
                                   else NO_INTERNET_SCRATCHPAD_TOOL)
         pkg_list = self._scratchpads.available_packages
         if pkg_list:

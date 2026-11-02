@@ -669,7 +669,8 @@ through a tool or from scratchpad code.
 NO_INTERNET_CHAT_SYSTEM_PROMPT = cut_spans(
     CHAT_SYSTEM_PROMPT,
     ("- **Internet access**: You DO have access", "- **Scratchpad execution**", ""),
-    ("INTERNET & LIVE INFORMATION:\n", "PROACTIVE FOLLOW-UP SUGGESTIONS:", NO_INTERNET_DATA_SOURCES),
+    # Up to SCRATCHPAD, so the follow-up suggestions about public datasets go too.
+    ("INTERNET & LIVE INFORMATION:\n", "SCRATCHPAD:\n- Use the scratchpad", NO_INTERNET_DATA_SOURCES),
     ("web scraping, ", "plotting", ""),
     ("- web_search(query) answers", "- get_llm, agentic_loop, and web_search", ""),
     (

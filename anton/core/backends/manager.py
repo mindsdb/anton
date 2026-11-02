@@ -17,6 +17,10 @@ from anton.utils.nofollow import read_text_nofollow, replace_text_nofollow
 
 logger = logging.getLogger(__name__)
 
+# Set once a factory without internet_research_enabled was warned about: hosts
+# build a manager for every message, and the factory doesn't change.
+_warned_no_internet_research_kwarg = False
+
 
 class _PathStamp(NamedTuple):
     """A sys.path entry and its mtime, or None when it cannot be stat'ed."""
@@ -117,7 +121,10 @@ class ScratchpadManager:
         self._factory_takes_internet_research = self._probe_factory_kwarg(
             runtime_factory, "internet_research_enabled"
         )
-        if not internet_research_enabled and not self._factory_takes_internet_research:
+        global _warned_no_internet_research_kwarg
+        if (not internet_research_enabled and not self._factory_takes_internet_research
+                and not _warned_no_internet_research_kwarg):
+            _warned_no_internet_research_kwarg = True
             logger.warning(
                 "this scratchpad runtime factory takes no internet_research_enabled, so "
                 "its pads keep web_search() although internet research is off"
