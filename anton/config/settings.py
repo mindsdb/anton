@@ -155,6 +155,10 @@ class AntonSettings(CoreSettings):
     # inline instead of stopping to ask. False = cautious ask-first discipline.
     act_first: bool = True
 
+    # False drops the DIRECT REPORTS path from the prompts and tool texts, so
+    # every web artifact goes through `generate_artifact`.
+    direct_reports: bool = True
+
     disable_autoupdates: bool = False
 
     terms_consent: bool = False
