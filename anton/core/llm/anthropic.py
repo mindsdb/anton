@@ -7,6 +7,7 @@ from typing import NoReturn
 import anthropic
 
 from .effort import LONGEST_SILENCE_S
+from .prompt_builder import SESSION_CONTEXT_MARKER
 from .provider import register_provider, safe_parse_tool_input, unregister_provider
 from .provider import (
     ContextOverflowError,
@@ -234,8 +235,6 @@ def _cached_system(system: str) -> str | list[dict]:
     Split at the session marker so the shared part stays cached when the
     per-conversation tail (memory, workspace listing) changes.
     """
-    from .prompt_builder import SESSION_CONTEXT_MARKER
-
     if not system:
         return system
     if system.count(SESSION_CONTEXT_MARKER) == 1:
@@ -340,7 +339,10 @@ class AnthropicProvider(LLMProvider):
             "model": model,
             "max_tokens": max_tokens,
             "system": _cached_system(system),
-            "messages": _cached_messages(messages),
+            # No mark on the messages: one-off calls (structured output,
+            # compaction) never send the same history again. The planning
+            # loop goes through stream(), which marks them.
+            "messages": messages,
         }
         if merged_tools:
             kwargs["tools"] = merged_tools
