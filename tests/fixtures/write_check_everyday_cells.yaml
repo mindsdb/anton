@@ -2,7 +2,7 @@
 # database, a listed endpoint or a file that was there when the turn began.
 # Each must raise no card in each context below: a false hold costs an
 # unattended answer the whole card timeout, and a card on every plot teaches
-# the tester to approve without reading.
+# the person who approves to click Approve without reading.
 #
 # Read by tests/test_write_check.py::test_everyday_cells_raise_no_card, which
 # runs every cell after every context's earlier cells, against a project

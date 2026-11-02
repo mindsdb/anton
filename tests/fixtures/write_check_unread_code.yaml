@@ -19536,7 +19536,8 @@ cases:
   # An `origin` column of data is no spec's origin, and an archive tar makes
   # or unzip lists unpacks nothing, so neither holds a later import; tar's
   # extract mode still does. Literal code an exec() inside a def runs reads
-  # the names of the namespace the def's code runs in.
+  # the def's globals, the names of the namespace its code runs in, not its
+  # locals or parameters.
 
   - name: an import after an earlier cell exports a csv per row named by an origin column
     earlier:

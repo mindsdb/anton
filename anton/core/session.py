@@ -7000,21 +7000,28 @@ class ChatSession:
                                 )
 
                                 cell = None
-                                async for item in pad.execute_streaming(
+                                # Closed with the turn, so a turn closed at its
+                                # own yield closes the pad's stream at once,
+                                # and the runtime records the cell it stopped.
+                                run = pad.execute_streaming(
                                     code,
                                     description=description,
                                     estimated_time=estimated_time,
                                     estimated_seconds=estimated_seconds,
-                                ):
-                                    if self._cancel_event.is_set():
-                                        await pad.cancel()
-                                        break
-                                    if isinstance(item, str):
-                                        yield StreamTaskProgress(
-                                            phase="scratchpad", message=scrub_output(item), id=tc.id,
-                                        )
-                                    elif isinstance(item, Cell):
-                                        cell = item
+                                )
+                                try:
+                                    async for item in run:
+                                        if self._cancel_event.is_set():
+                                            await pad.cancel()
+                                            break
+                                        if isinstance(item, str):
+                                            yield StreamTaskProgress(
+                                                phase="scratchpad", message=scrub_output(item), id=tc.id,
+                                            )
+                                        elif isinstance(item, Cell):
+                                            cell = item
+                                finally:
+                                    await run.aclose()
                                 _sp_elapsed = _time.monotonic() - _sp_t0
                                 yield StreamTaskProgress(
                                     phase="scratchpad_done",

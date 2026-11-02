@@ -125,20 +125,24 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
         """Ask the service to stop the running cell and restart the pad, and
         record the cell it stopped, as the local runtime does: its process
         is gone, so it kept none of its names, and the next cell runs in a
-        new process."""
-        await self._post("/scratchpad/cancel", {"name": self.name})
+        new process. The running cell is taken before the request, so the
+        stream it ends doesn't record it again, and recorded even when the
+        request fails."""
         running, self._running_code = self._running_code, None
-        self._record_cell(
-            Cell(
-                code=running if running is not None else "# (cancelled by user)",
-                stdout="",
-                stderr="",
-                error="Cancelled by user.",
-                description="Cancelled",
-                stopped_at=NOTHING_KEPT,
-                ended_process=True,
+        try:
+            await self._post("/scratchpad/cancel", {"name": self.name})
+        finally:
+            self._record_cell(
+                Cell(
+                    code=running if running is not None else "# (cancelled by user)",
+                    stdout="",
+                    stderr="",
+                    error="Cancelled by user.",
+                    description="Cancelled",
+                    stopped_at=NOTHING_KEPT,
+                    ended_process=True,
+                )
             )
-        )
 
     async def install_packages(self, packages: list[str]) -> str:
         result = await self._post("/scratchpad/install", {
@@ -169,6 +173,7 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
         }
 
         self._running_code = code
+        stopped_by = "The scratchpad service's stream ended with no result."
         try:
             async for event in self._sse("/scratchpad/execute-stream", body):
                 event_type = event.get("type", "")
@@ -214,26 +219,32 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
                     self._running_code = None
                     cell = self._record_cell(cell)
                     yield cell
-        except asyncio.CancelledError:
-            # A host that stops a turn by cancelling its task never calls
-            # `cancel()`, so record the stopped cell here the same way, unless
-            # `cancel()` already did (it clears `_running_code` first).
-            if self._running_code is not None:
-                self._running_code = None
+        except (asyncio.CancelledError, GeneratorExit, KeyboardInterrupt):
+            stopped_by = "Cancelled."
+            raise
+        except Exception as exc:
+            stopped_by = f"The scratchpad service's stream failed ({type(exc).__name__})."
+            raise
+        finally:
+            # A stream that ends with no cell for `code` stopped it: a host
+            # that cancels the turn's task, a close at a progress yield (as a
+            # turn closed at its own yield leaves it), or a stream that fails.
+            # Record it as `cancel()` does, unless a cell or `cancel()` already
+            # did (each clears `_running_code` first).
+            running, self._running_code = self._running_code, None
+            if running is not None:
                 self._record_cell(
                     Cell(
-                        code=code,
+                        code=running,
                         stdout="",
                         stderr="",
-                        error="Cancelled by user.",
-                        description="Cancelled",
+                        error=stopped_by,
+                        description=description,
+                        estimated_time=estimated_time,
                         stopped_at=NOTHING_KEPT,
                         ended_process=True,
                     )
                 )
-            raise
-        finally:
-            self._running_code = None
 
     async def cleanup(self) -> None:
         try:

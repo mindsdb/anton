@@ -831,6 +831,8 @@ def _flags_under_ifs(start: str, flag: str, *, count: int) -> str:
      "import subprocess\n" + "for v in rows():\n    subprocess.run(['echo', v])\n" * 300, "none"),
     ([], "def h0(x):\n    help(x)\n" + "".join(
         f"def h{i}(x):\n" + f"    h{i - 1}(x)\n" * 12 for i in range(1, 7)) + "h6(open('stock.csv').read())\n", "none"),
+    ([], "import timeit\ndef f():\n    return sum(range(10))\ndef h0(x):\n    return timeit.timeit(x, number=1)\n" + "".join(
+        f"def h{i}(x):\n" + f"    h{i - 1}(x)\n" * 20 for i in range(1, 5)) + "print(h4(f))\n", "none"),
 ], ids=["recursion-with-two-literal-parameters", "recursive-state-machine", "recursive-state-machine-of-eighty-states",
         "command-list-rebuilt-sixteen-times",
         "command-list-rebuilt-three-hundred-times", "command-text-rebuilt-three-hundred-times",
@@ -846,7 +848,8 @@ def _flags_under_ifs(start: str, flag: str, *, count: int) -> str:
         "call-after-thirty-nested-true-ifs-beside-a-global-setter", "import-at-the-end-of-150-stored-modules-each-from-the-last",
         "import-at-the-end-of-300-stored-modules-each-from-the-last",
         "a-thousand-cells-that-store-a-module-unread-code-filled", "loops-over-what-a-two-thousand-line-function-returns",
-        "a-parameter-handed-down-six-helpers-each-called-twelve-times"])
+        "a-parameter-handed-down-six-helpers-each-called-twelve-times",
+        "a-function-handed-down-four-helpers-to-timeit-each-called-twenty-times"])
 def test_a_recursion_or_a_rebuilt_command_is_read_in_well_under_a_second(earlier, code, card, snap):
     """A function the chain already reads is read again for other literals
     only so often (`_REREAD_LIMIT`); a name rebound from itself reads each
@@ -873,7 +876,13 @@ def test_a_recursion_or_a_rebuilt_command_is_read_in_well_under_a_second(earlier
     same worklist as the names it fills (`_names_tainted`); a name a cell
     binds by a def, class or import is found by its name
     (`_Reader.makers`); and what a function returns is read once per def
-    (`_Cell.returns_of`)."""
+    (`_Cell.returns_of`).
+
+    The bound covers a later turn's check, with the earlier cells already
+    parsed (`_EARLIER_CELLS`): each blowup these cases pin is in the read
+    itself, which every check repeats, while a first check also parses each
+    earlier cell once, a cost that grows only with their size."""
+    find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
     started = time.perf_counter()
     writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
     assert time.perf_counter() - started < 1
@@ -917,7 +926,9 @@ def test_a_helper_many_errored_cells_redefine_is_read_once_per_call(snap):
 def test_a_long_conversation_of_literal_execs_is_read_in_well_under_a_second(snap):
     """What each cell adds to a name's list or dict is indexed once per
     check (`_Reader.growth`), so each literal exec's namespace, read for
-    the calls through it, doesn't walk every earlier cell again."""
+    the calls through it, doesn't walk every earlier cell again. The bound
+    covers a later turn's check, with the earlier cells already parsed: the
+    first call parses each of them once and isn't timed."""
     earlier = [
         f"exec('def go{i}():\\n    return {i}')\ngo{i}()\nns{i} = {{}}\n"
         f"exec('def f():\\n    return 1', ns{i})\nns{i}['f']()\n"

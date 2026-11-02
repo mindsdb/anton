@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1356,6 +1356,103 @@ async def test_a_cell_after_a_remote_cell_whose_task_was_cancelled_is_held_once_
     outcome = await _hold()(session, pad=pad, code="print(1)")
     assert (outcome is not None) is held
     assert elicitor.asked == int(held)
+
+
+async def _closed_at_a_progress_yield(pad: RemoteScratchpadRuntime, code: str) -> None:
+    """A turn closed at its own yield, as a CLI Stop leaves it: the pad's
+    stream gives one progress line and is then closed there."""
+    run = pad.execute_streaming(code)
+    assert isinstance(await run.__anext__(), str)
+    await run.aclose()
+
+
+async def _failed_mid_stream(pad: RemoteScratchpadRuntime, code: str) -> None:
+    """A stream that fails after one progress line, as a dropped connection does."""
+    with pytest.raises(ConnectionError):
+        async for _ in pad.execute_streaming(code):
+            pass
+
+
+@pytest.mark.parametrize("earlier, held", [(HOOK_CELL, True), ("total = 1", False)],
+                         ids=["a-hook-written", "no-hook"])
+@pytest.mark.parametrize("stop, error", [
+    (_closed_at_a_progress_yield, "Cancelled."),
+    (_failed_mid_stream, "The scratchpad service's stream failed (ConnectionError)."),
+], ids=["closed-at-a-progress-yield", "failed-mid-stream"])
+async def test_a_cell_after_a_remote_stream_that_ended_with_no_cell_is_held_once_a_hook_was_written(
+    project, earlier, held, stop, error,
+):
+    """A remote stream that ends with no cell stopped it: the turn was
+    closed at a progress yield, or the stream failed. The pad records the
+    stopped cell's own code as one that ended its process, with its own
+    description, so the next cell is held once a hook was written."""
+    pad = RemoteScratchpadRuntime(
+        name="main", endpoint_url="https://scratchpad.example.com", api_key="test", workspace_path=project,
+        cells=[Cell(code=earlier, stdout="", stderr="", error=None)],
+    )
+
+    async def stream(path: str, body: dict):
+        yield {"type": "progress", "message": "running"}
+        raise ConnectionError("dropped")
+
+    with patch.object(pad, "_sse", stream):
+        await stop(pad, "import time\ntime.sleep(999)")
+    stopped = pad.cells[-1]
+    assert (stopped.code, stopped.error, stopped.stopped_at, stopped.ended_process) == (
+        "import time\ntime.sleep(999)", error, NOTHING_KEPT, True,
+    )
+    assert pad._running_code is None
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    outcome = await _hold()(session, pad=pad, code="print(1)")
+    assert (outcome is not None) is held
+    assert elicitor.asked == int(held)
+
+
+async def test_a_remote_cancel_and_then_a_task_cancel_record_the_stopped_cell_once(project):
+    """A host that calls the pad's `cancel()` and cancels the turn's task
+    while the cancel request is still out records the stopped cell once:
+    `cancel()` takes the running cell before its request, so the stream the
+    task cancel ends records nothing more."""
+    pad = RemoteScratchpadRuntime(
+        name="main", endpoint_url="https://scratchpad.example.com", api_key="test", workspace_path=project,
+    )
+    started, posting, answered = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def endless_stream(path: str, body: dict):
+        yield {"type": "progress", "message": "running"}
+        started.set()
+        await asyncio.Event().wait()
+        yield {}
+
+    async def slow_post(path: str, body: dict) -> dict:
+        posting.set()
+        await answered.wait()
+        return {}
+
+    with patch.object(pad, "_sse", endless_stream), patch.object(pad, "_post", slow_post):
+        task = asyncio.create_task(pad.execute("import time\ntime.sleep(999)"))
+        await started.wait()
+        cancelling = asyncio.create_task(pad.cancel())
+        await posting.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        answered.set()
+        await cancelling
+    assert [(c.code, c.ended_process) for c in pad.cells] == [("import time\ntime.sleep(999)", True)]
+
+
+def test_a_cells_process_fields_come_before_the_fields_a_host_cuts():
+    """A host that keeps a saved result cut short, as a stream that stores at
+    most 65,536 characters of it does, still reads the fields before the
+    cut. `json.dumps(asdict(cell))` writes them in the order `Cell` declares,
+    so `stopped_at` and `ended_process` come before `description`,
+    `estimated_time` and `logs`, the long fields such a cut falls in."""
+    names = [f.name for f in fields(Cell)]
+    assert max(names.index("stopped_at"), names.index("ended_process")) < min(
+        names.index("description"), names.index("estimated_time"), names.index("logs"),
+    )
 
 
 # A traceback whose text names a line the cell never reached: the hint the

@@ -102,8 +102,9 @@ What it finds:
   lookup (``getattr``, ``operator.methodcaller`` and ``attrgetter`` among
   them) and also passed or stored as a value, a loader's or a runner's own
   method too; a write of a startup hook a new Python process runs as it
-  starts, a ``.pth`` file in the installed packages, the user site or a
-  folder the check can't place but for a literal with no line it runs, or
+  starts, a ``.pth`` file in the installed packages, the user site, on
+  Windows the environment's own folder or its base Python's, or a folder
+  the check can't place but for a literal with no line it runs, or
   a ``sitecustomize`` or ``usercustomize`` module or package, by a copy, a
   move or a download that lands one too (a ``.pth`` file in the project,
   as PyTorch saves weights, runs only once ``site.addsitedir`` adds its
@@ -111,7 +112,8 @@ What it finds:
   once a cell wrote a hook a new Python process runs as it starts (such a
   module in any folder, or a ``.pth`` file in the installed packages, the
   user site, a folder with a ``site-packages`` or ``dist-packages`` part,
-  or a folder the check can't place, or a file written where the check
+  on Windows the environment's own folder or its base Python's, or a
+  folder the check can't place, or a file written where the check
   can't place it under a name such a hook may have, read through a name
   the path is bound to or a temporary file's suffix, a frame's or a
   model's only inside the installed packages), or unpacked or copied a
@@ -12011,7 +12013,9 @@ class _ExecPlace:
     namespace (`shared`), or in the namespace a name holds (`namespace`),
     or neither, as for a function's own locals. Given no namespace inside a
     function, the code still reads the names of the namespace the
-    function's own code runs in, its globals (`reads_host`)."""
+    function's own code runs in, its globals, not the function's locals or
+    parameters (`reads_host`), and so does such code a later call runs
+    through that function (`_ExecReading.follow`)."""
 
     shared: bool
     namespace: str | None = None
@@ -12263,25 +12267,28 @@ def _holds_a_running_member(node: ast.AST, reader: _Reader) -> bool:
 # The endings of a compiled extension module, which an import loads like a
 # `.py`: its name runs up to the first dot, as `erp.cpython-311.so` is `erp`.
 _EXTENSION_ENDS = (".so", ".pyd")
+# The endings of a source module: `.py`, and `.pyw`, which Python on Windows
+# imports as source too (`importlib.machinery.SOURCE_SUFFIXES` there).
+_SOURCE_ENDS = (".py", ".pyw")
 # What follows a module's name in the path of a file an import loads it from,
 # in a folder on `sys.path`, for a lookup on disk by that name: its source,
 # its bytecode with no source beside it, a compiled extension by an ending
 # this Python loads (`importlib.machinery.EXTENSION_SUFFIXES`), each a module
 # file's ending `_module_stem` reads, or a package's `__init__` with one.
-_MODULE_ENDS = (".py", ".pyc", *importlib.machinery.EXTENSION_SUFFIXES)
+_MODULE_ENDS = (*_SOURCE_ENDS, ".pyc", *importlib.machinery.EXTENSION_SUFFIXES)
 _MODULE_FILE_ENDS = (*_MODULE_ENDS, *(f"/__init__{end}" for end in _MODULE_ENDS))
 
 
 def _module_stem(path: str) -> str | None:
     """The name an import reaches a module file at `path` by, in the folder
-    that holds it: the stem of a `.py` file, of a `.pyc` file outside
+    that holds it: the stem of a source file (`_SOURCE_ENDS`), of a `.pyc` file outside
     `__pycache__` (which Python loads with no source beside it), or of a
     compiled extension (`_EXTENSION_ENDS`), whose name runs to its first dot.
     None for any other file, a `.pyc` in `__pycache__` among them: Python
     reads one only for the source it was compiled from."""
     folders, _, name = path.rpartition("/")
-    if name.endswith(".py"):
-        return name[: -len(".py")]
+    if name.endswith(_SOURCE_ENDS):
+        return name.rpartition(".")[0]
     if name.endswith(".pyc") and "__pycache__" not in folders.split("/"):
         return name[: -len(".pyc")]
     if name.endswith(_EXTENSION_ENDS):
@@ -12289,15 +12296,29 @@ def _module_stem(path: str) -> str | None:
     return None
 
 
-def _may_write_a_module(target: ast.AST, reader: _Reader, cell: _Cell) -> bool:
-    """Whether a write to `target`, code of `cell`, may make a file an import
-    loads (`_module_stem`): its name may end any way where the check can't
-    read the names (`_written_names`) or a name's ending is picked at run
-    time (`_RUN_TIME_PART`), so `f"out_{row.origin}.csv"` makes none."""
+def _may_name_a_module(name: str) -> bool:
+    """Whether a file named `name` may be one an import loads
+    (`_module_stem`): its ending may be picked at run time (`_RUN_TIME_PART`)."""
+    return _module_stem(name) is not None or _RUN_TIME_PART in name.rpartition(".")[2]
+
+
+def _may_write_a_module(call: ast.Call, target: ast.AST, reader: _Reader, cell: _Cell) -> bool:
+    """Whether `call`, code of `cell` that writes `target`, may put a file an
+    import loads there. A write of a file's contents (`_file_write`) makes one
+    when a name it writes may be one (`_may_name_a_module`), or when the check
+    can't read the names (`_written_names`), so `f"out_{row.origin}.csv"`
+    makes none. A copy or move into a folder lands each file under its own
+    name (`_copied_names`), and a move, rename or link may land a package
+    folder, a name with no ending: so a copied name or a destination with
+    none counts too, and a copy of `stock.csv` into a folder doesn't."""
     names = _written_names(target, reader, cell)
-    return names is None or any(
-        _module_stem(name) is not None or _RUN_TIME_PART in name.rpartition(".")[2] for name in names
-    )
+    if _file_write(call, reader) is not None:
+        return names is None or any(_may_name_a_module(name) for name in names)
+    copied = _copied_names(call, reader, cell)
+    if isinstance(copied, _Unknown) or any(_may_name_a_module(name) or "." not in name for name in copied):
+        return True
+    into_folder = reader.dotted(call.func) in _COPY_INTO_FOLDER
+    return names is None or any(_may_name_a_module(name) or not into_folder and "." not in name for name in names)
 
 
 def _module_place(path: str) -> str | None:
@@ -12550,6 +12571,10 @@ _TAR_OTHER_LONG = frozenset({
     "--compare",
 })
 _TAR_EXTRACT_LONG = frozenset({"--extract", "--get"})
+# The letters of tar's and bsdtar's options that take a value, which may be
+# glued to the letter (`-farchive.tar`, `-Cdest`), so the letters after one
+# in a word are its value, not modes.
+_TAR_VALUE_LETTERS = {"tar": frozenset("bCfFgHIKLNTVX"), "bsdtar": frozenset("bCfIsTX")}
 # unzip's options that list, test or print an archive and unpack nothing.
 _UNZIP_OTHER_MODES = frozenset({"-l", "-t", "-v", "-p", "-z", "-Z"})
 # 7z's commands that unpack nothing: add, benchmark, delete, hash, info,
@@ -12561,21 +12586,30 @@ def _unpacks(verb: str, args: list[str]) -> bool:
     """Whether an archive program, by its name `verb` and the words after it,
     unpacks files: tar or bsdtar in extract mode, unzip but for listing,
     testing or printing (`_UNZIP_OTHER_MODES`), 7z but for its commands that
-    unpack nothing (`_SEVENZIP_OTHER`), and unar. Words that name no mode
-    the check reads count as one that unpacks."""
+    unpack nothing (`_SEVENZIP_OTHER`), and unar. A tar mode counts only
+    where tar reads one: a long flag, or a prefix of `--extract` or `--get`,
+    which tar takes for it; a dash word's letters up to the first that takes
+    a value (`_TAR_VALUE_LETTERS`); and every letter of tar's first word with
+    no dash. Words that name no mode the check reads count as one that
+    unpacks."""
     if verb in ("tar", "bsdtar"):
         modes: set[str] = set()
         for i, word in enumerate(args):
             if word.startswith("--"):
                 flag = word.partition("=")[0]
-                if flag in _TAR_EXTRACT_LONG:
+                if len(flag) > 2 and any(name.startswith(flag) for name in _TAR_EXTRACT_LONG):
                     modes.add("x")
                 elif flag in _TAR_OTHER_LONG:
                     modes.add("c")
             elif word.startswith("-") or i == 0:
                 # Short letters, bundled as `-xzf`, or as tar's first word
-                # with no dash, as `czf`.
-                modes.update(set(word.lstrip("-")) & {"x", *_TAR_OTHER_MODES})
+                # with no dash, as `czf`; in a dash word, a value glued to a
+                # letter that takes one, as `-farchive.tar`, ends them.
+                letters = word.lstrip("-")
+                if word.startswith("-"):
+                    letters = next((letters[:k + 1] for k, letter in enumerate(letters)
+                                    if letter in _TAR_VALUE_LETTERS[verb]), letters)
+                modes.update(set(letters) & {"x", *_TAR_OTHER_MODES})
         return "x" in modes or not modes
     if verb == "unzip":
         return not any(word in _UNZIP_OTHER_MODES for word in args)
@@ -12655,8 +12689,8 @@ def _writes_site_packages(target: ast.AST, reader: _Reader, *, depth: int = 0) -
 
 def _may_be_a_spec(value: ast.AST, reader: _Reader, *, depth: int = 0) -> bool:
     """Whether `value`, what an `origin` lookup reads, may be a module's
-    spec: a call that finds one (`_SITE_PACKAGES_CALLS`), a module's
-    `__spec__`, or a name bound to either (`_Reader.read_bindings`), up to
+    spec: a call of `_SITE_PACKAGES_CALLS` (`find_spec` among them), a
+    module's `__spec__`, or a name bound to either (`_Reader.read_bindings`), up to
     `_PARAM_DEPTH` names. `origin` is a common field of data too, as a
     flight's row has, so a lookup on any other value reads no package's
     place."""
@@ -13003,15 +13037,16 @@ class _Modules:
     def wrote_site_packages(self) -> bool:
         """Whether a cell writes a module into the installed packages
         (`_writes_site_packages`), where an import finds it: a file write to
-        such a path, or a copy or move into one. Read once per check, where
-        an import asks."""
+        such a path, or a copy, move, rename or link into one, that may make
+        a module or a package (`_may_write_a_module`). Read once per check,
+        where an import asks."""
         reader = self._reader
         for cell in reader.cells:
             for call in cell.writer_calls:
                 if _last_name(call.func) not in _FILE_WRITE_NAMES:
                     continue
                 target = _written_target(call, reader, cell)
-                if target is not None and _may_write_a_module(target, reader, cell) and _writes_site_packages(
+                if target is not None and _may_write_a_module(call, target, reader, cell) and _writes_site_packages(
                     target, reader,
                 ):
                     return True
@@ -14000,8 +14035,10 @@ def _unread_run_at(node: ast.AST, reader: _Reader, cell: _Cell, *, read: _ExecRe
     an importer, or a loader's or a runner's own method, passed on or
     stored (`_holds_a_running_member`), and a lookup of a member that may
     run code (`_looks_up_a_runner`); a function given code the check can't
-    read (`_swaps_in_unread_code`); and a program it runs that runs Python
-    the check can't read (`_launches_unread`). Each name a runner, importer
+    read (`_swaps_in_unread_code`); a program it runs that runs Python the
+    check can't read (`_launches_unread`); and a write of a startup hook a
+    later Python process runs as it starts (`_hook_write`,
+    `_HookWrite.runs_at_start`). Each name a runner, importer
     or launcher is called by resolves through the imports
     (`_Reader.module_member`)."""
     if isinstance(node, ast.Import):
@@ -14115,7 +14152,8 @@ def _hook_write(call: ast.Call, reader: _Reader, cell: _Cell) -> _HookWrite:
     A data writer's file (`_WRITER_METHODS`), as `torch.save` and `to_csv`
     write, holds a frame, an array, a chart or a model, not a module's code
     or the import lines a `.pth` file runs, so it counts only inside the
-    installed packages (`_writes_site_packages`); and a literal text with
+    installed packages (`_writes_site_packages`, where an `origin` counts
+    only on a spec, `_may_be_a_spec`); and a literal text with
     no such line (`_runs_no_pth_line`) writes no hook into a `.pth` file,
     one named so in a folder the check can't place among them
     (`_written_names`)."""
@@ -14213,9 +14251,23 @@ def _runs_at_start(path: str) -> bool:
     folder on `PYTHONPATH`; a `.pth` file only in a folder `site` reads
     them from as Python starts, the installed packages or the user site,
     whose paths have a `site-packages` or `dist-packages` part
-    (`_names_package_folder`). A `.pth` file anywhere else runs only once
-    `site.addsitedir` adds its folder (`_Modules.may_hold_pth`)."""
-    return _names_hook_module(path) or _names_package_folder(path)
+    (`_names_package_folder`), and on Windows also the environment's own
+    folder and its base Python's (`sys.prefix`, `sys.base_prefix`), which a
+    placed path outside the project may be (`_outside_project`). A `.pth`
+    file anywhere else runs only once `site.addsitedir` adds its folder
+    (`_Modules.may_hold_pth`)."""
+    return _names_hook_module(path) or _names_package_folder(path) or (
+        sys.platform == "win32" and path.endswith(".pth") and _outside_project(path)
+    )
+
+
+def _outside_project(path: str) -> bool:
+    """Whether `path`, a placed path with `/` separators (`_placed_hooks`),
+    may lie outside the project: an absolute, home or drive-letter path, one
+    that climbs out with `..`, or one in the pad's own environments under
+    `.anton/`."""
+    return (posixpath.isabs(path) or path.startswith("~") or re.match(r"[A-Za-z]:/", path) is not None
+            or path == ".." or path.startswith("../") or path.startswith(".anton/"))
 
 
 # Programs that write the files their operands name, so an operand may name
@@ -14443,7 +14495,8 @@ def _unplaced_hook(call: ast.Call, target: ast.AST, reader: _Reader, cell: _Cell
     """Whether `call`, code of `cell` that writes to `target`, a path the
     check can't place, may write a startup hook a new Python process runs:
     a data writer's file (`_WRITER_METHODS`) only inside the installed
-    packages, as `_hook_write` reads it; any other where the file's name may
+    packages, as `_hook_write` reads it (an `origin` only on a spec,
+    `_may_be_a_spec`); any other where the file's name may
     be a hook's (`_written_names`, `_may_name_a_hook`), as a CSV saved into
     a temporary folder's isn't."""
     if _last_name(call.func) in _WRITER_METHODS:
@@ -15115,7 +15168,8 @@ def _store_heads(node: ast.AST) -> list[ast.AST]:
 
 
 def _stored_names(target: ast.AST) -> list[str]:
-    """The names a loop's or with's target binds, each part of it alike."""
+    """The names an assignment's, loop's or with's target binds, nested and
+    starred parts included; a subscript's or attribute's holder binds none."""
     return [n.id for n in ast.walk(target) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)]
 
 
