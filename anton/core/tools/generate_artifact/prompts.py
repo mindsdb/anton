@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from anton.core.artifacts.geography_guidance import GEOGRAPHY_GUIDANCE
 from anton.utils.datasources import DATASOURCES_HEADER
 
 from .discovery.notes import EXEC_OUTPUT_MAX
@@ -166,26 +167,7 @@ VISUAL DESIGN (for every HTML file you produce):
   `<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>`
   Initialise with `echarts.init(dom, 'dark')` and customise background to #0d1117.
   NEVER use Plotly, matplotlib, or other chart libraries unless explicitly asked.
-- MAPS AND GLOBES: ECharts ships no world outline, so a map or globe uses
-  one of these tested recipes, at exactly these versions. Load the world
-  atlas with d3@7.9.0 and topojson-client@3.1.0:
-  `<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>`
-  `<script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js"></script>`
-  `const WORLD_ATLAS = 'https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json';`
-  `d3.json(WORLD_ATLAS).then((world) => { const countries = topojson.feature(world, world.objects.countries); /* draw */ });`
-  Load it with `d3.json`, never `fetch()`: the verifier fails an absolute
-  URL in `fetch()`. Then draw `countries` in one of three ways:
-  - d3 into an `<svg>` (`d3.geoNaturalEarth1().fitSize([w, h], countries)`,
-    `d3.geoPath`);
-  - ECharts: `echarts.registerMap('world', countries)`, then a `map` series
-    with `map: 'world'`;
-  - a globe: globe.gl@2.34.2
-    (`<script src="https://cdn.jsdelivr.net/npm/globe.gl@2.34.2/dist/globe.gl.min.js"></script>`)
-    with `.polygonsData(countries.features)`. It is heavy, so the browser
-    check may run out of time on it and leave the page unverified.
-  Never write GeoJSON into the page by hand: a world outline runs to hundreds
-  of KB. Leaflet, raster map tiles, MapLibre (it needs a web worker) and
-  echarts-gl (it needs `eval`) break the preview policy below.
+""" + GEOGRAPHY_GUIDANCE + """
 - PREVIEW POLICY: the web app preview runs the page in a sandboxed frame
   under a content security policy that blocks what it does not allow. Build
   to that policy so the page renders on every deployment: no external
@@ -217,8 +199,9 @@ VISUAL DESIGN (for every HTML file you produce):
 - Multi-tab dashboards: NEVER call `echarts.init()` on a hidden container.
   Use lazy init — initialise charts only on first tab visibility.
   Pattern: `const _rendered = new Set(['overview']); function showPage(name) { if (!_rendered.has(name)) { _rendered.add(name); initChartsFor(name); } }`
-  `initChartsFor(name)` starts each view on that tab through `runView`, the
-  helper in the verifier contract, so a view that fails on a tab fails alone.
+  `initChartsFor(name)` starts each view on that tab by its title with
+  `runView(title, el)`, the helper in the verifier contract, so a view whose
+  script fails on a tab fails alone and the tab's other views still draw.
 - Layout composition:
   - Hero KPI cards at the top (large numbers, colour-coded ±, delta arrows).
   - Main narrative chart immediately below KPIs.
@@ -307,20 +290,32 @@ _BROWSER_GATE_SERVED = """\
 """
 
 
-# The one helper every view's setup goes through, here and, word for word, in
-# the build-html-dashboard skill. A throw or a rejected promise stays in its
-# view: the view shows a plain-text message and carries `data-view-failed`,
-# which the render check reports as a blank view whatever the message says.
-# The message names the view first in both channels: `console.error`, which
-# the render check counts, and `reportError`, which fires the window `error`
-# event the app preview's error list is built from. `el` may be missing, and
-# `fail` must not throw from inside the `catch`, or the error escapes the view.
+# The one helper every view goes through, here and, word for word, in the
+# build-html-dashboard skill. Each view's own script registers its setup with
+# `defineView`, and the page starts it by name with `runView`. A browser parses
+# each `<script>` element as a whole, so a syntax error in one view's script
+# stops only that script: its `defineView` never runs, and `runView` finds no
+# setup under that name. A missing setup, a throw or a rejected promise stays
+# in its view: the view shows a plain-text message and carries
+# `data-view-failed`, which the render check reports as a blank view whatever
+# the message says. The message names the view first in both channels:
+# `console.error`, which the render check counts, and `reportError`, which
+# fires the window `error` event the app preview's error list is built from.
+# A `Map` keeps a view titled like an `Object` property ("constructor") from
+# finding a setup it never registered. A title two scripts register fails
+# every view under it, instead of drawing the second view's setup in both.
+# `el` may be missing, and `fail` must not throw from inside the `catch`, or
+# the error escapes the view.
 VIEW_HELPER_JS = (
-    "function runView(name, el, setup) { const fail = (err) => { "
+    "const viewSetups = new Map(); "
+    "function defineView(name, setup) { viewSetups.set(name, viewSetups.has(name) ? () => { throw new Error('two scripts defined this view'); } : setup); } "
+    "function runView(name, el) { const fail = (err) => { "
     "const why = err && err.message ? err.message : String(err); "
     "if (el) { el.setAttribute('data-view-failed', name); el.textContent = name + ' could not load.'; } "
     "console.error(name + ' failed: ' + why); "
     "if (typeof reportError === 'function') reportError(new Error(name + ': ' + why)); }; "
+    "const setup = viewSetups.get(name); "
+    "if (typeof setup !== 'function') { fail(new Error('no script defined this view')); return; } "
     "try { const done = setup(el); if (done && typeof done.then === 'function') done.catch(fail); } "
     "catch (err) { fail(err); } }"
 )
@@ -331,13 +326,31 @@ VIEW_HELPER_JS = (
 # and an expected failure that logs one fails a page that works.
 _CAUGHT_ERRORS = """\
 - Start every view through this one helper: each chart, map, globe or other
-  view that runs setup code, on load or on its tab's first visit. A view
-  whose setup throws or whose promise rejects then fails alone, with a
-  plain-text message in its place, and every other view still draws:
+  view that runs setup code, on load or on its tab's first visit. Put the
+  helper alone in the page's first inline `<script>`:
   `""" + VIEW_HELPER_JS + """`
-  Call it with the view's title as the page shows it, its element and its
-  setup function, which may be `async`:
-  `runView('Shipment map', document.getElementById('world-map'), drawMap);`.
+  Give each view an inline `<script>` of its own that holds only its setup,
+  registered under the view's title as the page shows it. Give each view a
+  title no other view on the page uses: two scripts that register one title
+  fail both views. The setup takes the view's element and may be `async`:
+  `<script>defineView('Shipment map', (el) => { /* draw the map */ });</script>`.
+  Declare nothing else at a view script's top level: every function and
+  constant the view uses goes inside its setup. A page's scripts share one
+  global scope, so two views' top-level `function render` silently swap, and
+  one view draws the other's chart with no error.
+  Shared code, such as the data and formatters, goes in scripts before the
+  views'. The page's last script starts each view by its title once the
+  page has parsed, on load or on its tab's first visit:
+  `addEventListener('DOMContentLoaded', () => { runView('Shipment map', document.getElementById('world-map')); });`.
+  A `<script type="module">` runs after every classic script, so a view it
+  registers exists only by then. Keep the functions the page's HTML calls,
+  such as a tab's `showPage`, outside that listener, where an `onclick`
+  attribute finds them.
+  The browser parses each `<script>` on its own, so a syntax error in one
+  view's script stops only that view: it shows a plain-text message in its
+  place, and every other view still draws. A view whose setup throws or
+  whose promise rejects fails alone the same way. Never put two views' code
+  in one script, and never pass a setup function to `runView`.
   Await or return every promise the setup starts, such as the atlas's
   `d3.json(...)`. Don't end it with a `.catch` of your own: the helper must
   see the failure to name and mark the view.
@@ -626,10 +639,11 @@ tag, one that calls the backend outside `/api/*`, one that calls it with a
 root-relative path instead of `api()`, or one whose `fetch()` names a path
 `openapi.json` does not define, fails the step.
 
-- Single self-contained HTML file: your own CSS in `<style>`, all JS in
-  `<script>`. The only external resources are the CDN scripts named in the
-  design rules (Tailwind, ECharts) and, for a map or globe, the recipe
-  packages and world atlas named there.
+- Single self-contained HTML file: your own CSS in `<style>`, your own JS in
+  inline `<script>` elements, each view's code in a script of its own (see
+  the verifier contract). The only external resources are the CDN scripts
+  named in the design rules (Tailwind, ECharts) and, for a map or globe, the
+  recipe packages and world atlas named there.
 - Include the api-base meta tag in `<head>`:
   ```html
   <meta name="api-base" content="">
@@ -721,7 +735,8 @@ def _gen_html_task(target: str, *, fullstack: bool = False) -> str:
     if fullstack:
         body = f"""\
 Produce ONE self-contained HTML file named exactly `{target}`: the
-complete frontend of a fullstack app. Inline your own CSS and all JS; the
+complete frontend of a fullstack app. Inline your own CSS and all JS, each
+view's code in a `<script>` of its own as the verifier contract says; the
 only external resources allowed are the Tailwind and ECharts `<script>` tags
 from the CDNs named in the design rules and, for a map or globe, the recipe
 packages and world atlas named there. The backend is generated in parallel
@@ -734,7 +749,8 @@ the relative name given there."""
     else:
         body = f"""\
 Produce ONE self-contained HTML file named exactly `{target}`, at the root
-of the artifact folder. Inline your own CSS and all JS and embed all data in
+of the artifact folder. Inline your own CSS and all JS, each view's code in a
+`<script>` of its own as the verifier contract says, and embed all data in
 the file. Do not reference any other file of the artifact, except the assets
 listed under `## Attached files`, by the relative name given there in quotes
 (`<img src="logo.png">`): once you have written the page, the pipeline
@@ -1652,10 +1668,9 @@ any other stack. Describe behaviour, screens, data flow, and endpoints on top of
   an absolute URL anywhere in the spec.
 - Frontend: one self-contained HTML file (`static/index.html` for fullstack
   types) — vanilla JavaScript, Tailwind CSS via CDN for styling (hand-written
-  CSS where needed), Apache ECharts for charts. A map or globe uses the
-  tested recipe: d3@7.9.0 and topojson-client@3.1.0 load world-atlas@2.0.2,
-  drawn with d3, with ECharts, or on a globe with globe.gl@2.34.2. These
-  libraries need network access when the page opens; when the PRD requires
+  CSS where needed), Apache ECharts for charts. For Earth geography, use
+  the shared MAPS AND GLOBES guidance below. These libraries need network
+  access when the page opens; when the PRD requires
   offline use, the spec says so and the frontend is styled with hand-written
   CSS only.
 - Durable state (`fullstack-stateful-app` ONLY): the platform STATE store — a
@@ -1770,6 +1785,7 @@ def build_tech_spec_instruction(state) -> str:
         + "\n".join(content)
         + "\n\n## Fixed stack\n"
         + _TECH_SPEC_STACK
+        + "\n\n" + GEOGRAPHY_GUIDANCE
         + "\n\nKeep the whole document short: it complements the PRD, and "
         "every line is context the build step carries on every round.\n\n"
         "## Language\n"

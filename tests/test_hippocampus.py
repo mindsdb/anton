@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from anton.core.memory.hippocampus import Hippocampus
+from anton.core.memory.hippocampus import Hippocampus, writer_lock_name
 
 
 @pytest.fixture()
@@ -417,6 +417,14 @@ class TestWriterLock:
         assert appended.wait(5)
         text = hc._lessons_path.read_text()
         assert "rewritten" in text and "late" in text, text
+
+    def test_the_lock_file_has_the_published_name(self, tmp_path):
+        """A host that writes memory files itself locks by this name."""
+        hc = Hippocampus(tmp_path)
+        hc.encode_rule("Use httpx", kind="always")
+        hc.encode_lesson("first", topic="t")
+        assert (tmp_path / writer_lock_name("rules.md")).is_file()
+        assert (tmp_path / writer_lock_name("lessons.md")).is_file()
 
     def test_rewrite_if_unchanged_writes_nothing_on_a_changed_snapshot(self, tmp_path):
         hc = Hippocampus(tmp_path)

@@ -169,7 +169,8 @@ _pending_lock = threading.Lock()
 # both clients read the same way.
 #
 #   turn_completed   ended_by, verification_skipped ("true" when the turn
-#                    completed without a verifier verdict — denied/latched,
+#                    completed without a verifier verdict — denied, latched,
+#                    or skipped for a page out of repair cells,
 #                    ENG-1632 — so honest-stop denominators can exclude it),
 #                    tokens_total, input_tokens, output_tokens,
 #                    cache_read_tokens, cache_creation_tokens, llm_calls,
@@ -187,7 +188,9 @@ _pending_lock = threading.Lock()
 #                    (WHY the completion verifier produced no verdict — the
 #                    loop's truncated/transient/hard/denied class, or
 #                    latched_{hard,truncated,denied,mixed} for a turn that made
-#                    no call because an earlier one latched, plus the
+#                    no call because an earlier one latched, out_of_repairs
+#                    for a turn that skipped it for a page out of repair
+#                    cells, plus the
 #                    content-free exception type; "" on verified turns; ENG-1858),
 #                    harness, surface (desktop / web / cli — WHERE
 #                    the user was, "" when the host did not say; ENG-1945),

@@ -18,7 +18,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
 
-from anton.core.backends.base import Cell, ScratchpadRuntime, scrub_cell
+from anton.core.backends.base import ApiKeySupplier, Cell, ScratchpadRuntime, scrub_cell
 from anton.core.backends.sandbox import (
     CellSandbox,
     SandboxUnavailable,
@@ -58,6 +58,7 @@ from anton.utils.datasources import (
 from anton.core.backends.utils import compute_timeouts
 from anton.utils.nofollow import (
     make_dirs_nofollow,
+    replace_text_nofollow,
     rmtree_nofollow,
     unlink_matching_nofollow,
     write_text_nofollow,
@@ -66,6 +67,8 @@ from anton.utils.nofollow import (
 logger = logging.getLogger(__name__)
 
 _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
+# Holds the host's current coding key, inside the pad's venv folder.
+_CREDENTIAL_FILE = "scratchpad.credential"
 
 # Bound on a killed cell's reported salvage, so a killed cell can never report
 # more stdout than a successful one would have.
@@ -378,6 +381,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         workspace_env_overlay: dict[str, str] | None = None,
         cancel_ends_turn: bool = True,
         cell_sandbox: CellSandbox | None = None,
+        coding_api_key_supplier: ApiKeySupplier | None = None,
+        coding_flavor: str | None = None,
         _venvs_base: Path | None = None,
     ) -> None:
         # The name becomes a folder the host deletes and recreates, so one that
@@ -409,6 +414,15 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._workspace_env_overlay: dict[str, str] | None = workspace_env_overlay
         # Hosts need Stop to end the turn; the CLI preserves cell-only Ctrl+C.
         self._cancel_ends_turn = cancel_ends_turn
+        # The host's current coding key, which a desktop token refresh changes
+        # while the pad runs. Written to a file in the pad's venv that the
+        # boot script reads before each model call; None keeps the boot key.
+        self._coding_api_key_supplier = coding_api_key_supplier
+        # The coding provider's OpenAI transport; None leaves the boot script
+        # to infer it from the provider name and base URL.
+        self._coding_flavor: str | None = coding_flavor
+        self._credential_path: Path | None = None
+        self._credential_written: str | None = None
         # The Landlock policy every spawn of agent code runs under; None runs
         # them unlocked with the server's environment.
         self._cell_sandbox: CellSandbox | None = cell_sandbox
@@ -982,6 +996,38 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         except FileNotFoundError:
             return False
 
+    async def _refresh_credential(self) -> None:
+        """Write the supplier's current key to the pad's credential file if it changed.
+
+        Called at start, before each cell and on each liveness heartbeat. A
+        supplier failure keeps the last key written rather than failing the
+        cell: the pad then fails on its own if that key has expired.
+        """
+        supplier, path = self._coding_api_key_supplier, self._credential_path
+        if supplier is None or path is None:
+            return
+        try:
+            key = await supplier()
+        except Exception:
+            logger.warning(
+                "Scratchpad %s: the current API key could not be read; keeping the last one",
+                self.name,
+                exc_info=True,
+            )
+            return
+        if not key or key == self._credential_written:
+            return
+        try:
+            await asyncio.to_thread(replace_text_nofollow, path.parent, path, key, mode=0o600)
+        except OSError:
+            logger.warning(
+                "Scratchpad %s: the credential file could not be written; keeping the last one",
+                self.name,
+                exc_info=True,
+            )
+            return
+        self._credential_written = key
+
     async def start(self) -> None:
         """Write the boot script to a temp file and launch the subprocess.
 
@@ -1050,6 +1096,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             env["ANTON_SCRATCHPAD_PROVIDER"] = self._coding_provider
         else:
             env.pop("ANTON_SCRATCHPAD_PROVIDER", None)
+        if self._coding_flavor:
+            env["ANTON_SCRATCHPAD_FLAVOR"] = self._coding_flavor
+        else:
+            env.pop("ANTON_SCRATCHPAD_FLAVOR", None)
         # Propagate provider credentials from the ANTON_* names into the SDK
         # names the scratchpad's nested get_llm() expects.
         if "ANTHROPIC_API_KEY" not in env and "ANTON_ANTHROPIC_API_KEY" in env:
@@ -1088,6 +1138,14 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             }.get(self._coding_provider, "")
             if sdk_key:
                 env[sdk_key] = self._coding_api_key
+        self._credential_path = None
+        self._credential_written = None
+        if self._coding_api_key_supplier is not None and self._venv_dir:
+            self._credential_path = Path(self._venv_dir) / _CREDENTIAL_FILE
+            await self._refresh_credential()
+            # Set even when nothing was written yet (no key while signed
+            # out): the pad keeps its boot key until the file appears.
+            env["ANTON_SCRATCHPAD_CREDENTIAL_FILE"] = str(self._credential_path)
         if self._coding_provider in ("openai", "openai-compatible"):
             base_url = (
                 self._coding_base_url
@@ -1453,6 +1511,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._salvage: list[str] = []
         self._salvage_dropped = False
 
+        await self._refresh_credential()
         payload = code + "\n" + CELL_DELIM + "\n"
         trace = get_trace_context()
         if trace is not None:
@@ -1728,6 +1787,12 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
             line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
 
+            # On every line the pad sends, not only bare heartbeats: a cell
+            # that prints each tick sends output chunks instead. The pad's
+            # model calls read the credential file, so a key renewed during
+            # a long cell reaches its later calls.
+            await self._refresh_credential()
+
             if line.startswith(HEARTBEAT_MARKER):
                 # Liveness only: arrival already re-armed the readline timer.
                 # Do NOT extend current_inactivity here — a bare heartbeat is
@@ -1994,6 +2059,8 @@ def local_scratchpad_runtime_factory(
     workspace_env_overlay: dict[str, str] | None = None,
     cancel_ends_turn: bool = True,
     cell_sandbox: CellSandbox | None = None,
+    coding_api_key_supplier: ApiKeySupplier | None = None,
+    coding_flavor: str | None = None,
 ) -> ScratchpadRuntime:
     return LocalScratchpadRuntime(
         name=name,
@@ -2008,4 +2075,6 @@ def local_scratchpad_runtime_factory(
         workspace_env_overlay=workspace_env_overlay,
         cancel_ends_turn=cancel_ends_turn,
         cell_sandbox=cell_sandbox,
+        coding_api_key_supplier=coding_api_key_supplier,
+        coding_flavor=coding_flavor,
     )

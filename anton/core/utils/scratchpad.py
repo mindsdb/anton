@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict
 
@@ -27,6 +27,7 @@ from anton.core.utils.write_check import (
 
 if TYPE_CHECKING:
     from anton.core.backends.manager import ScratchpadManager
+    from anton.core.interaction.elicit import AskOption
     from anton.core.session import ChatSession
 
 logger = logging.getLogger(__name__)
@@ -99,7 +100,8 @@ class WriteGate:
     Present on a session only when the host turns the setting on. `begin_turn`
     records what the project and shared folders held when the turn began.
     `http_rules` are the endpoints the operator lists as writes
-    (`write_approval_http`).
+    (`write_approval_http`). `relayed_hosts` are the `host:port`s the write
+    relay holds writes for (`write_relay_hosts`).
     """
 
     snapshots: tuple[ProjectSnapshot, ...] = ()
@@ -108,6 +110,7 @@ class WriteGate:
     # timeout once per cell.
     unanswered: bool = False
     http_rules: tuple[HttpWriteRule, ...] = ()
+    relayed_hosts: frozenset[str] = frozenset()
 
     async def begin_turn(self, *, manager: ScratchpadManager) -> None:
         self.unanswered = False
@@ -394,39 +397,67 @@ async def ask_approval_card(
     the turn is refused without asking, so an unattended turn doesn't wait
     out the timeout once per card. Sessions without a `WriteGate` keep no
     such memory."""
-    from anton.core.interaction.elicit import AskOption, AskRequest, elicit
+    from anton.core.interaction.elicit import AskOption
+
+    choice = await ask_approval_choice(
+        session, prompt,
+        options=(AskOption(value="approve", label="Approve", detail=approve_detail),),
+        cancel_detail=cancel_detail, log_label=log_label,
+    )
+    return choice.cause
+
+
+class ApprovalChoice(NamedTuple):
+    """What came of an approval card: the option the person chose, or why
+    none was approved. Exactly one of the two is set."""
+
+    value: str | None
+    cause: RefusalCause | None
+
+
+async def ask_approval_choice(
+    session: ChatSession,
+    prompt: str,
+    *,
+    options: tuple[AskOption, ...],
+    cancel_detail: str = "Leave things as they are",
+    log_label: str = "write approval",
+    question_id: str | None = None,
+) -> ApprovalChoice:
+    """Choose one host-built action, or return why none was approved.
+
+    The gate remembers unanswered cards exactly as ask_approval_card does.
+    Cancel is always explicit, and no default or typed answer authorizes work.
+    `question_id` names the card when the host reads it, as the recording
+    proxy reads a held request's (`write_hold`); else a fresh `write:` id.
+    """
+    from anton.core.interaction.elicit import ApprovalRequest, AskOption, elicit
 
     gate = getattr(session, "_write_gate", None)
     if isinstance(gate, WriteGate) and gate.unanswered:
-        return "unanswered_earlier"
-    request = AskRequest(
+        return ApprovalChoice(None, "unanswered_earlier")
+    request = ApprovalRequest(
         prompt=prompt,
-        options=(
-            AskOption(value="approve", label="Approve", detail=approve_detail),
-            AskOption(value="cancel", label="Cancel", detail=cancel_detail),
-        ),
-        # No typed answer and no default: only a picked Approve clears the card.
-        allow_custom=False,
+        options=(*options, AskOption(value="cancel", label="Cancel", detail=cancel_detail)),
         timeout_s=getattr(session.elicitor, "timeout_s", None),
     )
     try:
-        # Not counted against the turn's questions: the card is the gate's,
-        # not the model's, so it spends none of the model's own.
-        answer = await elicit(session, f"write:{uuid.uuid4().hex}", request, counted=False)
+        answer = await elicit(session, question_id or f"write:{uuid.uuid4().hex}", request, counted=False)
     except Exception as exc:
-        # The type only: a traceback's frames would print the card and the
-        # statement under a host that logs local variables.
         logger.warning("%s: the question failed (%s)", log_label, type(exc).__name__)
-        return "error"
-    if answer.status == "answered" and answer.values == ("approve",):
-        return None
+        return ApprovalChoice(None, "error")
+    offered = {option.value for option in options}
+    if answer.status == "answered" and len(answer.values) == 1 and not answer.text:
+        value = answer.values[0]
+        if value in offered and value != "cancel":
+            return ApprovalChoice(value, None)
     if answer.status in ("answered", "cancelled"):
-        return "cancelled"
+        return ApprovalChoice(None, "cancelled")
     if answer.status == "timeout" and isinstance(gate, WriteGate):
         gate.unanswered = True
     if answer.status in ("timeout", "unavailable"):
-        return answer.status
-    return "error"
+        return ApprovalChoice(None, answer.status)
+    return ApprovalChoice(None, "error")
 
 
 def _log_decision(*, writes: CellWrites, status: DecisionStatus) -> None:
@@ -472,6 +503,16 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
         # The type only, as for a failed question.
         logger.warning("write approval: the check failed (%s)", type(exc).__name__)
         writes = CellWrites(unchecked=True)
+    if gate.relayed_hosts and writes.http:
+        # The write relay holds a request to a host it relays and raises its
+        # own card through approve_held_write, so a second card here would
+        # ask twice. `held_by_relay` counts only a request whose method,
+        # other than GET or HEAD, and `http://` host and port the code
+        # writes out.
+        from anton.core.utils.write_hold import held_by_relay
+
+        kept = tuple(w for w in writes.http if not held_by_relay(w, gate.relayed_hosts))
+        writes = writes.model_copy(update={"http": kept})
     if not writes.needs_approval():
         if writes.not_held_files:
             _log_decision(writes=writes, status="not_held")

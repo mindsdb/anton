@@ -506,13 +506,23 @@ if _scratchpad_model:
             # vision_format="anthropic" for every mdb.ai/mindshub.ai host used
             # to assume every model behind it was Claude, which broke non-Claude
             # models sharing the same gateway (ENG-1992).
-            # Resolve the OpenAI "flavor" so the injected web_search() helper can
-            # route through whatever native web tooling the endpoint exposes.
-            # Detect Minds/mdb.ai by HOST, not provider name (always "openai" for
-            # an OpenAIProvider even on the minds gateway) — see resolve_web_flavor.
-            _llm_provider_kwargs["flavor"] = _ProviderClass.resolve_web_flavor(
-                _scratchpad_provider_name, _llm_base_url
-            )
+            # The OpenAI "flavor" sets the API the pad's model calls use and
+            # the native web tooling web_search() routes through. The host
+            # passes the agent's own in ANTON_SCRATCHPAD_FLAVOR, so a provider
+            # on chat completions never sends the pad to the Responses API.
+            # Without it, infer one: detect Minds/mdb.ai by HOST, not provider
+            # name (always "openai" for an OpenAIProvider even on the minds
+            # gateway) — see resolve_web_flavor.
+            _llm_flavor = os.environ.get("ANTON_SCRATCHPAD_FLAVOR", "")
+            if _llm_flavor not in (
+                _ProviderClass.FLAVOR_OPENAI,
+                _ProviderClass.FLAVOR_MINDS_PASSTHROUGH,
+                _ProviderClass.FLAVOR_OPENAI_COMPATIBLE_GENERIC,
+            ):
+                _llm_flavor = _ProviderClass.resolve_web_flavor(
+                    _scratchpad_provider_name, _llm_base_url
+                )
+            _llm_provider_kwargs["flavor"] = _llm_flavor
         else:
             _llm_provider_kwargs = {}  # Anthropic doesn't need ssl_verify
 
@@ -530,9 +540,29 @@ if _scratchpad_model:
                 _real_stdout.write(USAGE_MARKER + " " + json.dumps(record, default=str) + "\n")
                 _real_stdout.flush()
 
+        # The host rewrites this file whenever its credential is renewed (a
+        # desktop token refresh). Read on every call, not at boot, so a long
+        # batch keeps working past the boot-time token's expiry.
+        _llm_credential_file = os.environ.get("ANTON_SCRATCHPAD_CREDENTIAL_FILE", "")
+
+        def _current_llm_api_key():
+            """The host's current key, or None to keep the boot-time one."""
+            if not _llm_credential_file:
+                return None
+            try:
+                with open(_llm_credential_file, encoding="utf-8") as handle:
+                    return handle.read().strip() or None
+            except OSError:
+                return None
+
         def _new_llm_provider():
             """Build a provider from the pad's model settings. The only place one is built."""
-            provider = _ProviderClass(**_llm_provider_kwargs)
+            kwargs = _llm_provider_kwargs
+            if "api_key" in kwargs:
+                key = _current_llm_api_key()
+                if key:
+                    kwargs = {**kwargs, "api_key": key}
+            provider = _ProviderClass(**kwargs)
             if _send_usage:
                 provider.usage_sink = _send_usage_to_host
             return provider
