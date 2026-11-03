@@ -305,3 +305,32 @@ def test_response_without_method_is_not_treated_as_mcp(monkeypatch):
     )
     vault = _vault(connections=[{"engine": "gmail", "name": "acme"}])
     assert _method_of(vault, "gmail", "acme") is None
+
+
+@pytest.mark.parametrize("mode", ["none", "read", "write"])
+def test_access_mode_passes_through_but_never_reaches_the_env(monkeypatch, mode):
+    """Dropping `_access_mode` made wiring default to "read": a "none"
+    HubSpot connection gained read tools and a "write" one lost write tools."""
+    from anton.core.mcp.wiring import _access_mode_of
+
+    monkeypatch.setattr(
+        "anton.minds_client.minds_request",
+        lambda *a, **kw: f'{{"access_token": "tok", "_method": "mcp", "_access_mode": "{mode}"}}'.encode(),
+    )
+    vault = _vault(connections=[{"engine": "hubspot", "name": "acme"}])
+    assert _access_mode_of(vault, "hubspot", "acme") == mode
+    for flat in (True, False):
+        env = vault.env_for("hubspot", "acme", flat=flat)
+        assert not any("ACCESS_MODE" in key or "METHOD" in key for key in env)
+        assert any(key.endswith("ACCESS_TOKEN") for key in env)
+
+
+def test_mcp_connection_without_access_mode_defaults_to_read(monkeypatch):
+    from anton.core.mcp.wiring import _access_mode_of
+
+    monkeypatch.setattr(
+        "anton.minds_client.minds_request",
+        lambda *a, **kw: b'{"access_token": "tok", "_method": "mcp"}',
+    )
+    vault = _vault(connections=[{"engine": "hubspot", "name": "acme"}])
+    assert _access_mode_of(vault, "hubspot", "acme") == "read"
