@@ -31,9 +31,9 @@ if TYPE_CHECKING:
 
 
 # Boundary between the prompt every session shares and the per-project /
-# per-conversation part. The OpenAI Responses transport sends the shared part as
-# its own message with an explicit cache breakpoint, so it is cached across
-# projects and conversations; other transports send the prompt as one string.
+# per-conversation part. The OpenAI Responses and Anthropic transports send the
+# shared part with its own cache breakpoint, so it is cached across projects and
+# conversations; other transports send the prompt as one string.
 SESSION_CONTEXT_MARKER = "\n\n# SESSION CONTEXT (this project and conversation)\n"
 
 # The build-html-dashboard skill's pointer to the DIRECT REPORTS path. Matched
