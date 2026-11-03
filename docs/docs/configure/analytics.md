@@ -35,8 +35,8 @@ identifiers, not your email address or name. The standalone `anton` CLI never
 sends them.
 
 An operator running Anton for others can label their deployment with
-`ANTON_DEPLOYMENT_ENV` (for example `staging`); the measurement events then
-carry it as `environment`. Unset, the label is empty.
+`ANTON_DEPLOYMENT_ENV` (for example `staging`); the events Anton sends directly
+to PostHog then carry it as `environment`. Unset, the label is empty.
 
 **No query content is ever sent** — no prompts, no message
 text, no tool output, no file contents, no file paths, no credentials, no
