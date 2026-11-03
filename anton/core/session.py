@@ -7,6 +7,7 @@ import hashlib
 import httpx2 as httpx
 import inspect
 import random
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
@@ -185,6 +186,10 @@ from anton.utils.datasources import (
 )
 from anton.core.settings import CoreSettings
 
+# Memory text each conversation's prompt was first built with, by conversation id.
+# Kept in the process: a file beside the conversation is writable by agent code.
+_MEMORY_PINS: OrderedDict[str, dict] = OrderedDict()
+_MEMORY_PINS_MAX = 512
 
 # The nudges that name internet workarounds or web_search(), and the versions
 # a session without internet research sends instead.
@@ -1963,8 +1968,8 @@ class ChatSession:
         # carried past once.
         self._finish_authorized: bool | None = None
         self._limits_passed_by_message: set[str] = set()
-        # Memory section by user message, reused within one turn. None outside a turn.
-        self._turn_memory: dict[str, str] | None = None
+        # Memory text the conversation's prompt was first built with (see _memory_pin).
+        self._memory_pin_values: dict | None = None
         # Tally of classified tool failures (ENG-1492). MEASUREMENT ONLY —
         # nothing reads this to change behaviour. The control that will
         # (ENG-1531) is deliberately unbuilt until this has reported real
@@ -2427,7 +2432,38 @@ class ChatSession:
         model (Cortex.memory_read). A host reads it after the turn to record
         it. None without a Cortex, or before the first turn built its prompt.
         """
-        return self._cortex.memory_read if self._cortex is not None else None
+        if self._cortex is None:
+            return None
+        pinned = self._memory_pin().get("read")
+        return pinned if pinned is not None else self._cortex.memory_read
+
+    def _memory_pin(self) -> dict:
+        """The memory text this conversation's prompt was first built with, by part.
+
+        Memory sits ahead of the whole conversation in the request, and end-of-turn
+        consolidation changes it after most turns, which re-wrote the conversation to
+        the prompt cache. New memories reach the prompt from the next conversation.
+        """
+        if self._memory_pin_values is None:
+            # Shared by id: the host builds a session per message.
+            pin = _MEMORY_PINS.get(self._session_id) if self._session_id else None
+            # A change of learned-memory scope must reach the prompt at once.
+            scope = getattr(self, "_learned_memory_scope", None)
+            if pin is None or pin.get("scope") != scope:
+                pin = {"scope": scope}
+                if self._session_id:
+                    _MEMORY_PINS[self._session_id] = pin
+                    while len(_MEMORY_PINS) > _MEMORY_PINS_MAX:
+                        _MEMORY_PINS.popitem(last=False)
+            elif self._session_id:
+                _MEMORY_PINS.move_to_end(self._session_id)
+            self._memory_pin_values = pin
+        return self._memory_pin_values
+
+    def _drop_memory_pin(self) -> None:
+        self._memory_pin_values = None
+        if self._session_id:
+            _MEMORY_PINS.pop(self._session_id, None)
 
     @property
     def last_compaction(self) -> dict | None:
@@ -2998,14 +3034,14 @@ class ChatSession:
         _started = self._started_at or _dt.datetime.now()
         _conversation_started = _started.strftime("%A, %B %d, %Y")
 
-        # Inject memory context (replaces old self_awareness)
+        # Inject memory context (replaces old self_awareness). Pinned for the
+        # conversation, which also keeps a retry from repeating the rule filter calls.
         memory_section = ""
         learned_memory_scope = getattr(self, "_learned_memory_scope", None)
         if self._cortex is not None:
-            # Once per turn: a retry must not repeat the rule filter model calls.
-            turn_memory = self._turn_memory
-            if turn_memory is not None and user_message in turn_memory:
-                memory_section = turn_memory[user_message]
+            pin = self._memory_pin()
+            if "system" in pin:
+                memory_section = pin["system"]
             else:
                 if learned_memory_scope is None:
                     memory_section = await self._cortex.build_memory_context(user_message)
@@ -3013,8 +3049,7 @@ class ChatSession:
                     memory_section = await self._cortex.build_memory_context(
                         user_message, learned_memory_scope=learned_memory_scope
                     )
-                if turn_memory is not None:
-                    turn_memory[user_message] = memory_section
+                pin["system"] = memory_section
         elif learned_memory_scope is not None:
             from anton.core.memory.cortex import learned_memory_notice
 
@@ -3050,6 +3085,10 @@ class ChatSession:
 
         # Ensure the registry is populated before we extract tool prompts.
         self._build_tools()
+        if self._cortex is not None and "read" not in self._memory_pin():
+            read = self._cortex.memory_read
+            if isinstance(read, MemoryRead):
+                self._memory_pin()["read"] = read
 
         # Which model is serving THIS conversation (ENG-1638): what the planning
         # provider reported on its last response, else the id we requested,
@@ -3237,15 +3276,21 @@ class ChatSession:
                 extra = f"\n\nInstalled packages: {len(pkg_list)} total (standard library plus dependencies)."
             scratchpad_tool.description = scratchpad_tool.description + extra
 
-        # Inject scratchpad wisdom from memory (procedural priming)
+        # Inject scratchpad wisdom from memory, pinned like the system memory:
+        # tools come first in the request.
         if self._cortex is not None:
-            learned_memory_scope = getattr(self, "_learned_memory_scope", None)
-            if learned_memory_scope is None:
-                wisdom = self._cortex.get_scratchpad_context()
+            pin = self._memory_pin()
+            if "scratchpad" in pin:
+                wisdom = pin["scratchpad"]
             else:
-                wisdom = self._cortex.get_scratchpad_context(
-                    learned_memory_scope=learned_memory_scope
-                )
+                learned_memory_scope = getattr(self, "_learned_memory_scope", None)
+                if learned_memory_scope is None:
+                    wisdom = self._cortex.get_scratchpad_context()
+                else:
+                    wisdom = self._cortex.get_scratchpad_context(
+                        learned_memory_scope=learned_memory_scope
+                    )
+                pin["scratchpad"] = wisdom
             if wisdom:
                 scratchpad_tool.description += (
                     f"\n\nLessons from past sessions:\n{wisdom}"
@@ -3706,6 +3751,8 @@ class ChatSession:
         self._seed_covered = covered
         if recorded and not self._compaction_sealed:
             self._last_compaction = {"summary": summary_body, "covered_through": covered}
+        # The conversation is written to cache again anyway, so memory can catch up.
+        self._drop_memory_pin()
         return True
 
     def _compact_scratchpads(self) -> bool:
@@ -5764,7 +5811,6 @@ class ChatSession:
         self._turn_steps = []
         self._finish_authorized = None
         self._limits_passed_by_message = set()
-        self._turn_memory = {}
         # ENG-673: a mid-stream provider failure that had NO prior retry (an
         # overload smuggled into an HTTP-200 stream) gets budget-bounded
         # backoff-and-retry — separate from the instant, count-bounded recovery
@@ -6359,7 +6405,6 @@ class ChatSession:
             _turn_raised = True
             raise
         finally:
-            self._turn_memory = None
             # A cancelled turn drops the failed cells the cerebellum buffered,
             # so neither this turn's flush nor the next one learns from a turn
             # the person backed out of. Same cancel test the books use below.
