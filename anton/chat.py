@@ -803,6 +803,8 @@ async def _handle_publish(
             elif isinstance(e, ArtifactShareOrgRequiredError):
                 console.print(f"  [anton.error]Publish failed: {escape(e.reason)}[/]")
             elif isinstance(e, urllib.error.HTTPError) and e.code == 401:
+                failure = describe_minds_request_failure(e) or str(e)
+                console.print(f"  [anton.error]Publish failed: {escape(failure)}[/]")
                 rejected = settings.minds_api_key
                 settings.minds_api_key = None
                 # Clear it where it is WRITTEN — but only if the global vault is

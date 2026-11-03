@@ -266,6 +266,29 @@ async def test_slash_publish_names_the_request_and_server_message(tmp_path, serv
 
 
 @pytest.mark.asyncio
+async def test_slash_publish_401_names_the_request_and_still_drops_the_key(tmp_path, server, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    base, answer = server
+    answer("/upload", 401, {"error": "Token expired at auth gateway"})
+    _artifact(tmp_path)
+    settings = _chat_settings(tmp_path, base)
+    console = Console(record=True, width=300)
+
+    async def public(*args, **kwargs):
+        return {"mode": "public"}
+
+    with mock.patch("anton.publish_access.prompt_access", side_effect=public), \
+         mock.patch("webbrowser.open"):
+        await chat._handle_publish(console, settings, file_arg="sales/report.html")
+
+    assert (
+        f"Publish failed: POST {base}/upload returned HTTP 401: Token expired at auth gateway."
+        in console.export_text()
+    )
+    assert settings.minds_api_key is None
+
+
+@pytest.mark.asyncio
 async def test_slash_unpublish_names_the_failed_listing(tmp_path, server):
     base, answer = server
     answer("/list", 500, {"error": "[/oops] listing broke"})
