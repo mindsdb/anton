@@ -51,6 +51,8 @@ from anton.core.tools.skill_draft import CREATE_SKILL_DRAFT_TOOL
 from anton.memory.history_store import is_user_turn, repair_replayed_tool_ids
 from anton.core.llm.prompts import (
     ANTON_NOTE,
+    NO_INTERNET_RESILIENCE_NUDGE,
+    NO_INTERNET_SCRATCHPAD_INSTALL_NUDGE,
     RESILIENCE_NUDGE,
     SCRATCHPAD_INSTALL_NUDGE,
     SCRATCHPAD_SIZE_NUDGE,
@@ -112,6 +114,7 @@ from anton.core.tools.tool_defs import (
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
+    NO_INTERNET_SCRATCHPAD_TOOL,
     READ_IMAGE_TOOL,
     READ_TEXT_FILE_TOOL,
     RECALL_TOOL,
@@ -182,6 +185,13 @@ from anton.utils.datasources import (
 )
 from anton.core.settings import CoreSettings
 
+
+# The nudges that name internet workarounds or web_search(), and the versions
+# a session without internet research sends instead.
+_NO_INTERNET_NUDGES = {
+    RESILIENCE_NUDGE: NO_INTERNET_RESILIENCE_NUDGE,
+    SCRATCHPAD_INSTALL_NUDGE: NO_INTERNET_SCRATCHPAD_INSTALL_NUDGE,
+}
 
 # Sentinel prefixing a compacted-history summary so later compactions can
 # recognize and update it in place rather than summarize a summary.
@@ -1841,6 +1851,12 @@ class ChatSessionConfig:
     # (registered on the tool registry). See ChatSession.__init__.
     web_search_enabled: bool = True
     web_fetch_enabled: bool = True
+    # False: the agent must not get information from the internet. Turns off
+    # both web tools, makes the scratchpad's web_search() raise, and swaps the
+    # prompt's internet guidance for "use the connected data only". A rule for
+    # the agent, not a network block. Separate from the web tool flags:
+    # cloud_turn turns those off while its scratchpads keep the internet.
+    internet_research_enabled: bool = True
     # When the task (conversation) was created. Rendered as a fixed
     # "Conversation started: …" line in the cache-stable prompt prefix — it
     # never changes across turns, so it doesn't bust the prefix cache. The
@@ -2146,6 +2162,7 @@ class ChatSession:
         key_supplier = getattr(coding_provider, "current_api_key", None)
         if not inspect.iscoroutinefunction(key_supplier):
             key_supplier = None
+        self._internet_research_enabled = config.internet_research_enabled
         self._scratchpads = ScratchpadManager(
             runtime_factory=config.runtime_factory,
             coding_provider=coding_conn.provider,
@@ -2160,6 +2177,7 @@ class ChatSession:
             data_vault=config.data_vault,
             workspace_env_overlay=config.workspace_env_overlay,
             cell_sandbox=config.cell_sandbox,
+            internet_research_enabled=config.internet_research_enabled,
         )
         # Sandboxed without live apps, nothing starts an app backend, so the
         # artifact tools and the prompt offer html-apps only.
@@ -2334,9 +2352,9 @@ class ChatSession:
         # we run ourselves via handler-dispatched ToolDefs (registered in
         # ``_build_core_tools``). The two sets are disjoint by construction.
         desired_web: set[str] = set()
-        if config.web_search_enabled:
+        if config.web_search_enabled and config.internet_research_enabled:
             desired_web.add("web_search")
-        if config.web_fetch_enabled:
+        if config.web_fetch_enabled and config.internet_research_enabled:
             desired_web.add("web_fetch")
         provider_native = self._llm.planning_provider.native_web_tools()
         self._native_web_tools: set[str] = desired_web & provider_native
@@ -2557,6 +2575,8 @@ class ChatSession:
         streak = error_streak.get(tool_name, 0)
         if streak >= self._resilience_nudge_at and tool_name not in resilience_nudged:
             nudge = self._select_resilience_nudge(tool_name, result_text)
+            if not getattr(self, "_internet_research_enabled", True):
+                nudge = _NO_INTERNET_NUDGES.get(nudge, nudge)
             if nudge:
                 result_text += nudge
                 resilience_nudged.add(tool_name)
@@ -3055,6 +3075,7 @@ class ChatSession:
             ),
             deployment_identity=getattr(self, "_deployment_identity", None),
             fullstack_offered=getattr(self, "_fullstack_offered", True),
+            internet_research=getattr(self, "_internet_research_enabled", True),
             direct_reports=self._direct_reports_enabled(),
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
@@ -3204,7 +3225,8 @@ class ChatSession:
         # Copy — SCRATCHPAD_TOOL is a module-level singleton; mutating its
         # .description in place would leak across every session/user sharing
         # this process instead of resetting per session.
-        scratchpad_tool = replace(SCRATCHPAD_TOOL)
+        scratchpad_tool = replace(SCRATCHPAD_TOOL if getattr(self, "_internet_research_enabled", True)
+                                  else NO_INTERNET_SCRATCHPAD_TOOL)
         pkg_list = self._scratchpads.available_packages
         if pkg_list:
             notable = sorted(p for p in pkg_list if p.lower() in self._NOTABLE_PACKAGES)

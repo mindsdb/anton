@@ -581,6 +581,9 @@ def _public_data_sources_skill(session) -> str:
     coroutine appears at all, because the mock is rejected by type before any
     call; here the call is unavoidable.)
     """
+    if getattr(session, "_internet_research_enabled", True) is False:
+        # A catalog of internet endpoints the session must not use.
+        return ""
     try:
         store = getattr(session, "_skill_store", None)
         skill = store.load_for_artifacts(_PUBLIC_SOURCES_SKILL) if store is not None else None

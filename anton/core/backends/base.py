@@ -393,4 +393,7 @@ class ScratchpadRuntimeFactory(Protocol):
         # pad's model calls use the same API. Optional for factories that
         # predate it, which leave the pad to infer it from the base URL.
         coding_flavor: str | None = None,
+        # False makes the pad's web_search() raise instead of searching. The
+        # manager passes it only when False.
+        internet_research_enabled: bool = True,
     ) -> ScratchpadRuntime: ...

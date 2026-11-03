@@ -1598,6 +1598,7 @@ async def _chat_loop(
         tools=list(DEFAULT_SESSION_TOOLS),
         web_search_enabled=settings.web_search_enabled,
         web_fetch_enabled=settings.web_fetch_enabled,
+        internet_research_enabled=settings.internet_research_enabled,
     ))
 
     # Handle --resume flag at startup
