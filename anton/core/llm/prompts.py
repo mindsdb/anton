@@ -300,7 +300,8 @@ each value of column `key`, filtering the rows shown in a region named \
 tables and text as shown), `rt.update(path, {element_id: new_content})` \
 (replaces those elements' content in any page; a section keeps its heading) \
 and `rt.insert(path, new_content, before=element_id)` (or `after=`). Write \
-your own HTML for anything they do not cover.
+your own HTML for anything they do not cover, wrapped in `rt.Html` (a plain \
+string shows as text).
 - To change an existing report, edit only what the request asks and keep the \
 rest, including the artifact itself, its look and any file the user asked you \
 not to change. Change the saved page in place with rt.update and rt.insert, \
@@ -391,6 +392,22 @@ STATIC_ARTIFACTS_PROMPT = cut_spans(
 )
 
 
+def _without_direct_reports(text: str) -> str:
+    return cut_spans(
+        text,
+        ("DIRECT REPORTS:\n", "WORKFLOW:", ""),
+        (
+            " A report the user has fully specified you build yourself (DIRECT REPORTS above). Any other",
+            " `html-app`",
+            " Every",
+        ),
+    )
+
+
+NO_DIRECT_REPORTS_ARTIFACTS_PROMPT = _without_direct_reports(ARTIFACTS_PROMPT)
+NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT = _without_direct_reports(STATIC_ARTIFACTS_PROMPT)
+
+
 # ---------------------------------------------------------------------------
 # Visualization prompt variants — selected by ANTON_PROACTIVE_DASHBOARDS flag
 # ---------------------------------------------------------------------------
@@ -469,6 +486,26 @@ repair as that result's `instruction` says, with no skill call. \
 Fallback only if `create_artifact` is unavailable: save to `{output_dir}` \
 (create it if needed).\
 """
+
+
+NO_DIRECT_REPORTS_VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT = cut_spans(
+    VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
+    (
+        "A report the user has fully specified follows DIRECT REPORTS in the ARTIFACTS section. Otherwise: ",
+        "`create_artifact(",
+        "",
+    ),
+    (" Changing a report's content or adding sections needs neither", None, ""),
+)
+NO_DIRECT_REPORTS_VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT = cut_spans(
+    VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
+    (
+        ". A report the user has fully specified follows DIRECT REPORTS in the ARTIFACTS section; otherwise",
+        " `create_artifact(",
+        ":",
+    ),
+    ("; not for changing a report's content", ")", ""),
+)
 
 
 BACKEND_GENERATION_PROMPT = """\
