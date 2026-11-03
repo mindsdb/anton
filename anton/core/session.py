@@ -135,7 +135,9 @@ from anton.core.interaction.emitter import TurnEmitter
 from anton.core.utils.scratchpad import (
     CELL_NOT_RUN_REASONS,
     WriteGate,
-    build_workspace_discovery_context,
+    render_workspace_discovery,
+    valid_workspace_names,
+    workspace_discovery_names,
     cell_failure_reason,
     prepare_scratchpad_exec,
     format_cell_result,
@@ -187,7 +189,8 @@ from anton.utils.datasources import (
 from anton.core.settings import CoreSettings
 
 # Memory and workspace text each conversation's prompt was first built with, by conversation id.
-# The process copy wins: agent code can write the saved file, as it can the memory files.
+# Only the workspace names are saved for a new process: agent code can write the saved file,
+# so the memory and scratchpad text it could forge stay in the process.
 _MEMORY_PINS: OrderedDict[str, dict] = OrderedDict()
 _MEMORY_PINS_MAX = 512
 _MEMORY_PIN_FILE = "_memory_prompt.json"
@@ -2465,10 +2468,13 @@ class ChatSession:
         return self._memory_pin_values
 
     def _set_memory_pin(self, part: str, value: object) -> None:
+        self._memory_pin()[part] = value
+
+    def _save_memory_pin(self) -> None:
         pin = self._memory_pin()
-        pin[part] = value
-        saved = {k: asdict(v) if isinstance(v, MemoryRead) else v for k, v in pin.items()}
-        self._scratchpads.write_conversation_text(_MEMORY_PIN_FILE, json.dumps(saved))
+        if self._scratchpads is not None and "workspace" in pin:
+            saved = {"scope": pin.get("scope"), "workspace": pin["workspace"]}
+            self._scratchpads.write_conversation_text(_MEMORY_PIN_FILE, json.dumps(saved))
 
     def _load_memory_pin(self) -> dict | None:
         text = self._scratchpads.read_conversation_text(_MEMORY_PIN_FILE)
@@ -2478,19 +2484,19 @@ class ChatSession:
             return None
         if not isinstance(data, dict):
             return None
-        # Agent code can write the file, so keep only parts of the expected type.
-        pin = {k: v for k, v in data.items() if k == "scope" or isinstance(v, str)}
-        try:
-            pin["read"] = MemoryRead(**data["read"])
-        except (KeyError, TypeError):
-            pin.pop("read", None)
-        return pin
+        names = valid_workspace_names(data.get("workspace"))
+        scope = data.get("scope")
+        if names is None or not (scope is None or isinstance(scope, str)):
+            return None
+        return {"scope": scope, "workspace": names}
 
     def _drop_memory_pin(self) -> None:
         self._memory_pin_values = None
         if self._session_id:
             _MEMORY_PINS.pop(self._session_id, None)
-        self._scratchpads.write_conversation_text(_MEMORY_PIN_FILE, "{}")
+        if self._scratchpads is not None:
+            # An empty record is no pin: the next turn builds the prompt afresh.
+            self._scratchpads.write_conversation_text(_MEMORY_PIN_FILE, "")
 
     @property
     def last_compaction(self) -> dict | None:
@@ -3106,14 +3112,10 @@ class ChatSession:
         workspace_ctx = ""
         if self._scratchpads is not None:
             pin = self._memory_pin()
-            if "workspace" in pin:
-                workspace_ctx = pin["workspace"]
-            else:
-                try:
-                    workspace_ctx = build_workspace_discovery_context(self._scratchpads)
-                except Exception:
-                    workspace_ctx = ""
-                self._set_memory_pin("workspace", workspace_ctx)
+            if "workspace" not in pin:
+                self._set_memory_pin("workspace", workspace_discovery_names(self._scratchpads))
+                self._save_memory_pin()
+            workspace_ctx = render_workspace_discovery(pin["workspace"])
 
         # Ensure the registry is populated before we extract tool prompts.
         self._build_tools()

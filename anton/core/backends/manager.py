@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 import os
 import sys
@@ -268,7 +269,6 @@ class ScratchpadManager:
         if text is None:
             return set()
         try:
-            import json
 
             names = json.loads(text)
             return {n for n in names if isinstance(n, str)} if isinstance(names, list) else set()
@@ -282,7 +282,6 @@ class ScratchpadManager:
         """
         if not name:
             return
-        import json
 
         current = self.agent_pads()
         if name not in current:
