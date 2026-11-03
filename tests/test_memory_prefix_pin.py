@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from anton.core.llm.identity import DeploymentIdentity
+from anton.core.llm.provider import LLMResponse, Usage
 from anton.core.memory.cortex import Cortex
 from anton.core.memory.hippocampus import Hippocampus
 from anton.core.session import ChatSession, ChatSessionConfig
@@ -121,3 +122,19 @@ async def test_turning_learned_memory_off_drops_the_pin(tmp_path, memory_dirs):
     off = await _session(tmp_path, memory_dirs, deployment_identity=identity,
                          learned_memory_scope="off")._build_system_prompt("hello")
     assert "verify totals before writing them" not in off
+
+
+async def test_compaction_lets_current_memory_in(tmp_path, memory_dirs):
+    _, project_dir = memory_dirs
+    _add_rule(project_dir, "verify totals before writing them")
+    history = [{"role": "user" if i % 2 == 0 else "assistant", "content": "x" * 50} for i in range(10)]
+    session = _session(tmp_path, memory_dirs, initial_history=history)
+    await session._build_system_prompt("hello")
+
+    _add_rule(project_dir, "a rule learned mid-conversation")
+    session._llm.summarize = AsyncMock(return_value=LLMResponse(
+        content="## Goal\nx", usage=Usage(input_tokens=1, output_tokens=1)))
+    assert await session._summarize_history() is True
+
+    later = await _session(tmp_path, memory_dirs)._build_system_prompt("next")
+    assert "a rule learned mid-conversation" in later

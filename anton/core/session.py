@@ -7,6 +7,7 @@ import hashlib
 import httpx2 as httpx
 import inspect
 import random
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
@@ -185,7 +186,10 @@ from anton.utils.datasources import (
 )
 from anton.core.settings import CoreSettings
 
-_MEMORY_PIN_FILE = "_memory_prompt.json"
+# Memory text each conversation's prompt was first built with, by conversation id.
+# Kept in the process: a file beside the conversation is writable by agent code.
+_MEMORY_PINS: OrderedDict[str, dict] = OrderedDict()
+_MEMORY_PINS_MAX = 512
 
 # The nudges that name internet workarounds or web_search(), and the versions
 # a session without internet research sends instead.
@@ -2431,12 +2435,7 @@ class ChatSession:
         if self._cortex is None:
             return None
         pinned = self._memory_pin().get("read")
-        if isinstance(pinned, dict):
-            try:
-                return MemoryRead(**pinned)
-            except TypeError:
-                pass
-        return self._cortex.memory_read
+        return pinned if pinned is not None else self._cortex.memory_read
 
     def _memory_pin(self) -> dict:
         """The memory text this conversation's prompt was first built with, by part.
@@ -2446,25 +2445,25 @@ class ChatSession:
         the prompt cache. New memories reach the prompt from the next conversation.
         """
         if self._memory_pin_values is None:
-            # Kept with the conversation's scratchpad records: the host builds a
-            # session per message.
-            text = self._scratchpads.read_conversation_text(_MEMORY_PIN_FILE)
-            try:
-                data = json.loads(text) if isinstance(text, str) and text else None
-            except ValueError:
-                data = None
+            # Shared by id: the host builds a session per message.
+            pin = _MEMORY_PINS.get(self._session_id) if self._session_id else None
             # A change of learned-memory scope must reach the prompt at once.
             scope = getattr(self, "_learned_memory_scope", None)
-            if isinstance(data, dict) and data.get("scope") == scope:
-                self._memory_pin_values = data
-            else:
-                self._memory_pin_values = {"scope": scope}
+            if pin is None or pin.get("scope") != scope:
+                pin = {"scope": scope}
+                if self._session_id:
+                    _MEMORY_PINS[self._session_id] = pin
+                    while len(_MEMORY_PINS) > _MEMORY_PINS_MAX:
+                        _MEMORY_PINS.popitem(last=False)
+            elif self._session_id:
+                _MEMORY_PINS.move_to_end(self._session_id)
+            self._memory_pin_values = pin
         return self._memory_pin_values
 
-    def _set_memory_pin(self, part: str, value: object) -> None:
-        pin = self._memory_pin()
-        pin[part] = value
-        self._scratchpads.write_conversation_text(_MEMORY_PIN_FILE, json.dumps(pin))
+    def _drop_memory_pin(self) -> None:
+        self._memory_pin_values = None
+        if self._session_id:
+            _MEMORY_PINS.pop(self._session_id, None)
 
     @property
     def last_compaction(self) -> dict | None:
@@ -3040,9 +3039,9 @@ class ChatSession:
         memory_section = ""
         learned_memory_scope = getattr(self, "_learned_memory_scope", None)
         if self._cortex is not None:
-            pinned = self._memory_pin().get("system")
-            if isinstance(pinned, str):
-                memory_section = pinned
+            pin = self._memory_pin()
+            if "system" in pin:
+                memory_section = pin["system"]
             else:
                 if learned_memory_scope is None:
                     memory_section = await self._cortex.build_memory_context(user_message)
@@ -3050,7 +3049,7 @@ class ChatSession:
                     memory_section = await self._cortex.build_memory_context(
                         user_message, learned_memory_scope=learned_memory_scope
                     )
-                self._set_memory_pin("system", memory_section)
+                pin["system"] = memory_section
         elif learned_memory_scope is not None:
             from anton.core.memory.cortex import learned_memory_notice
 
@@ -3089,7 +3088,7 @@ class ChatSession:
         if self._cortex is not None and "read" not in self._memory_pin():
             read = self._cortex.memory_read
             if isinstance(read, MemoryRead):
-                self._set_memory_pin("read", asdict(read))
+                self._memory_pin()["read"] = read
 
         # Which model is serving THIS conversation (ENG-1638): what the planning
         # provider reported on its last response, else the id we requested,
@@ -3280,8 +3279,10 @@ class ChatSession:
         # Inject scratchpad wisdom from memory, pinned like the system memory:
         # tools come first in the request.
         if self._cortex is not None:
-            wisdom = self._memory_pin().get("scratchpad")
-            if not isinstance(wisdom, str):
+            pin = self._memory_pin()
+            if "scratchpad" in pin:
+                wisdom = pin["scratchpad"]
+            else:
                 learned_memory_scope = getattr(self, "_learned_memory_scope", None)
                 if learned_memory_scope is None:
                     wisdom = self._cortex.get_scratchpad_context()
@@ -3289,7 +3290,7 @@ class ChatSession:
                     wisdom = self._cortex.get_scratchpad_context(
                         learned_memory_scope=learned_memory_scope
                     )
-                self._set_memory_pin("scratchpad", wisdom)
+                pin["scratchpad"] = wisdom
             if wisdom:
                 scratchpad_tool.description += (
                     f"\n\nLessons from past sessions:\n{wisdom}"
@@ -3750,6 +3751,8 @@ class ChatSession:
         self._seed_covered = covered
         if recorded and not self._compaction_sealed:
             self._last_compaction = {"summary": summary_body, "covered_through": covered}
+        # The conversation is written to cache again anyway, so memory can catch up.
+        self._drop_memory_pin()
         return True
 
     def _compact_scratchpads(self) -> bool:
