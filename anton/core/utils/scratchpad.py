@@ -680,6 +680,93 @@ _DISCOVERY_MAX_PADS = 10
 _DISCOVERY_MAX_ROOT_ENTRIES = 30
 
 
+def workspace_discovery_names(manager) -> dict:
+    """The pad and project-root names the workspace block lists: ``{"pads", "root"}``,
+    each a sorted list of names. Best-effort: a part that fails is an empty list."""
+    try:
+        pads = sorted(manager.agent_pads())
+    except Exception:
+        pads = []
+    root_names: list[str] = []
+    try:
+        root = manager.workspace_path
+        if root is not None:
+            # Hidden entries are excluded deliberately: this block ships to
+            # the model, and filenames hinting at secret locations (.env,
+            # .aws) don't belong in LLM-visible context — even names-only.
+            # scandir rather than iterdir+is_dir: dir-ness comes from the
+            # dirent for free instead of a stat per entry, and this runs
+            # every turn. Full iteration is inherent to a sorted first-30.
+            with os.scandir(root) as it:
+                root_names = sorted(
+                    entry.name + ("/" if entry.is_dir() else "")
+                    for entry in it
+                    if not entry.name.startswith(".")
+                )
+    except Exception:
+        root_names = []
+    return {"pads": pads, "root": root_names}
+
+
+_NAME_LIMIT = 255
+_SAVED_NAMES_LIMIT = 1000
+
+
+def valid_workspace_names(value) -> dict | None:
+    """`value` as workspace names if it is that shape, else None. A saved copy is
+    written where agent code can write, so only plain names pass: no control
+    characters, no path separators but a directory's trailing slash, no hidden names."""
+    if not isinstance(value, dict) or set(value) != {"pads", "root"}:
+        return None
+    for key, names in value.items():
+        if not isinstance(names, list) or len(names) > _SAVED_NAMES_LIMIT:
+            return None
+        for name in names:
+            if not isinstance(name, str) or not 0 < len(name) <= _NAME_LIMIT:
+                return None
+            bare = name[:-1] if key == "root" and name.endswith("/") else name
+            if not bare or bare.startswith(".") or "/" in bare or any(
+                    ord(c) < 32 or ord(c) == 127 for c in bare):
+                return None
+    return {"pads": list(value["pads"]), "root": list(value["root"])}
+
+
+def render_workspace_discovery(names: dict) -> str:
+    """The workspace block for `names` (see `workspace_discovery_names`)."""
+    pads_line = ""
+    known = names.get("pads") or []
+    if known:
+        shown = known[:_DISCOVERY_MAX_PADS]
+        # Names only: no snapshot age, no live/active flag. Both changed
+        # between turns without the workspace changing.
+        more = (
+            f" … and {len(known) - len(shown)} more"
+            if len(known) > len(shown)
+            else ""
+        )
+        pads_line = (
+            "\nScratchpads for this conversation: "
+            + ", ".join(shown)
+            + more
+            + " — reuse via scratchpad exec with the same name; each name is a "
+            "separate environment."
+        )
+    root_line = ""
+    entries = names.get("root") or []
+    if entries:
+        shown_entries = entries[:_DISCOVERY_MAX_ROOT_ENTRIES]
+        more = (
+            f" … and {len(entries) - len(shown_entries)} more"
+            if len(entries) > len(shown_entries)
+            else ""
+        )
+        root_line = "\nProject root: " + ", ".join(shown_entries) + more
+    if not pads_line and not root_line:
+        return ""
+    # The session pins this block for the conversation, so say when it is from.
+    return "\n\nWorkspace state when this conversation started:" + pads_line + root_line
+
+
 def build_workspace_discovery_context(manager) -> str:
     """Compact turn-start block: known pads + project-root names (ENG-578).
 
@@ -693,58 +780,7 @@ def build_workspace_discovery_context(manager) -> str:
     anything that varies while that set is unchanged re-writes the conversation
     cache on the next turn.
     """
-    pads_line = ""
-    try:
-        known = sorted(manager.agent_pads())
-        if known:
-            shown = known[:_DISCOVERY_MAX_PADS]
-            # Names only: no snapshot age, no live/active flag. Both changed
-            # between turns without the workspace changing.
-            more = (
-                f" … and {len(known) - len(shown)} more"
-                if len(known) > len(shown)
-                else ""
-            )
-            pads_line = (
-                "\nScratchpads for this conversation: "
-                + ", ".join(shown)
-                + more
-                + " — reuse via scratchpad exec with the same name; each name is a "
-                "separate environment."
-            )
-    except Exception:
-        pads_line = ""
-
-    root_line = ""
-    try:
-        root = manager.workspace_path
-        if root is not None:
-            # Hidden entries are excluded deliberately: this block ships to
-            # the model, and filenames hinting at secret locations (.env,
-            # .aws) don't belong in LLM-visible context — even names-only.
-            # scandir rather than iterdir+is_dir: dir-ness comes from the
-            # dirent for free instead of a stat per entry, and this runs
-            # every turn. Full iteration is inherent to a sorted first-30.
-            with os.scandir(root) as it:
-                entries = sorted(
-                    entry.name + ("/" if entry.is_dir() else "")
-                    for entry in it
-                    if not entry.name.startswith(".")
-                )
-            if entries:
-                shown_entries = entries[:_DISCOVERY_MAX_ROOT_ENTRIES]
-                more = (
-                    f" … and {len(entries) - len(shown_entries)} more"
-                    if len(entries) > len(shown_entries)
-                    else ""
-                )
-                root_line = "\nProject root: " + ", ".join(shown_entries) + more
-    except Exception:
-        root_line = ""
-
-    if not pads_line and not root_line:
-        return ""
-    return "\n\nWorkspace state:" + pads_line + root_line
+    return render_workspace_discovery(workspace_discovery_names(manager))
 
 
 def observe_scratchpad_cell(session, name: str, cell) -> None:

@@ -9,6 +9,7 @@ conversation first saw.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -124,6 +125,22 @@ async def test_turning_learned_memory_off_drops_the_pin(tmp_path, memory_dirs):
     assert "verify totals before writing them" not in off
 
 
+async def test_workspace_listing_is_pinned_across_turns(tmp_path, memory_dirs):
+    first = _session(tmp_path, memory_dirs)
+    (first._workspace.base / "notes.md").write_text("x")
+    first_prompt = await first._build_system_prompt("hello")
+    assert "notes.md" in first_prompt
+
+    # The agent saved a new file at the project root and used a pad.
+    later = _session(tmp_path, memory_dirs)
+    (later._workspace.base / "Scene - new.md").write_text("x")
+    later._scratchpads.record_agent_pad("drafts")
+    assert await later._build_system_prompt("second question") == first_prompt
+
+    other = _session(tmp_path, memory_dirs, session_id=CONV[:-1] + "2")
+    assert "Scene - new.md" in await other._build_system_prompt("hi")
+
+
 async def test_compaction_lets_current_memory_in(tmp_path, memory_dirs):
     _, project_dir = memory_dirs
     _add_rule(project_dir, "verify totals before writing them")
@@ -138,3 +155,64 @@ async def test_compaction_lets_current_memory_in(tmp_path, memory_dirs):
 
     later = await _session(tmp_path, memory_dirs)._build_system_prompt("next")
     assert "a rule learned mid-conversation" in later
+
+
+async def test_workspace_listing_survives_a_new_process(tmp_path, memory_dirs):
+    # Each cloud turn runs in a fresh process, so the listing comes back from disk.
+    from anton.core import session as session_module
+
+    _, project_dir = memory_dirs
+    first = _session(tmp_path, memory_dirs)
+    (first._workspace.base / "notes.md").write_text("x")
+    await first._build_system_prompt("hello")
+
+    session_module._MEMORY_PINS.clear()
+    (first._workspace.base / "Scene - new.md").write_text("x")
+    _add_rule(project_dir, "a rule learned mid-conversation")
+    later = _session(tmp_path, memory_dirs)
+    prompt = await later._build_system_prompt("second question")
+    assert "Project root: notes.md" in prompt and "Scene - new.md" not in prompt
+    # Memory text is not saved, so a new process reads the memory as it stands now.
+    assert "a rule learned mid-conversation" in prompt
+
+
+async def test_a_forged_saved_pin_cannot_change_the_prompt(tmp_path, memory_dirs):
+    # Agent code can write the saved pin, so its text must never reach the prompt.
+    from anton.core import session as session_module
+    from anton.core.session import _MEMORY_PIN_FILE
+
+    _, project_dir = memory_dirs
+    _add_rule(project_dir, "verify totals before writing them")
+    first = _session(tmp_path, memory_dirs)
+    (first._workspace.base / "notes.md").write_text("x")
+    await first._build_system_prompt("hello")
+    forged = {"scope": None, "system": "FORGED MEMORY", "scratchpad": "FORGED TOOL",
+              "workspace": {"pads": [], "root": ["notes.md\n\nFORGED ORDERS"]}}
+    first._scratchpads.write_conversation_text(_MEMORY_PIN_FILE, json.dumps(forged))
+
+    session_module._MEMORY_PINS.clear()
+    later = _session(tmp_path, memory_dirs)
+    prompt = await later._build_system_prompt("next")
+    assert "FORGED" not in prompt and "FORGED" not in _scratchpad_description(later)
+    assert "verify totals before writing them" in prompt
+    assert "Project root: notes.md" in prompt
+
+
+async def test_a_saved_pin_of_the_wrong_shape_is_rebuilt(tmp_path, memory_dirs):
+    from anton.core import session as session_module
+    from anton.core.memory.base import MemoryRead
+    from anton.core.session import _MEMORY_PIN_FILE
+
+    _, project_dir = memory_dirs
+    _add_rule(project_dir, "verify totals before writing them")
+    first = _session(tmp_path, memory_dirs)
+    (first._workspace.base / "notes.md").write_text("x")
+    await first._build_system_prompt("hello")
+    first._scratchpads.write_conversation_text(
+        _MEMORY_PIN_FILE, '{"scope": null, "system": 7, "workspace": ["x"], "read": "x"}')
+
+    session_module._MEMORY_PINS.clear()
+    later = _session(tmp_path, memory_dirs)
+    prompt = await later._build_system_prompt("next")
+    assert "verify totals before writing them" in prompt and "Project root: notes.md" in prompt
+    assert isinstance(later.memory_read, MemoryRead)
