@@ -1052,6 +1052,18 @@ _NO_GUESS_AT_LIMIT = (
     "withholding it because something is still unexplained."
 )
 
+# Closes the note for an unfinished verdict past the budget checkpoint; the
+# reply it asks for has no tools (see the INCOMPLETE branch of the verifier).
+_LATE_CHECK_CLAUSE = (
+    "This request has used over half of its token budget, so finish now from what "
+    "your tool results above already show; no more tools can run. If the check names "
+    "something those results do contain, add it. If your answer rests on something "
+    "they do not show, say so plainly instead of giving a value for it. Otherwise "
+    "give your answer again with the assumptions it rests on. Your next reply "
+    "replaces the previous one in what the user sees, so it must stand on its own. "
+    "Write it for the user, without referring to this check."
+)
+
 # Share of `max_turn_tokens` at which the turn is told, once, to take stock
 # (`_budget_checkpoint_note`). Turns that hit the ceiling had often had an
 # answer for most of it, then spent the rest doubting a property of the data
@@ -4886,6 +4898,13 @@ class ChatSession:
             + _HANDBACK_NOT_USER_CLAUSE
         )
 
+    def _past_budget_checkpoint(self) -> bool:
+        """True once this turn has spent `_BUDGET_CHECKPOINT_SHARE` of its
+        token ceiling. False with the ceiling off (0) or outside a turn."""
+        if self._max_turn_tokens <= 0 or self._turn_cost is None:
+            return False
+        return self._turn_cost.total_tokens >= self._max_turn_tokens * _BUDGET_CHECKPOINT_SHARE
+
     def _budget_checkpoint_note(self) -> str | None:
         """The one-time note sent when the turn passes `_BUDGET_CHECKPOINT_SHARE`
         of its token ceiling, or None.
@@ -4897,15 +4916,9 @@ class ChatSession:
         find it". It does not stop the turn: work that still needs doing goes
         on. Off with the ceiling (0), and once per turn.
         """
-        if (
-            self._budget_checkpoint_sent
-            or self._max_turn_tokens <= 0
-            or self._turn_cost is None
-        ):
+        if self._budget_checkpoint_sent or not self._past_budget_checkpoint():
             return None
         spent = self._turn_cost.total_tokens
-        if spent < self._max_turn_tokens * _BUDGET_CHECKPOINT_SHARE:
-            return None
         self._budget_checkpoint_sent = True
         ceiling = self._max_turn_tokens + self._spend_ceiling_continued_tokens
         return (
@@ -7985,6 +7998,37 @@ class ChatSession:
                     ):
                         yield event
                     break
+
+            # Past the budget checkpoint, an unfinished verdict gets one reply
+            # without tools instead of a working continuation. Measured on long
+            # analysis turns: the budget note got the answer given, with its
+            # assumptions, and the verdict read those assumptions as unfinished
+            # work; the continuation went back to investigating and ran into
+            # the ceiling, ending with no answer. Without tools the reply can
+            # still add what the check found missing from results already in
+            # hand, and must say plainly what those results do not show.
+            if self._past_budget_checkpoint():
+                continuation += 1
+                if self._turn_cost is not None:
+                    self._turn_cost.continuations = continuation
+                self._append_history(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"{_CHECK_NOTE} The check judged the answer above unfinished: "
+                            f"{reason}\n\n{_LATE_CHECK_CLAUSE}"
+                        ),
+                    }
+                )
+                yield StreamTaskProgress(
+                    phase="continuation",
+                    message="Task incomplete — finishing from the work done so far...",
+                )
+                async for event in self._stream_handback_diagnosis(
+                    system=system, label="late-check", answered=bool(reply.strip()),
+                ):
+                    yield event
+                break
 
             continuation += 1
             if self._turn_cost is not None:

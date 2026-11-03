@@ -725,3 +725,71 @@ def test_verifier_transcript_leaves_out_a_note_beside_tool_results():
     rendered = _render_verify_transcript(history)
     assert "Take stock" not in rendered
     assert "USER: total the fees" in rendered
+
+
+def _answer(text: str) -> LLMResponse:
+    """A text reply small enough not to read as an output-budget truncation."""
+    return LLMResponse(content=text, tool_calls=[],
+                       usage=Usage(input_tokens=10, output_tokens=5), stop_reason="end_turn")
+
+
+def _record_plan_calls(session) -> list[dict]:
+    """Wrap the scripted plan_stream to record each call's kwargs."""
+    calls: list[dict] = []
+    inner = session._llm.plan_stream
+
+    def _recording(**kwargs):
+        calls.append(kwargs)
+        return inner(**kwargs)
+
+    session._llm.plan_stream = _recording
+    return calls
+
+
+def _notes_containing(session, fragment: str) -> list[int]:
+    return [
+        i for i, m in enumerate(session._history)
+        if m["role"] == "user" and isinstance(m["content"], str) and fragment in m["content"]
+    ]
+
+
+async def test_unfinished_verdict_past_the_checkpoint_gets_one_reply_without_tools(workspace):
+    """Past half the ceiling, INCOMPLETE does not send the turn back to work:
+    one tool-less reply finishes from the results in hand, and the turn ends
+    on it."""
+    session = _session(
+        workspace,
+        responses=[*(_tool_call(i) for i in range(1, 6)), _answer("9.48, assuming the first rule"),
+                   _answer("12.91, summing every matching rule")],
+    )
+    session._llm.generate_object_code = AsyncMock(
+        return_value=_VerifierVerdict(status="INCOMPLETE", reason="rests on an assumption"))
+    calls = _record_plan_calls(session)
+    with patch("anton.analytics.send_event") as send:
+        await _run(session)
+    assert _notes_containing(session, "no more tools can run")
+    assert not _notes_containing(session, "Continue the user's original request")
+    assert calls[-1].get("tools") is None, "the late reply must not be able to call tools"
+    assert session.tool_registry.dispatch_tool.await_count == 5
+    assert session._history[-1] == {
+        "role": "assistant", "content": "12.91, summing every matching rule"}
+    assert send.call_args.kwargs["ended_by"] == "completed"
+    assert int(send.call_args.kwargs["continuations"]) == 1
+
+
+async def test_unfinished_verdict_below_the_checkpoint_continues_with_tools(workspace):
+    """Below half the ceiling an INCOMPLETE verdict still sends the turn back
+    to work, unchanged."""
+    session = _session(
+        workspace,
+        responses=[_tool_call(1), _answer("partial"), _tool_call(2), _answer("whole")],
+    )
+    session._llm.generate_object_code = AsyncMock(side_effect=[
+        _VerifierVerdict(status="INCOMPLETE", reason="half done"),
+        _VerifierVerdict(status="COMPLETE", reason="done"),
+    ])
+    with patch("anton.analytics.send_event"):
+        await _run(session)
+    assert _notes_containing(session, "Continue the user's original request")
+    assert not _notes_containing(session, "no more tools can run")
+    assert session.tool_registry.dispatch_tool.await_count == 2
