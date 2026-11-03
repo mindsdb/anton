@@ -298,6 +298,24 @@ class TestEditsKeepHandWrittenText:
         hc.update_lesson(target.id, "line one\n- forged entry")
         assert len(hc.get_lessons()) == 3
 
+    INDENTED_FIRST = " - first lesson\n- second lesson\n"
+
+    def test_an_indented_first_lesson_can_be_edited(self, hc, mem_dir):
+        path = mem_dir / "lessons.md"
+        path.write_text(self.INDENTED_FIRST)
+        target = hc.get_lessons()[0]
+        assert target.text == "first lesson"
+        hc.update_lesson(target.id, "edited lesson")
+        lines = self._lines(path)
+        assert lines[0].startswith("- edited lesson <!-- ts:")
+        assert lines[1] == "- second lesson"
+
+    def test_an_indented_first_lesson_can_be_deleted(self, hc, mem_dir):
+        path = mem_dir / "lessons.md"
+        path.write_text(self.INDENTED_FIRST)
+        hc.del_lesson(hc.get_lessons()[0].id)
+        assert self._lines(path) == ["- second lesson"]
+
 
 class TestEncodeLesson:
     def test_creates_lessons_file(self, hc, mem_dir):

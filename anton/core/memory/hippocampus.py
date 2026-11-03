@@ -126,10 +126,17 @@ def _rule_lines(content: str) -> list[tuple[str, Engram | None]]:
 
 def _lesson_lines(content: str) -> list[tuple[str, Engram | None]]:
     """Each line of lessons.md, line ending kept, with the lesson it holds as
-    get_lessons reads it: None for a heading, a blank line or a typed note."""
+    get_lessons reads it: None for a heading, a blank line or a typed note.
+
+    Leading whitespace on the file's first non-blank line is ignored, so an
+    indented first bullet still reads as a lesson."""
     lines: list[tuple[str, Engram | None]] = []
+    first = True
     for line in content.splitlines(keepends=True):
         body = line.rstrip("\r\n")
+        if first and body.strip():
+            body = body.lstrip()
+            first = False
         entry = None
         if body.strip() and (body.startswith("- ") or body.startswith("  ")):
             text, meta = _extract_metadata(body)
@@ -369,13 +376,15 @@ class Hippocampus:
         if not self._lessons_path.is_file():
             return []
         try:
-            content = self._lessons_path.read_text(encoding="utf-8").strip()
+            content = self._lessons_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             return []
 
-        if not content:
+        if not content.strip():
             return []
 
+        # Parse the file as read, as the edit path does, so every lesson
+        # returned here can be edited or deleted by its id.
         entries = [entry for _, entry in _lesson_lines(content) if entry is not None]
 
         if exclude_scratchpad:
