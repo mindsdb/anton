@@ -21,7 +21,10 @@ def test_program_round_trip_preserves_source_and_passes_existing_static_checks()
     assert component_page.existing_program(bound) == PROGRAM
 
 
-@pytest.mark.parametrize("bad", ["<html></html>", "await CoworkPage({title:'</script>'});", "42"])
+@pytest.mark.parametrize("bad", [
+    "<html></html>", "await CoworkPage({title:'</script>'});", "await CoworkPage({title:'</script foo>'});",
+    "await CoworkPage({title:'</script\t'});", "42",
+])
 def test_non_program_or_script_termination_requires_repair(bad):
     with pytest.raises(ValueError):
         component_page.document(bad)

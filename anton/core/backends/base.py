@@ -27,12 +27,28 @@ _COMPACTED_CELL_CODE = "# (compacted — see summary above)"
 
 @dataclass
 class Cell:
-    """A single scratchpad execution unit — code in, outputs out."""
+    """A single scratchpad execution unit — code in, outputs out.
+
+    `stopped_at` is the line of its own code a cell that failed stopped at,
+    as the boot read it from the traceback (`cell_stopped_at`); None where
+    the runtime doesn't say. A cell whose process died, was killed or never
+    got to run it says `wire.NOTHING_KEPT`: the namespace comes back as of
+    the last cell that completed, so it kept nothing it bound. Such a cell
+    also says `ended_process`: the pad starts a new process before the next
+    cell runs, which runs the startup hooks a cell wrote. So does the cell a
+    cancel records, with the code of the cell it stopped, a remote pad's
+    cell whose service says it ended its process, and a remote pad's error,
+    whose service may have started a new process.
+    """
 
     code: str
     stdout: str
     stderr: str
     error: str | None
+    # Before `logs`, the field a host that cuts a saved result short cuts
+    # most often, so a result cut there keeps them.
+    stopped_at: int | None = None
+    ended_process: bool = False
     description: str = ""
     estimated_time: str = ""
     logs: str = ""
@@ -44,6 +60,14 @@ class CompactedCell:
 
     code: str
     errored: bool
+    stopped_at: int | None = None
+    ended_process: bool = False
+
+
+def stopped_line(value: object) -> int | None:
+    """A cell result's `stopped_at` when it is a line of the cell's code; None
+    for anything else, as from a runtime that doesn't send one."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
 def scrub_cell(cell: Cell) -> Cell:
@@ -105,6 +129,16 @@ class ScratchpadRuntime(ABC):
         The manager refuses a runtime built for a policy that reports another.
         """
         return None
+
+    @property
+    def process_running(self) -> bool:
+        """Whether the runtime's process is up now, so the next cell runs in
+        it. False where the runtime starts a new process before the next
+        cell (`execute_streaming`), as after a death between cells: that
+        start runs the startup hooks a cell wrote, so the write check holds
+        the cell (`hold_unapproved_write`). True here: a runtime that starts
+        its own process again between cells says otherwise."""
+        return True
 
     @abstractmethod
     async def start(self) -> None:
@@ -312,7 +346,8 @@ class ScratchpadRuntime(ABC):
         )
         self.compacted_cells = (
             *self.compacted_cells,
-            *(CompactedCell(code=cell.code, errored=bool(cell.error))
+            *(CompactedCell(code=cell.code, errored=bool(cell.error), stopped_at=cell.stopped_at,
+                            ended_process=cell.ended_process)
               for cell in to_compact if cell.code != _COMPACTED_CELL_CODE),
         )
         summary_cell = Cell(
@@ -358,4 +393,7 @@ class ScratchpadRuntimeFactory(Protocol):
         # pad's model calls use the same API. Optional for factories that
         # predate it, which leave the pad to infer it from the base URL.
         coding_flavor: str | None = None,
+        # False makes the pad's web_search() raise instead of searching. The
+        # manager passes it only when False.
+        internet_research_enabled: bool = True,
     ) -> ScratchpadRuntime: ...

@@ -82,7 +82,7 @@ def document(program):
     fenced = re.fullmatch(r"```(?:javascript|js)?\s*\n(.*?)\n```", program, re.S | re.I)
     if fenced:
         program = fenced.group(1).strip()
-    if not re.search(r"\bCoworkPage\s*\(", program) or re.search(r"</script\s*>", program, re.I):
+    if not re.search(r"\bCoworkPage\s*\(", program) or re.search(r"</script\b", program, re.I):
         raise ValueError("Return a complete JavaScript program calling await CoworkPage(config), without HTML or script tags.")
     css = (HERE / "presentation.css").read_text()
     if _compares_selection(program):

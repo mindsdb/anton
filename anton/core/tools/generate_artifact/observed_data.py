@@ -248,13 +248,14 @@ def runtime_contract(value, path, depth=0, *, compact=False):
 
 
 def strip_binding(html):
-    html = re.sub(r'<script\b(?=[^>]*\bdata-cowork-observed\b)[^>]*>.*?</script\s*>', "", html,
+    # A browser ends a script at </script followed by whitespace, "/" or ">", up to the next ">".
+    html = re.sub(r'<script\b(?=[^>]*\bdata-cowork-observed\b)[^>]*>.*?</script\b[^>]*>', "", html,
                   flags=re.S | re.I)
     return re.sub(r'<meta\b(?=[^>]*\bdata-cowork-observed\b)[^>]*>', "", html, flags=re.I)
 
 
 def previous_data(html):
-    match = re.search(r'<script\b(?=[^>]*\bid=["\']cowork-observed-json["\'])[^>]*>(.*?)</script\s*>',
+    match = re.search(r'<script\b(?=[^>]*\bid=["\']cowork-observed-json["\'])[^>]*>(.*?)</script\b[^>]*>',
                       html, re.S | re.I)
     if match:
         try:

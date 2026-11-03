@@ -51,6 +51,8 @@ from anton.core.tools.skill_draft import CREATE_SKILL_DRAFT_TOOL
 from anton.memory.history_store import is_user_turn, repair_replayed_tool_ids
 from anton.core.llm.prompts import (
     ANTON_NOTE,
+    NO_INTERNET_RESILIENCE_NUDGE,
+    NO_INTERNET_SCRATCHPAD_INSTALL_NUDGE,
     RESILIENCE_NUDGE,
     SCRATCHPAD_INSTALL_NUDGE,
     SCRATCHPAD_SIZE_NUDGE,
@@ -103,6 +105,7 @@ from anton.core.backends.manager import ScratchpadManager
 from anton.core.tools.registry import ToolOutcome, ToolRegistry
 from anton.core.turn_cost import UNKNOWN_ROLE, TurnCost
 from anton.core.tools.tool_defs import (
+    APPROVE_HELD_WRITE_TOOL,
     ASK_USER_TOOL,
     CREATE_ARTIFACT_TOOL,
     CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
@@ -111,6 +114,7 @@ from anton.core.tools.tool_defs import (
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
+    NO_INTERNET_SCRATCHPAD_TOOL,
     READ_IMAGE_TOOL,
     READ_TEXT_FILE_TOOL,
     RECALL_TOOL,
@@ -139,6 +143,7 @@ from anton.core.utils.scratchpad import (
     scratchpad_action,
 )
 from anton.core.utils.write_check import parse_http_write_rules
+from anton.core.utils.write_hold import parse_relay_hosts
 # Artifact-edit tracking + lint and the scratchpad observer hooks: shared with
 # handle_scratchpad's own exec branch (tool_handlers.py) rather than duplicated
 # here, since this inline streaming exec bypasses that handler entirely.
@@ -181,6 +186,13 @@ from anton.utils.datasources import (
 from anton.core.settings import CoreSettings
 
 _MEMORY_PIN_FILE = "_memory_prompt.json"
+
+# The nudges that name internet workarounds or web_search(), and the versions
+# a session without internet research sends instead.
+_NO_INTERNET_NUDGES = {
+    RESILIENCE_NUDGE: NO_INTERNET_RESILIENCE_NUDGE,
+    SCRATCHPAD_INSTALL_NUDGE: NO_INTERNET_SCRATCHPAD_INSTALL_NUDGE,
+}
 
 # Sentinel prefixing a compacted-history summary so later compactions can
 # recognize and update it in place rather than summarize a summary.
@@ -1840,6 +1852,12 @@ class ChatSessionConfig:
     # (registered on the tool registry). See ChatSession.__init__.
     web_search_enabled: bool = True
     web_fetch_enabled: bool = True
+    # False: the agent must not get information from the internet. Turns off
+    # both web tools, makes the scratchpad's web_search() raise, and swaps the
+    # prompt's internet guidance for "use the connected data only". A rule for
+    # the agent, not a network block. Separate from the web tool flags:
+    # cloud_turn turns those off while its scratchpads keep the internet.
+    internet_research_enabled: bool = True
     # When the task (conversation) was created. Rendered as a fixed
     # "Conversation started: …" line in the cache-stable prompt prefix — it
     # never changes across turns, so it doesn't bust the prefix cache. The
@@ -2117,6 +2135,11 @@ class ChatSession:
         # Seconds spent waiting on humans during the current tool dispatch,
         # subtracted from the tool's reported elapsed time.
         self.answer_wait_s = 0.0
+        # The write relay's control address (`write_relay_url`). With it, and
+        # an elicitor that can ask, the session offers `approve_held_write`.
+        # `isinstance` so a MagicMock settings object reads unset.
+        relay_url = getattr(s, "write_relay_url", None)
+        self._write_relay_url: str | None = (relay_url.strip() or None) if isinstance(relay_url, str) else None
         # Holds a cell that changes a database, existing files, or data behind
         # an HTTP API until the user approves it (`hold_unapproved_write`).
         # Only when the host turns `write_approval` on; `is True` so a
@@ -2124,8 +2147,12 @@ class ChatSession:
         self._write_gate: WriteGate | None = None
         if getattr(s, "write_approval", False) is True:
             listed = getattr(s, "write_approval_http", "")
+            # The relayed hosts count only with a relay to hold their writes,
+            # so a stray hosts setting never drops a card.
+            relayed = getattr(s, "write_relay_hosts", "") if self._write_relay_url else ""
             self._write_gate = WriteGate(
                 http_rules=parse_http_write_rules(listed if isinstance(listed, str) else ""),
+                relayed_hosts=parse_relay_hosts(relayed if isinstance(relayed, str) else ""),
             )
 
         coding_provider = config.llm_client.coding_provider
@@ -2136,6 +2163,7 @@ class ChatSession:
         key_supplier = getattr(coding_provider, "current_api_key", None)
         if not inspect.iscoroutinefunction(key_supplier):
             key_supplier = None
+        self._internet_research_enabled = config.internet_research_enabled
         self._scratchpads = ScratchpadManager(
             runtime_factory=config.runtime_factory,
             coding_provider=coding_conn.provider,
@@ -2150,6 +2178,7 @@ class ChatSession:
             data_vault=config.data_vault,
             workspace_env_overlay=config.workspace_env_overlay,
             cell_sandbox=config.cell_sandbox,
+            internet_research_enabled=config.internet_research_enabled,
         )
         # Sandboxed without live apps, nothing starts an app backend, so the
         # artifact tools and the prompt offer html-apps only.
@@ -2195,6 +2224,13 @@ class ChatSession:
         # `tool_handlers.REPAIR_CELLS` of them (`check_cell_artifacts`).
         # Reset every turn.
         self._repair_cells: dict[PageKey, int] = {}
+        # The pages a check this turn left with no repair cells and failed, or
+        # unverified after an edit, put back or not. Never cleared within the
+        # turn: while it is non-empty the completion check is skipped, since
+        # its rounds would edit such a page again. generate_artifact refuses
+        # such a page's artifact, and a cell's change to the page is written
+        # back (`tool_handlers.check_cell_artifacts`). Reset every turn.
+        self._out_of_repairs: set[PageKey] = set()
         # The views the check that failed a page this turn measured, kept
         # until the page passes. Until then, a check of the page that no
         # longer finds one of them fails, even after an unverified check in
@@ -2317,9 +2353,9 @@ class ChatSession:
         # we run ourselves via handler-dispatched ToolDefs (registered in
         # ``_build_core_tools``). The two sets are disjoint by construction.
         desired_web: set[str] = set()
-        if config.web_search_enabled:
+        if config.web_search_enabled and config.internet_research_enabled:
             desired_web.add("web_search")
-        if config.web_fetch_enabled:
+        if config.web_fetch_enabled and config.internet_research_enabled:
             desired_web.add("web_fetch")
         provider_native = self._llm.planning_provider.native_web_tools()
         self._native_web_tools: set[str] = desired_web & provider_native
@@ -2576,6 +2612,8 @@ class ChatSession:
         streak = error_streak.get(tool_name, 0)
         if streak >= self._resilience_nudge_at and tool_name not in resilience_nudged:
             nudge = self._select_resilience_nudge(tool_name, result_text)
+            if not getattr(self, "_internet_research_enabled", True):
+                nudge = _NO_INTERNET_NUDGES.get(nudge, nudge)
             if nudge:
                 result_text += nudge
                 resilience_nudged.add(tool_name)
@@ -3077,6 +3115,7 @@ class ChatSession:
             ),
             deployment_identity=getattr(self, "_deployment_identity", None),
             fullstack_offered=getattr(self, "_fullstack_offered", True),
+            internet_research=getattr(self, "_internet_research_enabled", True),
             direct_reports=self._direct_reports_enabled(),
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
@@ -3226,7 +3265,8 @@ class ChatSession:
         # Copy — SCRATCHPAD_TOOL is a module-level singleton; mutating its
         # .description in place would leak across every session/user sharing
         # this process instead of resetting per session.
-        scratchpad_tool = replace(SCRATCHPAD_TOOL)
+        scratchpad_tool = replace(SCRATCHPAD_TOOL if getattr(self, "_internet_research_enabled", True)
+                                  else NO_INTERNET_SCRATCHPAD_TOOL)
         pkg_list = self._scratchpads.available_packages
         if pkg_list:
             notable = sorted(p for p in pkg_list if p.lower() in self._NOTABLE_PACKAGES)
@@ -3296,6 +3336,16 @@ class ChatSession:
                     ),
                 )
             )
+
+        # A request the write relay held: the tool reads it from the relay and
+        # asks the user on a card. Only with a relay to read and a way to ask,
+        # since without the card the tool could only refuse.
+        if (
+            self._write_relay_url is not None
+            and self.elicitor is not None
+            and "choice" in self.elicitor.supported_kinds
+        ):
+            self.tool_registry.register_tool(APPROVE_HELD_WRITE_TOOL)
 
         if self._cortex is not None or self._self_awareness is not None:
             self.tool_registry.register_tool(MEMORIZE_TOOL)
@@ -5650,6 +5700,7 @@ class ChatSession:
         self._artifact_geography_request = ""
         self._unverified_findings_listed = set()
         self._repair_cells = {}
+        self._out_of_repairs = set()
         self._failed_views = {}
         self._turn_pages = TurnPages()
         # What the project held when this turn began: a cell may delete or
@@ -7013,21 +7064,28 @@ class ChatSession:
                                 )
 
                                 cell = None
-                                async for item in pad.execute_streaming(
+                                # Closed with the turn, so a turn closed at its
+                                # own yield closes the pad's stream at once,
+                                # and the runtime records the cell it stopped.
+                                run = pad.execute_streaming(
                                     code,
                                     description=description,
                                     estimated_time=estimated_time,
                                     estimated_seconds=estimated_seconds,
-                                ):
-                                    if self._cancel_event.is_set():
-                                        await pad.cancel()
-                                        break
-                                    if isinstance(item, str):
-                                        yield StreamTaskProgress(
-                                            phase="scratchpad", message=scrub_output(item), id=tc.id,
-                                        )
-                                    elif isinstance(item, Cell):
-                                        cell = item
+                                )
+                                try:
+                                    async for item in run:
+                                        if self._cancel_event.is_set():
+                                            await pad.cancel()
+                                            break
+                                        if isinstance(item, str):
+                                            yield StreamTaskProgress(
+                                                phase="scratchpad", message=scrub_output(item), id=tc.id,
+                                            )
+                                        elif isinstance(item, Cell):
+                                            cell = item
+                                finally:
+                                    await run.aclose()
                                 _sp_elapsed = _time.monotonic() - _sp_t0
                                 yield StreamTaskProgress(
                                     phase="scratchpad_done",
@@ -7610,6 +7668,20 @@ class ChatSession:
                             f"latched_{self._verifier_latch.reason}"
                         )
                     break
+
+            # A continuation round would only edit a page out of repair cells
+            # again. Before the re-probe below, which this turn leaves due.
+            if self._out_of_repairs:
+                logger.info(
+                    "completion-verifier skipped — out of repair cells: %s",
+                    ", ".join(sorted(f"{key.slug}/{key.page}" for key in self._out_of_repairs)),
+                )
+                if self._turn_cost is not None:
+                    self._turn_cost.verification_skipped = True
+                    self._turn_cost.verifier_failure = "out_of_repairs"
+                break
+
+            if self._verifier_latch.latched:
                 logger.info(
                     "completion-verifier re-probing after %d skipped verifications",
                     self._verifier_latch.skips,

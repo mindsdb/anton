@@ -9,12 +9,16 @@ import dill
 
 from anton.core.backends.wire import (
     CELL_DELIM,
+    CELL_FILENAME,
     CELL_TRACE_MARKER,
+    EXPLAINABILITY_QUERIES_NAME,
+    INTERNET_RESEARCH_ENV,
     MISSING_MODULE_HINT,
     RESULT_START,
     RESULT_END,
     USAGE_MARKER,
     USAGE_MARKER_ENV,
+    cell_stopped_at,
     heal_surrogate_source,
 )
 
@@ -51,7 +55,7 @@ except ValueError:
     SESSION_MAX_BYTES = _SESSION_MAX_DEFAULT
 
 # Never snapshot these: rebuilt on every boot, and per-cell state.
-_SESSION_EXCLUDE_ALWAYS = frozenset({"__builtins__", "_anton_explainability_queries"})
+_SESSION_EXCLUDE_ALWAYS = frozenset({"__builtins__", EXPLAINABILITY_QUERIES_NAME})
 
 # Helpers this module injects. They are excluded because they are rebuilt fresh each
 # boot and some (`get_llm`, `web_search`, `query_minds_data`) close over live network
@@ -63,9 +67,6 @@ _SESSION_EXCLUDE_ALWAYS = frozenset({"__builtins__", "_anton_explainability_quer
 # value was dropped from the snapshot and then re-injected as the helper on the next
 # turn — so `print(sample)` returned `<function sample>` with no error. If the agent
 # rebinds one of these names, its value is data and gets persisted like any other.
-_INJECTED_HELPER_NAMES = frozenset(
-    {"get_llm", "agentic_loop", "web_search", "query_minds_data", "progress", "sample"}
-)
 
 # The helper objects this boot actually created, recorded by `_inject_helper` at the
 # point of definition. It must NOT be built from `namespace` after injection: on a
@@ -458,7 +459,7 @@ def _dump_namespace(ns: dict) -> str | None:
 namespace, _session_load_note = _load_namespace()
 if _session_load_note:
     _session_notes.append(_session_load_note)
-namespace["_anton_explainability_queries"] = []
+namespace[EXPLAINABILITY_QUERIES_NAME] = []
 
 # The running cell's trace context, read by every helper model call. The main
 # loop sets it from the cell's CELL_TRACE_MARKER line.
@@ -902,9 +903,20 @@ if _scratchpad_model:
             )
             return response.content
 
+        def _web_search_off(query, *, max_tokens=4096):
+            """Raise: this session answers from the connected data only."""
+            raise RuntimeError(
+                "Internet research is turned off for this session, so web_search() is "
+                "unavailable. Answer from the connected data sources and the user's files."
+            )
+
         _inject_helper("get_llm", get_llm)
         _inject_helper("agentic_loop", agentic_loop)
-        _inject_helper("web_search", web_search)
+        # A stub rather than no name: a NameError would read as a missing package.
+        _inject_helper(
+            "web_search",
+            _web_search_off if os.environ.get(INTERNET_RESEARCH_ENV) == "off" else web_search,
+        )
     except Exception:
         pass  # LLM not available — not fatal (e.g. anthropic not installed)
 
@@ -950,7 +962,7 @@ if not _cloud_turn and _minds_datasource and _minds_api_key and _minds_url:
             try:
                 with _minds_urllib.urlopen(req, context=ctx, timeout=60) as resp:
                     parsed = json.loads(resp.read().decode())
-                    namespace.setdefault("_anton_explainability_queries", []).append({
+                    namespace.setdefault(EXPLAINABILITY_QUERIES_NAME, []).append({
                         "datasource": ds,
                         "sql": query,
                         "engine": _minds_engine or None,
@@ -964,7 +976,7 @@ if not _cloud_turn and _minds_datasource and _minds_api_key and _minds_url:
                     body = e.read().decode()
                 except Exception:
                     pass
-                namespace.setdefault("_anton_explainability_queries", []).append({
+                namespace.setdefault(EXPLAINABILITY_QUERIES_NAME, []).append({
                     "datasource": ds,
                     "sql": query,
                     "engine": _minds_engine or None,
@@ -978,7 +990,7 @@ if not _cloud_turn and _minds_datasource and _minds_api_key and _minds_url:
                     "error_message": f"HTTP {e.code}: {body or e.reason}",
                 }
             except Exception as e:
-                namespace.setdefault("_anton_explainability_queries", []).append({
+                namespace.setdefault(EXPLAINABILITY_QUERIES_NAME, []).append({
                     "datasource": ds,
                     "sql": query,
                     "engine": _minds_engine or None,
@@ -1532,13 +1544,17 @@ while True:
         _cell_out["shipped"] = 0
         _cell_out["buf"] = out_buf
         error = None
-        namespace["_anton_explainability_queries"] = []
+        # The line of its own code the cell stopped at, read from the
+        # traceback rather than from the error's text, which the cell shapes.
+        stopped_at = None
+        compiled = None
+        namespace[EXPLAINABILITY_QUERIES_NAME] = []
         _cell_log_handler.buf = log_buf
 
         sys.stdout = out_buf
         sys.stderr = err_buf
         try:
-            compiled = compile(code, "<scratchpad>", "exec")
+            compiled = compile(code, CELL_FILENAME, "exec")
             exec(compiled, namespace)
         except ModuleNotFoundError as _mnf:
             # Don't pip-install a name pulled from an exception — it may be a
@@ -1548,8 +1564,10 @@ while True:
             if _mnf.name:
                 hint = MISSING_MODULE_HINT.format(name=_mnf.name)
             error = hint + traceback.format_exc()
-        except Exception:
+            stopped_at = cell_stopped_at(_mnf.__traceback__, compiled)
+        except Exception as _exc:
             error = traceback.format_exc()
+            stopped_at = cell_stopped_at(_exc.__traceback__, compiled)
         finally:
             sys.stdout = _real_stdout
             sys.stderr = sys.__stderr__
@@ -1609,7 +1627,8 @@ while True:
         "stderr": err_buf.getvalue(),
         "logs": logs_val,
         "error": error,
-        "explainability_queries": list(namespace.get("_anton_explainability_queries", [])),
+        "stopped_at": stopped_at,
+        "explainability_queries": list(namespace.get(EXPLAINABILITY_QUERIES_NAME, [])),
     }
     if len(stdout_full) > MAX_OUTPUT:
         # For LocalScratchpadRuntime, which scrubs before it cuts. Only for cut

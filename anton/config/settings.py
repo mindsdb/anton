@@ -106,6 +106,9 @@ class AntonSettings(CoreSettings):
     # (Exa or Brave); web_fetch always falls back to stdlib HTTP.
     web_search_enabled: bool = True
     web_fetch_enabled: bool = True
+    # False: the agent answers from the connected data only — see
+    # ChatSessionConfig.internet_research_enabled.
+    internet_research_enabled: bool = True
 
     # Case 3 fallback — only consulted when the LLM provider lacks native web
     # search and the user is on a generic OpenAI-compatible endpoint.

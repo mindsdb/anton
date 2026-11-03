@@ -16,6 +16,7 @@ from anton.core.tools.tool_handlers import (
 from anton.core.artifacts.listing import FIELDS as ARTIFACT_LIST_FIELDS
 from anton.core.llm.prompts import cut_spans
 from anton.core.utils.scratchpad import SCRATCHPAD_ACTIONS
+from anton.core.utils.write_hold import handle_approve_held_write
 from anton.core.tools.text_file import DEFAULT_LINE_COUNT, MAX_OUTPUT_CHARS
 
 import os
@@ -133,6 +134,14 @@ SCRATCHPAD_TOOL = ToolDef(
     },
     handler=handle_scratchpad,
 )
+
+# With internet research off the pad's web_search() only raises, so the
+# description doesn't offer it.
+NO_INTERNET_SCRATCHPAD_TOOL = replace(SCRATCHPAD_TOOL, description=cut_spans(
+    SCRATCHPAD_TOOL.description,
+    ("web_search(query) routes", "sample(var) inspects", ""),
+    ("get_llm, agentic_loop, web_search, sample, and progress", " are already", "get_llm, agentic_loop, sample, and progress"),
+))
 
 
 MEMORIZE_TOOL = ToolDef(
@@ -1087,4 +1096,37 @@ ASK_USER_TOOL = ToolDef(
         "required": ["question", "options"],
     },
     handler=handle_ask_user,
+)
+
+
+APPROVE_HELD_WRITE_TOOL = ToolDef(
+    name="approve_held_write",
+    description=(
+        "Ask the user to approve one HTTP request a host held for approval. Some hosts sit "
+        "behind a write relay: a GET or HEAD reaches them, but any other request is held, and "
+        "the host answers HTTP 428 with JSON such as "
+        '{"error": "held_for_approval", "pending_id": "<32 hex characters>", "sha256": "..."}. '
+        "The reply's Write-Relay-Pending-Id header and its status text carry the same pending_id, "
+        "so an error raised for the reply, such as raise_for_status()'s, names it too: read it "
+        "there rather than sending the request again. "
+        "A 428 held_for_approval reply means nothing was written. Call this tool with its "
+        "pending_id: the user sees the exact request and picks Approve or Cancel, and only "
+        "their Approve sends it, once. The result gives the host's answer, or says why nothing "
+        "was sent.\n\n"
+        "A person must approve: don't send the request again, change it to get past the hold, "
+        "or reach the host another way. Call it once per held request. When it isn't approved, "
+        "tell the user what the request would change and that it needs their approval."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "pending_id": {
+                "type": "string",
+                "description": "The pending_id from the host's 428 held_for_approval reply, in its "
+                "JSON, its Write-Relay-Pending-Id header or its status text: 32 lowercase hex characters.",
+            },
+        },
+        "required": ["pending_id"],
+    },
+    handler=handle_approve_held_write,
 )

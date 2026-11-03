@@ -18,7 +18,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
 
-from anton.core.backends.base import ApiKeySupplier, Cell, ScratchpadRuntime, scrub_cell
+from anton.core.backends.base import ApiKeySupplier, Cell, ScratchpadRuntime, scrub_cell, stopped_line
 from anton.core.backends.sandbox import (
     CellSandbox,
     SandboxUnavailable,
@@ -32,7 +32,9 @@ from anton.core.backends.wire import (
     HEARTBEAT_MARKER,
     INSTALL_END_MARKER,
     INSTALL_START_MARKER,
+    INTERNET_RESEARCH_ENV,
     MAX_OUTPUT,
+    NOTHING_KEPT,
     PROGRESS_MARKER,
     RESULT_END,
     RESULT_START,
@@ -383,6 +385,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         cell_sandbox: CellSandbox | None = None,
         coding_api_key_supplier: ApiKeySupplier | None = None,
         coding_flavor: str | None = None,
+        internet_research_enabled: bool = True,
         _venvs_base: Path | None = None,
     ) -> None:
         # The name becomes a folder the host deletes and recreates, so one that
@@ -421,6 +424,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # The coding provider's OpenAI transport; None leaves the boot script
         # to infer it from the provider name and base URL.
         self._coding_flavor: str | None = coding_flavor
+        # False: the boot script injects a web_search() that only raises.
+        self._internet_research_enabled = internet_research_enabled
         self._credential_path: Path | None = None
         self._credential_written: str | None = None
         # The Landlock policy every spawn of agent code runs under; None runs
@@ -434,6 +439,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # disposed of its launch descriptors, including subprocess creation.
         self._pending_starts: set[asyncio.Future[object]] = set()
         self._proc: asyncio.subprocess.Process | None = None
+        # The code of the cell the process runs now, which a cancel records
+        # as the cell it stopped; None between cells.
+        self._running_code: str | None = None
         self._boot_path: str | None = None
         self._venv_dir: str | None = None
         self._venv_python: str | None = None
@@ -1100,6 +1108,12 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             env["ANTON_SCRATCHPAD_FLAVOR"] = self._coding_flavor
         else:
             env.pop("ANTON_SCRATCHPAD_FLAVOR", None)
+        # Set or cleared here, after the workspace overlay, so neither an
+        # inherited value nor a project .env decides it.
+        if self._internet_research_enabled:
+            env.pop(INTERNET_RESEARCH_ENV, None)
+        else:
+            env[INTERNET_RESEARCH_ENV] = "off"
         # Propagate provider credentials from the ANTON_* names into the SDK
         # names the scratchpad's nested get_llm() expects.
         if "ANTHROPIC_API_KEY" not in env and "ANTON_ANTHROPIC_API_KEY" in env:
@@ -1312,6 +1326,12 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 "The Python venv has been deleted and will be recreated on next attempt."
             ) from exc
 
+    @property
+    def process_running(self) -> bool:
+        """Whether the pad's process is up: `execute_streaming` starts a new
+        one first when it isn't (`_auto_resume`)."""
+        return self._proc is not None and self._proc.returncode is None
+
     async def resume(self) -> None:
         """Restart a dead process WITHOUT discarding its namespace snapshot.
 
@@ -1435,13 +1455,20 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             await asyncio.wait_for(self._proc.wait(), timeout=5)
         except asyncio.TimeoutError:
             pass
+        running, self._running_code = self._running_code, None
         self._record_cell(
             Cell(
-                code="# (cancelled by user)",
+                # The cell the cancel stopped, so the write check reads what
+                # it may have written before it stopped.
+                code=running if running is not None else "# (cancelled by user)",
                 stdout="",
                 stderr="",
                 error="Cancelled by user.",
                 description="Cancelled",
+                # Its process is gone, so it kept none of its names, and the
+                # start below runs the next cell in a new process.
+                stopped_at=NOTHING_KEPT,
+                ended_process=True,
             )
         )
         self._proc = None
@@ -1497,6 +1524,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     ),
                     description=description,
                     estimated_time=estimated_time,
+                    stopped_at=NOTHING_KEPT,
+                    ended_process=True,
                 ))
                 return
             # Grabbed once and cleared immediately: whatever happens to THIS
@@ -1518,8 +1547,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             payload = f"{CELL_TRACE_MARKER} {trace_context_to_json(trace)}\n" + payload
         try:
             self._proc.stdin.write(_encode_cell_payload(payload))  # type: ignore[union-attr]
+            self._running_code = code
             await self._proc.stdin.drain()  # type: ignore[union-attr]
         except (BrokenPipeError, ConnectionResetError):
+            self._running_code = None
             if self._cell_sandbox is None:
                 raise
             # The launcher refused and exited before the cell could run.
@@ -1532,6 +1563,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 description=description,
                 estimated_time=estimated_time,
                 logs=recovery_note or "",
+                stopped_at=NOTHING_KEPT,
+                ended_process=True,
             ))
             return
 
@@ -1595,7 +1628,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 description=description,
                 estimated_time=estimated_time,
                 logs=recovery_note or "",
+                stopped_at=NOTHING_KEPT,
+                ended_process=True,
             )
+            self._running_code = None
             cell = self._record_cell(cell)
             # A Stop or a host's watchdog cancels the task running this cell.
             # With the cell killed and recorded, that cancel goes on up and
@@ -1627,15 +1663,21 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 estimated_time=estimated_time,
                 logs=recovery_note or "",
             )
+            self._running_code = None
             cell = self._record_cell(cell)
             yield cell
             return
 
         if result_data is None:
+            # The process died mid-cell: the next cell gets the namespace as
+            # of the last one that completed, from the snapshot
+            # `LocalScratchpadRuntime.resume` reloads.
             result_data = {
                 "stdout": "",
                 "stderr": "",
                 "error": "Process exited unexpectedly.",
+                "stopped_at": NOTHING_KEPT,
+                "ended_process": True,
             }
 
         for pkg in result_data.get("auto_installed") or []:
@@ -1659,7 +1701,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             description=description,
             estimated_time=estimated_time,
             logs=logs,
+            stopped_at=stopped_line(result_data.get("stopped_at")),
+            ended_process=result_data.get("ended_process") is True,
         )
+        self._running_code = None
         cell = self._record_cell(cell)
         # The process proved itself alive by completing this round trip —
         # whatever earlier death streak led here (if any) is over. This is
@@ -1778,10 +1823,15 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     refusal = await self._dead_cell_refusal()
                     if refusal is not None:
                         error = str(refusal)
+                # The next cell gets the namespace as of the last one that
+                # completed, from the snapshot `LocalScratchpadRuntime.resume`
+                # reloads.
                 yield {
                     "stdout": _salvage_tail(self._salvage, self._salvage_dropped),
                     "stderr": "",
                     "error": error,
+                    "stopped_at": NOTHING_KEPT,
+                    "ended_process": True,
                 }
                 return
 
@@ -2061,6 +2111,7 @@ def local_scratchpad_runtime_factory(
     cell_sandbox: CellSandbox | None = None,
     coding_api_key_supplier: ApiKeySupplier | None = None,
     coding_flavor: str | None = None,
+    internet_research_enabled: bool = True,
 ) -> ScratchpadRuntime:
     return LocalScratchpadRuntime(
         name=name,
@@ -2077,4 +2128,5 @@ def local_scratchpad_runtime_factory(
         cell_sandbox=cell_sandbox,
         coding_api_key_supplier=coding_api_key_supplier,
         coding_flavor=coding_flavor,
+        internet_research_enabled=internet_research_enabled,
     )
