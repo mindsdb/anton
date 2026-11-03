@@ -744,7 +744,8 @@ def build_workspace_discovery_context(manager) -> str:
 
     if not pads_line and not root_line:
         return ""
-    return "\n\nWorkspace state:" + pads_line + root_line
+    # The session pins this block for the conversation, so say when it is from.
+    return "\n\nWorkspace state when this conversation started:" + pads_line + root_line
 
 
 def observe_scratchpad_cell(session, name: str, cell) -> None:

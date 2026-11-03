@@ -186,10 +186,11 @@ from anton.utils.datasources import (
 )
 from anton.core.settings import CoreSettings
 
-# Memory text each conversation's prompt was first built with, by conversation id.
-# Kept in the process: a file beside the conversation is writable by agent code.
+# Memory and workspace text each conversation's prompt was first built with, by conversation id.
+# The process copy wins: agent code can write the saved file, as it can the memory files.
 _MEMORY_PINS: OrderedDict[str, dict] = OrderedDict()
 _MEMORY_PINS_MAX = 512
+_MEMORY_PIN_FILE = "_memory_prompt.json"
 
 # The nudges that name internet workarounds or web_search(), and the versions
 # a session without internet research sends instead.
@@ -2438,32 +2439,58 @@ class ChatSession:
         return pinned if pinned is not None else self._cortex.memory_read
 
     def _memory_pin(self) -> dict:
-        """The memory text this conversation's prompt was first built with, by part.
+        """The memory and workspace text this conversation's prompt was first built with, by part.
 
-        Memory sits ahead of the whole conversation in the request, and end-of-turn
-        consolidation changes it after most turns, which re-wrote the conversation to
-        the prompt cache. New memories reach the prompt from the next conversation.
+        Both sit ahead of the whole conversation in the request, and end-of-turn
+        consolidation or a new file changes them after most turns, which re-wrote the
+        conversation to the prompt cache. Changes reach the prompt from the next conversation.
         """
         if self._memory_pin_values is None:
             # Shared by id: the host builds a session per message.
-            pin = _MEMORY_PINS.get(self._session_id) if self._session_id else None
+            sid = self._session_id
+            pin = _MEMORY_PINS.get(sid) if sid else None
+            if pin is None and sid:
+                # A new process (every cloud turn, or after a restart) starts from the saved copy.
+                pin = self._load_memory_pin()
             # A change of learned-memory scope must reach the prompt at once.
             scope = getattr(self, "_learned_memory_scope", None)
             if pin is None or pin.get("scope") != scope:
                 pin = {"scope": scope}
-                if self._session_id:
-                    _MEMORY_PINS[self._session_id] = pin
-                    while len(_MEMORY_PINS) > _MEMORY_PINS_MAX:
-                        _MEMORY_PINS.popitem(last=False)
-            elif self._session_id:
-                _MEMORY_PINS.move_to_end(self._session_id)
+            if sid:
+                _MEMORY_PINS[sid] = pin
+                _MEMORY_PINS.move_to_end(sid)
+                while len(_MEMORY_PINS) > _MEMORY_PINS_MAX:
+                    _MEMORY_PINS.popitem(last=False)
             self._memory_pin_values = pin
         return self._memory_pin_values
+
+    def _set_memory_pin(self, part: str, value: object) -> None:
+        pin = self._memory_pin()
+        pin[part] = value
+        saved = {k: asdict(v) if isinstance(v, MemoryRead) else v for k, v in pin.items()}
+        self._scratchpads.write_conversation_text(_MEMORY_PIN_FILE, json.dumps(saved))
+
+    def _load_memory_pin(self) -> dict | None:
+        text = self._scratchpads.read_conversation_text(_MEMORY_PIN_FILE)
+        try:
+            data = json.loads(text) if isinstance(text, str) and text else None
+        except ValueError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        # Agent code can write the file, so keep only parts of the expected type.
+        pin = {k: v for k, v in data.items() if k == "scope" or isinstance(v, str)}
+        try:
+            pin["read"] = MemoryRead(**data["read"])
+        except (KeyError, TypeError):
+            pin.pop("read", None)
+        return pin
 
     def _drop_memory_pin(self) -> None:
         self._memory_pin_values = None
         if self._session_id:
             _MEMORY_PINS.pop(self._session_id, None)
+        self._scratchpads.write_conversation_text(_MEMORY_PIN_FILE, "{}")
 
     @property
     def last_compaction(self) -> dict | None:
@@ -3049,7 +3076,7 @@ class ChatSession:
                     memory_section = await self._cortex.build_memory_context(
                         user_message, learned_memory_scope=learned_memory_scope
                     )
-                pin["system"] = memory_section
+                self._set_memory_pin("system", memory_section)
         elif learned_memory_scope is not None:
             from anton.core.memory.cortex import learned_memory_notice
 
@@ -3073,22 +3100,27 @@ class ChatSession:
             usage_notes=self._connector_usage_notes,
         )
 
-        # Turn-start workspace discovery (ENG-578): volatile, so it rides the
-        # tail — never the cache-stable prefix. Best-effort; a failure here
-        # must not break the turn.
+        # Workspace listing, pinned like memory: a new file or pad would
+        # otherwise re-write the conversation to the prompt cache. Best-effort;
+        # a failure here must not break the turn.
         workspace_ctx = ""
         if self._scratchpads is not None:
-            try:
-                workspace_ctx = build_workspace_discovery_context(self._scratchpads)
-            except Exception:
-                workspace_ctx = ""
+            pin = self._memory_pin()
+            if "workspace" in pin:
+                workspace_ctx = pin["workspace"]
+            else:
+                try:
+                    workspace_ctx = build_workspace_discovery_context(self._scratchpads)
+                except Exception:
+                    workspace_ctx = ""
+                self._set_memory_pin("workspace", workspace_ctx)
 
         # Ensure the registry is populated before we extract tool prompts.
         self._build_tools()
         if self._cortex is not None and "read" not in self._memory_pin():
             read = self._cortex.memory_read
             if isinstance(read, MemoryRead):
-                self._memory_pin()["read"] = read
+                self._set_memory_pin("read", read)
 
         # Which model is serving THIS conversation (ENG-1638): what the planning
         # provider reported on its last response, else the id we requested,
@@ -3290,7 +3322,7 @@ class ChatSession:
                     wisdom = self._cortex.get_scratchpad_context(
                         learned_memory_scope=learned_memory_scope
                     )
-                pin["scratchpad"] = wisdom
+                self._set_memory_pin("scratchpad", wisdom)
             if wisdom:
                 scratchpad_tool.description += (
                     f"\n\nLessons from past sessions:\n{wisdom}"
