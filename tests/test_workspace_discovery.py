@@ -56,7 +56,7 @@ class TestDiscoveryBlock:
         mgr = make_manager(tmp_path)
         seed_agent_pads(mgr, ["catanah"])
         block = build_workspace_discovery_context(mgr)
-        assert "Workspace state:" in block
+        assert "Workspace state when this conversation started:" in block
         assert "catanah" in block
         assert "campaign_engine.py" in block
         assert "campaigns/" in block

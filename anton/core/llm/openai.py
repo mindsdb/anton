@@ -1114,6 +1114,7 @@ class OpenAIProvider(LLMProvider):
             base_url=self._base_url,
             ssl_verify=self._ssl_verify,
             api_version=self._api_version,
+            flavor=self._flavor,
         )
 
     async def current_api_key(self) -> str | None:

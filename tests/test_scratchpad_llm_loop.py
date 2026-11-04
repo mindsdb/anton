@@ -32,8 +32,10 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, TypeAdapter
 
-from anton.core.backends.local import LocalScratchpadRuntime
-from anton.core.backends.wire import CELL_DELIM, RESULT_START
+from anton.core.backends.local import LocalScratchpadRuntime, local_scratchpad_runtime_factory
+from anton.core.backends.manager import ScratchpadManager
+from anton.core.backends.wire import CELL_DELIM, INTERNET_RESEARCH_ENV, RESULT_START
+from anton.core.llm.openai import OpenAIProvider
 from anton.core.llm.tracing import TraceContext, reset_trace_context, set_trace_context
 
 
@@ -252,7 +254,9 @@ def _serving(
         server.server_close()
 
 
-def _run_cells(cells: list[str], tmp_path: Path, base_url: str) -> list[_CellResult]:
+def _run_cells(
+    cells: list[str], tmp_path: Path, base_url: str, extra_env: dict[str, str] | None = None
+) -> list[_CellResult]:
     """Run ``cells`` in order in one pad process: the real boot script."""
     env = os.environ.copy()
     env.update(
@@ -263,6 +267,7 @@ def _run_cells(cells: list[str], tmp_path: Path, base_url: str) -> list[_CellRes
             "OPENAI_BASE_URL": base_url,
             "ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL": "0",
             "PYTHONPATH": str(REPO_ROOT),
+            **(extra_env or {}),
         }
     )
     completed = subprocess.run(
@@ -669,3 +674,132 @@ def test_a_cell_line_that_starts_like_the_trace_marker_stays_code(tmp_path):
 
     assert cell.error is None, cell.error
     assert cell.stdout.strip() == "1"
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("flavor", "path"),
+    [
+        (OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC, "/v1/chat/completions"),
+        (OpenAIProvider.FLAVOR_OPENAI, "/v1/responses"),
+    ],
+    ids=["chat-completions", "responses-api"],
+)
+async def test_a_cells_model_calls_use_the_api_its_coding_provider_sends_on(tmp_path, flavor, path):
+    """A pad's model calls go where the agent's coding provider sends its own.
+
+    Every OpenAIProvider exports the name "openai", and that name alone sends a
+    pad on a host that isn't MindsHub's to the Responses API. A provider on chat
+    completions behind a model route would then get pad calls on a path its
+    endpoint may not serve. Built from the provider's own export, through the
+    manager and the real local runtime, as ChatSession builds it.
+    """
+    with _serving() as server:
+        base_url = f"http://127.0.0.1:{server.server_port}/v1"
+        conn = OpenAIProvider(api_key="test-key", base_url=base_url, flavor=flavor).export_connection_info()
+        manager = ScratchpadManager(
+            runtime_factory=local_scratchpad_runtime_factory,
+            coding_provider=conn.provider,
+            coding_model="stub-model",
+            coding_api_key=conn.api_key or "",
+            coding_base_url=conn.base_url or "",
+            coding_flavor=conn.flavor,
+            workspace_path=tmp_path,
+        )
+        try:
+            pad = await manager.get_or_create("flavor")
+            cell = await pad.execute(_ASK_CELL)
+        finally:
+            await manager.close_all()
+
+    assert cell.error is None, cell.error
+    assert conn.provider == "openai"
+    assert [request.path for request in server.seen] == [path]
+
+
+@pytest.mark.slow
+async def test_a_pad_with_no_flavor_keeps_inferring_it_and_ignores_an_inherited_one(tmp_path, monkeypatch):
+    """A host that passes no flavor keeps today's inference, and an inherited
+    ANTON_SCRATCHPAD_FLAVOR must not reach the pad and override it."""
+    monkeypatch.setenv("ANTON_SCRATCHPAD_FLAVOR", OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC)
+    with _serving() as server:
+        pad = LocalScratchpadRuntime(
+            name="no-flavor",
+            coding_provider="openai",
+            coding_model="stub-model",
+            coding_api_key="test-key",
+            coding_base_url=f"http://127.0.0.1:{server.server_port}/v1",
+            _venvs_base=tmp_path / "venvs",
+        )
+        await pad.start()
+        try:
+            cell = await pad.execute(_ASK_CELL)
+        finally:
+            await pad.cleanup()
+
+    assert cell.error is None, cell.error
+    assert [request.path for request in server.seen] == ["/v1/responses"]
+
+
+def test_an_unknown_flavor_falls_back_to_the_inferred_one(tmp_path):
+    """A flavor the boot script doesn't know must not reach OpenAIProvider."""
+    with _serving() as server:
+        (cell,) = _run_cells(
+            [_ASK_CELL],
+            tmp_path,
+            base_url=f"http://127.0.0.1:{server.server_port}/v1",
+            extra_env={"ANTON_SCRATCHPAD_FLAVOR": "not-a-flavor"},
+        )
+
+    assert cell.error is None, cell.error
+    assert [request.path for request in server.seen] == ["/v1/responses"]
+
+
+# With internet research off the pad's web_search() raises before any model
+# call: the session answers from the connected data only.
+_WEB_SEARCH_CELL = 'print(web_search("latest news"))'
+
+
+def test_web_search_raises_without_a_model_call_when_internet_research_is_off(tmp_path):
+    with _serving() as server:
+        web, ask = _run_cells(
+            [_WEB_SEARCH_CELL, _ASK_CELL],
+            tmp_path,
+            base_url=f"http://127.0.0.1:{server.server_port}/v1",
+            extra_env={INTERNET_RESEARCH_ENV: "off"},
+        )
+
+    assert web.error is not None and "Internet research is turned off" in web.error
+    # get_llm() is not internet research: the pad's other model calls still work.
+    assert ask.error is None, ask.error
+    assert len(server.seen) == 1
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("enabled", [False, True], ids=["off", "on"])
+async def test_the_session_flag_decides_web_search_whatever_the_pad_inherits(tmp_path, monkeypatch, enabled):
+    """Through the manager and the real local runtime, as ChatSession builds
+    them. An inherited value must not decide it either way."""
+    monkeypatch.setenv(INTERNET_RESEARCH_ENV, "on" if not enabled else "off")
+    with _serving() as server:
+        manager = ScratchpadManager(
+            runtime_factory=local_scratchpad_runtime_factory,
+            coding_provider="openai",
+            coding_model="stub-model",
+            coding_api_key="test-key",
+            coding_base_url=f"http://127.0.0.1:{server.server_port}/v1",
+            workspace_path=tmp_path,
+            internet_research_enabled=enabled,
+        )
+        try:
+            pad = await manager.get_or_create("research")
+            cell = await pad.execute(_WEB_SEARCH_CELL)
+        finally:
+            await manager.close_all()
+
+    if enabled:
+        assert cell.error is None, cell.error
+        assert len(server.seen) == 1
+    else:
+        assert cell.error is not None and "Internet research is turned off" in cell.error
+        assert server.seen == []

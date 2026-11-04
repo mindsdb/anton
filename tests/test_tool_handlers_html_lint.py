@@ -296,3 +296,29 @@ def test_the_local_browser_holds_a_failed_page_to_the_same_repair_budget(monkeyp
 
     assert lint.messages == [f"{slug}/index.html — {tool_handlers._NO_REPAIRS_LEFT}"]
     assert lint.page_checks == {key: "failed"}
+    assert lint.out_of_repairs == frozenset({key})
+
+
+def test_a_page_showing_markup_as_text_runs_out_of_repair_cells_without_the_service(monkeypatch, tmp_path: Path):
+    """Without the render-check service a page that shows its own markup
+    fails before any browser loads it, and the repair cells still run out."""
+    from anton.core.tools import tool_handlers
+
+    monkeypatch.delenv("ANTON_RENDER_CHECK_URL", raising=False)
+    monkeypatch.setattr(
+        "anton.core.artifacts.html_lint.lint_html",
+        lambda path, *, cell_sandbox: pytest.fail("the page failed before any browser loaded it"),
+    )
+    store, slug = _dashboard(tmp_path)
+    key = tool_handlers.PageKey(slug, "index.html")
+    for used in range(tool_handlers.REPAIR_CELLS):
+        before = tool_handlers.snapshot_existing_artifacts(store)
+        (store.root / slug / "index.html").write_text(
+            f"<html><body>&lt;style&gt;.x{{color:red}}&lt;/style&gt;{used}</body></html>"
+        )
+        lint = tool_handlers.lint_changed_artifact_files(
+            store, before, failing=frozenset({key}), repairs_used={key: used},
+        )
+        assert lint.out_of_repairs == (frozenset({key}) if used else frozenset())
+
+    assert lint.messages == [f"{slug}/index.html — {tool_handlers._NO_REPAIRS_LEFT}"]

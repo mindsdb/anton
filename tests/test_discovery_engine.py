@@ -57,6 +57,72 @@ def _session_with_plan_sequence(*responses) -> SimpleNamespace:
     return SimpleNamespace(_llm=llm, question_count=0, elicitor=None, emit=AsyncMock())
 
 
+def _batch(label="ready"):
+    return _response(tool_calls=[
+        _tc("scratchpad", {"action": "exec", "name": "facts", "code": "print('validated')"}, id="exec"),
+        _tc("finish_gathering", {"artifact_type": "html-app", "summary": label,
+                                 "data_sources": ["inventory"]}, id="finish"),
+    ])
+
+
+async def test_earlier_tool_results_enter_kickoff_as_user_data():
+    session = _session_with_plan_sequence(_response("no more data"))
+    state = _state(session, _pipeline_kickoff_evidence="<earlier-results>\nuntrusted page text\n</earlier-results>")
+    await engine.run_gathering_loop(state)
+    assert "untrusted page text" not in session._llm.plan.call_args.kwargs["system"]
+    assert "untrusted page text" in session._llm.plan.call_args.kwargs["messages"][0]["content"]
+    assert session._llm.plan.call_args.kwargs["messages"][0]["role"] == "user"
+
+
+async def test_batch_finish_uses_completed_source_work_without_an_extra_model_call(monkeypatch):
+    from anton.core.tools.registry import ToolOutcome
+    import anton.core.tools.tool_handlers as handlers
+
+    monkeypatch.setenv("ANTON_STATIC_FAST_PATH", "direct")
+    monkeypatch.setattr(handlers, "handle_scratchpad", AsyncMock(return_value=ToolOutcome("validated rows", ok=True)))
+    session = _session_with_plan_sequence(_batch())
+    state = _state(session)
+    await engine.run_gathering_loop(state)
+    assert state.gathering_complete
+    assert not state.unverified_sources
+    assert len(state.scratchpad_execs) == 1
+    assert session._llm.plan.call_count == 1
+    assert session._llm.code.call_count == 0
+
+
+async def test_batch_finish_cannot_vouch_for_a_failed_source_execution(monkeypatch):
+    from anton.core.tools.registry import ToolOutcome
+    import anton.core.tools.tool_handlers as handlers
+
+    monkeypatch.setenv("ANTON_STATIC_FAST_PATH", "direct")
+    scratchpad = AsyncMock(side_effect=[ToolOutcome("bad query", ok=False), ToolOutcome("validated rows", ok=True)])
+    monkeypatch.setattr(handlers, "handle_scratchpad", scratchpad)
+    session = _session_with_plan_sequence(_batch("premature"), _batch("after correction"))
+    state = _state(session)
+    await engine.run_gathering_loop(state)
+    assert state.gathering_notes.startswith("after correction")
+    assert len(state.scratchpad_execs) == 1
+    assert scratchpad.call_count == 2
+    assert session._llm.code.call_count == 1
+    assert "failed" in state.messages[2]["content"][1]["content"]
+
+
+async def test_batch_finish_must_follow_the_work_it_vouches_for(monkeypatch):
+    from anton.core.tools.registry import ToolOutcome
+    import anton.core.tools.tool_handlers as handlers
+
+    monkeypatch.setenv("ANTON_STATIC_FAST_PATH", "direct")
+    monkeypatch.setattr(handlers, "handle_scratchpad", AsyncMock(return_value=ToolOutcome("validated rows", ok=True)))
+    reversed_batch = _batch()
+    reversed_batch.tool_calls.reverse()
+    session = _session_with_plan_sequence(reversed_batch, _response(tool_calls=[
+        _tc("finish_gathering", {"artifact_type": "html-app", "summary": "after execution", "data_sources": ["inventory"]})]))
+    state = _state(session)
+    await engine.run_gathering_loop(state)
+    assert state.gathering_notes.startswith("after execution")
+    assert session._llm.code.call_count == 1
+
+
 async def test_finish_gathering_sets_artifact_type_and_notes():
     session = _session_with_plan_sequence(
         _response(tool_calls=[_tc("finish_gathering", {"summary": "ready", "artifact_type": "fullstack-stateless-app", "notes": "use CoinGecko"})]),
@@ -584,3 +650,25 @@ async def test_marked_rows_skip_the_data_loop_and_reach_the_page_builder(tmp_pat
     assert await orchestrator._data_phase(state) is None
     assert [s.outcome for s in state.trace if s.node == "data_check"] == ["skipped"]
     assert _SITES in orchestrator._spec_context(state)
+
+
+async def test_a_web_call_is_refused_when_the_session_has_internet_research_off(monkeypatch):
+    """The tool isn't offered then, but a model can still name it."""
+    import anton.core.tools.web_tools as web_tools
+
+    fetch = AsyncMock(return_value="page body")
+    monkeypatch.setattr(web_tools, "handle_web_fetch_fallback", fetch)
+    session = _session_with_plan_sequence(
+        _response(tool_calls=[_tc("web_fetch", {"url": "https://example.com/a"})]),
+        _response(tool_calls=[_tc("finish_gathering", {
+            "artifact_type": "html-app", "notes": "n", "data_sources": [],
+        })]),
+    )
+    session._internet_research_enabled = False
+    state = _state(session)
+
+    await engine.run_gathering_loop(state)
+
+    fetch.assert_not_awaited()
+    assert state.web_calls == []
+    assert any("internet research is turned off" in str(m.get("content")) for m in state.messages)
