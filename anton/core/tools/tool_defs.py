@@ -41,6 +41,9 @@ class ToolDef:
     # unlocked when the model recalls the skill with this label. Lets hosts
     # tag their own tools as on-demand without a separate config map.
     unlock_skill: Optional[str] = None
+    # A host tool the Chimera sidekick may also use (`delegate`). anton's own
+    # tools are allowed by name in `anton.core.chimera.tools`, never by this.
+    sidekick_safe: bool = False
 
 
 SCRATCHPAD_TOOL = ToolDef(

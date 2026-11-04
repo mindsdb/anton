@@ -216,6 +216,13 @@ _SENTINEL_REASONS = {
     # one sentinel cannot pick a tier honestly. Unclassified until the
     # pipeline reports a cause rather than a location.
     "pipeline": (TIER_UNCLASSIFIED, "unclassified"),
+    # Chimera's `delegate`: a missing brief or done-when, or a tool the
+    # sidekick cannot have, is the agent's own argument; so is calling it where
+    # it is not offered. A failed sidekick loop has any cause from a provider
+    # outage to a bug, and the report does not say which.
+    "delegate_invalid_input": (TIER_SELF, "invalid_argument"),
+    "delegate_unavailable": (TIER_SELF, "invalid_argument"),
+    "sidekick_failed": (TIER_UNCLASSIFIED, "unclassified"),
     # `read_image`'s catch-all read failure wraps a bare `except Exception`, so
     # one sentinel covers a permissions wall, a corrupt file the agent itself
     # wrote, and a decode bug. Nothing here distinguishes them, so it stays out

@@ -24,6 +24,9 @@ from anton.core.artifacts.geography import GeographyRequirement
 from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
+from anton.core.chimera.config import ChimeraConfig, resolve_main_cache_ttl
+from anton.core.chimera.policy import ChimeraPolicy
+from anton.core.chimera.state import SidekickState
 from anton.core.datasources.data_vault import DataVault
 from anton.core.llm import jev as _jev
 from anton.core.llm.effort import (
@@ -81,6 +84,7 @@ from anton.core.llm.provider import (
     TokenLimitExceeded,
     ToolCall,
     TransientProviderError,
+    Usage,
     context_window,
     damaged_tool_call_result,
     is_stream_drop,
@@ -1876,6 +1880,15 @@ class ChatSessionConfig:
     # `ChatSession.close()` can tear them down at turn end, the same way it
     # already closes the LLM client's transports.
     mcp_sessions: list["McpSession"] = field(default_factory=list)
+    # Chimera: whether the main agent may hand work to the sidekick with the
+    # `delegate` tool, and how a delegation is bounded. None reads it from
+    # `settings` (`ChimeraConfig.from_settings`), which is off by default. The
+    # tool is offered only with a client that has a sidekick model
+    # (`LLMClient.has_sidekick`).
+    chimera: ChimeraConfig | None = None
+    # The sidekick's state as the host saved it after an earlier turn of this
+    # conversation (`ChatSession.sidekick_state`), or None for none.
+    sidekick_state: dict | None = None
 
 
 class ChatSession:
@@ -1991,6 +2004,19 @@ class ChatSession:
         # the client themselves (cowork-server) pass their settings to the
         # session, and this is how the deadline setting reaches their client.
         self._llm.model_call_idle_timeout_s = s.model_call_idle_timeout_s
+        # Chimera (`anton.core.chimera`). The policy exists only when it is on;
+        # the state is whatever the host loaded, kept for `sidekick_state`.
+        self._chimera = config.chimera if config.chimera is not None else ChimeraConfig.from_settings(s)
+        self._chimera_policy: ChimeraPolicy | None = (
+            ChimeraPolicy(self._chimera, decide=self._jev_decide) if self._chimera.enabled else None
+        )
+        self._sidekick_state: SidekickState | None = SidekickState.from_dict(config.sidekick_state)
+        # The planning role's cache lifetime, applied like the deadline above.
+        # Only a set value is applied, so a host's own choice on its client
+        # stands when the settings name none.
+        main_cache_ttl = resolve_main_cache_ttl(s, self._chimera)
+        if main_cache_ttl is not None:
+            self._llm.main_cache_ttl = main_cache_ttl
         self._self_awareness = config.self_awareness
         self._cortex = config.cortex
         self._episodic = config.episodic
@@ -2371,6 +2397,14 @@ class ChatSession:
     def act_first(self) -> bool:
         """The "act first, ask later" setting this session was built with."""
         return self._act_first
+
+    @property
+    def sidekick_state(self) -> dict | None:
+        """The Chimera sidekick's state for the host to save after the turn
+        and pass back as `ChatSessionConfig.sidekick_state` next time. None
+        when no sidekick ran in this session and none was loaded."""
+        state = getattr(self, "_sidekick_state", None)
+        return state.to_dict() if state is not None else None
 
     @property
     def artifacts_touched(self) -> set[str]:
@@ -3342,6 +3376,15 @@ class ChatSession:
                 self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
             self.tool_registry.register_tool(generate)
 
+        # Chimera's `delegate`: only when it is on and the client has a
+        # sidekick model of its own; a defaulted one is the coding model,
+        # which would make delegating pointless.
+        chimera = getattr(self, "_chimera", None)
+        if chimera is not None and chimera.enabled and getattr(self._llm, "has_sidekick", False) is True:
+            from anton.core.chimera.tools import DELEGATE_TOOL
+
+            self.tool_registry.register_tool(DELEGATE_TOOL)
+
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""
         try:
@@ -4242,6 +4285,32 @@ class ChatSession:
             if tc.jev_checks
             else {}
         )
+        # Only on turns that used Chimera, so other turns stay as before. Its
+        # roles' tokens too: `by_role` books them, and without these the
+        # per-role sum would no longer reconcile with tokens_total.
+        _chimera_fields = {
+            **(
+                {
+                    "sidekick_delegations": str(tc.sidekick_delegations),
+                    "sidekick_rounds": str(tc.sidekick_rounds),
+                    "sidekick_last_status": tc.sidekick_last_status,
+                    "sidekick_handbacks": str(tc.sidekick_handbacks),
+                    "sidekick_jev_checks": str(tc.sidekick_jev_checks),
+                }
+                if tc.sidekick_delegations
+                else {}
+            ),
+            **{
+                key: value
+                for role in ("sidekick", "decision")
+                if role in tc.by_role
+                for key, value in (
+                    (f"{role}_model", _role_model(tc, role)),
+                    (f"{role}_tokens", _role_tokens(tc, role)),
+                    (f"{role}_calls", _role_calls(tc, role)),
+                )
+            },
+        }
         logger.info(
             # `attempt` alongside `turn`: `turn_index` is a history position,
             # so two attempts of one turn used to produce two indistinguishable
@@ -4274,7 +4343,7 @@ class ChatSession:
             # properties for weeks (ENG-1355) — the log is the sink that does
             # not depend on it.
             " ".join(f"{k}={v}" for k, v in _root_cause_fields.items()),
-            "".join(f" {k}={v}" for k, v in _jev_fields.items()),
+            "".join(f" {k}={v}" for k, v in {**_jev_fields, **_chimera_fields}.items()),
         )
 
         # Script traffic never reaches the analytics sink (ENG-1692).
@@ -4367,6 +4436,7 @@ class ChatSession:
                 # classification is broken.
                 **_root_cause_fields,
                 **_jev_fields,
+                **_chimera_fields,
                 ended_by=tc.ended_by,
                 # Empty unless the turn ended on an exception — see
                 # `TurnCost.error_type`.
@@ -4937,8 +5007,13 @@ class ChatSession:
             + _HANDBACK_NOT_USER_CLAUSE
         )
 
-    async def _jev_verdict(self, user_message: str | None) -> "_jev.JevVerdict | None":
-        """Ask Jev for the verdict; None when it is off or the verifier isn't on MindsHub."""
+    async def _jev_endpoint(
+        self, metadata: dict[str, str] | None = None
+    ) -> "tuple[str, str, dict[str, str]] | Literal['credentials'] | None":
+        """Where this session's Jev calls go: ``(base_url, api_key, headers)``,
+        "credentials" when the key could not be read, or None when Jev is off
+        or the session is not on MindsHub. ``metadata`` joins the call's
+        Langfuse metadata, under the built-in keys."""
         if not self._jev_enabled:
             return None
         provider = self._llm.coding_provider
@@ -4950,7 +5025,7 @@ class ChatSession:
         try:
             api_key = await provider.current_api_key()
         except Exception:
-            return _jev.JevVerdict(error="credentials")
+            return "credentials"
         if not api_key:
             return None
         # Traced like the LLM verifier it stands in for (same turn and harness);
@@ -4963,13 +5038,24 @@ class ChatSession:
         # recovers from. The conversation rides in the metadata instead, so the
         # check can still be joined to it.
         conversation_id = headers.pop("Langfuse-Session-Id", None)
-        if conversation_id and "Langfuse-Metadata" in headers:
-            metadata = json.loads(headers["Langfuse-Metadata"])
-            metadata["conversation_id"] = conversation_id
-            headers["Langfuse-Metadata"] = json.dumps(metadata)
+        if (conversation_id or metadata) and "Langfuse-Metadata" in headers:
+            merged = {**(metadata or {}), **json.loads(headers["Langfuse-Metadata"])}
+            if conversation_id:
+                merged["conversation_id"] = conversation_id
+            headers["Langfuse-Metadata"] = json.dumps(merged)
         if self._jev_http is None:
             # Same TLS setting as the provider, e.g. behind an intercepting proxy.
             self._jev_http = httpx.AsyncClient(timeout=self._jev_timeout_s, verify=info.ssl_verify is not False)
+        return base_url, api_key, headers
+
+    async def _jev_verdict(self, user_message: str | None) -> "_jev.JevVerdict | None":
+        """Ask Jev for the verdict; None when it is off or the verifier isn't on MindsHub."""
+        endpoint = await self._jev_endpoint()
+        if endpoint is None:
+            return None
+        if endpoint == "credentials":
+            return _jev.JevVerdict(error="credentials")
+        base_url, api_key, headers = endpoint
         return await _jev.classify(
             base_url=base_url,
             api_key=api_key,
@@ -4983,6 +5069,48 @@ class ChatSession:
             timeout_s=self._jev_timeout_s,
             client=self._jev_http,
         )
+
+    async def _jev_decide(
+        self, state: dict, questions: dict, metadata: dict[str, str] | None = None
+    ) -> "_jev.JevDecision | None":
+        """Jev's answers about the Chimera sidekick (`ChimeraPolicy.check`), or
+        None when Jev is unavailable here. Its billed tokens go on the turn's
+        books under the `decision` role."""
+        from anton.core.chimera.jev_questions import DECISION_TIMEOUT_S
+
+        endpoint = await self._jev_endpoint(metadata)
+        if endpoint is None:
+            return None
+        if endpoint == "credentials":
+            return _jev.JevDecision(error="credentials")
+        base_url, api_key, headers = endpoint
+        decision = await _jev.decide(
+            base_url=base_url,
+            api_key=api_key,
+            headers=headers,
+            model=self._jev_model,
+            state=state,
+            questions=questions,
+            timeout_s=DECISION_TIMEOUT_S,
+            client=self._jev_http,
+        )
+        books = self._turn_cost
+        if books is not None and decision.input_tokens is not None and decision.output_tokens is not None:
+            books.add(
+                JEV_CALL_ROLE,
+                decision.model or self._jev_model,
+                Usage(input_tokens=decision.input_tokens, output_tokens=decision.output_tokens),
+            )
+        return decision
+
+    def _on_main_compaction(self) -> None:
+        """Tell Chimera the main agent just summarized its history."""
+        policy = getattr(self, "_chimera_policy", None)
+        if policy is not None:
+            try:
+                policy.on_main_compaction(self)
+            except Exception:  # pragma: no cover - telemetry must not break a turn
+                logger.debug("chimera: compaction hook failed", exc_info=True)
 
     def _jev_decides(self, result: "_jev.JevVerdict | None") -> bool:
         """Jev settles only a confident COMPLETE or WAITING; the rest needs the LLM's reason."""
@@ -6638,6 +6766,7 @@ class ChatSession:
             self._compact_scratchpads()
             if compacted:
                 self._compacted_this_turn = True
+                self._on_main_compaction()
                 yield StreamContextCompacted(
                     message="Context was getting long — older history has been summarized."
                 )
@@ -7489,6 +7618,7 @@ class ChatSession:
                     self._compact_scratchpads()
                     if compacted:
                         self._compacted_this_turn = True
+                        self._on_main_compaction()
                         yield StreamContextCompacted(
                             message="Context was getting long — older history has been summarized."
                         )
