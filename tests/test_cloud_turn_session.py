@@ -25,6 +25,7 @@ import pytest
 import anton.core.llm.client as llm_client_mod
 import anton.core.session as session_mod
 from anton.cloud_turn.contract import TurnRequestV1
+from anton.config.settings import AntonSettings
 from anton.cloud_turn.session import (
     CLOUD_TOOL_ALLOWLIST,
     _ARTIFACTS_ROOT_ENV,
@@ -369,12 +370,17 @@ def test_llm_block_coding_model_applied(tmp_path, monkeypatch):
 
 
 def test_llm_block_without_coding_model_keeps_default(tmp_path, monkeypatch):
+    # Hermetic env, as below: a leaked ANTON_CODING_MODEL would mask the default.
+    for k in list(os.environ):
+        if k.startswith("ANTON_"):
+            monkeypatch.delenv(k, raising=False)
     _, cfg = _build(
         tmp_path, monkeypatch,
         llm={"provider": "minds-cloud", "api_key": "mdb_turnkey",
              "base_url": "https://api.mindshub.ai/v1"},
     )
-    assert cfg.settings.coding_model  # built-in default survives
+    default = AntonSettings.model_fields["coding_model"].default
+    assert cfg.settings.coding_model == default
 
 
 def test_cloud_session_without_llm_block_falls_back_to_env(tmp_path, monkeypatch):

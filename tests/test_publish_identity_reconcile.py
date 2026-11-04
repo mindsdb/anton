@@ -179,46 +179,38 @@ def test_reconciliation_is_idempotent_and_silent_when_there_is_nothing_to_do(tmp
     assert _reconcile_publish_identity(_settings(project)) is False
 
 
-def test_reconciliation_is_actually_wired_into_boot():
-    """The unit tests above call the function directly, so none of them notices
-    if the CALL SITE disappears — verified by mutation (stub the call out in
-    `cli.main` and every other test in this file still passes).
+def test_reconciliation_is_actually_wired_into_boot(tmp_path):
+    """Booting `anton` reconciles before `_ensure_workspace` promotes the project vault.
 
-    Checked structurally against the AST rather than by grepping the file for a
-    string: a source-text match would also hit a comment or a docstring, and
-    would break on a harmless reformat. This asserts the name is really
-    referenced inside `main`, and that it is referenced BEFORE
-    `_ensure_workspace` — reconciling after the promotion would leave the stale
-    key already in os.environ, which is the whole thing being prevented.
+    The tests above call the function directly, so only this one notices a lost or reordered call site.
     """
-    import ast
-    import inspect
+    from typer.testing import CliRunner
 
     import anton.cli as cli_mod
 
-    tree = ast.parse(inspect.getsource(cli_mod))
-    main_fn = next(
-        n for n in ast.walk(tree)
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "main"
-    )
-    # Keyed on lineno, NOT on position in the walk: ast.walk is breadth-first,
-    # so list order is depth order. A version that left _ensure_workspace nested
-    # inside `if ctx.invoked_subcommand is None:` and moved the reconcile call
-    # after it at statement level would be yielded reconcile-first and pass,
-    # while the stale key had already been promoted.
-    called = {
-        n.func.id: n.lineno
-        for n in ast.walk(main_fn)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-    }
-    assert "_reconcile_publish_identity" in called, (
-        "cli.main no longer reconciles the publish identity at boot — legacy "
-        "project-vault keys will be promoted into os.environ again"
-    )
-    assert "_ensure_workspace" in called
-    assert called["_reconcile_publish_identity"] < called["_ensure_workspace"], (
-        "reconciliation must run BEFORE _ensure_workspace promotes the project vault"
-    )
+    calls: list[str] = []
+
+    class Stop(Exception):
+        """Ends boot once the workspace would be promoted."""
+
+    def ensure_workspace(_settings):
+        calls.append("ensure_workspace")
+        raise Stop
+
+    with (
+        mock.patch.object(
+            cli_mod, "_reconcile_publish_identity",
+            side_effect=lambda _s: calls.append("reconcile") or False,
+        ),
+        mock.patch.object(cli_mod, "_ensure_workspace", ensure_workspace),
+        mock.patch.object(cli_mod, "_ensure_terms_consent"),
+        mock.patch("anton.updater.check_and_update", return_value=False),
+        mock.patch("anton.analytics.send_event"),
+    ):
+        result = CliRunner().invoke(cli_mod.app, ["--folder", str(tmp_path), "--no-update"])
+
+    assert isinstance(result.exception, Stop), result.output
+    assert calls == ["reconcile", "ensure_workspace"]
 
 
 def test_a_home_workspace_is_never_reconciled_against_itself(home):
