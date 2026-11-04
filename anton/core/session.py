@@ -1079,24 +1079,6 @@ _NO_GUESS_AT_LIMIT = (
     "withholding it because something is still unexplained."
 )
 
-# Closes the note for an unfinished verdict past the budget checkpoint; the
-# reply it asks for has no tools (see the INCOMPLETE branch of the verifier).
-_LATE_CHECK_CLAUSE = (
-    "This request has used over half of its token budget, so finish now from what "
-    "your tool results above already show; no more tools can run. If the check names "
-    "something those results do contain, add it. If your answer rests on something "
-    "they do not show, say so plainly instead of giving a value for it. Otherwise "
-    "give your answer again with the assumptions it rests on. Your next reply "
-    "replaces the previous one in what the user sees, so it must stand on its own. "
-    "Write it for the user, without referring to this check."
-)
-
-# Share of `max_turn_tokens` at which the turn is told, once, to take stock
-# (`_budget_checkpoint_note`). Turns that hit the ceiling had often had an
-# answer for most of it, then spent the rest doubting a property of the data
-# they never tested, and withheld the answer at the limit.
-_BUDGET_CHECKPOINT_SHARE = 0.5
-
 
 def _safe_error_detail(exc: BaseException) -> str:
     """Describe an exception for logs without copying model or user content.
@@ -1565,7 +1547,7 @@ def _render_verify_transcript(
                 btype = block.get("type")
                 if btype == "text":
                     text = (block.get("text") or "").strip()
-                    if not text or (role == "user" and text.startswith(_NOTE_PREFIXES)):
+                    if not text:
                         continue
                     if preamble:
                         # A tool_use rides with this text, so it is never the
@@ -1980,9 +1962,6 @@ class ChatSession:
         # limit. Reset per turn in turn_stream.
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
-        # Whether this turn has had its budget checkpoint note. Reset per turn
-        # in turn_stream.
-        self._budget_checkpoint_sent = False
         # The tool calls this turn ran, for the report `_stream_handback_diagnosis`
         # writes when the content filter stops every hand-back. Reset per turn in
         # turn_stream.
@@ -5063,41 +5042,6 @@ class ChatSession:
             + _HANDBACK_NOT_USER_CLAUSE
         )
 
-    def _past_budget_checkpoint(self) -> bool:
-        """True once this turn has spent `_BUDGET_CHECKPOINT_SHARE` of its
-        token ceiling. False with the ceiling off (0) or outside a turn."""
-        if self._max_turn_tokens <= 0 or self._turn_cost is None:
-            return False
-        return self._turn_cost.total_tokens >= self._max_turn_tokens * _BUDGET_CHECKPOINT_SHARE
-
-    def _budget_checkpoint_note(self) -> str | None:
-        """The one-time note sent when the turn passes `_BUDGET_CHECKPOINT_SHARE`
-        of its token ceiling, or None.
-
-        The ceiling's hand-back comes too late to save the answer: by then the
-        turn has spent its budget, and the hand-back is told not to guess. This
-        asks earlier, while there is room, whether the turn already has its
-        answer, so a long turn ends on a result rather than on "I could not
-        find it". It does not stop the turn: work that still needs doing goes
-        on. Off with the ceiling (0), and once per turn.
-        """
-        if self._budget_checkpoint_sent or not self._past_budget_checkpoint():
-            return None
-        spent = self._turn_cost.total_tokens
-        self._budget_checkpoint_sent = True
-        ceiling = self._max_turn_tokens + self._spend_ceiling_continued_tokens
-        return (
-            f"{ANTON_NOTE} This request has used {spent:,} of its {ceiling:,}-token "
-            "limit. Take stock before the next step. If you already have a result "
-            "that answers the request, give it now, and say in a line or two what "
-            "it assumes that you could not settle. Keep working only on a specific "
-            "error you can name or on work the request still needs. If something "
-            "in the data surprised you, test it once against the data or its "
-            "documentation; if that does not settle it, state it as an assumption "
-            "and go on. This note comes from an automatic budget check, not from "
-            "the user."
-        )
-
     async def _jev_verdict(self, user_message: str | None) -> "_jev.JevVerdict | None":
         """Ask Jev for the verdict; None when it is off or the verifier isn't on MindsHub."""
         if not self._jev_enabled:
@@ -5900,7 +5844,6 @@ class ChatSession:
         self._round_cap_grace_used = False
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
-        self._budget_checkpoint_sent = False
         self._turn_steps = []
         self._finish_authorized = None
         self._limits_passed_by_message = set()
@@ -7570,9 +7513,6 @@ class ChatSession:
                 # fire, the lesson text appears inline alongside tool_results
                 # so the LLM sees the alarm before its next decision.
                 self._acc_maybe_nudge(tool_results)
-                budget_note = self._budget_checkpoint_note()
-                if budget_note:
-                    tool_results.append({"type": "text", "text": budget_note})
 
                 self._append_history({"role": "user", "content": tool_results})
                 # Every model call resends the whole history: one render
@@ -8189,37 +8129,6 @@ class ChatSession:
                     ):
                         yield event
                     break
-
-            # Past the budget checkpoint, an unfinished verdict gets one reply
-            # without tools instead of a working continuation. Measured on long
-            # analysis turns: the budget note got the answer given, with its
-            # assumptions, and the verdict read those assumptions as unfinished
-            # work; the continuation went back to investigating and ran into
-            # the ceiling, ending with no answer. Without tools the reply can
-            # still add what the check found missing from results already in
-            # hand, and must say plainly what those results do not show.
-            if self._past_budget_checkpoint():
-                continuation += 1
-                if self._turn_cost is not None:
-                    self._turn_cost.continuations = continuation
-                self._append_history(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"{_CHECK_NOTE} The check judged the answer above unfinished: "
-                            f"{reason}\n\n{_LATE_CHECK_CLAUSE}"
-                        ),
-                    }
-                )
-                yield StreamTaskProgress(
-                    phase="continuation",
-                    message="Task incomplete — finishing from the work done so far...",
-                )
-                async for event in self._stream_handback_diagnosis(
-                    system=system, label="late-check", answered=bool(reply.strip()),
-                ):
-                    yield event
-                break
 
             continuation += 1
             if self._turn_cost is not None:
