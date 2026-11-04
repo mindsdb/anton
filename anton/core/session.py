@@ -4993,7 +4993,10 @@ class ChatSession:
         ):
             yield "result", False
             return
-        if limit not in self._limits_passed_by_message and await self._user_authorized_finishing(
+        # The time limit always asks: "don't stop" in the message can't speak
+        # for the extra hour, and the host extends the turn's credentials only
+        # when the question is answered. With nobody to ask it hands back.
+        if limit != "time_limit" and limit not in self._limits_passed_by_message and await self._user_authorized_finishing(
             user_message
         ):
             # Named before the grant, which would report the raised limit.

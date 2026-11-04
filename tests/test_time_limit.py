@@ -13,7 +13,7 @@ The session's clock is swapped for one that moves 100 s per model call, so a
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -22,7 +22,7 @@ from anton.core.llm.provider import StreamAskUser, StreamTurnEnded
 from anton.core.session import _HANDBACK_NOT_USER_CLAUSE, _VerifierVerdict
 from anton.core.settings import CoreSettings
 
-from tests.test_limit_continue import KEEP_GOING, STOP_HERE, _run, _ScriptedElicitor
+from tests.test_limit_continue import KEEP_GOING, STOP_HERE, _run, _ScriptedElicitor, _structured_calls
 from tests.test_spend_ceiling import (
     _history_text,
     _session,
@@ -187,3 +187,54 @@ async def test_after_three_more_windows_the_limit_hands_back_without_asking(work
     assert kwargs["ended_by"] == "time_limit"
     assert kwargs["limit_continues"] == "3"
     assert len(elicitor.requests) == 3
+
+
+async def test_a_message_that_says_dont_stop_still_asks_at_the_time_limit(workspace, clock):
+    """The message's "don't stop" passes the step and token limits once; the
+    time limit asks anyway, since the host extends the turn's key only on an
+    answer."""
+    session = _timed_session(workspace, [_tool_call(1), _tool_call(2), _text("all done")], clock)
+    _structured_calls(session, authorized=True)
+    session._verify_min_tool_rounds = 10**6
+    elicitor = _ScriptedElicitor(KEEP_GOING)
+    session.elicitor = elicitor
+    _, kwargs = await _run(session, "Keep going, don't stop until it's done.")
+    assert len(elicitor.requests) == 1
+    assert elicitor.requests[0].prompt.startswith("This task reached its time limit")
+    assert kwargs["limit_message_continues"] == "0"
+
+
+async def test_with_nobody_to_ask_dont_stop_still_ends_at_the_time_limit(workspace, clock):
+    """A scheduled or channel turn can't be asked: it ends with the summary."""
+    session = _timed_session(workspace, [_tool_call(i) for i in range(1, 8)], clock)
+    _structured_calls(session, authorized=True)
+    session._verify_min_tool_rounds = 10**6
+    session.elicitor = None
+    _, kwargs = await _run(session, "Keep going, don't stop until it's done.")
+    assert kwargs["ended_by"] == "time_limit"
+    assert "This task reached its time limit of 3 minutes per request." in _history_text(session)
+
+
+async def test_a_new_turn_starts_from_the_base_time_limit(workspace, clock):
+    """Keep going widens the limit for its own turn only: the next turn asks at
+    the base limit again."""
+    session = _timed_session(workspace, [_tool_call(1), _tool_call(2), _text("first done")], clock)
+    session.elicitor = _ScriptedElicitor(KEEP_GOING)
+    _, first = await _run(session)
+    assert first["limit_continues"] == "1"
+    # The second turn's replies, on the same session and clock.
+    replies = _session(workspace, responses=[_tool_call(3), _tool_call(4), _tool_call(5)])._llm.plan_stream
+
+    def _second_turn(**kwargs):
+        clock[0] += STEP_S
+        return replies(**kwargs)
+
+    session._llm.plan_stream = _second_turn
+    second = _ScriptedElicitor(STOP_HERE)
+    session.elicitor = second
+    with patch("anton.analytics.send_event"):
+        events = [event async for event in session.turn_stream("and now the next one")]
+    assert events[-1] == StreamTurnEnded(ended_by="time_limit")
+    assert second.requests[0].prompt.startswith(
+        "This task reached its time limit of 3 minutes per request."
+    )
