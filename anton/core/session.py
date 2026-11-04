@@ -5094,13 +5094,22 @@ class ChatSession:
             timeout_s=DECISION_TIMEOUT_S,
             client=self._jev_http,
         )
+        if decision.input_tokens is None or decision.output_tokens is None:
+            return decision
+        usage = Usage(input_tokens=decision.input_tokens, output_tokens=decision.output_tokens)
         books = self._turn_cost
-        if books is not None and decision.input_tokens is not None and decision.output_tokens is not None:
-            books.add(
-                JEV_CALL_ROLE,
-                decision.model or self._jev_model,
-                Usage(input_tokens=decision.input_tokens, output_tokens=decision.output_tokens),
-            )
+        if books is not None:
+            books.add(JEV_CALL_ROLE, decision.model or self._jev_model, usage)
+        # And a usage line, like every model call: an eval that reads the host's
+        # log finds Jev only in the turn_cost line's jev_* fields, which count
+        # the completion verifier's checks and never these.
+        try:
+            with call_role(JEV_CALL_ROLE):
+                self._llm.coding_provider.log_usage(
+                    model=self._jev_model, usage=usage, served_model=decision.model or None,
+                )
+        except Exception:  # pragma: no cover - bookkeeping must not break a delegation
+            logger.debug("chimera: logging a sidekick check's usage failed", exc_info=True)
         return decision
 
     def _on_main_compaction(self) -> None:

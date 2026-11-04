@@ -630,6 +630,45 @@ async def test_a_sidekick_check_on_mindshub_is_traced_and_booked_as_a_decision()
     assert books.by_role["decision"].tokens == 800
 
 
+async def test_a_sidekick_check_writes_a_decision_usage_line(monkeypatch, usage_lines):
+    # An eval reading the host's log books Jev from the turn_cost line's jev_*
+    # fields, which hold only the completion verifier's checks.
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    coding = OpenAIProvider(api_key="k", base_url="https://api.mindshub.ai/v1",
+                            flavor=OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH)
+    session, _ = _session(coding=coding)
+    session._jev_http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(
+        200, json={"model": "jev-1.13.0-served", "usage": {"input_tokens": 700, "output_tokens": 5},
+                   "answers": {n: {"noul": 0.1} for n in ("take_back", "stuck", "off_scope", "done")}})))
+    token = set_trace_context(TraceContext(session_id="conv-1", metadata={"turn": "3"}))
+    try:
+        await session._chimera_policy.check(trigger="finish", brief="b", done_when="d", transcript="t")
+    finally:
+        reset_trace_context(token)
+        await session._jev_http.aclose()
+
+    (line,) = usage_lines()
+    assert (line["conversation"], line["turn"], line["role"]) == ("conv-1", "3", "decision")
+    assert (line["model"], line["served_model"]) == (session._jev_model, "jev-1.13.0-served")
+    assert (line["input"], line["output"], line["cache_read"], line["cache_creation"]) == (700, 5, 0, 0)
+
+
+async def test_a_sidekick_check_without_usage_writes_no_usage_line(monkeypatch, usage_lines):
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    coding = OpenAIProvider(api_key="k", base_url="https://api.mindshub.ai/v1",
+                            flavor=OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH)
+    session, _ = _session(coding=coding)
+    session._jev_http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(
+        200, json={"model": "jev-1.13.0",
+                   "answers": {n: {"noul": 0.1} for n in ("take_back", "stuck", "off_scope", "done")}})))
+    try:
+        await session._chimera_policy.check(trigger="finish", brief="b", done_when="d", transcript="t")
+    finally:
+        await session._jev_http.aclose()
+
+    assert usage_lines() == []
+
+
 def test_main_compaction_reaches_the_policy(caplog):
     session, _ = _session()
     calls = []
