@@ -196,6 +196,7 @@ def test_the_sidekicks_tools_are_the_allowlist_and_host_tools_marked_safe():
     assert {"publish", "connect", "delegate", "select_path", "recall_skill"}.isdisjoint(names)
     assert names - {"lookup"} <= SIDEKICK_ALLOWLIST
     assert "publish" in SIDEKICK_NEVER and "ask_user" in SIDEKICK_NEVER
+    assert "publish_or_preview" in SIDEKICK_NEVER
 
 
 # -- outcomes -------------------------------------------------------------------------

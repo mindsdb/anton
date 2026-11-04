@@ -42,11 +42,13 @@ SIDEKICK_ALLOWLIST = frozenset({
 })
 # Never the sidekick's, even when a host marks one sidekick-safe: each talks to
 # the user, changes what persists beyond the task, or delegates again.
-# `connect_new_datasource` is anton's own name for `connect_datasource`.
+# `connect_new_datasource` and `publish_or_preview` are anton's own names for
+# `connect_datasource` and `publish`.
 SIDEKICK_NEVER = frozenset({
     "ask_user",
     "approve_held_write",
     "publish",
+    "publish_or_preview",
     "memorize",
     "request_credentials",
     "connect_datasource",
