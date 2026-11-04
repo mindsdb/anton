@@ -1,5 +1,8 @@
 """Completion verdicts from TypeSafe's Jev, via MindsHub's ``/v1/decisions``.
 
+`classify` reads the completion verifier's one `status` choice; `decide` reads
+every named answer of any question set (Chimera's sidekick checks).
+
 Failures come back as an error class, never raised, so the caller can fall back.
 """
 
@@ -9,7 +12,8 @@ import asyncio
 import math
 import re
 import time
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 
 STATUSES = ("COMPLETE", "WAITING", "INCOMPLETE", "STUCK")
 
@@ -28,6 +32,35 @@ class JevVerdict:
     # Billed usage the service reported; None when the reply carried none.
     input_tokens: int | None = None
     output_tokens: int | None = None
+
+
+@dataclass(frozen=True)
+class JevAnswer:
+    """One named answer. ``p`` is the probability of yes for a `noul`
+    question, of the chosen option for a `choice` one."""
+
+    type: str
+    p: float
+    choice: str = ""
+    probabilities: Mapping[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class JevDecision:
+    """One `decide` call: every answer by question name, or an error class.
+    Content-free, like `JevVerdict`."""
+
+    answers: Mapping[str, JevAnswer] = field(default_factory=dict)
+    ms: int = 0
+    model: str = ""
+    error: str = ""
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+    def p(self, name: str) -> float | None:
+        """The probability answered for ``name``, or None when there is none."""
+        answer = self.answers.get(name)
+        return answer.p if answer is not None else None
 
 
 def build_questions(status_description: str, rubric: str, close_to_done_description: str) -> dict:
@@ -63,7 +96,7 @@ def _probability(value: object) -> float:
     return float(value)
 
 
-async def classify(
+async def _post(
     *,
     base_url: str,
     api_key: str,
@@ -71,13 +104,11 @@ async def classify(
     state: dict,
     questions: dict,
     timeout_s: float,
-    client=None,
-    headers: dict[str, str] | None = None,
-) -> JevVerdict:
-    """POST one decision request. Never raises; failures come back in ``error``.
-
-    ``headers`` are sent alongside the key, which they cannot override.
-    """
+    client,
+    headers: dict[str, str] | None,
+) -> tuple[object, int, str]:
+    """POST one decision request: the parsed body, the milliseconds it took,
+    and an error class ("" when a body parsed). Never raises."""
     import httpx2 as httpx
 
     started = time.monotonic()
@@ -97,22 +128,45 @@ async def classify(
                 json={"model": model, "state": state, "questions": questions},
             )
     except TimeoutError:
-        return JevVerdict(ms=elapsed(), error="timeout")
+        return None, elapsed(), "timeout"
     except httpx.HTTPError:
-        return JevVerdict(ms=elapsed(), error="transport")
+        return None, elapsed(), "transport"
     except Exception as exc:  # the shadow must never raise into the turn
-        return JevVerdict(ms=elapsed(), error=type(exc).__name__)
+        return None, elapsed(), type(exc).__name__
     finally:
         if owned:
             await client.aclose()
 
     ms = elapsed()
     if response.status_code != 200:
-        return JevVerdict(ms=ms, error=f"http_{response.status_code}")
+        return None, ms, f"http_{response.status_code}"
     try:
-        body = response.json()
+        return response.json(), ms, ""
     except Exception:
-        return JevVerdict(ms=ms, error="malformed")
+        return None, ms, "malformed"
+
+
+async def classify(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    state: dict,
+    questions: dict,
+    timeout_s: float,
+    client=None,
+    headers: dict[str, str] | None = None,
+) -> JevVerdict:
+    """POST one decision request. Never raises; failures come back in ``error``.
+
+    ``headers`` are sent alongside the key, which they cannot override.
+    """
+    body, ms, error = await _post(
+        base_url=base_url, api_key=api_key, model=model, state=state, questions=questions,
+        timeout_s=timeout_s, client=client, headers=headers,
+    )
+    if error:
+        return JevVerdict(ms=ms, error=error)
     # A reply that was billed keeps its usage even when its answer is unusable.
     usage = _usage(body)
     try:
@@ -129,3 +183,49 @@ async def classify(
         status=status, p_status=p_status, p_complete=p_complete, ms=ms, model=str(body.get("model") or ""),
         **usage,
     )
+
+
+def _parse_answer(raw: object) -> JevAnswer:
+    """One answer as the service returns it; raises on any shape problem."""
+    if not isinstance(raw, dict):
+        raise ValueError("answer is not an object")
+    if "noul" in raw:
+        return JevAnswer(type="noul", p=_probability(raw["noul"]))
+    choice = raw["choice"]
+    if not isinstance(choice, str):
+        raise ValueError("choice is not a string")
+    probabilities = {str(k): _probability(v) for k, v in raw["probabilities"].items()}
+    return JevAnswer(type="choice", p=probabilities[choice], choice=choice, probabilities=probabilities)
+
+
+async def decide(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    state: dict,
+    questions: dict,
+    timeout_s: float,
+    client=None,
+    headers: dict[str, str] | None = None,
+) -> JevDecision:
+    """POST one decision request and read every named answer, `noul` and
+    `choice` alike. Never raises: a failure, or an answer missing for any
+    question asked, comes back in ``error`` with no answers, so a caller that
+    acts only on answers fails open.
+
+    ``headers`` are sent alongside the key, which they cannot override.
+    """
+    body, ms, error = await _post(
+        base_url=base_url, api_key=api_key, model=model, state=state, questions=questions,
+        timeout_s=timeout_s, client=client, headers=headers,
+    )
+    if error:
+        return JevDecision(ms=ms, error=error)
+    usage = _usage(body)
+    try:
+        raw = body["answers"]
+        answers = {name: _parse_answer(raw[name]) for name in questions}
+    except Exception:  # any shape problem is one error class
+        return JevDecision(ms=ms, error="malformed", **usage)
+    return JevDecision(answers=answers, ms=ms, model=str(body.get("model") or ""), **usage)
