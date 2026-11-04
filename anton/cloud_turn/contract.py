@@ -241,9 +241,11 @@ def _is_skill_name(slug: object) -> bool:
 
 
 #: The per-task limits a request may set, with the lowest value each accepts.
-#: A turn-token limit of 0 means no limit to anton, so it is refused here: a
-#: producer bug must not turn the ceiling off.
-TURN_LIMIT_MINIMUMS = {"max_tool_rounds": 1, "max_continuations": 0, "max_turn_tokens": 1}
+#: A turn-token or turn-seconds limit of 0 means no limit to anton, so it is
+#: refused here: a producer bug must not turn the limit off.
+TURN_LIMIT_MINIMUMS = {
+    "max_tool_rounds": 1, "max_continuations": 0, "max_turn_tokens": 1, "max_turn_seconds": 1,
+}
 
 
 def _parse_limits(value: object, conversation_id: str) -> dict[str, int]:
@@ -371,7 +373,8 @@ class TurnRequestV1:
     #: vault connects. Absent when no connected engine has notes.
     connectors: dict | None = None
     #: The tenant's per-task limits cowork-server resolved: any of
-    #: ``max_tool_rounds``, ``max_continuations``, ``max_turn_tokens``. Each one
+    #: ``max_tool_rounds``, ``max_continuations``, ``max_turn_tokens``,
+    #: ``max_turn_seconds``. Each one
     #: present replaces the pod's own default for this turn; an absent one (or
     #: an older controller that sends no block) leaves the default.
     limits: dict[str, int] = field(default_factory=dict)
