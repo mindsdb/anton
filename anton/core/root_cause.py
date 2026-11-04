@@ -204,6 +204,9 @@ _SENTINEL_REASONS = {
     # Other people hold every slot. Each frees itself in time, so retrying
     # later can succeed: transient, never a wall.
     "live_app_slots_full": (TIER_TRANSIENT, "live_app_slots_full"),
+    # Other launches kept the slots busy, or held the launch lock past its
+    # limit. They finish in moments, so retrying shortly can succeed.
+    "live_app_slots_busy": (TIER_TRANSIENT, "live_app_slots_busy"),
     # The slot image lacks a requirement. A rewritten backend may drop it, or
     # the app may truly need it; nothing here tells which.
     "live_app_missing_package": (TIER_UNCLASSIFIED, "unclassified"),

@@ -355,6 +355,9 @@ class GenState:
     live_app: "LiveAppLaunchResult | None" = None
     # Why a live app's launch didn't happen, when no new backend could fix it.
     launch_failure: "LiveAppLaunchError | None" = None
+    # Where an app the run gave up on may still run, when its stop failed:
+    # the run's final text carries it. Empty when the stop went through.
+    live_app_stop_note: str = ""
     trace: list[StepResult] = field(default_factory=list)
     error: str | None = None
     trace_log: "GenTrace | NullTrace" = field(default_factory=NullTrace)
@@ -475,6 +478,7 @@ class GenState:
     # change them mid-run has to live in a step message instead.
     _pipeline_system: str = ""
     _pipeline_tools: "list[dict] | None" = None
+    _pipeline_kickoff_evidence: str = ""
 
     @property
     def datasource_context(self) -> str:
@@ -496,8 +500,18 @@ class GenState:
         if self._pipeline_tools is None:
             from .discovery.sub_tools import pipeline_tool_schemas
 
-            self._pipeline_tools = pipeline_tool_schemas(self.buildable_types)
+            self._pipeline_tools = pipeline_tool_schemas(
+                self.buildable_types, internet_research=self.internet_research,
+            )
         return self._pipeline_tools
+
+    @property
+    def internet_research(self) -> bool:
+        """False when the session answers from the connected data only
+        (`ChatSessionConfig.internet_research_enabled`): no web tools and no
+        public-data-sources catalog in this run. A session object without the
+        attribute (a test double) keeps them."""
+        return getattr(self.session, "_internet_research_enabled", True) is not False
 
     @property
     def buildable_types(self) -> tuple[str, ...]:

@@ -5,7 +5,9 @@ import contextvars
 import functools
 import hashlib
 import httpx2 as httpx
+import inspect
 import random
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
@@ -19,6 +21,7 @@ import uuid
 
 from pydantic import BaseModel, Field, field_validator
 
+from anton.core.artifacts.geography import GeographyRequirement
 from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
@@ -55,6 +58,8 @@ from anton.core.tools.skill_draft import CREATE_SKILL_DRAFT_TOOL
 from anton.memory.history_store import is_user_turn, repair_replayed_tool_ids
 from anton.core.llm.prompts import (
     ANTON_NOTE,
+    NO_INTERNET_RESILIENCE_NUDGE,
+    NO_INTERNET_SCRATCHPAD_INSTALL_NUDGE,
     RESILIENCE_NUDGE,
     SCRATCHPAD_INSTALL_NUDGE,
     SCRATCHPAD_SIZE_NUDGE,
@@ -107,12 +112,16 @@ from anton.core.backends.manager import ScratchpadManager
 from anton.core.tools.registry import ToolOutcome, ToolRegistry
 from anton.core.turn_cost import UNKNOWN_ROLE, TurnCost
 from anton.core.tools.tool_defs import (
+    APPROVE_HELD_WRITE_TOOL,
     ASK_USER_TOOL,
     CREATE_ARTIFACT_TOOL,
+    CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
     GENERATE_ARTIFACT_TOOL,
+    GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
+    NO_INTERNET_SCRATCHPAD_TOOL,
     READ_IMAGE_TOOL,
     READ_TEXT_FILE_TOOL,
     RECALL_TOOL,
@@ -120,7 +129,9 @@ from anton.core.tools.tool_defs import (
     SELECT_PATH_TOOL,
     SELECT_PATH_TOOL_PICK_ONLY,
     STATIC_CREATE_ARTIFACT_TOOL,
+    STATIC_CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
     STATIC_GENERATE_ARTIFACT_TOOL,
+    STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
     STATIC_UPDATE_ARTIFACT_METADATA_TOOL,
     UPDATE_ARTIFACT_METADATA_TOOL,
     ToolDef,
@@ -130,7 +141,9 @@ from anton.core.interaction.emitter import TurnEmitter
 from anton.core.utils.scratchpad import (
     CELL_NOT_RUN_REASONS,
     WriteGate,
-    build_workspace_discovery_context,
+    render_workspace_discovery,
+    valid_workspace_names,
+    workspace_discovery_names,
     cell_failure_reason,
     prepare_scratchpad_exec,
     format_cell_result,
@@ -139,6 +152,7 @@ from anton.core.utils.scratchpad import (
     scratchpad_action,
 )
 from anton.core.utils.write_check import parse_http_write_rules
+from anton.core.utils.write_hold import parse_relay_hosts
 # Artifact-edit tracking + lint and the scratchpad observer hooks: shared with
 # handle_scratchpad's own exec branch (tool_handlers.py) rather than duplicated
 # here, since this inline streaming exec bypasses that handler entirely.
@@ -180,6 +194,19 @@ from anton.utils.datasources import (
 )
 from anton.core.settings import CoreSettings
 
+# Memory and workspace text each conversation's prompt was first built with, by conversation id.
+# Only the workspace names are saved for a new process: agent code can write the saved file,
+# so the memory and scratchpad text it could forge stay in the process.
+_MEMORY_PINS: OrderedDict[str, dict] = OrderedDict()
+_MEMORY_PINS_MAX = 512
+_MEMORY_PIN_FILE = "_memory_prompt.json"
+
+# The nudges that name internet workarounds or web_search(), and the versions
+# a session without internet research sends instead.
+_NO_INTERNET_NUDGES = {
+    RESILIENCE_NUDGE: NO_INTERNET_RESILIENCE_NUDGE,
+    SCRATCHPAD_INSTALL_NUDGE: NO_INTERNET_SCRATCHPAD_INSTALL_NUDGE,
+}
 
 # Sentinel prefixing a compacted-history summary so later compactions can
 # recognize and update it in place rather than summarize a summary.
@@ -1839,6 +1866,12 @@ class ChatSessionConfig:
     # (registered on the tool registry). See ChatSession.__init__.
     web_search_enabled: bool = True
     web_fetch_enabled: bool = True
+    # False: the agent must not get information from the internet. Turns off
+    # both web tools, makes the scratchpad's web_search() raise, and swaps the
+    # prompt's internet guidance for "use the connected data only". A rule for
+    # the agent, not a network block. Separate from the web tool flags:
+    # cloud_turn turns those off while its scratchpads keep the internet.
+    internet_research_enabled: bool = True
     # When the task (conversation) was created. Rendered as a fixed
     # "Conversation started: …" line in the cache-stable prompt prefix — it
     # never changes across turns, so it doesn't bust the prefix cache. The
@@ -1945,8 +1978,8 @@ class ChatSession:
         # carried past once.
         self._finish_authorized: bool | None = None
         self._limits_passed_by_message: set[str] = set()
-        # Memory section by user message, reused within one turn. None outside a turn.
-        self._turn_memory: dict[str, str] | None = None
+        # Memory text the conversation's prompt was first built with (see _memory_pin).
+        self._memory_pin_values: dict | None = None
         # Tally of classified tool failures (ENG-1492). MEASUREMENT ONLY —
         # nothing reads this to change behaviour. The control that will
         # (ENG-1531) is deliberately unbuilt until this has reported real
@@ -2116,6 +2149,11 @@ class ChatSession:
         # Seconds spent waiting on humans during the current tool dispatch,
         # subtracted from the tool's reported elapsed time.
         self.answer_wait_s = 0.0
+        # The write relay's control address (`write_relay_url`). With it, and
+        # an elicitor that can ask, the session offers `approve_held_write`.
+        # `isinstance` so a MagicMock settings object reads unset.
+        relay_url = getattr(s, "write_relay_url", None)
+        self._write_relay_url: str | None = (relay_url.strip() or None) if isinstance(relay_url, str) else None
         # Holds a cell that changes a database, existing files, or data behind
         # an HTTP API until the user approves it (`hold_unapproved_write`).
         # Only when the host turns `write_approval` on; `is True` so a
@@ -2123,24 +2161,38 @@ class ChatSession:
         self._write_gate: WriteGate | None = None
         if getattr(s, "write_approval", False) is True:
             listed = getattr(s, "write_approval_http", "")
+            # The relayed hosts count only with a relay to hold their writes,
+            # so a stray hosts setting never drops a card.
+            relayed = getattr(s, "write_relay_hosts", "") if self._write_relay_url else ""
             self._write_gate = WriteGate(
                 http_rules=parse_http_write_rules(listed if isinstance(listed, str) else ""),
+                relayed_hosts=parse_relay_hosts(relayed if isinstance(relayed, str) else ""),
             )
 
         coding_provider = config.llm_client.coding_provider
         coding_conn = coding_provider.export_connection_info()
+        # The live key, so a pad can follow a credential renewed after it
+        # started. Only a real coroutine method qualifies: a provider without
+        # one, or a test double, leaves the pad on the exported key.
+        key_supplier = getattr(coding_provider, "current_api_key", None)
+        if not inspect.iscoroutinefunction(key_supplier):
+            key_supplier = None
+        self._internet_research_enabled = config.internet_research_enabled
         self._scratchpads = ScratchpadManager(
             runtime_factory=config.runtime_factory,
             coding_provider=coding_conn.provider,
             coding_model=config.llm_client.coding_model,
             coding_api_key=coding_conn.api_key or "",
+            coding_api_key_supplier=key_supplier,
             coding_base_url=coding_conn.base_url or "",
+            coding_flavor=coding_conn.flavor,
             cells=config.cells,
             workspace_path=config.workspace.base if config.workspace else None,
             session_id=config.session_id,
             data_vault=config.data_vault,
             workspace_env_overlay=config.workspace_env_overlay,
             cell_sandbox=config.cell_sandbox,
+            internet_research_enabled=config.internet_research_enabled,
         )
         # Sandboxed without live apps, nothing starts an app backend, so the
         # artifact tools and the prompt offer html-apps only.
@@ -2174,6 +2226,8 @@ class ChatSession:
         # ends with a line for each artifact with a page that did not pass.
         # Reset every turn.
         self._page_checks: dict[PageKey, RenderStatus] = {}
+        self._geography_requirements: dict[PageKey, GeographyRequirement] = {}
+        self._artifact_geography_request = ""
         # The pages whose findings an unverified check already listed for
         # the agent this turn, in a cell's result or in generate_artifact's
         # `checks_skipped`. A later unverified check of such a page lists
@@ -2184,6 +2238,13 @@ class ChatSession:
         # `tool_handlers.REPAIR_CELLS` of them (`check_cell_artifacts`).
         # Reset every turn.
         self._repair_cells: dict[PageKey, int] = {}
+        # The pages a check this turn left with no repair cells and failed, or
+        # unverified after an edit, put back or not. Never cleared within the
+        # turn: while it is non-empty the completion check is skipped, since
+        # its rounds would edit such a page again. generate_artifact refuses
+        # such a page's artifact, and a cell's change to the page is written
+        # back (`tool_handlers.check_cell_artifacts`). Reset every turn.
+        self._out_of_repairs: set[PageKey] = set()
         # The views the check that failed a page this turn measured, kept
         # until the page passes. Until then, a check of the page that no
         # longer finds one of them fails, even after an unverified check in
@@ -2306,9 +2367,9 @@ class ChatSession:
         # we run ourselves via handler-dispatched ToolDefs (registered in
         # ``_build_core_tools``). The two sets are disjoint by construction.
         desired_web: set[str] = set()
-        if config.web_search_enabled:
+        if config.web_search_enabled and config.internet_research_enabled:
             desired_web.add("web_search")
-        if config.web_fetch_enabled:
+        if config.web_fetch_enabled and config.internet_research_enabled:
             desired_web.add("web_fetch")
         provider_native = self._llm.planning_provider.native_web_tools()
         self._native_web_tools: set[str] = desired_web & provider_native
@@ -2381,7 +2442,67 @@ class ChatSession:
         model (Cortex.memory_read). A host reads it after the turn to record
         it. None without a Cortex, or before the first turn built its prompt.
         """
-        return self._cortex.memory_read if self._cortex is not None else None
+        if self._cortex is None:
+            return None
+        pinned = self._memory_pin().get("read")
+        return pinned if pinned is not None else self._cortex.memory_read
+
+    def _memory_pin(self) -> dict:
+        """The memory and workspace text this conversation's prompt was first built with, by part.
+
+        Both sit ahead of the whole conversation in the request, and end-of-turn
+        consolidation or a new file changes them after most turns, which re-wrote the
+        conversation to the prompt cache. Changes reach the prompt from the next conversation.
+        """
+        if self._memory_pin_values is None:
+            # Shared by id: the host builds a session per message.
+            sid = self._session_id
+            pin = _MEMORY_PINS.get(sid) if sid else None
+            if pin is None and sid:
+                # A new process (every cloud turn, or after a restart) starts from the saved copy.
+                pin = self._load_memory_pin()
+            # A change of learned-memory scope must reach the prompt at once.
+            scope = getattr(self, "_learned_memory_scope", None)
+            if pin is None or pin.get("scope") != scope:
+                pin = {"scope": scope}
+            if sid:
+                _MEMORY_PINS[sid] = pin
+                _MEMORY_PINS.move_to_end(sid)
+                while len(_MEMORY_PINS) > _MEMORY_PINS_MAX:
+                    _MEMORY_PINS.popitem(last=False)
+            self._memory_pin_values = pin
+        return self._memory_pin_values
+
+    def _set_memory_pin(self, part: str, value: object) -> None:
+        self._memory_pin()[part] = value
+
+    def _save_memory_pin(self) -> None:
+        pin = self._memory_pin()
+        if self._scratchpads is not None and "workspace" in pin:
+            saved = {"scope": pin.get("scope"), "workspace": pin["workspace"]}
+            self._scratchpads.write_conversation_text(_MEMORY_PIN_FILE, json.dumps(saved))
+
+    def _load_memory_pin(self) -> dict | None:
+        text = self._scratchpads.read_conversation_text(_MEMORY_PIN_FILE)
+        try:
+            data = json.loads(text) if isinstance(text, str) and text else None
+        except ValueError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        names = valid_workspace_names(data.get("workspace"))
+        scope = data.get("scope")
+        if names is None or not (scope is None or isinstance(scope, str)):
+            return None
+        return {"scope": scope, "workspace": names}
+
+    def _drop_memory_pin(self) -> None:
+        self._memory_pin_values = None
+        if self._session_id:
+            _MEMORY_PINS.pop(self._session_id, None)
+        if self._scratchpads is not None:
+            # An empty record is no pin: the next turn builds the prompt afresh.
+            self._scratchpads.write_conversation_text(_MEMORY_PIN_FILE, "")
 
     @property
     def last_compaction(self) -> dict | None:
@@ -2529,6 +2650,8 @@ class ChatSession:
         streak = error_streak.get(tool_name, 0)
         if streak >= self._resilience_nudge_at and tool_name not in resilience_nudged:
             nudge = self._select_resilience_nudge(tool_name, result_text)
+            if not getattr(self, "_internet_research_enabled", True):
+                nudge = _NO_INTERNET_NUDGES.get(nudge, nudge)
             if nudge:
                 result_text += nudge
                 resilience_nudged.add(tool_name)
@@ -2930,6 +3053,15 @@ class ChatSession:
             getattr(cell, "code", "")
         )
 
+    def _direct_reports_enabled(self) -> bool:
+        """`direct_reports` from the settings the host passed; True without
+        them. Read from the settings object, not a config field: a host that
+        builds `ChatSessionConfig` itself still passes its settings."""
+        settings = getattr(self, "_settings", None)
+        if settings is None:
+            return True
+        return bool(getattr(settings, "direct_reports", True))
+
     async def _build_system_prompt(self, user_message: str = "") -> str:
         import datetime as _dt
 
@@ -2941,14 +3073,14 @@ class ChatSession:
         _started = self._started_at or _dt.datetime.now()
         _conversation_started = _started.strftime("%A, %B %d, %Y")
 
-        # Inject memory context (replaces old self_awareness)
+        # Inject memory context (replaces old self_awareness). Pinned for the
+        # conversation, which also keeps a retry from repeating the rule filter calls.
         memory_section = ""
         learned_memory_scope = getattr(self, "_learned_memory_scope", None)
         if self._cortex is not None:
-            # Once per turn: a retry must not repeat the rule filter model calls.
-            turn_memory = self._turn_memory
-            if turn_memory is not None and user_message in turn_memory:
-                memory_section = turn_memory[user_message]
+            pin = self._memory_pin()
+            if "system" in pin:
+                memory_section = pin["system"]
             else:
                 if learned_memory_scope is None:
                     memory_section = await self._cortex.build_memory_context(user_message)
@@ -2956,8 +3088,7 @@ class ChatSession:
                     memory_section = await self._cortex.build_memory_context(
                         user_message, learned_memory_scope=learned_memory_scope
                     )
-                if turn_memory is not None:
-                    turn_memory[user_message] = memory_section
+                self._set_memory_pin("system", memory_section)
         elif learned_memory_scope is not None:
             from anton.core.memory.cortex import learned_memory_notice
 
@@ -2981,18 +3112,23 @@ class ChatSession:
             usage_notes=self._connector_usage_notes,
         )
 
-        # Turn-start workspace discovery (ENG-578): volatile, so it rides the
-        # tail — never the cache-stable prefix. Best-effort; a failure here
-        # must not break the turn.
+        # Workspace listing, pinned like memory: a new file or pad would
+        # otherwise re-write the conversation to the prompt cache. Best-effort;
+        # a failure here must not break the turn.
         workspace_ctx = ""
         if self._scratchpads is not None:
-            try:
-                workspace_ctx = build_workspace_discovery_context(self._scratchpads)
-            except Exception:
-                workspace_ctx = ""
+            pin = self._memory_pin()
+            if "workspace" not in pin:
+                self._set_memory_pin("workspace", workspace_discovery_names(self._scratchpads))
+                self._save_memory_pin()
+            workspace_ctx = render_workspace_discovery(pin["workspace"])
 
         # Ensure the registry is populated before we extract tool prompts.
         self._build_tools()
+        if self._cortex is not None and "read" not in self._memory_pin():
+            read = self._cortex.memory_read
+            if isinstance(read, MemoryRead):
+                self._set_memory_pin("read", read)
 
         # Which model is serving THIS conversation (ENG-1638): what the planning
         # provider reported on its last response, else the id we requested,
@@ -3018,6 +3154,8 @@ class ChatSession:
             ),
             deployment_identity=getattr(self, "_deployment_identity", None),
             fullstack_offered=getattr(self, "_fullstack_offered", True),
+            internet_research=getattr(self, "_internet_research_enabled", True),
+            direct_reports=self._direct_reports_enabled(),
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
             output_dir=self._output_dir,
@@ -3166,7 +3304,8 @@ class ChatSession:
         # Copy — SCRATCHPAD_TOOL is a module-level singleton; mutating its
         # .description in place would leak across every session/user sharing
         # this process instead of resetting per session.
-        scratchpad_tool = replace(SCRATCHPAD_TOOL)
+        scratchpad_tool = replace(SCRATCHPAD_TOOL if getattr(self, "_internet_research_enabled", True)
+                                  else NO_INTERNET_SCRATCHPAD_TOOL)
         pkg_list = self._scratchpads.available_packages
         if pkg_list:
             notable = sorted(p for p in pkg_list if p.lower() in self._NOTABLE_PACKAGES)
@@ -3177,15 +3316,21 @@ class ChatSession:
                 extra = f"\n\nInstalled packages: {len(pkg_list)} total (standard library plus dependencies)."
             scratchpad_tool.description = scratchpad_tool.description + extra
 
-        # Inject scratchpad wisdom from memory (procedural priming)
+        # Inject scratchpad wisdom from memory, pinned like the system memory:
+        # tools come first in the request.
         if self._cortex is not None:
-            learned_memory_scope = getattr(self, "_learned_memory_scope", None)
-            if learned_memory_scope is None:
-                wisdom = self._cortex.get_scratchpad_context()
+            pin = self._memory_pin()
+            if "scratchpad" in pin:
+                wisdom = pin["scratchpad"]
             else:
-                wisdom = self._cortex.get_scratchpad_context(
-                    learned_memory_scope=learned_memory_scope
-                )
+                learned_memory_scope = getattr(self, "_learned_memory_scope", None)
+                if learned_memory_scope is None:
+                    wisdom = self._cortex.get_scratchpad_context()
+                else:
+                    wisdom = self._cortex.get_scratchpad_context(
+                        learned_memory_scope=learned_memory_scope
+                    )
+                self._set_memory_pin("scratchpad", wisdom)
             if wisdom:
                 scratchpad_tool.description += (
                     f"\n\nLessons from past sessions:\n{wisdom}"
@@ -3233,6 +3378,16 @@ class ChatSession:
                 )
             )
 
+        # A request the write relay held: the tool reads it from the relay and
+        # asks the user on a card. Only with a relay to read and a way to ask,
+        # since without the card the tool could only refuse.
+        if (
+            self._write_relay_url is not None
+            and self.elicitor is not None
+            and "choice" in self.elicitor.supported_kinds
+        ):
+            self.tool_registry.register_tool(APPROVE_HELD_WRITE_TOOL)
+
         if self._cortex is not None or self._self_awareness is not None:
             self.tool_registry.register_tool(MEMORIZE_TOOL)
 
@@ -3277,14 +3432,22 @@ class ChatSession:
         # entirely so the LLM doesn't try to use them.
         if self._workspace is not None:
             fullstack = self._fullstack_offered
-            self.tool_registry.register_tool(CREATE_ARTIFACT_TOOL if fullstack else STATIC_CREATE_ARTIFACT_TOOL)
+            direct = self._direct_reports_enabled()
+            if fullstack:
+                create = CREATE_ARTIFACT_TOOL if direct else CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS
+                generate = GENERATE_ARTIFACT_TOOL if direct else GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS
+            else:
+                create = STATIC_CREATE_ARTIFACT_TOOL if direct else STATIC_CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS
+                generate = (STATIC_GENERATE_ARTIFACT_TOOL if direct
+                            else STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS)
+            self.tool_registry.register_tool(create)
             self.tool_registry.register_tool(LIST_ARTIFACTS_TOOL)
             self.tool_registry.register_tool(
                 UPDATE_ARTIFACT_METADATA_TOOL if fullstack else STATIC_UPDATE_ARTIFACT_METADATA_TOOL
             )
             if fullstack:
                 self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
-            self.tool_registry.register_tool(GENERATE_ARTIFACT_TOOL if fullstack else STATIC_GENERATE_ARTIFACT_TOOL)
+            self.tool_registry.register_tool(generate)
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""
@@ -3628,6 +3791,8 @@ class ChatSession:
         self._seed_covered = covered
         if recorded and not self._compaction_sealed:
             self._last_compaction = {"summary": summary_body, "covered_through": covered}
+        # The conversation is written to cache again anyway, so memory can catch up.
+        self._drop_memory_pin()
         return True
 
     def _compact_scratchpads(self) -> bool:
@@ -5574,8 +5739,11 @@ class ChatSession:
         # session per turn get the same result either way.
         self._artifacts_touched = set()
         self._page_checks = {}
+        self._geography_requirements = {}
+        self._artifact_geography_request = ""
         self._unverified_findings_listed = set()
         self._repair_cells = {}
+        self._out_of_repairs = set()
         self._failed_views = {}
         self._turn_pages = TurnPages()
         # What the project held when this turn began: a cell may delete or
@@ -5631,6 +5799,10 @@ class ChatSession:
         (e.g. an eval-run id) without any change to Anton.
         """
         user_input = _scrub_user_input(user_input)
+        self._artifact_geography_request = (
+            user_input if isinstance(user_input, str)
+            else "\n".join(block.get("text", "") for block in user_input if block.get("type") == "text")
+        )
         # Stamp the inbound user turn here, not in _append_history: tool_result
         # and synthetic user-role messages also flow through append and must
         # NOT be stamped.
@@ -5679,7 +5851,6 @@ class ChatSession:
         self._turn_steps = []
         self._finish_authorized = None
         self._limits_passed_by_message = set()
-        self._turn_memory = {}
         # ENG-673: a mid-stream provider failure that had NO prior retry (an
         # overload smuggled into an HTTP-200 stream) gets budget-bounded
         # backoff-and-retry — separate from the instant, count-bounded recovery
@@ -6274,7 +6445,6 @@ class ChatSession:
             _turn_raised = True
             raise
         finally:
-            self._turn_memory = None
             # A cancelled turn drops the failed cells the cerebellum buffered,
             # so neither this turn's flush nor the next one learns from a turn
             # the person backed out of. Same cancel test the books use below.
@@ -6938,21 +7108,28 @@ class ChatSession:
                                 )
 
                                 cell = None
-                                async for item in pad.execute_streaming(
+                                # Closed with the turn, so a turn closed at its
+                                # own yield closes the pad's stream at once,
+                                # and the runtime records the cell it stopped.
+                                run = pad.execute_streaming(
                                     code,
                                     description=description,
                                     estimated_time=estimated_time,
                                     estimated_seconds=estimated_seconds,
-                                ):
-                                    if self._cancel_event.is_set():
-                                        await pad.cancel()
-                                        break
-                                    if isinstance(item, str):
-                                        yield StreamTaskProgress(
-                                            phase="scratchpad", message=scrub_output(item), id=tc.id,
-                                        )
-                                    elif isinstance(item, Cell):
-                                        cell = item
+                                )
+                                try:
+                                    async for item in run:
+                                        if self._cancel_event.is_set():
+                                            await pad.cancel()
+                                            break
+                                        if isinstance(item, str):
+                                            yield StreamTaskProgress(
+                                                phase="scratchpad", message=scrub_output(item), id=tc.id,
+                                            )
+                                        elif isinstance(item, Cell):
+                                            cell = item
+                                finally:
+                                    await run.aclose()
                                 _sp_elapsed = _time.monotonic() - _sp_t0
                                 yield StreamTaskProgress(
                                     phase="scratchpad_done",
@@ -7548,6 +7725,20 @@ class ChatSession:
                             f"latched_{self._verifier_latch.reason}"
                         )
                     break
+
+            # A continuation round would only edit a page out of repair cells
+            # again. Before the re-probe below, which this turn leaves due.
+            if self._out_of_repairs:
+                logger.info(
+                    "completion-verifier skipped — out of repair cells: %s",
+                    ", ".join(sorted(f"{key.slug}/{key.page}" for key in self._out_of_repairs)),
+                )
+                if self._turn_cost is not None:
+                    self._turn_cost.verification_skipped = True
+                    self._turn_cost.verifier_failure = "out_of_repairs"
+                break
+
+            if self._verifier_latch.latched:
                 logger.info(
                     "completion-verifier re-probing after %d skipped verifications",
                     self._verifier_latch.skips,

@@ -162,14 +162,14 @@ FINISH_GATHERING_SCHEMA: dict = {
 }
 
 
-def _scratchpad_schema() -> dict:
+def _scratchpad_schema(*, internet_research: bool = True) -> dict:
     # Reuse the exact schema the main agent sees, so the gathering loop
     # drives scratchpads with the same contract. Imported lazily to avoid a
     # tool_defs <-> discovery import cycle (mirrors generate_artifact's
     # own sub_tools.py).
-    from anton.core.tools.tool_defs import SCRATCHPAD_TOOL
+    from anton.core.tools.tool_defs import NO_INTERNET_SCRATCHPAD_TOOL, SCRATCHPAD_TOOL
 
-    return tool_schema(SCRATCHPAD_TOOL)
+    return tool_schema(SCRATCHPAD_TOOL if internet_research else NO_INTERNET_SCRATCHPAD_TOOL)
 
 
 def _web_search_schema() -> dict:
@@ -523,14 +523,18 @@ _STEP_TASK = {
 }
 
 
-def pipeline_tool_schemas(types: tuple[str, ...] = GENERATOR_ARTIFACT_TYPES_ORDERED) -> list[dict]:
+def pipeline_tool_schemas(
+    types: tuple[str, ...] = GENERATOR_ARTIFACT_TYPES_ORDERED, *, internet_research: bool = True,
+) -> list[dict]:
     """The ONE tool array used by every call in phases A-D.
 
     Fixed contents, fixed order, built the same way every time: it is part of
     the cached prefix, and a reordered array is a changed prefix. Availability
     per step is decided by `rejection_for`, never by dropping entries here.
     ``types`` are the ones `finish_gathering` may settle on
-    (`GenState.buildable_types`).
+    (`GenState.buildable_types`). ``internet_research`` False
+    (`GenState.internet_research`, fixed for the session) leaves out the two
+    web tools and the scratchpad's web_search().
     """
     finish = FINISH_GATHERING_SCHEMA
     if types != GENERATOR_ARTIFACT_TYPES_ORDERED:
@@ -545,10 +549,10 @@ def pipeline_tool_schemas(types: tuple[str, ...] = GENERATOR_ARTIFACT_TYPES_ORDE
                 },
             },
         }
+    web = [_web_search_schema(), _web_fetch_schema()] if internet_research else []
     return [
-        _scratchpad_schema(),
-        _web_search_schema(),
-        _web_fetch_schema(),
+        _scratchpad_schema(internet_research=internet_research),
+        *web,
         _ask_user_schema(),
         finish,
     ]

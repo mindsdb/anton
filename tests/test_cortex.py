@@ -14,7 +14,12 @@ import pytest
 from anton.core.backends.base import Cell
 from anton.core.memory.cerebellum import Cerebellum, _DiffPassResult, _LessonDraft
 from anton.core.memory.base import MemoryRead
-from anton.core.memory.cortex import Cortex, _CompactionResult
+from anton.core.memory.cortex import (
+    Cortex,
+    _CompactionResult,
+    plan_compaction,
+    read_compaction_input,
+)
 from anton.core.memory.hippocampus import Engram, Hippocampus
 from anton.core.session import ChatSession
 from anton.core.tools.tool_handlers import handle_memorize
@@ -1134,6 +1139,186 @@ class TestCompactRulesFile:
         await self._compact(dirs, hc, keep=list(range(1, 12)))
         assert "Hand-added note" in hc._rules_path.read_text()
         assert len(hc.get_rules()) == 11
+
+
+class TestCompactionHalves:
+    """A host that holds its own locks runs the read, the model call and the
+    write apart, without building a Cortex."""
+
+    @staticmethod
+    def _lessons(path: Path, count: int) -> Hippocampus:
+        hc = Hippocampus(path)
+        for i in range(count):
+            hc.encode_lesson(f"Fact number {i}", topic=f"t{i}")
+        return hc
+
+    async def test_planning_touches_no_file(self, dirs):
+        hc = self._lessons(dirs[0], 10)
+        hc.rewrite_identity(["Name: Ada"])
+        before = {p.name: p.read_bytes() for p in dirs[0].iterdir()}
+
+        source = read_compaction_input(hc._lessons_path, "lesson")
+        plan = await plan_compaction(_CompactionLLM(keep=[1, 2]), source)
+
+        assert plan is not None and plan.kept == 2
+        assert {p.name: p.read_bytes() for p in dirs[0].iterdir()} == before
+
+    async def test_applying_a_plan_leaves_the_profile_alone(self, dirs):
+        """Building a Cortex moves and clears profile lines; the halves must not."""
+        hc = self._lessons(dirs[0], 10)
+        hc.rewrite_identity(["Name: Ada"])
+        project = Hippocampus(dirs[1])
+        project.rewrite_identity(["Timezone: UTC"])
+        profiles = [h._profile_path.read_bytes() for h in (hc, project)]
+
+        plan = await plan_compaction(
+            _CompactionLLM(keep=[1]), read_compaction_input(hc._lessons_path, "lesson")
+        )
+        assert plan.apply(hc) is True
+
+        assert [h._profile_path.read_bytes() for h in (hc, project)] == profiles
+        assert len(hc.get_lessons()) == 1
+
+    async def test_a_lesson_saved_between_plan_and_apply_survives(self, dirs):
+        hc = self._lessons(dirs[0], 10)
+        plan = await plan_compaction(
+            _CompactionLLM(keep=[1]), read_compaction_input(hc._lessons_path, "lesson")
+        )
+        hc.encode_lesson("Saved while the plan waited", topic="late")
+
+        assert plan.apply(hc) is False
+        assert len(hc.get_lessons()) == 11
+
+    async def test_a_plan_writes_the_file_of_its_kind_in_the_given_store(self, dirs):
+        hc = self._lessons(dirs[0], 10)
+        copy = Hippocampus(dirs[1])
+        copy._lessons_path.write_bytes(hc._lessons_path.read_bytes())
+        plan = await plan_compaction(
+            _CompactionLLM(keep=[1]), read_compaction_input(hc._lessons_path, "lesson")
+        )
+
+        assert plan.apply(copy) is True
+        assert len(copy.get_lessons()) == 1
+        assert len(hc.get_lessons()) == 10
+        assert not copy._rules_path.exists()
+
+    async def test_nothing_to_plan_returns_none(self, dirs):
+        short = self._lessons(dirs[0], 7)
+        assert await plan_compaction(
+            _CompactionLLM(keep=[1]), read_compaction_input(short._lessons_path, "lesson")
+        ) is None
+        full = self._lessons(dirs[1], 10)
+        assert await plan_compaction(
+            _CompactionLLM(keep=[]), read_compaction_input(full._lessons_path, "lesson")
+        ) is None
+
+    async def test_text_that_is_not_an_entry_is_kept(self, dirs):
+        """A line typed into the file without `- ` survives the rewrite."""
+        hc = Hippocampus(dirs[0])
+        rules = "\n".join(f"- Rule number {i}" for i in range(10))
+        hc._rules_path.parent.mkdir(parents=True, exist_ok=True)
+        hc._rules_path.write_text(
+            f"# Rules\nOur fiscal year starts in April.\n\n## Always\n{rules}\n"
+        )
+        lessons = self._lessons(dirs[1], 10)
+        lessons._lessons_path.write_text(
+            lessons._lessons_path.read_text().replace("# Lessons\n", "# Lessons\nAsk Ana first.\n")
+        )
+
+        for store, path, kind in ((hc, hc._rules_path, "rules"), (lessons, lessons._lessons_path, "lesson")):
+            plan = await plan_compaction(
+                _CompactionLLM(keep=[1, 2]), read_compaction_input(path, kind)
+            )
+            assert plan.apply(store) is True
+
+        assert "Our fiscal year starts in April." in hc._rules_path.read_text()
+        assert len(hc.get_rules()) == 2
+        assert "Ask Ana first." in lessons._lessons_path.read_text()
+        assert len(lessons.get_lessons()) == 2
+
+    @staticmethod
+    async def _compact(hc: Hippocampus, kind: str, keep: list[int]) -> str:
+        path = hc._rules_path if kind == "rules" else hc._lessons_path
+        plan = await plan_compaction(_CompactionLLM(keep=keep), read_compaction_input(path, kind))
+        assert plan.apply(hc) is True
+        return path.read_text()
+
+    async def test_a_line_typed_in_a_section_stays_in_it(self, dirs):
+        hc = Hippocampus(dirs[0])
+        hc._rules_path.parent.mkdir(parents=True, exist_ok=True)
+        always = "\n".join(f"- Always {i}" for i in range(5))
+        never = "\n".join(f"- Never {i}" for i in range(5))
+        hc._rules_path.write_text(
+            f"# Rules\n\n## Always\n{always}\n\n## Never\nOnly for the billing repo.\n{never}\n"
+        )
+
+        text = await self._compact(hc, "rules", keep=[1, 6, 7])
+
+        never_section = text.split("## Never")[1].split("## When")[0]
+        assert never_section.splitlines()[1] == "Only for the billing repo."
+        assert "Only for the billing repo." not in text.split("## Never")[0]
+
+    async def test_a_line_after_a_dropped_entry_stays_in_place(self, dirs):
+        hc = self._lessons(dirs[0], 10)
+        text = hc._lessons_path.read_text()
+        third = text.splitlines()[3]
+        hc._lessons_path.write_text(text.replace(third, third + "\nSee the wiki."))
+
+        text = await self._compact(hc, "lesson", keep=[1, 2, 5])
+
+        lines = text.splitlines()
+        assert lines.index("See the wiki.") == lines.index(next(l for l in lines if "Fact number 1 " in l)) + 1
+
+    async def test_an_unknown_heading_hides_no_rule(self, dirs):
+        """Rules under `## Team` fold into Always; the heading must not follow them."""
+        hc = Hippocampus(dirs[0])
+        hc._rules_path.parent.mkdir(parents=True, exist_ok=True)
+        always = "\n".join(f"- Always {i}" for i in range(5))
+        team = "\n".join(f"- Team {i}" for i in range(5))
+        hc._rules_path.write_text(f"# Rules\n\n## Always\n{always}\n\n## Team\nAsk Ana.\n{team}\n")
+
+        text = await self._compact(hc, "rules", keep=list(range(1, 11)))
+
+        assert {r.text for r in hc.get_rules()} >= {f"Team {i}" for i in range(5)}
+        assert text.rstrip().endswith("## Team\nAsk Ana.")
+
+    async def test_an_indented_continuation_stays_under_its_lesson(self, dirs):
+        hc = self._lessons(dirs[0], 10)
+        text = hc._lessons_path.read_text()
+        first = text.splitlines()[1]
+        hc._lessons_path.write_text(text.replace(first, first + "\n  and in the staging cluster too"))
+
+        text = await self._compact(hc, "lesson", keep=[1, 2])
+
+        lines = text.splitlines()
+        assert lines[1] == first
+        assert lines[2] == "  and in the staging cluster too"
+
+    async def test_a_rules_heading_typed_in_lessons_is_kept(self, dirs):
+        hc = self._lessons(dirs[0], 10)
+        hc._lessons_path.write_text(hc._lessons_path.read_text() + "## When\n")
+
+        text = await self._compact(hc, "lesson", keep=[1])
+
+        assert text.rstrip().endswith("## When")
+
+    def test_an_unknown_kind_is_refused(self, dirs):
+        hc = self._lessons(dirs[0], 10)
+        with pytest.raises(ValueError):
+            read_compaction_input(hc._lessons_path, "lessons")
+        with pytest.raises(ValueError):
+            hc.entry_file("lessons")
+
+    async def test_an_edit_to_text_that_is_not_an_entry_stops_the_rewrite(self, dirs):
+        hc = self._lessons(dirs[0], 10)
+        plan = await plan_compaction(
+            _CompactionLLM(keep=[1]), read_compaction_input(hc._lessons_path, "lesson")
+        )
+        edited = hc._lessons_path.read_text().replace("# Lessons\n", "# Lessons\nTyped meanwhile.\n")
+        hc._lessons_path.write_text(edited)
+
+        assert plan.apply(hc) is False
+        assert hc._lessons_path.read_text() == edited
 
 
 # ─────────────────────────────────────────────────────────────────────────────

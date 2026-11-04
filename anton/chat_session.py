@@ -127,4 +127,5 @@ async def rebuild_session(
         tools=list(DEFAULT_SESSION_TOOLS),
         web_search_enabled=settings.web_search_enabled,
         web_fetch_enabled=settings.web_fetch_enabled,
+        internet_research_enabled=settings.internet_research_enabled,
     ))

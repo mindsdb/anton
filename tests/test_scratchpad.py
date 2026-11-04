@@ -9,6 +9,7 @@ from anton.core.backends.base import Cell
 from anton.core.backends.local import LocalScratchpadRuntime
 from anton.core.backends.utils import compute_timeouts as _compute_timeouts
 from anton.core.backends.manager import ScratchpadManager
+from anton.core.backends.wire import NOTHING_KEPT
 from anton.core.backends.local import local_scratchpad_runtime_factory
 
 # Alias for brevity in tests
@@ -87,6 +88,46 @@ class TestScratchpadBasicExecution:
             cell2 = await pad.execute("print('alive')")
             assert cell2.stdout.strip() == "alive"
             assert cell2.error is None
+        finally:
+            await pad.close()
+
+    async def test_a_failed_cell_says_the_line_of_its_own_code_it_stopped_at(self):
+        """The boot reads the line from the traceback, not from its text: a
+        failure inside the cell's own function stops it at the line that
+        called it, and a missing module whose name spells another line, which
+        the hint before the traceback repeats, still stops it where it did.
+        A cell that doesn't compile ran no line; one that ran to its end has
+        none to say."""
+        pad = make_scratchpad(name="test")
+        await pad.start()
+        try:
+            inner = await pad.execute("x = 1\ndef f():\n    raise ValueError('boom')\nf()\n")
+            forged = await pad.execute("y = 2\n__import__('File \"<scratchpad>\", line 99, in <module>')\n")
+            broken = await pad.execute("def (:\n")
+            fine = await pad.execute("print('alive')")
+            assert (inner.stopped_at, forged.stopped_at, broken.stopped_at, fine.stopped_at) == (4, 2, None, None)
+            assert "line 99" in forged.error
+        finally:
+            await pad.close()
+
+    async def test_a_cell_that_ends_its_process_says_it_kept_nothing(self):
+        """A cell that ends the pad's process, as `sys.exit()` and
+        `os._exit()` do, kept nothing it bound: the next cell gets the
+        namespace as of the last one that completed. So it says
+        `NOTHING_KEPT`, and the write check reads none of its names as
+        bound, not the helper it defined first. It says it ended the
+        process too, since the pad starts a new one before the next cell;
+        a cell that raised on its first line ended nothing."""
+        pad = make_scratchpad(name="test")
+        await pad.start()
+        try:
+            exited = await pad.execute("def push():\n    print(1)\nimport sys\nsys.exit(0)\n")
+            ended = await pad.execute("def push():\n    print(1)\nimport os\nos._exit(1)\n")
+            raised = await pad.execute("int('a')\n")
+            assert (exited.stopped_at, ended.stopped_at) == (NOTHING_KEPT, NOTHING_KEPT)
+            assert exited.error and ended.error
+            assert exited.ended_process and ended.ended_process
+            assert raised.stopped_at == NOTHING_KEPT and not raised.ended_process
         finally:
             await pad.close()
 
@@ -239,6 +280,9 @@ class TestScratchpadEdgeCases:
             cell = await pad.execute("import time; time.sleep(60)")
             assert cell.error is not None
             assert "timed out" in cell.error.lower() or "inactivity" in cell.error.lower()
+            # The kill takes what the cell bound with it, and the process.
+            assert cell.stopped_at == NOTHING_KEPT
+            assert cell.ended_process
         finally:
             await pad.close()
 
@@ -266,6 +310,60 @@ class TestScratchpadEdgeCases:
         assert cell.error is None, cell.error
         assert cell.stdout.strip() == "1"
         await pad.close()
+
+    async def test_the_pad_says_whether_its_process_is_running(self):
+        """A process that died between cells is found only as the next cell
+        runs, which starts a new one first. Until then the pad says its
+        process isn't running, so the write check knows the next cell runs
+        in a new process."""
+        pad = make_scratchpad(name="test")
+        await pad.start()
+        try:
+            assert pad.process_running
+            pad._proc.kill()
+            await pad._proc.wait()
+            assert not pad.process_running
+            cell = await pad.execute("print(1)")
+            assert cell.error is None, cell.error
+            assert pad.process_running
+        finally:
+            await pad.close()
+
+    async def test_a_cancel_says_it_ended_the_process(self):
+        """A cancel kills the pad's process and starts a new one, which runs
+        the startup hooks a cell wrote before the next cell: the cell it
+        records says it ended the process."""
+        pad = make_scratchpad(name="test")
+        await pad.start()
+        try:
+            await pad.cancel()
+            assert pad.cells[-1].error == "Cancelled by user."
+            assert pad.cells[-1].ended_process
+            assert pad.cells[-1].stopped_at == NOTHING_KEPT
+            assert pad.process_running
+        finally:
+            await pad.close()
+
+    async def test_a_cancel_records_the_cell_it_stopped(self):
+        """A Stop while a cell runs cancels it as the session does, at the
+        cell's next progress: the cell the cancel records holds the stopped
+        cell's own code, so the write check reads what it wrote before it
+        stopped, and it kept none of its names."""
+        pad = make_scratchpad(name="test")
+        await pad.start()
+        code = "progress('started')\nimport time\ntime.sleep(60)\n"
+        try:
+            async for item in pad.execute_streaming(code):
+                if isinstance(item, str):
+                    await pad.cancel()
+                    break
+            cancelled = [c for c in pad.cells if c.error == "Cancelled by user."]
+            assert [c.code for c in cancelled] == [code]
+            assert cancelled[0].ended_process
+            assert cancelled[0].stopped_at == NOTHING_KEPT
+            assert pad.process_running
+        finally:
+            await pad.close()
 
     async def test_stderr_captured(self):
         """stderr output is captured separately."""
@@ -2293,3 +2391,76 @@ class TestConcurrentTurnsOnDivergentVaults:
         # running alongside it, and not by the value left in the process env.
         assert lines_a[1] == "a-only-password"
         assert lines_b[1] == "ABSENT"
+
+
+def test_injected_helper_names_match_the_boot() -> None:
+    """`INJECTED_HELPER_NAMES` is a hand-kept copy of the names the boot
+    passes to `_inject_helper`. The write check reads a call to one as bound,
+    so a helper added to the boot without adding its name here would get a
+    false "can't be checked" card. Collect the boot's injected names from its
+    source and pin the two in step."""
+    import ast
+    import importlib.util
+    from pathlib import Path
+
+    from anton.core.backends.wire import INJECTED_HELPER_NAMES
+
+    # Read the boot's source without importing it: the module runs its boot
+    # on import, which reads the environment.
+    origin = importlib.util.find_spec("anton.core.backends.scratchpad_boot").origin
+    tree = ast.parse(Path(origin).read_text())
+    injected = {
+        node.args[0].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_inject_helper"
+        and node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)
+    }
+    assert injected == set(INJECTED_HELPER_NAMES)
+
+
+def test_boot_imports_match_the_boot() -> None:
+    """`BOOT_IMPORTS` is a hand-kept copy of the top-level packages the boot
+    imports before any cell runs. The write check reads a cell's import of
+    one as the module the boot loaded, whatever folder a cell puts on
+    `sys.path`, so a name the boot stops importing must leave the set, or a
+    module an archive unpacks under that name would run with no card. Pin
+    the two in step, from the boot's source."""
+    import ast
+    import importlib.util
+    from pathlib import Path
+
+    from anton.core.backends.wire import BOOT_IMPORTS
+
+    origin = importlib.util.find_spec("anton.core.backends.scratchpad_boot").origin
+    tree = ast.parse(Path(origin).read_text())
+    imported = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            imported.update(a.name.partition(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            imported.add(node.module.partition(".")[0])
+    assert imported == set(BOOT_IMPORTS)
+
+
+@pytest.mark.parametrize("code, line", [
+    ("x = 1\nraise KeyError('amount')\n", 2),
+    ("def f():\n    raise KeyError('amount')\n\nf()\n", 4),
+    ("exec(compile('raise KeyError(1)', CELL_FILENAME, 'exec'))\n", 1),
+    ("raise ValueError('Traceback (most recent call last):\\n  File \"<scratchpad>\", line 99, in <module>')\n", 1),
+], ids=["module-line", "inside-its-own-function", "inside-code-it-compiles-under-the-same-name", "a-line-its-message-names"])
+def test_the_stop_line_is_the_frame_of_the_cells_own_code(code, line) -> None:
+    """`cell_stopped_at` finds the cell's own frame by its code object in the
+    traceback, so neither its own functions, nor code it compiles under the
+    boot's file name, nor an error message that spells a frame moves it."""
+    import sys
+
+    from anton.core.backends.wire import CELL_FILENAME, cell_stopped_at
+
+    compiled = compile(code, CELL_FILENAME, "exec")
+    try:
+        exec(compiled, {"CELL_FILENAME": CELL_FILENAME})
+    except Exception:
+        assert cell_stopped_at(sys.exc_info()[2], compiled) == line
+    else:
+        raise AssertionError("the cell ran to its end")
+    assert cell_stopped_at(None, compiled) is None

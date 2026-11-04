@@ -18,6 +18,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from anton.core.artifacts import html_lint, render_check
+from anton.core.artifacts.geography import GeographyRequirement, check_geography
 from anton.core.artifacts.html_lint import lint_html, lint_url
 from anton.core.artifacts.render_check import RenderFinding
 from anton.core.artifacts.report_tools import shown_markup
@@ -275,7 +276,7 @@ _HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
 # `<script type="importmap">`: the addresses its `imports` and `scopes` map
 # modules to load under `script-src` too.
 _IMPORT_MAP = re.compile(
-    r"""<script\b[^>]*\btype\s*=\s*['"]?importmap['"]?[^>]*>(?P<body>.*?)</script\s*>""", re.I | re.S
+    r"""<script\b[^>]*\btype\s*=\s*['"]?importmap['"]?[^>]*>(?P<body>.*?)</script\b[^>]*>""", re.I | re.S
 )
 # `_MODULE_IMPORT`, plus `export ... from` and backtick quotes, which a live
 # app's script rule fails and the preview's advisory warning never needed.
@@ -401,15 +402,19 @@ def _root_relative_detail(html: str, *, is_fullstack: bool) -> str | None:
 
 
 def verify_frontend(
-    html: str, *, is_fullstack: bool, api_paths: set[str] | None = None, live_app: bool = False
+    html: str, *, is_fullstack: bool, api_paths: set[str] | None = None, live_app: bool = False,
+    geography: GeographyRequirement | None = None,
 ) -> VerifyResult:
     """Static checks of the page. `api_paths` (from `contract_paths`) is the
     set of normalised `openapi.json` paths a fullstack page may call; None
     skips that comparison — html-app pages and callers without a contract.
     `live_app` is set for a fullstack page that runs as a live app, whose
     content security policy loads scripts from one origin only."""
+    geographic = check_geography(html, geography)
     errors: list[str] = []
     warnings: list[str] = []
+    errors.extend(geographic.errors)
+    warnings.extend(geographic.warnings)
     low = html.lower()
 
     # 1. Valid document with an explicit <body>.
