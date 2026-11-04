@@ -11555,10 +11555,11 @@ def _quiet_parses() -> None:
     filters back without it. It names the check's file alone, so a check
     running in any thread changes no warning other code raises, and no
     filter is saved and put back around each parse."""
+    # Warning, not SyntaxWarning: Python 3.11 raises an invalid escape as a DeprecationWarning.
     first = warnings.filters[0] if warnings.filters else None
-    if not (first is not None and first[0] == "ignore" and first[2] is SyntaxWarning and first[3] is not None
+    if not (first is not None and first[0] == "ignore" and first[2] is Warning and first[3] is not None
             and first[3].pattern == _CHECK_MODULE):
-        warnings.filterwarnings("ignore", category=SyntaxWarning, module=_CHECK_MODULE)
+        warnings.filterwarnings("ignore", category=Warning, module=_CHECK_MODULE)
 
 
 def _parse(code: str) -> ast.Module:
@@ -11577,7 +11578,7 @@ def _read_cell(*, code: str, index: int) -> _Cell | None:
     """`code` read as the cell at `index` among the parsed cells; None when it doesn't parse."""
     try:
         return _Cell(_parse(code), code, index)
-    except (SyntaxError, ValueError):
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
         return None
 
 
@@ -16166,7 +16167,8 @@ def find_cell_writes(
     """
     try:
         tree = _parse(code)
-    except (SyntaxError, ValueError):
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        # Too deep for this Python's parser: compile() fails on it the same way.
         if earlier and earlier[-1].ended_process:
             return find_cell_writes(code="", earlier=earlier, snapshots=snapshots, http_rules=http_rules)
         return CellWrites()
