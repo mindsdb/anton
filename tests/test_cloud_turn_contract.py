@@ -239,6 +239,12 @@ def test_a_missing_or_non_object_limits_block_reads_as_no_limits(value):
     assert _limits_request(value).limits == {}
 
 
+def test_the_time_limit_is_read_and_zero_is_refused():
+    """0 means no time limit to anton; a producer bug must not turn it off."""
+    assert _limits_request({"max_turn_seconds": 3600}).limits == {"max_turn_seconds": 3600}
+    assert _limits_request({"max_turn_seconds": 0}).limits == {}
+
+
 def test_a_bad_limit_is_dropped_and_the_rest_are_kept():
     request = _limits_request({
         "max_tool_rounds": 250,
