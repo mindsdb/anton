@@ -159,12 +159,17 @@ def trace_context_from_json(text: str) -> TraceContext | None:
         return None
 
 
-# The LLMClient role (planning, coding, router) of the model call in flight, or
-# JEV_CALL_ROLE for a Jev check, which runs on none of the client's models.
-# A ContextVar rather than a provider attribute: one provider object can serve
-# two roles (the router falls back to the coding provider).
+# The LLMClient role (planning, coding, router, sidekick) of the model call in
+# flight, or JEV_CALL_ROLE for a Jev check, which runs on none of the client's
+# models. A ContextVar rather than a provider attribute: one provider object can
+# serve two roles (the router falls back to the coding provider).
 _call_role: ContextVar[str | None] = ContextVar("anton_call_role", default=None)
 JEV_CALL_ROLE = "decision"
+
+# The prompt-cache lifetime the call in flight asks MindsHub for, or None. Set
+# beside the role because the client decides it per call: only the main loop's
+# planning calls ask for one (`LLMClient.main_cache_ttl`).
+_call_cache_ttl: ContextVar[str | None] = ContextVar("anton_call_cache_ttl", default=None)
 
 
 def get_call_role() -> str | None:
@@ -172,13 +177,21 @@ def get_call_role() -> str | None:
     return _call_role.get()
 
 
+def get_call_cache_ttl() -> str | None:
+    """Return the cache lifetime the call in flight asks for, or None."""
+    return _call_cache_ttl.get()
+
+
 @contextlib.contextmanager
-def call_role(role: str):
-    """Mark model calls made inside the block as serving `role`."""
+def call_role(role: str, *, cache_ttl: str | None = None):
+    """Mark model calls made inside the block as serving `role`, asking for a
+    prompt-cache lifetime of `cache_ttl` when it is set."""
     token = _call_role.set(role)
+    ttl_token = _call_cache_ttl.set(cache_ttl)
     try:
         yield
     finally:
+        _call_cache_ttl.reset(ttl_token)
         _call_role.reset(token)
 
 

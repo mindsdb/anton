@@ -104,6 +104,10 @@ def _rejects_cache_breakpoint(exc: "openai.BadRequestError") -> bool:
     return "prompt_cache_breakpoint" in text
 
 
+# Asks MindsHub for a prompt-cache lifetime ("5m" | "1h") on the request's
+# automatic cache marks. Sent only on the passthrough (`_apply_cache_hints`).
+CACHE_TTL_HEADER = "X-MindsHub-Cache-TTL"
+
 # (base_url, model) pairs that refused an explicit cache breakpoint. Process-wide
 # because Cowork builds a provider per turn: one refusal is enough.
 _CACHE_BREAKPOINT_REFUSED: set[tuple[str, str]] = set()
@@ -1230,6 +1234,30 @@ class OpenAIProvider(LLMProvider):
             headers["Langfuse-Metadata"] = json.dumps(extra)
         return headers or None
 
+    def _apply_cache_hints(self, kwargs: dict) -> None:
+        """Add MindsHub's prompt-cache hints to chat.completions ``kwargs``.
+
+        Only on the MindsHub passthrough: no other endpoint knows the header,
+        and a third party has no business seeing the conversation id. The
+        lifetime header goes only on calls the client asked one for (the main
+        loop's planning calls, `LLMClient.main_cache_ttl`); every other call
+        keeps the gateway's 5 minutes. The cache key names the conversation
+        and the role, so each role's prefix lands where its last call left it
+        even when two roles share a model; without a session id (background
+        work, a host that names none) there is nothing stable to key on.
+        """
+        if self._flavor != self.FLAVOR_MINDS_PASSTHROUGH:
+            return
+        from .tracing import get_call_cache_ttl, get_call_role, get_trace_context
+
+        ttl = get_call_cache_ttl()
+        if ttl:
+            kwargs["extra_headers"] = {**(kwargs.get("extra_headers") or {}), CACHE_TTL_HEADER: ttl}
+        ctx = get_trace_context()
+        role = get_call_role() or self.trace_role
+        if ctx is not None and ctx.session_id and role:
+            kwargs["prompt_cache_key"] = f"{ctx.session_id}:{role}"
+
     async def complete(
         self,
         *,
@@ -1277,6 +1305,7 @@ class OpenAIProvider(LLMProvider):
         trace_headers = self._build_trace_headers()
         if trace_headers:
             kwargs["extra_headers"] = trace_headers
+        self._apply_cache_hints(kwargs)
 
         try:
             response = await self._client.chat.completions.create(**kwargs)
@@ -1397,6 +1426,7 @@ class OpenAIProvider(LLMProvider):
         trace_headers = self._build_trace_headers()
         if trace_headers:
             kwargs["extra_headers"] = trace_headers
+        self._apply_cache_hints(kwargs)
 
         content_text = ""
         tool_calls: list[ToolCall] = []

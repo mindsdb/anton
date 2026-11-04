@@ -50,8 +50,9 @@ _MODEL_ROUTE: ContextVar[ModelRoute | None] = ContextVar("anton_model_route", de
 
 @contextlib.contextmanager
 def model_route(route: ModelRoute | None) -> Iterator[None]:
-    """Send every planning, coding and structured call inside to ``route``'s
-    model and effort, whichever `LLMClient` makes it. None changes nothing.
+    """Send every planning, coding, sidekick and structured call inside to
+    ``route``'s model and effort, whichever `LLMClient` makes it. None changes
+    nothing.
 
     Enter it in a plain coroutine or around a single ``await``, never across a
     ``yield``: an async generator has no context of its own, so the route would
@@ -73,11 +74,16 @@ def routed_model() -> str | None:
     return route.model if route is not None else None
 
 
+# The client attribute naming each role's own model; any other role reads the
+# planning model.
+_ROLE_MODEL_ATTRS = {"coding": "coding_model", "sidekick": "sidekick_model"}
+
+
 def asked_model(llm: object, role: str) -> str | None:
     """The model a call of ``role`` through ``llm`` asks for here: the route's
     inside `model_route`, else the role's own. None for a host client or a test
     double that names no model."""
-    model = routed_model() or getattr(llm, "coding_model" if role == "coding" else "planning_model", None)
+    model = routed_model() or getattr(llm, _ROLE_MODEL_ATTRS.get(role, "planning_model"), None)
     return model if isinstance(model, str) else None
 
 
@@ -176,8 +182,11 @@ class LLMClient:
         coding_model: str,
         router_provider: LLMProvider | None = None,
         router_model: str | None = None,
+        sidekick_provider: LLMProvider | None = None,
+        sidekick_model: str | None = None,
         max_tokens: int = 8192,
         model_call_idle_timeout_s: float = 600.0,
+        main_cache_ttl: str | None = None,
     ) -> None:
         self._planning_provider = planning_provider
         self._planning_model = planning_model
@@ -191,14 +200,22 @@ class LLMClient:
         self._router_auth_role = "router" if router_provider is not None else "coding"
         self._router_provider = router_provider or coding_provider
         self._router_model = router_model or coding_model
+        # Sidekick role (Chimera): the model the `delegate` tool's loop runs
+        # on. Defaults to the coding role the way the router does, but only an
+        # explicitly configured model counts as having one (`has_sidekick`).
+        self._sidekick_provider = sidekick_provider or coding_provider
+        self._sidekick_model = sidekick_model or coding_model
+        self._has_sidekick = bool(sidekick_model)
         # Calls through this client name their role per call (call_role). This
         # default covers calls a host makes on a provider directly. A provider
-        # shared by two roles gets none: no role beats a wrong one.
+        # shared by two roles gets none: no role beats a wrong one. The
+        # sidekick joins only when it has a provider of its own, so a client
+        # without one names its providers exactly as before.
         roles = (
             (planning_provider, "planning"),
             (coding_provider, "coding"),
             (self._router_provider, "router"),
-        )
+        ) + (((sidekick_provider, "sidekick"),) if sidekick_provider is not None else ())
         for provider, role in roles:
             shared = sum(other is provider for other, _ in roles) > 1
             if provider is not None and not shared and getattr(provider, "trace_role", None) is None:
@@ -224,6 +241,11 @@ class LLMClient:
         # attribute so the session can apply its own settings to a client the
         # host built.
         self.model_call_idle_timeout_s = model_call_idle_timeout_s
+        # The prompt-cache lifetime ("5m" | "1h") the main loop's planning
+        # calls ask MindsHub for (`X-MindsHub-Cache-TTL`); None asks for none.
+        # A plain attribute for the same reason as the deadline above: the
+        # session applies its own settings to a client the host built.
+        self.main_cache_ttl = main_cache_ttl
 
     @property
     def call_tracker(self) -> ModelCallTracker | None:
@@ -253,6 +275,15 @@ class LLMClient:
             return {}
         return {"reasoning_effort": route.effort if route.effort is not None else ""}
 
+    def _main_cache_ttl_here(self) -> str | None:
+        """The cache lifetime a main-loop planning call asks for here: none
+        inside `model_route`, whose calls build something else on a model of
+        their own and have no long-lived prefix to keep."""
+        if _MODEL_ROUTE.get() is not None:
+            return None
+        ttl = self.main_cache_ttl
+        return ttl if isinstance(ttl, str) and ttl else None
+
     def _record_served_unless_routed(self, response) -> None:
         """`_record_served`, except for a call `model_route` sent to another
         model: the identity line names the agent's model, not the builder's."""
@@ -268,15 +299,19 @@ class LLMClient:
         other keeps the client default. ``by_effort`` is the table, for a call
         that needs more room at an effort than the default table gives.
         """
-        provider = self._coding_provider if role == "coding" else self._planning_provider
+        provider = {"coding": self._coding_provider, "sidekick": self._sidekick_provider}.get(
+            role, self._planning_provider
+        )
         if getattr(provider, "accepts_large_output", False) is not True:
             return self._max_tokens
         return stream_budget_for(self._effective_effort(provider), self._max_tokens, by_effort)
 
     async def aclose(self) -> None:
-        """Close provider transports. The three roles may share objects."""
+        """Close provider transports. The roles may share objects."""
         seen: set[int] = set()
-        for p in (self._planning_provider, self._coding_provider, self._router_provider):
+        for p in (
+            self._planning_provider, self._coding_provider, self._router_provider, self._sidekick_provider,
+        ):
             if p is None or id(p) in seen:
                 continue
             seen.add(id(p))
@@ -351,6 +386,7 @@ class LLMClient:
         role: str,
         model: str,
         max_tokens: int,
+        cache_ttl: str | None = None,
     ) -> _T:
         """Await a non-streamed call under the idle deadline.
 
@@ -358,6 +394,7 @@ class LLMClient:
         retry and the SDK's own retries inside ``operation``, because a
         non-streamed call sends nothing until it is done. A turn whose
         deadline already latched fails here, before the provider is reached.
+        ``cache_ttl`` is the prompt-cache lifetime the call asks for, if any.
         """
         tracker = self.call_tracker
         if tracker is not None:
@@ -368,12 +405,12 @@ class LLMClient:
             if call is not None:
                 call.awaiting = True
             if idle_s is None:
-                with call_role(role):
+                with call_role(role, cache_ttl=cache_ttl):
                     return await operation()
             scope = asyncio.timeout(idle_s)
             try:
                 async with scope:
-                    with call_role(role):
+                    with call_role(role, cache_ttl=cache_ttl):
                         return await operation()
             except TimeoutError:
                 # Only our own expiry becomes a deadline error. A TimeoutError
@@ -396,6 +433,7 @@ class LLMClient:
         model: str,
         max_tokens: int,
         note: str | None = None,
+        cache_ttl: str | None = None,
     ) -> AsyncIterator[_T]:
         """Relay a streamed call, bounding each wait for the next event.
 
@@ -424,13 +462,13 @@ class LLMClient:
                     # Set around each wait, never across the yield, so the
                     # role cannot leak into the consumer's own calls.
                     if idle_s is None:
-                        with call_role(role):
+                        with call_role(role, cache_ttl=cache_ttl):
                             event = await anext(stream)
                     else:
                         scope = asyncio.timeout(idle_s)
                         try:
                             async with scope:
-                                with call_role(role):
+                                with call_role(role, cache_ttl=cache_ttl):
                                     event = await anext(stream)
                         except TimeoutError:
                             if scope.expired():
@@ -485,6 +523,7 @@ class LLMClient:
             role="planning",
             model=model,
             max_tokens=budget,
+            cache_ttl=self._main_cache_ttl_here(),
         )
         self._notify_usage("planning", model, response.usage, listener)
         self._record_served_unless_routed(response)
@@ -526,6 +565,7 @@ class LLMClient:
             model=model,
             max_tokens=budget,
             note=wait_note,
+            cache_ttl=self._main_cache_ttl_here(),
         )
         async with contextlib.aclosing(events):
             async for event in events:
@@ -591,6 +631,21 @@ class LLMClient:
     def router_model(self) -> str:
         """The model name used for the cheap router (summarization) role."""
         return self._router_model
+
+    @property
+    def sidekick_provider(self) -> LLMProvider:
+        """The LLM provider the Chimera sidekick runs on (the coding one by default)."""
+        return self._sidekick_provider
+
+    @property
+    def sidekick_model(self) -> str:
+        """The model the Chimera sidekick runs on (the coding one by default)."""
+        return self._sidekick_model
+
+    @property
+    def has_sidekick(self) -> bool:
+        """True only when a sidekick model was configured, not defaulted."""
+        return self._has_sidekick
 
     async def code(
         self,
@@ -662,6 +717,45 @@ class LLMClient:
             async for event in events:
                 if isinstance(event, StreamComplete):
                     self._notify_usage("coding", model, event.response.usage, listener)
+                yield event
+
+    async def sidekick_stream(
+        self,
+        *,
+        system: str,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        max_tokens: int | None = None,
+        native_web_tools: set[str] | None = None,
+        wait_note: str | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """`code_stream` on the sidekick role: the Chimera `delegate` loop's calls."""
+        listener = self.usage_listener
+        budget = max_tokens or self.stream_budget("sidekick")
+        effort_kw = self._effort_kwargs(self._sidekick_provider)
+        model = asked_model(self, "sidekick")
+        events = self._guarded_stream(
+            make_stream=lambda: _stream_with_auth_confirmation(
+                lambda: self._sidekick_provider.stream(
+                    model=model,
+                    system=system,
+                    messages=messages,
+                    tools=tools,
+                    max_tokens=budget,
+                    native_web_tools=native_web_tools,
+                    **effort_kw,
+                ),
+                role="sidekick",
+            ),
+            role="sidekick",
+            model=model,
+            max_tokens=budget,
+            note=wait_note,
+        )
+        async with contextlib.aclosing(events):
+            async for event in events:
+                if isinstance(event, StreamComplete):
+                    self._notify_usage("sidekick", model, event.response.usage, listener)
                 yield event
 
     async def summarize(
@@ -950,6 +1044,24 @@ class LLMClient:
                 raise ValueError(f"Unknown router provider: {router_provider_name}")
             router_provider = router_factory(None)
 
+        # Sidekick role (Chimera). Built like the router's, but with its own
+        # effort. A sidekick effort with no sidekick provider still needs a
+        # provider of its own to carry that effort, so it gets one of the
+        # coding provider's kind.
+        sidekick_provider = None
+        sidekick_model = getattr(settings, "sidekick_model", None)
+        sidekick_effort = getattr(settings, "sidekick_reasoning_effort", None)
+        sidekick_provider_name = getattr(settings, "sidekick_provider", None) or (
+            settings.coding_provider if sidekick_model and sidekick_effort else None
+        )
+        if sidekick_provider_name:
+            sidekick_factory = providers.get(sidekick_provider_name)
+            if sidekick_factory is None:
+                raise ValueError(f"Unknown sidekick provider: {sidekick_provider_name}")
+            sidekick_provider = sidekick_factory(sidekick_effort)
+
+        from anton.core.chimera.config import resolve_main_cache_ttl
+
         return cls(
             planning_provider=planning_factory(
                 getattr(settings, "planning_reasoning_effort", None)
@@ -961,6 +1073,9 @@ class LLMClient:
             coding_model=settings.coding_model,
             router_provider=router_provider,
             router_model=getattr(settings, "router_model", None),
+            sidekick_provider=sidekick_provider,
+            sidekick_model=sidekick_model,
             max_tokens=getattr(settings, "max_tokens", 8192),
             model_call_idle_timeout_s=getattr(settings, "model_call_idle_timeout_s", 600.0),
+            main_cache_ttl=resolve_main_cache_ttl(settings),
         )

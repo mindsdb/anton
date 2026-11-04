@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import PrivateAttr, ValidationInfo, field_validator, model_validator
 
@@ -50,7 +51,7 @@ class AntonSettings(CoreSettings):
     coding_model: str = "claude-haiku-4-5-20251001"
 
     @field_validator(
-        "planning_provider", "coding_provider", "router_provider", mode="before"
+        "planning_provider", "coding_provider", "router_provider", "sidekick_provider", mode="before"
     )
     @classmethod
     def _map_minds_cloud_to_openai_compatible(cls, v: object) -> object:
@@ -91,6 +92,36 @@ class AntonSettings(CoreSettings):
     # the coding provider/model.
     router_provider: str | None = None
     router_model: str | None = None
+
+    # Sidekick role (Chimera): the cheaper model the `delegate` tool runs its
+    # bounded loop on. Unset provider/model fall back to the coding role, like
+    # the router's; the tool is offered only when a sidekick model is set and
+    # `chimera_enabled` is on.
+    sidekick_provider: str | None = None
+    sidekick_model: str | None = None
+    sidekick_reasoning_effort: str | None = None
+    chimera_enabled: bool = False
+    # Prompt-cache lifetime the planning role asks MindsHub for, sent as
+    # `X-MindsHub-Cache-TTL`. Unset sends nothing (the gateway's 5 minutes),
+    # except under Chimera, where the main agent asks for "1h": it idles
+    # through whole delegations and would otherwise rewrite its prefix.
+    main_cache_ttl: Literal["5m", "1h"] | None = None
+    # Rounds one delegation may run when the agent names none, never more than
+    # `ChimeraConfig.max_rounds_cap` (40).
+    chimera_max_rounds: int = 20
+    # Ask Jev about the sidekick every this many rounds (0 = only on errors and
+    # `finish`), and act on an answer at or above this probability.
+    chimera_jev_every: int = 4
+    chimera_jev_threshold: float = 0.8
+
+    @field_validator("main_cache_ttl", mode="before")
+    @classmethod
+    def _normalise_cache_ttl(cls, v: object) -> object:
+        """``1H`` and `` 1h `` mean "1h"; a blank value means unset."""
+        if isinstance(v, str):
+            v = v.strip().lower()
+            return v or None
+        return v
 
     max_tokens: int = 8192  # max output tokens per LLM call
 

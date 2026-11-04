@@ -53,16 +53,19 @@ from anton.core.llm.provider import Usage
 # alarm's tokens from disappearing instead. The folded role's name is lost, but
 # the log line keeps the model (`unknown=haiku:320/1`), which is usually enough
 # to find the caller.
+#
+# `sidekick` is Chimera's delegated loop and `decision` its Jev checks. Both
+# reach the event only on a turn that used them (`ChatSession._emit_turn_cost`).
 UNKNOWN_ROLE = "unknown"
-EVENT_ROLES = ("planning", "coding", "router", UNKNOWN_ROLE)
+EVENT_ROLES = ("planning", "coding", "router", "sidekick", "decision", UNKNOWN_ROLE)
 
 
 @dataclass
 class RoleCost:
     """One role's slice of a turn: which model ran it and what it spent.
 
-    Roles are a closed set (planning / coding / router), which is why the turn
-    event can carry this as flat properties instead of a nested blob.
+    Roles are a closed set (`EVENT_ROLES`), which is why the turn event can
+    carry this as flat properties instead of a nested blob.
 
     ``model`` is the alias anton REQUESTED. The gateway may resolve or fail
     over to a different model server-side; it does echo the resolved id on the
@@ -193,6 +196,16 @@ class TurnCost:
     jev_input_tokens: int = 0
     jev_output_tokens: int = 0
     jev_checks_without_usage: int = 0
+    # Chimera delegations this turn (the `delegate` tool): how many, their
+    # rounds together, the latest one's status, how many came back unfinished
+    # (`needs_main` / `budget_exhausted`), and Jev's checks of the sidekick.
+    # The tokens are in `by_role` under `sidekick` and `decision`. Reported
+    # only on a turn that delegated.
+    sidekick_delegations: int = 0
+    sidekick_rounds: int = 0
+    sidekick_last_status: str = ""
+    sidekick_handbacks: int = 0
+    sidekick_jev_checks: int = 0
     # WHY the retry flow terminated, when a turn ended after retrying (ENG-1361).
     # Named for TERMINATION, not exhaustion: `rate_limit_wait_too_long` is a
     # terminal where nothing ran out — the server named an interval past our cap
