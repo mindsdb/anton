@@ -975,6 +975,12 @@ _LIMIT_CONTINUE_MULTIPLIER = 4
 # allowance far longer than anyone agreed to by clicking once.
 _TIME_LIMIT_CONTINUE_MULTIPLIER = 1
 
+# How many times the time limit asks before it hands back without asking:
+# the limit plus three more windows. The hosting side's hard ceiling and the
+# turn key's lifetime sit just above that, so the turn ends with a summary
+# rather than being cut off.
+_TIME_LIMIT_MAX_CONTINUES = 3
+
 # Closes every hand-back notice. The notices reach the model as user-role
 # messages, so without this it reads the pause as the user's request and tells
 # them it "stopped, as requested" right after they asked it to keep going.
@@ -4946,6 +4952,12 @@ class ChatSession:
            here", Skip, a timeout, or a host that cannot ask returns False
            and the caller hands back as before.
         """
+        if limit == "time_limit" and self._max_turn_seconds > 0 and (
+            self._time_limit_continued_s
+            >= _TIME_LIMIT_MAX_CONTINUES * _TIME_LIMIT_CONTINUE_MULTIPLIER * self._max_turn_seconds
+        ):
+            yield "result", False
+            return
         if limit not in self._limits_passed_by_message and await self._user_authorized_finishing(
             user_message
         ):
