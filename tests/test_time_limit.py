@@ -175,3 +175,15 @@ async def test_no_verdict_is_asked_after_the_time_limit_stopped_the_turn(workspa
     _, kwargs = await _run(session)
     assert kwargs["ended_by"] == "time_limit"
     assert not [c for c in verdict.call_args_list if c.args and c.args[0] is _VerifierVerdict]
+
+
+async def test_after_three_more_windows_the_limit_hands_back_without_asking(workspace, clock):
+    """The total is four windows; past it the turn ends with a summary rather
+    than asking again, so the hosting side's ceiling never cuts it off."""
+    session = _timed_session(workspace, [_tool_call(i) for i in range(1, 30)], clock)
+    elicitor = _ScriptedElicitor(KEEP_GOING, KEEP_GOING, KEEP_GOING, KEEP_GOING)
+    session.elicitor = elicitor
+    _, kwargs = await _run(session)
+    assert kwargs["ended_by"] == "time_limit"
+    assert kwargs["limit_continues"] == "3"
+    assert len(elicitor.requests) == 3
