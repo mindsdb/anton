@@ -191,3 +191,21 @@ def test_a_slug_that_is_not_a_string_is_dropped():
     assert parse_turn_skills({7: {"files": {"SKILL.md": "x"}}, "ok": {"files": {}}}) == {
         "ok": TurnSkillEntry(files={}),
     }
+
+
+def _jev_request(value):
+    body = {"protocol_version": 1, "conversation_id": "c", "input": "hi"}
+    if value is not ...:
+        body["jev_decisions"] = value
+    return TurnRequestV1.from_json(json.dumps(body))
+
+
+def test_jev_decisions_false_is_read():
+    assert _jev_request(False).jev_decisions is False
+
+
+@pytest.mark.parametrize("value", [..., True, None, 0, "false", {"on": False}])
+def test_jev_decisions_stay_on_unless_a_real_false(value):
+    """Only cowork's opt-out turns Jev off; a controller that does not forward
+    the field, or forwards something else, changes nothing."""
+    assert _jev_request(value).jev_decisions is True
