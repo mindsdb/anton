@@ -2,7 +2,8 @@ name: Anton evals
 
 # Behavioural baseline for the Anton harness: runs the `dialog_context` dataset
 # through a cowork-server built from this PR's anton sha, then posts accuracy,
-# tokens and latency as a PR comment.
+# tokens and latency as a PR comment. A manual run can name another cowork_evals
+# run template (`template`), e.g. one of the Chimera templates.
 #
 # This reports numbers; it does not gate. Agent runs vary between passes, and a
 # red check on noise trains people to click "re-run" without reading. The job
@@ -50,6 +51,9 @@ on:
       repeats:
         description: "replicate passes per task"
         default: "3"
+      template:
+        description: "cowork_evals run template (a path under runs/templates/)"
+        default: runs/templates/ci-dialog-context.yaml
 
 concurrency:
   group: evals-${{ github.event.pull_request.number || github.ref }}
@@ -69,6 +73,9 @@ jobs:
       BASELINE_REF: ${{ inputs.baseline_ref || 'staging' }}
       EVALS_REF: ${{ inputs.evals_ref || 'main' }}
       REPEATS: ${{ inputs.repeats || '3' }}
+      # Passed through the environment, never spliced into a script: an input
+      # is free text, and `${{ }}` inside `run:` would execute it.
+      TEMPLATE: ${{ inputs.template || 'runs/templates/ci-dialog-context.yaml' }}
       ANTON_SHA: ${{ github.event.pull_request.head.sha || inputs.anton_ref || github.sha }}
       REPO_TOKEN: ${{ secrets.GH_EVALS_READ_TOKEN }}
       LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
@@ -194,8 +201,17 @@ jobs:
           CI_BASELINE_REF: ${{ steps.baseline.outputs.sha }}
         run: |
           set -euo pipefail
+          # A template is a file under runs/templates/ of the cowork_evals checkout.
+          case "$TEMPLATE" in
+            runs/templates/*.yaml|runs/templates/*.yml) ;;
+            *) echo "::error::template must be a .yaml under runs/templates/, got: $TEMPLATE"; exit 1 ;;
+          esac
+          case "$TEMPLATE" in
+            *..*) echo "::error::template may not contain '..': $TEMPLATE"; exit 1 ;;
+          esac
+          [ -f "$TEMPLATE" ] || { echo "::error::no such template in cowork_evals@$EVALS_REF: $TEMPLATE"; exit 1; }
           uv run eval run \
-            --config runs/templates/ci-dialog-context.yaml \
+            --config "$TEMPLATE" \
             --repeats "$REPEATS" | tee run.log
           # `eval run` ends with "done: <run_id> (...)"; that id names the results
           # directory everything downstream reads.
@@ -210,9 +226,14 @@ jobs:
         run: |
           set -euo pipefail
           # Derived, not hardcoded: adding a task to the dataset must not silently
-          # lower the bar for what counts as a complete run.
-          tasks=$(grep -c . datasets/dialog_context.jsonl)
-          expected=$(( tasks * REPEATS ))
+          # lower the bar for what counts as a complete run. Another template
+          # names its own datasets, so there the bar is only "something ran".
+          if [ "$TEMPLATE" = "runs/templates/ci-dialog-context.yaml" ]; then
+            tasks=$(grep -c . datasets/dialog_context.jsonl)
+            expected=$(( tasks * REPEATS ))
+          else
+            expected=1
+          fi
           uv run eval report --run "${{ steps.eval.outputs.run_id }}" \
             --fmt pr --expect "$expected" > report.md
           cat report.md >> "$GITHUB_STEP_SUMMARY"
