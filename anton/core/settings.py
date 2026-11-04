@@ -90,6 +90,11 @@ class CoreSettings(BaseSettings):
     # of the runaway session this exists for (1,480,766) and you stop catching
     # it — 1.5M misses it by 20k tokens.
     max_turn_tokens: int = 1_250_000
+    # Wall-clock limit per turn, in seconds, asked about like the other limits
+    # and ended with a summary. 0 is no limit: desktop has none. The cloud pod
+    # sets it from the request, since a web turn otherwise meets the hosting
+    # side's hard cut-off with no summary.
+    max_turn_seconds: int = 0
     context_pressure_threshold: float = 0.7
     max_consecutive_errors: int = 5
     resilience_nudge_at: int = 2
