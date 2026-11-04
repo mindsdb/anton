@@ -1706,6 +1706,13 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         )
         self._running_code = None
         cell = self._record_cell(cell)
+        if cell.ended_process and self._proc is not None and self._proc.returncode is None:
+            # The exit can be reaped after the result arrives; until then the
+            # next cell sees a live process and writes to its closed pipe.
+            try:
+                await asyncio.wait_for(self._proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                pass
         # The process proved itself alive by completing this round trip —
         # whatever earlier death streak led here (if any) is over. This is
         # in addition to (not instead of) the reset inside _auto_resume()
