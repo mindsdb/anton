@@ -44,6 +44,7 @@ from anton.cloud_turn.session import (
     drain_pending_memory,
     resolve_trusted_workspace_path,
     drain_pending_skills,
+    remove_staged_skills,
 )
 from anton.cloud_turn.stdin import start_answer_reader
 from anton.core.llm.liveness import MODEL_WAIT_PHASE, MODEL_WAIT_TICK_S
@@ -493,6 +494,9 @@ async def _stream_turn(
             await hb
         if session is not None:
             await _close(session)
+        # After close, so none of this turn's cells still reads it. Not tied to
+        # the session: a build that raised after staging leaves none to close.
+        remove_staged_skills()
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -159,6 +159,8 @@ GENERAL RULES:
 - Validate your output before claiming the task is done — actually check the result \
 (inspect the data, run it, confirm the file/artifact exists and looks right) instead of \
 assuming it worked. Report what you verified, not what you intended.
+- A summary line or final answer restates every value the question asked for, written \
+out in full — no shorthand like "etc." that drops part of the answer.
 - Be conversational, concise, and direct. No filler. No bullet-point dumps unless asked.
 - Respond naturally to greetings, small talk, and follow-up questions.
 - When describing yourself, focus on problem-solving and collaboration — not listing \
@@ -196,6 +198,8 @@ Phrase it like "Assuming you mean X (the common case), so I'll…" or "Going wit
 granularity since you didn't specify." Surface each assumption as it happens so the user \
 can redirect mid-flight instead of being blocked up front. Acting silently is wrong; \
 acting out loud with your assumptions visible is right.
+- PICK THE READING THE REQUEST ITSELF SUPPORTS. When a question has more than one \
+reasonable reading, take the most literal one.
 - NEVER let a training-data fact BLOCK a task without first verifying it is still current. \
 Facts like company public/private status, leadership, product availability, regulatory \
 status, or market listings can change after your training cutoff. If something you learned \
@@ -300,7 +304,8 @@ each value of column `key`, filtering the rows shown in a region named \
 tables and text as shown), `rt.update(path, {element_id: new_content})` \
 (replaces those elements' content in any page; a section keeps its heading) \
 and `rt.insert(path, new_content, before=element_id)` (or `after=`). Write \
-your own HTML for anything they do not cover.
+your own HTML for anything they do not cover, wrapped in `rt.Html` (a plain \
+string shows as text).
 - To change an existing report, edit only what the request asks and keep the \
 rest, including the artifact itself, its look and any file the user asked you \
 not to change. Change the saved page in place with rt.update and rt.insert, \
@@ -391,6 +396,22 @@ STATIC_ARTIFACTS_PROMPT = cut_spans(
 )
 
 
+def _without_direct_reports(text: str) -> str:
+    return cut_spans(
+        text,
+        ("DIRECT REPORTS:\n", "WORKFLOW:", ""),
+        (
+            " A report the user has fully specified you build yourself (DIRECT REPORTS above). Any other",
+            " `html-app`",
+            " Every",
+        ),
+    )
+
+
+NO_DIRECT_REPORTS_ARTIFACTS_PROMPT = _without_direct_reports(ARTIFACTS_PROMPT)
+NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT = _without_direct_reports(STATIC_ARTIFACTS_PROMPT)
+
+
 # ---------------------------------------------------------------------------
 # Visualization prompt variants — selected by ANTON_PROACTIVE_DASHBOARDS flag
 # ---------------------------------------------------------------------------
@@ -469,6 +490,26 @@ repair as that result's `instruction` says, with no skill call. \
 Fallback only if `create_artifact` is unavailable: save to `{output_dir}` \
 (create it if needed).\
 """
+
+
+NO_DIRECT_REPORTS_VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT = cut_spans(
+    VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
+    (
+        "A report the user has fully specified follows DIRECT REPORTS in the ARTIFACTS section. Otherwise: ",
+        "`create_artifact(",
+        "",
+    ),
+    (" Changing a report's content or adding sections needs neither", None, ""),
+)
+NO_DIRECT_REPORTS_VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT = cut_spans(
+    VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
+    (
+        ". A report the user has fully specified follows DIRECT REPORTS in the ARTIFACTS section; otherwise",
+        " `create_artifact(",
+        ":",
+    ),
+    ("; not for changing a report's content", ")", ""),
+)
 
 
 BACKEND_GENERATION_PROMPT = """\
@@ -608,4 +649,57 @@ SCRATCHPAD_SILENT_TIMEOUT_NUDGE = (
     "progress() to narrate phases, and give blocking calls their own timeouts. "
     "If it dies silently again, treat the code as stuck (find the blocking "
     "call) rather than too big. Reuse the SAME scratchpad; do not rename it."
+)
+
+
+# ---------------------------------------------------------------------------
+# Internet research off (`ChatSessionConfig.internet_research_enabled`): the
+# agent answers from the connected data only. Every passage that sends it to
+# the internet, or names the scratchpad's web_search() helper, is cut. This is
+# a rule for the agent, not a network block: scratchpad code can still reach
+# the internet, for package installs among other things.
+# ---------------------------------------------------------------------------
+
+NO_INTERNET_DATA_SOURCES = """\
+DATA SOURCES:
+- Internet research is turned off for this session. Work only with the data \
+sources the user connected and the files they gave you. Do not download \
+datasets, call public APIs, or look anything up on the internet, whether \
+through a tool or from scratchpad code.
+- If that data cannot answer the question, say so instead of looking elsewhere.
+
+"""
+
+NO_INTERNET_CHAT_SYSTEM_PROMPT = cut_spans(
+    CHAT_SYSTEM_PROMPT,
+    ("- **Internet access**: You DO have access", "- **Scratchpad execution**", ""),
+    # Up to SCRATCHPAD, so the follow-up suggestions about public datasets go too.
+    ("INTERNET & LIVE INFORMATION:\n", "SCRATCHPAD:\n- Use the scratchpad", NO_INTERNET_DATA_SOURCES),
+    ("web scraping, ", "plotting", ""),
+    ("- web_search(query) answers", "- get_llm, agentic_loop, and web_search", ""),
+    (
+        "- get_llm, agentic_loop, and web_search are already available",
+        " as globals",
+        "- get_llm and agentic_loop are already available",
+    ),
+    ("(HTTP 403, import error", ", pause", "(an error, a timeout, an empty result, etc.)"),
+    (
+        "- Try creative workarounds first:",
+        "\n- Exhaust",
+        "- Try creative workarounds first: a different query, join or parsing approach, "
+        "alternate libraries, another of the connected data sources, retrying with backoff, etc.",
+    ),
+)
+
+NO_INTERNET_RESILIENCE_NUDGE = cut_spans(
+    RESILIENCE_NUDGE,
+    (
+        "different headers/user-agent",
+        ". If those also fail",
+        "a different query, an alternate library, or another of the connected data sources",
+    ),
+)
+
+NO_INTERNET_SCRATCHPAD_INSTALL_NUDGE = cut_spans(
+    SCRATCHPAD_INSTALL_NUDGE, ("web_search, ", "sample and progress", "")
 )

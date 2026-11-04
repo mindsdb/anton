@@ -243,6 +243,12 @@ The same host supplies `learned_memory_scope` as `personal`, `shared`, `off` or 
 
 These are in-process session inputs. The cloud-turn wire does not transport deployment identity or learned-memory scope.
 
+## Shared live-app slots
+
+Hosts that enable live apps can set `ANTON_LIVE_APPS_PER_PERSON` from zero through their configured slot count. Empty uses the slot count; zero refuses launches and leaves running apps alone. At the cap, or when every slot is full, the person chooses one of their own apps to replace. Cancel, Skip and unanswered cards leave the apps running.
+
+`LiveAppHost` must implement a deployment-wide `launch_lock`, plus `slots_full` and `slots_available` hooks for durable notices. The lock must coordinate every server worker. Approval cards wait outside it; final ownership checks, slot changes and launch recording happen inside it. A notice invites refused people to try again and reserves no capacity.
+
 ## Model-call deadline
 A model call that sends nothing for 10 minutes is stopped, and the turn ends with "The model sent no output for 10 minutes, so the call was stopped." Every piece of text, thinking or tool-call arguments anton reads from the model restarts the 10 minutes, so a slow model that keeps writing is never cut. A non-streamed call gets the 10 minutes for the whole call, including the SDK's own retries. After one call in a turn runs out, every later model call in that turn fails at once. The one exception is the completion check after an answer: when it runs out, the turn ends on the answer that already streamed, marked unverified.
 
@@ -253,6 +259,28 @@ export ANTON_MODEL_CALL_IDLE_TIMEOUT_S=600
 ```
 
 While a model call is silent, hosts can show that the turn is still working. `ChatSession.model_calls` is `None` before the first turn. Its `snapshot()` returns the oldest call waiting on the model, or `None` when nothing is waiting, a question is open, or the turn has ended. The cloud turn entrypoint uses it: when a call is waiting and nothing else has gone out for 20 seconds, it writes a progress line with phase `model_wait`, such as "Waiting for the model (2m 40s)". A hung tool or cell reports no wait, so it still goes quiet and the host's idle limits still end it.
+
+## Cloud turn skills
+
+A cloud turn's request (`TurnRequestV1` in `anton/cloud_turn/contract.py`) can carry a `skills` block: the skills cowork-server resolved for that turn's person and project. Each key is a skill's slug. Each entry holds the skill's files, by their path inside the skill's folder, and `always_on`, which cowork-server leaves out or sets to false for a skill the agent recalls on demand:
+
+```json
+{"skills": {"sql-style": {"files": {"SKILL.md": "---\nname: sql-style\ndescription: How we write SQL\n---\nUppercase keywords.", "references/examples.md": "..."}, "always_on": true}}}
+```
+
+When the block is present, even as `{}`, it is the complete set of skills the turn may recall or list. Anton's built-in skills resolve either way. The pod treats the block as untrusted input, and nothing in it fails the turn. `parse_turn_skills` reads each entry into a `TurnSkillEntry` (`files: dict[str, str]`, `always_on: bool = False`). It drops an entry whose slug isn't a valid skill name (lowercase letters, digits and single hyphens, at most 64 characters) or whose value isn't an object, and a file whose path or text isn't a string. Only a JSON `true` turns `always_on` on. Staging then drops any file whose path escapes its skill's folder.
+
+Each turn writes its skills into a fresh folder in the system temp dir, outside the workspace, and the folder's name carries the turn's process id. The entrypoint deletes that folder when the turn ends, including a turn that fails. The next turn's staging also deletes any folder a killed turn left behind. It keeps a folder whose process id belongs to another running process, since that turn may still be reading it.
+
+`always_on: true` keeps the skill staged for recall and also puts its SKILL.md body into every turn's prompt. The bodies follow an "Organization and team skills (always apply)" heading, each inside `<org_skill>` tags, in the order the block lists them. cowork-server sets `always_on` for organization and team skills marked always on. The section has a budget, set in `anton/core/memory/always_on_skills.py`:
+
+| Constant | Value | Past it |
+|---|---|---|
+| `ALWAYS_ON_SKILL_MAX_CHARS` | 6,000 characters of one skill's body | The body is cut at a line boundary, an open code fence is closed, and a marker says the full skill is available on demand. |
+| `ALWAYS_ON_TOTAL_MAX_CHARS` | 24,000 characters for the section after its heading and opening paragraph: every skill's heading, tags, body and marker, plus the closing line | The first skill that no longer fits, and every skill after it, is left out of the prompt and named on a closing "Also available on demand" line instead. When that line itself doesn't fit, the last skills shown move onto it. A skill left out stays staged for recall. |
+| `ALWAYS_ON_OMITTED_MAX_NAMES` | 20 names on the closing line | The rest are counted as "and N more". |
+
+A request with no `skills` block at all stages no skills, with one rollout fallback. On a pod whose controller mounts the organization's whole skills tree and names it in `ANTON_CLOUD_SKILLS_ROOT`, such a request reads that mount instead, and the pod logs a warning. The mount holds every member's skills, so a request that carries a block never reads it.
 
 ---
 

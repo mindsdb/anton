@@ -106,6 +106,9 @@ class AntonSettings(CoreSettings):
     # (Exa or Brave); web_fetch always falls back to stdlib HTTP.
     web_search_enabled: bool = True
     web_fetch_enabled: bool = True
+    # False: the agent answers from the connected data only — see
+    # ChatSessionConfig.internet_research_enabled.
+    internet_research_enabled: bool = True
 
     # Case 3 fallback — only consulted when the LLM provider lacks native web
     # search and the user is on a generic OpenAI-compatible endpoint.
@@ -154,6 +157,10 @@ class AntonSettings(CoreSettings):
     # "Do first, ask later": act on reasonable defaults and surface assumptions
     # inline instead of stopping to ask. False = cautious ask-first discipline.
     act_first: bool = True
+
+    # False drops the DIRECT REPORTS path from the prompts and tool texts, so
+    # every web artifact goes through `generate_artifact`.
+    direct_reports: bool = True
 
     disable_autoupdates: bool = False
 

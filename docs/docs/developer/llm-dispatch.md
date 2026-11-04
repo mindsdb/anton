@@ -115,7 +115,7 @@ graceful degradation.
 | `connect_collector.py::extract_variables` | `_ExtractionResult` | planning | Parse free-form credential input into structured fields |
 | `commands/skills.py::handle_skill_save` | `_SkillDraft` | planning | Draft a skill from recent scratchpad work |
 | `commands/datasource.py::handle_add_custom_datasource` | `_CustomDatasourceSpec` | planning | Identify a custom datasource's auth fields |
-| `cortex.py::_compact_file` | `_CompactionResult` | **coding** | Memory deduplication during synaptic homeostasis |
+| `cortex.py::plan_compaction` | `_CompactionResult` | **coding** | Memory deduplication during synaptic homeostasis |
 | `cortex.py::maybe_update_identity` | `_IdentityFacts` | **coding** | Default-mode identity extraction every 5 turns |
 | `consolidator.py::replay_and_extract` | `_ConsolidatedLessons` | **coding** | Sleep-replay extraction of lessons |
 | `cerebellum.py::_run_diff` | `_DiffPassResult` | **coding** | Post-mortem error learning from cell failures |

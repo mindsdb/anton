@@ -19,6 +19,8 @@ Each Hippocampus instance manages one scope's files:
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Callable
+from contextlib import contextmanager
 import re
 import sys
 import time
@@ -80,6 +82,69 @@ def _extract_metadata(text: str) -> tuple[str, dict]:
     return clean_text, meta
 
 
+# The metadata keys an entry line carries in its trailing comment, besides `ts`.
+_META_KEYS = ("confidence", "source", "topic")
+
+
+def _entry_line(entry: Engram) -> str:
+    """`entry` as one ``- text <!-- key:value ... ts:... -->`` line.
+
+    A field with no value is left out rather than written as ``key:None``,
+    which would read back as the string "None".
+    """
+    parts = [
+        f"{key}:{getattr(entry, key)}"
+        for key in _META_KEYS
+        if getattr(entry, key) not in (None, "")
+    ]
+    ts = entry.updated_at.strftime("%Y-%m-%d") if entry.updated_at else time.strftime("%Y-%m-%d")
+    parts.append(f"ts:{ts}")
+    return f"- {_entry_text(entry.text)} <!-- {' '.join(parts)} -->\n"
+
+
+def _rule_lines(content: str) -> list[tuple[str, Engram | None]]:
+    """Each line of rules.md, line ending kept, with the rule it holds as
+    get_rules reads it: None for a heading, a blank line, a note someone typed,
+    or an entry above the first heading."""
+    lines: list[tuple[str, Engram | None]] = []
+    kind = None
+    for line in content.splitlines(keepends=True):
+        stripped = line.strip()
+        entry = None
+        if stripped.startswith("## "):
+            kind = stripped[3:].lower()
+        elif stripped.startswith("- ") and kind:
+            text, meta = _extract_metadata(stripped[2:])
+            # The "## " heading decides the kind, so drop a `kind:` key from
+            # the trailing comment; passing both to Engram raises TypeError.
+            meta.pop("kind", None)
+            if text:
+                entry = Engram(text=text, kind=kind, **meta)
+        lines.append((line, entry))
+    return lines
+
+
+def _lesson_lines(content: str) -> list[tuple[str, Engram | None]]:
+    """Each line of lessons.md, line ending kept, with the lesson it holds as
+    get_lessons reads it: None for a heading, a blank line or a typed note.
+
+    Leading whitespace on the file's first non-blank line is ignored, so an
+    indented first bullet still reads as a lesson."""
+    lines: list[tuple[str, Engram | None]] = []
+    first = True
+    for line in content.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        if first and body.strip():
+            body = body.lstrip()
+            first = False
+        entry = None
+        if body.strip() and (body.startswith("- ") or body.startswith("  ")):
+            text, meta = _extract_metadata(body)
+            entry = Engram(text=text.removeprefix("- "), **meta)
+        lines.append((line, entry))
+    return lines
+
+
 def _filter_by_token_budget(engrams: list[Engram], token_budget: int) -> list[Engram]:
     """Keep entries, in the given order, until token_budget is spent.
 
@@ -111,6 +176,12 @@ def _is_scratchpad_related(engram: Engram) -> bool:
     if "scratchpad" in engram.text.lower():
         return True
     return bool(engram.topic and "scratchpad" in engram.topic.lower())
+
+
+def writer_lock_name(file_name: str) -> str:
+    """Name of the sibling file every writer of `file_name` flocks, so a host
+    that writes memory files itself can take the same lock."""
+    return file_name + ".lock"
 
 
 class Hippocampus:
@@ -211,25 +282,29 @@ class Hippocampus:
         return engrams
 
     def del_identity(self, id):
-        entries = self.get_identities()
-        entries_out = []
-        for entry in entries:
-            if entry.id != id:
-                entries_out.append(entry)
+        """Remove the identity fact with `id`, rewriting profile.md under its lock."""
+        with self._file_lock(self._profile_path):
+            entries = self.get_identities()
+            entries_out = []
+            for entry in entries:
+                if entry.id != id:
+                    entries_out.append(entry)
 
-        self.save_identities(entries_out)
+            self._save_identities_unlocked(entries_out)
 
     def update_identity(self, id, text):
-        entries = self.get_identities()
+        """Replace the text of the identity fact with `id`; a no-op for an unknown id."""
+        with self._file_lock(self._profile_path):
+            entries = self.get_identities()
 
-        for entry in entries:
-            if entry.id != id:
-                continue
-            entry.text = text
-            entry.updated_at = dt.datetime.now()
+            for entry in entries:
+                if entry.id != id:
+                    continue
+                entry.text = text
+                entry.updated_at = dt.datetime.now()
 
-            self.save_identities(entries)
-            return
+                self._save_identities_unlocked(entries)
+                return
 
     def rewrite_identity(self, entries: list[str]) -> None:
         """Merge new entries into the identity snapshot (profile.md) and rewrite.
@@ -239,33 +314,41 @@ class Hippocampus:
         a coherent snapshot rather than growing unboundedly.
         """
 
-        existing_entries = [
-            item.text
-            for item in self.get_identities()
-        ]
+        with self._file_lock(self._profile_path):
+            existing_entries = [
+                item.text
+                for item in self.get_identities()
+            ]
 
-        for fact in entries:
-            fact = _entry_text(fact) if isinstance(fact, str) else fact
-            if isinstance(fact, str) and fact and fact not in existing_entries:
-                # Check if this updates an existing fact (same key prefix)
-                key = fact.split(":")[0].strip().lower() if ":" in fact else ""
-                if key:
-                    existing_entries = [
-                        e
-                        for e in existing_entries
-                        if not e.lower().startswith(key + ":")
-                    ]
-                existing_entries.append(fact)
+            for fact in entries:
+                fact = _entry_text(fact) if isinstance(fact, str) else fact
+                if isinstance(fact, str) and fact and fact not in existing_entries:
+                    # Check if this updates an existing fact (same key prefix)
+                    key = fact.split(":")[0].strip().lower() if ":" in fact else ""
+                    if key:
+                        existing_entries = [
+                            e
+                            for e in existing_entries
+                            if not e.lower().startswith(key + ":")
+                        ]
+                    existing_entries.append(fact)
 
-        self.save_identities([
-            Engram(text)
-            for text in existing_entries
-        ])
+            self._save_identities_unlocked([
+                Engram(text)
+                for text in existing_entries
+            ])
 
     def save_identities(self, entries: list[Engram]) -> None:
+        """Rewrite profile.md from `entries` under its writer lock. A caller that
+        already holds the lock uses `_save_identities_unlocked` instead."""
+        with self._file_lock(self._profile_path):
+            self._save_identities_unlocked(entries)
+
+    def _save_identities_unlocked(self, entries: list[Engram]) -> None:
+        """Rewrite profile.md from `entries`; the caller holds its writer lock."""
         self._dir.mkdir(parents=True, exist_ok=True)
         content = "# Profile\n" + "\n".join(f"- {_entry_text(e.text)}" for e in entries) + "\n"
-        self._encode_with_lock(self._profile_path, content, mode="write")
+        self._write_unlocked(self._profile_path, content, mode="write")
 
     def clear_identity(self) -> None:
         if self._profile_path.is_file():
@@ -293,28 +376,16 @@ class Hippocampus:
         if not self._lessons_path.is_file():
             return []
         try:
-            content = self._lessons_path.read_text(encoding="utf-8").strip()
+            content = self._lessons_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             return []
 
-        if not content:
+        if not content.strip():
             return []
 
-        # Extract individual entries (lines starting with "- ")
-        lines = [ln for ln in content.splitlines() if ln.strip()]
-        # Keep header, then entries in reverse order (most recent last → first)
-        header_lines = []
-        entry_lines = []
-        for ln in lines:
-            if ln.startswith("- ") or ln.startswith("  "):
-                entry_lines.append(ln)
-            else:
-                header_lines.append(ln)
-
-        entries = []
-        for text in entry_lines:
-            text, meta = _extract_metadata(text)
-            entries.append(Engram(text=text.removeprefix("- "), **meta))
+        # Parse the file as read, as the edit path does, so every lesson
+        # returned here can be edited or deleted by its id.
+        entries = [entry for _, entry in _lesson_lines(content) if entry is not None]
 
         if exclude_scratchpad:
             entries = [e for e in entries if not _is_scratchpad_related(e)]
@@ -328,28 +399,18 @@ class Hippocampus:
         return _filter_by_token_budget(entries, token_budget)
 
     def del_lesson(self, id):
-        entries = self.get_lessons()
-        entries_out = []
-        for entry in entries:
-            if entry.id != id:
-                entries_out.append(entry)
-
-        if len(entries_out) != len(entries):
-            self._encode_with_lock(self._lessons_path, self._lessons_to_text(entries_out), mode="write")
-
+        """Remove the lesson with `id`, rewriting lessons.md under its lock."""
+        with self._file_lock(self._lessons_path):
+            if not any(entry.id == id for entry in self.get_lessons()):
+                return
+            self._edit_entries_unlocked(self._lessons_path, _lesson_lines, id, None)
 
     def update_lesson(self, id, text):
-        entries = self.get_lessons()
-
-        for entry in entries:
-            if entry.id != id:
-                continue
-            entry.text = text
-            entry.updated_at = dt.datetime.now()
-
-            self._encode_with_lock(self._lessons_path, self._lessons_to_text(entries), mode="write")
-
-            break
+        """Replace the text of the lesson with `id`; a no-op for an unknown id."""
+        with self._file_lock(self._lessons_path):
+            if not any(entry.id == id for entry in self.get_lessons()):
+                return
+            self._edit_entries_unlocked(self._lessons_path, _lesson_lines, id, text)
 
     @staticmethod
     def _lessons_to_text(entries: list[Engram], header="Lessons") -> str:
@@ -358,24 +419,7 @@ class Hippocampus:
         Writes all non-None/non-empty Engram fields into a trailing
         <!-- key:value --> comment. 'updated_at' is serialised as 'ts'.
         """
-        lines = []
-        for entry in entries:
-            parts: list[str] = []
-
-            for key in ("confidence", "source", "topic"):
-                val = getattr(entry, key)
-                if val is not None and val != "":
-                    parts.append(f"{key}:{val}")
-
-            ts = (
-                entry.updated_at.strftime("%Y-%m-%d")
-                if entry.updated_at
-                else time.strftime("%Y-%m-%d")
-            )
-            parts.append(f"ts:{ts}")
-
-            lines.append(f"- {entry.text} <!-- {' '.join(parts)} -->\n")
-
+        lines = [_entry_line(entry) for entry in entries]
         if len(lines) == 0:
             return ""
         return f"# {header}\n" + "".join(lines)
@@ -471,21 +515,7 @@ class Hippocampus:
         except (OSError, UnicodeDecodeError):
             return []
 
-        current_kind = None
-        entries: list[Engram] = []
-
-        for line in content.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("## "):
-                current_kind = stripped[3:].lower()
-            elif stripped.startswith("- ") and current_kind:
-                text, meta = _extract_metadata(stripped[2:])
-                # The "## " heading decides the kind, so drop a `kind:` key from
-                # the trailing comment; passing both to Engram raises TypeError.
-                meta.pop("kind", None)
-                if text and current_kind is not None:
-                    entries.append(Engram(text=text, kind=current_kind, **meta))
-
+        entries = [entry for _, entry in _rule_lines(content) if entry is not None]
         entries.sort(key=lambda x: x.kind)
 
         if exclude_scratchpad_when:
@@ -496,27 +526,27 @@ class Hippocampus:
         return entries
 
     def del_rule(self, id):
-        entries = self.get_rules()
-        entries_out = []
-        for entry in entries:
-            if entry.id != id:
-                entries_out.append(entry)
-
-        self.save_rules(entries_out)
+        """Remove the rule with `id`, rewriting rules.md under its lock."""
+        with self._file_lock(self._rules_path):
+            if not any(entry.id == id for entry in self.get_rules()):
+                return
+            self._edit_entries_unlocked(self._rules_path, _rule_lines, id, None)
 
     def update_rule(self, id, text):
-        entries = self.get_rules()
-
-        for entry in entries:
-            if entry.id != id:
-                continue
-            entry.text = text
-            entry.updated_at = dt.datetime.now()
-
-            self.save_rules(entries)
-            return
+        """Replace the text of the rule with `id`; a no-op for an unknown id."""
+        with self._file_lock(self._rules_path):
+            if not any(entry.id == id for entry in self.get_rules()):
+                return
+            self._edit_entries_unlocked(self._rules_path, _rule_lines, id, text)
 
     def save_rules(self, rules: list[Engram]) -> None:
+        """Rewrite rules.md from `rules` under its writer lock. A caller that
+        already holds the lock uses `_save_rules_unlocked` instead."""
+        with self._file_lock(self._rules_path):
+            self._save_rules_unlocked(rules)
+
+    def _save_rules_unlocked(self, rules: list[Engram]) -> None:
+        """Rewrite rules.md from `rules`; the caller holds its writer lock."""
         self._dir.mkdir(parents=True, exist_ok=True)
         sections: dict[str, list[Engram]] = {"always": [], "never": [], "when": []}
         for rule in rules:
@@ -526,12 +556,9 @@ class Hippocampus:
         lines = ["# Rules\n"]
         for section, entries in sections.items():
             lines.append(f"\n## {section.capitalize()}\n")
-            for e in entries:
-                ts = e.updated_at.strftime("%Y-%m-%d") if e.updated_at else time.strftime("%Y-%m-%d")
-                meta = f"<!-- confidence:{e.confidence} source:{e.source} ts:{ts} -->"
-                lines.append(f"- {_entry_text(e.text)} {meta}\n")
+            lines.extend(_entry_line(e) for e in entries)
 
-        self._encode_with_lock(self._rules_path, "".join(lines), mode="write")
+        self._write_unlocked(self._rules_path, "".join(lines), mode="write")
 
     def encode_rule(
         self,
@@ -548,8 +575,6 @@ class Hippocampus:
         """
         self._dir.mkdir(parents=True, exist_ok=True)
 
-        rules = self.get_rules()
-
         # Sanitize at ingest too, not just on write: the dedupe below compares
         # against text parsed back off disk, which is already sanitized.
         new_rule = Engram(
@@ -560,14 +585,80 @@ class Hippocampus:
             source=source,
         )
 
-        # Check for duplicate (exact entry match, ignoring metadata)
-        for rule in rules:
-            if rule.text == new_rule.text:
-                return
+        # The read, the dedupe and the rewrite share one lock, so a rule
+        # another session saves in between is in the file this one rewrites.
+        with self._file_lock(self._rules_path):
+            rules = self.get_rules()
 
-        rules.append(new_rule)
+            # Check for duplicate (exact entry match, ignoring metadata)
+            for rule in rules:
+                if rule.text == new_rule.text:
+                    return
 
-        self.save_rules(rules)
+            self._insert_rule_unlocked(new_rule)
+
+    def _insert_rule_unlocked(self, rule: Engram) -> None:
+        """Add `rule` at the end of its `## Kind` section, leaving every other
+        line of rules.md as it is; the caller holds its writer lock.
+
+        A section that is missing is added at the end of the file, and a
+        missing or empty file is created with all three headings.
+        """
+        content = self._rules_path.read_text(encoding="utf-8") if self._rules_path.is_file() else ""
+        if not content.strip():
+            self._save_rules_unlocked([rule])
+            return
+
+        lines = content.splitlines(keepends=True)
+        if not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        heading = f"## {rule.kind}"
+        at = None
+        in_section = False
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("## "):
+                if in_section:
+                    break
+                in_section = stripped.lower() == heading
+                if in_section:
+                    at = i + 1
+            elif in_section and stripped:
+                # After the section's last line, so a note typed below an
+                # entry stays right below it.
+                at = i + 1
+
+        if at is None:
+            gap = "" if not lines[-1].strip() else "\n"
+            lines.append(f"{gap}## {rule.kind.capitalize()}\n{_entry_line(rule)}")
+        else:
+            lines.insert(at, _entry_line(rule))
+        self._write_unlocked(self._rules_path, "".join(lines), mode="write")
+
+    def _edit_entries_unlocked(
+        self,
+        path: Path,
+        parse: Callable[[str], list[tuple[str, Engram | None]]],
+        id: str,
+        text: str | None,
+    ) -> None:
+        """Rewrite the entry with `id` in `path` to `text`, or remove every
+        entry with `id` when `text` is None; the caller holds the writer lock.
+
+        Only those lines change. Headings, blank lines and notes someone typed
+        into the file are written back as they were.
+        """
+        out: list[str] = []
+        updated = False
+        for line, entry in parse(path.read_text(encoding="utf-8")):
+            if entry is None or entry.id != id or updated:
+                out.append(line)
+            elif text is not None:
+                entry.text = _entry_text(text)
+                entry.updated_at = dt.datetime.now()
+                out.append(_entry_line(entry))
+                updated = True
+        self._write_unlocked(path, "".join(out), mode="write")
 
     def encode_lesson(
         self,
@@ -589,20 +680,27 @@ class Hippocampus:
         topic_tag = f" topic:{topic}" if topic else ""
         entry = f"- {text} <!--{topic_tag} ts:{ts} -->\n"
 
-        # Append to lessons.md
-        if not self._lessons_path.is_file():
-            self._encode_with_lock(
-                self._lessons_path,
-                f"# Lessons\n{entry}",
-                mode="write",
-            )
-        else:
+        # The existence check and the dedupe read sit under the writer lock,
+        # so two sessions creating the file at once cannot replace each
+        # other's first entry.
+        with self._file_lock(self._lessons_path):
+            if not self._lessons_path.is_file():
+                self._write_unlocked(self._lessons_path, f"# Lessons\n{entry}", mode="write")
+                return
             # Check for duplicate (exact entry match, ignoring metadata)
             existing = self._lessons_path.read_text(encoding="utf-8")
             if text in self._extract_entry_texts(existing):
                 return
-            self._encode_with_lock(self._lessons_path, entry, mode="append")
+            self._write_unlocked(self._lessons_path, entry, mode="append")
 
+
+    def entry_file(self, kind: Literal["rules", "lesson"]) -> Path:
+        """The file that holds entries of `kind`: rules.md or lessons.md."""
+        if kind == "rules":
+            return self._rules_path
+        if kind == "lesson":
+            return self._lessons_path
+        raise ValueError(f"no memory file holds {kind!r} entries")
 
     def entry_count(self) -> int:
         """Count total entries across rules.md and lessons.md."""
@@ -618,47 +716,57 @@ class Hippocampus:
                     continue
         return count
 
-    def _encode_with_lock(self, path: Path, text: str, mode: str = "append") -> None:
-        """Write with file locking (fcntl.flock on Unix, no-op on Windows).
+    @contextmanager
+    def _file_lock(self, path: Path):
+        """Hold the writer lock for `path`: a sibling `.lock` file, flocked.
 
-        Prevents corruption from concurrent Anton sessions writing to
-        global memory — like synaptic tagging ensuring encoding fidelity
-        despite concurrent neural activity.
+        One lock for every writer of the file, append or rewrite, in every
+        process that shares it, so a rewrite's check and replace and another
+        session's append cannot interleave. Readers do not take it: a rewrite
+        is an atomic replace, so a reader always sees one complete version.
+        No-op on Windows, where fcntl is unavailable, as the lock was before.
         """
         path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = path.with_name(writer_lock_name(path.name))
+        with open(lock_path, "a", encoding="utf-8") as lock:
+            if sys.platform != "win32":
+                import fcntl
 
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if sys.platform != "win32":
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def rewrite_if_unchanged(
+        self, path: Path, text: str, *, read: Callable[[Path], object], snapshot: object
+    ) -> bool:
+        """Replace `path` with `text` unless `read(path)` no longer equals `snapshot`.
+
+        The writer lock is held across the check and the replace, so an append
+        from another session waits and lands on the new file instead of being
+        erased by it. Returns whether the file was written.
+        """
+        with self._file_lock(path):
+            if read(path) != snapshot:
+                return False
+            self._write_unlocked(path, text, mode="write")
+            return True
+
+    @staticmethod
+    def _write_unlocked(path: Path, text: str, mode: str) -> None:
+        """Replace the file atomically (temp file + rename) or append; the
+        caller holds the writer lock."""
         if mode == "write":
-            # Atomic write via temp file + rename
             tmp_path = path.with_suffix(path.suffix + ".tmp")
             with open(tmp_path, "w", encoding="utf-8") as f:
-                if sys.platform != "win32":
-                    import fcntl
-
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                try:
-                    f.write(text)
-                    f.flush()
-                finally:
-                    if sys.platform != "win32":
-                        import fcntl
-
-                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                f.write(text)
+                f.flush()
             tmp_path.replace(path)
         else:
-            # Append mode
             with open(path, "a", encoding="utf-8") as f:
-                if sys.platform != "win32":
-                    import fcntl
-
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                try:
-                    f.write(text)
-                    f.flush()
-                finally:
-                    if sys.platform != "win32":
-                        import fcntl
-
-                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                f.write(text)
 
     @staticmethod
     def _extract_entry_texts(content: str) -> set[str]:

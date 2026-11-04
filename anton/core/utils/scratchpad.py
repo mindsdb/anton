@@ -8,14 +8,16 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict
 
 from anton.core.backends.sandbox import cell_sandbox_of, validate_pad_name
 from anton.core.tools.registry import ToolOutcome
 from anton.core.utils.write_check import (
+    PACKAGE_FILE_SUFFIXES,
     CellWrites,
+    EarlierCell,
     FileChange,
     HttpWrite,
     HttpWriteRule,
@@ -27,6 +29,7 @@ from anton.core.utils.write_check import (
 
 if TYPE_CHECKING:
     from anton.core.backends.manager import ScratchpadManager
+    from anton.core.interaction.elicit import AskOption
     from anton.core.session import ChatSession
 
 logger = logging.getLogger(__name__)
@@ -99,7 +102,8 @@ class WriteGate:
     Present on a session only when the host turns the setting on. `begin_turn`
     records what the project and shared folders held when the turn began.
     `http_rules` are the endpoints the operator lists as writes
-    (`write_approval_http`).
+    (`write_approval_http`). `relayed_hosts` are the `host:port`s the write
+    relay holds writes for (`write_relay_hosts`).
     """
 
     snapshots: tuple[ProjectSnapshot, ...] = ()
@@ -108,6 +112,7 @@ class WriteGate:
     # timeout once per cell.
     unanswered: bool = False
     http_rules: tuple[HttpWriteRule, ...] = ()
+    relayed_hosts: frozenset[str] = frozenset()
 
     async def begin_turn(self, *, manager: ScratchpadManager) -> None:
         self.unanswered = False
@@ -394,39 +399,67 @@ async def ask_approval_card(
     the turn is refused without asking, so an unattended turn doesn't wait
     out the timeout once per card. Sessions without a `WriteGate` keep no
     such memory."""
-    from anton.core.interaction.elicit import AskOption, AskRequest, elicit
+    from anton.core.interaction.elicit import AskOption
+
+    choice = await ask_approval_choice(
+        session, prompt,
+        options=(AskOption(value="approve", label="Approve", detail=approve_detail),),
+        cancel_detail=cancel_detail, log_label=log_label,
+    )
+    return choice.cause
+
+
+class ApprovalChoice(NamedTuple):
+    """What came of an approval card: the option the person chose, or why
+    none was approved. Exactly one of the two is set."""
+
+    value: str | None
+    cause: RefusalCause | None
+
+
+async def ask_approval_choice(
+    session: ChatSession,
+    prompt: str,
+    *,
+    options: tuple[AskOption, ...],
+    cancel_detail: str = "Leave things as they are",
+    log_label: str = "write approval",
+    question_id: str | None = None,
+) -> ApprovalChoice:
+    """Choose one host-built action, or return why none was approved.
+
+    The gate remembers unanswered cards exactly as ask_approval_card does.
+    Cancel is always explicit, and no default or typed answer authorizes work.
+    `question_id` names the card when the host reads it, as the recording
+    proxy reads a held request's (`write_hold`); else a fresh `write:` id.
+    """
+    from anton.core.interaction.elicit import ApprovalRequest, AskOption, elicit
 
     gate = getattr(session, "_write_gate", None)
     if isinstance(gate, WriteGate) and gate.unanswered:
-        return "unanswered_earlier"
-    request = AskRequest(
+        return ApprovalChoice(None, "unanswered_earlier")
+    request = ApprovalRequest(
         prompt=prompt,
-        options=(
-            AskOption(value="approve", label="Approve", detail=approve_detail),
-            AskOption(value="cancel", label="Cancel", detail=cancel_detail),
-        ),
-        # No typed answer and no default: only a picked Approve clears the card.
-        allow_custom=False,
+        options=(*options, AskOption(value="cancel", label="Cancel", detail=cancel_detail)),
         timeout_s=getattr(session.elicitor, "timeout_s", None),
     )
     try:
-        # Not counted against the turn's questions: the card is the gate's,
-        # not the model's, so it spends none of the model's own.
-        answer = await elicit(session, f"write:{uuid.uuid4().hex}", request, counted=False)
+        answer = await elicit(session, question_id or f"write:{uuid.uuid4().hex}", request, counted=False)
     except Exception as exc:
-        # The type only: a traceback's frames would print the card and the
-        # statement under a host that logs local variables.
         logger.warning("%s: the question failed (%s)", log_label, type(exc).__name__)
-        return "error"
-    if answer.status == "answered" and answer.values == ("approve",):
-        return None
+        return ApprovalChoice(None, "error")
+    offered = {option.value for option in options}
+    if answer.status == "answered" and len(answer.values) == 1 and not answer.text:
+        value = answer.values[0]
+        if value in offered and value != "cancel":
+            return ApprovalChoice(value, None)
     if answer.status in ("answered", "cancelled"):
-        return "cancelled"
+        return ApprovalChoice(None, "cancelled")
     if answer.status == "timeout" and isinstance(gate, WriteGate):
         gate.unanswered = True
     if answer.status in ("timeout", "unavailable"):
-        return answer.status
-    return "error"
+        return ApprovalChoice(None, answer.status)
+    return ApprovalChoice(None, "error")
 
 
 def _log_decision(*, writes: CellWrites, status: DecisionStatus) -> None:
@@ -455,23 +488,46 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
     gate = getattr(session, "_write_gate", None)
     if not isinstance(gate, WriteGate):
         return None
-    # The cells compaction folded away come first: the pad's process still
-    # holds what they imported and bound. Their outcomes still decide whether
-    # the check can count a write as one that ran.
-    compacted = tuple(getattr(pad, "compacted_cells", ()))
-    cells = tuple(getattr(pad, "cells", ()) or ())
-    earlier = (*(cell.code for cell in compacted), *(cell.code for cell in cells))
-    errored = (*(cell.errored for cell in compacted), *(bool(getattr(cell, "error", None)) for cell in cells))
     try:
+        # The cells compaction folded away come first: the pad's process still
+        # holds what they imported and bound. Their outcomes still decide
+        # whether the check can count a write as one that ran. Where each cell
+        # that failed stopped is the line the boot read from the traceback, not
+        # from its text, which the cell shapes; None where the runtime doesn't
+        # say. A cell whose process ended has the pad start a new one before
+        # the next cell. Built inside the try: a value `EarlierCell` refuses
+        # gets the card too.
+        earlier = (
+            *(EarlierCell(code=cell.code, errored=cell.errored, stopped_at=cell.stopped_at,
+                          ended_process=cell.ended_process)
+              for cell in getattr(pad, "compacted_cells", ())),
+            *(EarlierCell(code=cell.code, errored=bool(getattr(cell, "error", None)),
+                          stopped_at=getattr(cell, "stopped_at", None),
+                          ended_process=getattr(cell, "ended_process", False) is True)
+              for cell in getattr(pad, "cells", ()) or ()),
+        )
+        if earlier and getattr(pad, "process_running", True) is False:
+            # The pad starts a new process before this cell, as after a death
+            # between cells, which the runtime finds only as this cell runs:
+            # the last cell before it is one whose process ended.
+            earlier = (*earlier[:-1], earlier[-1].model_copy(update={"ended_process": True}))
         writes = await asyncio.to_thread(
-            find_cell_writes,
-            code=code, earlier_code=earlier, snapshots=gate.snapshots, http_rules=gate.http_rules,
-            earlier_errored=errored,
+            find_cell_writes, code=code, earlier=earlier, snapshots=gate.snapshots, http_rules=gate.http_rules,
         )
     except Exception as exc:
         # The type only, as for a failed question.
         logger.warning("write approval: the check failed (%s)", type(exc).__name__)
         writes = CellWrites(unchecked=True)
+    if gate.relayed_hosts and writes.http:
+        # The write relay holds a request to a host it relays and raises its
+        # own card through approve_held_write, so a second card here would
+        # ask twice. `held_by_relay` counts only a request whose method,
+        # other than GET or HEAD, and `http://` host and port the code
+        # writes out.
+        from anton.core.utils.write_hold import held_by_relay
+
+        kept = tuple(w for w in writes.http if not held_by_relay(w, gate.relayed_hosts))
+        writes = writes.model_copy(update={"http": kept})
     if not writes.needs_approval():
         if writes.not_held_files:
             _log_decision(writes=writes, status="not_held")
@@ -533,14 +589,19 @@ def invalid_package_spec(entry: str) -> bool:
     call — dependency confusion through the one install path this ticket
     leaves open. Direct-URL requirements ("name @ https://…") are refused
     for the same reason: installs come from the configured index or not
-    at all.
+    at all. So is a name ending like a local archive
+    (`PACKAGE_FILE_SUFFIXES`, any case), such as "job.tar.gz" or
+    "job-1.0-py3-none-any.whl": pip and uv install that file from where it
+    lies, with the code it runs to build or install it. A name such as
+    "discord.py" is a name on the index, as any other is.
     """
     from packaging.requirements import InvalidRequirement, Requirement
 
     try:
-        return Requirement(str(entry)).url is not None
+        requirement = Requirement(str(entry))
     except InvalidRequirement:
         return True
+    return requirement.url is not None or requirement.name.lower().endswith(PACKAGE_FILE_SUFFIXES)
 
 
 def reject_invalid_packages(packages: list[str]) -> str | None:
@@ -619,6 +680,93 @@ _DISCOVERY_MAX_PADS = 10
 _DISCOVERY_MAX_ROOT_ENTRIES = 30
 
 
+def workspace_discovery_names(manager) -> dict:
+    """The pad and project-root names the workspace block lists: ``{"pads", "root"}``,
+    each a sorted list of names. Best-effort: a part that fails is an empty list."""
+    try:
+        pads = sorted(manager.agent_pads())
+    except Exception:
+        pads = []
+    root_names: list[str] = []
+    try:
+        root = manager.workspace_path
+        if root is not None:
+            # Hidden entries are excluded deliberately: this block ships to
+            # the model, and filenames hinting at secret locations (.env,
+            # .aws) don't belong in LLM-visible context — even names-only.
+            # scandir rather than iterdir+is_dir: dir-ness comes from the
+            # dirent for free instead of a stat per entry, and this runs
+            # every turn. Full iteration is inherent to a sorted first-30.
+            with os.scandir(root) as it:
+                root_names = sorted(
+                    entry.name + ("/" if entry.is_dir() else "")
+                    for entry in it
+                    if not entry.name.startswith(".")
+                )
+    except Exception:
+        root_names = []
+    return {"pads": pads, "root": root_names}
+
+
+_NAME_LIMIT = 255
+_SAVED_NAMES_LIMIT = 1000
+
+
+def valid_workspace_names(value) -> dict | None:
+    """`value` as workspace names if it is that shape, else None. A saved copy is
+    written where agent code can write, so only plain names pass: no control
+    characters, no path separators but a directory's trailing slash, no hidden names."""
+    if not isinstance(value, dict) or set(value) != {"pads", "root"}:
+        return None
+    for key, names in value.items():
+        if not isinstance(names, list) or len(names) > _SAVED_NAMES_LIMIT:
+            return None
+        for name in names:
+            if not isinstance(name, str) or not 0 < len(name) <= _NAME_LIMIT:
+                return None
+            bare = name[:-1] if key == "root" and name.endswith("/") else name
+            if not bare or bare.startswith(".") or "/" in bare or any(
+                    ord(c) < 32 or ord(c) == 127 for c in bare):
+                return None
+    return {"pads": list(value["pads"]), "root": list(value["root"])}
+
+
+def render_workspace_discovery(names: dict) -> str:
+    """The workspace block for `names` (see `workspace_discovery_names`)."""
+    pads_line = ""
+    known = names.get("pads") or []
+    if known:
+        shown = known[:_DISCOVERY_MAX_PADS]
+        # Names only: no snapshot age, no live/active flag. Both changed
+        # between turns without the workspace changing.
+        more = (
+            f" … and {len(known) - len(shown)} more"
+            if len(known) > len(shown)
+            else ""
+        )
+        pads_line = (
+            "\nScratchpads for this conversation: "
+            + ", ".join(shown)
+            + more
+            + " — reuse via scratchpad exec with the same name; each name is a "
+            "separate environment."
+        )
+    root_line = ""
+    entries = names.get("root") or []
+    if entries:
+        shown_entries = entries[:_DISCOVERY_MAX_ROOT_ENTRIES]
+        more = (
+            f" … and {len(entries) - len(shown_entries)} more"
+            if len(entries) > len(shown_entries)
+            else ""
+        )
+        root_line = "\nProject root: " + ", ".join(shown_entries) + more
+    if not pads_line and not root_line:
+        return ""
+    # The session pins this block for the conversation, so say when it is from.
+    return "\n\nWorkspace state when this conversation started:" + pads_line + root_line
+
+
 def build_workspace_discovery_context(manager) -> str:
     """Compact turn-start block: known pads + project-root names (ENG-578).
 
@@ -632,58 +780,7 @@ def build_workspace_discovery_context(manager) -> str:
     anything that varies while that set is unchanged re-writes the conversation
     cache on the next turn.
     """
-    pads_line = ""
-    try:
-        known = sorted(manager.agent_pads())
-        if known:
-            shown = known[:_DISCOVERY_MAX_PADS]
-            # Names only: no snapshot age, no live/active flag. Both changed
-            # between turns without the workspace changing.
-            more = (
-                f" … and {len(known) - len(shown)} more"
-                if len(known) > len(shown)
-                else ""
-            )
-            pads_line = (
-                "\nScratchpads for this conversation: "
-                + ", ".join(shown)
-                + more
-                + " — reuse via scratchpad exec with the same name; each name is a "
-                "separate environment."
-            )
-    except Exception:
-        pads_line = ""
-
-    root_line = ""
-    try:
-        root = manager.workspace_path
-        if root is not None:
-            # Hidden entries are excluded deliberately: this block ships to
-            # the model, and filenames hinting at secret locations (.env,
-            # .aws) don't belong in LLM-visible context — even names-only.
-            # scandir rather than iterdir+is_dir: dir-ness comes from the
-            # dirent for free instead of a stat per entry, and this runs
-            # every turn. Full iteration is inherent to a sorted first-30.
-            with os.scandir(root) as it:
-                entries = sorted(
-                    entry.name + ("/" if entry.is_dir() else "")
-                    for entry in it
-                    if not entry.name.startswith(".")
-                )
-            if entries:
-                shown_entries = entries[:_DISCOVERY_MAX_ROOT_ENTRIES]
-                more = (
-                    f" … and {len(entries) - len(shown_entries)} more"
-                    if len(entries) > len(shown_entries)
-                    else ""
-                )
-                root_line = "\nProject root: " + ", ".join(shown_entries) + more
-    except Exception:
-        root_line = ""
-
-    if not pads_line and not root_line:
-        return ""
-    return "\n\nWorkspace state:" + pads_line + root_line
+    return render_workspace_discovery(workspace_discovery_names(manager))
 
 
 def observe_scratchpad_cell(session, name: str, cell) -> None:

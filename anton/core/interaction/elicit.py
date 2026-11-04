@@ -50,6 +50,9 @@ MAX_QUESTIONS_PER_TURN = 8
 # model should narrow the question instead.
 MIN_OPTIONS = 2
 MAX_OPTIONS = 10
+# A host-built approval card (`ApprovalRequest`) may offer more: room for
+# fifteen of a person's apps plus Cancel.
+MAX_APPROVAL_OPTIONS = 16
 
 # The `answer_hint` of every host that renders a question as a card with
 # buttons, a free-form input and a Skip control (cowork desktop and web).
@@ -112,6 +115,17 @@ class AskRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class ApprovalRequest(AskRequest):
+    """A host-built single-choice approval, with room for fifteen apps and Cancel.
+
+    Model questions remain AskRequest and keep MAX_OPTIONS. Approval callers
+    cannot supply a default or accept free text in place of a chosen action.
+    """
+
+    allow_custom: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class AskAnswer:
     """The outcome of one question.
 
@@ -156,9 +170,14 @@ def validate_request(request: AskRequest) -> bool:
     """
     if not (request.prompt or "").strip():
         return False
+    limit = MAX_OPTIONS
+    if isinstance(request, ApprovalRequest):
+        if request.kind != "choice" or request.select != "one" or request.allow_custom or request.default_value:
+            return False
+        limit = MAX_APPROVAL_OPTIONS
     if request.kind != "choice":
         return True
-    if not MIN_OPTIONS <= len(request.options) <= MAX_OPTIONS:
+    if not MIN_OPTIONS <= len(request.options) <= limit:
         return False
     if request.select not in ("one", "many"):
         return False

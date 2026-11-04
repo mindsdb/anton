@@ -91,7 +91,9 @@ def _system_of(api: str, body: dict) -> str:
         return body["messages"][0]["content"]
     if api == RESPONSES:
         return body["instructions"]
-    return body["system"]
+    # Messages sends the system prompt as cache-marked text blocks.
+    system = body["system"]
+    return system if isinstance(system, str) else "".join(block["text"] for block in system)
 
 
 def _effort_of(api: str, body: dict) -> str | None:
