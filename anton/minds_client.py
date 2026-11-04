@@ -433,6 +433,8 @@ def describe_minds_request_failure(err: BaseException) -> str | None:
     Names the request, the HTTP status and the server's own message, then what
     to check. The agent reads this line, so it reports what was observed and
     never offers a cause (an outage, a removed tool) that nothing here shows.
+    The server's words are quoted and anton's advice is labelled as anton's,
+    so a reader cannot repeat the advice as something the server said.
     None when `err` did not come out of `minds_request` (a local failure before
     any request was sent), so callers show `str(err)` instead.
     """
@@ -442,8 +444,11 @@ def describe_minds_request_failure(err: BaseException) -> str | None:
     if isinstance(err, urllib.error.HTTPError):
         body = getattr(err, "body", None)
         detail = _error_body_message(body) if isinstance(body, bytes) else None
-        answer = f"HTTP {err.code}: {detail}" if detail else f"HTTP {err.code} {err.reason or ''}".rstrip()
-        return f"{request_line} returned {answer}. {_http_failure_hint(err.code)}"
+        if detail:
+            answer = f'HTTP {err.code}. The server said: "{detail}".'
+        else:
+            answer = f"HTTP {err.code} {err.reason or ''}".rstrip() + "."
+        return f"{request_line} returned {answer} Anton's note: {_http_failure_hint(err.code)}"
     headline, _advice = describe_minds_connection_error(err)
     return (
         f"{request_line} got no response. {headline} "
@@ -453,14 +458,14 @@ def describe_minds_request_failure(err: BaseException) -> str | None:
 
 def _http_failure_hint(status: int) -> str:
     if status == 401:
-        return "The API key was rejected: check ANTON_MINDS_API_KEY."
+        return "the API key was rejected; check ANTON_MINDS_API_KEY."
     if status == 403:
-        return "The server refused this key for this action."
+        return "the server refused this key for this action."
     if status == 404:
-        return "Nothing answers at that URL for this key: check the URL and the id in it."
+        return "nothing answers at that URL for this key; check the URL and the id in it."
     if 400 <= status < 500:
-        return "The server refused the request."
-    return "The server reported an error; nothing here shows its cause."
+        return "the server refused the request."
+    return "the server reported an error; nothing here shows its cause."
 
 
 def test_llm(

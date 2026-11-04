@@ -99,8 +99,8 @@ async def test_publish_tool_names_the_request_status_and_server_message(tmp_path
 
     out = await _tool_publish(tmp_path, base)
 
-    assert out.startswith(f"PUBLISH FAILED: POST {base}/upload returned HTTP 401: Invalid token.")
-    assert "ANTON_MINDS_API_KEY" in out
+    assert out.startswith(f'PUBLISH FAILED: POST {base}/upload returned HTTP 401. The server said: "Invalid token".')
+    assert out.endswith("Anton's note: the API key was rejected; check ANTON_MINDS_API_KEY.")
 
 
 @pytest.mark.asyncio
@@ -130,7 +130,7 @@ async def test_server_text_is_not_read_as_console_markup(tmp_path, server):
 
     out = await _tool_publish(tmp_path, base)
 
-    assert "HTTP 400: bad [/bold] value" in out
+    assert 'HTTP 400. The server said: "bad [/bold] value"' in out
 
 
 def test_another_owners_409_is_still_typed(tmp_path, server):
@@ -202,7 +202,7 @@ def test_long_server_text_keeps_its_end(server):
         minds_request(f"{base}/upload", "key", method="POST", payload=b"{}")
 
     line = describe_minds_request_failure(caught.value)
-    assert line.endswith("no matching dist. The server refused the request.")
+    assert line.endswith('no matching dist". Anton\'s note: the server refused the request.')
     assert len(line) < 700
 
 
@@ -262,7 +262,7 @@ async def test_slash_publish_names_the_request_and_server_message(tmp_path, serv
          mock.patch("webbrowser.open"):
         await chat._handle_publish(console, _chat_settings(tmp_path, base), file_arg="sales/report.html")
 
-    assert f"Publish failed: POST {base}/upload returned HTTP 400: bad [/bold] value." in console.export_text()
+    assert f'Publish failed: POST {base}/upload returned HTTP 400. The server said: "bad [/bold] value".' in console.export_text()
 
 
 @pytest.mark.asyncio
@@ -282,7 +282,7 @@ async def test_slash_publish_401_names_the_request_and_still_drops_the_key(tmp_p
         await chat._handle_publish(console, settings, file_arg="sales/report.html")
 
     assert (
-        f"Publish failed: POST {base}/upload returned HTTP 401: Token expired at auth gateway."
+        f'Publish failed: POST {base}/upload returned HTTP 401. The server said: "Token expired at auth gateway".'
         in console.export_text()
     )
     assert settings.minds_api_key is None
@@ -296,7 +296,7 @@ async def test_slash_unpublish_names_the_failed_listing(tmp_path, server):
 
     await chat._handle_unpublish(console, _chat_settings(tmp_path, base), mock.Mock())
 
-    assert f"Failed to list reports: GET {base}/list returned HTTP 500: [/oops] listing broke." in console.export_text()
+    assert f'Failed to list reports: GET {base}/list returned HTTP 500. The server said: "[/oops] listing broke".' in console.export_text()
 
 
 @pytest.mark.asyncio
@@ -311,4 +311,4 @@ async def test_slash_unpublish_names_the_failed_delete(tmp_path, server):
     with mock.patch("anton.chat.prompt_or_cancel", new=mock.AsyncMock(side_effect=["1", "y"])):
         await chat._handle_unpublish(console, _chat_settings(tmp_path, base), mock.Mock())
 
-    assert f"Failed to remove: DELETE {base}/delete/247c4983 returned HTTP 404: Report [/x] not found." in console.export_text()
+    assert f'Failed to remove: DELETE {base}/delete/247c4983 returned HTTP 404. The server said: "Report [/x] not found".' in console.export_text()
