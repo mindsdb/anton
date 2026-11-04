@@ -190,6 +190,11 @@ class AntonSettings(CoreSettings):
     posthog_host: str = "https://us.i.posthog.com"
     posthog_key: str = "phc_ypFMKbvAwRsLuDCToox2AkEg5wx6ReBfkyi3kX2zw6VK"
 
+    # Names the deployment that sent an event (`prod`, `staging`, `dev`, ...).
+    # Set by the host that knows it; empty wherever none does, such as the CLI,
+    # so empty means "unknown", never "prod".
+    deployment_env: str = ""
+
     # Minds datasource integration
     minds_api_key: str | None = None
     minds_url: str = "https://mdb.ai"
