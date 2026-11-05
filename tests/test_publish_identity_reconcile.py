@@ -204,6 +204,8 @@ def test_reconciliation_is_actually_wired_into_boot(tmp_path):
         ),
         mock.patch.object(cli_mod, "_ensure_workspace", ensure_workspace),
         mock.patch.object(cli_mod, "_ensure_terms_consent"),
+        # Real boot logging stops anton.usage propagating, which hides usage lines from later tests.
+        mock.patch("anton.diagnostics.configure_logging"),
         mock.patch("anton.updater.check_and_update", return_value=False),
         mock.patch("anton.analytics.send_event"),
     ):
