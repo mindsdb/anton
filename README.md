@@ -109,9 +109,9 @@ Anton exposes two web tools to the agent — `web_search` and `web_fetch` — bo
 | Anthropic BYOK | Anthropic native server tool | Anthropic native server tool | None — billed on your Anthropic key |
 | OpenAI BYOK | OpenAI Responses API native | covered by `web_search` | None — billed on your OpenAI key |
 | MindsHub Model Router | passthrough | passthrough | None — billed on your MindsHub API key |
-| Generic OpenAI-compatible (Together, Groq, Ollama, vLLM, …) | Exa.ai or Brave (you choose at setup) | stdlib HTTP GET (no key) | Run `anton setup-search` once |
+| Generic OpenAI-compatible (Together, Groq, Ollama, vLLM, …) | Parallel Search MCP (free, no key), or Exa.ai / Brave by choice | stdlib HTTP GET (no key) | None for Parallel; `anton setup-search` to choose |
 
-For the first three rows there's nothing to configure — the LLM provider executes the tools server-side and the results are folded directly into its response. For the fourth row, after `anton setup` finishes configuring a custom OpenAI-compatible endpoint Anton will offer to set up Exa or Brave; you can also (re)run that step at any time with `anton setup-search`. The chosen search-provider key is persisted to `~/.anton/.env` so it carries across sessions and workspaces, exactly like your LLM key.
+For the first three rows the LLM provider executes the tools server-side. On a generic endpoint, Anton sends search queries to [Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp) by default. This free route needs no Parallel account or key and is rate limited. Run `anton setup-search` to select Exa or Brave with your own key, or to disable search. Explicit choices persist in `~/.anton/.env`.
 
 To opt out, set `ANTON_WEB_SEARCH_ENABLED=false` and/or `ANTON_WEB_FETCH_ENABLED=false`.
 
