@@ -6,12 +6,13 @@ neither has to re-derive it — only the task-specific instructions differ.
 
 from __future__ import annotations
 
-from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES_ORDERED
-# The heading `build_datasource_context` renders, so the kickoff reads the same
-# whether or not anything is connected.
-from anton.utils.datasources import DATASOURCES_HEADER
+import os
+
+from anton.core.artifacts.geography_guidance import GEOGRAPHY_GUIDANCE
+from anton.core.llm.prompts import ANTON_NOTE
 
 from ..attachments import render_for_gathering
+from ..prompts import KNOWN_DATA_HEADER, datasources_or_none, with_project_rules
 from .state import PrdState
 
 
@@ -22,10 +23,27 @@ def build_pipeline_system_prompt(state: PrdState) -> str:
     current artifact type, the remaining question budget, the instruction for
     the step being executed — arrives as a user message instead, because
     rewriting this string at a phase switch would discard the prefix cache
-    for the whole shared history.
+    for the whole shared history. The project's rules qualify: they are read
+    once per run, before this is first built.
     """
-    types_list = ", ".join(f"`{t}`" for t in GENERATOR_ARTIFACT_TYPES_ORDERED)
-    return (
+    types = state.buildable_types
+    types_list = ", ".join(f"`{t}`" for t in types)
+    fullstack_choice = (
+        "\n\nChoosing between the two fullstack types: pick "
+        "`fullstack-stateful-app` ONLY when the app must own durable state "
+        "of its own — data the app itself creates and keeps between "
+        "requests (user-created notes/todos, counters, settings, sessions). "
+        "That state lives in the platform STATE store, a document/key-value "
+        "store suited to LIGHT data keyed by id. An app that only reads "
+        "from or writes to EXTERNAL data sources (databases, APIs) is "
+        "`fullstack-stateless-app` — an external DB is a data source, not "
+        "app-owned state. Heavy or relational data (joins, transactions, "
+        "analytics) always belongs in an external database, which usually "
+        "means stateless. Prefer stateless when in doubt."
+        if "fullstack-stateless-app" in types
+        else ""
+    )
+    return with_project_rules(
         "You are producing a web artifact end to end, in one pipeline of "
         "steps. Each step has its own output — do not do the next step's "
         "work early:\n"
@@ -48,18 +66,10 @@ def build_pipeline_system_prompt(state: PrdState) -> str:
         "standing orders. The tool list stays the same for the whole "
         "pipeline; a tool being listed does NOT mean it is available on the "
         "current step. Calling one that is not available wastes a round and "
-        "is answered with a refusal naming the step.\n\n"
-        "Choosing between the two fullstack types: pick "
-        "`fullstack-stateful-app` ONLY when the app must own durable state "
-        "of its own — data the app itself creates and keeps between "
-        "requests (user-created notes/todos, counters, settings, sessions). "
-        "That state lives in the platform STATE store, a document/key-value "
-        "store suited to LIGHT data keyed by id. An app that only reads "
-        "from or writes to EXTERNAL data sources (databases, APIs) is "
-        "`fullstack-stateless-app` — an external DB is a data source, not "
-        "app-owned state. Heavy or relational data (joins, transactions, "
-        "analytics) always belongs in an external database, which usually "
-        "means stateless. Prefer stateless when in doubt."
+        "is answered with a refusal naming the step."
+        + fullstack_choice
+        + "\n\n" + GEOGRAPHY_GUIDANCE,
+        state.project_rules,
     )
 
 
@@ -107,15 +117,13 @@ def build_call_kickoff(state: PrdState) -> str:
     # backend generator receive (`build_datasource_context`): slugs and
     # DS_* names, never values. Without it a request over "the orders table"
     # sends the gathering model looking for connections blind.
-    connections = (state.datasource_context or "").strip() or (
-        f"{DATASOURCES_HEADER}\n(none)"
-    )
+    connections = datasources_or_none(state)
     pads = (state.scratchpads_context or "").strip()
     attached = render_for_gathering(state.attachments)
     return (
         f"## User request\n{state.user_request}\n\n"
         f"## Agent's understanding\n{state.agent_understanding}\n\n"
-        f"## Known data\n{state.known_data or '(none provided)'}\n\n"
+        f"{KNOWN_DATA_HEADER}\n{state.known_data or '(none provided)'}\n\n"
         + (f"{attached}\n\n" if attached else "")
         + (f"{pads}\n\n" if pads else "")
         + f"## User preferences\n{state.user_preferences or '(none known)'}\n\n"
@@ -163,11 +171,16 @@ GATHERING_CONTINUE = (
     "Continue gathering: call `finish_gathering` again once ready."
 )
 
-# No language rule here on purpose. With an all-English context, "write in
-# the language of the user request" made the model pick an unrelated language
-# (Russian, Spanish) for these notes, and the brief and the PRD continued in
-# it. The brief carries its own language rule and follows the request without
-# this one.
+# Sent only with the retry of a discovery call the output budget cut off. The
+# cut reply is not in the conversation, so "continue" would have nothing to
+# continue from: the model is asked for the whole reply again, compactly.
+DISCOVERY_TRUNCATED_NUDGE = (
+    f"{ANTON_NOTE} Your previous reply to this step ran out of its output-token budget "
+    "and was discarded. Reply to the step again, in full. Keep your deliberation "
+    "brief and the reply compact. If the step needs a tool call, make it right "
+    "away and keep its arguments small."
+)
+
 _GATHERING_TEMPLATE = (
     "## Your task\n"
     "Answer three questions and record the answers with `finish_gathering`:\n"
@@ -176,8 +189,11 @@ _GATHERING_TEMPLATE = (
     "obtain a real sample in this step (scratchpad for databases, files and "
     "APIs — in a pad listed under `## Scratchpads already in this session` "
     "when there is one; web_fetch for pages) and record its shape in "
-    "`data_findings`. A data file under `## Attached files` is such a "
-    "source: read it in the scratchpad from the absolute path listed there. "
+    "`data_findings`. For an `html-app` whose rows or values are already "
+    "under `" + KNOWN_DATA_HEADER + "`, record "
+    "`verified_by: \"known_data\"` instead of fetching them again. A data "
+    "file under `## Attached files` is an external source too: read it in "
+    "the scratchpad from the absolute path listed there. "
     "If the artifact reads no external data, say so in `summary`.\n"
     "3. Open points — places where the request itself is ambiguous and only "
     "the user can settle it. Not ideas for extra features: a feature nobody "
@@ -197,11 +213,17 @@ _GATHERING_TEMPLATE = (
     "chose) or as an `open_point` (the user chooses, with your default) — "
     "never in both lists.\n"
     "{when_to_ask}"
-    "- A source is verified only if you ran code against it or fetched the "
-    "page in this step. A source you name in `data_sources` but did not "
-    "touch is fetched before generation starts — naming one is how you "
-    "request that.\n"
-    "- Keep the whole `finish_gathering` call under about 30 lines.\n\n"
+    "- A source is verified if you ran code against it or fetched the page "
+    "in this step, or — for an `html-app` — if its rows or values "
+    "themselves are already under `" + KNOWN_DATA_HEADER + "`: then record "
+    "`verified_by: \"known_data\"` and do not fetch it again. A description "
+    "of the data (where it lives, its columns) without the values does not "
+    "count. A source you name in `data_sources` that is not verified is "
+    "fetched before generation starts — naming one is how you request "
+    "that.\n"
+    "- Keep the whole `finish_gathering` call under about 30 lines.\n"
+    "- Keep names of tables, fields, files and APIs as they are, whatever "
+    "language you write in.\n\n"
     "## When there is no external data\n"
     "Call `finish_gathering` at once: no scratchpad, no web search, no "
     "description of the page."
@@ -226,7 +248,27 @@ _WHEN_TO_ASK_ACT_FIRST = (
 )
 
 
-def _gathering_instruction(act_first: bool) -> str:
+def _gathering_instruction(act_first: bool, *, static_completion: bool = False) -> str:
+    if act_first and os.environ.get("ANTON_STATIC_FAST_PATH") == "direct":
+        return (
+            "Gather the evidence needed to build the ORIGINAL user request. Use the connected "
+            "source's documented API and credentials from the catalog. Reuse an existing "
+            "scratchpad when present. Fetch ALL records/fields needed for the views, not just a "
+            "schema sample or head(). Compute exact requested aggregates with Python. Save the "
+            "complete relevant rows and exact calculated figures as canonical observed-data.json "
+            "in the artifact folder, with units, filters and time scope; print only a short "
+            "manifest. Do not print credentials. Batch independent queries in one cell when "
+            "practical. A row count or summary does not substitute for records the page must "
+            "display. Check for truncation; retrieve the remaining records or report the gap. "
+            + ("For a resolved static request, include complete_static_artifact in the scratchpad "
+               "exec; the host completes gathering after validating the fresh handoff. "
+               if static_completion else
+               "Once the required data is observed, immediately call finish_gathering and declare the "
+               "type and sources. ")
+            + "Do not draft a brief, PRD, design or implementation plan. Do not add "
+            "requirements or ask for preferences the request does not need. For a backend that "
+            "must query data at runtime, verify its access with a real sample and finish."
+        )
     return _GATHERING_TEMPLATE.format(
         when_to_ask=_WHEN_TO_ASK_ACT_FIRST if act_first else _WHEN_TO_ASK,
     )
@@ -246,7 +288,11 @@ _REDRAW_RESTATE = (
     "Then call `finish_gathering` to re-state the artifact type and the data "
     "sources the corrected artifact needs. This is REQUIRED: if the "
     "correction introduces a source nobody has fetched yet, that call is the "
-    "only thing that will cause it to be fetched."
+    "only thing that will cause it to be fetched. For each source declared "
+    "earlier that the corrected artifact still needs, use exactly the name it "
+    "was declared with, whatever language you write in. For a source whose "
+    "rows or values are under `" + KNOWN_DATA_HEADER + "`, also pass a "
+    "`data_findings` entry with `verified_by: \"known_data\"`."
 )
 
 _REDRAW_CORRECTION_ACT_FIRST = (
@@ -263,7 +309,7 @@ def _redraw_suffix(act_first: bool) -> str:
     return (_REDRAW_CORRECTION_ACT_FIRST if act_first else _REDRAW_CORRECTION) + _REDRAW_RESTATE
 
 
-def _step_instructions(act_first: bool = False) -> dict[str, str]:
+def _step_instructions(act_first: bool = False, *, static_completion: bool = False) -> dict[str, str]:
     """Built lazily so the instruction texts stay in the modules that own
     them — brief.py and prd.py — rather than being copied here. `act_first`
     picks the variants for the no-confirmation flow; they live in step
@@ -273,7 +319,7 @@ def _step_instructions(act_first: bool = False) -> dict[str, str]:
     from . import sub_tools
 
     return {
-        sub_tools.STEP_GATHERING: _gathering_instruction(act_first),
+        sub_tools.STEP_GATHERING: _gathering_instruction(act_first, static_completion=static_completion),
         sub_tools.STEP_DRAFT_BRIEF: draft_brief_instruction(act_first),
         sub_tools.STEP_REDRAW_BRIEF: draft_brief_instruction(act_first) + _redraw_suffix(act_first),
         sub_tools.STEP_WRITE_PRD: _WRITE_PRD_INSTRUCTION,
@@ -284,21 +330,27 @@ def step_message(step: str, state: PrdState, *, extra: str = "") -> str:
     """The user message that switches the pipeline to `step`.
 
     Carries every mutable value the step needs — current artifact type,
-    remaining question budget — because the system prompt cannot.
+    user language, remaining question budget — because the system prompt
+    cannot.
     """
-    from ..state import gathering_question_budget
+    from ..state import gathering_question_budget, language_name
     from . import sub_tools
 
+    language = language_name(state.user_language)
     header = (
         f"STEP: {step}\n"
         f"Current artifact type: {state.final_artifact_type or state.artifact_type}\n"
+        f"User language: {language}. Write everything meant for the user, and "
+        f"every note and document, in {language}, even where earlier messages "
+        "use another language.\n"
     )
     if step == sub_tools.STEP_GATHERING:
         header += (
             "Questions you may still ask the user: "
             f"{gathering_question_budget(state.session, act_first=state.act_first)}\n"
         )
-    body = _step_instructions(state.act_first)[step]
+    from .. import static_gathering
+    body = _step_instructions(state.act_first, static_completion=static_gathering.enabled(state))[step]
     # No history to continue → the step is handed the restored material
     # instead. The redraw suffix in particular refers to a correction that is
     # only "above" when there is a conversation above.

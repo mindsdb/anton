@@ -13,6 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import pytest
+
 from anton.core.llm.provider import StreamComplete
 from anton.core.tools.generate_artifact import engine, orchestrator, prompts
 from anton.core.tools.generate_artifact.state import (
@@ -305,6 +307,39 @@ def test_declared_api_paths_come_from_the_backend_section_only():
     assert engine._declared_api_paths("## Product requirements\nX") == {}
 
 
+def test_declared_api_paths_drop_markdown_punctuation_and_query():
+    """The paths are quoted back to the model to copy character for
+    character, so bold markers, a sentence's full stop and a query string
+    must not become part of a path."""
+    section = (
+        "## Backend\n"
+        "- **GET /api/poll**: current results.\n"
+        "- Then GET /api/results.\n"
+        "- POST /api/vote?option=Pizza records a vote.\n"
+    )
+    assert engine._declared_api_paths(section) == {
+        "/api/poll": "/api/poll",
+        "/api/results": "/api/results",
+        "/api/vote": "/api/vote",
+    }
+
+
+@pytest.mark.parametrize("line, path", [
+    ("- **GET** /api/poll", "/api/poll"),
+    ("- GET `/api/poll`", "/api/poll"),
+    ('- "GET /api/poll"', "/api/poll"),
+    ("- [GET /api/poll]", "/api/poll"),
+    ("- GET /api/poll! Then vote", "/api/poll"),
+    ("- `GET /api/files/{file_path:path}`", "/api/files/{file_path:path}"),
+    ("- GET /api/items/:id", "/api/items/{id}"),
+    ("- GET /api/v1.2/items.", "/api/v1.2/items"),
+])
+def test_declared_api_paths_take_the_whole_path_and_nothing_after_it(line, path):
+    """A path that is missed or cut is quoted to the model as exact, and the
+    check then rejects any path it did not list."""
+    assert list(engine._declared_api_paths("## Backend\n" + line + "\n").values()) == [path]
+
+
 def _doc(*paths: str) -> dict:
     return {"paths": {p: {"get": {"responses": {"200": {}}}} for p in paths}}
 
@@ -329,6 +364,45 @@ def test_api_spec_problem_rejects_paths_that_differ_from_spec_md():
     assert p(renamed, {}) is None
 
 
+def test_api_spec_problem_names_every_missing_and_extra_path():
+    """The node retries once: a message naming only the first mismatch
+    leaves every other one for a retry it doesn't have."""
+    declared = engine._declared_api_paths(_BACKEND_SECTION)
+    off = _doc("/api/rooms", "/api/rooms/{code}", "/api/stats", "/api/players")
+    problem = engine._api_spec_problem(off, declared)
+    for path in ("/api/rooms/{code}/state", "/api/rooms/{code}/action"):
+        assert f"`{path}`" in problem.split("; the document adds")[0]
+    for path in ("/api/rooms/{code}", "/api/stats", "/api/players"):
+        assert f"`{path}`" in problem.split("; the document adds")[1]
+
+
+async def test_the_api_spec_step_sees_the_spec_it_copies_its_paths_from(tmp_path):
+    """Hot path: `make_api_spec` continues the shared history, and its
+    instruction alone tells it to keep every path "exactly as `spec.md`
+    writes it". The spec step sent the spec from a copy of that history and
+    kept only the file, so the API step never saw the spec it was told to
+    copy. Through the real planning call, both steps on one fake model."""
+    spec = _BACKEND_SECTION.removeprefix("## Technical specification\n")
+    api = json.dumps({"openapi": "3.0.0", "paths": {
+        "/api/rooms": {"post": {"responses": {"201": {}}}},
+        "/api/rooms/{code}/state": {"get": {"responses": {"200": {}}}},
+        "/api/rooms/{code}/action": {"post": {"responses": {"200": {}}}},
+    }})
+    session = AsyncMock()
+    session._llm.plan_stream = _stream_mock(
+        _response(spec, output_tokens=10), _response(api, output_tokens=10),
+    )
+    state = _state(tmp_path, session=session, artifact_type="fullstack-stateless-app", is_fullstack=True)
+    state.messages = [{"role": "user", "content": "kickoff"}, {"role": "assistant", "content": "# PRD"}]
+
+    assert await orchestrator._write_tech_spec(state) is None
+    assert await orchestrator._make_api_spec(state) is None
+
+    api_messages = session._llm.plan_stream.call_args_list[1].kwargs["messages"]
+    assert {"role": "assistant", "content": spec.strip()} in api_messages[:-1]
+    assert api_messages[-1]["content"].startswith(prompts.build_api_spec_instruction(stateless=True))
+
+
 async def test_a_renamed_path_is_sent_back_with_spec_md_quoted():
     calls: list[str] = []
 
@@ -345,6 +419,29 @@ async def test_a_renamed_path_is_sent_back_with_spec_md_quoted():
     assert "## Previous reply rejected" in calls[1]
     assert "`spec.md` lists `/api/rooms/{code}/state`" in calls[1]
     assert '"/api/rooms/{code}/state"' in out
+
+
+async def test_the_first_api_spec_request_already_names_the_exact_paths():
+    """Told only to copy the paths from spec.md, the model renamed them on the
+    first attempt in most live runs; the list must not wait for a rejection."""
+    calls: list[str] = []
+
+    def _capture(*, system, messages, max_tokens=None, tools=None):
+        calls.append(messages[-1]["content"])
+        doc = _doc("/api/rooms", "/api/rooms/{code}/state", "/api/rooms/{code}/action")
+        return _one_event_stream(_response(json.dumps(doc), output_tokens=50))
+
+    session = SimpleNamespace(_llm=SimpleNamespace(plan_stream=Mock(side_effect=_capture)))
+    out = await engine._generate_api_spec(
+        session, _BACKEND_SECTION, messages=[{"role": "user", "content": "kickoff"}],
+        system_override="pipeline-system",
+    )
+    assert not out.startswith("Error:")
+    assert len(calls) == 1
+    assert (
+        "`paths` must be exactly these, character for character: `/api/rooms`, "
+        "`/api/rooms/{code}/state`, `/api/rooms/{code}/action`"
+    ) in calls[0]
 
 
 async def test_a_recovered_tech_spec_is_written_normally(tmp_path: Path):

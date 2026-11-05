@@ -211,7 +211,9 @@ async def test_a_path_component_that_is_too_long_gives_a_verdict(session):
 async def test_a_partial_session_falls_back_to_the_working_directory(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "a.txt").write_text("x\n")
-    out = await handle_read_text_file(AsyncMock(), {"path": "a.txt"})
+    session = AsyncMock()
+    session._scratchpads.cell_sandbox = None
+    out = await handle_read_text_file(session, {"path": "a.txt"})
     assert out.ok is True
 
 

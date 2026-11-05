@@ -814,7 +814,7 @@ class TestWebFetchDoesNotPoisonTheErrorStreak:
     def _run(self, results):
         """Feed (text, ok) pairs through the REAL streak tracker."""
         from anton.core.session import ChatSession
-        from anton.core.llm.prompts import RESILIENCE_NUDGE
+        from anton.core.llm.prompts import ANTON_NOTE, RESILIENCE_NUDGE
         sess, streak, nudged = self._session(), {}, set()
         nudge = breaker = False
         for text, ok in results:
@@ -822,7 +822,7 @@ class TestWebFetchDoesNotPoisonTheErrorStreak:
                 sess, text, "web_fetch", streak, nudged, ok=ok
             )
             nudge = nudge or RESILIENCE_NUDGE in out
-            breaker = breaker or "SYSTEM: The 'web_fetch' tool has failed" in out
+            breaker = breaker or f"{ANTON_NOTE} The 'web_fetch' tool has failed" in out
         return streak.get("web_fetch", 0), nudge, breaker
 
     def test_successful_pages_mentioning_failure_do_not_climb(self):

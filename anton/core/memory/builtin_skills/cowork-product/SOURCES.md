@@ -29,5 +29,8 @@ fails automatically when that code changes, so re-check these when touching:
   the `RoleRow` calls in the `Model Router` group, and
   `defaultModeProviderType` in `SettingsView.jsx`
 - the server-rejection limitation — `_translate_tool_choice` in
-  `anton/core/llm/openai.py` sends a named `tool_choice` with no unforced
-  fallback; remove that bullet when the verifier gains one
+  `anton/core/llm/openai.py` sends a named `tool_choice`. `send_structured` in
+  `anton/core/llm/structured.py` resends a refused one unforced only when the
+  400 names `tool_choice` (`refuses_forced_tool_choice`); a server whose refusal
+  says something else still fails the verifier, so the bullet stays until
+  every refusal gets the fallback

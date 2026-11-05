@@ -188,15 +188,31 @@ These are the same checks `generate_artifact` runs on its own output (see the `#
     from anton_state import Collection
     todos = Collection(get_store(), "todos")
     await todos.put("id1", {"text": "buy milk"})     # pk defaults to one partition
+    item = await todos.get("id1")                       # None if missing; an item written by put also carries pk, sk, _key, _v
     items = await todos.list()                          # all items in the collection
     n = await Collection(get_store(), "counters").increment("visits", field="n")
+    ```
+    CHANGE A STORED DOCUMENT by reading it, modifying it and putting it back with the `_v` it was read with. If another request wrote in between, the put raises `ConditionalCheckFailed` and writes nothing, instead of silently overwriting that write; answer 409. Handle a missing document first, and make sure some endpoint creates it, e.g. a "new game" route calling `await games.put("current", new_game(), if_not_exists=True)`; until then this route answers 404:
+    ```python
+    from fastapi import HTTPException
+    from anton_state import ConditionalCheckFailed
+
+    games = Collection(get_store(), "games")
+    game = await games.get("current")
+    if game is None:
+        raise HTTPException(status_code=404, detail="no game")
+    game["moves"].append(cell)
+    try:
+        await games.put("current", game, if_version=game["_v"])
+    except ConditionalCheckFailed:
+        raise HTTPException(status_code=409, detail="state changed, reload")
     ```
     Low-level `store` methods (all async; NO `scan()` / "list everything"):
     * `await store.get(pk, sk=None)` → one item or `None`
     * `await store.put(item)` → write (dict MUST include `pk` and, if the schema has a sort key, `sk`); `_v` is set by the store — never set it yourself
     * `await store.delete(pk, sk=None)`
     * `await store.query(pk, *, sk_prefix=None, filters=None, limit=None)` → items sharing partition key `pk` (NO secondary indexes in v1 — there is no `index=` argument)
-    * `await store.increment(pk, sk=None, *, field, by=1)` → atomic counter (use this for counters; do NOT hand-roll read-modify-write)
+    * `await store.increment(pk, sk=None, *, field, by=1)` → atomic counter (use this for counters; never read-modify-write a counter by hand)
     * `await store.update(pk, sk=None, *, set_fields=None, add_fields=None, if_version=None)` → atomic partial update
     DESIGN KEYS AROUND ACCESS PATTERNS: every "list" must map to a single `query(pk=...)` (or `Collection.list()`). Do NOT call the store in a loop — collect with one `query`. Do NOT wrap a STATE mutation (`put`/`delete`/`increment`/`update`) in your own retry loop: on a timeout the outcome is unknown and a retry can double-apply — surface the error instead.
 
@@ -205,7 +221,7 @@ These are the same checks `generate_artifact` runs on its own output (see the `#
   - Include all CSS and JS inlined (no external file references)
   - MANDATORY: call `recall_skill("build-html-dashboard")` and apply its full HTML output contract to the frontend — it is the single source of truth for dashboard/chart HTML, including the HOST CONTRACT list of static checks (explicit `<body>`, viewport meta, no root-relative `src`/`href`/`fetch()`/`new EventSource()`, closed `<script>` blocks, no `window.__antonCommentsLayer`, no universal `* { !important }`, `z-index` <= 1000, stable `id` attributes on significant blocks, only the Tailwind and ECharts CDNs). Only if that skill cannot be recalled, fall back to these defaults: single self-contained HTML file; Tailwind CSS and Apache ECharts via CDN; dark theme #0d1117; responsive layout with a viewport meta tag.
   - The frontend calls ONLY the endpoints of the technical specification from step 2, spelled exactly as the backend registers them (same method, same path segments). Keep the two in sync: a `fetch()` to a path the backend does not serve is a 404 at runtime that no static check catches on this path.
-  - UI text and the `<html lang>` attribute follow the language the user writes in.
+  - UI text and the `<html lang>` attribute follow the language the user writes in, unless they ask for another language for the page.
   - Save the entry-point to `<artifact_path>/static/index.html` (create the `static/` subfolder if needed). ANY additional frontend assets that don't end up inlined into `index.html` (separate CSS, JS, images, fonts, large data .js payloads, and any file the user uploaded or pasted that you bring into the artifact) MUST live under `<artifact_path>/static/` — never at the artifact root, since the backend only serves files from `static/` and publishing bundles nothing else. The page itself is in `static/`, so reference such a file by its name there: `app.js`, not `static/app.js` or `/static/app.js`.
   - All backend endpoints MUST be called under the `/api/*` prefix (matches the backend route convention from step 4). The frontend never calls bare paths like `/items` — always `api('/api/items')`.
   - API base URL is supplied via a `<meta>` tag so the same HTML works locally AND when deployed with frontend and backend on different origins (e.g. CloudFront/S3 + API Gateway/Lambda). Include this line in `<head>`:

@@ -448,6 +448,9 @@ _ALL_HANDLERS = frozenset({
 #: The subset of the above that declares at least one explicit `ToolOutcome`
 #: verdict. Not a wish list — a lock.
 _VERDICT_DECLARING_HANDLERS = frozenset({
+    # Tier 1 on a question that timed out or was skipped: the tool worked, and
+    # its reason ends the turn. Every other result stays a bare return.
+    "handle_ask_user",
     "handle_create_skill_draft",
     # Streaming handler: it YIELDS its verdicts rather than returning them.
     # Tier 1 on success (every listed file was statically verified by the

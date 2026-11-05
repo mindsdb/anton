@@ -747,6 +747,21 @@ class TestPipelineContractMirrored:
         # The preview frame's storage APIs throw, and a page that
         # reads them at top level dies before binding a single listener.
         "BROWSER STORAGE",
+        # Every view's setup goes through one helper, so a view that fails
+        # fails alone, and the browser check and the preview's error list
+        # both hear its name.
+        "function runView(name, el)",
+        "data-view-failed",
+        # A browser parses each `<script>` as a whole, so each view's code
+        # sits in a script of its own and a syntax error stops only that view.
+        "helper alone in the page's first inline `<script>`",
+        "Give each view an inline `<script>` of its own that holds only its setup",
+        # A promise the setup neither awaits nor returns, or ends with its
+        # own `.catch`, fails outside the helper, unnamed and unmarked.
+        "Await or return every promise the setup starts",
+        # Storage throws on every load in the preview frame, so a helper
+        # that logs that throw as an error fails a page that works.
+        "stays silent or uses `console.warn`",
     )
 
     # FRONTEND_MARKERS minus the two the pipeline contract does not state

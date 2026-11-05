@@ -37,6 +37,7 @@ class RecordingConsole:
 from anton.commands.share import handle_share_export, handle_share_import, handle_share_status, handle_share_history
 from anton.core.backends.base import Cell
 from anton.core.backends.manager import ScratchpadManager
+from anton.core.backends.sandbox import validate_pad_name
 from anton.core.memory.cortex import Cortex
 from anton.core.memory.episodes import EpisodicMemory
 from anton.core.memory.hippocampus import Hippocampus
@@ -278,6 +279,25 @@ class TestShareRoundtrip:
         assert len(restored) == 1
         assert token not in restored[0].stdout
         assert '"access_token": "[REDACTED_TOKEN]"' in restored[0].stdout
+
+    async def test_a_cell_from_a_pad_name_pads_can_no_longer_have_is_still_imported(self, tmp_path, workspace):
+        """An export can name a pad with a separator, from before pad names were restricted."""
+        session, episodic, _ = _build_session(tmp_path, workspace)
+        with patch("anton.commands.share._generate_meta",
+                   AsyncMock(return_value=("old-pads", "An export from before."))):
+            await handle_share_export(RecordingConsole(), session, workspace, make_mock_llm(), episodic)
+        anton_file = next((tmp_path / ".anton" / "output").glob("*.anton"))
+        payload = json.loads(anton_file.read_text())
+        payload["scratchpad"]["cells"][0]["pad"] = "team/report"
+        anton_file.write_text(json.dumps(payload))
+
+        new_session, _ = await _do_import(tmp_path, RecordingConsole(), workspace, anton_file)
+
+        pads = new_session._scratchpads._pads
+        assert list(pads) == ["team_report"]
+        assert len(pads["team_report"].cells) == 1
+        for name in pads:
+            validate_pad_name(name)
 
     async def test_imported_history_is_scrubbed(self, tmp_path, workspace):
         """A tool result from an older export that held a token reaches neither the model nor the episodic log."""

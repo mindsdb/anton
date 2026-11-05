@@ -1,14 +1,20 @@
 """Which files `read_text_file` may read.
 
-Not a security boundary: the scratchpad can read any file the process can.
-The policy keeps this tool to the files the agent is meant to work with and
-keeps secrets (`.anton/.env`, a nested `.published.json`) out of one call.
+On its own not a security boundary: without a sandbox policy the scratchpad
+can read any file the process can. The policy keeps this tool to the files
+the agent is meant to work with and keeps secrets (`.anton/.env`, a nested
+`.published.json`) out of one call. Under a sandbox policy, `under_policy`
+also holds it to what the person's own cells may read.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from anton.core.backends.sandbox import CellSandbox
 
 REFUSED_OUTSIDE = "outside the project, the artifacts and the conversation's attachments"
 REFUSED_HIDDEN = "a dot-file or inside a dot-directory"
@@ -43,3 +49,24 @@ def read_refusal(
             return None
         hidden = True
     return REFUSED_HIDDEN if hidden else REFUSED_OUTSIDE
+
+
+def under_policy(
+    reason: str | None, resolved: Path, policy: "CellSandbox | None", *, outside: str
+) -> str | None:
+    """`reason`, held to what the person's own cells may read when a policy is set.
+
+    anton's tools read in the host process, outside the sandbox. Under a
+    policy, a path the rules call `outside` passes when the person's cells may
+    read it, such as a file attached to this conversation, and a path they
+    admit is refused when the cells may not, such as another person's upload.
+    Without a policy, `reason` stands.
+    """
+    if policy is None:
+        return reason
+    allowed = policy.allows_read(resolved)
+    if reason == outside and allowed:
+        return None
+    if reason is None and not allowed:
+        return outside
+    return reason

@@ -98,3 +98,28 @@ async def test_no_workspace():
 
     out = await handle_list_artifacts(_Bare(), {})
     assert (out.ok, out.reason) == (False, "store_unavailable")
+
+
+async def test_slug_in_fields_is_accepted_and_adds_nothing(session):
+    """The schema once said "`slug` is always included", so models asked for
+    it and got "unknown field". Every entry is headed by its slug anyway."""
+    slug = await _create(session, "Alpha")
+
+    only_slug = await handle_list_artifacts(session, {"fields": ["slug"]})
+    assert only_slug.ok is True
+    assert f"## {slug}" in only_slug.content.splitlines()
+    assert "name: " not in only_slug.content and "primary: " not in only_slug.content
+
+    with_name = await handle_list_artifacts(session, {"match": [slug], "fields": ["slug", "name"]})
+    assert with_name.ok is True
+    assert with_name.content == (await handle_list_artifacts(session, {"match": [slug], "fields": ["name"]})).content
+    assert "name: Alpha" in with_name.content
+
+
+def test_the_fields_description_does_not_offer_slug_as_a_field():
+    from anton.core.tools.tool_defs import LIST_ARTIFACTS_TOOL
+
+    fields = LIST_ARTIFACTS_TOOL.input_schema["properties"]["fields"]
+    assert "slug" not in fields["items"]["enum"]
+    assert "always included" not in fields["description"]
+    assert "the slug needs no field" in fields["description"]

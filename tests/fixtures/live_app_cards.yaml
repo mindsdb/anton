@@ -1,0 +1,144 @@
+# The live-app launch card, case by case: the approved connections an app
+# gets, what changed since its owner last approved it, the owner's other app
+# it replaces when every slot is taken, and the exact card the owner sees.
+# Read by tests/test_live_app_slots.py::test_the_launch_card_reads_as_written.
+
+cases:
+  - name: a first launch with a database and a read-only API
+    slug: sales-demo
+    running: false
+    changed: []
+    connections:
+      - {engine: postgres, name: demo, kind: db, host: samples.mindsdb.com, port: 5432}
+      - {engine: rest, name: httpbin, kind: http-read, host: httpbin.org, port: 443, relay_port: 10001}
+    card: |
+      **Launch this live app?**
+
+      `sales-demo` would run as you, with these connections:
+
+      - `postgres/demo`: reads, and writes if its database role allows
+      - `rest/httpbin`: reads
+
+      It starts only if you approve. Cancel, Skip or no answer starts nothing.
+
+  - name: a read-only API with POST and GraphQL paths
+    slug: plan-viewer
+    running: false
+    changed: []
+    connections:
+      - {engine: rest, name: planner, kind: http-read, host: planner.example.com, port: 443, relay_port: 10002,
+         post_paths: [/search], graphql_paths: [/graphql]}
+      - {engine: rest, name: catalog, kind: http-read, host: catalog.example.com, port: 443, relay_port: 10003,
+         graphql_paths: [/graphql, /v2/graphql]}
+      - {engine: rest, name: lookup, kind: http-read, host: lookup.example.com, port: 443, relay_port: 10004,
+         post_paths: [/find, /match]}
+    card: |
+      **Launch this live app?**
+
+      `plan-viewer` would run as you, with these connections:
+
+      - `rest/planner`: reads (POST to /search; /graphql, queries only)
+      - `rest/catalog`: reads (POST to /graphql, /v2/graphql, queries only)
+      - `rest/lookup`: reads (POST to /find, /match)
+
+      It starts only if you approve. Cancel, Skip or no answer starts nothing.
+
+  - name: an API approved for writes
+    slug: orders-desk
+    running: false
+    changed: []
+    connections:
+      - {engine: rest, name: orders, kind: http-write, host: orders.example.com, port: 443, relay_port: 10002}
+    card: |
+      **Launch this live app?**
+
+      `orders-desk` would run as you, with these connections:
+
+      - `rest/orders`: reads and writes
+
+      It starts only if you approve. Cancel, Skip or no answer starts nothing.
+
+  - name: an API approved for writes on a host chat holds writes to
+    slug: plan-editor
+    running: false
+    changed: []
+    connections:
+      - {engine: rest, name: planner, kind: http-write, host: planner.example.com, port: 443, relay_port: 10003, overrides_write_hold: true}
+    card: |
+      **Launch this live app?**
+
+      `plan-editor` would run as you, with these connections:
+
+      - `rest/planner`: reads and writes, overriding the write-approval hold
+
+      Chat holds writes to `planner.example.com` for your approval. This app's writes there aren't held: your operator approved them for apps, and each write is logged.
+
+      It starts only if you approve. Cancel, Skip or no answer starts nothing.
+
+  - name: an app with no connections
+    slug: clock
+    running: false
+    changed: []
+    connections: []
+    card: |
+      **Launch this live app?**
+
+      `clock` would run as you, with no connections.
+
+      It starts only if you approve. Cancel, Skip or no answer starts nothing.
+
+  - name: a relaunch after the backend and its requirements changed
+    slug: sales-demo
+    running: true
+    changed: [backend, requirements]
+    connections:
+      - {engine: postgres, name: demo, kind: db, host: samples.mindsdb.com, port: 5432}
+    card: |
+      **Launch this live app?**
+
+      `sales-demo` would run as you, with these connections:
+
+      - `postgres/demo`: reads, and writes if its database role allows
+
+      Since you last approved it, these changed: `backend.py`, `requirements.txt`.
+
+      It starts only if you approve. Cancel, Skip or no answer leaves your running apps as they are.
+
+  - name: a launch that replaces the owner's own oldest app
+    slug: forecast
+    running: false
+    changed: []
+    replaces: {artifact: old-dashboard, started_at: "2026-10-21T04:12:00Z"}
+    connections: []
+    card: |
+      **Launch this live app?**
+
+      `forecast` would run as you, with no connections.
+
+      Every app slot is in use, so this stops your app `old-dashboard`, running since 04:12 UTC, and takes its slot.
+
+      It starts only if you approve. Cancel, Skip or no answer leaves your running apps as they are.
+
+  - name: two hosts whose writes override the hold, one of them twice
+    slug: ops-board
+    running: false
+    changed: []
+    connections:
+      - {engine: rest, name: orders, kind: http-write, host: orders.example.com, port: 443, relay_port: 10002,
+         overrides_write_hold: true}
+      - {engine: rest, name: stock, kind: http-write, host: stock.example.com, port: 443, relay_port: 10003,
+         overrides_write_hold: true}
+      - {engine: rest, name: orders-admin, kind: http-write, host: orders.example.com, port: 443, relay_port: 10004,
+         overrides_write_hold: true}
+    card: |
+      **Launch this live app?**
+
+      `ops-board` would run as you, with these connections:
+
+      - `rest/orders`: reads and writes, overriding the write-approval hold
+      - `rest/stock`: reads and writes, overriding the write-approval hold
+      - `rest/orders-admin`: reads and writes, overriding the write-approval hold
+
+      Chat holds writes to `orders.example.com`, `stock.example.com` for your approval. This app's writes there aren't held: your operator approved them for apps, and each write is logged.
+
+      It starts only if you approve. Cancel, Skip or no answer starts nothing.

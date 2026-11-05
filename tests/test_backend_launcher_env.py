@@ -39,6 +39,12 @@ def test_build_env_merges_extra_env():
     assert env["PATH"] == os.environ["PATH"]  # inherits parent env
 
 
+def test_build_env_disables_bytecode_writes(monkeypatch):
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+
+    assert build_backend_env(None)["PYTHONDONTWRITEBYTECODE"] == "1"
+
+
 def test_ds_env_replaces_inherited_ds_vars(monkeypatch):
     """A backend must see only the datasources its artifact declared, not
     whatever DS_* happen to be in the parent process."""
@@ -315,3 +321,26 @@ async def test_the_log_tail_is_scrubbed_off_the_event_loop(tmp_path, monkeypatch
     )
 
     assert scrub_threads and loop_thread not in scrub_threads
+
+
+async def test_a_launched_backend_leaves_no_bytecode_in_the_artifact_folder(tmp_path, monkeypatch):
+    """`backend.py` runs with the artifact folder on sys.path, so its local
+    imports would otherwise leave `__pycache__` next to them."""
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+    (tmp_path / "helpers.py").write_text("VALUE = 1\n")
+    (tmp_path / "routes").mkdir()
+    (tmp_path / "routes" / "x.py").write_text("VALUE = 2\n")
+    (tmp_path / "backend.py").write_text(
+        "import helpers\nimport routes.x\nraise SystemExit(1)\n"
+    )
+
+    result = await launch_artifact_backend(
+        slug="app",
+        artifact_folder=tmp_path,
+        scratchpad_pool=_PoolWithHostPython(),
+        tracked_backends={},
+    )
+
+    assert isinstance(result, str) and "exited early" in result
+    assert list(tmp_path.rglob("__pycache__")) == []
+    assert list(tmp_path.rglob("*.pyc")) == []

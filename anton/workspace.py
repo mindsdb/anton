@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from anton.config.settings import AntonSettings
+from anton.utils.nofollow import create_text_nofollow, make_dirs_nofollow, read_text_nofollow
 
 ANTON_MD_TEMPLATE = """\
 # Anton Workspace
@@ -76,6 +77,8 @@ class Workspace:
         self._anton_md = self._anton_dir / "anton.md"
         self._env_file = self._anton_dir / ".env"
         self._anton_md_last_read: datetime | None = None
+        # Set by initialize(refuse_links=True): the reads below refuse a link too.
+        self._refuse_links = False
 
         # Reuse a caller's settings so the cloud pod's dotenv-disabled
         # AntonSettings isn't bypassed by a second one built here. Only
@@ -125,7 +128,7 @@ class Workspace:
 
     # ── Initialization ───────────────────────────────────────────
 
-    def initialize(self, *, create_anton_md: bool = True) -> list[str]:
+    def initialize(self, *, create_anton_md: bool = True, refuse_links: bool = False) -> list[str]:
         """Create the workspace structure. Returns list of actions taken.
 
         Retries once on ESTALE: on a shared NFS/EFS workspace another
@@ -143,33 +146,50 @@ class Workspace:
         the retry above cannot recover. Not creating the file removes the
         ownership fight entirely; skipping the stat also removes the one
         ESTALE-prone call from the cloud turn's critical path.
+
+        ``refuse_links=True`` is for a host that runs agent code in a sandbox,
+        where that code can write the workspace: ``.anton`` and
+        ``.anton/memory`` must not be links, and ``anton.md`` and ``.env`` are
+        created only where nothing, not even a dangling link, holds the name.
+        From then on ``read_anton_md`` and ``load_env`` raise OSError when
+        either file is a link, a hard link or not a regular file, or
+        ``.anton`` is a link. The default follows links, as the desktop, the
+        CLI and the cloud pod always have.
         """
+        if refuse_links:
+            self._refuse_links = True
         try:
-            return self._initialize_once(create_anton_md=create_anton_md)
+            return self._initialize_once(create_anton_md=create_anton_md, refuse_links=refuse_links)
         except OSError as exc:
             if exc.errno != errno.ESTALE:
                 raise
-            return self._initialize_once(create_anton_md=create_anton_md)
+            return self._initialize_once(create_anton_md=create_anton_md, refuse_links=refuse_links)
 
-    def _initialize_once(self, *, create_anton_md: bool = True) -> list[str]:
+    def _initialize_once(self, *, create_anton_md: bool = True, refuse_links: bool = False) -> list[str]:
         actions: list[str] = []
 
         # Create .anton/ directory and memory subdirectory
-        self._anton_dir.mkdir(parents=True, exist_ok=True)
-        (self._anton_dir / "memory").mkdir(exist_ok=True)
+        if refuse_links:
+            self._base.mkdir(parents=True, exist_ok=True)
+            make_dirs_nofollow(self._base, self._anton_dir / "memory")
+        else:
+            self._anton_dir.mkdir(parents=True, exist_ok=True)
+            (self._anton_dir / "memory").mkdir(exist_ok=True)
         actions.append(f"Created {self._anton_dir}")
 
         # Create anton.md if it doesn't exist
-        if create_anton_md and not self._anton_md.is_file():
-            self._anton_md.write_text(
-                ANTON_MD_TEMPLATE.format(date=datetime.now().strftime("%Y-%m-%d")),
-                encoding="utf-8",
-            )
+        if create_anton_md and self._create_if_missing(
+            self._anton_md,
+            ANTON_MD_TEMPLATE.format(date=datetime.now().strftime("%Y-%m-%d")),
+            private=False,
+            refuse_links=refuse_links,
+        ):
             actions.append(f"Created {self._anton_md}")
 
         # Create .env if it doesn't exist
-        if not self._env_file.is_file():
-            _write_private(self._env_file, "# Anton environment variables\n")
+        if self._create_if_missing(
+            self._env_file, "# Anton environment variables\n", private=True, refuse_links=refuse_links
+        ):
             actions.append(f"Created {self._env_file}")
 
         # Visible artifacts directory at the workspace root. Replaces
@@ -182,6 +202,25 @@ class Workspace:
 
         return actions
 
+    def _create_if_missing(self, path: Path, text: str, *, private: bool, refuse_links: bool) -> bool:
+        """Write ``text`` to ``path`` unless it is already there; returns whether it wrote.
+
+        ``private`` creates the file 0600. With ``refuse_links``, nothing (not
+        even a dangling link) may hold the name, and no folder between the
+        workspace and the file may be a link.
+        """
+        if refuse_links:
+            return create_text_nofollow(
+                self._base, path, text, mode=_SECRET_FILE_MODE if private else 0o666
+            )
+        if path.is_file():
+            return False
+        if private:
+            _write_private(path, text)
+        else:
+            path.write_text(text, encoding="utf-8")
+        return True
+
     @property
     def artifacts_dir(self) -> Path:
         """Where artifacts live. Created lazily by `initialize()`."""
@@ -189,11 +228,26 @@ class Workspace:
 
     # ── anton.md reading ─────────────────────────────────────────
 
+    def _read_own_file(self, path: Path) -> str | None:
+        """``path``'s text, or None when it doesn't exist.
+
+        After ``initialize(refuse_links=True)``, a link at the file or at
+        ``.anton``, a hard link, or anything but a regular file raises
+        OSError: a host that runs unlocked would otherwise read another
+        person's file through a link left in the project.
+        """
+        if not self._refuse_links:
+            if not path.is_file():
+                return None
+            return path.read_text(encoding="utf-8")
+        try:
+            return read_text_nofollow(self._base, path)
+        except FileNotFoundError:
+            return None
+
     def read_anton_md(self) -> str | None:
         """Read anton.md content. Returns None if it doesn't exist."""
-        if not self._anton_md.is_file():
-            return None
-        return self._anton_md.read_text(encoding="utf-8")
+        return self._read_own_file(self._anton_md)
 
     def anton_md_modified_since_last_read(self) -> bool:
         """Check if anton.md has been modified since last read_anton_md_tracked()."""
@@ -228,9 +282,10 @@ class Workspace:
     def load_env(self) -> dict[str, str]:
         """Load all variables from .anton/.env. Returns key=value dict."""
         result: dict[str, str] = {}
-        if not self._env_file.is_file():
+        text = self._read_own_file(self._env_file)
+        if text is None:
             return result
-        for line in self._env_file.read_text(encoding="utf-8").splitlines():
+        for line in text.splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue

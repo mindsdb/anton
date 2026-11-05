@@ -180,7 +180,8 @@ def test_cloud_turn_filter_preserves_unrelated_error_tracebacks(
     assert record.getMessage() == "cloud turn failed"
     assert record.exc_info[1] is error
     assert "ordinary runtime failure" in logging.Formatter().format(record)
-    assert "RuntimeError: ordinary runtime failure" in pod_stderr.getvalue()
+    assert "RuntimeError: [error details omitted]" in pod_stderr.getvalue()
+    assert "ordinary runtime failure" not in pod_stderr.getvalue()
     assert events[-1] == {"kind": "turn_failed", "error": _scrub(error)}
 
 

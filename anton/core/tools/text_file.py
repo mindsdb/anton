@@ -77,6 +77,8 @@ class TextRange:
     def render(self) -> str:
         if self.total_lines == 0:
             return f"{self.path} — empty file\n"
+        # cowork-server's figure sources strip this header and _shorten's mark
+        # from what they match (cowork/harnesses/anton_harness/figure_sources.py).
         header = f"{self.path} — lines {self.first}-{self.last} of {self.total_lines}"
         if self.shortened:
             half = MAX_LINE_CHARS // 2

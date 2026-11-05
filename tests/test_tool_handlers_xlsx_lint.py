@@ -22,7 +22,7 @@ import openpyxl
 import pytest
 
 from anton.core.artifacts.xlsx_office_check import FormulaErrorFinding
-from anton.core.tools.tool_handlers import lint_changed_artifact_files
+from anton.core.tools.tool_handlers import ArtifactFiles, lint_changed_artifact_files, snapshot_existing_artifacts
 
 
 @pytest.fixture(autouse=True)
@@ -67,9 +67,9 @@ def test_flags_circular_refs_in_a_changed_artifact(store: _FakeStore):
             "Assumptions": {"E6": "SLOPE(E6:J6,{1,2,3,4,5,6})"},  # missing sheet prefix
         },
     )
-    before = {"forecast-abc12345": 0.0}  # older than the mtime the write above just set
+    before = {"forecast-abc12345": ArtifactFiles()}  # older than the mtime the write above just set
 
-    messages = lint_changed_artifact_files(store, before)
+    messages = lint_changed_artifact_files(store, before).messages
 
     assert len(messages) == 1
     assert "forecast-abc12345/forecast.xlsx" in messages[0]
@@ -90,9 +90,9 @@ def test_clean_workbook_produces_no_messages_from_the_structural_lint(store: _Fa
             "Assumptions": {"E6": "SLOPE('Actuals'!E6:J6,{1,2,3,4,5,6})"},
         },
     )
-    before = {"clean-abc12345": 0.0}
+    before = {"clean-abc12345": ArtifactFiles()}
 
-    assert lint_changed_artifact_files(store, before) == []
+    assert lint_changed_artifact_files(store, before).messages == []
 
 
 def test_both_checkers_agree_a_clean_workbook_is_clean(monkeypatch, store: _FakeStore):
@@ -101,13 +101,13 @@ def test_both_checkers_agree_a_clean_workbook_is_clean(monkeypatch, store: _Fake
     agrees with the structural lint — still no messages."""
     monkeypatch.setattr(
         "anton.core.artifacts.xlsx_office_check.check_xlsx_via_office",
-        lambda _path: [],
+        lambda _path, *, cell_sandbox: [],
     )
     folder = _make_artifact(store, "clean-abc12345")
     _write_workbook(folder / "clean.xlsx", {"Sheet1": {"A1": "1+1"}})
-    before = {"clean-abc12345": 0.0}
+    before = {"clean-abc12345": ArtifactFiles()}
 
-    assert lint_changed_artifact_files(store, before) == []
+    assert lint_changed_artifact_files(store, before).messages == []
 
 
 def test_structural_message_wins_when_both_flag_the_same_cell(monkeypatch, store: _FakeStore):
@@ -116,7 +116,7 @@ def test_structural_message_wins_when_both_flag_the_same_cell(monkeypatch, store
     actionable structural message should reach the agent, not both."""
     monkeypatch.setattr(
         "anton.core.artifacts.xlsx_office_check.check_xlsx_via_office",
-        lambda _path: [
+        lambda _path, *, cell_sandbox: [
             FormulaErrorFinding(
                 sheet="Assumptions", cell="E6",
                 formula="SLOPE(E6:J6,{1,2,3,4,5,6})", error="#VALUE!",
@@ -131,9 +131,9 @@ def test_structural_message_wins_when_both_flag_the_same_cell(monkeypatch, store
             "Assumptions": {"E6": "SLOPE(E6:J6,{1,2,3,4,5,6})"},  # missing sheet prefix
         },
     )
-    before = {"forecast-abc12345": 0.0}
+    before = {"forecast-abc12345": ArtifactFiles()}
 
-    messages = lint_changed_artifact_files(store, before)
+    messages = lint_changed_artifact_files(store, before).messages
 
     assert len(messages) == 1
     assert "missing cross-sheet prefix" in messages[0]
@@ -146,7 +146,7 @@ def test_oracle_only_finding_still_surfaces(monkeypatch, store: _FakeStore):
     here would silently drop real coverage."""
     monkeypatch.setattr(
         "anton.core.artifacts.xlsx_office_check.check_xlsx_via_office",
-        lambda _path: [
+        lambda _path, *, cell_sandbox: [
             FormulaErrorFinding(
                 sheet="Sheet1", cell="B2", formula="A1/0", error="#DIV/0!",
             )
@@ -154,9 +154,9 @@ def test_oracle_only_finding_still_surfaces(monkeypatch, store: _FakeStore):
     )
     folder = _make_artifact(store, "clean-abc12345")
     _write_workbook(folder / "clean.xlsx", {"Sheet1": {"A1": "1", "B2": "A1/0"}})
-    before = {"clean-abc12345": 0.0}
+    before = {"clean-abc12345": ArtifactFiles()}
 
-    messages = lint_changed_artifact_files(store, before)
+    messages = lint_changed_artifact_files(store, before).messages
 
     assert len(messages) == 1
     assert "#DIV/0!" in messages[0]
@@ -164,8 +164,8 @@ def test_oracle_only_finding_still_surfaces(monkeypatch, store: _FakeStore):
 
 def test_skips_artifacts_the_cell_did_not_touch(store: _FakeStore):
     """A broken workbook already on disk before this cell ran must not be
-    re-flagged on every unrelated turn — only an mtime bump counts as
-    'this cell touched it'."""
+    re-flagged on every unrelated turn: only a change to its files counts
+    as 'this cell touched it'."""
     folder = _make_artifact(store, "forecast-abc12345")
     workbook = folder / "forecast.xlsx"
     _write_workbook(
@@ -175,9 +175,8 @@ def test_skips_artifacts_the_cell_did_not_touch(store: _FakeStore):
             "Assumptions": {"E6": "SLOPE(E6:J6,{1,2,3,4,5,6})"},
         },
     )
-    # `before` mtime equal to (not older than) the file's current mtime: no
-    # edit happened during this cell's window.
-    current_mtime = workbook.stat().st_mtime
-    before = {"forecast-abc12345": current_mtime}
+    # `before` taken after the write: no edit happened during this cell's
+    # window.
+    before = snapshot_existing_artifacts(store)
 
-    assert lint_changed_artifact_files(store, before) == []
+    assert lint_changed_artifact_files(store, before).messages == []

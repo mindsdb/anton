@@ -91,6 +91,20 @@ def unwrap_outcome(result):
     return result.content if isinstance(result, ToolOutcome) else result
 
 
+def result_text(content) -> str:
+    """A tool result's text: the string, or the text blocks of a list joined.
+
+    A cell that changed a page can carry its render screenshot as an image
+    block; notes built from the output keep the words, not the image data.
+    """
+    if isinstance(content, list):
+        return "\n".join(
+            str(block.get("text", "")) for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    return content if isinstance(content, str) else str(content)
+
+
 # ── The file-body protocol ──────────────────────────────────────────────────
 #
 # The body of a generated file travels as PLAIN TEXT in the assistant's reply,

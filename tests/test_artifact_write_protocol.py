@@ -187,9 +187,11 @@ async def test_a_body_alongside_finish_does_not_end_the_run(tmp_path: Path):
 
 
 async def test_a_reply_with_neither_body_nor_calls_still_ends_the_loop(tmp_path: Path):
-    """Unchanged behaviour: a model that simply stopped is a failed node, not a
-    protocol slip to retry forever."""
-    result = await _drive(tmp_path, [_resp([], body="I am not sure what to do.")])
+    """A writer that simply stopped is a failed node, not a protocol slip to
+    retry forever."""
+    result = await _drive(
+        tmp_path, [_resp([], body="I am not sure what to do.")], require_files=True
+    )
     assert isinstance(result, str)
     assert "without writing files" in result
 

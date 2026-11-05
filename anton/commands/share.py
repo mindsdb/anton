@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 from rich.console import Console
 
+from anton.core.backends.sandbox import validate_pad_name
 from anton.core.llm.structured import (
     generate_with_truncation_retry,
     no_preamble_instruction,
@@ -42,6 +43,25 @@ class _SessionMeta(BaseModel):
             "Each distinct finding appears exactly once. 2-4 sentences."
         )
     )
+
+
+def _importable_pad_name(name: object) -> str:
+    """``name`` when a pad may have it, else a pad name made from it.
+
+    An export can predate the pad-name rules (a ``/`` or ``:`` in a name) or
+    come from anywhere. Each character a pad name can't hold becomes ``_``,
+    and a name that still can't be one becomes ``main``.
+    """
+    if not isinstance(name, str):
+        return "main"
+    try:
+        return validate_pad_name(name)
+    except ValueError:
+        pass
+    try:
+        return validate_pad_name(re.sub(r"[^\w .-]", "_", name).strip(". "))
+    except ValueError:
+        return "main"
 
 
 def _format_history_for_llm(history: list[dict], max_messages: int = 20) -> str:
@@ -465,7 +485,7 @@ async def import_v0_1(
     from anton.core.backends.base import Cell as _Cell, scrub_cell  # noqa: PLC0415
     cells_data = payload.get("scratchpad", {}).get("cells", [])
     for cell_data in cells_data:
-        pad_name = cell_data.get("pad", "main")
+        pad_name = _importable_pad_name(cell_data.get("pad", "main"))
         pad = await new_session._scratchpads.get_or_create(pad_name)
         # An export can predate the scrub, or come from anywhere.
         pad.cells.append(scrub_cell(_Cell(

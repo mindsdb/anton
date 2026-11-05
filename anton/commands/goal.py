@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from anton.chat_ui import is_displayed_tool_result
+from anton.core.llm.prompts import ANTON_NOTE
 from anton.core.llm.provider import (
     StreamContextCompacted,
     StreamTaskProgress,
@@ -210,7 +211,7 @@ async def run_goal_loop(
         session._append_history({
             "role": "user",
             "content": (
-                "SYSTEM: The autonomous goal session has ended. "
+                f"{ANTON_NOTE} The autonomous goal session has ended. "
                 "Do NOT continue any prior task unless the user explicitly asks."
             ),
         })

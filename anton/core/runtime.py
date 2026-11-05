@@ -139,7 +139,7 @@ async def build_chat_session(
     cortex = Cortex(
         global_hc=Hippocampus(global_memory_dir),
         project_hc=Hippocampus(project_memory_dir),
-        mode=settings.memory_mode if settings.memory_enabled else "off",
+        mode=settings.effective_memory_mode,
         llm_client=llm_client,
     )
     episodic = EpisodicMemory(episodes_dir, enabled=settings.episodic_memory)

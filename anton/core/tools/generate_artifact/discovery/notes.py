@@ -45,7 +45,8 @@ def render_exec_notes(
         out = " ".join((e.get("output") or "").split())
         if len(out) > EXEC_OUTPUT_MAX:
             out = out[:EXEC_OUTPUT_MAX] + " …"
-        block = f"Scratchpad `{e.get('name')}`:\n```python\n{code}\n```"
+        failed = " (failed)" if e.get("ok") is False else ""
+        block = f"Scratchpad `{e.get('name')}`{failed}:\n```python\n{code}\n```"
         if out:
             block += f"\nOutput: {out}"
         blocks.append(block)
@@ -130,6 +131,37 @@ def string_list(value) -> list[str]:
         return []
     cleaned = (_TOOL_CALL_MARKUP_RE.sub("", item).strip() for item in raw)
     return [item for item in cleaned if item]
+
+
+def source_key(name: str) -> str:
+    """A declared source's name for matching: the model re-types it in
+    `data_findings`, and spacing and case drift between the two."""
+    return " ".join(str(name or "").split()).casefold()
+
+
+def known_data_sources(inp: dict, *, usable: bool) -> set[str]:
+    """`source_key`s of the findings a `finish_gathering` call marked
+    `verified_by: known_data`.
+
+    Empty unless `usable` (`state.known_data_usable`): only an html-app's
+    snapshot can stand in for code. The mark is matched loosely — quoted,
+    spaced or followed by a note — because every miss sends the run through
+    the data loop.
+    """
+    if not usable:
+        return set()
+    findings = inp.get("data_findings")
+    if not isinstance(findings, list):
+        return set()
+    covered: set[str] = set()
+    for f in findings:
+        if not isinstance(f, dict):
+            continue
+        key = source_key(f.get("source"))
+        mark = re.sub(r"[^a-z]+", "_", str(f.get("verified_by") or "").casefold()).strip("_")
+        if key and mark.startswith("known_data"):
+            covered.add(key)
+    return covered
 
 
 def render_gathering_notes(inp: dict) -> str:

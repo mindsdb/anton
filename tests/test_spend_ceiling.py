@@ -22,6 +22,8 @@ from tests.conftest import make_mock_llm
 from anton.core.llm.provider import (
     LLMResponse,
     StreamComplete,
+    StreamTextDelta,
+    StreamTurnEnded,
     ToolCall,
     Usage,
 )
@@ -558,3 +560,102 @@ async def _empty_stream():
     """A hand-back that streams nothing — the guarded empty-diagnosis case."""
     return
     yield  # pragma: no cover - makes this an async generator
+
+
+# ── Filtered hand-back ───────────────────────────────────────────────────────
+
+_REFUSAL = "I'm sorry, but I cannot assist with that request."
+
+
+def _described_call(i: int, description: str) -> LLMResponse:
+    """A tool call carrying the one-line description the report lists it by."""
+    call = _tool_call(i)
+    call.tool_calls[0].input["one_line_description"] = description
+    return call
+
+
+def _filter_every_handback(session) -> list[dict]:
+    """Route each hand-back call (it sends no tools) to Azure's filtered refusal.
+
+    Returns the list the hand-back calls are recorded in, to count them.
+    """
+    tool_loop_stream = session._llm.plan_stream
+    handbacks: list[dict] = []
+
+    def _plan_stream(**kwargs):
+        if "tools" in kwargs:
+            return tool_loop_stream(**kwargs)
+        handbacks.append(kwargs)
+
+        async def _gen():
+            yield StreamTextDelta(text=_REFUSAL)
+            yield StreamComplete(response=LLMResponse(
+                content=_REFUSAL, tool_calls=[], usage=_usage(), stop_reason="content_filter",
+            ))
+        return _gen()
+
+    session._llm.plan_stream = _plan_stream
+    return handbacks
+
+
+async def _drain_shown(session) -> tuple[str, list, str]:
+    with patch("anton.analytics.send_event") as send:
+        events = [e async for e in session.turn_stream("do the thing")]
+    shown = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+    return shown, events, send.call_args.kwargs["ended_by"]
+
+
+_CEILING_SENTENCE = "This task reached its limit of 1,000,000 tokens per request."
+
+
+async def test_filtered_handback_in_the_tool_loop_sends_anton_s_own_report(workspace):
+    """Both hand-back tries filtered: the user still reads the limit and the steps."""
+    from anton.core.tools.registry import ToolOutcome
+
+    session = _session(
+        workspace, responses=[_described_call(i, f"Query page {i}") for i in range(1, 40)]
+    )
+
+    async def _dispatch(_session, name, tc_input, **_kw):
+        failed = tc_input["one_line_description"] == "Query page 3"
+        return ToolOutcome(content="rows = 4521", ok=not failed)
+
+    session.tool_registry.dispatch_tool = AsyncMock(side_effect=_dispatch)
+    handbacks = _filter_every_handback(session)
+    shown, events, ended_by = await _drain_shown(session)
+    assert shown == (
+        f"{_CEILING_SENTENCE}\n\n"
+        "The model provider's content filter stopped my summary of this request. "
+        "This is what I did before I stopped:\n\n"
+        "- Query page 1\n- Query page 2\n- Query page 3 (failed)\n- Query page 4\n"
+        "- Query page 5\n- Query page 6\n- Query page 7\n- Query page 8\n\n"
+        'Reply "keep going" to continue from where I stopped.'
+    )
+    assert "4521" not in shown
+    assert session._history[-1] == {"role": "assistant", "content": shown}
+    assert _REFUSAL not in str(session._history)
+    assert len(handbacks) == 2, "the report must not cost a third model call"
+    assert ended_by == "content_filter"
+    assert events[-1] == StreamTurnEnded(ended_by="content_filter")
+
+
+async def test_filtered_handback_at_the_continuation_gate_sends_anton_s_own_report(workspace):
+    """The gate's hand-back has no answer before it when the reply was empty."""
+    # An empty reply small enough not to read as an output-budget truncation.
+    empty = LLMResponse(content="", tool_calls=[], usage=Usage(input_tokens=10, output_tokens=5),
+                        stop_reason="end_turn")
+    session = _session(workspace, per_call=300_000,
+                       responses=[_described_call(1, "Query page 1"), empty, empty, empty])
+    session._llm.generate_object_code = AsyncMock(
+        return_value=_VerifierVerdict(status="INCOMPLETE", reason="not done"))
+    handbacks = _filter_every_handback(session)
+    shown, events, ended_by = await _drain_shown(session)
+    # Only the gate path runs the verifier; the tool loop's ceiling skips it.
+    assert any(c.args and c.args[0] is _VerifierVerdict
+               for c in session._llm.generate_object_code.call_args_list)
+    assert shown.startswith(f"{_CEILING_SENTENCE}\n\n")
+    assert "- Query page 1\n" in shown
+    assert session._history[-1] == {"role": "assistant", "content": shown}
+    assert len(handbacks) == 2
+    assert ended_by == "content_filter"
+    assert events[-1] == StreamTurnEnded(ended_by="content_filter")

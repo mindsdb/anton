@@ -34,7 +34,7 @@ def _stub_env(monkeypatch, tmp_path, *, latest_tag, local_version, proc=None):
         calls["install"] += 1
         return result_proc
 
-    monkeypatch.setattr(updater.subprocess, "run", _rec_run)
+    monkeypatch.setattr(updater, "_install_release", _rec_run)
     return calls
 
 

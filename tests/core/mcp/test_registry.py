@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from mcp.server.mcpserver import MCPServer
 
+from anton.core.mcp.access import TOOL_ACCESS
 from anton.core.mcp.client import McpSession
-from anton.core.mcp.registry import discover_tool_defs, namespaced_tool_name
+from anton.core.mcp.names import ToolNameParts, namespaced_tool_name, parse_namespaced_tool_name
+from anton.core.mcp.registry import discover_tool_defs
 from anton.core.tools.registry import ToolOutcome
 
 
@@ -24,6 +26,48 @@ def test_namespaced_tool_name_disambiguates_by_connection_when_given():
         namespaced_tool_name("hubspot", "search_crm_objects", connection_name="acme")
         != namespaced_tool_name("hubspot", "search_crm_objects", connection_name="other-org")
     )
+
+
+def test_parse_namespaced_tool_name_splits_engine_and_tool():
+    assert parse_namespaced_tool_name(name="hubspot__search_crm_objects") == ToolNameParts(
+        engine="hubspot", connection_name=None, tool_name="search_crm_objects"
+    )
+
+
+def test_parse_namespaced_tool_name_reads_the_connection_between_engine_and_tool():
+    """A connection name may itself contain "__", so the engine is the text
+    before the first "__", the tool is the text after the last, and
+    everything between is the connection."""
+    assert parse_namespaced_tool_name(name="hubspot__acme__search_crm_objects") == ToolNameParts(
+        engine="hubspot", connection_name="acme", tool_name="search_crm_objects"
+    )
+    assert parse_namespaced_tool_name(name="hubspot__acme__eu__search_crm_objects") == ToolNameParts(
+        engine="hubspot", connection_name="acme__eu", tool_name="search_crm_objects"
+    )
+
+
+def test_parse_namespaced_tool_name_round_trips_namespaced_tool_name():
+    """A connection's name is free text, so it may start or end with "_" or
+    hold "__" anywhere. Every classified HubSpot tool still parses back to
+    the engine, connection and tool that built its name."""
+    for connection_name in (None, "acme", "acme__eu", "crm_", "a____b", "crm__", "__crm"):
+        for tool_name in TOOL_ACCESS["hubspot"]:
+            name = namespaced_tool_name("hubspot", tool_name, connection_name=connection_name)
+            assert parse_namespaced_tool_name(name=name) == ToolNameParts(
+                engine="hubspot", connection_name=connection_name, tool_name=tool_name
+            ), name
+
+
+def test_parse_namespaced_tool_name_rejects_a_name_that_is_not_namespaced():
+    for name in (
+        "web_fetch",
+        "read_text_file",
+        "__search_crm_objects",
+        "hubspot__",
+        "hubspot____get_crm_objects",
+        "",
+    ):
+        assert parse_namespaced_tool_name(name=name) is None, name
 
 
 async def test_discover_tool_defs_namespaces_and_filters_by_access_mode(stub_mcp_server):

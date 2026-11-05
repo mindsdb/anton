@@ -20,6 +20,10 @@ and directories). `NON_CONTENT_NAMES` is every top-level name that is never
 artifact content: match it against the first component of an artifact-relative
 path, or walk with `store.iter_content_files`. cowork-server imports it from
 here. Consumers that match differently say so where they do it.
+
+Python bytecode is the exception to the top-level rule: `is_bytecode_name`
+matches a path component at any depth, because imports from the scratchpad or
+the backend leave `__pycache__` next to whichever module they loaded.
 """
 
 from __future__ import annotations
@@ -32,6 +36,9 @@ API_SPEC_FILENAME = "openapi.json"
 # rendered data/web notes. `prd.md` is the human-readable record of the same
 # phases; this is what the pipeline itself reads back on a cold start.
 DISCOVERY_FILENAME = "discovery.json"
+# The static fast path's data handoff (every fetched row) and its saved page program.
+OBSERVED_DATA_FILENAME = "observed-data.json"
+PRESENTATION_PROGRAM_FILENAME = "presentation-program.js"
 
 # Reported by `generate_artifact` as `internal_files` and excluded from an
 # artifact's `files[]`: generation inputs, not deliverables.
@@ -40,6 +47,8 @@ GENERATION_INPUT_FILES = frozenset({
     TECH_SPEC_FILENAME,
     API_SPEC_FILENAME,
     DISCOVERY_FILENAME,
+    OBSERVED_DATA_FILENAME,
+    PRESENTATION_PROGRAM_FILENAME,
 })
 
 
@@ -71,3 +80,13 @@ HOUSEKEEPING_FILES = frozenset({
 HOUSEKEEPING_DIRS = frozenset({REVISIONS_DIRNAME})
 
 NON_CONTENT_NAMES = HOUSEKEEPING_FILES | GENERATION_INPUT_FILES | HOUSEKEEPING_DIRS
+
+
+BYTECODE_DIRNAME = "__pycache__"
+BYTECODE_SUFFIX = ".pyc"
+
+
+def is_bytecode_name(name: str) -> bool:
+    """True for a path component that holds Python bytecode at any depth."""
+    folded = name.casefold()
+    return folded == BYTECODE_DIRNAME or folded.endswith(BYTECODE_SUFFIX)

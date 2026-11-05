@@ -22,6 +22,7 @@ from anton.core.tools.generate_artifact.discovery import checkpoint as cp
 from anton.core.tools.generate_artifact.discovery.engine import run_gathering_loop
 from anton.core.tools.generate_artifact.discovery.notes import WEB_NOTES_MAX
 from anton.core.tools.generate_artifact.state import GenState
+from tests.streaming_llm import StreamingLLM
 
 ARTICLE_URL = "https://example.com/the-article"
 
@@ -57,6 +58,7 @@ async def _gather_one_web_fetch(state: GenState, monkeypatch, page: str) -> None
     monkeypatch.setattr(
         web_tools, "handle_web_fetch_fallback", AsyncMock(return_value=page)
     )
+    state.session._llm = StreamingLLM()
     state.session._llm.plan = AsyncMock(
         return_value=_response(("web_fetch", {"url": ARTICLE_URL}))
     )

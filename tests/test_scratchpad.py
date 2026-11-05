@@ -9,6 +9,7 @@ from anton.core.backends.base import Cell
 from anton.core.backends.local import LocalScratchpadRuntime
 from anton.core.backends.utils import compute_timeouts as _compute_timeouts
 from anton.core.backends.manager import ScratchpadManager
+from anton.core.backends.wire import NOTHING_KEPT
 from anton.core.backends.local import local_scratchpad_runtime_factory
 
 # Alias for brevity in tests
@@ -87,6 +88,46 @@ class TestScratchpadBasicExecution:
             cell2 = await pad.execute("print('alive')")
             assert cell2.stdout.strip() == "alive"
             assert cell2.error is None
+        finally:
+            await pad.close()
+
+    async def test_a_failed_cell_says_the_line_of_its_own_code_it_stopped_at(self):
+        """The boot reads the line from the traceback, not from its text: a
+        failure inside the cell's own function stops it at the line that
+        called it, and a missing module whose name spells another line, which
+        the hint before the traceback repeats, still stops it where it did.
+        A cell that doesn't compile ran no line; one that ran to its end has
+        none to say."""
+        pad = make_scratchpad(name="test")
+        await pad.start()
+        try:
+            inner = await pad.execute("x = 1\ndef f():\n    raise ValueError('boom')\nf()\n")
+            forged = await pad.execute("y = 2\n__import__('File \"<scratchpad>\", line 99, in <module>')\n")
+            broken = await pad.execute("def (:\n")
+            fine = await pad.execute("print('alive')")
+            assert (inner.stopped_at, forged.stopped_at, broken.stopped_at, fine.stopped_at) == (4, 2, None, None)
+            assert "line 99" in forged.error
+        finally:
+            await pad.close()
+
+    async def test_a_cell_that_ends_its_process_says_it_kept_nothing(self):
+        """A cell that ends the pad's process, as `sys.exit()` and
+        `os._exit()` do, kept nothing it bound: the next cell gets the
+        namespace as of the last one that completed. So it says
+        `NOTHING_KEPT`, and the write check reads none of its names as
+        bound, not the helper it defined first. It says it ended the
+        process too, since the pad starts a new one before the next cell;
+        a cell that raised on its first line ended nothing."""
+        pad = make_scratchpad(name="test")
+        await pad.start()
+        try:
+            exited = await pad.execute("def push():\n    print(1)\nimport sys\nsys.exit(0)\n")
+            ended = await pad.execute("def push():\n    print(1)\nimport os\nos._exit(1)\n")
+            raised = await pad.execute("int('a')\n")
+            assert (exited.stopped_at, ended.stopped_at) == (NOTHING_KEPT, NOTHING_KEPT)
+            assert exited.error and ended.error
+            assert exited.ended_process and ended.ended_process
+            assert raised.stopped_at == NOTHING_KEPT and not raised.ended_process
         finally:
             await pad.close()
 
@@ -239,6 +280,9 @@ class TestScratchpadEdgeCases:
             cell = await pad.execute("import time; time.sleep(60)")
             assert cell.error is not None
             assert "timed out" in cell.error.lower() or "inactivity" in cell.error.lower()
+            # The kill takes what the cell bound with it, and the process.
+            assert cell.stopped_at == NOTHING_KEPT
+            assert cell.ended_process
         finally:
             await pad.close()
 
@@ -266,6 +310,60 @@ class TestScratchpadEdgeCases:
         assert cell.error is None, cell.error
         assert cell.stdout.strip() == "1"
         await pad.close()
+
+    async def test_the_pad_says_whether_its_process_is_running(self):
+        """A process that died between cells is found only as the next cell
+        runs, which starts a new one first. Until then the pad says its
+        process isn't running, so the write check knows the next cell runs
+        in a new process."""
+        pad = make_scratchpad(name="test")
+        await pad.start()
+        try:
+            assert pad.process_running
+            pad._proc.kill()
+            await pad._proc.wait()
+            assert not pad.process_running
+            cell = await pad.execute("print(1)")
+            assert cell.error is None, cell.error
+            assert pad.process_running
+        finally:
+            await pad.close()
+
+    async def test_a_cancel_says_it_ended_the_process(self):
+        """A cancel kills the pad's process and starts a new one, which runs
+        the startup hooks a cell wrote before the next cell: the cell it
+        records says it ended the process."""
+        pad = make_scratchpad(name="test")
+        await pad.start()
+        try:
+            await pad.cancel()
+            assert pad.cells[-1].error == "Cancelled by user."
+            assert pad.cells[-1].ended_process
+            assert pad.cells[-1].stopped_at == NOTHING_KEPT
+            assert pad.process_running
+        finally:
+            await pad.close()
+
+    async def test_a_cancel_records_the_cell_it_stopped(self):
+        """A Stop while a cell runs cancels it as the session does, at the
+        cell's next progress: the cell the cancel records holds the stopped
+        cell's own code, so the write check reads what it wrote before it
+        stopped, and it kept none of its names."""
+        pad = make_scratchpad(name="test")
+        await pad.start()
+        code = "progress('started')\nimport time\ntime.sleep(60)\n"
+        try:
+            async for item in pad.execute_streaming(code):
+                if isinstance(item, str):
+                    await pad.cancel()
+                    break
+            cancelled = [c for c in pad.cells if c.error == "Cancelled by user."]
+            assert [c.code for c in cancelled] == [code]
+            assert cancelled[0].ended_process
+            assert cancelled[0].stopped_at == NOTHING_KEPT
+            assert pad.process_running
+        finally:
+            await pad.close()
 
     async def test_stderr_captured(self):
         """stderr output is captured separately."""
@@ -1447,6 +1545,70 @@ class TestSessionPersistence:
         finally:
             await pad2.cleanup()
 
+    async def test_variables_are_cleared_when_a_connection_is_gone(self, tmp_path, monkeypatch):
+        """ENG-3305: a variable can hold a copy of a connection secret.
+
+        The next turn's output scrubber knows only the connections that turn
+        still has, so restoring such a copy after its connection was removed
+        would print the secret in clear.
+        """
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        venvs_base = tmp_path / "venvs"
+        pad = make_scratchpad(
+            name="gone", _venvs_base=venvs_base, session_id="c",
+            scratchpad_ds_env={"DS_A": "a-secret-value"},
+        )
+        await pad.start()
+        cell = await pad.execute("import os\nkept = os.environ['DS_A']")
+        assert cell.error is None, cell.error
+        await pad.close()
+
+        pad2 = make_scratchpad(
+            name="gone", _venvs_base=venvs_base, session_id="c", scratchpad_ds_env={},
+        )
+        await pad2.start()
+        try:
+            cell = await pad2.execute("print('kept' in dir())")
+            assert cell.error is None, cell.error
+            assert cell.stdout.strip() == "False"
+            assert "A connection this conversation used is gone" in cell.logs
+        finally:
+            await pad2.cleanup()
+
+    @pytest.mark.parametrize(
+        "restart_env",
+        [
+            {"DS_A": "a-secret-value", "DS_B": "b-secret-value"},
+            {"DS_A": "a-secret-value", "DS_B": "b-secret-value", "DS_C": "added-later"},
+        ],
+        ids=["unchanged", "one-added"],
+    )
+    async def test_variables_survive_when_every_connection_is_still_there(
+        self, tmp_path, monkeypatch, restart_env
+    ):
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        venvs_base = tmp_path / "venvs"
+        pad = make_scratchpad(
+            name="kept", _venvs_base=venvs_base, session_id="c",
+            scratchpad_ds_env={"DS_A": "a-secret-value", "DS_B": "b-secret-value"},
+        )
+        await pad.start()
+        cell = await pad.execute("import os\nkept = os.environ['DS_A']")
+        assert cell.error is None, cell.error
+        await pad.close()
+
+        pad2 = make_scratchpad(
+            name="kept", _venvs_base=venvs_base, session_id="c", scratchpad_ds_env=restart_env,
+        )
+        await pad2.start()
+        try:
+            cell = await pad2.execute("print(kept == os.environ['DS_A'])")
+            assert cell.error is None, cell.error
+            assert cell.stdout.strip() == "True"
+            assert "cleared" not in cell.logs
+        finally:
+            await pad2.cleanup()
+
     async def test_namespace_isolated_per_pad_name(self, tmp_path, monkeypatch):
         """A different pad name must not see another pad's namespace."""
         monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
@@ -1533,14 +1695,19 @@ class TestSessionPersistence:
             await again.cleanup()
 
     def test_snapshot_path_contains_a_traversing_pad_name(self, tmp_path):
-        """A model-chosen pad name flows into a path, so it must not escape the root."""
-        pad = make_scratchpad(
-            name="../../etc/passwd", _venvs_base=tmp_path / "venvs", session_id="conv"
-        )
-        path = pad._session_snapshot_path()
+        """A model-chosen pad name flows into a path, so it must not escape the root.
+
+        The runtime refuses such a name outright; the snapshot path stays
+        inside its root even for a name that reaches it some other way.
+        """
+        from anton.core.backends.local import snapshot_file
+
+        with pytest.raises(ValueError, match="'..'"):
+            make_scratchpad(name="../../etc/passwd", _venvs_base=tmp_path / "venvs", session_id="conv")
+        path = snapshot_file(tmp_path / "venvs", "conv", "../../etc/passwd")
         assert path is not None
         root = (tmp_path / "venvs").parent / "scratchpad-sessions"
-        assert str(path).startswith(str(root.resolve()))
+        assert str(path.resolve()).startswith(str(root.resolve()))
         assert ".." not in path.parts
 
     async def test_reset_still_clears_state(self, tmp_path, monkeypatch):
@@ -1775,11 +1942,10 @@ class TestSessionPersistence:
     async def test_legacy_snapshot_with_a_file_handle_is_not_materialised(
         self, tmp_path, monkeypatch
     ):
-        """Snapshots written before the dump-side filter can still hold handles.
+        """A snapshot file can hold a handle the dump-side filter never saw.
 
         Loading such a snapshot must drop the handle instead of re-opening (and
-        truncating) its file — the load-side guard is what protects conversations
-        that carried a snapshot across the deploy of the fix.
+        truncating) its file.
         """
         import dill
 
@@ -1794,8 +1960,9 @@ class TestSessionPersistence:
         pad = make_scratchpad(name="legacy", _venvs_base=venvs_base, session_id="c")
         snapshot = pad._session_snapshot_path(create=True)
         assert snapshot is not None
-        # The on-disk envelope format of scratchpad_boot (magic, version, blobs).
-        envelope = ("__anton_snapshot__", 2, {"legacy": blob, "ok": dill.dumps(42)})
+        # The on-disk envelope format of scratchpad_boot (magic, version, blobs,
+        # DS_* names).
+        envelope = ("__anton_snapshot__", 3, {"legacy": blob, "ok": dill.dumps(42)}, ())
         with open(snapshot, "wb") as f:
             dill.dump(envelope, f)
 
@@ -2113,30 +2280,50 @@ class TestAgentAuthoredModuleSnapshots:
         finally:
             await pad.cleanup()
 
-    async def test_a_snapshot_in_the_old_format_still_loads(self, tmp_path, monkeypatch):
-        """A conversation in flight across the upgrade keeps its state.
+    @pytest.mark.parametrize("old_format", ["single-stream", "envelope-v2"])
+    async def test_a_snapshot_in_an_older_format_is_discarded_once(
+        self, tmp_path, monkeypatch, old_format
+    ):
+        """ENG-3305: an older snapshot does not record which connections it saw.
 
-        The pre-ENG-1366 snapshot is one stream holding real objects; the new one is an
-        envelope of individually-pickled values. The loader must read both, or the
-        release costs every open conversation a cold turn.
+        A variable in it can hold a copy of a connection secret that the current
+        turn no longer scrubs, so it is cleared once, and the snapshot the next
+        cell writes loads as usual.
         """
         import dill
 
         monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        venvs_base = tmp_path / "venvs"
         pad = make_scratchpad(
-            name="legacy", _venvs_base=tmp_path / "venvs", session_id="c"
+            name="legacy", _venvs_base=venvs_base, session_id="c", scratchpad_ds_env={},
         )
         snapshot = pad._session_snapshot_path(create=True)
         assert snapshot is not None
-        snapshot.write_bytes(dill.dumps({"carried_over": [1, 2, 3]}))
+        if old_format == "single-stream":
+            # Before ENG-1366: one stream holding the real objects.
+            old = {"carried_over": [1, 2, 3]}
+        else:
+            old = ("__anton_snapshot__", 2, {"carried_over": dill.dumps([1, 2, 3])})
+        snapshot.write_bytes(dill.dumps(old))
 
         await pad.start()
+        cell = await pad.execute("print('carried_over' in dir())\nfresh = 1")
+        assert cell.error is None, cell.error
+        assert cell.stdout.strip() == "False"
+        assert "older format" in cell.logs
+        await pad.close()
+
+        pad2 = make_scratchpad(
+            name="legacy", _venvs_base=venvs_base, session_id="c", scratchpad_ds_env={},
+        )
+        await pad2.start()
         try:
-            cell = await pad.execute("print(carried_over)")
+            cell = await pad2.execute("print(fresh)")
             assert cell.error is None, cell.error
-            assert cell.stdout.strip() == "[1, 2, 3]", cell.stdout
+            assert cell.stdout.strip() == "1"
+            assert "cleared" not in cell.logs
         finally:
-            await pad.cleanup()
+            await pad2.cleanup()
 
 
 class TestConcurrentTurnsOnDivergentVaults:
@@ -2204,3 +2391,76 @@ class TestConcurrentTurnsOnDivergentVaults:
         # running alongside it, and not by the value left in the process env.
         assert lines_a[1] == "a-only-password"
         assert lines_b[1] == "ABSENT"
+
+
+def test_injected_helper_names_match_the_boot() -> None:
+    """`INJECTED_HELPER_NAMES` is a hand-kept copy of the names the boot
+    passes to `_inject_helper`. The write check reads a call to one as bound,
+    so a helper added to the boot without adding its name here would get a
+    false "can't be checked" card. Collect the boot's injected names from its
+    source and pin the two in step."""
+    import ast
+    import importlib.util
+    from pathlib import Path
+
+    from anton.core.backends.wire import INJECTED_HELPER_NAMES
+
+    # Read the boot's source without importing it: the module runs its boot
+    # on import, which reads the environment.
+    origin = importlib.util.find_spec("anton.core.backends.scratchpad_boot").origin
+    tree = ast.parse(Path(origin).read_text())
+    injected = {
+        node.args[0].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_inject_helper"
+        and node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)
+    }
+    assert injected == set(INJECTED_HELPER_NAMES)
+
+
+def test_boot_imports_match_the_boot() -> None:
+    """`BOOT_IMPORTS` is a hand-kept copy of the top-level packages the boot
+    imports before any cell runs. The write check reads a cell's import of
+    one as the module the boot loaded, whatever folder a cell puts on
+    `sys.path`, so a name the boot stops importing must leave the set, or a
+    module an archive unpacks under that name would run with no card. Pin
+    the two in step, from the boot's source."""
+    import ast
+    import importlib.util
+    from pathlib import Path
+
+    from anton.core.backends.wire import BOOT_IMPORTS
+
+    origin = importlib.util.find_spec("anton.core.backends.scratchpad_boot").origin
+    tree = ast.parse(Path(origin).read_text())
+    imported = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            imported.update(a.name.partition(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            imported.add(node.module.partition(".")[0])
+    assert imported == set(BOOT_IMPORTS)
+
+
+@pytest.mark.parametrize("code, line", [
+    ("x = 1\nraise KeyError('amount')\n", 2),
+    ("def f():\n    raise KeyError('amount')\n\nf()\n", 4),
+    ("exec(compile('raise KeyError(1)', CELL_FILENAME, 'exec'))\n", 1),
+    ("raise ValueError('Traceback (most recent call last):\\n  File \"<scratchpad>\", line 99, in <module>')\n", 1),
+], ids=["module-line", "inside-its-own-function", "inside-code-it-compiles-under-the-same-name", "a-line-its-message-names"])
+def test_the_stop_line_is_the_frame_of_the_cells_own_code(code, line) -> None:
+    """`cell_stopped_at` finds the cell's own frame by its code object in the
+    traceback, so neither its own functions, nor code it compiles under the
+    boot's file name, nor an error message that spells a frame moves it."""
+    import sys
+
+    from anton.core.backends.wire import CELL_FILENAME, cell_stopped_at
+
+    compiled = compile(code, CELL_FILENAME, "exec")
+    try:
+        exec(compiled, {"CELL_FILENAME": CELL_FILENAME})
+    except Exception:
+        assert cell_stopped_at(sys.exc_info()[2], compiled) == line
+    else:
+        raise AssertionError("the cell ran to its end")
+    assert cell_stopped_at(None, compiled) is None

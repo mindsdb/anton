@@ -8,25 +8,28 @@ import re
 import uuid
 from typing import TYPE_CHECKING
 
-from rich.markup import escape
-
 from anton.core.tools.tool_defs import ToolDef
+from anton.utils.datasources import _SCRUB_MARKER
 
 
 if TYPE_CHECKING:
+    from rich.console import Console
+
     from anton.core.datasources.datasource_registry import DatasourceEngine, DatasourceField
     from anton.core.session import ChatSession
+    from anton.publisher import ArtifactShareOrgRequiredError
 
 
 SECRET_NAME_TOKENS = (
     "password", "secret", "token", "api_key", "key",
     "auth", "credential", "private",
 )
-# All marker forms `scrub_credentials` emits: [DS_*] for vault secrets,
-# [<ENV_VAR>] labels for provider keys, [REDACTED_API_KEY] for shape matches.
-# User messages are scrubbed too, so the model may see these and echo them
-# back as known_variables — they must never be saved as real credentials.
-SCRUBBED_VALUE_RE = re.compile(r"^\[(?:DS_\w+|[A-Z][A-Z0-9_]*)\]$")
+# All marker forms the scrub emits: [DS_*] for vault secrets, [<ENV_VAR>]
+# labels for provider keys, [REDACTED_API_KEY] and [REDACTED_TOKEN] for shape
+# matches. User messages are scrubbed too, so the model may see these and echo
+# them back as known_variables. A value holding one anywhere, whole or inside a
+# DSN or a base64 header, is not a real credential and is never saved.
+SCRUBBED_VALUE_RE = re.compile(_SCRUB_MARKER)
 
 
 def looks_secret(field_name: str) -> bool:
@@ -87,9 +90,10 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     resolved_from_vault = []
     dropped_scrubbed = []
     for k, v in list(known_variables.items()):
-        if not SCRUBBED_VALUE_RE.match(v):
+        if not SCRUBBED_VALUE_RE.search(v):
             continue
-        resolved = unscrub_marker(vault, v)
+        # Only a value that is a marker alone names a vaulted field to reuse.
+        resolved = unscrub_marker(vault, v) if SCRUBBED_VALUE_RE.fullmatch(v) else None
         if resolved:
             known_variables[k] = resolved
             resolved_from_vault.append(k)
@@ -102,9 +106,9 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
         console.print()
         console.print(
             f"[anton.warning](anton)[/] Ignoring scrubbed-placeholder values "
-            f"for {', '.join(dropped_scrubbed)} — those bracketed strings are "
-            f"scrub-markers, not real credentials. Pass the actual secret "
-            f"values instead."
+            f"for {', '.join(dropped_scrubbed)}: each is or holds a bracketed "
+            f"scrub-marker, which stands where a secret was hidden, so it is "
+            f"not a real credential. Pass the actual secret values instead."
         )
     if resolved_from_vault:
         console.print()
@@ -279,8 +283,9 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
         if dropped_scrubbed:
             note = (
                 f" Scrubbed-placeholder values for "
-                f"{', '.join(sorted(dropped_scrubbed))} were ignored — those "
-                f"are not real credentials; pass the actual secret values "
+                f"{', '.join(sorted(dropped_scrubbed))} were ignored: each is "
+                f"or holds a bracketed scrub-marker where a secret was hidden, "
+                f"so it is not a real credential. Pass the actual secret values "
                 f"instead."
             )
         return (
@@ -515,6 +520,18 @@ def _previewable_html(path: "Path"):
     return htmls[0] if htmls else None
 
 
+def _share_org_refused(console: "Console", err: "ArtifactShareOrgRequiredError") -> str:
+    """Show the service's reason for refusing an org-wide share, and tell the
+    agent not to publish to a wider audience instead."""
+    from rich.markup import escape
+
+    from anton.publisher import SHARE_ORG_REQUIRED_INSTRUCTION
+
+    console.print(f"  [anton.error]Publish failed: {escape(err.reason)}[/]")
+    console.print()
+    return f"PUBLISH FAILED: {err.reason} {SHARE_ORG_REQUIRED_INSTRUCTION}"
+
+
 async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str:
     """Interactive preview/publish flow after dashboard creation.
 
@@ -601,7 +618,12 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     # Publish flow
     import urllib.error
 
-    from anton.publisher import ArtifactOwnedByOtherUserError, publish
+    from anton.minds_client import describe_minds_request_failure
+    from anton.publisher import (
+        ArtifactOwnedByOtherUserError,
+        ArtifactShareOrgRequiredError,
+        publish,
+    )
 
     if not settings.minds_api_key:
         console.print()
@@ -618,6 +640,7 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     import json as _json
 
     from rich.live import Live
+    from rich.markup import escape
     from rich.spinner import Spinner
 
     from anton.utils.prompt import prompt_or_cancel
@@ -702,6 +725,8 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
                 "that the existing link belongs to another account, and that they can "
                 "publish their own copy by running /publish and choosing 'new'."
             )
+        except ArtifactShareOrgRequiredError as e:
+            return _share_org_refused(console, e)
         except Exception as e:
             # Only a 404 from the upload itself says the report is gone, so
             # publishing it afresh without report_id is safe. After a timeout,
@@ -719,14 +744,18 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
                         pwd_version=pwd_version,
                         access_version=access_version,
                     )
+                except ArtifactShareOrgRequiredError as e2:
+                    return _share_org_refused(console, e2)
                 except Exception as e2:
-                    console.print(f"  [anton.error]Publish failed: {escape(str(e2))}[/]")
+                    failure = describe_minds_request_failure(e2) or str(e2)
+                    console.print(f"  [anton.error]Publish failed: {escape(failure)}[/]")
                     console.print()
-                    return f"PUBLISH FAILED: {e2}"
+                    return f"PUBLISH FAILED: {failure}"
             else:
-                console.print(f"  [anton.error]Publish failed: {escape(str(e))}[/]")
+                failure = describe_minds_request_failure(e) or str(e)
+                console.print(f"  [anton.error]Publish failed: {escape(failure)}[/]")
                 console.print()
-                return f"PUBLISH FAILED: {e}"
+                return f"PUBLISH FAILED: {failure}"
 
     view_url = result.get("view_url", "")
     returned_report_id = result.get("report_id", "")

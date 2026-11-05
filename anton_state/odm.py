@@ -34,9 +34,15 @@ class Collection:
         self, key: str, value: dict, *, pk: str = _DEFAULT_PK,
         if_not_exists: bool = False, if_version: int | None = None,
     ) -> None:
-        clash = self._reserved & set(value)
+        # An item read back with get() carries its own key attrs; they may come
+        # back only if they still point at this same item.
+        target = {self._pk: pk, self._sk: self._sk_val(key), "_key": key}
+        clash = sorted(a for a in self._reserved & set(value) if value[a] != target[a])
         if clash:
-            raise StateValidationError(f"value must not contain reserved attrs: {sorted(clash)}")
+            raise StateValidationError(
+                f"reserved attrs {clash} do not match the target key or partition; "
+                "remove them to copy an item under another key"
+            )
         item: dict[str, Any] = dict(value)
         item[self._pk] = pk
         item[self._sk] = self._sk_val(key)

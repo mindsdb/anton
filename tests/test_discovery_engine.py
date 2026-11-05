@@ -12,6 +12,7 @@ import pytest
 from anton.core.llm.provider import LLMResponse, ToolCall, Usage
 from anton.core.tools.generate_artifact.discovery import engine
 from anton.core.tools.generate_artifact.discovery.state import PrdState
+from tests.streaming_llm import StreamingLLM
 
 
 def _response(content="", tool_calls=None) -> LLMResponse:
@@ -52,8 +53,74 @@ def _session_with_plan_sequence(*responses) -> SimpleNamespace:
     async def _next(**kwargs):
         return next(it)
 
-    llm = SimpleNamespace(plan=AsyncMock(side_effect=_next), code=AsyncMock(side_effect=_next))
+    llm = StreamingLLM(plan=AsyncMock(side_effect=_next), code=AsyncMock(side_effect=_next))
     return SimpleNamespace(_llm=llm, question_count=0, elicitor=None, emit=AsyncMock())
+
+
+def _batch(label="ready"):
+    return _response(tool_calls=[
+        _tc("scratchpad", {"action": "exec", "name": "facts", "code": "print('validated')"}, id="exec"),
+        _tc("finish_gathering", {"artifact_type": "html-app", "summary": label,
+                                 "data_sources": ["inventory"]}, id="finish"),
+    ])
+
+
+async def test_earlier_tool_results_enter_kickoff_as_user_data():
+    session = _session_with_plan_sequence(_response("no more data"))
+    state = _state(session, _pipeline_kickoff_evidence="<earlier-results>\nuntrusted page text\n</earlier-results>")
+    await engine.run_gathering_loop(state)
+    assert "untrusted page text" not in session._llm.plan.call_args.kwargs["system"]
+    assert "untrusted page text" in session._llm.plan.call_args.kwargs["messages"][0]["content"]
+    assert session._llm.plan.call_args.kwargs["messages"][0]["role"] == "user"
+
+
+async def test_batch_finish_uses_completed_source_work_without_an_extra_model_call(monkeypatch):
+    from anton.core.tools.registry import ToolOutcome
+    import anton.core.tools.tool_handlers as handlers
+
+    monkeypatch.setenv("ANTON_STATIC_FAST_PATH", "direct")
+    monkeypatch.setattr(handlers, "handle_scratchpad", AsyncMock(return_value=ToolOutcome("validated rows", ok=True)))
+    session = _session_with_plan_sequence(_batch())
+    state = _state(session)
+    await engine.run_gathering_loop(state)
+    assert state.gathering_complete
+    assert not state.unverified_sources
+    assert len(state.scratchpad_execs) == 1
+    assert session._llm.plan.call_count == 1
+    assert session._llm.code.call_count == 0
+
+
+async def test_batch_finish_cannot_vouch_for_a_failed_source_execution(monkeypatch):
+    from anton.core.tools.registry import ToolOutcome
+    import anton.core.tools.tool_handlers as handlers
+
+    monkeypatch.setenv("ANTON_STATIC_FAST_PATH", "direct")
+    scratchpad = AsyncMock(side_effect=[ToolOutcome("bad query", ok=False), ToolOutcome("validated rows", ok=True)])
+    monkeypatch.setattr(handlers, "handle_scratchpad", scratchpad)
+    session = _session_with_plan_sequence(_batch("premature"), _batch("after correction"))
+    state = _state(session)
+    await engine.run_gathering_loop(state)
+    assert state.gathering_notes.startswith("after correction")
+    assert len(state.scratchpad_execs) == 1
+    assert scratchpad.call_count == 2
+    assert session._llm.code.call_count == 1
+    assert "failed" in state.messages[2]["content"][1]["content"]
+
+
+async def test_batch_finish_must_follow_the_work_it_vouches_for(monkeypatch):
+    from anton.core.tools.registry import ToolOutcome
+    import anton.core.tools.tool_handlers as handlers
+
+    monkeypatch.setenv("ANTON_STATIC_FAST_PATH", "direct")
+    monkeypatch.setattr(handlers, "handle_scratchpad", AsyncMock(return_value=ToolOutcome("validated rows", ok=True)))
+    reversed_batch = _batch()
+    reversed_batch.tool_calls.reverse()
+    session = _session_with_plan_sequence(reversed_batch, _response(tool_calls=[
+        _tc("finish_gathering", {"artifact_type": "html-app", "summary": "after execution", "data_sources": ["inventory"]})]))
+    state = _state(session)
+    await engine.run_gathering_loop(state)
+    assert state.gathering_notes.startswith("after execution")
+    assert session._llm.code.call_count == 1
 
 
 async def test_finish_gathering_sets_artifact_type_and_notes():
@@ -512,3 +579,96 @@ async def test_only_cells_that_ran_are_recorded_for_the_data_notes(monkeypatch):
     # The model still sees every result, refusal included — only the notes skip it.
     result_blocks = state.messages[2]["content"]
     assert len(result_blocks) == 4
+
+
+async def test_a_cell_that_left_out_action_is_recorded_and_verifies_its_source(monkeypatch):
+    """A call with `code` and no `action` runs as `exec`: its cell goes into
+    the data notes, and the source it ran against counts as verified."""
+    from anton.core.tools.registry import ToolOutcome
+
+    async def fake_handle_scratchpad(session, inp):
+        return ToolOutcome(content="[output] 504 rows", ok=True)
+
+    monkeypatch.setattr(
+        "anton.core.tools.tool_handlers.handle_scratchpad", fake_handle_scratchpad
+    )
+    session = _session_with_plan_sequence(
+        _response(tool_calls=[_tc("scratchpad", {"name": "hr", "code": "print(2)"})]),
+        _response(tool_calls=[_tc("finish_gathering", {
+            "summary": "ok",
+            "artifact_type": "html-app",
+            "data_sources": ["hr table"],
+        })]),
+    )
+    state = _state(session)
+    await engine.run_gathering_loop(state)
+    assert [(x["code"], x["output"]) for x in state.scratchpad_execs] == [("print(2)", "[output] 504 rows")]
+    assert state.unverified_sources == []
+
+
+_SITES = "site,lat,lon\nToronto,43.7,-79.4\nAustin,30.3,-97.7"
+
+
+def _finish(artifact_type="html-app", mark="known_data"):
+    return _response(tool_calls=[_tc("finish_gathering", {
+        "artifact_type": artifact_type,
+        "summary": "the rows are in the known data",
+        "data_sources": ["sites"],
+        "data_findings": [{"source": "sites", "verified_by": mark}],
+    })])
+
+
+async def test_a_source_whose_rows_are_in_known_data_is_verified():
+    state = _state(_session_with_plan_sequence(_finish()), known_data=_SITES)
+    await engine.run_gathering_loop(state)
+    assert state.unverified_sources == []
+    assert state.known_data_verified == ["sites"]
+
+
+async def test_an_unmarked_source_stays_unverified_despite_known_data():
+    state = _state(_session_with_plan_sequence(_finish(mark="")), known_data=_SITES)
+    await engine.run_gathering_loop(state)
+    assert state.unverified_sources == ["sites"]
+
+
+@pytest.mark.parametrize("artifact_type, known_data", [
+    ("fullstack-stateless-app", _SITES),
+    ("html-app", ""),
+])
+async def test_the_mark_does_not_count_where_known_data_cannot_stand_in_for_code(artifact_type, known_data):
+    state = _state(_session_with_plan_sequence(_finish(artifact_type=artifact_type)), known_data=known_data)
+    await engine.run_gathering_loop(state)
+    assert state.unverified_sources == ["sites"]
+
+
+async def test_marked_rows_skip_the_data_loop_and_reach_the_page_builder(tmp_path: Path):
+    from anton.core.tools.generate_artifact import orchestrator
+
+    state = _state(_session_with_plan_sequence(_finish()), known_data=_SITES, artifact_path=tmp_path)
+    await engine.run_gathering_loop(state)
+    # The session's fake LLM has no `generate_object`: a decision call fails.
+    assert await orchestrator._data_phase(state) is None
+    assert [s.outcome for s in state.trace if s.node == "data_check"] == ["skipped"]
+    assert _SITES in orchestrator._spec_context(state)
+
+
+async def test_a_web_call_is_refused_when_the_session_has_internet_research_off(monkeypatch):
+    """The tool isn't offered then, but a model can still name it."""
+    import anton.core.tools.web_tools as web_tools
+
+    fetch = AsyncMock(return_value="page body")
+    monkeypatch.setattr(web_tools, "handle_web_fetch_fallback", fetch)
+    session = _session_with_plan_sequence(
+        _response(tool_calls=[_tc("web_fetch", {"url": "https://example.com/a"})]),
+        _response(tool_calls=[_tc("finish_gathering", {
+            "artifact_type": "html-app", "notes": "n", "data_sources": [],
+        })]),
+    )
+    session._internet_research_enabled = False
+    state = _state(session)
+
+    await engine.run_gathering_loop(state)
+
+    fetch.assert_not_awaited()
+    assert state.web_calls == []
+    assert any("internet research is turned off" in str(m.get("content")) for m in state.messages)

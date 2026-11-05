@@ -341,3 +341,26 @@ async def test_e2e_anthropic_model_restriction_is_its_own_type():
     # A sanity check that the mock gateway served this request, not a retry
     # guarantee: the SDKs do not retry a 403, so this count cannot catch one.
     assert calls["n"] == 1
+
+
+async def test_e2e_azure_throttle_waits_retry_after_ms_then_hands_the_session_its_wait():
+    import time
+
+    seen: list[float] = []
+
+    def handler(_req):
+        seen.append(time.monotonic())
+        return httpx.Response(429, headers={"retry-after-ms": "50", "retry-after": "1"}, json={
+            "error": {"code": "429", "message": "Requests have exceeded the token rate limit."},
+        })
+
+    prov = _openai_provider(handler, host="model-route.internal")
+    with pytest.raises(TransientProviderError) as ei:
+        await _drain(prov)
+    # The SDK retried twice, each after the interval Azure named.
+    assert len(seen) == 3
+    assert all(b - a >= 0.045 for a, b in zip(seen, seen[1:]))
+    # Then the session gets a rate limit it waits on, not a fast count-based retry.
+    assert ei.value.code == "rate_limited"
+    assert ei.value.session_backoff is True
+    assert ei.value.retry_after == 0.05

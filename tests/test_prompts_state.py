@@ -62,3 +62,10 @@ def test_store_api_drops_gsi_index_kwarg(T):
 
 def test_rules_warn_against_manual_mutation_retries(T):
     assert "retry" in T.lower()
+
+
+def test_store_api_shows_versioned_read_modify_write(T):
+    assert "todos.get(" in T
+    assert 'if_version=game["_v"]' in T
+    assert "ConditionalCheckFailed" in T
+    assert 'games.put("current", new_game(), if_not_exists=True)' in T

@@ -83,7 +83,7 @@ async def rebuild_session(
     # Update cortex with new LLM client and memory mode
     if cortex is not None:
         cortex._llm = state["llm_client"]
-        cortex.mode = settings.memory_mode
+        cortex.mode = settings.effective_memory_mode
 
     # Refresh mind knowledge from remote server
     refresh_knowledge(settings, cortex)
@@ -127,4 +127,5 @@ async def rebuild_session(
         tools=list(DEFAULT_SESSION_TOOLS),
         web_search_enabled=settings.web_search_enabled,
         web_fetch_enabled=settings.web_fetch_enabled,
+        internet_research_enabled=settings.internet_research_enabled,
     ))

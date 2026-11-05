@@ -235,6 +235,20 @@ ANTON_LANGFUSE_HEADERS=1
 
 ---
 
+## Self-hosted product identity
+
+A host can supply `ChatSessionConfig.deployment_identity` using `DeploymentIdentity(kind="self-hosted", product_name="Acme Cowork")` from `anton.core.llm.identity`. Anton uses that name, identifies MindsHub as the maker, and explains that users access an operator-managed deployment in the browser. The prompt opens with a neutral identity, leaving the configured name in its authoritative PRODUCT block. These facts take precedence over the default product skill. When such a session recalls the `cowork-product` skill, the deployment's precedence rules come ahead of the skill's default facts; without a deployment identity, the skill is recalled unchanged. The product name is 1 to 64 characters, with no leading or trailing whitespace, control or format characters, unpaired surrogates, or line separators. The host must read it from trusted deployment configuration, never from a chat message or a user's preferences.
+
+The same host supplies `learned_memory_scope` as `personal`, `shared`, `off` or `unavailable`. With a deployment identity, Anton explains the saved-memory state and distinguishes product instructions and operator rules from learned user preferences. It checks saved content before retrieval filters and reports unreadable stores as unverified. Off and unavailable turns skip learned-store reads during prompt assembly and tool-context construction; the host must also supply the appropriate stores and learning policy when constructing Cortex. Without a deployment identity, both identity and memory prompts keep their existing defaults.
+
+These are in-process session inputs. The cloud-turn wire does not transport deployment identity or learned-memory scope.
+
+## Shared live-app slots
+
+Hosts that enable live apps can set `ANTON_LIVE_APPS_PER_PERSON` from zero through their configured slot count. Empty uses the slot count; zero refuses launches and leaves running apps alone. At the cap, or when every slot is full, the person chooses one of their own apps to replace. Cancel, Skip and unanswered cards leave the apps running.
+
+`LiveAppHost` must implement a deployment-wide `launch_lock`, plus `slots_full` and `slots_available` hooks for durable notices. The lock must coordinate every server worker. Approval cards wait outside it; final ownership checks, slot changes and launch recording happen inside it. A notice invites refused people to try again and reserves no capacity.
+
 ## Model-call deadline
 A model call that sends nothing for 10 minutes is stopped, and the turn ends with "The model sent no output for 10 minutes, so the call was stopped." Every piece of text, thinking or tool-call arguments anton reads from the model restarts the 10 minutes, so a slow model that keeps writing is never cut. A non-streamed call gets the 10 minutes for the whole call, including the SDK's own retries. After one call in a turn runs out, every later model call in that turn fails at once. The one exception is the completion check after an answer: when it runs out, the turn ends on the answer that already streamed, marked unverified.
 
@@ -245,6 +259,28 @@ export ANTON_MODEL_CALL_IDLE_TIMEOUT_S=600
 ```
 
 While a model call is silent, hosts can show that the turn is still working. `ChatSession.model_calls` is `None` before the first turn. Its `snapshot()` returns the oldest call waiting on the model, or `None` when nothing is waiting, a question is open, or the turn has ended. The cloud turn entrypoint uses it: when a call is waiting and nothing else has gone out for 20 seconds, it writes a progress line with phase `model_wait`, such as "Waiting for the model (2m 40s)". A hung tool or cell reports no wait, so it still goes quiet and the host's idle limits still end it.
+
+## Cloud turn skills
+
+A cloud turn's request (`TurnRequestV1` in `anton/cloud_turn/contract.py`) can carry a `skills` block: the skills cowork-server resolved for that turn's person and project. Each key is a skill's slug. Each entry holds the skill's files, by their path inside the skill's folder, and `always_on`, which cowork-server leaves out or sets to false for a skill the agent recalls on demand:
+
+```json
+{"skills": {"sql-style": {"files": {"SKILL.md": "---\nname: sql-style\ndescription: How we write SQL\n---\nUppercase keywords.", "references/examples.md": "..."}, "always_on": true}}}
+```
+
+When the block is present, even as `{}`, it is the complete set of skills the turn may recall or list. Anton's built-in skills resolve either way. The pod treats the block as untrusted input, and nothing in it fails the turn. `parse_turn_skills` reads each entry into a `TurnSkillEntry` (`files: dict[str, str]`, `always_on: bool = False`). It drops an entry whose slug isn't a valid skill name (lowercase letters, digits and single hyphens, at most 64 characters) or whose value isn't an object, and a file whose path or text isn't a string. Only a JSON `true` turns `always_on` on. Staging then drops any file whose path escapes its skill's folder.
+
+Each turn writes its skills into a fresh folder in the system temp dir, outside the workspace, and the folder's name carries the turn's process id. The entrypoint deletes that folder when the turn ends, including a turn that fails. The next turn's staging also deletes any folder a killed turn left behind. It keeps a folder whose process id belongs to another running process, since that turn may still be reading it.
+
+`always_on: true` keeps the skill staged for recall and also puts its SKILL.md body into every turn's prompt. The bodies follow an "Organization and team skills (always apply)" heading, each inside `<org_skill>` tags, in the order the block lists them. cowork-server sets `always_on` for organization and team skills marked always on. The section has a budget, set in `anton/core/memory/always_on_skills.py`:
+
+| Constant | Value | Past it |
+|---|---|---|
+| `ALWAYS_ON_SKILL_MAX_CHARS` | 6,000 characters of one skill's body | The body is cut at a line boundary, an open code fence is closed, and a marker says the full skill is available on demand. |
+| `ALWAYS_ON_TOTAL_MAX_CHARS` | 24,000 characters for the section after its heading and opening paragraph: every skill's heading, tags, body and marker, plus the closing line | The first skill that no longer fits, and every skill after it, is left out of the prompt and named on a closing "Also available on demand" line instead. When that line itself doesn't fit, the last skills shown move onto it. A skill left out stays staged for recall. |
+| `ALWAYS_ON_OMITTED_MAX_NAMES` | 20 names on the closing line | The rest are counted as "and N more". |
+
+A request with no `skills` block at all stages no skills, with one rollout fallback. On a pod whose controller mounts the organization's whole skills tree and names it in `ANTON_CLOUD_SKILLS_ROOT`, such a request reads that mount instead, and the pod logs a warning. The mount holds every member's skills, so a request that carries a block never reads it.
 
 ---
 
@@ -347,15 +383,47 @@ service repos through the `calver-release.yml` reusable workflow in
 [mindsdb/github-actions](https://github.com/mindsdb/github-actions); this repo's
 workflow supplies the major component and consumes the resulting `tag`/`version` outputs.
 
+### Reviewed dependency updates
+
+`uv.lock` selects the dependencies used by CI and release checks. Docker uses `uv sync --locked --no-dev --group scratchpad`; the scratchpad group includes `boto3` and its dependencies in that same lock. Its initial SDK selection matches the successful image build on October 21, 2026. Existing runtime selections are unchanged.
+
+`anton/release-requirements.txt` is generated from the runtime lock with markers and artifact hashes. Both release archives include it. CI rejects a stale export or an archive with a different export. Wheel, source and Git smoke installs install the hashed registry requirements first, then Anton without resolving dependencies again.
+
+The shell and PowerShell installers and the CLI auto-updater resolve one release tag to a commit and use that commit's requirements as constraints. They refuse missing or empty exports before replacing the installation. Rerun the installer to select a newer release; a generic `uv tool upgrade` does not apply this contract. These tool installs constrain versions; the release smoke tests additionally enforce artifact hashes.
+
+To update a dependency deliberately:
+
+```sh
+# Advance tool.uv.exclude-newer in pyproject.toml to the reviewed cutoff first.
+uv lock --upgrade-package <package-name>
+python scripts/release_contract.py
+uv sync --locked --group dev
+uv run --locked --group dev pytest
+```
+
+Review the lock and export diffs together, then publish through the normal release checks. Changing a source file does not update dependency versions. Public `Requires-Dist` keeps compatibility ranges for library consumers; an independent `pip install anton-agent` resolves those ranges. Python, build backends and operating-system packages remain separate image inputs. Packages an agent explicitly installs during a task remain runtime user work.
+
 ### Staging release candidates
 
-Every push to `staging` publishes a **release candidate** through [`.github/workflows/publish-staging.yml`](.github/workflows/publish-staging.yml): it cuts a PEP 440 pre-release tag (`v2.YY.M.DD.SEQrcN`), publishes a GitHub pre-release, and uploads the wheel to PyPI — so cowork-server staging installs an immutable, versioned Anton instead of a mutable branch or hand-pinned commit (ENG-1159). These never reach production: resolvers ignore pre-releases unless a specifier names one, and PyPI's `info.version` (read by the prod desktop updater) excludes them.
+Every push to `staging` publishes a **release candidate** through [`.github/workflows/publish-staging.yml`](.github/workflows/publish-staging.yml): it cuts a PEP 440 pre-release tag (`v2.YY.M.DD.SEQrcN`), publishes a GitHub pre-release, and uploads the wheel to PyPI — so a reviewed cowork-server lock can select an immutable, versioned Anton. These never reach production: resolvers ignore pre-releases unless a specifier names one, and PyPI's `info.version` (read by the prod desktop updater) excludes them.
 
 ### What you should NOT do
 
 - **Don't create GitHub releases manually.** The `v*` tag namespace is locked via a repo ruleset — only the release workflow can create them. Manual attempts will be rejected by GitHub.
 - **Don't push `v*` tags directly.** Same protection applies.
 - **Don't hand-edit a version.** There's no version file to bump — the tag is the source of truth, and both publishers derive the wheel version from it.
+
+### Running the test suite
+
+CI runs four unit-test shards on separate runners while stub E2E runs alongside them. Each shard collects the full unit suite, then selects whole files using a stable hash of their repository-relative paths. Separate checkouts keep the shared scratchpad workspaces isolated. The `run-tests` check requires every shard, stub E2E and the Windows installer tests to succeed; failed or skipped jobs cannot pass the gate. Test durations are printed for the slowest 20 cases.
+
+Without shard options, pytest still runs the full selected suite. To reproduce one CI shard:
+
+```sh
+uv run --locked --group dev pytest tests/ --ignore=tests/e2e --shard-index 0 --shard-count 4 --durations=20
+```
+
+Run indices 0 through 3 in separate checkouts to reproduce all shards concurrently. Stub E2E uses `uv run --locked --group dev pytest tests/e2e/ --durations=20`.
 
 ### Editing CI / workflows
 
@@ -364,3 +432,9 @@ Anything under [`.github/`](.github/) is owned by `@mindsdb/devops` via [CODEOWN
 ### Hotfixes / out-of-band releases
 
 If you genuinely need to release outside the normal flow (e.g. an admin hotfix), coordinate with `@mindsdb/devops` to bypass the tag ruleset. The e2e workflow's version-match guard will still verify the release tag matches `anton.__version__` and fail loudly on mismatch.
+
+## Diagnostics
+
+The CLI, cloud-turn, and resident launcher share safe diagnostic settings.
+See [structured logging](docs/structured-logging.md) for defaults, troubleshooting
+overrides, retained evidence streams and rollout requirements.

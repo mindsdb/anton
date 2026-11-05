@@ -45,6 +45,20 @@ in both directions (no unclassified extras, no stale entries).
 `query_crm_data` (SQL-shaped) and `manage_onboarding` (its own description
 contradicts its write-shaped name) are the two the original source doc left
 ambiguous; both are kept on the safe side of the line they're closest to.
+
+A second table, ``TOOL_OUTPUT``, says what each read-tier tool returns:
+``"records"`` (the customer's own data, such as CRM objects, campaign or
+email analytics) or ``"metadata"`` (docs, schema, property definitions,
+account or user details). The access tier answers "may this connection call
+it"; this table answers "is its output evidence for a figure in an answer".
+A caller that attributes an answer's numbers to tool calls, such as
+cowork-server's figure sources, should count only ``returns_records``
+tools, so a limit quoted from ``tool_guidance`` or a ``displayOrder`` from
+``get_properties`` never reads as a sourced figure. Write-tier tools stay
+out of it too. Some also view data (``manage_aeo_prompts`` can view tracked
+prompts), but a tool's name can't tell a view from a write, so none of
+their output counts. The same fail-closed default applies: an unlisted tool
+or engine returns no records.
 """
 
 from __future__ import annotations
@@ -52,6 +66,7 @@ from __future__ import annotations
 from typing import Literal
 
 AccessMode = Literal["read", "write", "none"]
+ToolOutput = Literal["records", "metadata"]
 
 #: engine -> {tool_name: "read" | "write"}. Live-verified 2026-09-15 against
 #: a real HubSpot MCP Auth App with both read- and write-scoped grants (see
@@ -59,7 +74,8 @@ AccessMode = Literal["read", "write", "none"]
 #: `render_asset`, and `manage_blog_post` (all in the original doc-derived
 #: table) never appeared in either live `tools/list()` run — removed here as
 #: stale. If a future live check shows them again, re-add with their
-#: original classification (read/read/write).
+#: original classification (read/read/write). A new read-tier tool also
+#: needs a TOOL_OUTPUT entry (below) saying whether it returns records.
 TOOL_ACCESS: dict[str, dict[str, str]] = {
     "hubspot": {
         # READ
@@ -103,6 +119,37 @@ TOOL_ACCESS: dict[str, dict[str, str]] = {
 }
 
 
+#: engine -> {tool_name: "records" | "metadata"} for every read-tier tool in
+#: TOOL_ACCESS (a test keeps the two in step). "records" means the output is
+#: the customer's own data; "metadata" means docs, schema or account details
+#: whose numbers (limits, display orders, ids) are not figures about the
+#: business. Write-tier tools are not listed (see module docstring).
+TOOL_OUTPUT: dict[str, dict[str, ToolOutput]] = {
+    "hubspot": {
+        # RECORDS
+        "search_crm_objects": "records",  # CRM objects matching filters
+        "get_crm_objects": "records",  # CRM objects by id
+        "query_crm_data": "records",  # SQL-shaped query over CRM objects
+        "read_campaign_data": "records",  # campaign analytics, asset metrics, contact ids
+        "get_campaign_attribution_reports": "records",  # attributed revenue/contacts
+        "get_marketing_email_analytics": "records",  # sends, opens, clicks
+        "get_content_analytics_report": "records",  # page/blog views, sessions
+        "get_aeo_metrics": "records",  # AI-answer (AEO) visibility metrics
+        "search_intent_signals": "records",  # buyer intent signals
+        "search_conversations": "records",  # inbox threads and messages
+        # METADATA
+        "tool_guidance": "metadata",  # HubSpot's usage docs for its own tools
+        "discover_hubspot_schema": "metadata",  # object types and associations
+        "get_properties": "metadata",  # property definitions
+        "search_properties": "metadata",  # property definitions
+        "get_user_details": "metadata",  # the connected user and their scopes
+        "get_organization_details": "metadata",  # the HubSpot account itself
+        "search_owners": "metadata",  # the portal's users (owner ids, names)
+        "get_conversation_channel_metadata": "metadata",  # inbox channel config
+    },
+}
+
+
 def allowed_for_mode(engine: str, tool_name: str, access_mode: AccessMode) -> bool:
     """Whether `tool_name` should be registered for a connection at `access_mode`.
 
@@ -116,3 +163,17 @@ def allowed_for_mode(engine: str, tool_name: str, access_mode: AccessMode) -> bo
     if access_mode == "write":
         return True
     return TOOL_ACCESS.get(engine, {}).get(tool_name) == "read"
+
+
+def returns_records(*, engine: str, tool: str) -> bool:
+    """Whether `tool`'s output is the customer's own records, the only kind
+    of output that counts as evidence for a figure in an answer.
+
+    True only for a read-tier tool this engine's TOOL_OUTPUT marks
+    "records". False for metadata tools, write-tier tools, and any tool or
+    engine TOOL_OUTPUT does not list. `tool` is the bare tool name; split a
+    registered name with `names.parse_namespaced_tool_name` first.
+    """
+    if not allowed_for_mode(engine, tool, "read"):
+        return False
+    return TOOL_OUTPUT.get(engine, {}).get(tool) == "records"

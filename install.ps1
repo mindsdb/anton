@@ -125,12 +125,18 @@ Write-Host "  Fetching latest release..."
 try {
     $release = Invoke-RestMethod "https://api.github.com/repos/mindsdb/anton/releases/latest"
     $latestTag = $release.tag_name
-    $repoUrl = "git+https://github.com/mindsdb/anton.git@$latestTag"
+    if (-not $latestTag) { throw "GitHub did not return a release tag" }
+    $refs = git ls-remote https://github.com/mindsdb/anton.git "refs/tags/$latestTag" "refs/tags/$latestTag^{}"
+    if ($LASTEXITCODE -ne 0) { throw "Could not resolve the release commit" }
+    $releaseCommit = (($refs | Sort-Object | Select-Object -Last 1) -split '\s+')[0]
+    # Prefer the peeled commit for an annotated tag.
+    $peeled = $refs | Where-Object { $_ -match '\^\{\}$' }
+    if ($peeled) { $releaseCommit = ($peeled -split '\s+')[0] }
+    if ($releaseCommit -notmatch '^[0-9a-f]{40}$') { throw "Invalid release commit" }
+    $repoUrl = "git+https://github.com/mindsdb/anton.git@$releaseCommit"
 }
 catch {
-    Write-Host "warning: Could not determine latest release tag. Falling back to main branch." -ForegroundColor Yellow
-    $repoUrl = "git+https://github.com/mindsdb/anton.git"
-    $latestTag = ""
+    throw "Could not resolve a released version. Retry when GitHub is available. $_"
 }
 
 # ── 6. Install anton via uv tool ───────────────────────────────────
@@ -143,7 +149,16 @@ Write-Host ""
 
 if (Confirm-Step "Proceed with installation?") {
     Write-Host "  Installing anton into an isolated venv..."
-    uv tool install $repoUrl --force
+    $releaseContract = [System.IO.Path]::GetTempFileName()
+    try {
+        Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/mindsdb/anton/$releaseCommit/anton/release-requirements.txt" -OutFile $releaseContract
+        if ((Get-Item $releaseContract).Length -eq 0) { throw "The release dependency contract is empty" }
+        uv tool install $repoUrl --force --constraints $releaseContract
+        if ($LASTEXITCODE -ne 0) { throw "The locked Anton install failed" }
+    }
+    finally {
+        Remove-Item $releaseContract -ErrorAction SilentlyContinue
+    }
     Write-Host "  Installed anton"
 }
 else {
@@ -258,7 +273,7 @@ Write-Host "# Dashboard" -ForegroundColor Cyan
 Write-Host "    anton run `"analyze last month's sales data`"    " -NoNewline
 Write-Host "# Give Anton a task" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "  Upgrade:    uv tool upgrade anton"
+Write-Host "  Upgrade:    run this installer again to use the next release's dependency contract"
 Write-Host "  Uninstall:  uv tool uninstall anton"
 Write-Host ""
 Write-Host "  Config: ~\.anton\.env"
