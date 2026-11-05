@@ -2039,6 +2039,9 @@ class ChatSession:
             else DEFAULT_MAX_IMAGES
         )
         self._images_this_turn = 0
+        # Whether `generate_image` is offered: None until `_settle_image_offer`
+        # decides, at the first turn.
+        self._image_offer: bool | None = None
         self._self_awareness = config.self_awareness
         self._cortex = config.cortex
         self._episodic = config.episodic
@@ -3142,6 +3145,7 @@ class ChatSession:
             workspace_ctx = render_workspace_discovery(pin["workspace"])
 
         # Ensure the registry is populated before we extract tool prompts.
+        await self._settle_image_offer()
         self._build_tools()
         if self._cortex is not None and "read" not in self._memory_pin():
             read = self._cortex.memory_read
@@ -3268,7 +3272,10 @@ class ChatSession:
             }
             # Fail loud on a name that matches no built or deferred tool (typo /
             # unavailable here) rather than silently dropping it.
-            unknown = set(self._tool_allowlist) - built - deferred
+            # `generate_image` is offered only where an images API serves it
+            # (`_settle_image_offer`), so a host may allow it unconditionally.
+            withheld = set() if getattr(self, "_image_offer", None) else {GENERATE_IMAGE_TOOL.name}
+            unknown = set(self._tool_allowlist) - built - deferred - withheld
             if unknown:
                 raise ValueError(
                     "tool_allowlist names not registered in this session: "
@@ -3467,35 +3474,74 @@ class ChatSession:
                 self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
             self.tool_registry.register_tool(generate)
             # Pictures, saved as image artifacts — so also only with a
-            # workspace, and only where a role can reach an images API.
-            if self._image_generation_available():
-                # The pad's generate_image() goes out on the coding provider,
-                # and only an OpenAI-API one has an images API.
-                coding = self._llm.coding_provider.export_connection_info().provider
-                self.tool_registry.register_tool(
-                    GENERATE_IMAGE_TOOL if coding in ("openai", "openai-compatible")
-                    else GENERATE_IMAGE_TOOL_NO_PAD_HELPER
-                )
+            # workspace, and only once `_settle_image_offer` found an images
+            # API to send them to.
+            if getattr(self, "_image_offer", None):
+                self.tool_registry.register_tool(self._image_tool())
 
-    def _image_generation_available(self) -> bool:
-        """Whether this session offers `generate_image` (ENG-4024).
+    def _image_tool(self) -> ToolDef:
+        """`generate_image`, offering the pad's helper only where it can work:
+        the pad's helper goes out on the coding provider, and only an
+        OpenAI-API one has an images API."""
+        coding = self._llm.coding_provider.export_connection_info().provider
+        return (
+            GENERATE_IMAGE_TOOL if coding in ("openai", "openai-compatible")
+            else GENERATE_IMAGE_TOOL_NO_PAD_HELPER
+        )
+
+    async def _settle_image_offer(self) -> None:
+        """Decide, once per session, whether `generate_image` is offered (ENG-4024).
 
         It needs a role on an OpenAI-API endpoint to send the call to
-        (`LLMClient.image_provider`). MindsHub and OpenAI serve the images API;
-        another OpenAI-compatible server is assumed not to unless an image
-        model was configured for it, since a tool that can only answer 404
-        would still be called.
+        (`LLMClient.image_provider`), and then:
+
+        - an image model configured (settings, ANTON_IMAGE_MODEL, a cloud
+          turn's `llm["image_model"]`) turns it on;
+        - direct OpenAI serves the images API;
+        - on MindsHub, its catalogue must list an image model this key may
+          use: the image aliases are published after the clients that use them
+          ship, and until then every call would fail. A catalogue that cannot
+          be read offers nothing. Read off the event loop, and cached for the
+          process (`images.catalog_offers_images`);
+        - another OpenAI-compatible server is assumed to have none.
+
+        Runs before the turn's first tool build. A registry built earlier
+        (a host that builds tools before the turn) gets the tool added here.
         """
-        from anton.core.llm.images import is_mindshub_endpoint
+        if getattr(self, "_image_offer", None) is not None:
+            return
+        offered = False
+        try:
+            offered = await self._image_generation_available()
+        except Exception:
+            logger.warning("could not decide whether to offer generate_image", exc_info=True)
+        self._image_offer = offered
+        if (
+            offered
+            and self._workspace is not None
+            and self.tool_registry
+            and not any(t.name == GENERATE_IMAGE_TOOL.name for t in self.tool_registry.get_tool_defs())
+        ):
+            self.tool_registry.register_tool(self._image_tool())
+
+    async def _image_generation_available(self) -> bool:
+        from anton.core.llm.images import catalog_offers_images, is_mindshub_endpoint
         from anton.core.llm.openai import OpenAIProvider
 
         provider = getattr(self._llm, "image_provider", None)
         if not isinstance(provider, OpenAIProvider):
             return False
-        conn = provider.export_connection_info()
-        if conn.flavor == OpenAIProvider.FLAVOR_OPENAI or is_mindshub_endpoint(conn.flavor, conn.base_url):
+        if _named_model(getattr(self._llm, "image_model", None)) is not None:
             return True
-        return _named_model(getattr(self._llm, "image_model", None)) is not None
+        conn = provider.export_connection_info()
+        if is_mindshub_endpoint(conn.flavor, conn.base_url):
+            api_key = await provider.current_api_key()
+            if not conn.base_url or not api_key:
+                return False
+            return await asyncio.to_thread(
+                catalog_offers_images, conn.base_url, api_key, verify=conn.ssl_verify,
+            )
+        return conn.flavor == OpenAIProvider.FLAVOR_OPENAI
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""
@@ -6773,6 +6819,7 @@ class ChatSession:
         self, user_message: str = ""
     ) -> AsyncIterator[StreamEvent]:
         """Stream one LLM call, handle tool loops, yield all events."""
+        await self._settle_image_offer()
         tools = self._build_tools()
         system = await self._build_system_prompt(user_message)
         self._compacted_this_turn = False

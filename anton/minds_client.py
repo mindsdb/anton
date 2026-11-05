@@ -311,6 +311,15 @@ def fetch_model_catalog(
     return [entry for entry in entries or [] if isinstance(entry, dict)]
 
 
+def usable_models_of_kind(entries: list[dict], kind: str) -> list[str]:
+    """The ids of the catalogue rows of ``kind`` the key may use (not ``enabled: false``)."""
+    return [
+        str(entry["id"])
+        for entry in entries
+        if entry.get("id") and entry.get("kind") == kind and entry.get("enabled") is not False
+    ]
+
+
 def role_default_model(entries: list[dict], role: str, *, kind: str | None = None) -> str | None:
     """The id of the catalogue row whose ``default_for`` names ``role``, or None.
 

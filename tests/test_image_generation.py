@@ -99,9 +99,9 @@ def _client(gateway: Gateway, *, image_model: str | None = "gpt-image-2.6-flare"
 
 @pytest.fixture(autouse=True)
 def _fresh_catalog_cache():
-    images._catalog_defaults.clear()
+    images._catalog_cache.clear()
     yield
-    images._catalog_defaults.clear()
+    images._catalog_cache.clear()
 
 
 # ── Settings ─────────────────────────────────────────────────────────
@@ -694,23 +694,113 @@ async def _first_request(tmp_path: Path, llm) -> tuple[str, set[str]]:
     return kwargs["system"], {tool["name"] for tool in kwargs["tools"]}
 
 
-@pytest.mark.parametrize("flavor, base_url, image_model, offered", [
-    (OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH, MINDSHUB, None, True),
-    (OpenAIProvider.FLAVOR_OPENAI, "https://api.openai.com/v1", None, True),
-    (OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC, "http://localhost:11434/v1", None, False),
-    (OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC, "http://localhost:11434/v1", "local-image", True),
-])
+_CATALOG_NO_IMAGES = {"data": [{"id": "sonnet", "kind": "chat", "default_for": ["planning"]}]}
+_CATALOG_IMAGES_LOCKED = {"data": [{"id": "gpt-image-2.6-flare", "kind": "image", "enabled": False}]}
+
+
+@pytest.mark.parametrize("flavor, base_url, image_model, catalog, offered", [
+    # MindsHub: the catalogue decides, failing closed.
+    (OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH, MINDSHUB, None, _CATALOG, True),
+    (OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH, MINDSHUB, None, _CATALOG_NO_IMAGES, False),
+    (OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH, MINDSHUB, None, _CATALOG_IMAGES_LOCKED, False),
+    (OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH, MINDSHUB, None, OSError("down"), False),
+    # A configured image model turns it on whatever the catalogue says.
+    (OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH, MINDSHUB, "gpt-image-2.6-sunburst", OSError("down"), True),
+    # Elsewhere, as before: direct OpenAI yes, another server only when configured.
+    (OpenAIProvider.FLAVOR_OPENAI, "https://api.openai.com/v1", None, AssertionError("read"), True),
+    (OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC, "http://localhost:11434/v1", None, AssertionError("read"), False),
+    (OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC, "http://localhost:11434/v1", "local-image", AssertionError("read"), True),
+], ids=["mindshub-listed", "mindshub-none", "mindshub-locked", "mindshub-unreadable", "mindshub-configured",
+        "openai", "generic", "generic-configured"])
 async def test_the_tool_and_its_prompt_are_offered_where_an_images_api_is(
-    tmp_path, flavor, base_url, image_model, offered,
+    tmp_path, flavor, base_url, image_model, catalog, offered,
 ):
     llm = make_mock_llm()
     llm.image_provider = OpenAIProvider(api_key="k", base_url=base_url, flavor=flavor)
     llm.image_model = image_model
-    system, tools = await _first_request(tmp_path, llm)
+    reply = (
+        {"side_effect": catalog} if isinstance(catalog, BaseException)
+        else {"return_value": json.dumps(catalog).encode()}
+    )
+    with patch("anton.minds_client.minds_request", **reply):
+        system, tools = await _first_request(tmp_path, llm)
     assert ("generate_image" in tools) is offered
     # The mock's coding provider is Anthropic, so the pad helper is not offered.
     assert (GENERATE_IMAGE_TOOL_NO_PAD_HELPER.prompt in system) is offered
     assert "in the scratchpad instead" not in system
+
+
+async def test_the_catalogue_is_read_off_the_event_loop_and_once_per_process(tmp_path):
+    import threading
+
+    threads = []
+
+    def reply(*_a, **_kw):
+        threads.append(threading.current_thread())
+        return json.dumps(_CATALOG).encode()
+
+    with patch("anton.minds_client.minds_request", side_effect=reply):
+        for _ in range(2):
+            llm = make_mock_llm()
+            llm.image_provider = OpenAIProvider(api_key="k", base_url=MINDSHUB)
+            llm.image_model = None
+            _, tools = await _first_request(tmp_path, llm)
+            assert "generate_image" in tools
+    assert len(threads) == 1 and threads[0] is not threading.main_thread()
+
+
+async def test_a_registry_built_before_the_turn_gets_the_tool_once_it_is_offered(tmp_path):
+    """A host (goal mode) builds the tools before the first turn; the turn's
+    catalogue check adds the tool then."""
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    llm = make_mock_llm()
+    llm.image_provider = OpenAIProvider(api_key="k", base_url=MINDSHUB)
+    llm.image_model = None
+    session = ChatSession(ChatSessionConfig(llm_client=llm, workspace=workspace))
+    try:
+        session._build_tools()
+        assert "generate_image" not in {t.name for t in session.tool_registry.get_tool_defs()}
+        with _catalog():
+            await run_turn(session, "Draw me a cat.")
+        assert "generate_image" in {t["name"] for t in llm.plan.call_args_list[0].kwargs["tools"]}
+    finally:
+        await session.close()
+
+
+@pytest.mark.parametrize("catalog, offered", [(_CATALOG, True), (_CATALOG_NO_IMAGES, False)])
+async def test_an_allowlist_may_name_the_tool_where_it_is_withheld(tmp_path, catalog, offered):
+    """The cloud allowlist names generate_image unconditionally; a name that
+    matches no tool is otherwise fatal."""
+    from anton.cloud_turn.session import CLOUD_TOOL_ALLOWLIST
+
+    assert "generate_image" in CLOUD_TOOL_ALLOWLIST
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    llm = make_mock_llm()
+    llm.image_provider = OpenAIProvider(api_key="k", base_url=MINDSHUB)
+    llm.image_model = None
+    session = ChatSession(ChatSessionConfig(
+        llm_client=llm, workspace=workspace, tool_allowlist=["scratchpad", "generate_image"],
+    ))
+    try:
+        with _catalog(catalog):
+            await run_turn(session, "Draw me a cat.")
+        tools = {t["name"] for t in llm.plan.call_args_list[0].kwargs["tools"]}
+        assert tools == ({"scratchpad", "generate_image"} if offered else {"scratchpad"})
+    finally:
+        await session.close()
+
+
+def test_catalog_offers_images_only_for_a_usable_image_row():
+    with _catalog():
+        assert images.catalog_offers_images(MINDSHUB, "k") is True
+    images._catalog_cache.clear()
+    with _catalog(_CATALOG_IMAGES_LOCKED):
+        assert images.catalog_offers_images(MINDSHUB, "k") is False
+    images._catalog_cache.clear()
+    with patch("anton.minds_client.minds_request", side_effect=OSError("down")):
+        assert images.catalog_offers_images(MINDSHUB, "k") is False
 
 
 async def test_the_pad_helper_is_offered_only_where_the_coding_connection_has_images(tmp_path):
@@ -718,10 +808,12 @@ async def test_the_pad_helper_is_offered_only_where_the_coding_connection_has_im
 
     llm = make_mock_llm()
     llm.image_provider = OpenAIProvider(api_key="k", base_url=MINDSHUB)
+    llm.image_model = None
     llm.coding_provider.export_connection_info = MagicMock(
         return_value=ProviderConnectionInfo(provider="openai", api_key="k", base_url=MINDSHUB)
     )
-    system, _ = await _first_request(tmp_path, llm)
+    with _catalog():
+        system, _ = await _first_request(tmp_path, llm)
     assert GENERATE_IMAGE_TOOL.prompt in system
     assert "in the scratchpad instead" in system
 

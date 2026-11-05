@@ -69,7 +69,10 @@ _SUFFIX_FORMATS = {".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg", ".webp": "web
 _REFERENCE_FORMATS = {"png": "image/png", "jpeg": "image/jpeg", "webp": "image/webp"}
 
 _CATALOG_TTL_S = 3600.0
-_catalog_defaults: dict[str, tuple[float, str | None]] = {}
+# A catalogue that could not be read is asked again sooner: until it is, the
+# image tool is not offered on MindsHub (`catalog_offers_images`).
+_CATALOG_FAILURE_TTL_S = 300.0
+_catalog_cache: dict[str, tuple[float, "_CatalogImages | None"]] = {}
 _catalog_lock = threading.Lock()
 
 
@@ -527,34 +530,70 @@ def image_call_error(exc: "openai.APIStatusError", model: str) -> Exception:
 # ── Which model ──────────────────────────────────────────────────────
 
 
-def catalog_image_model(base_url: str, api_key: str, *, verify: bool = True) -> str | None:
-    """The alias MindsHub's ``/v1/models`` marks ``default_for: ["image"]``, or None.
+@dataclass(frozen=True)
+class _CatalogImages:
+    """What MindsHub's ``/v1/models`` says about images, for one base URL."""
+
+    #: The alias marked ``default_for: ["image"]``, if any.
+    default: str | None
+    #: Whether any ``kind: "image"`` row is usable by this key.
+    offered: bool
+
+
+def _catalog_images(base_url: str, api_key: str, *, verify: bool = True) -> _CatalogImages | None:
+    """The catalogue's image facts, or None when it cannot be read.
 
     Read through `anton.minds_client` — the catalogue reader setup already
-    uses — and kept per base URL for an hour, so a host that builds a client
-    per turn asks once. A catalogue that cannot be read is remembered as None
-    for the same hour: the caller then falls back to `DEFAULT_IMAGE_MODEL`,
-    which is the same alias, rather than paying a timeout on every call.
-    Blocking: call it off the event loop.
+    uses — and kept per base URL: an hour when read, five minutes when not,
+    so a host that builds a client per turn asks rarely. Blocking: call it
+    off the event loop.
     """
-    from anton.minds_client import fetch_model_catalog, minds_v1_base, role_default_model
+    from anton.minds_client import (
+        fetch_model_catalog,
+        minds_v1_base,
+        role_default_model,
+        usable_models_of_kind,
+    )
 
     key = minds_v1_base(base_url)
     now = time.monotonic()
     with _catalog_lock:
-        cached = _catalog_defaults.get(key)
-    if cached is not None and now - cached[0] < _CATALOG_TTL_S:
-        return cached[1]
+        cached = _catalog_cache.get(key)
+    if cached is not None:
+        ttl = _CATALOG_TTL_S if cached[1] is not None else _CATALOG_FAILURE_TTL_S
+        if now - cached[0] < ttl:
+            return cached[1]
     try:
         entries = fetch_model_catalog(base_url, api_key, verify=verify, timeout=5)
-        found = role_default_model(entries, IMAGE_ROLE, kind="image")
+        found: _CatalogImages | None = _CatalogImages(
+            default=role_default_model(entries, IMAGE_ROLE, kind="image"),
+            offered=bool(usable_models_of_kind(entries, "image")),
+        )
     except Exception as exc:
-        logger.info("image model: MindsHub catalogue unreadable (%s); using %s",
-                    type(exc).__name__, DEFAULT_IMAGE_MODEL)
+        logger.info("image models: MindsHub catalogue unreadable (%s)", type(exc).__name__)
         found = None
     with _catalog_lock:
-        _catalog_defaults[key] = (now, found)
+        _catalog_cache[key] = (now, found)
     return found
+
+
+def catalog_image_model(base_url: str, api_key: str, *, verify: bool = True) -> str | None:
+    """The alias MindsHub's ``/v1/models`` marks ``default_for: ["image"]``, or
+    None (none marked, or the catalogue unreadable: the caller then falls back
+    to `DEFAULT_IMAGE_MODEL`). Blocking: call it off the event loop."""
+    info = _catalog_images(base_url, api_key, verify=verify)
+    return info.default if info is not None else None
+
+
+def catalog_offers_images(base_url: str, api_key: str, *, verify: bool = True) -> bool:
+    """Whether MindsHub's catalogue lists an image model this key may use.
+
+    False when it lists none — the image aliases ship after the clients that
+    use them — and when it cannot be read: a tool whose every call fails with
+    an unknown model is worse than none. Blocking: call it off the event loop.
+    """
+    info = _catalog_images(base_url, api_key, verify=verify)
+    return info is not None and info.offered
 
 
 def resolve_image_model(

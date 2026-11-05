@@ -84,6 +84,10 @@ CLOUD_TOOL_ALLOWLIST = frozenset(
         # tool is fatal. Writes only into this conversation's drafts dir; the
         # tenant's skill store is never touched from the pod.
         "create_skill_draft",
+        # Pictures (ENG-4024). Listed although core registers it only where an
+        # images API serves it: the session exempts it from the fatal
+        # unknown-name check when it withholds the tool.
+        "generate_image",
     }
 )
 
