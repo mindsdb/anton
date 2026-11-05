@@ -1716,6 +1716,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     "scratchpad %s: cell reported its process ended, but pid %s had not exited after 5s",
                     self.name, self._proc.pid,
                 )
+                await self._stop_process()
         # The process proved itself alive by completing this round trip —
         # whatever earlier death streak led here (if any) is over. This is
         # in addition to (not instead of) the reset inside _auto_resume()
