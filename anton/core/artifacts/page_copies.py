@@ -11,7 +11,10 @@ What the turn broke, blanked, removed, shrank or put back closes the
 agent's final message (`TurnPages.end_lines`).
 
 Copies are kept only with the render-check service configured: without it
-nothing compares them. `ChatSession` holds one `TurnPages` per turn.
+nothing compares them. A page out of repair cells is also kept as its last
+check left it, with or without the service, and a later change to it is
+written back (`TurnPages.hold`, `TurnPages.put_held_back`). `ChatSession`
+holds one `TurnPages` per turn.
 """
 
 from __future__ import annotations
@@ -171,6 +174,9 @@ class TurnPages:
         # Per page, what the agent was last shown, set by set.
         self._shown: dict[PageKey, _Shown] = {}
         self._restored: dict[PageKey, None] = {}
+        # Each page out of repair cells, byte for byte as the latest check
+        # that left it so found it (`hold`).
+        self._held: dict[PageKey, bytes] = {}
 
     def capture(self, store, *, cell_sandbox: CellSandbox | None) -> None:
         """Keep the main page of every artifact but a fullstack app, the
@@ -347,6 +353,34 @@ class TurnPages:
         if self._on_disk_is(key, store, data):
             return False
         return self._write(key, store, data)
+
+    def hold(self, keys: Iterable[PageKey], store) -> None:
+        """Keep each of KEYS' pages as it is on disk now, after a check that
+        left it out of repair cells, over any earlier hold: a later change
+        to it goes back to this (`put_held_back`). A page that can't be read
+        (`read_current`) keeps its earlier hold, or none. Blocks on file
+        reads: call it off the event loop."""
+        for key in keys:
+            data = self.read_current(key, store)
+            if data is None:
+                _log.debug("no hold of %s/%s for this turn", key.slug, key.page)
+                continue
+            with self._lock:
+                self._held[key] = data
+
+    def put_held_back(self, keys: Iterable[PageKey], store) -> frozenset[PageKey]:
+        """Write each of KEYS' held pages (`hold`) back over a change made to
+        it since, through a rename that never follows a link. The pages
+        written back: not a page with no hold, one already as held, or one
+        whose write failed (logged). Blocks on file I/O: call it off the
+        event loop."""
+        written: set[PageKey] = set()
+        for key in keys:
+            with self._lock:
+                data = self._held.get(key)
+            if data is not None and not self._on_disk_is(key, store, data) and self._write(key, store, data):
+                written.add(key)
+        return frozenset(written)
 
     def is_as_found(self, key: PageKey, store) -> bool:
         """Whether KEY's page on disk is, byte for byte, its copy. False

@@ -668,6 +668,7 @@ def test_with_live_apps_on_the_verifier_fails_a_script_from_another_host():
 @pytest.mark.parametrize("markup, blocked", [
     ('<script type="importmap">{"imports": {"a": "https://unpkg.com/a.js", "b": "./b.js"}}</script>',
      "https://unpkg.com/a.js"),
+    ('<script type="importmap">{"imports": {"a": "https://unpkg.com/a.js"}}</script foo>', "https://unpkg.com/a.js"),
     ('<script type="module">export { x } from "https://esm.sh/x";</script>', "https://esm.sh/x"),
     ("<script type=module>import(`https://esm.sh/y`)</script>", "https://esm.sh/y"),
     ('<script src="https://cdn.jsdelivr.net.evil.com/x.js"></script>', "cdn.jsdelivr.net.evil.com"),
@@ -732,7 +733,7 @@ async def _verify_frontend_live_app(tmp_path, policy, monkeypatch, seen: dict | 
         )
         return {"files_written": ["static/index.html"], "rounds_used": 1, "summary": "s"}
 
-    def fake_verify(html, *, is_fullstack, api_paths=None, live_app=False, data_ids=None):
+    def fake_verify(html, *, is_fullstack, api_paths=None, live_app=False, geography=None, data_ids=None):
         seen["live_app"] = live_app
         return VerifyResult(errors=[])
 

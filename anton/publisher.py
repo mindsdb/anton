@@ -16,6 +16,8 @@ import zipfile
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 
+from pydantic import BaseModel, ValidationError
+
 from anton.core.artifacts.internal_files import (
     GENERATION_INPUT_FILES,
     HOUSEKEEPING_DIRS,
@@ -85,20 +87,83 @@ class ArtifactOwnedByOtherUserError(RuntimeError):
         super().__init__(message)
 
 
-def _raise_if_owned_by_other_user(err: urllib.error.HTTPError) -> None:
-    """Turn the upload's 409 `artifact_owned_by_other_user` into a typed error.
+# The upload service's 403 code for a publish that newly shares an artifact
+# with everyone in its organization from an account without the
+# artifacts.share_org permission. MindsHub, cowork-server's sharing contract
+# module (cowork/services/sharing_contract.py) and the Cowork app's
+# (src/renderer/cowork/lib/sharingContract.js) hold the same code under this
+# name.
+SHARE_ORG_REQUIRED_CODE = "share_org_required"
 
-    Anything else, including a 409 body that cannot be read or parsed, is left
-    for the caller to re-raise.
+# What the agent is told after a SHARE_ORG_REQUIRED_CODE refusal, so it does
+# not pick a wider audience on its own. The publish tool names people only by
+# email and has no teams, so the sentence offers only that. cowork-server's
+# sharing contract module (cowork/services/sharing_contract.py) holds the same
+# sentence under this name.
+SHARE_ORG_REQUIRED_INSTRUCTION = (
+    "Do not publish it publicly or to a wider audience instead. Tell the user "
+    "that an organization admin can share it with everyone, or offer to share "
+    "it with specific people by email."
+)
+
+
+class ArtifactShareOrgRequiredError(urllib.error.HTTPError):
+    """The upload service refused to share the artifact with everyone in its organization.
+
+    ``reason`` is the body's ``error``, or the HTTP status text when the body
+    has none. Callers must not retry with a wider audience, such as public:
+    tell the user instead. It stays an HTTPError with the 403 and its body, so
+    a caller that reads the body itself still can.
     """
-    if err.code != 409:
-        return
+
+
+#: Bytes of an upload error's body that publish reads. The service's JSON
+#: answers are far smaller.
+_ERROR_BODY_MAX_BYTES = 65_536
+
+
+class _UploadErrorBody(BaseModel):
+    """The JSON body the upload service answers a failed upload with."""
+
+    #: What went wrong, in words the person publishing can act on.
+    error: str | None = None
+    #: A stable reason clients match on, such as OWNED_BY_OTHER_USER_CODE.
+    code: str | None = None
+
+
+def _upload_error(err: urllib.error.HTTPError) -> Exception:
+    """The error publish raises for the upload's *err*, from one read of its body.
+
+    A 409 ``artifact_owned_by_other_user`` is ArtifactOwnedByOtherUserError.
+    Every other answer stays an HTTPError with the same status and headers,
+    and a 403 ``share_org_required`` is the HTTPError subclass
+    ArtifactShareOrgRequiredError. Its reason is the body's ``error`` when the
+    body has one, so the message a caller shows says why ("HTTP Error 500:
+    <error>"), and its body can be read again by a caller that reads it
+    itself. A body that can't be read leaves *err* as it is.
+    """
     try:
-        code = json.loads(err.read(65_536))["code"]
+        body = err.read(_ERROR_BODY_MAX_BYTES)
     except Exception:
-        return
-    if code == OWNED_BY_OTHER_USER_CODE:
-        raise ArtifactOwnedByOtherUserError() from err
+        return err
+    try:
+        answer = _UploadErrorBody.model_validate_json(body)
+    except ValidationError:
+        answer = _UploadErrorBody()
+    if err.code == 409 and answer.code == OWNED_BY_OTHER_USER_CODE:
+        return ArtifactOwnedByOtherUserError()
+    if err.code == 403 and answer.code == SHARE_ORG_REQUIRED_CODE:
+        raised = ArtifactShareOrgRequiredError(
+            err.filename, err.code, answer.error or err.msg, err.hdrs, io.BytesIO(body)
+        )
+    else:
+        raised = urllib.error.HTTPError(
+            err.filename, err.code, answer.error or err.msg, err.hdrs, io.BytesIO(body)
+        )
+    # What describe_minds_request_failure reads off a minds_request error.
+    raised.body = body
+    raised.request_line = getattr(err, "request_line", None)
+    return raised
 
 
 DEFAULT_PUBLISH_URL = "https://view.mindshub.ai"
@@ -539,6 +604,13 @@ def publish(
         ArtifactOwnedByOtherUserError: the service answered 409
                   `artifact_owned_by_other_user` — another owner holds
                   `report_id`. Do not retry without `report_id`.
+        ArtifactShareOrgRequiredError: the service answered 403
+                  `share_org_required`: this account may not newly share
+                  the artifact with everyone in its organization. Do not
+                  retry with a wider audience.
+        urllib.error.HTTPError: any other answer the service refused the
+                  upload with. Its reason is the body's `error` when it has
+                  one, and its body reads again (`_upload_error`).
     """
     if not file_path.exists():
         raise FileNotFoundError(f"Path not found: {file_path}")
@@ -610,8 +682,10 @@ def publish(
     try:
         raw = minds_request(url, api_key, method="POST", payload=payload, verify=ssl_verify)
     except urllib.error.HTTPError as err:
-        _raise_if_owned_by_other_user(err)
-        raise
+        raised = _upload_error(err)
+        if raised is err:
+            raise
+        raise raised from err
     # Upload succeeded (minds_request raises on failure): record the published
     # key schema so the next publish can warn on an incompatible change.
     if state_manifest is not None:

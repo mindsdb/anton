@@ -334,6 +334,14 @@ def make_llm_response():
 
 
 @pytest.fixture(autouse=True)
+def _no_shared_memory_pins():
+    """Memory pins live in the process by conversation id, and tests reuse ids."""
+    from anton.core import session
+
+    session._MEMORY_PINS.clear()
+
+
+@pytest.fixture(autouse=True)
 def _no_browser_windows(monkeypatch):
     """No test may pop a real browser window.
 
@@ -506,6 +514,19 @@ def _no_user_registry(tmp_path_factory, monkeypatch):
 
     empty = tmp_path_factory.mktemp("no-user-registry")
     monkeypatch.setattr(DatasourceRegistry, "_USER_PATH", empty / "datasources.md")
+
+
+@pytest.fixture()
+def skills_tmp(tmp_path_factory, monkeypatch):
+    """Route a cloud turn's per-turn mkdtemp skills staging into pytest tmp.
+
+    Outside `tmp_path`, which the cloud session tests use as the workspace
+    mount, because the real staging lives outside the mount."""
+    import tempfile
+
+    root = tmp_path_factory.mktemp("skills-scratch")
+    monkeypatch.setattr(tempfile, "tempdir", str(root))
+    return root
 
 
 @pytest.fixture()

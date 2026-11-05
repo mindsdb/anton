@@ -106,6 +106,9 @@ class AntonSettings(CoreSettings):
     # (Exa or Brave); web_fetch always falls back to stdlib HTTP.
     web_search_enabled: bool = True
     web_fetch_enabled: bool = True
+    # False: the agent answers from the connected data only — see
+    # ChatSessionConfig.internet_research_enabled.
+    internet_research_enabled: bool = True
 
     # Case 3 fallback — only consulted when the LLM provider lacks native web
     # search and the user is on a generic OpenAI-compatible endpoint.
@@ -186,6 +189,11 @@ class AntonSettings(CoreSettings):
     # "" to disable the direct sink.
     posthog_host: str = "https://us.i.posthog.com"
     posthog_key: str = "phc_ypFMKbvAwRsLuDCToox2AkEg5wx6ReBfkyi3kX2zw6VK"
+
+    # Names the deployment that sent an event (`prod`, `staging`, `dev`, ...).
+    # Set by the host that knows it; empty wherever none does, such as the CLI,
+    # so empty means "unknown", never "prod".
+    deployment_env: str = ""
 
     # Minds datasource integration
     minds_api_key: str | None = None

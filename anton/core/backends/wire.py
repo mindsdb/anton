@@ -4,6 +4,8 @@ These delimiter strings must be identical on both sides of the subprocess pipe.
 Neither side should redefine them — import from here.
 """
 
+from types import CodeType, TracebackType
+
 CELL_DELIM = "__ANTON_CELL_END__"
 # Optional first line of a cell: the running turn's trace context as JSON, so
 # the cell's model calls carry the same session and question ids. Per cell,
@@ -19,6 +21,9 @@ STDOUT_CHUNK_MARKER = "__ANTON_STDOUT_CHUNK__"
 # when the host sets USAGE_MARKER_ENV in the pad's environment.
 USAGE_MARKER = "__ANTON_USAGE__"
 USAGE_MARKER_ENV = "ANTON_SCRATCHPAD_USAGE"
+# "off" when the session has internet research turned off: the pad's
+# web_search() then raises instead of searching.
+INTERNET_RESEARCH_ENV = "ANTON_SCRATCHPAD_INTERNET_RESEARCH"
 # A cell's stdout limit, and how much more the worker sends for the parent to
 # scrub before it cuts, so a secret across the limit can still match whole.
 MAX_OUTPUT = 10_000
@@ -40,6 +45,49 @@ MISSING_MODULE_HINT = (
     "name, not a missing package. Only a real PyPI distribution this task "
     "genuinely needs should ever be installed.\n"
 )
+
+# The helpers scratchpad_boot.py injects into the cell namespace before any
+# cell runs, by name. The host's write check reads a call to one as a call
+# to a name the pad binds.
+INJECTED_HELPER_NAMES = frozenset(
+    {"get_llm", "agentic_loop", "web_search", "query_minds_data", "progress", "sample"}
+)
+# The list the boot binds in the cell namespace for the data helpers to
+# record their queries in.
+EXPLAINABILITY_QUERIES_NAME = "_anton_explainability_queries"
+# The file name the boot compiles each cell under, which a cell's traceback
+# names its own frames by.
+CELL_FILENAME = "<scratchpad>"
+# The top-level packages scratchpad_boot.py imports before any cell runs. A
+# cell's import of one gets the module the boot loaded, whatever folder a
+# cell puts on `sys.path`, so the host's write check reads it as no module
+# a cell wrote.
+BOOT_IMPORTS = frozenset({"anton", "contextlib", "dill", "io", "json", "logging", "os", "sys", "threading", "traceback"})
+
+
+# The `stopped_at` of a cell that kept nothing it bound, as one whose process
+# died, was killed or never got to run it: no statement ends before the first
+# line, so the host's write check (`_Reader.ran_before_stop`) reads none of
+# its names as bound, nor those of a cell that doesn't compile.
+NOTHING_KEPT = 1
+
+
+def cell_stopped_at(tb: TracebackType | None, code: CodeType | None) -> int | None:
+    """The line of a cell's own code an error stopped it at: the line of
+    the frame that runs `code`, the cell's compiled code, in the traceback
+    `tb`. Read from the traceback itself, not its text, which the error's
+    message, or the hint put before it, can shape. A failure inside a
+    function the cell defines stops it at the line that called it. None
+    when the cell's code never ran, as for a cell that doesn't compile.
+
+    The boot sends it beside the error (`stopped_at`), and the host's write
+    check reads what the cell bound before that line as bound.
+    """
+    while tb is not None:
+        if tb.tb_frame.f_code is code:
+            return tb.tb_lineno
+        tb = tb.tb_next
+    return None
 
 
 def heal_surrogate_source(code: str) -> str:

@@ -18,6 +18,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from anton.core.artifacts import html_lint, render_check
+from anton.core.artifacts.geography import GeographyRequirement, check_geography
 from anton.core.artifacts.html_lint import lint_html, lint_url
 from anton.core.artifacts.render_check import RenderFinding
 from anton.core.artifacts.report_tools import shown_markup
@@ -276,7 +277,7 @@ _HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
 # `<script type="importmap">`: the addresses its `imports` and `scopes` map
 # modules to load under `script-src` too.
 _IMPORT_MAP = re.compile(
-    r"""<script\b[^>]*\btype\s*=\s*['"]?importmap['"]?[^>]*>(?P<body>.*?)</script\s*>""", re.I | re.S
+    r"""<script\b[^>]*\btype\s*=\s*['"]?importmap['"]?[^>]*>(?P<body>.*?)</script\b[^>]*>""", re.I | re.S
 )
 # `_MODULE_IMPORT`, plus `export ... from` and backtick quotes, which a live
 # app's script rule fails and the preview's advisory warning never needed.
@@ -407,6 +408,7 @@ def verify_frontend(
     is_fullstack: bool,
     api_paths: set[str] | None = None,
     live_app: bool = False,
+    geography: GeographyRequirement | None = None,
     data_ids: set[str] | None = None,
 ) -> VerifyResult:
     """Static checks of the page. `api_paths` (from `contract_paths`) is the
@@ -416,8 +418,12 @@ def verify_frontend(
     content security policy loads scripts from one origin only. `data_ids`
     is the set of data file ids an html-app page may fill into its blocks;
     None skips the block checks."""
+    # Geography reads the whole page: geometry may arrive in a data block.
+    geographic = check_geography(html, geography)
     errors: list[str] = []
     warnings: list[str] = []
+    errors.extend(geographic.errors)
+    warnings.extend(geographic.warnings)
     # The checks below judge the page's code; a filled data block holds rows
     # that may contain anything, and no retry can change them.
     html = data_files.without_data(html)

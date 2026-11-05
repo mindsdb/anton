@@ -624,6 +624,9 @@ def _public_data_sources_skill(session) -> str:
     coroutine appears at all, because the mock is rejected by type before any
     call; here the call is unavoidable.)
     """
+    if getattr(session, "_internet_research_enabled", True) is False:
+        # A catalog of internet endpoints the session must not use.
+        return ""
     try:
         store = getattr(session, "_skill_store", None)
         skill = store.load_for_artifacts(_PUBLIC_SOURCES_SKILL) if store is not None else None
@@ -1134,6 +1137,8 @@ async def _gen_verify_frontend(
         else:
             # In a thread: the static checks scan the whole page, which an
             # embedded asset can grow to tens of megabytes.
+            from anton.core.artifacts.geography_pages import generated_requirement
+
             verdict = await asyncio.to_thread(
                 verifiers.verify_frontend,
                 entry_file.read_text(encoding="utf-8"), is_fullstack=state.is_fullstack,
@@ -1141,6 +1146,7 @@ async def _gen_verify_frontend(
                     verifiers.contract_operations(state.api_spec)
                 ) if state.is_fullstack else None,
                 live_app=state.is_fullstack and _runs_live_apps(state),
+                geography=generated_requirement(state, entry_file),
                 data_ids=None if state.is_fullstack else {f.id for f in state.data_files},
             )
             if verdict.ok and not state.is_fullstack:

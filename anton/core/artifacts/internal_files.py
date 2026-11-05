@@ -36,6 +36,9 @@ API_SPEC_FILENAME = "openapi.json"
 # rendered data/web notes. `prd.md` is the human-readable record of the same
 # phases; this is what the pipeline itself reads back on a cold start.
 DISCOVERY_FILENAME = "discovery.json"
+# The static fast path's data handoff (every fetched row) and its saved page program.
+OBSERVED_DATA_FILENAME = "observed-data.json"
+PRESENTATION_PROGRAM_FILENAME = "presentation-program.js"
 
 # Reported by `generate_artifact` as `internal_files` and excluded from an
 # artifact's `files[]`: generation inputs, not deliverables.
@@ -44,6 +47,8 @@ GENERATION_INPUT_FILES = frozenset({
     TECH_SPEC_FILENAME,
     API_SPEC_FILENAME,
     DISCOVERY_FILENAME,
+    OBSERVED_DATA_FILENAME,
+    PRESENTATION_PROGRAM_FILENAME,
 })
 
 

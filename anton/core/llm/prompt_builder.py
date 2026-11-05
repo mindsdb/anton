@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from anton.core.artifacts.geography_guidance import GEOGRAPHY_GUIDANCE
 
 from .identity import DeploymentIdentity, build_runtime_identity_section
 from .prompts import (
@@ -12,10 +15,14 @@ from .prompts import (
     CHAT_SYSTEM_PROMPT,
     CONVERSATION_DISCIPLINE_ACT_FIRST,
     CONVERSATION_DISCIPLINE_ASK_FIRST,
+    NO_DIRECT_REPORTS_ARTIFACTS_PROMPT,
+    NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT,
+    NO_DIRECT_REPORTS_VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
+    NO_DIRECT_REPORTS_VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
+    NO_INTERNET_CHAT_SYSTEM_PROMPT,
     STATIC_ARTIFACTS_PROMPT,
     VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
     VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
-    WITHOUT_DIRECT_REPORTS,
 )
 
 if TYPE_CHECKING:
@@ -24,9 +31,9 @@ if TYPE_CHECKING:
 
 
 # Boundary between the prompt every session shares and the per-project /
-# per-conversation part. The OpenAI Responses transport sends the shared part as
-# its own message with an explicit cache breakpoint, so it is cached across
-# projects and conversations; other transports send the prompt as one string.
+# per-conversation part. The OpenAI Responses and Anthropic transports send the
+# shared part with its own cache breakpoint, so it is cached across projects and
+# conversations; other transports send the prompt as one string.
 SESSION_CONTEXT_MARKER = "\n\n# SESSION CONTEXT (this project and conversation)\n"
 
 # The build-html-dashboard skill's pointer to the DIRECT REPORTS path. Matched
@@ -87,8 +94,10 @@ class ChatSystemPromptBuilder:
         self,
         skill_store: "SkillStore | None",
         *,
+        direct_generation: bool = False,
         fullstack_offered: bool = True,
         direct_reports: bool = True,
+        internet_research: bool = True,
     ) -> str:
         """Build the '## Procedural memory' section listing available skills.
 
@@ -98,6 +107,8 @@ class ChatSystemPromptBuilder:
         or no skills are saved — the caller skips the section entirely.
         ``fullstack_offered`` False leaves out `build-fullstack-backend`,
         whose line offers the fullstack types the tools leave out.
+        ``internet_research`` False leaves out `public-data-sources`, a
+        catalog of internet endpoints the session must not use.
         """
         if skill_store is None:
             return ""
@@ -108,27 +119,30 @@ class ChatSystemPromptBuilder:
         if not summaries:
             return ""
 
-        lines: list[str] = [
-            "",
-            "",
-            "## Procedural memory (skills available)",
-            "",
-            (
+        instructions = (
                 "These are reusable procedures you've previously refined for "
                 "recurring tasks. When the user's request matches one of "
                 "them, call `recall_skill(label)` to load the full step-by-"
                 "step procedure into your context. You may recall multiple "
                 "skills if the task spans several. If none apply, proceed "
                 "with normal reasoning."
-            ),
-            "",
-        ]
+        )
+        if direct_generation:
+            instructions = (
+                "These are reusable procedures. Call recall_skill(label) when a procedure "
+                "matches. For an HTML artifact delegated to generate_artifact, pass what "
+                "a recalled source procedure says about access in known_data instead of "
+                "querying the same source beforehand."
+            )
+        lines: list[str] = ["", "", "## Procedural memory (skills available)", "", instructions, ""]
         for s in summaries:
             label = s.get("label", "")
             when = s.get("description", "").strip()
             if not direct_reports:
                 when = DIRECT_REPORTS_SKILL_NOTE.sub("", when).strip()
             if not label or (not fullstack_offered and label == "build-fullstack-backend"):
+                continue
+            if not internet_research and label == "public-data-sources":
                 continue
             if when:
                 lines.append(f"- `{label}` — {when}")
@@ -141,15 +155,19 @@ class ChatSystemPromptBuilder:
         *,
         proactive_dashboards: bool,
         output_dir: str,
+        direct_generation: bool = False,
         direct_reports: bool = True,
     ) -> str:
-        template = (
-            VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT
-            if proactive_dashboards
-            else VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT
-        )
-        if not direct_reports:
-            template = WITHOUT_DIRECT_REPORTS[template]
+        if direct_generation:
+            from .static_artifact_prompt import visualizations
+
+            return visualizations(proactive=proactive_dashboards)
+        if proactive_dashboards:
+            template = (VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT if direct_reports
+                        else NO_DIRECT_REPORTS_VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT)
+        else:
+            template = (VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT if direct_reports
+                        else NO_DIRECT_REPORTS_VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT)
         output_format = template.format(output_dir=output_dir)
         return BASE_VISUALIZATIONS_PROMPT.format(output_format=output_format)
 
@@ -173,20 +191,35 @@ class ChatSystemPromptBuilder:
         deployment_identity: DeploymentIdentity | None = None,
         fullstack_offered: bool = True,
         direct_reports: bool = True,
+        internet_research: bool = True,
     ) -> str:
         """``fullstack_offered`` False (`live_app_slots.fullstack_offered`)
         leaves out the fullstack types, the backend section and the backend
         skill's line: nothing on this deployment would start the app's
-        backend."""
+        backend. ``internet_research`` False
+        (`ChatSessionConfig.internet_research_enabled`) swaps the internet
+        guidance for "use the connected data only" and leaves out the
+        public-data-sources skill's line."""
+        direct_generation = (os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on"
+                             and any(getattr(tool, "name", "") == "generate_artifact"
+                                     and "name" in tool.input_schema.get("properties", {})
+                                     for tool in tool_defs or []))
         visualizations_section = self._build_visualizations_section(
             proactive_dashboards=proactive_dashboards,
             output_dir=output_dir,
+            direct_generation=direct_generation,
             direct_reports=direct_reports,
         )
+        if fullstack_offered:
+            artifacts_section = ARTIFACTS_PROMPT if direct_reports else NO_DIRECT_REPORTS_ARTIFACTS_PROMPT
+        else:
+            artifacts_section = (STATIC_ARTIFACTS_PROMPT if direct_reports
+                                 else NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT)
+        # The single-call path has its own artifact instructions, which have no direct report path
+        if direct_generation:
+            from .static_artifact_prompt import ARTIFACTS
 
-        artifacts_section = ARTIFACTS_PROMPT if fullstack_offered else STATIC_ARTIFACTS_PROMPT
-        if not direct_reports:
-            artifacts_section = WITHOUT_DIRECT_REPORTS[artifacts_section]
+            artifacts_section = ARTIFACTS
 
         prompt = ""
 
@@ -208,7 +241,8 @@ class ChatSystemPromptBuilder:
             configured_block=system_prompt_context.runtime_context,
             product_block=list(product_lines) if product_lines else None,
         )
-        prompt += CHAT_SYSTEM_PROMPT.format(
+        chat_prompt = CHAT_SYSTEM_PROMPT if internet_research else NO_INTERNET_CHAT_SYSTEM_PROMPT
+        prompt += chat_prompt.format(
             # PRODUCT carries the configured name. An explicit deployment must
             # not also introduce itself as Anton in the prompt's opening line.
             identity_lead="You are an AI coworker" if deployment_identity is not None else "You are Anton",
@@ -218,6 +252,9 @@ class ChatSystemPromptBuilder:
             conversation_discipline=conversation_discipline,
             conversation_started=conversation_started,
         )
+
+        # Geography must reach direct writes and repairs even without a skill store.
+        prompt += "\n\n" + GEOGRAPHY_GUIDANCE
 
         # Short pointer only — the full backend/fullstack contract lives in the
         # built-in `build-fullstack-backend` skill (recalled on demand).
@@ -240,7 +277,8 @@ class ChatSystemPromptBuilder:
         # Saved skills change rarely (the built-ins plus the user's own), so
         # they stay in the shared part ahead of anything project-specific.
         procedural_memory = self._build_procedural_memory_section(
-            skill_store, fullstack_offered=fullstack_offered, direct_reports=direct_reports
+            skill_store, direct_generation=direct_generation, fullstack_offered=fullstack_offered,
+            direct_reports=direct_reports, internet_research=internet_research,
         )
         if procedural_memory:
             prompt += procedural_memory
