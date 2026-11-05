@@ -42,6 +42,8 @@ class FakeInstance:
         self.sites: list[dict] = []
         self.control = {"holder": "agent", "reason": ""}
         self.control_changes: list[str] = []
+        self.tabs = [{"id": "t1", "url": PAGE["url"], "title": PAGE["title"], "active": True}]
+        self.saved: dict[str, list[dict]] = {}
 
     def page(self):
         return self.pages[0] if len(self.pages) == 1 else self.pages.pop(0)
@@ -72,6 +74,28 @@ class FakeInstance:
             record = {"site": body["site"], "account_hint": body.get("account_hint", ""), "cookies_present": True}
             self.sites.append(record)
             return httpx.Response(200, json={"site": record})
+        if path == "/sessions/main/tabs" and request.method == "GET":
+            return httpx.Response(200, json={"tabs": self.tabs})
+        if path == "/sessions/main/tabs" and request.method == "POST":
+            tab = {"id": f"t{len(self.tabs) + 1}", "url": body.get("url", "about:blank"), "title": "", "active": True}
+            self.tabs = [{**t, "active": False} for t in self.tabs] + [tab]
+            return httpx.Response(201, json={"tab": tab})
+        if path.startswith("/sessions/main/tabs/"):
+            tab_id = path.split("/")[4]
+            if tab_id not in {t["id"] for t in self.tabs}:
+                return httpx.Response(404, json={"error": "tab_not_found", "message": f"no tab {tab_id}"})
+            if request.method == "DELETE":
+                self.tabs = [t for t in self.tabs if t["id"] != tab_id]
+                self.tabs[-1]["active"] = True
+                return httpx.Response(200, json={"ok": True})
+            self.tabs = [{**t, "active": t["id"] == tab_id} for t in self.tabs]
+            return httpx.Response(200, json={"tab": next(t for t in self.tabs if t["active"])})
+        if path == "/saved-tabs" and request.method == "GET":
+            return httpx.Response(200, json={"tabs": self.saved.get(request.url.params["project"], [])})
+        if path == "/saved-tabs" and request.method == "POST":
+            tab = {"name": body["name"], "url": body["url"], "notes": body.get("notes", ""), "saved_at": 1}
+            self.saved.setdefault(body["project"], []).append(tab)
+            return httpx.Response(200, json={"tab": tab})
         if path.endswith("/screenshot"):
             return httpx.Response(200, content=b"\xff\xd8jpeg", headers={"x-image-width": "1024", "x-image-height": "640"})
         if request.method == "DELETE":
@@ -503,6 +527,108 @@ async def test_auth_failures_read_as_a_login_problem():
     assert result.ok is False and result.reason == "browser_unauthorized"
 
 
+# ── tabs ───────────────────────────────────────────────────────────────────
+
+
+async def test_tabs_lists_the_open_tabs():
+    instance = FakeInstance()
+    instance.tabs.append({"id": "t2", "url": "https://docs.example/", "title": "Docs", "active": False})
+    session = make_session(instance)
+    result = await browser_tool.handle_browser(session, {"action": "tabs"})
+    assert result.ok is True
+    assert '- t1 (active) "Shop" https://shop.example/' in result.content
+    assert '- t2 "Docs" https://docs.example/' in result.content
+
+
+async def test_new_tab_opens_and_returns_the_page_like_act():
+    instance = FakeInstance()
+    session = make_session(instance)
+    result = await browser_tool.handle_browser(session, {"action": "new_tab", "url": "https://docs.example/"})
+    assert result.ok is True and result.content.startswith("Opened tab t2 and switched to it.")
+    assert "Welcome to the shop" in result.content
+    assert ("POST", "/sessions/main/tabs", {"url": "https://docs.example/"}) in [c[:3] for c in instance.calls]
+    # Without a url the body is empty: a blank tab.
+    await browser_tool.handle_browser(session, {"action": "new_tab"})
+    assert ("POST", "/sessions/main/tabs", {}) in [c[:3] for c in instance.calls]
+
+
+async def test_switch_and_close_tab_return_the_active_page():
+    instance = FakeInstance()
+    instance.tabs.append({"id": "t2", "url": "https://docs.example/", "title": "Docs", "active": False})
+    session = make_session(instance)
+    switched = await browser_tool.handle_browser(session, {"action": "switch_tab", "tab": "t2"})
+    assert switched.ok and switched.content.startswith("Switched to tab t2.") and "URL: " in switched.content
+    assert ("POST", "/sessions/main/tabs/t2/activate") == instance.calls[-2][:2]
+    closed = await browser_tool.handle_browser(session, {"action": "close_tab", "tab": "t2"})
+    assert closed.ok and closed.content.startswith("Closed tab t2.") and "URL: " in closed.content
+    assert [t["id"] for t in instance.tabs] == ["t1"]
+
+    missing = await browser_tool.handle_browser(session, {"action": "switch_tab"})
+    assert missing.ok is False and missing.reason == "browser_bad_input"
+    unknown = await browser_tool.handle_browser(session, {"action": "close_tab", "tab": "t9"})
+    assert unknown.ok is False and "tab_not_found" in unknown.content
+
+
+async def test_a_new_tab_on_a_human_check_hands_over(fake_jev, elicit_answers):
+    instance = FakeInstance(pages=[CHALLENGE, PAGE])
+    session = make_session(instance, elicitor=FakeElicitor())
+    elicit_answers.answers.append("done")
+    result = await browser_tool.handle_browser(session, {"action": "new_tab", "url": "https://claude.ai/login"})
+    assert "showed a human check (Cloudflare)" in result.content
+    assert instance.control_changes == ["human", "agent"]
+
+
+async def test_tab_actions_wait_while_the_user_has_the_browser():
+    instance = FakeInstance()
+    instance.handler = lambda request: httpx.Response(409, json={"error": "human_in_control", "message": "The person is using the browser."})
+    session = make_session(instance)
+    session._browser_state.client._http = httpx.AsyncClient(transport=httpx.MockTransport(instance.handler))
+    result = await browser_tool.handle_browser(session, {"action": "switch_tab", "tab": "t1"})
+    assert result.ok is False and result.reason == "browser_human_in_control"
+
+
+async def test_save_tab_keeps_the_active_page_in_the_project():
+    instance = FakeInstance()
+    session = make_session(instance, config=BrowserConfig(base_url=BASE, project="p-abc"))
+    result = await browser_tool.handle_browser(session, {"action": "save_tab", "name": "Shop home", "notes": "start here"})
+    assert result.ok is True and "https://shop.example/" in result.content
+    assert ("POST", "/saved-tabs", {"project": "p-abc", "name": "Shop home", "url": "https://shop.example/", "notes": "start here"}) == instance.calls[-1][:3]
+    await browser_tool.handle_browser(session, {"action": "save_tab", "name": "Docs", "url": "https://docs.example/"})
+    listed = await browser_tool.handle_browser(session, {"action": "saved_tabs"})
+    assert '- "Shop home" https://shop.example/ (start here)' in listed.content
+    assert '- "Docs" https://docs.example/' in listed.content
+    method, path, _, _ = instance.calls[-1]
+    assert (method, path) == ("GET", "/saved-tabs")
+
+    nameless = await browser_tool.handle_browser(session, {"action": "save_tab"})
+    assert nameless.ok is False and "needs `name`" in nameless.content
+    bad_url = await browser_tool.handle_browser(session, {"action": "save_tab", "name": "x", "url": "file:///etc/passwd"})
+    assert bad_url.ok is False and "http(s)" in bad_url.content
+
+
+async def test_saved_tabs_need_a_project():
+    instance = FakeInstance()
+    session = make_session(instance)
+    for tc_input in ({"action": "save_tab", "name": "Shop"}, {"action": "saved_tabs"}):
+        result = await browser_tool.handle_browser(session, tc_input)
+        assert result.ok is False and "belong to a project" in result.content
+    assert not any(path == "/saved-tabs" for _, path, *_ in instance.calls)
+
+
+async def test_client_keeps_the_routers_path_prefix():
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.path)
+        return httpx.Response(200, json={"tabs": []})
+
+    router = "https://cowork.mindshub.ai/browser"
+    client = BrowserClient(router, lambda: _async("k"), http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    await client.tabs("t-abc")
+    await client.saved_tabs("p-abc")
+    assert seen == ["/browser/sessions/t-abc/tabs", "/browser/saved-tabs"]
+
+
 # ── jev.decide ─────────────────────────────────────────────────────────────
 
 
@@ -532,6 +658,13 @@ def test_browser_config_parses_only_https_instances():
     assert BrowserConfig.from_dict({"base_url": "http://br-x.4nton.ai"}) is None
     assert BrowserConfig.from_dict({"base_url": BASE, "profile": "work"}).profile == "work"
     assert BrowserConfig.from_dict("nope") is None
+
+
+def test_browser_config_takes_a_project_key():
+    assert BrowserConfig.from_dict({"base_url": BASE, "project": "p-ab_12"}).project == "p-ab_12"
+    assert BrowserConfig.from_dict({"base_url": BASE}).project == ""
+    for bad in ("", "has space", "a" * 65, "p/../x", 7):
+        assert BrowserConfig.from_dict({"base_url": BASE, "project": bad}).project == ""
 
 
 def test_browser_config_takes_a_standalone_token_and_local_http():

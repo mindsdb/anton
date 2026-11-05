@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -49,7 +50,10 @@ DEFAULT_MAX_STEPS = 15
 MAX_STALLS = 2
 SCROLL_PX = 700
 
-ACTIONS = ("open", "run", "page", "act", "screenshot", "hand_to_user", "note_login", "close")
+ACTIONS = (
+    "open", "run", "page", "act", "screenshot", "hand_to_user", "note_login",
+    "tabs", "new_tab", "switch_tab", "close_tab", "save_tab", "saved_tabs", "close",
+)
 STEP_ACTIONS = ("click", "type", "press", "select", "scroll", "hover", "drag", "back", "forward", "reload", "wait", "navigate")
 
 
@@ -91,7 +95,7 @@ async def _credential(session: "ChatSession") -> str:
     """The bearer the browser checks.
 
     A standalone service's own token when the host gave one. Otherwise the
-    MindsHub credential the worker checks: the turn key in a cloud pod, the
+    MindsHub credential the router checks: the turn key in a cloud pod, the
     user's key or token on desktop and the CLI.
     """
     token = getattr(session._browser_config, "token", "")
@@ -671,6 +675,101 @@ async def _do_run(session: "ChatSession", tc_input: dict) -> str:
     return _handback(f"Stopped after {max_steps} steps without finishing.", taken, page)
 
 
+# ── tabs ───────────────────────────────────────────────────────────────────
+
+
+def _tab_line(tab: dict) -> str:
+    active = " (active)" if tab.get("active") else ""
+    title = json.dumps(tab.get("title") or "", ensure_ascii=False)
+    return f"- {tab.get('id', '?')}{active} {title} {tab.get('url', '')}"
+
+
+def _tab_id(tc_input: dict, action: str) -> str:
+    tab = str(tc_input.get("tab") or "").strip()
+    if not tab:
+        raise ValueError(f"{action} needs `tab`, a tab id from action=tabs, e.g. t2")
+    return tab
+
+
+async def _after_tab_change(session: "ChatSession", lead: str) -> str:
+    """The active tab's page after a tab change, the same way act returns one."""
+    state = _state(session)
+    page = await state.client.page(state.session_id)
+    checked = await _unless_human_check(session, page)
+    return f"{lead}\n\n{checked or format_page(page)}"
+
+
+async def _do_tabs(session: "ChatSession", tc_input: dict) -> str:
+    state = _state(session)
+    await _ensure_open(session)
+    tabs = await state.client.tabs(state.session_id)
+    if not tabs:
+        return "No tabs are open."
+    return "Open tabs (actions and page reads use the active one):\n" + "\n".join(_tab_line(t) for t in tabs)
+
+
+async def _do_new_tab(session: "ChatSession", tc_input: dict) -> str:
+    state = _state(session)
+    await _ensure_open(session)
+    tab = await state.client.new_tab(state.session_id, tc_input.get("url") or None)
+    return await _after_tab_change(session, f"Opened tab {tab.get('id', '')} and switched to it.")
+
+
+async def _do_switch_tab(session: "ChatSession", tc_input: dict) -> str:
+    tab_id = _tab_id(tc_input, "switch_tab")
+    state = _state(session)
+    await _ensure_open(session)
+    await state.client.activate_tab(state.session_id, tab_id)
+    return await _after_tab_change(session, f"Switched to tab {tab_id}.")
+
+
+async def _do_close_tab(session: "ChatSession", tc_input: dict) -> str:
+    tab_id = _tab_id(tc_input, "close_tab")
+    state = _state(session)
+    await _ensure_open(session)
+    await state.client.close_tab(state.session_id, tab_id)
+    return await _after_tab_change(session, f"Closed tab {tab_id}. This is the active tab now.")
+
+
+def _project(session: "ChatSession") -> str:
+    project = getattr(session._browser_config, "project", "")
+    if not project:
+        raise ValueError(
+            "saved tabs belong to a project, and this conversation isn't in one. "
+            "Keep the tab open instead, or tell the user the URL."
+        )
+    return project
+
+
+async def _do_save_tab(session: "ChatSession", tc_input: dict) -> str:
+    project = _project(session)
+    name = (tc_input.get("name") or "").strip()
+    if not name:
+        raise ValueError("save_tab needs `name`, a short label the user will recognise")
+    state = _state(session)
+    url = (tc_input.get("url") or "").strip()
+    if not url:
+        await _ensure_open(session)
+        active = [t for t in await state.client.tabs(state.session_id) if t.get("active")]
+        url = active[0].get("url", "") if active else ""
+    if not url.startswith(("http://", "https://")):
+        raise ValueError("save_tab needs an http(s) `url`, or an active tab showing one")
+    tab = await state.client.save_tab(project, name, url, (tc_input.get("notes") or "").strip())
+    return f"Saved {tab.get('name') or name!r} ({tab.get('url') or url}) to this project's tabs."
+
+
+async def _do_saved_tabs(session: "ChatSession", tc_input: dict) -> str:
+    project = _project(session)
+    tabs = await _state(session).client.saved_tabs(project)
+    if not tabs:
+        return "No saved tabs in this project yet."
+    lines = []
+    for t in tabs:
+        notes = f" ({t['notes']})" if t.get("notes") else ""
+        lines.append(f"- {json.dumps(t.get('name', ''), ensure_ascii=False)} {t.get('url', '')}{notes}")
+    return "Saved tabs in this project (open one with action=new_tab and its url):\n" + "\n".join(lines)
+
+
 _HANDLERS = {
     "open": _do_open,
     "run": _do_run,
@@ -679,6 +778,12 @@ _HANDLERS = {
     "screenshot": _do_screenshot,
     "hand_to_user": _do_hand_to_user,
     "note_login": _do_note_login,
+    "tabs": _do_tabs,
+    "new_tab": _do_new_tab,
+    "switch_tab": _do_switch_tab,
+    "close_tab": _do_close_tab,
+    "save_tab": _do_save_tab,
+    "saved_tabs": _do_saved_tabs,
     "close": _do_close,
 }
 
@@ -730,6 +835,7 @@ BROWSER: you and the user share a real browser (Chromium, their own browser inst
 - hand_to_user is only for those. Never use it to hand over work you found hard; if you can't do something with these actions, stop and say so in the chat, with what you tried and another way to get it done.
 - Never click or try to solve a "verify you are human" check (Cloudflare, reCAPTCHA, hCaptcha). The tool hands those to the user by itself; wait for them.
 - After the user signs in to a site, call action=note_login with the site (and an account hint they'd recognise, never a secret) so later conversations know the login is there.
+- Use tabs (action=new_tab, switch_tab, close_tab, tabs) to keep a reference page open while you work in another. When the user will want a page again in this project, save it with action=save_tab (action=saved_tabs lists them).
 - Ask before anything that commits on the user's behalf: buying, paying, sending, deleting, or submitting a form.
 - Only report what the page actually shows. If a step fails or the page didn't change, say so.
 - Use action=screenshot when the page list can't show what you need (canvas, maps, charts, text in images), or when you seem stuck: a step failed or timed out, the page didn't change, or you're about to try the same thing again. Usually something is in the way (a modal, cookie banner or overlay); close it, then go on. Don't take one after every step.
@@ -746,10 +852,16 @@ BROWSER_TOOL_SCHEMA = {
                 "run: work toward a goal, taking the steps that are clear. "
                 "page: read the current page. act: take one step. screenshot: see the page, e.g. when stuck. "
                 "hand_to_user: let the user take over (sign-in, CAPTCHA, payment). "
-                "note_login: record that the user is signed in to a site. close: close the browser."
+                "note_login: record that the user is signed in to a site. "
+                "tabs: list open tabs. new_tab: open a tab (optionally at url) and switch to it. "
+                "switch_tab / close_tab: by tab id. save_tab: save a page to this project's tabs. "
+                "saved_tabs: list them. close: close the browser."
             ),
         },
-        "url": {"type": "string", "description": "open / run: page to start on."},
+        "url": {"type": "string", "description": "open / run / new_tab: page to start on. save_tab: page to save (default: the active tab's)."},
+        "tab": {"type": "string", "description": "switch_tab / close_tab: tab id from action=tabs, e.g. t2."},
+        "name": {"type": "string", "description": "save_tab: short label, e.g. \"Q3 pipeline report\". Saving the same name again replaces it."},
+        "notes": {"type": "string", "description": "save_tab: optional note on what the page is for."},
         "goal": {"type": "string", "description": "run: what to achieve on the site, in one sentence."},
         "inputs": {
             "type": "object",

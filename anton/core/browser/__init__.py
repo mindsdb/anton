@@ -1,4 +1,5 @@
-"""The browser tool: drives the user's MindsHub browser instance (br-<hash>).
+"""The browser tool: drives the user's MindsHub browser, reached through the
+MindsHub browser router (one address; the router finds the caller's own browser).
 
 The instance runs a Playwright + Chromium API (mindshub_services
 snapshots/browser/service). Anton reads pages as numbered elements, acts on

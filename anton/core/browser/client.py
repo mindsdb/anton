@@ -1,9 +1,9 @@
 """HTTP client for the browser instance's API.
 
 Every call carries ``Authorization: Bearer <credential>``. On MindsHub that
-is the user's MindsHub credential, which the Cloudflare worker checks belongs
-to the instance's owner before anything reaches the instance (mindshub_services
-ENG-3295). A standalone service checks its own ``BROWSER_SERVICE_TOKEN``.
+is the user's MindsHub credential, which the browser router resolves to the
+user and sends only to that user's own browser. A standalone service checks
+its own ``BROWSER_SERVICE_TOKEN``.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from urllib.parse import quote
 import httpx2 as httpx
 
 #: Page loads and clicks that navigate can take a while; the service caps its
-#: own navigation at 30s, so leave room for that plus the worker hop.
+#: own navigation at 30s, so leave room for that plus the router hop.
 REQUEST_TIMEOUT_S = 45.0
 
 
@@ -97,7 +97,7 @@ class BrowserClient:
         return response.content, size
 
     async def embed(self, session_id: str) -> dict:
-        """A viewer URL another origin can frame (``POST /_embed``: the worker's on
+        """A viewer URL another origin can frame (``POST /_embed``: the router's on
         MindsHub, the service's own when standalone)."""
         return (await self._request("POST", "/_embed", json={"session_id": session_id})).json()
 
@@ -118,6 +118,35 @@ class BrowserClient:
         page reads, and the viewer shows them it's their turn."""
         body = {"holder": holder, "reason": reason[:300]}
         return (await self._request("POST", f"/sessions/{quote(session_id)}/control", json=body)).json()
+
+    async def tabs(self, session_id: str) -> list[dict]:
+        """``[{"id": "t1", "url", "title", "active"}]``; the active tab is the one
+        actions, page reads and the viewer use."""
+        return (await self._request("GET", f"/sessions/{quote(session_id)}/tabs")).json().get("tabs", [])
+
+    async def new_tab(self, session_id: str, url: str | None = None) -> dict:
+        body = {"url": url} if url else {}
+        return (await self._request("POST", f"/sessions/{quote(session_id)}/tabs", json=body)).json().get("tab", {})
+
+    async def activate_tab(self, session_id: str, tab_id: str) -> dict:
+        path = f"/sessions/{quote(session_id)}/tabs/{quote(tab_id, safe='')}/activate"
+        return (await self._request("POST", path)).json().get("tab", {})
+
+    async def close_tab(self, session_id: str, tab_id: str) -> None:
+        """Closing the last tab leaves a blank one."""
+        await self._request("DELETE", f"/sessions/{quote(session_id)}/tabs/{quote(tab_id, safe='')}")
+
+    async def saved_tabs(self, project: str) -> list[dict]:
+        """The project's saved tabs: ``[{"name", "url", "notes", "saved_at"}]``."""
+        return (await self._request("GET", "/saved-tabs", params={"project": project})).json().get("tabs", [])
+
+    async def save_tab(self, project: str, name: str, url: str, notes: str = "") -> dict:
+        """Upserts by name within the project."""
+        body = {"project": project, "name": name, "url": url, "notes": notes}
+        return (await self._request("POST", "/saved-tabs", json=body)).json().get("tab", {})
+
+    async def delete_saved_tab(self, project: str, name: str) -> None:
+        await self._request("DELETE", "/saved-tabs", params={"project": project, "name": name})
 
     async def close_session(self, session_id: str) -> None:
         await self._request("DELETE", f"/sessions/{quote(session_id)}")
