@@ -822,6 +822,43 @@ READ_IMAGE_TOOL = ToolDef(
 )
 
 
+_IMAGES_PROMPT_HEAD = (
+    "IMAGES:\n"
+    "- When the user wants a picture — an illustration, a photo, a hero or banner image, "
+    "slide or page images, an icon or a logo concept — make a real one with "
+    "`generate_image`. Never fake it by drawing with matplotlib, PIL, SVG, HTML canvas or "
+    "CSS shapes, and never say you cannot make images. Charts, plots and diagrams of data "
+    "are still drawn with code.\n"
+    "- To change an image (the user's upload, or one you made), pass its path in "
+    "`reference_images` and say what to change and what to keep.\n"
+    "- A picture the user asked for on its own: `generate_image` registers it as an "
+    "`image` artifact itself, so do not call `create_artifact` for it. The picture is not "
+    "in your context: describe it from your prompt, or `read_image` its `absolute_path` "
+    "if you must check it.\n"
+    "- A picture for an artifact (a slide, a document, an app page): an artifact reads "
+    "only files inside its own folder, so save the image there by passing `filename` as a "
+    "path in that folder — `.anton/artifacts/<slug>/hero.png`, or under `static/` for a "
+    "fullstack app — and reference it from the artifact by its path inside the folder. "
+    "For a page `generate_artifact` builds, pass the image's `absolute_path` in its "
+    "`attachments` instead; for a single-file HTML page you write, embed it as a "
+    "`data:` URI.\n"
+)
+# The scratchpad's generate_image(), offered only where it can work (see
+# GENERATE_IMAGE_TOOL_NO_PAD_HELPER).
+_IMAGES_PROMPT_PAD_HELPER = (
+    "- For several images that are parts of one piece of work (a deck's slide images), "
+    "call `generate_image(prompt, size=None, quality=None, reference_images=None, "
+    "path=None)` in the scratchpad instead — a global there, do not import it. It saves "
+    "each image to `path` (relative to the project, or absolute, such as a file in the "
+    "folder `create_artifact` returned), else as an image artifact of its own, returns "
+    "the saved file's absolute path, and refuses past its per-cell limit.\n"
+)
+_IMAGES_PROMPT_TAIL = (
+    "- Each image costs the user money: make the images asked for, not unrequested "
+    "variations."
+)
+
+
 GENERATE_IMAGE_TOOL = ToolDef(
     name="generate_image",
     description=(
@@ -839,36 +876,7 @@ GENERATE_IMAGE_TOOL = ToolDef(
         "relay to the user: a safety refusal, a rate limit, no credits, a provider error. A "
         "turn may make a limited number of images; the tool says when that is reached."
     ),
-    prompt=(
-        "IMAGES:\n"
-        "- When the user wants a picture — an illustration, a photo, a hero or banner image, "
-        "slide or page images, an icon or a logo concept — make a real one with "
-        "`generate_image`. Never fake it by drawing with matplotlib, PIL, SVG, HTML canvas or "
-        "CSS shapes, and never say you cannot make images. Charts, plots and diagrams of data "
-        "are still drawn with code.\n"
-        "- To change an image (the user's upload, or one you made), pass its path in "
-        "`reference_images` and say what to change and what to keep.\n"
-        "- A picture the user asked for on its own: `generate_image` registers it as an "
-        "`image` artifact itself, so do not call `create_artifact` for it. The picture is not "
-        "in your context: describe it from your prompt, or `read_image` its `absolute_path` "
-        "if you must check it.\n"
-        "- A picture for an artifact (a slide, a document, an app page): an artifact reads "
-        "only files inside its own folder, so save the image there by passing `filename` as a "
-        "path in that folder — `.anton/artifacts/<slug>/hero.png`, or under `static/` for a "
-        "fullstack app — and reference it from the artifact by its path inside the folder. "
-        "For a page `generate_artifact` builds, pass the image's `absolute_path` in its "
-        "`attachments` instead; for a single-file HTML page you write, embed it as a "
-        "`data:` URI.\n"
-        "- For several images that are parts of one piece of work (a deck's slide images), "
-        "call `generate_image(prompt, size=None, quality=None, reference_images=None, "
-        "path=None)` in the scratchpad instead — a global there, do not import it. It saves "
-        "each image to `path` (relative to the project, or absolute, such as a file in the "
-        "folder `create_artifact` returned), else as an image artifact of its own, returns "
-        "the saved file's "
-        "absolute path, and refuses past its per-cell limit.\n"
-        "- Each image costs the user money: make the images asked for, not unrequested "
-        "variations."
-    ),
+    prompt=_IMAGES_PROMPT_HEAD + _IMAGES_PROMPT_PAD_HELPER + _IMAGES_PROMPT_TAIL,
     input_schema={
         "type": "object",
         "properties": {
@@ -911,6 +919,12 @@ GENERATE_IMAGE_TOOL = ToolDef(
         "required": ["prompt"],
     },
     handler=handle_generate_image,
+)
+
+# Where the scratchpad's model provider has no images API (an Anthropic coding
+# model), its generate_image() only raises, so the prompt does not offer it.
+GENERATE_IMAGE_TOOL_NO_PAD_HELPER = replace(
+    GENERATE_IMAGE_TOOL, prompt=_IMAGES_PROMPT_HEAD + _IMAGES_PROMPT_TAIL
 )
 
 

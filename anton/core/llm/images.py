@@ -104,12 +104,18 @@ class ImageGenerationError(Exception):
     code) or one of ours (``rate_limited``, ``provider_error``,
     ``connection_error``, ``model_not_found``, ``bad_request``, ``no_image``,
     ``unavailable``).
+
+    ``usage`` is set when the provider answered, and so billed, but the reply
+    held no usable image: the callers still count it.
     """
 
-    def __init__(self, message: str, *, code: str, status_code: int | None = None) -> None:
+    def __init__(
+        self, message: str, *, code: str, status_code: int | None = None, usage: Usage | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.status_code = status_code
+        self.usage = usage
 
 
 # ── Arguments ────────────────────────────────────────────────────────
@@ -328,11 +334,11 @@ def image_call_usage(raw: Any) -> Usage:
     text_in = _count(text_in) if text_in is not None else max(0, input_total - image_in)
     output_total = _count(_field(raw, "output_tokens"))
     output_details = _field(raw, "output_tokens_details")
-    if output_details is not None:
-        image_out = _count(_field(output_details, "image_tokens"))
-        text_out = _count(_field(output_details, "text_tokens"))
-    else:
-        image_out, text_out = output_total, 0
+    text_out = _count(_field(output_details, "text_tokens")) if output_details is not None else 0
+    image_out = _field(output_details, "image_tokens") if output_details is not None else None
+    # Details without an image count (another provider's shape, such as
+    # {"reasoning_tokens": 0}) leave the picture as what is not text.
+    image_out = _count(image_out) if image_out is not None else max(0, output_total - text_out)
     return Usage(
         input_tokens=text_in,
         output_tokens=text_out,
@@ -342,7 +348,9 @@ def image_call_usage(raw: Any) -> Usage:
 
 
 def parse_image_response(response: Any, model: str) -> GeneratedImage:
-    """Decode the first image of an images API reply. Raises ImageGenerationError."""
+    """Decode the first image of an images API reply. Raises ImageGenerationError,
+    carrying the reply's usage: the call was billed even when its image is unusable."""
+    usage = image_call_usage(_field(response, "usage"))
     data = _field(response, "data") or []
     first = data[0] if data else None
     encoded = _field(first, "b64_json") if first is not None else None
@@ -350,20 +358,20 @@ def parse_image_response(response: Any, model: str) -> GeneratedImage:
         raise ImageGenerationError(
             "The image provider answered without an image, so nothing was saved. "
             "Try once more; if it happens again, tell the user.",
-            code="no_image",
+            code="no_image", usage=usage,
         )
     try:
         raw = base64.b64decode(encoded)
     except (binascii.Error, ValueError) as exc:
         raise ImageGenerationError(
             "The image provider sent image data that could not be decoded, so nothing was saved.",
-            code="no_image",
+            code="no_image", usage=usage,
         ) from exc
     fmt, width, height = sniff_image(raw)
     if fmt not in _FORMATS:
         raise ImageGenerationError(
             "The image provider sent data that is not a PNG, JPEG or WebP image, so nothing was saved.",
-            code="no_image",
+            code="no_image", usage=usage,
         )
     revised = _field(first, "revised_prompt")
     return GeneratedImage(
@@ -373,7 +381,7 @@ def parse_image_response(response: Any, model: str) -> GeneratedImage:
         width=width,
         height=height,
         model=model,
-        usage=image_call_usage(_field(response, "usage")),
+        usage=usage,
         revised_prompt=revised if isinstance(revised, str) and revised.strip() else None,
     )
 
@@ -392,7 +400,14 @@ async def request_image(
     """One image from ``client`` (an ``AsyncOpenAI``): a generation, or an edit
     of ``reference_images`` sent as multipart. Raises ImageGenerationError, or
     ProviderAuthError for a rejected key so the caller's auth retry can run.
+
+    Sent once: the SDK's own retries are off for image calls, since a 429,
+    5xx or timeout after the provider started drawing would draw (and bill)
+    the picture again. A failure reaches the agent, which decides.
     """
+    with_options = getattr(client, "with_options", None)
+    if callable(with_options):
+        client = with_options(max_retries=0)
     kwargs: dict[str, Any] = {"model": model, "prompt": prompt}
     if size:
         kwargs["size"] = size

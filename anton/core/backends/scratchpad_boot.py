@@ -3,6 +3,7 @@ import io
 import json
 import os
 import sys
+import threading
 import traceback
 
 import dill
@@ -469,8 +470,10 @@ namespace[EXPLAINABILITY_QUERIES_NAME] = []
 _cell_trace = None
 
 # Images generate_image() made in the running cell, held to MAX_IMAGES_ENV.
-# The main loop zeroes it before each cell.
+# The main loop zeroes it before each cell. Checked and taken under the lock:
+# a cell can call the helper from several threads at once.
 _cell_images = {"made": 0}
+_cell_images_lock = threading.Lock()
 
 # --- Inject get_llm() for LLM access from scratchpad code ---
 _scratchpad_model = os.environ.get("ANTON_SCRATCHPAD_MODEL", "")
@@ -947,48 +950,60 @@ if _scratchpad_model:
                 )
             if not isinstance(prompt, str) or not prompt.strip():
                 raise ValueError("generate_image() needs a non-empty prompt")
-            if _cell_images["made"] >= _max_cell_images:
-                raise RuntimeError(
-                    f"generate_image() refused: this cell already asked for {_cell_images['made']} "
-                    f"images, the most one scratchpad run may (ANTON_SCRATCHPAD_MAX_IMAGES="
-                    f"{_max_cell_images}). No request was sent. Use the images made so far and "
-                    "ask the user before making more."
+            # The slot is taken before any blocking work, so calls racing in
+            # threads cannot all pass the check. It is given back only when the
+            # call fails before its request goes out: a refused request may
+            # still be billed.
+            with _cell_images_lock:
+                if _cell_images["made"] >= _max_cell_images:
+                    raise RuntimeError(
+                        f"generate_image() refused: this cell already asked for {_cell_images['made']} "
+                        f"images, the most one scratchpad run may (ANTON_SCRATCHPAD_MAX_IMAGES="
+                        f"{_max_cell_images}). No request was sent. Use the images made so far and "
+                        "ask the user before making more."
+                    )
+                _cell_images["made"] += 1
+            sent = False
+            try:
+                size = _images.normalize_size(size)
+                quality = _images.normalize_quality(quality)
+                output_format = _images.output_format_for(str(path) if path else None)
+                root = _Path(_resolved_workspace() or os.getcwd())
+                if isinstance(reference_images, (str, os.PathLike)):
+                    reference_images = [reference_images]
+                refs = []
+                for ref in reference_images or []:
+                    ref_path = _Path(os.fspath(ref)).expanduser()
+                    refs.append(_images.load_reference_image(
+                        ref_path if ref_path.is_absolute() else root / ref_path
+                    ))
+                api_key = _current_llm_api_key() or _llm_provider_kwargs.get("api_key")
+                model = _images.resolve_image_model(
+                    os.environ.get(IMAGE_MODEL_ENV) or os.environ.get("ANTON_IMAGE_MODEL"),
+                    base_url=_llm_base_url,
+                    api_key=api_key,
+                    verify=_llm_ssl_verify,
+                    mindshub=_images.is_mindshub_endpoint(_llm_flavor, _llm_base_url),
                 )
-            size = _images.normalize_size(size)
-            quality = _images.normalize_quality(quality)
-            output_format = _images.output_format_for(str(path) if path else None)
-            root = _Path(_resolved_workspace() or os.getcwd())
-            if isinstance(reference_images, (str, os.PathLike)):
-                reference_images = [reference_images]
-            refs = []
-            for ref in reference_images or []:
-                ref_path = _Path(os.fspath(ref)).expanduser()
-                refs.append(_images.load_reference_image(
-                    ref_path if ref_path.is_absolute() else root / ref_path
-                ))
-            api_key = _current_llm_api_key() or _llm_provider_kwargs.get("api_key")
-            model = _images.resolve_image_model(
-                os.environ.get(IMAGE_MODEL_ENV) or os.environ.get("ANTON_IMAGE_MODEL"),
-                base_url=_llm_base_url,
-                api_key=api_key,
-                verify=_llm_ssl_verify,
-                mindshub=_images.is_mindshub_endpoint(_llm_flavor, _llm_base_url),
-            )
-            # Counted before the call: a refused request may still be billed.
-            _cell_images["made"] += 1
-            result = _llm_asyncio.run(
-                _with_fresh_provider(
-                    lambda provider: provider.generate_image(
-                        model=model,
-                        prompt=prompt,
-                        size=size,
-                        quality=quality,
-                        output_format=output_format,
-                        reference_images=refs,
-                    ),
-                    role=_images.IMAGE_ROLE,
+                sent = True
+                result = _llm_asyncio.run(
+                    _with_fresh_provider(
+                        lambda provider: provider.generate_image(
+                            model=model,
+                            prompt=prompt,
+                            size=size,
+                            quality=quality,
+                            output_format=output_format,
+                            reference_images=refs,
+                        ),
+                        role=_images.IMAGE_ROLE,
+                    )
                 )
-            )
+            except BaseException:
+                if not sent:
+                    with _cell_images_lock:
+                        _cell_images["made"] = max(0, _cell_images["made"] - 1)
+                raise
             if path:
                 target = _Path(os.fspath(path)).expanduser()
                 target = target if target.is_absolute() else root / target
@@ -1003,12 +1018,29 @@ if _scratchpad_model:
                     os.environ.get(ARTIFACTS_ROOT_ENV) or str(root / ".anton" / "artifacts")
                 )
                 stem = _images.file_stem(None, prompt)
+                title = _images.image_title(None, prompt)
                 artifact = store.create(
-                    name=_images.image_title(None, prompt),
+                    name=title,
                     description=(("Edited image: " if refs else "Generated image: ") + prompt)[:500],
                     type="image",
                     primary=f"{stem}.{result.extension}",
                 )
+                # The conversation and turn this cell runs for, first in the
+                # provenance, as the host's artifact tools record theirs: it
+                # is how the host claims a folder that appeared during the
+                # cell as this turn's (`track_edits_since`, and cowork-server's
+                # cloud path).
+                conversation = getattr(_cell_trace, "session_id", None)
+                if conversation:
+                    turn = getattr(_cell_trace, "turn_id", None)
+                    store.record_turn(
+                        artifact.slug,
+                        conversation_id=str(conversation),
+                        conversation_title=None,
+                        turn_index=turn if isinstance(turn, int) else 0,
+                        summary=f"Generated image: {title}",
+                        files_touched=[],
+                    )
                 directory = store.folder_for(artifact.slug)
             saved = _images.write_new_image_file(result.data, directory, stem, result.extension)
             return str(saved.resolve())
@@ -1647,7 +1679,8 @@ while True:
         # re-shipped duplicate chunk, never a skipped one.
         _cell_out["shipped"] = 0
         _cell_out["buf"] = out_buf
-        _cell_images["made"] = 0
+        with _cell_images_lock:
+            _cell_images["made"] = 0
         error = None
         # The line of its own code the cell stopped at, read from the
         # traceback rather than from the error's text, which the cell shapes.

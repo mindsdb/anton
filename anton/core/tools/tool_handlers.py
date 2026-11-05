@@ -1259,6 +1259,33 @@ def track_edits_since(session: "ChatSession", store, before: dict[str, ArtifactF
         files = after.get(slug)
         if files is not None and files != files_before and slug not in already_touched:
             _track_artifact(session, store, slug, summary="Edited via scratchpad")
+    # Artifacts the cell CREATED, such as the image artifact the pad's
+    # `generate_image()` registers. A sibling conversation can create one in
+    # the same window, so a new folder is claimed only when its provenance
+    # names this conversation, which the helper stamps the way
+    # `_track_artifact` does (cowork-server's cloud path claims by the same
+    # stamp). A session with no conversation (the CLI) shares its folder with
+    # nobody and claims what appeared. Added to the set directly: the folder
+    # already carries this turn's provenance.
+    conversation = str(getattr(session, "_session_id", "") or "")
+    for slug in sorted(after.keys() - before.keys()):
+        if slug in already_touched:
+            continue
+        if conversation and _provenance_origin(store, slug) != conversation:
+            continue
+        with contextlib.suppress(AttributeError):
+            session._artifacts_touched.add(slug)
+
+
+def _provenance_origin(store, slug: str) -> str | None:
+    """The conversation that created `slug`: the first in its provenance."""
+    try:
+        artifact = store.read_metadata(slug)
+    except (OSError, ValueError):
+        return None
+    if artifact is None or not artifact.provenance:
+        return None
+    return artifact.provenance[0].conversation
 
 
 async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> ToolOutcome:
@@ -3143,6 +3170,8 @@ async def handle_generate_image(session: "ChatSession", tc_input: dict):
         usage_summary,
         write_new_image_file,
     )
+    import asyncio
+
     from anton.core.llm.provider import ProviderAuthError
     from anton.core.tools.progress import ToolProgress
 
@@ -3174,11 +3203,6 @@ async def handle_generate_image(session: "ChatSession", tc_input: dict):
         yield ToolOutcome(content=f"Error: {destination}", ok=False, reason="invalid_path")
         return
 
-    refs, ref_error = _image_references(session, tc_input.get("reference_images"))
-    if ref_error is not None:
-        yield ToolOutcome(content=f"Error: {ref_error}", ok=False, reason="invalid_path")
-        return
-
     limit = getattr(session, "_max_images_per_turn", DEFAULT_MAX_IMAGES)
     used = getattr(session, "_images_this_turn", 0)
     if used >= limit:
@@ -3190,6 +3214,15 @@ async def handle_generate_image(session: "ChatSession", tc_input: dict):
             ),
             ok=False, reason="image_limit",
         )
+        return
+
+    # Off the event loop: a reference image can be tens of megabytes, and the
+    # host serves other turns from this loop.
+    refs, ref_error = await asyncio.to_thread(
+        _image_references, session, tc_input.get("reference_images")
+    )
+    if ref_error is not None:
+        yield ToolOutcome(content=f"Error: {ref_error}", ok=False, reason="invalid_path")
         return
     # Counted before the call: a refused or failed request may still be billed,
     # and a loop of refusals must hit the cap too.

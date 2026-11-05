@@ -191,3 +191,73 @@ async def test_on_a_cloud_pod_the_default_goes_to_the_mounted_artifacts_folder(t
     assert saved.parent.parent == mount.resolve() and saved.read_bytes() == _PNG
     # Unset everywhere, endpoint not MindsHub: the built-in default.
     assert json.loads(gateway.requests[0][2])["model"] == "gpt-image-2.6-flare"
+
+
+async def test_threads_racing_in_one_cell_cannot_pass_the_cap_together(tmp_path, host_env):
+    """The slot is taken before the helper's blocking work, so six threads
+    against a cap of two send two requests."""
+    host_env.setenv("ANTON_SCRATCHPAD_MAX_IMAGES", "2")
+    with _serving() as gateway:
+        pad = _pad(gateway, tmp_path, image_model="m")
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "from concurrent.futures import ThreadPoolExecutor\n"
+                "def one(i):\n"
+                "    try:\n"
+                "        return generate_image(f'image {i}', path=f'out/{i}.png')\n"
+                "    except RuntimeError as exc:\n"
+                "        return 'refused' if 'No request was sent' in str(exc) else repr(exc)\n"
+                "with ThreadPoolExecutor(6) as pool:\n"
+                "    results = list(pool.map(one, range(6)))\n"
+                "print(sum(r == 'refused' for r in results), sum(r.endswith('.png') for r in results))\n"
+            )
+        finally:
+            await pad.close()
+    assert cell.error is None, cell.error
+    assert cell.stdout.split() == ["4", "2"]
+    assert len(gateway.requests) == 2
+
+
+async def test_a_call_that_fails_before_sending_gives_its_slot_back(tmp_path, host_env):
+    host_env.setenv("ANTON_SCRATCHPAD_MAX_IMAGES", "1")
+    (tmp_path / "notes.txt").write_text("not an image")
+    with _serving() as gateway:
+        pad = _pad(gateway, tmp_path, image_model="m")
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "try:\n"
+                "    generate_image('x', reference_images=['notes.txt'])\n"
+                "except ValueError as exc:\n"
+                "    print('refused:', 'not a PNG' in str(exc))\n"
+                "print(generate_image('y', path='y.png'))\n"
+            )
+        finally:
+            await pad.close()
+    assert cell.error is None, cell.error
+    assert cell.stdout.splitlines()[0] == "refused: True"
+    assert len(gateway.requests) == 1
+
+
+async def test_the_default_artifact_names_the_cells_conversation_first(tmp_path, host_env):
+    """The provenance stamp is how the desktop host (track_edits_since) and
+    cowork-server's cloud path claim a pad-made artifact as the turn's."""
+    from anton.core.artifacts import ArtifactStore
+    from anton.core.llm.tracing import TraceContext, reset_trace_context, set_trace_context
+
+    conversation = "3f2b8c1e-5d6a-4e7f-9a0b-1c2d3e4f5a6b"
+    with _serving() as gateway:
+        pad = _pad(gateway, tmp_path, image_model="m")
+        await pad.start()
+        token = set_trace_context(TraceContext(session_id=conversation, turn_id=3))
+        try:
+            cell = await pad.execute("print(generate_image('a fox'))\n")
+        finally:
+            reset_trace_context(token)
+            await pad.close()
+    assert cell.error is None, cell.error
+    slug = Path(cell.stdout.strip()).parent.name
+    artifact = ArtifactStore(tmp_path / ".anton" / "artifacts").read_metadata(slug)
+    first = artifact.provenance[0]
+    assert first.conversation == conversation and first.turns[0].index == 3

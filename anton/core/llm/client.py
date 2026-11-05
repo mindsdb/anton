@@ -674,23 +674,29 @@ class LLMClient:
                 code="unavailable",
             )
         model = model or await self.resolve_image_model()
-        result = await self._guarded_call(
-            operation=lambda: _call_with_auth_confirmation(
-                lambda: provider.generate_image(
-                    model=model,
-                    prompt=prompt,
-                    size=size,
-                    quality=quality,
-                    output_format=output_format,
-                    reference_images=reference_images,
+        try:
+            result = await self._guarded_call(
+                operation=lambda: _call_with_auth_confirmation(
+                    lambda: provider.generate_image(
+                        model=model,
+                        prompt=prompt,
+                        size=size,
+                        quality=quality,
+                        output_format=output_format,
+                        reference_images=reference_images,
+                    ),
+                    role=IMAGE_ROLE,
                 ),
                 role=IMAGE_ROLE,
-            ),
-            role=IMAGE_ROLE,
-            model=model,
-            # An image call has no output budget; this keeps the configured deadline.
-            max_tokens=0,
-        )
+                model=model,
+                # An image call has no output budget; this keeps the configured deadline.
+                max_tokens=0,
+            )
+        except ImageGenerationError as exc:
+            # The provider answered, and billed, but sent no usable image.
+            if exc.usage is not None:
+                self._notify_usage(IMAGE_ROLE, model, exc.usage, listener)
+            raise
         self._notify_usage(IMAGE_ROLE, model, result.usage, listener)
         return result
 

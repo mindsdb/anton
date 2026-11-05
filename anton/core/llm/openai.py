@@ -1145,18 +1145,24 @@ class OpenAIProvider(LLMProvider):
         `anton.core.llm.images`, shared with the scratchpad helper. Raises
         ImageGenerationError, or ProviderAuthError on a 401.
         """
-        from .images import request_image
+        from .images import ImageGenerationError, request_image
 
-        result = await request_image(
-            self._client,
-            model=model,
-            prompt=prompt,
-            size=size,
-            quality=quality,
-            output_format=output_format,
-            reference_images=reference_images,
-            extra_headers=self._build_trace_headers(),
-        )
+        try:
+            result = await request_image(
+                self._client,
+                model=model,
+                prompt=prompt,
+                size=size,
+                quality=quality,
+                output_format=output_format,
+                reference_images=reference_images,
+                extra_headers=self._build_trace_headers(),
+            )
+        except ImageGenerationError as exc:
+            # A billed reply without a usable image is still counted.
+            if exc.usage is not None:
+                self.log_usage(model=model, usage=exc.usage, served_model=None)
+            raise
         self.log_usage(model=model, usage=result.usage, served_model=None)
         return result
 

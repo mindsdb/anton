@@ -30,7 +30,7 @@ from anton.core.settings import CoreSettings
 from anton.core.tools import tool_handlers as th
 from anton.core.tools.progress import ToolProgress
 from anton.core.tools.registry import ToolOutcome, ToolRegistry
-from anton.core.tools.tool_defs import GENERATE_IMAGE_TOOL
+from anton.core.tools.tool_defs import GENERATE_IMAGE_TOOL, GENERATE_IMAGE_TOOL_NO_PAD_HELPER
 from anton.core.turn_cost import EVENT_ROLES, TurnCost
 from anton.workspace import Workspace
 from tests.conftest import make_mock_llm, run_turn
@@ -289,6 +289,41 @@ async def test_failures_come_back_as_messages_to_relay(status, body, headers, co
     assert phrase in str(caught.value)
 
 
+async def test_an_image_call_is_sent_once_even_where_the_sdk_would_retry():
+    """A retried 5xx/429/timeout would draw, and bill, the picture again."""
+    gateway = Gateway(status=503, body={"error": {"message": "busy"}})
+    client = _client(gateway)
+    # The SDK's default: two retries.
+    client.image_provider._client = client.image_provider._client.with_options(max_retries=2)
+    with pytest.raises(images.ImageGenerationError):
+        await client.generate_image(prompt="x")
+    assert len(gateway.requests) == 1
+
+
+def test_output_details_without_an_image_count_leave_the_output_as_image_tokens():
+    usage = images.image_call_usage({
+        "input_tokens": 16, "output_tokens": 824,
+        "output_tokens_details": {"reasoning_tokens": 0},
+    })
+    assert (usage.output_tokens, usage.image_output_tokens) == (0, 824)
+    usage = images.image_call_usage({"output_tokens": 830, "output_tokens_details": {"text_tokens": 6}})
+    assert (usage.output_tokens, usage.image_output_tokens) == (6, 824)
+
+
+async def test_a_billed_reply_without_an_image_is_still_counted():
+    gateway = Gateway(body={"created": 1, "data": [], "usage": LIVE_USAGE})
+    client = _client(gateway)
+    seen: list = []
+    client.usage_listener = lambda role, model, usage: seen.append((role, usage.image_output_tokens))
+    logged: list = []
+    client.image_provider.usage_sink = logged.append
+    with pytest.raises(images.ImageGenerationError) as caught:
+        await client.generate_image(prompt="x")
+    assert caught.value.code == "no_image"
+    assert seen == [("image", 824)]
+    assert [(r["role"], r["image_output"]) for r in logged] == [("image", 824)]
+
+
 async def test_a_rejected_key_is_an_auth_error_after_one_confirmation_retry():
     gateway = Gateway(status=401, body={"error": {"message": "bad key"}})
     with pytest.raises(ProviderAuthError):
@@ -489,6 +524,64 @@ async def test_past_the_turn_cap_no_request_is_sent(tmp_path):
     assert gateway.requests == []
 
 
+async def test_the_cap_is_checked_before_reference_images_are_read(tmp_path, monkeypatch):
+    read = []
+    monkeypatch.setattr(th, "_image_references", lambda *a: read.append(a) or ([], None))
+    session = _session(tmp_path, Gateway())
+    session._images_this_turn = session._max_images_per_turn
+    _, outcome = await _run(session, {"prompt": "x", "reference_images": ["huge.png"]})
+    assert outcome.reason == "image_limit" and read == []
+
+
+async def test_reference_images_are_read_off_the_event_loop(tmp_path, monkeypatch):
+    import threading
+
+    threads = []
+    real = th._image_references
+
+    def recording(*args):
+        threads.append(threading.current_thread())
+        return real(*args)
+
+    monkeypatch.setattr(th, "_image_references", recording)
+    (tmp_path / "photo.png").write_bytes(PNG)
+    _, outcome = await _run(_session(tmp_path, Gateway()), {"prompt": "x", "reference_images": ["photo.png"]})
+    assert outcome.ok is True
+    assert threads and threads[0] is not threading.main_thread()
+
+
+def _artifact(store, name: str, conversation: str | None):
+    artifact = store.create(name=name, description="d", type="image", primary="a.png")
+    if conversation:
+        store.record_turn(artifact.slug, conversation_id=conversation, conversation_title=None,
+                          turn_index=1, summary="s", files_touched=[])
+    return artifact.slug
+
+
+@pytest.mark.parametrize("session_id, claimed", [
+    ("11111111-1111-1111-1111-111111111111", {"ours"}),
+    (None, {"ours", "theirs", "unstamped"}),
+])
+def test_a_cell_created_artifact_is_this_turns_when_its_provenance_says_so(tmp_path, session_id, claimed):
+    """The pad's generate_image() registers an image artifact the tool layer
+    never sees. A folder that appeared during the cell is claimed when its
+    provenance names this conversation; a sibling conversation's is not."""
+    from anton.core.artifacts import ArtifactStore
+
+    store = ArtifactStore(tmp_path / "artifacts")
+    existing = _artifact(store, "existing", None)
+    before = th.snapshot_existing_artifacts(store)
+    slugs = {
+        "ours": _artifact(store, "ours", "11111111-1111-1111-1111-111111111111"),
+        "theirs": _artifact(store, "theirs", "22222222-2222-2222-2222-222222222222"),
+        "unstamped": _artifact(store, "unstamped", None),
+    }
+    session = SimpleNamespace(_artifacts_touched=set(), _session_id=session_id, _turn_count=0)
+    th.track_edits_since(session, store, before)
+    assert session._artifacts_touched == {slugs[name] for name in claimed}
+    assert existing not in session._artifacts_touched
+
+
 async def test_a_safety_refusal_is_relayed_and_leaves_no_artifact(tmp_path):
     gateway = Gateway(status=400, body={"error": {"code": "moderation_blocked", "message": "blocked"}})
     session = _session(tmp_path, gateway)
@@ -615,7 +708,22 @@ async def test_the_tool_and_its_prompt_are_offered_where_an_images_api_is(
     llm.image_model = image_model
     system, tools = await _first_request(tmp_path, llm)
     assert ("generate_image" in tools) is offered
-    assert (GENERATE_IMAGE_TOOL.prompt in system) is offered
+    # The mock's coding provider is Anthropic, so the pad helper is not offered.
+    assert (GENERATE_IMAGE_TOOL_NO_PAD_HELPER.prompt in system) is offered
+    assert "in the scratchpad instead" not in system
+
+
+async def test_the_pad_helper_is_offered_only_where_the_coding_connection_has_images(tmp_path):
+    from anton.core.llm.provider import ProviderConnectionInfo
+
+    llm = make_mock_llm()
+    llm.image_provider = OpenAIProvider(api_key="k", base_url=MINDSHUB)
+    llm.coding_provider.export_connection_info = MagicMock(
+        return_value=ProviderConnectionInfo(provider="openai", api_key="k", base_url=MINDSHUB)
+    )
+    system, _ = await _first_request(tmp_path, llm)
+    assert GENERATE_IMAGE_TOOL.prompt in system
+    assert "in the scratchpad instead" in system
 
 
 async def test_an_anthropic_only_session_has_no_image_tool(tmp_path):

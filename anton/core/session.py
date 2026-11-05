@@ -115,6 +115,7 @@ from anton.core.tools.tool_defs import (
     GENERATE_ARTIFACT_TOOL,
     GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
     GENERATE_IMAGE_TOOL,
+    GENERATE_IMAGE_TOOL_NO_PAD_HELPER,
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
@@ -3468,7 +3469,13 @@ class ChatSession:
             # Pictures, saved as image artifacts — so also only with a
             # workspace, and only where a role can reach an images API.
             if self._image_generation_available():
-                self.tool_registry.register_tool(GENERATE_IMAGE_TOOL)
+                # The pad's generate_image() goes out on the coding provider,
+                # and only an OpenAI-API one has an images API.
+                coding = self._llm.coding_provider.export_connection_info().provider
+                self.tool_registry.register_tool(
+                    GENERATE_IMAGE_TOOL if coding in ("openai", "openai-compatible")
+                    else GENERATE_IMAGE_TOOL_NO_PAD_HELPER
+                )
 
     def _image_generation_available(self) -> bool:
         """Whether this session offers `generate_image` (ENG-4024).

@@ -77,8 +77,8 @@ see [Search providers](/configure/search-providers).
 | `ANTON_DEPLOYMENT_ENV` | unset | A short label for the deployment, such as `staging`, sent as `environment` on the measurement events — see [Analytics](/configure/analytics) |
 | `ANTON_LANGFUSE_HEADERS` | unset | Set to `1` to attach Langfuse trace headers on any OpenAI-compatible endpoint — see [Trace headers](/configure/trace-headers) |
 | `ANTON_PROACTIVE_DASHBOARDS` | `false` | When `true`, Anton builds HTML dashboards proactively; when `false`, CLI output only |
-| `ANTON_MAX_IMAGES_PER_TURN` | `8` | Most images the `generate_image` tool makes in one turn |
-| `ANTON_SCRATCHPAD_MAX_IMAGES` | `8` | Most images the scratchpad's `generate_image()` makes in one cell |
+| `ANTON_MAX_IMAGES_PER_TURN` | `8` | Most images the `generate_image` tool makes in one turn. The scratchpad's `generate_image()` is capped separately |
+| `ANTON_SCRATCHPAD_MAX_IMAGES` | `8` | Most images the scratchpad's `generate_image()` makes in one cell; every cell gets this many again |
 | `ANTON_BACKEND` | `local` | Scratchpad backend: `local` or `remote` (remote requires Minds URL and API key) |
 | `ANTON_PUBLISH_URL` | `https://4nton.ai` | Publish service used when sharing artifacts |
 | `ANTON_TERMS_CONSENT` | `false` | Records that you accepted the terms screen (set by the first-run flow) |
