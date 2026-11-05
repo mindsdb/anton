@@ -11578,7 +11578,7 @@ def _read_cell(*, code: str, index: int) -> _Cell | None:
     """`code` read as the cell at `index` among the parsed cells; None when it doesn't parse."""
     try:
         return _Cell(_parse(code), code, index)
-    except (SyntaxError, ValueError, RecursionError, MemoryError):
+    except (SyntaxError, ValueError):
         return None
 
 
@@ -16167,11 +16167,13 @@ def find_cell_writes(
     """
     try:
         tree = _parse(code)
-    except (SyntaxError, ValueError, RecursionError, MemoryError):
-        # Too deep for this Python's parser: compile() fails on it the same way.
+    except (SyntaxError, ValueError):
         if earlier and earlier[-1].ended_process:
             return find_cell_writes(code="", earlier=earlier, snapshots=snapshots, http_rules=http_rules)
         return CellWrites()
+    except (RecursionError, MemoryError):
+        # Too deep for this Python's parser, and the pad may run another Python (remote backend): hold it.
+        return CellWrites(unchecked=True)
     cells: list[_Cell] = []
     errored: set[int] = set()
     stopped_at: dict[int, int] = {}
