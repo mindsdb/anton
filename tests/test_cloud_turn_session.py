@@ -343,6 +343,8 @@ def test_model_override_applied(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(("jev_decisions", "verifier_jev"), [(False, "off"), (True, "on")])
 def test_jev_decisions_set_the_completion_check(tmp_path, monkeypatch, jev_decisions, verifier_jev):
+    # The default under test, not a developer's shell.
+    monkeypatch.delenv("ANTON_VERIFIER_JEV", raising=False)
     _, cfg = _build(tmp_path, monkeypatch, jev_decisions=jev_decisions)
     assert cfg.settings.verifier_jev == verifier_jev
 

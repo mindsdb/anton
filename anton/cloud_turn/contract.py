@@ -315,9 +315,9 @@ class TurnRequestV1:
     #: but a JSON `true` reads as False.
     tool_messages: bool = False
     #: Whether the turn may ask Jev, MindsHub's decision model, whether the
-    #: agent finished. Only a JSON `false` turns it off (the organization
-    #: opted out in cowork); anything else, a missing field included, keeps it
-    #: on, so a controller that does not forward the field changes nothing.
+    #: agent finished. A missing field or a JSON `true` keeps it on, so a
+    #: controller that does not forward the field changes nothing; anything
+    #: else turns it off, since a malformed opt-out must not read as consent.
     jev_decisions: bool = True
     #: Per-engine connector data cowork-server resolved for this turn:
     #: {engine: {"usage_notes": str}}. Rendered only for engines the turn's
@@ -354,7 +354,7 @@ class TurnRequestV1:
             ),
             interactive=d.get("interactive") is True,
             tool_messages=d.get("tool_messages") is True,
-            jev_decisions=d.get("jev_decisions") is not False,
+            jev_decisions=d.get("jev_decisions", True) is True,
             # Same defensive isinstance check as oauth/trace.
             connectors=(
                 d.get("connectors") if isinstance(d.get("connectors"), dict) else None

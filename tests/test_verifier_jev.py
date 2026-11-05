@@ -306,6 +306,8 @@ async def test_a_refusal_stops_jev_for_the_rest_of_the_session(workspace):
 
     classify.assert_awaited_once()
     assert llm.generate_object_code.await_count == 2
+    # The refused session's client is closed, not left idle.
+    assert session._jev_http is None
 
 
 @pytest.mark.parametrize("error", ["http_402", "http_500", "timeout"])

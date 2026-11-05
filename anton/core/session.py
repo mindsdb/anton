@@ -5089,9 +5089,14 @@ class ChatSession:
         if result.error == "http_403":
             # MindsHub refuses Jev to this organization, for zero data retention
             # or an admin's model rule, and will refuse every later check too:
-            # the rest of the session uses the LLM verifier alone.
+            # this session's later checks use the LLM verifier alone. A desktop
+            # session spans the conversation; a hosted turn builds its own
+            # session, so there it lasts the turn.
             self._jev_enabled = False
-            logger.info("Jev refused (HTTP 403); verifying with the LLM for the rest of the session")
+            logger.info("Jev refused (HTTP 403); verifying with the LLM for the rest of this session")
+            client, self._jev_http = self._jev_http, None
+            if client is not None:
+                await client.aclose()
         return result
 
     def _jev_decides(self, result: "_jev.JevVerdict | None") -> bool:

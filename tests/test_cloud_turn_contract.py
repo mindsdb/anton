@@ -200,12 +200,13 @@ def _jev_request(value):
     return TurnRequestV1.from_json(json.dumps(body))
 
 
-def test_jev_decisions_false_is_read():
-    assert _jev_request(False).jev_decisions is False
-
-
-@pytest.mark.parametrize("value", [..., True, None, 0, "false", {"on": False}])
-def test_jev_decisions_stay_on_unless_a_real_false(value):
-    """Only cowork's opt-out turns Jev off; a controller that does not forward
-    the field, or forwards something else, changes nothing."""
+@pytest.mark.parametrize("value", [..., True])
+def test_jev_decisions_stay_on_when_missing_or_true(value):
+    """A controller that does not forward the field changes nothing."""
     assert _jev_request(value).jev_decisions is True
+
+
+@pytest.mark.parametrize("value", [False, None, 0, "true", "false", {"on": True}])
+def test_jev_decisions_turn_off_on_anything_else(value):
+    """A malformed opt-out must not read as consent."""
+    assert _jev_request(value).jev_decisions is False
