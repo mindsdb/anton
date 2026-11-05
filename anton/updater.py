@@ -5,7 +5,9 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
+import time
 import urllib.request
 from pathlib import Path
 
@@ -109,11 +111,7 @@ def _check_and_update(result: dict, settings) -> None:
     messages.append(f"  Updating anton {local_ver} \u2192 {remote_ver}...")
 
     try:
-        proc = subprocess.run(
-            ["uv", "tool", "install", f"git+https://github.com/mindsdb/anton.git@{latest_tag}", "--force"],
-            capture_output=True,
-            timeout=_TOTAL_TIMEOUT,
-        )
+        proc = _install_release(latest_tag)
     except Exception:
         messages.append("  [dim]Update failed, continuing...[/]")
         return
@@ -149,6 +147,41 @@ def _check_and_update(result: dict, settings) -> None:
         pass
     messages.append("  \u2713 Updated!")
     result["new_version"] = remote_version_str
+
+
+def _install_release(tag: str) -> subprocess.CompletedProcess:
+    """Install one immutable release and its reviewed dependency selection."""
+    deadline = time.monotonic() + _TOTAL_TIMEOUT
+
+    def remaining_timeout() -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Release installation timed out")
+        return remaining
+
+    repository = "https://github.com/mindsdb/anton.git"
+    tag_ref = f"refs/tags/{tag}"
+    result = subprocess.run(
+        ["git", "ls-remote", repository, tag_ref, tag_ref + "^{}"],
+        capture_output=True, text=True, check=True, timeout=remaining_timeout(),
+    )
+    refs = {ref: oid for line in result.stdout.splitlines() for oid, ref in [line.split()]}
+    commit = refs.get(tag_ref + "^{}", refs.get(tag_ref, ""))
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ValueError("Could not resolve the selected release commit")
+
+    with tempfile.TemporaryDirectory(prefix="anton-release-") as directory:
+        contract = Path(directory) / "requirements.txt"
+        url = f"https://raw.githubusercontent.com/mindsdb/anton/{commit}/anton/release-requirements.txt"
+        with urllib.request.urlopen(url, timeout=remaining_timeout()) as response:
+            contents = response.read()
+        if not contents.strip():
+            raise ValueError("The release dependency contract is empty")
+        contract.write_bytes(contents)
+        return subprocess.run(
+            ["uv", "tool", "install", f"git+{repository}@{commit}", "--force", "--constraints", str(contract)],
+            capture_output=True, timeout=remaining_timeout(),
+        )
 
 
 def _fetch_latest_release_tag() -> str:

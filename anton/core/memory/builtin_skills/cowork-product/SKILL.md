@@ -84,6 +84,57 @@ and troubleshooting a missing feature as if it were broken wastes their time.
   downloaded or previewed in the page instead.
 - Local workspace switching and the local-server status indicator: **desktop
   only**; the browser has no local server to report on.
+- Adding a model provider, including a local model: **desktop only**. See
+  LOCAL MODELS.
+
+LOCAL MODELS — Ollama, LM Studio, vLLM and other self-hosted models
+The PRODUCT block in your system prompt names the surface this conversation is
+on. Answer for that surface, unless the user says they are asking about the
+other one; do not ask which one they are on when the block already says. If it
+names no surface, give the browser and desktop answers below, one short
+paragraph each.
+
+- In the browser (https://cowork.mindshub.ai): **not available**. The browser
+  version runs on MindsHub's servers with MindsHub's models, and has no setting
+  for adding a model provider. A server in the cloud could not reach a model
+  running on the user's own computer anyway. A user who wants a local model
+  needs the desktop app: https://mindshub.ai/download
+- In the desktop app: **supported**, through any server that speaks the OpenAI
+  API (an "OpenAI-compatible" server). Ollama, LM Studio and vLLM all do.
+  1. Run the model server on the computer and download a model with it.
+     Cowork does not download, install or run models itself. With Ollama:
+     `ollama pull <model>`. With LM Studio: download a model in its app and
+     start its local server.
+  2. In Cowork: Settings → Agent → LLM Providers → Add provider →
+     OpenAI-compatible.
+  3. Give it a name, and set the Base URL to the server's OpenAI-compatible
+     address, ending in `/v1`. Ollama's default is `http://localhost:11434/v1`;
+     LM Studio's default is `http://localhost:1234/v1`. An API key is optional
+     for a local server.
+  4. Under Model Router there are three roles: **Planning model**, **Routing
+     and summarization model** and **Coding model**. For each one, pick that
+     provider (the picker only appears when more than one provider is set up)
+     and type the model's name exactly as the server lists it, e.g. as
+     `ollama list` shows it. A role left alone keeps its current provider: a
+     user signed in to MindsHub would still have that role running on
+     MindsHub's cloud models. To run fully locally, set all three.
+  5. Save. Cowork tests the connection; "connected" means it reached the
+     server.
+  First-run setup offers the same thing: choose "Custom" and enter a Base URL.
+- Limitations. Mention them so the user is not surprised:
+  - Cowork is an agent and calls tools on most turns, so the model must support
+    tool (function) calling through the server's OpenAI-compatible API. Many
+    local models handle this poorly.
+  - Always mention: some local servers refuse a request Cowork makes, so a turn
+    can stop early with a message that an internal check failed. It is a known
+    limitation of those servers, not a setup mistake, and a larger model does
+    not fix it.
+  - Speed and answer quality depend on the model and the user's hardware.
+- Do not invent other routes. There is no built-in model download, no model
+  catalogue to browse inside Cowork, and no local-model option in the browser.
+- If the PRODUCT block says this is the anton command-line interface, these
+  steps describe the Cowork app, not the CLI. Say that rather than describing
+  Cowork's settings as if the user had them.
 
 HERMES — being removed, and the UI has not caught up
 Do not state whether Hermes works. As of 2026-09-14 the two halves disagree:
@@ -109,23 +160,12 @@ The most common cause of "it doesn't work" here is a feature that belongs to
 the other surface.
 
 IF THIS FILE DOES NOT ANSWER THE QUESTION
-Say so, and send the user to https://docs.mindshub.ai. Do not improvise a
+First give whatever part of the answer this file does support, such as what
+exists on their surface. Then say what you are not certain of, and send the user
+to https://docs.mindshub.ai. A bare "my product information does not cover
+that" plus a link to the docs homepage is not an answer. Do not improvise a
 version number, a price, a roadmap date, a support email, or a feature that is
 not described here — inventing one is the failure this file exists to prevent,
 and a wrong answer about our own product is worse than no answer.
 
-WHERE THESE FACTS COME FROM (for whoever maintains this file)
-Each fact was read out of the code that implements it. Nothing here fails
-automatically when that code changes, so re-check these when touching:
-- installed app name — `package.json` `productName` (cowork)
-- platforms and installer types — `.github/workflows/build-installers.yml`
-- download URL — `src/renderer/lib/mindsUrls.ts` and the `mindshub.ai/download`
-  call sites in `ComingSoonModal`, `ConnectorPicker`, `useAppUpdates`
-- account-wide harness toggle — the `host.isWeb` gate on the `Agent Harness`
-  group in `src/renderer/cowork/views/settings/SettingsView.jsx`
-- whether Hermes still exists — `cowork/harnesses/` in cowork-server (the
-  directory is the answer) against the UI references above; when they agree
-  again, replace the HERMES section with the settled fact
-- Coding Mode being desktop-only — `codeModeAvailable` in
-  `src/renderer/platform/host.ts`, and `renderCodingModeSection`
 If the app and this file disagree, the app is right and this file is stale.

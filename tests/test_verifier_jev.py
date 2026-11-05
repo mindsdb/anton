@@ -7,6 +7,7 @@ failure, and every non-MindsHub (BYOK) route uses the LLM verifier as before.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -97,6 +98,22 @@ async def test_classify_turns_bad_responses_into_an_error_class(response, error)
     assert (result.status, result.error) == ("", error)
 
 
+async def test_classify_sends_extra_headers_but_never_lets_them_replace_the_key():
+    seen = {}
+
+    def handler(request):
+        seen.update(request.headers)
+        return _answer()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await jev.classify(base_url="https://api.example/v1", api_key="k", model="jev-1.13.0",
+                           state={"request": "r", "transcript": "t"}, questions=_jev_questions(),
+                           timeout_s=2.0, client=client,
+                           headers={"Langfuse-Session-Id": "conv", "Authorization": "Bearer other"})
+    assert seen["langfuse-session-id"] == "conv"
+    assert seen["authorization"] == "Bearer k"
+
+
 async def test_classify_reports_the_billed_usage():
     result = await _classify(lambda request: _answer())
     assert (result.input_tokens, result.output_tokens) == (1700, 0)
@@ -163,15 +180,19 @@ class _Stream:
         return self._items.pop(0)
 
 
-def _session(workspace, *, jev_setting="on", base_url="https://api.mindshub.ai/v1", llm_status="COMPLETE", ssl_verify=None):
+def _session(workspace, *, jev_setting="on", base_url="https://api.mindshub.ai/v1", llm_status="COMPLETE", ssl_verify=None,
+             coding_provider=None, harness=None, surface=None):
     from anton.core.tools.registry import ToolOutcome
 
     llm = make_mock_llm()
     llm.generate_object_code = AsyncMock(return_value=_VerifierVerdict(status=llm_status, reason="llm reason"))
-    llm.coding_provider.export_connection_info = MagicMock(
-        return_value=ProviderConnectionInfo(provider="openai", api_key="k", base_url=base_url, ssl_verify=ssl_verify)
-    )
-    llm.coding_provider.current_api_key = AsyncMock(return_value="k")
+    if coding_provider is not None:
+        llm.coding_provider = coding_provider
+    else:
+        llm.coding_provider.export_connection_info = MagicMock(
+            return_value=ProviderConnectionInfo(provider="openai", api_key="k", base_url=base_url, ssl_verify=ssl_verify)
+        )
+        llm.coding_provider.current_api_key = AsyncMock(return_value="k")
     calls = iter([
         LLMResponse(content="Running.", tool_calls=[ToolCall(id="t1", name="scratchpad", input={"action": "exec", "name": "m", "code": "print(1)"})],
                     usage=Usage(input_tokens=10, output_tokens=5), stop_reason="tool_use"),
@@ -180,7 +201,7 @@ def _session(workspace, *, jev_setting="on", base_url="https://api.mindshub.ai/v
     llm.plan_stream = lambda **kwargs: _Stream([StreamComplete(response=next(calls))])
     session = ChatSession(ChatSessionConfig(
         llm_client=llm, workspace=workspace, session_id="conv-jev",
-        settings=CoreSettings(verifier_jev=jev_setting),
+        settings=CoreSettings(verifier_jev=jev_setting), harness=harness, surface=surface,
     ))
     session.tool_registry.dispatch_tool = AsyncMock(return_value=ToolOutcome(content="1", ok=True))
     return session, llm
@@ -301,3 +322,41 @@ async def test_the_client_follows_ssl_verify_and_is_reused(workspace):
     assert make_client.call_args.kwargs["verify"] is False
     assert classify.call_args.kwargs["client"] is client
     client.aclose.assert_awaited_once()
+
+
+async def test_the_check_is_traced_like_the_llm_verifier_it_replaces(workspace):
+    # The gateway files a call with no Langfuse headers as direct-API use, so the
+    # check must carry the same turn identity the provider's own calls carry.
+    provider = OpenAIProvider(api_key="k", base_url="https://api.mindshub.ai/v1")
+    # As LLMClient labels a coding provider no other role shares: the check runs on
+    # Jev, not the coding model, so it must not inherit that label.
+    provider.trace_role = "coding"
+    session, _ = _session(workspace, coding_provider=provider, harness="anton", surface="desktop")
+    seen = {}
+
+    def handler(request):
+        seen.update(request.headers)
+        return _answer("COMPLETE", p_complete=0.97)
+
+    real_client = httpx.AsyncClient
+    try:
+        with patch("anton.core.session.httpx.AsyncClient",
+                   side_effect=lambda **kwargs: real_client(transport=httpx.MockTransport(handler))), \
+                patch("anton.analytics.send_event") as send:
+            async for _ in session.turn_stream("run it"):
+                pass
+        await session.close()
+    finally:
+        await provider.aclose()
+
+    assert send.call_args.kwargs["jev_decided"] == "1"
+    metadata = json.loads(seen["langfuse-metadata"])
+    # Joinable to the conversation without being one of its calls: a refused check
+    # would otherwise mark a conversation failed that the turn recovered.
+    assert "langfuse-session-id" not in seen
+    assert metadata["conversation_id"] == "conv-jev"
+    assert (metadata["harness"], metadata["surface"], metadata["turn_id"]) == ("anton", "desktop", 1)
+    assert metadata["role"] == "decision"
+    assert seen["langfuse-tags"] == "anton,surface:desktop"
+    # Its answer decides the turn, so it is not a background probe hidden from the user.
+    assert "x-minds-request-kind" not in seen

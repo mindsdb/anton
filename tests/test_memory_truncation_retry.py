@@ -186,13 +186,13 @@ async def test_identity_extraction_survives_narration(caplog):
     extraction narrating to the cap. The retry must rescue it and the facts
     must actually be stored."""
     client, complete = _client_truncating_once(
-        "_IdentityFacts", {"facts": ["User's name is Mynda"]}
+        "_IdentityFacts", {"facts": ["User's name is Alex"]}
     )
     cortex = _cortex(client)
 
-    await cortex.maybe_update_identity("hi, I'm Mynda and I work in Excel")
+    await cortex.maybe_update_identity("hi, I'm Alex and I work in Excel")
 
-    cortex.global_hc.rewrite_identity.assert_called_once_with(["User's name is Mynda"])
+    cortex.global_hc.rewrite_identity.assert_called_once_with(["User's name is Alex"])
     assert complete.await_count == 2
     system_sent = complete.await_args_list[0].kwargs["system"]
     assert "Call the _IdentityFacts tool immediately" in system_sent

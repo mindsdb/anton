@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from anton.chat import ChatSession
-from anton.core.session import ChatSessionConfig
+from anton.core.session import ChatSessionConfig, _VerifierVerdict
 from tests.conftest import make_mock_llm, run_turn
 from anton.core.llm.provider import (
     ContextOverflowError,
@@ -75,6 +75,9 @@ class TestChatSession:
                 ),
                 _text_response(""),
             ]
+        )
+        mock_llm.generate_object_code = AsyncMock(
+            return_value=_VerifierVerdict(status="COMPLETE", reason="test")
         )
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm))
         session.tool_registry.dispatch_tool = AsyncMock(

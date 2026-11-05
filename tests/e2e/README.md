@@ -66,3 +66,4 @@ python -m pytest tests/e2e/ --live
 | `test_scratchpad_resilience.py` | Output flooding, progress marker consumption, error cell recovery |
 | `test_credential_scrubbing.py` | DS_* secret scrubbing before LLM calls |
 | `test_circuit_breaker_evasion.py` | Alternating errors, MAX_TOOL_ROUNDS backstop |
+| `test_model_call_deadline.py` | A silent model call ends at `ANTON_MODEL_CALL_IDLE_TIMEOUT_S`; a call that keeps writing is not cut |

@@ -26,12 +26,15 @@ divergences become generalizable lessons that future code-generating calls see.
 
 ### Hooks live in the dispatcher, not the runtime
 
-The cerebellum observes via two hooks fired from the scratchpad tool dispatcher
-(`handle_scratchpad` in `anton/core/tools/tool_handlers.py`) — never from the
-runtime backend:
+The cerebellum observes via two hooks fired from the orchestration layer, never
+from the runtime backend. Both exec paths fire them: the inline streaming exec
+in `ChatSession._stream_and_handle_tools` (`anton/core/session.py`), which every
+host's main agent takes, and `handle_scratchpad`
+(`anton/core/tools/tool_handlers.py`), which serves the generate_artifact
+sub-loops. Both build the preliminary cell with `preliminary_cell`:
 
 ```
-handle_scratchpad (orchestration layer)
+streaming exec or handle_scratchpad (orchestration layer)
   ├─ build prelim Cell from tool input
   ├─ FIRE pre-execute observers ──→ Cerebellum.on_pre_execute (counter)
   ├─ pad.execute(code, ...)        (pure execution — runtime never sees observers)

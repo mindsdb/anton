@@ -74,11 +74,25 @@ LATEST_TAG=$(curl -sSf "https://api.github.com/repos/mindsdb/anton/releases/late
     | grep '"tag_name"' | head -1 \
     | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
 if [ -z "$LATEST_TAG" ]; then
-    warn "Could not determine latest release tag. Falling back to main branch."
-    REPO_URL="git+https://github.com/mindsdb/anton.git"
-else
-    REPO_URL="git+https://github.com/mindsdb/anton.git@${LATEST_TAG}"
+    error "Could not determine a released version. Retry when GitHub is available."
+    exit 1
 fi
+# Bind the code and its dependency contract to the same commit, including
+# annotated tags. Never install a branch or resolve without the release lock.
+RELEASE_COMMIT=$(git ls-remote https://github.com/mindsdb/anton.git \
+    "refs/tags/${LATEST_TAG}" "refs/tags/${LATEST_TAG}^{}" | sort -k2 | tail -1 | cut -f1)
+if ! printf '%s\n' "$RELEASE_COMMIT" | grep -Eq '^[0-9a-f]{40}$'; then
+    error "Could not resolve the selected release commit."
+    exit 1
+fi
+REPO_URL="git+https://github.com/mindsdb/anton.git@${RELEASE_COMMIT}"
+RELEASE_CONTRACT=$(mktemp)
+trap 'rm -f "$RELEASE_CONTRACT"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+curl -fsSL "https://raw.githubusercontent.com/mindsdb/anton/${RELEASE_COMMIT}/anton/release-requirements.txt" \
+    -o "$RELEASE_CONTRACT"
+test -s "$RELEASE_CONTRACT" || { error "The release dependency contract is empty."; exit 1; }
 
 # ── 4. Find or install uv ──────────────────────────────────────────
 NEED_UV=0
@@ -124,7 +138,7 @@ info ""
 
 if confirm "Proceed with installation?"; then
     info "  Installing anton into an isolated venv..."
-    uv tool install "$REPO_URL" --force
+    uv tool install "$REPO_URL" --force --constraints "$RELEASE_CONTRACT"
     info "  Installed anton"
 else
     info "  Installation cancelled."
@@ -205,7 +219,7 @@ rm -rf "$HEALTH_DIR" 2>/dev/null
 info ""
 info "${GREEN}  ✓ anton installed successfully!${RESET}"
 info ""
-info "  Upgrade:    uv tool upgrade anton"
+info "  Upgrade:    run this installer again to use the next release's dependency contract"
 info "  Uninstall:  uv tool uninstall anton"
 info ""
 info "  Config: ~/.anton/.env"

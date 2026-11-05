@@ -9,22 +9,27 @@ import uuid
 from typing import TYPE_CHECKING
 
 from anton.core.tools.tool_defs import ToolDef
+from anton.utils.datasources import _SCRUB_MARKER
 
 
 if TYPE_CHECKING:
+    from rich.console import Console
+
     from anton.core.datasources.datasource_registry import DatasourceEngine, DatasourceField
     from anton.core.session import ChatSession
+    from anton.publisher import ArtifactShareOrgRequiredError
 
 
 SECRET_NAME_TOKENS = (
     "password", "secret", "token", "api_key", "key",
     "auth", "credential", "private",
 )
-# All marker forms `scrub_credentials` emits: [DS_*] for vault secrets,
-# [<ENV_VAR>] labels for provider keys, [REDACTED_API_KEY] for shape matches.
-# User messages are scrubbed too, so the model may see these and echo them
-# back as known_variables — they must never be saved as real credentials.
-SCRUBBED_VALUE_RE = re.compile(r"^\[(?:DS_\w+|[A-Z][A-Z0-9_]*)\]$")
+# All marker forms the scrub emits: [DS_*] for vault secrets, [<ENV_VAR>]
+# labels for provider keys, [REDACTED_API_KEY] and [REDACTED_TOKEN] for shape
+# matches. User messages are scrubbed too, so the model may see these and echo
+# them back as known_variables. A value holding one anywhere, whole or inside a
+# DSN or a base64 header, is not a real credential and is never saved.
+SCRUBBED_VALUE_RE = re.compile(_SCRUB_MARKER)
 
 
 def looks_secret(field_name: str) -> bool:
@@ -85,9 +90,10 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     resolved_from_vault = []
     dropped_scrubbed = []
     for k, v in list(known_variables.items()):
-        if not SCRUBBED_VALUE_RE.match(v):
+        if not SCRUBBED_VALUE_RE.search(v):
             continue
-        resolved = unscrub_marker(vault, v)
+        # Only a value that is a marker alone names a vaulted field to reuse.
+        resolved = unscrub_marker(vault, v) if SCRUBBED_VALUE_RE.fullmatch(v) else None
         if resolved:
             known_variables[k] = resolved
             resolved_from_vault.append(k)
@@ -100,9 +106,9 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
         console.print()
         console.print(
             f"[anton.warning](anton)[/] Ignoring scrubbed-placeholder values "
-            f"for {', '.join(dropped_scrubbed)} — those bracketed strings are "
-            f"scrub-markers, not real credentials. Pass the actual secret "
-            f"values instead."
+            f"for {', '.join(dropped_scrubbed)}: each is or holds a bracketed "
+            f"scrub-marker, which stands where a secret was hidden, so it is "
+            f"not a real credential. Pass the actual secret values instead."
         )
     if resolved_from_vault:
         console.print()
@@ -277,8 +283,9 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
         if dropped_scrubbed:
             note = (
                 f" Scrubbed-placeholder values for "
-                f"{', '.join(sorted(dropped_scrubbed))} were ignored — those "
-                f"are not real credentials; pass the actual secret values "
+                f"{', '.join(sorted(dropped_scrubbed))} were ignored: each is "
+                f"or holds a bracketed scrub-marker where a secret was hidden, "
+                f"so it is not a real credential. Pass the actual secret values "
                 f"instead."
             )
         return (
@@ -513,6 +520,18 @@ def _previewable_html(path: "Path"):
     return htmls[0] if htmls else None
 
 
+def _share_org_refused(console: "Console", err: "ArtifactShareOrgRequiredError") -> str:
+    """Show the service's reason for refusing an org-wide share, and tell the
+    agent not to publish to a wider audience instead."""
+    from rich.markup import escape
+
+    from anton.publisher import SHARE_ORG_REQUIRED_INSTRUCTION
+
+    console.print(f"  [anton.error]Publish failed: {escape(err.reason)}[/]")
+    console.print()
+    return f"PUBLISH FAILED: {err.reason} {SHARE_ORG_REQUIRED_INSTRUCTION}"
+
+
 async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str:
     """Interactive preview/publish flow after dashboard creation.
 
@@ -597,7 +616,14 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
         return f"{title} is at {file_path} but no previewable HTML was found."
 
     # Publish flow
-    from anton.publisher import publish
+    import urllib.error
+
+    from anton.minds_client import describe_minds_request_failure
+    from anton.publisher import (
+        ArtifactOwnedByOtherUserError,
+        ArtifactShareOrgRequiredError,
+        publish,
+    )
 
     if not settings.minds_api_key:
         console.print()
@@ -614,6 +640,7 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     import json as _json
 
     from rich.live import Live
+    from rich.markup import escape
     from rich.spinner import Spinner
 
     from anton.utils.prompt import prompt_or_cancel
@@ -687,11 +714,26 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
                 access=eff_access,
                 pwd_version=pwd_version,
                 access_version=access_version,
+                previous_access=prev,
             )
+        except ArtifactOwnedByOtherUserError as e:
+            console.print(f"  [anton.error]{e}[/]")
+            console.print()
+            return (
+                f"PUBLISH FAILED: {e} Do NOT call this tool again for this artifact "
+                "and do not publish it under a new report on your own. Tell the user "
+                "that the existing link belongs to another account, and that they can "
+                "publish their own copy by running /publish and choosing 'new'."
+            )
+        except ArtifactShareOrgRequiredError as e:
+            return _share_org_refused(console, e)
         except Exception as e:
-            if report_id:
-                # The report may have been deleted server-side — retry
-                # without report_id to create a fresh one.
+            # Only a 404 says the report is gone, so publishing it afresh
+            # without report_id is safe. After a timeout, a 5xx or a 409 the
+            # report may still exist, and a retry would publish a copy under
+            # a new URL.
+            gone = isinstance(e, urllib.error.HTTPError) and e.code == 404
+            if report_id and gone:
                 try:
                     result = publish(
                         publish_target,
@@ -702,14 +744,18 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
                         pwd_version=pwd_version,
                         access_version=access_version,
                     )
+                except ArtifactShareOrgRequiredError as e2:
+                    return _share_org_refused(console, e2)
                 except Exception as e2:
-                    console.print(f"  [anton.error]Publish failed: {e2}[/]")
+                    failure = describe_minds_request_failure(e2) or str(e2)
+                    console.print(f"  [anton.error]Publish failed: {escape(failure)}[/]")
                     console.print()
-                    return f"PUBLISH FAILED: {e2}"
+                    return f"PUBLISH FAILED: {failure}"
             else:
-                console.print(f"  [anton.error]Publish failed: {e}[/]")
+                failure = describe_minds_request_failure(e) or str(e)
+                console.print(f"  [anton.error]Publish failed: {escape(failure)}[/]")
                 console.print()
-                return f"PUBLISH FAILED: {e}"
+                return f"PUBLISH FAILED: {failure}"
 
     view_url = result.get("view_url", "")
     returned_report_id = result.get("report_id", "")
@@ -729,6 +775,9 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     # instead of creating a new report (owner-side; unified location + key).
     if returned_report_id:
         entry = dict(owner_side)
+        if result.get("password_hash"):
+            # Sent again by the next publish while the password is unchanged.
+            entry["password_hash"] = result["password_hash"]
         entry.update({
             "report_id": returned_report_id,
             "url": view_url,
@@ -766,7 +815,8 @@ PUBLISH_TOOL = ToolDef(
             "file_path": {
                 "type": "string",
                 "description": (
-                    "Path to the artifact FOLDER (e.g. artifacts/<slug>). The tool reads "
+                    "The artifact's folder: the absolute path that create_artifact or "
+                    "generate_artifact returned, or the artifact's slug. The tool reads "
                     "the folder's metadata.json to decide how to publish: fullstack apps "
                     "publish the whole folder, static reports publish their primary file. "
                     "A path to a file inside the artifact also works."

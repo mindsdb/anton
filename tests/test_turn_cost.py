@@ -22,12 +22,22 @@ import pytest
 from anton.core.llm.client import LLMClient
 from anton.core.llm.provider import (
     LLMResponse,
+    ProviderConnectionInfo,
     StreamComplete,
     StreamTextDelta,
     Usage,
 )
 from anton.core.session import ChatSession
 from anton.core.turn_cost import TurnCost
+
+
+def _structured_provider() -> AsyncMock:
+    """An AsyncMock provider whose export_connection_info answers synchronously, as every
+    LLMProvider's does. A structured call reads it for the endpoint a refused forced tool choice
+    is remembered under (forced_choice_key in anton/core/llm/structured.py)."""
+    provider = AsyncMock()
+    provider.export_connection_info = MagicMock(return_value=ProviderConnectionInfo(provider="openai"))
+    return provider
 
 
 def _usage(inp=100, out=10, cr=0, cc=0) -> Usage:
@@ -122,7 +132,7 @@ class TestClientUsageListener:
         class _Schema(BaseModel):
             x: str
 
-        provider = AsyncMock()
+        provider = _structured_provider()
         provider.complete.return_value = LLMResponse(
             content="narration, no tool call", usage=_usage(inp=300, out=256)
         )
@@ -528,7 +538,7 @@ class TestRoleIsPassedNotInferred:
         class _S(BaseModel):
             x: str
 
-        provider = AsyncMock()
+        provider = _structured_provider()
         provider.complete.return_value = LLMResponse(
             content="",
             tool_calls=[
@@ -559,7 +569,7 @@ class TestRoleIsPassedNotInferred:
         class _S(BaseModel):
             x: str
 
-        provider = AsyncMock()
+        provider = _structured_provider()
         provider.complete.return_value = LLMResponse(
             content="", tool_calls=[], usage=_usage(500, 50)
         )

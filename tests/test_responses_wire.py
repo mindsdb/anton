@@ -264,15 +264,13 @@ async def test_failed_context_length_exceeded_raises_context_overflow(endpoint):
 
 
 async def test_rate_limit_error_event_takes_the_rate_limit_path(endpoint):
-    """`rate_limited` on the count path, as an unconfirmed 429 gets, not the
-    incident backoff: the code does not say whether a per-minute or a per-day
-    limit was hit, so it earns no session wait. No HTTP status, because the
-    stream itself was a 200."""
+    """`rate_limited` with the session wait, not the incident backoff or an
+    immediate re-send. No HTTP status, because the stream itself was a 200."""
     endpoint.replies.append((200, "sse", _sse(*_text_events(""), {
         "type": "error", "code": "rate_limit_exceeded", "message": "Slow down", "param": None})))
     with pytest.raises(TransientProviderError) as info:
         await _stream(endpoint.provider())
-    assert (info.value.code, info.value.session_backoff, info.value.status_code) == ("rate_limited", False, None)
+    assert (info.value.code, info.value.session_backoff, info.value.status_code) == ("rate_limited", True, None)
     assert info.value.retry_after is None
 
 
@@ -320,6 +318,7 @@ async def test_failed_image_size_code_raises_content_too_large(endpoint, code):
     with pytest.raises(ContentTooLargeError) as info:
         await _stream(endpoint.provider())
     assert "The image is larger than the 20 MB limit." in str(info.value)
+    assert not provider_mod.is_image_refusal(info.value), "one image's size says nothing about images"
 
 
 @pytest.mark.parametrize("code", _IMAGE_REJECTED_CODES)
@@ -328,6 +327,10 @@ async def test_failed_image_code_raises_content_validation(endpoint, code):
     with pytest.raises(ContentValidationError) as info:
         await _stream(endpoint.provider())
     assert not isinstance(info.value, ContentTooLargeError)
+    # The code names the one image the provider could not use, so the session
+    # keeps its render screenshots.
+    assert info.value.code == code
+    assert not provider_mod.is_image_refusal(info.value)
 
 
 async def test_a_filtered_output_still_ends_as_a_stop_reason(endpoint):
@@ -363,7 +366,7 @@ async def test_a_failed_non_streamed_response_maps_the_same_codes(endpoint, code
         await endpoint.provider().complete(
             model="gpt-test", system="s", messages=[{"role": "user", "content": "hi"}], max_tokens=16)
     if expected is TransientProviderError:
-        assert (info.value.code, info.value.session_backoff) == ("rate_limited", False)
+        assert (info.value.code, info.value.session_backoff) == ("rate_limited", True)
 
 
 async def test_function_tools_are_sent_non_strict(endpoint):
@@ -458,3 +461,70 @@ async def test_an_unrelated_bad_request_is_not_mistaken_for_a_refused_breakpoint
     with pytest.raises(openai.BadRequestError):
         await _stream_system(endpoint.provider(), SPLIT_SYSTEM, tools=TOOLS)
     assert len(endpoint.requests) == 1
+
+
+async def test_a_streamed_responses_call_logs_its_usage(endpoint, monkeypatch, usage_lines):
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    endpoint.replies.append(_done())
+    token = set_trace_context(TraceContext(session_id="conv-1", metadata={"turn": "0"}))
+    try:
+        await _stream(endpoint.provider())
+    finally:
+        reset_trace_context(token)
+
+    (line,) = usage_lines()
+    assert (line["conversation"], line["turn"], line["served_model"]) == ("conv-1", "0", "gpt-test")
+    assert (line["input"], line["cache_read"], line["output"]) == (20, 100, 16)
+
+
+async def test_a_failed_responses_call_is_logged_before_it_raises(endpoint, monkeypatch, usage_lines):
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    endpoint.replies.append((200, "json", _response("failed", error={"code": "server_error", "message": "boom"})))
+    with pytest.raises(TransientProviderError):
+        await endpoint.provider().complete(model="gpt-test", system="s",
+                                           messages=[{"role": "user", "content": "hi"}], max_tokens=16)
+
+    (line,) = usage_lines()
+    assert (line["model"], line["input"], line["output"]) == ("gpt-test", 20, 16)
+
+
+async def test_a_streamed_responses_call_that_fails_is_logged_before_it_raises(endpoint, monkeypatch, usage_lines):
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    endpoint.replies.append((200, "sse", _failed("server_error", "boom")))
+    with pytest.raises(TransientProviderError):
+        await _stream(endpoint.provider())
+
+    (line,) = usage_lines()
+    assert (line["model"], line["input"], line["cache_read"], line["output"]) == ("gpt-test", 20, 100, 16)
+
+
+async def test_a_failed_responses_call_without_usage_logs_nothing(endpoint, monkeypatch, usage_lines):
+    """A failure before any token was billed must not read as a call in the eval."""
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    failed = _response("failed", usage=None, error={"code": "server_error", "message": "boom"})
+    endpoint.replies.append((200, "json", failed))
+    with pytest.raises(TransientProviderError):
+        await endpoint.provider().complete(model="gpt-test", system="s",
+                                           messages=[{"role": "user", "content": "hi"}], max_tokens=16)
+
+    assert usage_lines() == []
+
+
+async def test_a_streamed_responses_call_that_fails_without_usage_logs_nothing(endpoint, monkeypatch, usage_lines):
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    failed = _response("failed", usage=None, error={"code": "server_error", "message": "boom"})
+    endpoint.replies.append((200, "sse", _sse(*_text_events(""), {"type": "response.failed", "response": failed})))
+    with pytest.raises(TransientProviderError):
+        await _stream(endpoint.provider())
+
+    assert usage_lines() == []
+
+
+async def test_a_streamed_responses_call_that_reports_no_usage_logs_nothing(endpoint, monkeypatch, usage_lines):
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    completed = {"type": "response.completed", "response": _response("completed", usage=None)}
+    endpoint.replies.append((200, "sse", _sse(*_text_events("ok"), completed)))
+    _, response = await _stream(endpoint.provider())
+
+    assert response.content == "ok"
+    assert usage_lines() == []

@@ -547,6 +547,88 @@ class TestNonInteractiveSave:
             _DS_SECRET_VARS.discard(marker_key)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("value", [
+        "Basic dXV1O[DS_POSTGRES_ABC12345__PASSWORD]",
+        "postgresql://admin:[DS_POSTGRES_ABC12345__PASSWORD]@db2.example.com:5432/analytics",
+        "[DS_POSTGRES_ABC12345__PASSWORD]-rotated",
+        "s3cr3t-[REDACTED_API_KEY]",
+        "Bearer [REDACTED_TOKEN]",
+        "key=[OPENAI_API_KEY]",
+    ], ids=["base64-header", "dsn", "marker-then-text", "redacted-inside", "token-inside", "provider-label-inside"])
+    async def test_a_value_holding_a_marker_is_dropped_not_saved_or_resolved(
+        self, vault_dir, value
+    ):
+        """A marker inside a longer value stands where a secret was hidden, so
+        the value is not the credential, and it names no field to reuse even
+        when the marker's field is in this vault."""
+        session = _make_session(vault_dir)
+        session._data_vault.save(
+            "postgres",
+            "abc12345",
+            {
+                "host": "db.example.com",
+                "port": "5432",
+                "database": "sales",
+                "user": "admin",
+                "password": "s3cr3t-reused",
+            },
+        )
+        interactive = _fake_interactive(session)
+        with _patch_test_ok(), patch(
+            "anton.commands.datasource.handle_connect_datasource", new=interactive
+        ):
+            await handle_connect_datasource(
+                session,
+                {
+                    "engine": "postgres",
+                    "known_variables": {
+                        "host": "db2.example.com",
+                        "database": "analytics",
+                        "user": "admin",
+                        "password": value,
+                    },
+                },
+            )
+        interactive.assert_called_once()
+        assert [c["name"] for c in session._data_vault.list_connections()] == ["abc12345"]
+        printed = " ".join(
+            str(c.args[0])
+            for c in session._console.print.call_args_list
+            if c.args
+        )
+        assert "scrubbed-placeholder" in printed
+        assert "password" in printed
+        assert "holds a bracketed scrub-marker" in printed
+        assert "Reusing the existing vaulted value" not in printed
+
+    @pytest.mark.asyncio
+    async def test_a_password_holding_a_bracketed_capital_is_saved(self, vault_dir):
+        """`[Q]` has no underscore, so `x7[Q]abc` is a real password, not one holding a marker."""
+        session = _make_session(vault_dir)
+        with _patch_test_ok():
+            await handle_connect_datasource(
+                session,
+                {
+                    "engine": "postgres",
+                    "known_variables": {
+                        "host": "db.example.com",
+                        "database": "sales",
+                        "user": "admin",
+                        "password": "x7[Q]abc",
+                    },
+                },
+            )
+        conns = session._data_vault.list_connections()
+        assert len(conns) == 1
+        assert session._data_vault.load("postgres", conns[0]["name"])["password"] == "x7[Q]abc"
+        printed = " ".join(
+            str(c.args[0])
+            for c in session._console.print.call_args_list
+            if c.args
+        )
+        assert "scrubbed-placeholder" not in printed
+
+    @pytest.mark.asyncio
     async def test_yolo_dedups_matching_connection(self, vault_dir):
         """YOLO save for a DB already in the vault reuses the existing slug."""
         session = _make_session(vault_dir)
@@ -675,6 +757,31 @@ class TestNoConsole:
         # field itself, not just say "interactive setup unavailable".
         assert "password" in result
         assert "scrub" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_a_value_holding_a_marker_is_named_to_the_model_with_no_console(
+        self, vault_dir
+    ):
+        """The model reads only the result, so it names the field and says why."""
+        session = _make_session(vault_dir)
+        session._console = None
+        with _patch_test_ok():
+            result = await handle_connect_datasource(
+                session,
+                {
+                    "engine": "postgres",
+                    "known_variables": {
+                        "host": "db.example.com",
+                        "database": "sales",
+                        "user": "admin",
+                        "password": "postgresql://admin:[DS_POSTGRES_OLD__PASSWORD]@db/sales",
+                    },
+                },
+            )
+        assert "Interactive connection setup isn't available" in result
+        assert "password" in result
+        assert "holds a bracketed scrub-marker" in result
+        assert session._data_vault.list_connections() == []
 
     @pytest.mark.asyncio
     async def test_interactive_fallback_without_console_returns_actionable_message(

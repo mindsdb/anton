@@ -72,9 +72,13 @@ class CLIElicitor:
     async def _ask_choice(self, request: AskRequest) -> AskAnswer:
         """Read the reply. The options were already printed by StreamDisplay.
 
-        Input is a comma-separated list of offered numbers, the value of an
-        option typed directly, or anything else, which is taken as the
-        user's own wording. With ``select="one"`` a list keeps only the
+        Input is a comma-separated list of offered numbers, the value or the
+        displayed label of an option typed directly (case-insensitive), or
+        anything else, which is taken as the user's own wording. When
+        ``request.allow_custom`` is False there is no own wording: the
+        caption does not invite it, and unrecognised input is asked again
+        rather than returned as text the caller cannot use (typing "Keep
+        going" at a turn-limit question used to hand back the turn). With ``select="one"`` a list keeps only the
         first number — deliberately, so a stray "2,1" answers with 2 rather
         than erroring or silently answering with both.
 
@@ -94,32 +98,44 @@ class CLIElicitor:
 
         if request.compact:
             label = ""
-        else:
+        elif request.allow_custom:
             label = (
                 "Send the numbers (comma-separated) or type your own answer"
                 if request.select == "many"
                 else "Send the answer number or type your own"
             )
-        raw = await prompt_or_cancel(label, default=request.default_value)
-        if raw is None or not raw.strip():
-            return AskAnswer(status="cancelled")
-        raw = raw.strip()
-
+        else:
+            label = (
+                "Send the numbers (comma-separated)"
+                if request.select == "many"
+                else "Send the answer number"
+            )
         values = {option.value for option in request.options}
-        if raw in values:
-            return AskAnswer(status="answered", values=(raw,))
-
+        by_label = {option.label.casefold(): option.value for option in request.options}
         numbers = {str(i): option for i, option in enumerate(request.options, start=1)}
-        tokens = [t.strip() for t in raw.split(",") if t.strip()]
-        if tokens and all(token in numbers for token in tokens):
-            picked = tuple(numbers[token].value for token in tokens)
-            if request.select == "one":
-                picked = picked[:1]
-            return AskAnswer(status="answered", values=picked)
-        # Anything that is not a clean list of offered numbers, and not one
-        # of the option values typed directly, is the user answering in
-        # their own words.
-        return AskAnswer(status="answered", text=raw)
+        while True:
+            raw = await prompt_or_cancel(label, default=request.default_value)
+            if raw is None or not raw.strip():
+                return AskAnswer(status="cancelled")
+            raw = raw.strip()
+
+            if raw in values:
+                return AskAnswer(status="answered", values=(raw,))
+            if raw.casefold() in by_label:
+                return AskAnswer(status="answered", values=(by_label[raw.casefold()],))
+
+            tokens = [t.strip() for t in raw.split(",") if t.strip()]
+            if tokens and all(token in numbers for token in tokens):
+                picked = tuple(numbers[token].value for token in tokens)
+                if request.select == "one":
+                    picked = picked[:1]
+                return AskAnswer(status="answered", values=picked)
+            # Anything that is not a clean list of offered numbers, and not
+            # an option typed directly, is the user answering in their own
+            # words — unless the question has no room for that.
+            if request.allow_custom:
+                return AskAnswer(status="answered", text=raw)
+            label = f"Please send one of the listed numbers (1-{len(request.options)})"
 
     # ── path — this class renders as well ────────────────────────────
     async def _ask_path(self, request: AskRequest) -> AskAnswer:

@@ -6,7 +6,7 @@ Contract (matches scratchpad-controller + cowork-server):
           never closes stdin.
   stdout: JSONL events (see contract.py) - deltas, steps, ask_user questions,
           then exactly one terminal
-  stderr: diagnostic logs + full tracebacks
+  stderr: diagnostic logs; logged tracebacks omit provider error bodies
   exit  : 0 (the controller detects the terminal from the event, not the code)
 
 stdout is isolated at the OS file-descriptor level: the real FD 1 is duplicated
@@ -23,10 +23,13 @@ import functools
 import inspect
 import json
 import logging
+from anton.diagnostics import configure_logging, make_formatter
+from structlog.contextvars import bind_contextvars, bound_contextvars
 import os
 import sys
 import time
-from typing import BinaryIO
+from collections.abc import Callable
+from typing import BinaryIO, TextIO
 
 from anton.cloud_turn.contract import TurnRequestV1
 from anton.cloud_turn.elicitor import (
@@ -41,17 +44,22 @@ from anton.cloud_turn.session import (
     drain_pending_memory,
     resolve_trusted_workspace_path,
     drain_pending_skills,
+    remove_staged_skills,
 )
 from anton.cloud_turn.stdin import start_answer_reader
+from anton.core.llm.liveness import MODEL_WAIT_PHASE, MODEL_WAIT_TICK_S
+from anton.core.llm.provider import ProviderErrorFilter
 
 logger = logging.getLogger(__name__)
 
-#: Bound step-event payloads (tool args / results) on the wire. Matches the
-#: cap cowork's SSE formatter applies to the same content.
 # Trace-block keys the pod applies to the session config rather than forwarding
 # as per-turn Langfuse metadata (see `stream_turn`).
 _SESSION_CONFIG_TRACE_KEYS = frozenset({"surface", "user_id", "organization_id"})
 
+#: Bound step-event payloads (tool args / results) on the wire. Cowork's SSE
+#: formatter caps results and other tools' args at the same length but keeps a
+#: scratchpad call's args whole; a remote turn's are cut here, and remote turns
+#: run no write check.
 MAX_STEP_CHARS = 65536
 MAX_PROGRESS_CHARS = 2000
 #: Per-string-field cap when shrinking a cell-result JSON to fit the wire.
@@ -61,6 +69,8 @@ RESULT_FIELD_CAP = 16384
 #: Matches cowork's SSE-side PROGRESS_THROTTLE.
 PROGRESS_WIRE_INTERVAL = 0.25
 
+#: cowork-server's figure sources split a cut cell result at this marker
+#: (cowork/harnesses/anton_harness/figure_sources.py).
 _TRUNCATION_MARKER = "\n[… truncated …]\n"
 
 
@@ -98,14 +108,23 @@ MAX_ERROR_MESSAGE_CHARS = 300
 
 
 def _scrub(exc: Exception) -> str:
-    """Short, credential-scrubbed error string for the wire. Full traceback
-    stays on stderr (logged by the caller)."""
+    """Short, credential-scrubbed error string for the wire. ProviderErrorFilter
+    separately removes provider bodies from logged diagnostics."""
     from anton.utils.datasources import scrub_credentials
 
     text = scrub_credentials(f"{type(exc).__name__}: {exc}")
     if len(text) > MAX_ERROR_MESSAGE_CHARS:
         text = text[: MAX_ERROR_MESSAGE_CHARS - 1] + "…"
     return text
+
+
+def _stderr_log_handler(*, stream: TextIO) -> logging.Handler:
+    """The pod's root stderr handler. Its filter sees every record any logger
+    sends to it, so no logged traceback prints a provider error body."""
+    handler = logging.StreamHandler(stream)
+    handler.addFilter(ProviderErrorFilter())
+    handler.setFormatter(make_formatter())
+    return handler
 
 
 @contextlib.contextmanager
@@ -121,7 +140,10 @@ def _isolated_protocol_stdout():
     os.dup2(stderr_fd, 1)                   # any write to fd 1 now lands on stderr
     saved_sys_stdout = sys.stdout
     sys.stdout = sys.stderr
-    logging.basicConfig(stream=sys.stderr, level=logging.INFO)
+    # The entrypoint owns the pod's logging. `force` replaces any root handler
+    # configured before main(), so the filtered handler is the only one on stderr.
+    configure_logging(stream=sys.stderr)
+    logging.getLogger().handlers[0].addFilter(ProviderErrorFilter())
 
     def emit(event: dict) -> None:
         data = (json.dumps(event) + "\n").encode("utf-8")
@@ -137,6 +159,50 @@ def _isolated_protocol_stdout():
             sys.stderr.flush()
         sys.stdout = saved_sys_stdout
         os.close(protocol_fd)
+
+
+class _WireClock:
+    """``emit`` plus the time the last protocol line went out.
+
+    Every line the turn writes goes through it except the heartbeat. A
+    heartbeat only resets the controller's stall timer and never reaches
+    cowork-server, so it is not activity on the wire a user's idle bound sees.
+    """
+
+    def __init__(self, *, emit: Callable[[dict], None]) -> None:
+        self._emit = emit
+        self.last_line_at = time.monotonic()
+
+    def __call__(self, event: dict) -> None:
+        self._emit(event)
+        self.last_line_at = time.monotonic()
+
+
+def _model_wait_line(*, session, wire: _WireClock) -> dict | None:
+    """The still-working progress line to write now, or None.
+
+    Written only when the session reports a model call waiting on the provider
+    and nothing else has gone out for ``MODEL_WAIT_TICK_S``. A hung tool, cell
+    or question reports no wait, so it still goes quiet on the wire. Catches
+    its own errors: it runs in the heartbeat task, and a dead heartbeat trips
+    the controller's stall window.
+    """
+    try:
+        calls = getattr(session, "model_calls", None)
+        if calls is None:
+            return None
+        if time.monotonic() - wire.last_line_at < MODEL_WAIT_TICK_S:
+            return None
+        snapshot = calls.snapshot()
+        if snapshot is None:
+            return None
+        return {"kind": "progress", "phase": MODEL_WAIT_PHASE,
+                "message": snapshot.message[:MAX_PROGRESS_CHARS],
+                "eta_seconds": snapshot.open_for_s,
+                "id": None, "ok": None}
+    except Exception:
+        logger.warning("model-wait check failed (non-fatal)", exc_info=True)
+        return None
 
 
 async def _close(session) -> None:
@@ -166,6 +232,13 @@ async def _settle_memory(session) -> None:
 async def stream_turn(
     raw_line: str, emit, session_builder=None, stdin: BinaryIO | None = None
 ) -> None:
+    with bound_contextvars(conversation_id=None):
+        await _stream_turn(raw_line, emit, session_builder, stdin)
+
+
+async def _stream_turn(
+    raw_line: str, emit, session_builder=None, stdin: BinaryIO | None = None
+) -> None:
     """Parse the request, run one turn, and emit exactly one terminal event.
 
     Streaming: assistant text is emitted as ``delta`` events as it arrives, then
@@ -175,9 +248,13 @@ async def stream_turn(
 
     A background ticker emits a bare ``heartbeat`` event every
     ``ANTON_CLOUD_TURN_HEARTBEAT_SECONDS`` (default 5) so long-but-alive turns
-    keep the controller's stall timer reset. It is cancelled once the turn
-    ends. ``emit`` is a synchronous ``os.write`` with no ``await`` inside, so
-    the ticker and the delta loop cannot interleave mid-line - no lock needed.
+    keep the controller's stall timer reset. On the same tick it writes a
+    ``model_wait`` progress line when the session reports a model call waiting
+    on the provider and the wire has been quiet for ``MODEL_WAIT_TICK_S``, so
+    cowork-server's and the UI's idle bounds see a silent model call as alive.
+    It is cancelled once the turn ends. ``emit`` is a synchronous ``os.write``
+    with no ``await`` inside, so the ticker and the delta loop cannot
+    interleave mid-line - no lock needed.
     """
     from anton.core.llm.provider import (
         MindsHubBillingStop,
@@ -192,17 +269,22 @@ async def stream_turn(
         StreamToolUseDelta,
         StreamToolUseEnd,
         StreamToolUseStart,
+        StreamTurnEnded,
     )
 
     builder = session_builder or build_cloud_chat_session
     session = None
     interval = float(os.environ.get("ANTON_CLOUD_TURN_HEARTBEAT_SECONDS", "5"))
+    wire = _WireClock(emit=emit)
 
     async def _heartbeat() -> None:
         try:
             while True:
                 await asyncio.sleep(interval)
                 emit({"kind": "heartbeat"})
+                line = _model_wait_line(session=session, wire=wire)
+                if line is not None:
+                    wire(line)
         except asyncio.CancelledError:
             return
 
@@ -214,26 +296,19 @@ async def stream_turn(
     elicitor = None
     try:
         req = TurnRequestV1.from_json(raw_line)
+        bind_contextvars(conversation_id=req.conversation_id)
         build = functools.partial(builder, req)
         if req.interactive and stdin is not None:
             # Before the build: the build is what registers `ask_user`, and a
             # question must never be asked with nothing reading its answer.
-            elicitor = CloudElicitor(emit)
+            elicitor = CloudElicitor(wire)
             start_answer_reader(stdin, asyncio.get_running_loop(), elicitor.deliver)
             build = functools.partial(builder, req, elicitor=elicitor)
         # build_cloud_chat_session() can block synchronously for several
         # seconds (a turn-key OAuth token fetch per connector) — run it off
         # the event loop thread so the heartbeat ticker above keeps firing
         # instead of the controller seeing the turn go silent and stall it.
-        session = await asyncio.get_running_loop().run_in_executor(None, build)
-        # Length of the seeded history — everything anton appends past this
-        # index belongs to this turn. Captured BEFORE turn_stream, so the
-        # current turn's user input lands inside the slice and is trimmed off
-        # below. Guarded: a session double without `.history` skips capture and
-        # the turn degrades to text-only replay (mirrors cowork-server's
-        # in-process harness).
-        seed_len = len(session.history) if hasattr(session, "history") else None
-        compacted = False  # set if anton summarizes history mid-turn
+        session = await asyncio.to_thread(build)
         # Fold in any attachments cowork-server staged into the workspace (read
         # off the mount, so image bytes never crossed the stdin wire). Plain
         # string when there are none. Never fail the turn over this — degrade to
@@ -266,13 +341,13 @@ async def stream_turn(
         } or None
         async for event in session.turn_stream(turn_content, trace_metadata=_trace_md):
             if isinstance(event, StreamTextDelta):
-                emit({"kind": "delta", "text": event.text or ""})
+                wire({"kind": "delta", "text": event.text or ""})
             # Step events go on the wire for cowork's thinking/steps UI;
             # stderr keeps the controller-log narration.
             elif isinstance(event, StreamToolUseStart):
                 logger.info("tool call: %s", event.name)
                 tool_args[event.id] = []
-                emit({"kind": "tool_start", "id": event.id, "name": event.name})
+                wire({"kind": "tool_start", "id": event.id, "name": event.name})
             elif isinstance(event, StreamToolUseDelta):
                 parts = tool_args.get(event.id)
                 if parts is not None and tool_args_len.get(event.id, 0) < MAX_STEP_CHARS:
@@ -283,10 +358,10 @@ async def stream_turn(
             elif isinstance(event, StreamToolUseEnd):
                 args = "".join(tool_args.pop(event.id, []))
                 tool_args_len.pop(event.id, None)
-                emit({"kind": "tool_end", "id": event.id,
+                wire({"kind": "tool_end", "id": event.id,
                       "args": args[:MAX_STEP_CHARS]})
             elif isinstance(event, StreamTaskProgress):
-                logger.info("progress [%s]: %s", event.phase, event.message)
+                logger.info("Turn progress", extra={"event": "turn_progress"})
                 phase = event.phase or ""
                 # A tool_progress line with an id is a step announcement: the
                 # first one opens the renderer's step, every one is a step the
@@ -309,7 +384,7 @@ async def stream_turn(
                 if always or now - last_progress_wire >= PROGRESS_WIRE_INTERVAL:
                     if not always:
                         last_progress_wire = now
-                    emit({"kind": "progress", "phase": phase,
+                    wire({"kind": "progress", "phase": phase,
                           "message": (event.message or "")[:MAX_PROGRESS_CHARS],
                           "eta_seconds": event.eta_seconds,
                           "id": event.id, "ok": event.ok})
@@ -317,7 +392,7 @@ async def stream_turn(
                 action = f" action={event.action}" if event.action else ""
                 logger.info("tool result: %s%s (%d chars)",
                             event.name, action, len(event.content or ""))
-                emit({"kind": "tool_result", "id": event.id, "name": event.name,
+                wire({"kind": "tool_result", "id": event.id, "name": event.name,
                       "action": event.action,
                       "content": _clip_result_content(event.content or "")})
             elif isinstance(event, StreamBrowserSession):
@@ -326,35 +401,37 @@ async def stream_turn(
                 emit({"kind": "browser", "session_id": event.session_id,
                       "view_url": event.view_url, "expires_at": event.expires_at})
             elif isinstance(event, StreamContextCompacted):
-                logger.info("context compacted: %s", event.message)
-                compacted = True
-                emit({"kind": "compacted", "message": event.message})
+                logger.debug("Context compacted", extra={"event": "context_compacted"})
+                wire({"kind": "compacted", "message": event.message})
             elif isinstance(event, StreamAskUser):
                 logger.info("ask_user question: %s", event.id)
-                emit(ask_user_event(event))
+                wire(ask_user_event(event))
             elif isinstance(event, StreamAskUserAnswered):
                 logger.info("ask_user closed: %s status=%s", event.id, event.answer.status)
-                emit(ask_user_answered_event(event, elicitor))
+                wire(ask_user_answered_event(event, elicitor))
             elif isinstance(event, StreamComplete):
                 logger.info("model response complete")
                 # Round boundary: cowork's formatter separates rounds with a
                 # paragraph break unless the round was truncated mid-sentence.
-                emit({"kind": "round_end",
+                wire({"kind": "round_end",
                       "stop_reason": event.response.stop_reason,
                       "had_tool_calls": bool(event.response.tool_calls)})
+            elif isinstance(event, StreamTurnEnded):
+                logger.info("turn handed back: %s", event.ended_by)
+                wire({"kind": "turn_ended", "ended_by": event.ended_by})
         await _settle_memory(session)
         entries = drain_pending_memory(session)
         if entries:
             # Before the terminal event: cowork persists on this, then stops reading.
             logger.info("emitting %d memory entr(ies)", len(entries))
-            emit({"kind": "memory", "entries": entries})
+            wire({"kind": "memory", "entries": entries})
         drafts = drain_pending_skills(session)
         if drafts:
             # Pre-terminal for the same reason as memory. Staged only — cowork
             # surfaces a card the user saves; nothing reaches their skill store.
             logger.info("emitting %d skill draft(s): %s",
                         len(drafts), ", ".join(d["slug"] for d in drafts))
-            emit({"kind": "skill", "entries": drafts})
+            wire({"kind": "skill", "entries": drafts})
         # Pre-terminal like memory and skills. Without this the pod compacts
         # every turn and throws the result away: the host owns history, so it
         # must be told which seeded messages the summary now covers.
@@ -365,20 +442,20 @@ async def stream_turn(
         if compaction:
             logger.info("emitting compaction covering %d seeded message(s)",
                         compaction["covered_through"])
-            emit({"kind": "compaction",
+            wire({"kind": "compaction",
                   "summary": compaction["summary"],
                   "covered_through": compaction["covered_through"]})
         # Pre-terminal for the same reason as memory and skills: cowork stops
         # reading the stream at the terminal event.
         #
-        # Skipped after a mid-turn compaction: session.history was reassigned,
-        # so seed_len no longer marks this turn's start and slicing could drop
-        # rows or surface an orphan tool_result whose tool_use was summarized
-        # away — an invalid replay. Text-only replay stays valid, so degrade to
-        # it. The failure paths below never reach this line, so a failed or
-        # torn-down turn degrades the same way.
-        if seed_len is not None and not compacted:
-            turn_slice = session.history[seed_len:]
+        # `turn_messages` reads every list the turn wrote to, so a turn that
+        # compacted or hard-truncated mid-turn sends its rows too, beside the
+        # compaction frame above. The failure paths below never reach this
+        # line, so a failed or torn-down turn degrades to text-only replay.
+        # Guarded: a session double without `turn_messages` skips capture and
+        # the turn degrades the same way.
+        if hasattr(session, "turn_messages"):
+            turn_slice = session.turn_messages()
             # Drop this turn's user input (and anything before the first
             # assistant message) so the slice starts where the model replied.
             while turn_slice and (
@@ -389,13 +466,13 @@ async def stream_turn(
             rows = split_turn_into_rows(turn_slice)
             if rows:
                 logger.info("emitting %d turn-history row(s)", len(rows))
-                emit({"kind": "history", "rows": rows})
+                wire({"kind": "history", "rows": rows})
         logger.info("cloud turn completed")
-        emit({"kind": "turn_completed"})
+        wire({"kind": "turn_completed"})
         terminal_emitted = True
     except Exception as exc:
-        # Full traceback -> stderr only; wire carries a short scrubbed string.
-        logger.exception("cloud turn failed")
+        # ProviderErrorFilter omits provider bodies from diagnostics; the wire is unchanged.
+        logger.exception("cloud turn failed", extra={"event": "turn_failed", "reason": "execution_failed"})
         failed = {"kind": "turn_failed", "error": _scrub(exc)}
         # A billing stop's reset instant rides beside the string, so the host
         # can say when the limit lifts. `reset_at` is already a normalized
@@ -403,7 +480,7 @@ async def stream_turn(
         # no instant that parses, and then the key is left off.
         if isinstance(exc, MindsHubBillingStop) and exc.reset_at:
             failed["reset_at"] = exc.reset_at
-        emit(failed)
+        wire(failed)
         terminal_emitted = True
     finally:
         # No terminal yet = BaseException/teardown path; emit one (guarded — a
@@ -416,13 +493,16 @@ async def stream_turn(
                 # remote_turn_error can classify it instead of discarding it for
                 # the fully generic message — a bare sentence with no colon reads
                 # as an unrecognized type name and gets thrown away.
-                emit({"kind": "turn_failed",
+                wire({"kind": "turn_failed",
                       "error": "TurnInterrupted: The turn ended unexpectedly. Please try again."})
         hb.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await hb
         if session is not None:
             await _close(session)
+        # After close, so none of this turn's cells still reads it. Not tied to
+        # the session: a build that raised after staging leaves none to close.
+        remove_staged_skills()
 
 
 def main(argv: list[str] | None = None) -> int:

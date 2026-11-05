@@ -64,6 +64,9 @@ _DEFAULT_SKILLS_ROOT = Path("~/.anton/skills").expanduser()
 # same label shadows the built-in.
 _BUILTIN_SKILLS_ROOT = Path(__file__).parent / "builtin_skills"
 
+# One value of a skill's `applies_to` list.
+_APPLIES_TO_VALUE_RE = re.compile(r"[a-z0-9_-]+")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data classes
@@ -104,10 +107,23 @@ class Skill:
     created_at: str
     provenance: str  # "manual" | "consolidator" | "builtin" | "host"
     when_to_use: str = ""
+    # The SKILL.md `applies_to` key, at the top level or under `metadata`
+    # (the parser folds the first into the second), as written. See
+    # `for_artifacts`.
+    applies_to: str = ""
     stage_1_present: bool = True
     stage_2_present: bool = False
     stage_3_present: bool = False
     stats: SkillStats = field(default_factory=SkillStats)
+
+    @property
+    def for_artifacts(self) -> bool:
+        """Whether `applies_to` names `artifacts`.
+
+        One value, a comma- or space-separated list, or a YAML list, which
+        the parser keeps as its `str()` ("['artifacts', 'chat']").
+        """
+        return "artifacts" in _APPLIES_TO_VALUE_RE.findall(self.applies_to.lower())
 
     def to_stats_dict(self) -> dict:
         return {
@@ -187,8 +203,9 @@ def check_migrate(skill_dir: Path, store_root: Path) -> Path | None:
       code/      → scripts/
 
     Returns the (possibly renamed) directory path, or None if the directory
-    contains neither legacy files nor a SKILL.md (unrecognised dir, skip it).
-    Raises OSError on IO failures.
+    contains neither legacy files nor a SKILL.md, or a declarative.md that
+    isn't UTF-8 (unrecognised dir, skip it). A meta.json that isn't a JSON
+    object is read as empty. Raises OSError on IO failures.
     Idempotent: returns skill_dir immediately if SKILL.md already exists.
     """
     skill_md_path = skill_dir / "SKILL.md"
@@ -201,14 +218,22 @@ def check_migrate(skill_dir: Path, store_root: Path) -> Path | None:
         return None
 
     # Load legacy data
+    # A walk of the store runs this on every folder, and a store built with
+    # host-named roots walks at construction, so a folder that can't be read
+    # must be skipped rather than raise: it would fail every turn.
     meta: dict = {}
     if meta_path.is_file():
         try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
+            loaded = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):  # JSONDecodeError, UnicodeDecodeError
+            loaded = None
+        if isinstance(loaded, dict):
+            meta = loaded
 
-    declarative = decl_path.read_text(encoding="utf-8") if decl_path.is_file() else ""
+    try:
+        declarative = decl_path.read_text(encoding="utf-8") if decl_path.is_file() else ""
+    except UnicodeDecodeError:
+        return None
 
     old_label = skill_dir.name
     new_label = normalize_name(old_label)
@@ -284,6 +309,7 @@ class SkillStore:
         root: Path | None = None,
         builtin_root: Path | None = None,
         extra_roots: list[Path] | None = None,
+        artifact_roots: list[Path] | None = None,
     ) -> None:
         self.root = Path(root) if root is not None else _DEFAULT_SKILLS_ROOT
         # Resolved at construction so tests can monkeypatch the module default.
@@ -294,6 +320,18 @@ class SkillStore:
         # skills for its own tools). Take precedence over anton's packaged
         # built-ins; user skills under `root` still shadow everything.
         self.extra_roots: list[Path] = [Path(p) for p in extra_roots or []]
+        # Folders the host trusts for artifact builds (`list_for_artifacts`);
+        # None when it named none.
+        self.artifact_roots: list[Path] | None = (
+            None if artifact_roots is None else [Path(p) for p in artifact_roots]
+        )
+        # Read now, when the host names the trusted folders at the start of
+        # its turn: they are paths, so a skill deleted during the turn and
+        # made again under its name by someone else would otherwise be
+        # followed. None without host-named folders, read live instead.
+        self._pinned_artifact_skills: list[Skill] | None = (
+            None if self.artifact_roots is None else self._trusted_artifact_skills()
+        )
 
     def _readonly_roots(self) -> list[Path]:
         """Host roots first (they win on label collisions), then built-ins."""
@@ -332,6 +370,7 @@ class SkillStore:
             declarative_md=fm.instructions,
             created_at=fm.metadata.get("created_at", ""),
             provenance=fm.metadata.get("provenance", "manual"),
+            applies_to=fm.metadata.get("applies_to", ""),
             stage_1_present=True,
             stage_2_present=(d / "references").is_dir(),
             stage_3_present=(d / "scripts").is_dir(),
@@ -425,6 +464,91 @@ class SkillStore:
         out.sort(key=lambda s: s.label)
         return out
 
+    def list_for_artifacts(self) -> list[Skill]:
+        """The skills an artifact build follows without a recall, by label.
+
+        A skill qualifies when it is marked (`Skill.for_artifacts`) and its
+        folder, with links resolved, sits under a trusted folder: anton's
+        built-ins always, plus `artifact_roots` when the host named them.
+        Resolving matters because a host names the folders its own links
+        point into, so a real folder planted where one of its links was
+        resolves elsewhere and is left out.
+
+        With no `artifact_roots`, a store with host roots trusts nothing
+        else: a host's writable root can hold other people's skills, and
+        only the host can tell them apart. A store without host roots (the
+        CLI) also trusts every skill listed in `root`, the user's own
+        library, links to folders elsewhere included.
+
+        With `artifact_roots`, the skills are the ones read when the store
+        was built, so a turn follows what its host trusted when it began.
+        """
+        if self._pinned_artifact_skills is not None:
+            return list(self._pinned_artifact_skills)
+        return self._trusted_artifact_skills()
+
+    def _trusted_artifact_skills(self) -> list[Skill]:
+        """`list_for_artifacts`, read from disk now."""
+        out: list[Skill] = []
+        for d in self._iter_skill_dirs():
+            if not self._trusts_for_artifacts(d):
+                continue
+            skill = self._skill_from_dir(d)
+            if skill is not None and skill.for_artifacts:
+                out.append(skill)
+        out.sort(key=lambda s: s.label)
+        return out
+
+    def _trusts_for_artifacts(self, d: Path) -> bool:
+        """Whether an artifact build may follow the skill in folder `d`
+        without a recall: the rule `list_for_artifacts` describes."""
+        # Nobody else writes the CLI's library, so where its links lead is
+        # the user's choice, not a planted folder.
+        if self.artifact_roots is None and not self.extra_roots and d.parent == self.root:
+            return True
+        resolved = d.resolve()
+        return any(
+            resolved.is_relative_to(t.resolve())
+            for t in [self.builtin_root, *(self.artifact_roots or [])]
+        )
+
+    def load_for_artifacts(self, label: str) -> Skill | None:
+        """`load(label)` kept to folders an artifact build trusts
+        (`_trusts_for_artifacts`), marked or not, or None.
+
+        For a skill a generator step reads by name, such as the fetch step's
+        `public-data-sources`. Through `load`, any folder under that name in
+        `root`, which on a host can link another person's skill, would
+        replace anton's built-in. Here an untrusted folder is passed over and
+        the next one in `load`'s order is read: the host roots, then the
+        built-ins.
+        """
+        candidates: list[Path] = []
+        if self.root.is_dir():
+            own = self._find_dir(label)
+            if own is not None:
+                candidates.append(own)
+        norm = label.replace("_", "-")
+        candidates += [base / norm for base in self._readonly_roots()]
+        for d in candidates:
+            if not d.is_dir() or not self._trusts_for_artifacts(d):
+                continue
+            if d.parent == self.root:
+                try:
+                    migrated = check_migrate(d, self.root)
+                except OSError:
+                    continue
+                if migrated is None:
+                    continue
+                d = migrated
+            skill = self._skill_from_dir(d)
+            if skill is None:
+                continue
+            if d.parent == self.builtin_root:
+                skill.provenance = "builtin"
+            return skill
+        return None
+
     def list_summaries(self) -> list[dict]:
         """Lightweight listing for prompt-building.
 
@@ -502,6 +626,7 @@ class SkillStore:
             "display_name": skill.name,
             "provenance": skill.provenance,
             "created_at": skill.created_at,
+            "applies_to": skill.applies_to,
         }.items() if v}
 
         description = skill.description

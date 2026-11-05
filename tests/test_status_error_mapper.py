@@ -4,7 +4,8 @@ One mapper (`openai._raise_for_status_error`) serves all four call paths
 (chat/stream × completions/responses). These tests pin the mapping policy:
 
 - 401 → ProviderAuthError with the exact invalid-key copy.
-- 429 + quota detail → TokenLimitExceeded (and it outranks any 403 logic).
+- 429 whose body carries only a FastAPI detail (the MindsHub edge's request
+  limit) → the rate-limit TransientProviderError, never TokenLimitExceeded.
 - 403 + structured gateway code → ModelUnavailableError carrying code+model,
   with actionable copy per code.
 - Any other 403 (BYOK region blocks, Anthropic permission errors, Cloudflare
@@ -131,27 +132,29 @@ def test_401_html_body_maps_to_invalid_key():
     assert _is_provider_auth_error(err.value)
 
 
-# ── 429 (quota) ───────────────────────────────────────────────────────
+# ── 429 with a FastAPI detail: a rate limit, not a quota ──────────────
 
-def test_429_fastapi_detail_maps_to_token_limit():
-    # The gateway's CURRENT dialect: FastAPI HTTPException → {"detail": ...},
-    # no envelope, so the SDK's unwrap is a no-op.
-    exc = _sdk_error(429, json_body={"detail": "Monthly limit exceeded for tokens: 5/5"})
-    with pytest.raises(TokenLimitExceeded) as err:
-        _raise_for_status_error(exc, "sonnet")
-    assert "Monthly limit exceeded" in str(err.value)
-    assert "console.mindshub.ai" in str(err.value)
+# What the MindsHub edge sends when one IP floods api.mindshub.ai: a
+# FastAPI-style body and no X-MindsHub-Reason.
+_EDGE_REQUEST_LIMIT_BODY = {
+    "detail": "You have reached your request limit. Please refer to the documentation "
+    "for more details or contact us to request an increase in your limit.",
+}
 
 
-def test_429_enveloped_detail_also_maps_to_token_limit():
-    # If the gateway ever moves its 429 into the OpenAI envelope while keeping
-    # the `detail` field, the SDK unwraps it to top level — still classified.
-    # Classified before the transient path (429+detail → quota), so ENG-673's
-    # bare-429-is-transient change leaves this untouched.
-    exc = _sdk_error(429, json_body={"error": {"detail": "Monthly limit exceeded for tokens: 5/5"}})
-    with pytest.raises(TokenLimitExceeded) as err:
-        _raise_for_status_error(exc, "sonnet")
-    assert "Monthly limit exceeded" in str(err.value)
+@pytest.mark.parametrize("make_error", [
+    lambda: _sdk_error(429, json_body=_EDGE_REQUEST_LIMIT_BODY),
+    lambda: _sdk_error(429, json_body={"error": _EDGE_REQUEST_LIMIT_BODY}),
+    lambda: _wire_shaped_error(429, {"error": _EDGE_REQUEST_LIMIT_BODY}),
+], ids=["top_level", "sdk_unwrapped_envelope", "wire_envelope"])
+def test_the_edge_request_limit_429_is_a_rate_limit_not_out_of_credits(make_error):
+    # A request flood is not a spent balance: no TokenLimitExceeded, and no
+    # top-up link.
+    with pytest.raises(TransientProviderError) as err:
+        _raise_for_status_error(make_error(), "sonnet")
+    assert err.value.code == "rate_limited"
+    assert not isinstance(err.value, TokenLimitExceeded)
+    assert "console.mindshub.ai" not in str(err.value)
 
 
 def test_bare_429_is_transient_and_backs_off_in_session():
@@ -192,6 +195,43 @@ def test_retry_after_http_date_form_is_ignored_not_misparsed():
     assert err.value.retry_after is None
 
 
+@pytest.mark.parametrize("code", ["429", "rate_limit_exceeded"])
+def test_azure_429_with_retry_after_ms_waits_the_named_interval(code):
+    # Azure's per-minute limit, in both of its body dialects.
+    exc = _sdk_error(429, json_body={"error": {
+        "code": code,
+        "message": "Requests have exceeded the token rate limit. Please retry after 6 seconds.",
+    }}, headers={"retry-after-ms": "5500", "retry-after": "6"})
+    with pytest.raises(TransientProviderError) as err:
+        _raise_for_status_error(exc, "gpt")
+    assert err.value.code == "rate_limited"
+    assert err.value.session_backoff is True
+    assert err.value.retry_after == 5.5
+
+
+@pytest.mark.parametrize("headers,expected", [
+    ({"retry-after-ms": "bogus", "retry-after": "30"}, 30.0),
+    ({"retry-after-ms": "-5", "retry-after": "30"}, 30.0),
+    ({"Retry-After-Ms": "5500", "Retry-After": "6"}, 5.5),
+])
+def test_retry_after_ms_falls_back_and_ignores_case(headers, expected):
+    from anton.core.llm.provider import retry_after_seconds
+
+    exc = Exception()
+    exc.headers = headers
+    assert retry_after_seconds(exc) == expected
+
+
+def test_rate_limit_exceeded_without_retry_after_ms_stays_unconfirmed():
+    # OpenAI uses the same code for daily limits, which a short wait cannot clear.
+    exc = _sdk_error(429, json_body={"error": {"code": "rate_limit_exceeded"}},
+                     headers={"retry-after": "6"})
+    with pytest.raises(TransientProviderError) as err:
+        _raise_for_status_error(exc, "gpt")
+    assert err.value.session_backoff is False
+    assert err.value.retry_after is None
+
+
 def _openai_quota_429():
     """OpenAI's own quota dialect, byte-shaped like the live body captured
     from a zero-quota project key on 2026-07-28."""
@@ -226,9 +266,9 @@ def test_429_insufficient_quota_never_transient():
     assert classify_transient(429, exc.body, provider="openai", model="gpt-4o") is None
 
 
-def test_429_list_detail_stays_generic():
+def test_429_list_detail_never_reaches_user_copy():
     # FastAPI validation errors put a LIST in detail — its Python repr must
-    # never reach user-facing copy with an upgrade CTA attached.
+    # never reach user-facing copy.
     exc = _sdk_error(429, json_body={"detail": [{"loc": ["body", "x"], "msg": "field required"}]})
     with pytest.raises(ConnectionError) as err:
         _raise_for_status_error(exc, "sonnet")
@@ -291,12 +331,6 @@ def test_envelope_shaped_403_maps_via_fallback():
         _raise_for_status_error(exc, "sonnet")
 
 
-def test_envelope_shaped_429_detail_maps_via_fallback():
-    exc = _wire_shaped_error(429, {"error": {"detail": "Monthly limit exceeded for tokens: 5/5"}})
-    with pytest.raises(TokenLimitExceeded):
-        _raise_for_status_error(exc, "sonnet")
-
-
 # ── 403 WITHOUT the gateway codes: never the plan copy ────────────────
 
 def test_byok_openai_403_falls_through_to_generic():
@@ -326,18 +360,19 @@ def test_403_with_no_code_falls_through_to_generic():
     assert not isinstance(err.value, ModelUnavailableError)
 
 
-# ── precedence: quota beats model-403 logic ───────────────────────────
+# ── precedence: a 429 never takes the model-403 copy ──────────────────
 
-def test_429_with_detail_wins_even_if_error_code_present():
-    # A quota failure must stay token_limit, never be misread as model-403.
-    # (The SDK unwraps this body to its "error" member, which carries both
-    # fields — precedence must hold on the unwrapped shape too.)
+def test_429_with_detail_and_a_model_code_stays_a_rate_limit():
+    # The model-403 logic keys on the 403 status, so a 429 carrying a model
+    # code is still a rate limit. (The SDK unwraps this body to its "error"
+    # member, which carries both fields.)
     exc = _sdk_error(429, json_body={
         "error": {"detail": "Monthly limit exceeded for tokens: 5/5",
                   "code": "model_disabled"},
     })
-    with pytest.raises(TokenLimitExceeded):
+    with pytest.raises(TransientProviderError) as err:
         _raise_for_status_error(exc, "sonnet")
+    assert not isinstance(err.value, (TokenLimitExceeded, ModelUnavailableError))
 
 
 # ── 5xx / infra failures are transient (ENG-673) ──────────────────────
@@ -968,9 +1003,8 @@ def test_no_carrier_lets_a_third_party_mint_mindshub_billing_copy(status, body, 
     """Every branch that names MindsHub or links console.mindshub.ai must
     refuse a provably foreign origin — not just the two the first cut covered.
 
-    The `detail` carrier is the cheapest to abuse (one JSON key, no header) and
-    the only one whose text is partly attacker-authored, since it is
-    interpolated into the message beside our billing link.
+    A FastAPI `detail` is the cheapest carrier to abuse (one JSON key, no
+    header), so it stays in the table though no branch reads it now.
     """
     exc = _byok_error("openrouter.ai", json_body=body, status=status)
     with pytest.raises(Exception) as err:
@@ -981,13 +1015,16 @@ def test_no_carrier_lets_a_third_party_mint_mindshub_billing_copy(status, body, 
     assert "MindsHub plan" not in text, f"{carrier} leaked MindsHub plan copy: {text[:120]}"
 
 
-def test_the_gateway_keeps_all_three_carriers():
-    """The mirror: none of the gates may break a real gateway denial."""
+def test_the_gateway_keeps_its_billing_and_plan_carriers():
+    """The mirror: none of the gates may break a real gateway denial. A 429
+    with only a `detail` from our own host is the edge's request limit, so it
+    stays a rate limit."""
     with pytest.raises(TokenLimitExceeded):
         _raise_for_status_error(_byok_error("api.mindshub.ai", json_body={"code": "wallet_empty"}), "s")
-    with pytest.raises(TokenLimitExceeded):
+    with pytest.raises(TransientProviderError) as err:
         _raise_for_status_error(
             _byok_error("api.mindshub.ai", json_body={"detail": "Monthly limit exceeded"}, status=429), "s")
+    assert not isinstance(err.value, TokenLimitExceeded)
     with pytest.raises(ModelUnavailableError):
         _raise_for_status_error(
             _byok_error("api.mindshub.ai", json_body={"error": {"code": "model_access_denied"}}, status=403), "s")
@@ -1064,10 +1101,9 @@ def test_the_anthropic_twin_still_cards_a_real_gateway_denial():
         anthropic_mapper(exc, provider="Anthropic", model="sonnet")
 
 
-def test_the_anthropic_detail_branch_rejects_a_list():
-    """FastAPI validation errors put a LIST in `detail`; the openai twin has
-    guarded this for a while and the anthropic one did not, so a Python repr
-    could render next to our billing link."""
+def test_an_anthropic_429_list_detail_never_reaches_user_copy():
+    """FastAPI validation errors put a LIST in `detail`; its Python repr must
+    never render in the copy."""
     from anton.core.llm.anthropic import _raise_for_status_error as anthropic_mapper
 
     exc = _anthropic_sdk_error(429, json_body={"detail": [{"loc": ["body"], "msg": "bad"}]})
@@ -1263,13 +1299,9 @@ def test_the_allowance_copy_never_states_the_window():
         assert word not in text, f"allowance copy names a window: {text}"
 
 
-def test_the_legacy_quota_branches_still_raise_plain_token_limit():
-    """The FastAPI `detail` 429 and OpenAI's own `insufficient_quota` are not gate
-    billing codes, so neither may claim to name a MindsHub limit."""
-    with pytest.raises(TokenLimitExceeded) as detail:
-        _raise_for_status_error(
-            _sdk_error(429, json_body={"detail": "Monthly limit exceeded"}), "sonnet")
-    assert type(detail.value) is TokenLimitExceeded
+def test_the_openai_quota_branch_still_raises_plain_token_limit():
+    """OpenAI's own `insufficient_quota` is not a gate billing code, so it may
+    not claim to name a MindsHub limit."""
     with pytest.raises(TokenLimitExceeded) as quota:
         _raise_for_status_error(_openai_quota_429(), "sonnet")
     assert type(quota.value) is TokenLimitExceeded
@@ -1419,8 +1451,8 @@ def test_a_request_less_response_does_not_shadow_a_foreign_host():
     "api-pr123.dev.mindshub.ai",    # ephemeral per-PR env
     "llm.mdb.ai",                   # legacy vanity gateway
     "llm.staging.mdb.ai",
-    "writer.mdb.ai",                # white-label surfaces
-    "terabase.dev.mdb.ai",
+    "example.mdb.ai",               # vanity host shapes
+    "example.dev.mdb.ai",
     "view.mindshub.ai",
 ])
 def test_every_real_gateway_host_is_trusted(host):

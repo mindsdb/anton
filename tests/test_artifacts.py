@@ -466,6 +466,59 @@ def test_reconcile_excludes_generation_inputs(store: ArtifactStore):
     assert {f.path for f in opened.files} == {"backend.py", "requirements.txt"}
 
 
+def _write_bytecode(folder: Path) -> None:
+    for rel in (
+        "__pycache__/backend.cpython-313.pyc",
+        "routes/__pycache__/x.cpython-313.pyc",
+        "stray.pyc",
+    ):
+        path = folder / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"\0")
+
+
+def test_reconcile_excludes_python_bytecode(store: ArtifactStore):
+    """Backend and scratchpad imports leave `__pycache__` anywhere in the
+    folder; it is not something the agent built."""
+    artifact = store.create(
+        name="App", description="x", type="fullstack-stateless-app"
+    )
+    folder = store.folder_for(artifact.slug)
+    (folder / "backend.py").write_text("app = 1")
+    _write_bytecode(folder)
+
+    opened = store.open(artifact.slug)
+
+    assert {f.path for f in opened.files} == {"backend.py"}
+
+
+def test_reconcile_drops_bytecode_already_listed_in_metadata(store: ArtifactStore):
+    """Artifacts reconciled before bytecode was ignored carry `.pyc` entries
+    in metadata.json; the next read must rewrite them away."""
+    artifact = store.create(
+        name="App", description="x", type="fullstack-stateless-app"
+    )
+    folder = store.folder_for(artifact.slug)
+    (folder / "backend.py").write_text("app = 1")
+    _write_bytecode(folder)
+    meta_path = folder / "metadata.json"
+    meta = json.loads(meta_path.read_text())
+    meta["files"] = [
+        {"path": "backend.py", "bytes": 7, "modifiedAt": "2026-01-01T00:00:00+00:00"},
+        {
+            "path": "__pycache__/backend.cpython-313.pyc",
+            "bytes": 1,
+            "modifiedAt": "2026-01-01T00:00:00+00:00",
+        },
+    ]
+    meta_path.write_text(json.dumps(meta))
+
+    store.open(artifact.slug)
+
+    persisted = json.loads(meta_path.read_text())
+    assert [f["path"] for f in persisted["files"]] == ["backend.py"]
+
+
 def test_excluded_set_covers_every_generation_input():
     """The exclusion list is derived from the same constants the generators
     write through — a fourth generation input added there must not need a

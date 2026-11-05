@@ -9,9 +9,14 @@ import sys
 import json
 import base64
 import hashlib
+import hmac
 import secrets
+import urllib.error
 import zipfile
+from collections.abc import Iterable, Iterator
 from pathlib import Path
+
+from pydantic import BaseModel, ValidationError
 
 from anton.core.artifacts.internal_files import (
     GENERATION_INPUT_FILES,
@@ -19,10 +24,12 @@ from anton.core.artifacts.internal_files import (
     PUBLISHED_FILENAME,
     REVISIONS_DIRNAME,
     STATE_SNAPSHOT_FILENAME,
+    is_bytecode_name,
 )
 from anton.core.artifacts.models import Artifact, artifact_key as artifact_key_for
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.minds_client import minds_request
+from anton.publish_access import access_from_owner_side
 from anton.utils.datasources import scrub_credentials
 
 # LLM API key env vars whose values must be stripped from published files.
@@ -62,6 +69,103 @@ class StatePublishBlocked(Exception):
     (not an anton_state runtime error) — surfaced to the publish caller."""
 
 
+# The upload service's 409 code for a report that belongs to another account
+# (a fullstack `report_id` is global, so a folder published by someone else,
+# or under another API key, carries a `report_id` this caller does not own).
+OWNED_BY_OTHER_USER_CODE = "artifact_owned_by_other_user"
+
+
+class ArtifactOwnedByOtherUserError(RuntimeError):
+    """The upload service refused the publish: another owner holds this report.
+
+    Callers must not retry without ``report_id``: that publishes a silent copy
+    under a new URL, which is exactly what the 409 exists to prevent. Tell the
+    user instead.
+    """
+
+    def __init__(self, message: str = "This artifact was published by another owner.") -> None:
+        super().__init__(message)
+
+
+# The upload service's 403 code for a publish that newly shares an artifact
+# with everyone in its organization from an account without the
+# artifacts.share_org permission. MindsHub, cowork-server's sharing contract
+# module (cowork/services/sharing_contract.py) and the Cowork app's
+# (src/renderer/cowork/lib/sharingContract.js) hold the same code under this
+# name.
+SHARE_ORG_REQUIRED_CODE = "share_org_required"
+
+# What the agent is told after a SHARE_ORG_REQUIRED_CODE refusal, so it does
+# not pick a wider audience on its own. The publish tool names people only by
+# email and has no teams, so the sentence offers only that. cowork-server's
+# sharing contract module (cowork/services/sharing_contract.py) holds the same
+# sentence under this name.
+SHARE_ORG_REQUIRED_INSTRUCTION = (
+    "Do not publish it publicly or to a wider audience instead. Tell the user "
+    "that an organization admin can share it with everyone, or offer to share "
+    "it with specific people by email."
+)
+
+
+class ArtifactShareOrgRequiredError(urllib.error.HTTPError):
+    """The upload service refused to share the artifact with everyone in its organization.
+
+    ``reason`` is the body's ``error``, or the HTTP status text when the body
+    has none. Callers must not retry with a wider audience, such as public:
+    tell the user instead. It stays an HTTPError with the 403 and its body, so
+    a caller that reads the body itself still can.
+    """
+
+
+#: Bytes of an upload error's body that publish reads. The service's JSON
+#: answers are far smaller.
+_ERROR_BODY_MAX_BYTES = 65_536
+
+
+class _UploadErrorBody(BaseModel):
+    """The JSON body the upload service answers a failed upload with."""
+
+    #: What went wrong, in words the person publishing can act on.
+    error: str | None = None
+    #: A stable reason clients match on, such as OWNED_BY_OTHER_USER_CODE.
+    code: str | None = None
+
+
+def _upload_error(err: urllib.error.HTTPError) -> Exception:
+    """The error publish raises for the upload's *err*, from one read of its body.
+
+    A 409 ``artifact_owned_by_other_user`` is ArtifactOwnedByOtherUserError.
+    Every other answer stays an HTTPError with the same status and headers,
+    and a 403 ``share_org_required`` is the HTTPError subclass
+    ArtifactShareOrgRequiredError. Its reason is the body's ``error`` when the
+    body has one, so the message a caller shows says why ("HTTP Error 500:
+    <error>"), and its body can be read again by a caller that reads it
+    itself. A body that can't be read leaves *err* as it is.
+    """
+    try:
+        body = err.read(_ERROR_BODY_MAX_BYTES)
+    except Exception:
+        return err
+    try:
+        answer = _UploadErrorBody.model_validate_json(body)
+    except ValidationError:
+        answer = _UploadErrorBody()
+    if err.code == 409 and answer.code == OWNED_BY_OTHER_USER_CODE:
+        return ArtifactOwnedByOtherUserError()
+    if err.code == 403 and answer.code == SHARE_ORG_REQUIRED_CODE:
+        raised = ArtifactShareOrgRequiredError(
+            err.filename, err.code, answer.error or err.msg, err.hdrs, io.BytesIO(body)
+        )
+    else:
+        raised = urllib.error.HTTPError(
+            err.filename, err.code, answer.error or err.msg, err.hdrs, io.BytesIO(body)
+        )
+    # What describe_minds_request_failure reads off a minds_request error.
+    raised.body = body
+    raised.request_line = getattr(err, "request_line", None)
+    return raised
+
+
 DEFAULT_PUBLISH_URL = "https://view.mindshub.ai"
 
 # Owner-side files that must never enter a published html-app bundle.
@@ -70,7 +174,7 @@ DEFAULT_PUBLISH_URL = "https://view.mindshub.ai"
 # inputs (PRD, tech spec, discovery state) are the user's working documents,
 # not deliverables — they are hidden from `files[]` and must stay out of the
 # public bundle for the same reason.
-_BUNDLE_SKIP_NAMES = {PUBLISHED_FILENAME, REVISIONS_DIRNAME} | GENERATION_INPUT_FILES
+_BUNDLE_SKIP_NAMES = frozenset({PUBLISHED_FILENAME, REVISIONS_DIRNAME}) | GENERATION_INPUT_FILES
 
 # PBKDF2 parameters for access passwords. Stdlib-only (no argon2 dep) so
 # the same verification runs in the anton-services viewer Lambda without
@@ -91,6 +195,26 @@ def hash_access_password(password: str) -> str:
     return f"pbkdf2_sha256${_PBKDF2_ITERATIONS}${b64(salt)}${b64(dk)}"
 
 
+def _hash_matches_password(stored: object, password: str) -> bool:
+    """True if `stored` is a `hash_access_password` hash of `password`.
+
+    Only the exact current format counts, iteration count included, so a hash
+    from older parameters or a hand-edited value is never sent again.
+    """
+    if not isinstance(stored, str):
+        return False
+    try:
+        scheme, iterations, salt_b64, dk_b64 = stored.split("$")
+        if scheme != "pbkdf2_sha256" or iterations != str(_PBKDF2_ITERATIONS):
+            return False
+        salt = base64.b64decode(salt_b64, validate=True)
+        expected = base64.b64decode(dk_b64, validate=True)
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ITERATIONS)
+    except ValueError:
+        return False
+    return hmac.compare_digest(actual, expected)
+
+
 def _normalize_emails(values) -> list[str]:
     """Strip + lowercase + de-dupe, preserving first-seen order."""
     seen: set[str] = set()
@@ -103,7 +227,29 @@ def _normalize_emails(values) -> list[str]:
     return out
 
 
-def build_access_payload(access: dict | None, *, pwd_version: int = 1, access_version: int = 1) -> dict:
+def _reusable_password_hash(password: str, previous: dict | None) -> str | None:
+    """The hash sent last time, while the password is still the same one.
+
+    `previous` is the owner-side `.published.json` entry of the last publish.
+    `hash_access_password` salts every call, and the artifact content host
+    fingerprints the stored hash to revoke viewers' password grants, so a new
+    hash on every re-publish would ask every viewer for the password again.
+    A changed password, an entry that left password mode in between, or a
+    stored hash that does not verify `password` gets a fresh hash.
+    """
+    if access_from_owner_side(previous) != {"mode": "password", "password": password}:
+        return None
+    stored = previous.get("password_hash")
+    return stored if _hash_matches_password(stored, password) else None
+
+
+def build_access_payload(
+    access: dict | None,
+    *,
+    pwd_version: int = 1,
+    access_version: int = 1,
+    previous: dict | None = None,
+) -> dict:
     """Translate the inbound access spec into the `/upload` ``access`` block.
 
     Input (from cowork-server, the caller) is one of::
@@ -118,15 +264,18 @@ def build_access_payload(access: dict | None, *, pwd_version: int = 1, access_ve
         {"mode": "password", "password_hash": "pbkdf2_sha256$...", "pwd_version": N}
         {"mode": "restricted", "allowed_emails": [...], "org_allowed": bool, "access_version": N}
 
-    The plaintext password is hashed here and never forwarded. Emails are
-    normalized and forwarded as-is (auth compares them server-side) and never
-    enter the zip bundle.
+    The plaintext password is hashed here and never forwarded. `previous` is
+    the owner-side `.published.json` entry of the last publish: while the
+    password is unchanged, the hash sent then is sent again (see
+    `_reusable_password_hash`). Emails are normalized and forwarded as-is
+    (auth compares them server-side) and never enter the zip bundle.
     """
     mode = (access or {}).get("mode", "public")
     if mode == "password":
+        password = access["password"]
         return {
             "mode": "password",
-            "password_hash": hash_access_password(access["password"]),
+            "password_hash": _reusable_password_hash(password, previous) or hash_access_password(password),
             "pwd_version": pwd_version,
         }
     if mode == "restricted":
@@ -146,14 +295,46 @@ _REF_PATTERNS = [
 ]
 
 
+def _bundle_entries(
+    root: Path, files: Iterable[Path], skip: frozenset[str]
+) -> Iterator[tuple[Path, str]]:
+    """Yield (resolved file, arcname) for each of *files* that may enter the
+    published bundle. The arcname is the path as written, relative to *root*;
+    the caller reads the resolved file, the one these checks were made on.
+
+    Skipped: non-files, files written or resolving outside *root* (a symlink
+    must not publish what it points to), files with a *skip* name on the
+    path as written or as resolved, and Python bytecode (`is_bytecode_name`)
+    on either path. Names match case-insensitively because on macOS
+    `.PUBLISHED.json` opens `.published.json`.
+    """
+    real_root = root.resolve()
+    folded = {name.casefold() for name in skip}
+    for f in files:
+        if not f.is_file() or not f.is_relative_to(root):
+            continue
+        try:
+            target = f.resolve()
+        except (OSError, RuntimeError):  # RuntimeError: symlink loop before 3.13
+            continue
+        if not target.is_relative_to(real_root):
+            continue
+        rel = f.relative_to(root)
+        parts = rel.parts + target.relative_to(real_root).parts
+        if not any(part.casefold() in folded or is_bytecode_name(part) for part in parts):
+            yield target, rel.as_posix()
+
+
 def _find_referenced_files(html_path: Path) -> list[Path]:
-    """Scan an HTML file for relative references and return existing sibling paths."""
+    """Scan an HTML file for relative references and return them as written
+    (normalized, not resolved), so a reference through a symlink keeps the
+    name the page uses; `_bundle_entries` decides which ones are bundled."""
     try:
         html = html_path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
         return []
 
-    parent = html_path.parent
+    parent = html_path.parent.resolve()
     refs: set[Path] = set()
 
     for pattern in _REF_PATTERNS:
@@ -162,10 +343,7 @@ def _find_referenced_files(html_path: Path) -> list[Path]:
             # Skip absolute URLs, data URIs, anchors, protocol-relative
             if not ref or ref.startswith(("/", "http:", "https:", "data:", "//")):
                 continue
-            candidate = (parent / ref).resolve()
-            # Only include files that exist and are under the parent directory
-            if candidate.is_file() and str(candidate).startswith(str(parent.resolve())):
-                refs.add(candidate)
+            refs.add(Path(os.path.normpath(parent / ref)))
 
     return sorted(refs)
 
@@ -202,17 +380,20 @@ def _zip_html(path: Path) -> bytes:
         if path.is_file():
             _write_scrubbed(zf, path, "index.html")
             # Bundle any referenced sibling files (JS, CSS, images, etc.)
-            parent = path.resolve().parent
-            for ref in _find_referenced_files(path):
-                _write_scrubbed(zf, ref, ref.relative_to(parent).as_posix())
+            primary = path.resolve()
+            refs = _find_referenced_files(path)
+            for src, arc_name in _bundle_entries(path.parent.resolve(), refs, _BUNDLE_SKIP_NAMES):
+                # The primary page owns `index.html`, so a sibling under that
+                # name would replace it. A self-reference keeps its duplicate
+                # entry so existing bundles keep their md5.
+                if arc_name != "index.html" or src == primary:
+                    _write_scrubbed(zf, src, arc_name)
         else:
             # Directory — include all files except owner-side housekeeping
             # (e.g. `.published.json`, which holds the plaintext access
             # password and must never be published).
-            for f in sorted(path.rglob("*")):
-                rel = f.relative_to(path)
-                if f.is_file() and not any(part in _BUNDLE_SKIP_NAMES for part in rel.parts):
-                    _write_scrubbed(zf, f, rel.as_posix())
+            for f, arc_name in _bundle_entries(path, sorted(path.rglob("*")), _BUNDLE_SKIP_NAMES):
+                _write_scrubbed(zf, f, arc_name)
     return buf.getvalue()
 
 
@@ -228,39 +409,24 @@ def _load_artifact_metadata(artifact_dir: Path) -> Artifact | None:
 
 
 def _zip_fullstack(artifact_dir: Path) -> tuple[bytes, list[str]]:
-    """Bundle backend.py + static/ + requirements.txt into a zip.
+    """Bundle backend.py, requirements.txt, static/, state_manifest.json and
+    the vendored `anton_state` package into a zip.
 
     Returns (zip_bytes, included_arcnames). Text files are scrubbed.
-    Housekeeping files (metadata.json, README.md, backend.log) are excluded.
+    Non-content files are skipped (see `_bundle_entries`).
     """
+    files = [
+        artifact_dir / "backend.py",
+        artifact_dir / "requirements.txt",
+        *sorted((artifact_dir / "static").rglob("*")),
+        artifact_dir / "state_manifest.json",
+    ]
     buf = io.BytesIO()
     included: list[str] = []
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        backend = artifact_dir / "backend.py"
-        if backend.is_file():
-            _write_scrubbed(zf, backend, "backend.py")
-            included.append("backend.py")
-
-        reqs = artifact_dir / "requirements.txt"
-        if reqs.is_file():
-            _write_scrubbed(zf, reqs, "requirements.txt")
-            included.append("requirements.txt")
-
-        static_dir = artifact_dir / "static"
-        if static_dir.is_dir():
-            for f in sorted(static_dir.rglob("*")):
-                if not f.is_file():
-                    continue
-                arc_name = f"static/{f.relative_to(static_dir).as_posix()}"
-                if Path(arc_name).name in _FULLSTACK_EXCLUDED:
-                    continue
-                _write_scrubbed(zf, f, arc_name)
-                included.append(arc_name)
-
-        manifest = artifact_dir / "state_manifest.json"
-        if manifest.is_file():
-            _write_scrubbed(zf, manifest, "state_manifest.json")
-            included.append("state_manifest.json")
+        for f, arc_name in _bundle_entries(artifact_dir, files, _FULLSTACK_EXCLUDED):
+            _write_scrubbed(zf, f, arc_name)
+            included.append(arc_name)
 
         included.extend(_vendor_anton_state(zf))
     return buf.getvalue(), included
@@ -392,6 +558,7 @@ def publish(
     access_version: int = 1,
     artifact_key: str | None = None,
     vault: DataVault | None = None,
+    previous_access: dict | None = None,
 ) -> dict:
     """Zip and upload an HTML file/directory or a fullstack artifact directory.
 
@@ -423,8 +590,27 @@ def publish(
                   to anton's local vault (`~/.anton/data_vault`); cowork-server
                   passes its own vault so published secrets match where the
                   connection credentials were actually saved.
+        previous_access: The owner-side `.published.json` entry of this
+                  artifact's last publish, or None. In password mode its
+                  `password_hash` is sent again while the password is the
+                  same (see `build_access_payload`).
 
-    Response keys (HTML path): user_prefix, report_id, md5, view_url, version, files
+    Response keys (HTML path): user_prefix, report_id, md5, view_url, version, files.
+    In password mode the dict also carries `password_hash`, the hash that was
+    sent, for the caller to store next to `access_password`. It is owner-side
+    only: callers must not forward the result dict to clients or logs.
+
+    Raises:
+        ArtifactOwnedByOtherUserError: the service answered 409
+                  `artifact_owned_by_other_user` — another owner holds
+                  `report_id`. Do not retry without `report_id`.
+        ArtifactShareOrgRequiredError: the service answered 403
+                  `share_org_required`: this account may not newly share
+                  the artifact with everyone in its organization. Do not
+                  retry with a wider audience.
+        urllib.error.HTTPError: any other answer the service refused the
+                  upload with. Its reason is the body's `error` when it has
+                  one, and its body reads again (`_upload_error`).
     """
     if not file_path.exists():
         raise FileNotFoundError(f"Path not found: {file_path}")
@@ -485,18 +671,29 @@ def publish(
     # Backward-compat: a bare `password=` (no `access=`) maps to password mode.
     if access is None and password:
         access = {"mode": "password", "password": password}
-    payload_dict["access"] = build_access_payload(
-        access, pwd_version=pwd_version, access_version=access_version
+    access_payload = build_access_payload(
+        access, pwd_version=pwd_version, access_version=access_version,
+        previous=previous_access,
     )
+    payload_dict["access"] = access_payload
     payload = json.dumps(payload_dict).encode()
 
     url = f"{publish_url.rstrip('/')}/upload"
-    raw = minds_request(url, api_key, method="POST", payload=payload, verify=ssl_verify)
+    try:
+        raw = minds_request(url, api_key, method="POST", payload=payload, verify=ssl_verify)
+    except urllib.error.HTTPError as err:
+        raised = _upload_error(err)
+        if raised is err:
+            raise
+        raise raised from err
     # Upload succeeded (minds_request raises on failure): record the published
     # key schema so the next publish can warn on an incompatible change.
     if state_manifest is not None:
         _save_state_snapshot(file_path, state_manifest)
-    return json.loads(raw)
+    result = json.loads(raw)
+    if "password_hash" in access_payload:
+        result["password_hash"] = access_payload["password_hash"]
+    return result
 
 
 def list_published(

@@ -7,6 +7,8 @@ from typing import Union
 
 import yaml
 
+from anton.core.utils.yaml_cache import safe_load_cached
+
 
 @dataclass
 class DatasourceField:
@@ -74,7 +76,11 @@ def _parse_fields(raw: list) -> list[DatasourceField]:
 def _parse_file(
     path: Path, *, custom: bool = False
 ) -> dict[str, DatasourceEngine]:
-    """Extract engine definitions from a datasources.md file."""
+    """Extract engine definitions from a datasources.md file.
+
+    Reads the file on every call and builds new engine objects every time;
+    only the YAML parse of a block whose text is unchanged is reused.
+    """
     if not path.is_file():
         return {}
     text = path.read_text(encoding="utf-8")
@@ -83,12 +89,23 @@ def _parse_file(
     for match in _YAML_BLOCK_RE.finditer(text):
         yaml_text = match.group(3)
         try:
-            data = yaml.safe_load(yaml_text)
-        except yaml.YAMLError as exc:
+            data = safe_load_cached(yaml_text)
+        except (yaml.YAMLError, ValueError, RecursionError) as exc:
             import sys
 
+            # PyYAML's message quotes the offending line, which can hold a
+            # token, so the warning names only the error class and position.
+            # The mark counts from 0 within the block, so the block's own
+            # offset turns it into a line of the file.
+            mark = getattr(exc, "problem_mark", None)
+            if mark is not None:
+                line = text.count("\n", 0, match.start(3)) + mark.line + 1
+                column = mark.column + 1
+            else:
+                line = column = "unknown"
             print(
-                f"[anton] Warning: skipping malformed YAML block in {path}: {exc}",
+                f"[anton] Warning: skipping malformed YAML block in {path}: "
+                f"error_type={type(exc).__name__} line={line} column={column}",
                 file=sys.stderr,
             )
             continue

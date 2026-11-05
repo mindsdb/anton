@@ -1,21 +1,84 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar
 
+from .effort import (
+    SILENCE_COVERED_BUDGET,
+    SILENT_TOKENS_PER_SECOND,
+    STREAM_BUDGET_BY_EFFORT,
+    stream_budget_for,
+)
+from .liveness import ModelCallTracker, current_turn_tracker
 from .provider import (
     LLMProvider,
     LLMResponse,
+    ModelCallTimeoutError,
     ProviderAuthError,
     StreamComplete,
     StreamEvent,
 )
+from .tracing import call_role
 
 if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
 
 _T = TypeVar("_T")
+
+
+@dataclass(frozen=True)
+class ModelRoute:
+    """The model and effort that replace a role's own for every call inside `model_route`.
+
+    The calls keep their role's provider, so they reach the same endpoint.
+    ``effort`` None sends no effort at all, not the role provider's own.
+    """
+
+    model: str
+    effort: str | None = None
+
+
+# Set by `model_route`. A ContextVar, so every call a pipeline makes, in the
+# tasks it gathers too, asks for the route's model.
+_MODEL_ROUTE: ContextVar[ModelRoute | None] = ContextVar("anton_model_route", default=None)
+
+
+@contextlib.contextmanager
+def model_route(route: ModelRoute | None) -> Iterator[None]:
+    """Send every planning, coding and structured call inside to ``route``'s
+    model and effort, whichever `LLMClient` makes it. None changes nothing.
+
+    Enter it in a plain coroutine or around a single ``await``, never across a
+    ``yield``: an async generator has no context of its own, so the route would
+    leak to whatever consumes it.
+    """
+    if route is None:
+        yield
+        return
+    token = _MODEL_ROUTE.set(route)
+    try:
+        yield
+    finally:
+        _MODEL_ROUTE.reset(token)
+
+
+def routed_model() -> str | None:
+    """The model `model_route` sends calls to here, or None outside one."""
+    route = _MODEL_ROUTE.get()
+    return route.model if route is not None else None
+
+
+def asked_model(llm: object, role: str) -> str | None:
+    """The model a call of ``role`` through ``llm`` asks for here: the route's
+    inside `model_route`, else the role's own. None for a host client or a test
+    double that names no model."""
+    model = routed_model() or getattr(llm, "coding_model" if role == "coding" else "planning_model", None)
+    return model if isinstance(model, str) else None
 
 
 class _ProviderAuthConfirmation:
@@ -114,6 +177,7 @@ class LLMClient:
         router_provider: LLMProvider | None = None,
         router_model: str | None = None,
         max_tokens: int = 8192,
+        model_call_idle_timeout_s: float = 600.0,
     ) -> None:
         self._planning_provider = planning_provider
         self._planning_model = planning_model
@@ -127,6 +191,19 @@ class LLMClient:
         self._router_auth_role = "router" if router_provider is not None else "coding"
         self._router_provider = router_provider or coding_provider
         self._router_model = router_model or coding_model
+        # Calls through this client name their role per call (call_role). This
+        # default covers calls a host makes on a provider directly. A provider
+        # shared by two roles gets none: no role beats a wrong one.
+        roles = (
+            (planning_provider, "planning"),
+            (coding_provider, "coding"),
+            (self._router_provider, "router"),
+        )
+        for provider, role in roles:
+            shared = sum(other is provider for other, _ in roles) > 1
+            if provider is not None and not shared and getattr(provider, "trace_role", None) is None:
+                with contextlib.suppress(AttributeError):
+                    provider.trace_role = role
         self._max_tokens = max_tokens
         # ENG-1638: the model the planning provider last reported SERVING (the
         # `model` on its response), not the id we asked for. The session reads
@@ -142,6 +219,59 @@ class LLMClient:
         # Accounting must never break a call: notification is wrapped and
         # swallowed (see _notify_usage).
         self.usage_listener = None  # Callable[[str, str, Usage], None] | None
+        # How long one model call may send nothing before it is stopped with
+        # ModelCallTimeoutError. 0 or less turns the deadline off. A plain
+        # attribute so the session can apply its own settings to a client the
+        # host built.
+        self.model_call_idle_timeout_s = model_call_idle_timeout_s
+
+    @property
+    def call_tracker(self) -> ModelCallTracker | None:
+        """The turn's open-call tracker, or None outside a turn.
+
+        Each call captures it when it is issued. It lives in a ContextVar the
+        session arms (``liveness.arm_turn_tracker``) rather than on this
+        client, so work a turn leaves running after it ends cannot reach the
+        next turn's tracker on a client the two turns share.
+        """
+        return current_turn_tracker()
+
+    @staticmethod
+    def _effective_effort(provider: LLMProvider) -> str | None:
+        """The effort a call sends: a `model_route`'s inside one, else the provider's own."""
+        route = _MODEL_ROUTE.get()
+        return route.effort if route is not None else getattr(provider, "reasoning_effort", None)
+
+    @staticmethod
+    def _effort_kwargs(provider: LLMProvider) -> dict:
+        """``reasoning_effort=`` for the provider call, only when a `model_route`
+        changed it. A route with no effort over a provider that has one sends
+        ``""``, so the provider sends none (`call_effort`)."""
+        route = _MODEL_ROUTE.get()
+        own = getattr(provider, "reasoning_effort", None)
+        if route is None or route.effort == own:
+            return {}
+        return {"reasoning_effort": route.effort if route.effort is not None else ""}
+
+    def _record_served_unless_routed(self, response) -> None:
+        """`_record_served`, except for a call `model_route` sent to another
+        model: the identity line names the agent's model, not the builder's."""
+        if _MODEL_ROUTE.get() is None:
+            self._record_served(response)
+
+    def stream_budget(
+        self, role: str = "planning", *, by_effort: Mapping[str, int] = STREAM_BUDGET_BY_EFFORT
+    ) -> int:
+        """Output budget a streamed call of ``role`` gets when it passes none.
+
+        Only endpoints known to take large outputs get the effort table; any
+        other keeps the client default. ``by_effort`` is the table, for a call
+        that needs more room at an effort than the default table gives.
+        """
+        provider = self._coding_provider if role == "coding" else self._planning_provider
+        if getattr(provider, "accepts_large_output", False) is not True:
+            return self._max_tokens
+        return stream_budget_for(self._effective_effort(provider), self._max_tokens, by_effort)
 
     async def aclose(self) -> None:
         """Close provider transports. The three roles may share objects."""
@@ -177,6 +307,155 @@ class LLMClient:
                 "usage_listener raised — turn cost undercounted", exc_info=True
             )
 
+    def _idle_timeout_for(self, *, max_tokens: int) -> float | None:
+        """The idle deadline for one call with this output budget, or None for none.
+
+        The configured deadline, raised for a budget above
+        `SILENCE_COVERED_BUDGET`, whose hidden thinking can outlast it: one
+        second per `SILENT_TOKENS_PER_SECOND` tokens of the budget, so 655 s at
+        65536 and 1280 s at 128000, never below the configured deadline. The
+        providers raise their SDK read timeout to `LONGEST_SILENCE_S`, since on
+        an endpoint that sends no keepalives a streamed call that goes quiet
+        ends at the SDK's read timeout instead of this deadline.
+        """
+        idle_s = self.model_call_idle_timeout_s
+        # `not idle_s > 0` rather than `idle_s <= 0`, so NaN reads as off.
+        if idle_s is None or not idle_s > 0:
+            return None
+        if max_tokens > SILENCE_COVERED_BUDGET:
+            return float(max(idle_s, max_tokens / SILENT_TOKENS_PER_SECOND))
+        return float(idle_s)
+
+    def _timed_out(
+        self,
+        *,
+        role: str,
+        model: str,
+        idle_s: float,
+        tracker: ModelCallTracker | None,
+    ) -> ModelCallTimeoutError:
+        """Build the deadline error, log it and latch it on the turn's tracker."""
+        exc = ModelCallTimeoutError(role=role, model=model, idle_timeout_s=idle_s)
+        logging.getLogger(__name__).warning(
+            "model call stopped: role=%s model=%s sent no output for %.1fs",
+            role, model, idle_s,
+        )
+        if tracker is not None:
+            tracker.record_expiry(exc=exc)
+        return exc
+
+    async def _guarded_call(
+        self,
+        *,
+        operation: Callable[[], Awaitable[_T]],
+        role: str,
+        model: str,
+        max_tokens: int,
+    ) -> _T:
+        """Await a non-streamed call under the idle deadline.
+
+        The deadline covers the whole call, including the auth confirmation
+        retry and the SDK's own retries inside ``operation``, because a
+        non-streamed call sends nothing until it is done. A turn whose
+        deadline already latched fails here, before the provider is reached.
+        """
+        tracker = self.call_tracker
+        if tracker is not None:
+            tracker.raise_if_expired()
+        idle_s = self._idle_timeout_for(max_tokens=max_tokens)
+        call = tracker.open(role=role, idle_timeout_s=idle_s) if tracker is not None else None
+        try:
+            if call is not None:
+                call.awaiting = True
+            if idle_s is None:
+                with call_role(role):
+                    return await operation()
+            scope = asyncio.timeout(idle_s)
+            try:
+                async with scope:
+                    with call_role(role):
+                        return await operation()
+            except TimeoutError:
+                # Only our own expiry becomes a deadline error. A TimeoutError
+                # from inside the call stays itself, and an outside cancel that
+                # races the expiry stays a CancelledError.
+                if scope.expired():
+                    raise self._timed_out(
+                        role=role, model=model, idle_s=idle_s, tracker=tracker
+                    ) from None
+                raise
+        finally:
+            if call is not None:
+                tracker.close_call(call=call)
+
+    async def _guarded_stream(
+        self,
+        *,
+        make_stream: Callable[[], AsyncIterator[_T]],
+        role: str,
+        model: str,
+        max_tokens: int,
+        note: str | None = None,
+    ) -> AsyncIterator[_T]:
+        """Relay a streamed call, bounding each wait for the next event.
+
+        The deadline restarts with every event. It wraps only the wait on the
+        provider and never spans a ``yield``, so a slow consumer (a tool
+        running between rounds, a host writing to its wire) is never charged
+        to the model. For the same reason the call reports "awaiting" to the
+        tracker only while it waits on the provider. A turn whose deadline
+        already latched fails on the first event, before the provider is
+        reached.
+        """
+        tracker = self.call_tracker
+        if tracker is not None:
+            tracker.raise_if_expired()
+        idle_s = self._idle_timeout_for(max_tokens=max_tokens)
+        call = (
+            tracker.open(role=role, idle_timeout_s=idle_s, note=note) if tracker is not None else None
+        )
+        stream = None
+        try:
+            stream = aiter(make_stream())
+            while True:
+                if call is not None:
+                    call.awaiting = True
+                try:
+                    # Set around each wait, never across the yield, so the
+                    # role cannot leak into the consumer's own calls.
+                    if idle_s is None:
+                        with call_role(role):
+                            event = await anext(stream)
+                    else:
+                        scope = asyncio.timeout(idle_s)
+                        try:
+                            async with scope:
+                                with call_role(role):
+                                    event = await anext(stream)
+                        except TimeoutError:
+                            if scope.expired():
+                                raise self._timed_out(
+                                    role=role, model=model, idle_s=idle_s, tracker=tracker
+                                ) from None
+                            raise
+                except StopAsyncIteration:
+                    return
+                finally:
+                    if call is not None:
+                        call.awaiting = False
+                if call is not None:
+                    tracker.output(call=call)
+                yield event
+        finally:
+            if call is not None:
+                tracker.close_call(call=call)
+            closer = getattr(stream, "aclose", None) if stream is not None else None
+            if closer is not None:
+                # Cleanup only: a failure here must not replace the primary
+                # exception. Cancellation still propagates.
+                with contextlib.suppress(Exception):
+                    await closer()
+
     async def plan(
         self,
         *,
@@ -187,19 +466,28 @@ class LLMClient:
         native_web_tools: set[str] | None = None,
     ) -> LLMResponse:
         listener = self.usage_listener
-        response = await _call_with_auth_confirmation(
-            lambda: self._planning_provider.complete(
-                model=self._planning_model,
-                system=system,
-                messages=messages,
-                tools=tools,
-                max_tokens=max_tokens or self._max_tokens,
-                native_web_tools=native_web_tools,
+        budget = max_tokens or self._max_tokens
+        effort_kw = self._effort_kwargs(self._planning_provider)
+        model = asked_model(self, "planning")
+        response = await self._guarded_call(
+            operation=lambda: _call_with_auth_confirmation(
+                lambda: self._planning_provider.complete(
+                    model=model,
+                    system=system,
+                    messages=messages,
+                    tools=tools,
+                    max_tokens=budget,
+                    native_web_tools=native_web_tools,
+                    **effort_kw,
+                ),
+                role="planning",
             ),
             role="planning",
+            model=model,
+            max_tokens=budget,
         )
-        self._notify_usage("planning", self._planning_model, response.usage, listener)
-        self._record_served(response)
+        self._notify_usage("planning", model, response.usage, listener)
+        self._record_served_unless_routed(response)
         return response
 
     async def plan_stream(
@@ -210,25 +498,42 @@ class LLMClient:
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
         native_web_tools: set[str] | None = None,
+        wait_note: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
+        """``wait_note`` leads the host's still-working line while this call waits."""
         listener = self.usage_listener
-        async for event in _stream_with_auth_confirmation(
-            lambda: self._planning_provider.stream(
-                model=self._planning_model,
-                system=system,
-                messages=messages,
-                tools=tools,
-                max_tokens=max_tokens or self._max_tokens,
-                native_web_tools=native_web_tools,
+        budget = max_tokens or self.stream_budget("planning")
+        effort_kw = self._effort_kwargs(self._planning_provider)
+        # Read once, as the effort is: the whole stream asks for one model.
+        model = asked_model(self, "planning")
+        routed = _MODEL_ROUTE.get() is not None
+        # aclosing: a caller that stops early closes the call now, not when
+        # the abandoned generator is finalized.
+        events = self._guarded_stream(
+            make_stream=lambda: _stream_with_auth_confirmation(
+                lambda: self._planning_provider.stream(
+                    model=model,
+                    system=system,
+                    messages=messages,
+                    tools=tools,
+                    max_tokens=budget,
+                    native_web_tools=native_web_tools,
+                    **effort_kw,
+                ),
+                role="planning",
             ),
             role="planning",
-        ):
-            if isinstance(event, StreamComplete):
-                self._notify_usage(
-                    "planning", self._planning_model, event.response.usage, listener
-                )
-                self._record_served(event.response)
-            yield event
+            model=model,
+            max_tokens=budget,
+            note=wait_note,
+        )
+        async with contextlib.aclosing(events):
+            async for event in events:
+                if isinstance(event, StreamComplete):
+                    self._notify_usage("planning", model, event.response.usage, listener)
+                    if not routed:
+                        self._record_served(event.response)
+                yield event
 
     def _record_served(self, response) -> None:
         """Keep the last served model the planning provider reported.
@@ -249,6 +554,9 @@ class LLMClient:
     @property
     def max_tokens(self) -> int:
         """Default output-token budget for calls that don't pass their own.
+
+        Streamed calls that pass no budget use `stream_budget()` instead; this
+        default stays the budget of every non-streamed call.
 
         Exposed so the session's truncation recovery can compare a
         response's ``output_tokens`` against the budget the call actually
@@ -294,18 +602,27 @@ class LLMClient:
         native_web_tools: set[str] | None = None,
     ) -> LLMResponse:
         listener = self.usage_listener
-        response = await _call_with_auth_confirmation(
-            lambda: self._coding_provider.complete(
-                model=self._coding_model,
-                system=system,
-                messages=messages,
-                tools=tools,
-                max_tokens=max_tokens or self._max_tokens,
-                native_web_tools=native_web_tools,
+        budget = max_tokens or self._max_tokens
+        effort_kw = self._effort_kwargs(self._coding_provider)
+        model = asked_model(self, "coding")
+        response = await self._guarded_call(
+            operation=lambda: _call_with_auth_confirmation(
+                lambda: self._coding_provider.complete(
+                    model=model,
+                    system=system,
+                    messages=messages,
+                    tools=tools,
+                    max_tokens=budget,
+                    native_web_tools=native_web_tools,
+                    **effort_kw,
+                ),
+                role="coding",
             ),
             role="coding",
+            model=model,
+            max_tokens=budget,
         )
-        self._notify_usage("coding", self._coding_model, response.usage, listener)
+        self._notify_usage("coding", model, response.usage, listener)
         return response
 
     async def code_stream(
@@ -316,21 +633,36 @@ class LLMClient:
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
         native_web_tools: set[str] | None = None,
+        wait_note: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
+        """``wait_note`` leads the host's still-working line while this call waits."""
         listener = self.usage_listener
-        async for event in self._coding_provider.stream(
-            model=self._coding_model,
-            system=system,
-            messages=messages,
-            tools=tools,
-            max_tokens=max_tokens or self._max_tokens,
-            native_web_tools=native_web_tools,
-        ):
-            if isinstance(event, StreamComplete):
-                self._notify_usage(
-                    "coding", self._coding_model, event.response.usage, listener
-                )
-            yield event
+        budget = max_tokens or self.stream_budget("coding")
+        effort_kw = self._effort_kwargs(self._coding_provider)
+        model = asked_model(self, "coding")
+        events = self._guarded_stream(
+            make_stream=lambda: _stream_with_auth_confirmation(
+                lambda: self._coding_provider.stream(
+                    model=model,
+                    system=system,
+                    messages=messages,
+                    tools=tools,
+                    max_tokens=budget,
+                    native_web_tools=native_web_tools,
+                    **effort_kw,
+                ),
+                role="coding",
+            ),
+            role="coding",
+            model=model,
+            max_tokens=budget,
+            note=wait_note,
+        )
+        async with contextlib.aclosing(events):
+            async for event in events:
+                if isinstance(event, StreamComplete):
+                    self._notify_usage("coding", model, event.response.usage, listener)
+                yield event
 
     async def summarize(
         self,
@@ -346,14 +678,20 @@ class LLMClient:
         this is behavior-preserving unless a distinct model is selected.
         """
         listener = self.usage_listener
-        response = await _call_with_auth_confirmation(
-            lambda: self._router_provider.complete(
-                model=self._router_model,
-                system=system,
-                messages=messages,
-                max_tokens=max_tokens or self._max_tokens,
+        budget = max_tokens or self._max_tokens
+        response = await self._guarded_call(
+            operation=lambda: _call_with_auth_confirmation(
+                lambda: self._router_provider.complete(
+                    model=self._router_model,
+                    system=system,
+                    messages=messages,
+                    max_tokens=budget,
+                ),
+                role=self._router_auth_role,
             ),
-            role=self._router_auth_role,
+            role="router",
+            model=self._router_model,
+            max_tokens=budget,
         )
         self._notify_usage("router", self._router_model, response.usage, listener)
         return response
@@ -378,36 +716,52 @@ class LLMClient:
         """
         from anton.core.llm.structured import (
             build_structured_tool,
+            forced_choice_key,
             looks_truncated,
             raise_unusable_tool_call,
+            send_structured,
             unwrap_structured_response,
         )
 
         tool, validator_class, is_list = build_structured_tool(schema_class)
 
         budget = max_tokens or self._max_tokens
+        effort_kw = self._effort_kwargs(provider)
 
         listener = self.usage_listener
-        response = await _call_with_auth_confirmation(
-            lambda: provider.complete(
+
+        async def send(tool_choice: dict | None, prompt: str):
+            response = await self._guarded_call(
+                operation=lambda: _call_with_auth_confirmation(
+                    lambda: provider.complete(
+                        model=model,
+                        system=prompt,
+                        messages=messages,
+                        tools=[tool],
+                        tool_choice=tool_choice,
+                        max_tokens=budget,
+                        **effort_kw,
+                    ),
+                    role=role,
+                ),
+                role=role,
                 model=model,
-                system=system,
-                messages=messages,
-                tools=[tool],
-                tool_choice={"type": "tool", "name": tool["name"]},
                 max_tokens=budget,
-            ),
-            role=role,
+            )
+            # Count BEFORE the no-tool-call raise below: a structured call that
+            # failed (and its bigger-budget retry) still spent real tokens
+            # (ENG-1288). The role is PASSED, not inferred from model equality:
+            # deployments exist where planning and coding resolve to the same
+            # model (cowork-server's Gemini defaults are identical across all
+            # three roles), and inference collapsed every generate_object_code
+            # call — verifier verdicts, compaction, identity extraction — into
+            # `planning`, defeating the split this exists to provide (#309 review).
+            self._notify_usage(role, model, response.usage, listener)
+            return response
+
+        response = await send_structured(
+            send, key=forced_choice_key(provider, model), tool=tool, system=system, budget=budget
         )
-        # Count BEFORE the no-tool-call raise below: a structured call that
-        # failed (and its bigger-budget retry) still spent real tokens
-        # (ENG-1288). The role is PASSED, not inferred from model equality:
-        # deployments exist where planning and coding resolve to the same
-        # model (cowork-server's Gemini defaults are identical across all
-        # three roles), and inference collapsed every generate_object_code
-        # call — verifier verdicts, compaction, identity extraction — into
-        # `planning`, defeating the split this exists to provide (#309 review).
-        self._notify_usage(role, model, response.usage, listener)
 
         # No call at all, or one whose arguments were cut mid-value. `repaired`
         # cannot wait for the validation branch below: the dict parses, and it
@@ -493,7 +847,7 @@ class LLMClient:
         return await self._generate_object_with(
             schema_class,
             provider=self._planning_provider,
-            model=self._planning_model,
+            model=asked_model(self, "planning"),
             role="planning",
             system=system,
             messages=messages,
@@ -520,7 +874,7 @@ class LLMClient:
         return await self._generate_object_with(
             schema_class,
             provider=self._coding_provider,
-            model=self._coding_model,
+            model=asked_model(self, "coding"),
             role="coding",
             system=system,
             messages=messages,
@@ -529,18 +883,24 @@ class LLMClient:
 
     @classmethod
     def from_settings(cls, settings: AntonSettings) -> LLMClient:
-        from .anthropic import AnthropicProvider
         from .openai import OpenAIProvider
+
+        def build_anthropic(effort: str | None) -> LLMProvider:
+            # Imported only when a role needs it: the SDK costs about a second
+            # per pod turn under gVisor, and MindsHub turns never use it.
+            from .anthropic import AnthropicProvider
+
+            return AnthropicProvider(
+                api_key=settings.anthropic_api_key,
+                reasoning_effort=effort,
+            )
 
         api_version = getattr(settings, "openai_api_version", None)
         compatible_flavor = _resolve_openai_compatible_flavor(settings)
         # Each factory takes the per-role effort so planning and coding stay
         # independent even when they resolve to the same provider type.
         providers = {
-            "anthropic": lambda effort: AnthropicProvider(
-                api_key=settings.anthropic_api_key,
-                reasoning_effort=effort,
-            ),
+            "anthropic": build_anthropic,
             "openai": lambda effort: OpenAIProvider(
                 api_key=settings.openai_api_key,
                 base_url=settings.openai_base_url,
@@ -602,4 +962,5 @@ class LLMClient:
             router_provider=router_provider,
             router_model=getattr(settings, "router_model", None),
             max_tokens=getattr(settings, "max_tokens", 8192),
+            model_call_idle_timeout_s=getattr(settings, "model_call_idle_timeout_s", 600.0),
         )

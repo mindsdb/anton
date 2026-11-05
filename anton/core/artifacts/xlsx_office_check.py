@@ -20,8 +20,12 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from anton.core.artifacts.xlsx_lint import _formula_text
+
+if TYPE_CHECKING:
+    from anton.core.backends.sandbox import CellSandbox
 
 # Headless conversion writes into a scratch profile per call, so parallel
 # runs never contend for the same lock file (the LibreOffice "document
@@ -68,7 +72,9 @@ class FileLoadFinding:
         return f"LibreOffice could not open this file: {self.detail}"
 
 
-def check_xlsx_via_office(path: Path) -> list[FormulaErrorFinding | FileLoadFinding] | None:
+def check_xlsx_via_office(
+    path: Path, *, cell_sandbox: CellSandbox | None
+) -> list[FormulaErrorFinding | FileLoadFinding] | None:
     """Recalculate `path` with LibreOffice and flag formulas that error out.
 
     Returns `None` when the oracle isn't usable right now (no LibreOffice on
@@ -79,7 +85,13 @@ def check_xlsx_via_office(path: Path) -> list[FormulaErrorFinding | FileLoadFind
     (nonzero exit with a message on stderr), that's a concrete finding in
     its own right — surfaced as a `FileLoadFinding`, not folded into the
     generic "unavailable" case, since the file itself is the actual problem.
+
+    Under a sandbox policy (`cell_sandbox` set) it returns `None` without
+    starting LibreOffice, which would open the agent's file unlocked with
+    the server's environment. Required, so no caller can forget it.
     """
+    if cell_sandbox is not None:
+        return None
     try:
         return _check_via_office(path)
     except Exception:

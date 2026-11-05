@@ -15,10 +15,12 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 from rich.console import Console
 
+from anton.core.backends.sandbox import validate_pad_name
 from anton.core.llm.structured import (
     generate_with_truncation_retry,
     no_preamble_instruction,
 )
+from anton.utils.datasources import scrub_output
 
 if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
@@ -41,6 +43,25 @@ class _SessionMeta(BaseModel):
             "Each distinct finding appears exactly once. 2-4 sentences."
         )
     )
+
+
+def _importable_pad_name(name: object) -> str:
+    """``name`` when a pad may have it, else a pad name made from it.
+
+    An export can predate the pad-name rules (a ``/`` or ``:`` in a name) or
+    come from anywhere. Each character a pad name can't hold becomes ``_``,
+    and a name that still can't be one becomes ``main``.
+    """
+    if not isinstance(name, str):
+        return "main"
+    try:
+        return validate_pad_name(name)
+    except ValueError:
+        pass
+    try:
+        return validate_pad_name(re.sub(r"[^\w .-]", "_", name).strip(". "))
+    except ValueError:
+        return "main"
 
 
 def _format_history_for_llm(history: list[dict], max_messages: int = 20) -> str:
@@ -397,6 +418,11 @@ async def import_v0_1(
             return session
 
     raw_history = payload.get("session", {}).get("conversation_history", [])
+    # An export can predate the scrub. User turns get scrub_output too: import never
+    # feeds connect. tool_call content is the model's own code and stays as written.
+    for ep_data in raw_history:
+        if ep_data.get("role") != "tool_call" and isinstance(ep_data.get("content"), str):
+            ep_data["content"] = scrub_output(ep_data["content"])
 
     # fill episodic from export
     if episodic and episodic.enabled:
@@ -456,18 +482,19 @@ async def import_v0_1(
                 cortex.project_hc.encode_lesson(content, topic=topic, source="import")
 
     # restore scratchpad cells
-    from anton.core.backends.base import Cell as _Cell  # noqa: PLC0415
+    from anton.core.backends.base import Cell as _Cell, scrub_cell  # noqa: PLC0415
     cells_data = payload.get("scratchpad", {}).get("cells", [])
     for cell_data in cells_data:
-        pad_name = cell_data.get("pad", "main")
+        pad_name = _importable_pad_name(cell_data.get("pad", "main"))
         pad = await new_session._scratchpads.get_or_create(pad_name)
-        pad.cells.append(_Cell(
+        # An export can predate the scrub, or come from anywhere.
+        pad.cells.append(scrub_cell(_Cell(
             code=cell_data.get("code", ""),
             stdout=cell_data.get("stdout", ""),
             stderr=cell_data.get("stderr", ""),
             error=cell_data.get("error"),
             description=cell_data.get("description", ""),
-        ))
+        )))
 
     # print briefing
     sess = payload.get("session", {})

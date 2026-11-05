@@ -27,9 +27,11 @@ Storage and retrieval
 The cerebellum is a *producer* only. It does not own its own storage.
 Corrections are encoded as `Engram` objects with `kind="lesson"` and
 `topic="scratchpad"` via `Cortex.encode()`, the same path that manual
-lessons and the consolidator already use. They flow back into future
-prompts via the existing `Cortex.get_scratchpad_context()` →
-`recall_scratchpad_wisdom()` → scratchpad tool description injection
+lessons and the consolidator already use. Lessons the cortex's encoding
+gate holds back (copilot mode) are handed to `queue_for_confirmation`
+instead, and are written only once the person confirms them. They flow
+back into future prompts via the existing `Cortex.get_scratchpad_context()`
+→ `recall_scratchpad_wisdom()` → scratchpad tool description injection
 chain. We add nothing to the storage layer — the cerebellum just
 generates new entries for the existing pipe.
 
@@ -38,10 +40,11 @@ Decoupling
 
 This module knows nothing about scratchpad runtimes. It exposes two
 async hook methods (`on_pre_execute`, `on_post_execute`) that take a
-`Cell` object. Whoever orchestrates execution (today: the
-`handle_scratchpad` dispatcher) is responsible for calling them at the
-right moments. The runtime backends — local, future remote, future
-Docker — are completely hook-agnostic. See discussion in v2.2 design.
+`Cell` object. Whoever orchestrates execution (today: `handle_scratchpad`
+and the inline streaming exec in `ChatSession._stream_and_handle_tools`)
+is responsible for calling them at the right moments. The runtime
+backends — local, future remote, future Docker — are completely
+hook-agnostic.
 
 Diff frequency
 ==============
@@ -64,6 +67,7 @@ that errored or warned trigger the post-turn diff.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -216,8 +220,11 @@ class Cerebellum:
 
     Cells are buffered until `flush()` is called. The diff pass runs only
     on the buffered cells that errored or warned — clean cells contribute
-    nothing. Lessons are encoded via `cortex.encode()` and flow into
-    future prompts through the existing wisdom-injection pipeline.
+    nothing. Lessons the cortex's encoding gate lets through are encoded
+    via `cortex.encode()` and flow into future prompts through the
+    existing wisdom-injection pipeline. The rest go to
+    `queue_for_confirmation`, or are dropped when it is None, so nothing
+    the person has not confirmed is written.
     """
 
     def __init__(
@@ -226,10 +233,12 @@ class Cerebellum:
         cortex: "Cortex | None",
         llm: "LLMClient | None",
         max_lessons_per_flush: int = 3,
+        queue_for_confirmation: Callable[[list[Engram]], None] | None = None,
     ) -> None:
         self._cortex = cortex
         self._llm = llm
         self._max_lessons = max_lessons_per_flush
+        self._queue_for_confirmation = queue_for_confirmation
         # Cells observed since the last flush. Indexed by insertion order.
         self._buffered: list[Cell] = []
         # Optional intent capture from pre-execute. Today we just trust the
@@ -268,8 +277,9 @@ class Cerebellum:
         empty (returns []). Safe to call multiple times (idempotent — the
         buffer is cleared each time).
 
-        Returns the lessons that were encoded, mostly for testing /
-        observability. Production code typically ignores the return value.
+        Returns the lessons the diff pass extracted, whether encoded or
+        queued for confirmation, mostly for testing / observability.
+        Production code typically ignores the return value.
         """
         if not self._buffered:
             return []
@@ -305,8 +315,9 @@ class Cerebellum:
     def reset(self) -> None:
         """Drop the current buffer without encoding anything.
 
-        Used when a turn is cancelled mid-flight — we don't want to
-        encode lessons from a turn the user backed out of.
+        The session calls it when a turn is cancelled, so no flush learns
+        from a turn the person backed out of, and in place of a flush when
+        automatic memory passes are off.
         """
         self._buffered.clear()
         self._pre_count = 0
@@ -379,7 +390,9 @@ class Cerebellum:
         return out
 
     async def _encode_lessons(self, lessons: list[CerebellumLesson]) -> None:
-        """Hand the lessons to Cortex for storage in the existing pipeline."""
+        """Encode the lessons the cortex's encoding gate lets through, and hand
+        the rest to `queue_for_confirmation`, the same split the scratchpad
+        consolidator makes."""
         engrams = [
             Engram(
                 text=lesson.text,
@@ -391,9 +404,12 @@ class Cerebellum:
             )
             for lesson in lessons
         ]
-        if not engrams:
-            return
-        await self._cortex.encode(engrams)
+        auto_encode = [e for e in engrams if not self._cortex.encoding_gate(e)]
+        needs_confirm = [e for e in engrams if self._cortex.encoding_gate(e)]
+        if needs_confirm and self._queue_for_confirmation is not None:
+            self._queue_for_confirmation(needs_confirm)
+        if auto_encode:
+            await self._cortex.encode(auto_encode)
 
 
 __all__ = ["Cerebellum", "CerebellumLesson"]

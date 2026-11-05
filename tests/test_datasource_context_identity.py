@@ -8,7 +8,12 @@ fields.
 import json
 
 from anton.core.datasources.data_vault import LocalDataVault
-from anton.utils.datasources import _connection_identity, _parse_picked_files, build_datasource_context
+from anton.utils.datasources import (
+    _connection_identity,
+    _parse_picked_files,
+    build_datasource_context,
+    collect_datasource_catalog,
+)
 
 
 class TestConnectionIdentity:
@@ -107,11 +112,78 @@ class TestUserLabelInPrompt:
         ctx = build_datasource_context(v)
         assert "Label: Support" in ctx
 
-    def test_no_label_shows_none(self, tmp_path):
+    def test_no_label_falls_back_to_the_engine(self, tmp_path):
+        # A connection nobody named reads as its engine.
         v = LocalDataVault(tmp_path)
         v.save("postgres", "a1b2c3", {"host": "db.example.com", "database": "demo"})
         ctx = build_datasource_context(v)
-        assert "Label: (none)" in ctx
+        assert "Label: postgres" in ctx
+        assert "(none)" not in ctx
+
+    def test_two_unnamed_connections_of_one_engine_get_distinct_labels(self, tmp_path):
+        v = LocalDataVault(tmp_path)
+        v.save("postgres", "a1b2c3", {"host": "a.example.com"})
+        v.save("postgres", "d4e5f6", {"host": "b.example.com"})
+        ctx = build_datasource_context(v)
+        assert ctx.count("— Label: postgres\n") == 1
+        assert ctx.count("— Label: postgres 2\n") == 1
+
+    def test_engine_fallback_skips_a_label_another_connection_stored(self, tmp_path):
+        v = LocalDataVault(tmp_path)
+        v.save("postgres", "a1b2c3", {"host": "a.example.com"})
+        v.save("postgres", "d4e5f6", {"host": "b.example.com", "_user_label": "postgres"})
+        ctx = build_datasource_context(v)
+        assert "### Slug: `postgres-d4e5f6` — Label: postgres\n" in ctx
+        assert "### Slug: `postgres-a1b2c3` — Label: postgres 2\n" in ctx
+
+    def test_unnamed_labels_stay_unique_across_engines_and_stored_suffixes(self, tmp_path):
+        v = LocalDataVault(tmp_path)
+        v.save("postgres", "a1b2c3", {"host": "a.example.com"})
+        v.save("postgres", "d4e5f6", {"host": "b.example.com"})
+        v.save("mysql", "g7h8i9", {"host": "c.example.com", "_user_label": "postgres 2"})
+        v.save("mysql", "j1k2l3", {"host": "d.example.com"})
+        labels = [
+            block.split("— Label: ", 1)[1].split("\n", 1)[0]
+            for block in (c.block for c in collect_datasource_catalog(v).connections)
+        ]
+        assert sorted(labels) == ["mysql", "postgres", "postgres 2", "postgres 3"]
+
+    def test_a_newer_unnamed_connection_takes_the_suffix(self, tmp_path):
+        # The newcomer sorts first by name; the older connection keeps its label.
+        v = LocalDataVault(tmp_path)
+        v.save("postgres", "d4e5f6", {"host": "a.example.com"})
+        v.save("postgres", "a1b2c3", {"host": "b.example.com"})
+        for name, created_at in (("d4e5f6", "2026-01-01T00:00:00"), ("a1b2c3", "2026-02-01T00:00:00")):
+            record = next(tmp_path.glob(f"*{name}*"))
+            data = json.loads(record.read_text())
+            data["created_at"] = created_at
+            record.write_text(json.dumps(data))
+        ctx = build_datasource_context(v)
+        assert "### Slug: `postgres-d4e5f6` — Label: postgres\n" in ctx
+        assert "### Slug: `postgres-a1b2c3` — Label: postgres 2\n" in ctx
+
+    def test_a_filtered_out_connection_does_not_claim_a_label(self, tmp_path):
+        v = LocalDataVault(tmp_path)
+        v.save("postgres", "a1b2c3", {"host": "a.example.com"})
+        v.save("postgres", "d4e5f6", {"host": "b.example.com", "_user_label": "postgres"})
+        catalog = collect_datasource_catalog(v, slugs={"postgres-a1b2c3"})
+        assert "— Label: postgres\n" in catalog.connections[0].block
+
+    def test_the_engine_fallback_stays_out_of_the_catalog_label(self, tmp_path):
+        v = LocalDataVault(tmp_path)
+        v.save("postgres", "a1b2c3", {"host": "db.example.com", "database": "demo"})
+        assert collect_datasource_catalog(v).connections[0].label == ""
+
+    def test_a_record_with_no_engine_still_gets_a_label(self, tmp_path):
+        v = LocalDataVault(tmp_path)
+        v.save("postgres", "a1b2c3", {"host": "db.example.com"})
+        record = next(tmp_path.glob("*a1b2c3*"))
+        data = json.loads(record.read_text())
+        data.pop("engine", None)
+        record.write_text(json.dumps(data))
+        ctx = build_datasource_context(v)
+        assert "— Label: \n" not in ctx
+        assert "— Label: " in ctx and "(none)" not in ctx
 
     def test_slug_leads_the_block_in_backticks(self, tmp_path):
         v = LocalDataVault(tmp_path)

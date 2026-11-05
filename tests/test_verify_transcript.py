@@ -8,7 +8,7 @@ injections.
 
 from __future__ import annotations
 
-from anton.core.session import _render_verify_transcript
+from anton.core.session import _CHECK_NOTE, _render_verify_transcript
 
 
 def test_keeps_prior_turn_context_for_referential_followups():
@@ -53,6 +53,17 @@ def test_omits_internal_system_injections():
     out = _render_verify_transcript(history)
     assert "SYSTEM:" not in out
     assert "Continue working" not in out
+    assert "build the dashboard" in out
+
+
+def test_omits_the_continuation_note():
+    history = [
+        {"role": "user", "content": "build the dashboard"},
+        {"role": "user", "content": f"{_CHECK_NOTE} The check judged the answer unfinished."},
+        {"role": "assistant", "content": "Working on it."},
+    ]
+    out = _render_verify_transcript(history)
+    assert "judged the answer unfinished" not in out
     assert "build the dashboard" in out
 
 

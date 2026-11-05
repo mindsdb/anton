@@ -125,8 +125,13 @@ class TurnCost:
     # Stamped at the skip/deny sites, never read from live session state at
     # emit (late finalizers would read a later turn's latch state — see the
     # note below on stamped-at-open fields). Handback terminals don't need it:
-    # their ended_by already distinguishes them.
+    # their ended_by already distinguishes them. Also stamped when a page ran
+    # out of repair cells and the check was skipped (`ChatSession._out_of_repairs`),
+    # with `verifier_failure="out_of_repairs"`; an earlier round may have had a verdict.
     verification_skipped: bool = False
+    # A model call this turn ended with the provider's content filter. The
+    # turn books ended_by="content_filter" unless it was cancelled or failed.
+    content_filtered: bool = False
     # One-time grace(s) granted this turn: "", "round", "ceiling", or
     # "ceiling,round" — alphabetical, not firing order (see `_record_grace`).
     # Without this a turn that used a grace and finished is
@@ -137,16 +142,31 @@ class TurnCost:
     # Size of the spend-ceiling grace actually granted, 0 if none. Queryable
     # alongside `grace_granted` so the size of the concession is visible.
     grace_tokens: int = 0
+    # Times the user answered "Keep going" when this turn reached its spend
+    # ceiling or round cap. With `ended_by`, says whether one answer carried
+    # the work to the end or the turn still stopped.
+    limit_continues: int = 0
+    # Times this turn's own message ("keep going", "don't stop") carried it
+    # past a limit without asking.
+    limit_message_continues: int = 0
     # WHY the completion verifier produced no verdict this turn (ENG-1858).
     # `ended_by="handback_verifier_failure"` and `verification_skipped=True`
     # both say only THAT it failed; 343 such turns / 14 days (5.3% of real
     # turns, 3x the tokens of a completed one) had no groupable cause. Values
     # are the classification the verdict loop already draws for the latch —
-    # `truncated` / `transient` / `hard` / `denied` — plus `latched_hard` /
+    # `truncated` / `transient` / `hard` / `denied`. Also `timeout`: a model
+    # call ran out its idle deadline, and the turn ended quietly on the
+    # streamed answer with `verification_skipped=True` and no latch.
+    # `verifier_error_type` names the call's role: `ModelCallTimeoutError:coding`
+    # for the verdict call itself, `:router` when compaction ran out earlier
+    # and the deadline latch failed the verdict call unsent. Plus `latched_hard` /
     # `latched_truncated` / `latched_mixed` / `latched_denied` for turns that
     # never made the call because an earlier one latched. `latched_mixed` means
     # the counted failures were not all the same class, so neither names the
-    # cause on its own. Empty when a verdict was produced or the verifier was
+    # cause on its own. `out_of_repairs` when the check was skipped because a
+    # page ran out of repair cells (`ChatSession._out_of_repairs`), though an
+    # earlier round of the turn may have had a verdict. Empty when a verdict
+    # was produced or the verifier was
     # not applicable. Stamped at the loop's exits, never read from latch
     # state at emit (late finalizers would see a later turn's latch).
     verifier_failure: str = ""
@@ -195,7 +215,9 @@ class TurnCost:
     #   "request_refused"           — the provider refused the request itself:
     #                                 a setting the model does not accept, or a
     #                                 prompt its policy blocks
-    # The last two end the turn on the first attempt, without retrying. Empty
+    #   "model_call_timeout"        — a model call sent no output for its whole
+    #                                 idle deadline
+    # The last three end the turn on the first attempt, without retrying. Empty
     # for every other terminal that did not retry.
     retry_terminal_reason: str = ""
     # WHAT kind of provider failure ended the turn — a closed vocabulary

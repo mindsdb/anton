@@ -32,7 +32,11 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, TypeAdapter
 
-from anton.core.backends.wire import CELL_DELIM, RESULT_START
+from anton.core.backends.local import LocalScratchpadRuntime, local_scratchpad_runtime_factory
+from anton.core.backends.manager import ScratchpadManager
+from anton.core.backends.wire import CELL_DELIM, INTERNET_RESEARCH_ENV, RESULT_START
+from anton.core.llm.openai import OpenAIProvider
+from anton.core.llm.tracing import TraceContext, reset_trace_context, set_trace_context
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +49,8 @@ class _SeenRequest:
     retry_count: str | None  # x-stainless-retry-count: "0" on a call's first attempt
     connection: int  # the client's source port, one per TCP connection
     prompt: str
+    session_id: str | None = None  # Langfuse-Session-Id
+    metadata: str | None = None  # Langfuse-Metadata, raw JSON
 
 
 class _InputItem(BaseModel):
@@ -70,6 +76,20 @@ class _ResponsesRequest(BaseModel):
         return next(
             item.content
             for item in self.input
+            if item.role == "user" and isinstance(item.content, str)
+        )
+
+
+class _ChatRequest(BaseModel):
+    """The fields of a chat completions request that the stub reads."""
+
+    model: str
+    messages: list[_InputItem]
+
+    def prompt(self) -> str:
+        return next(
+            item.content
+            for item in self.messages
             if item.role == "user" and isinstance(item.content, str)
         )
 
@@ -137,6 +157,24 @@ def _responses_object(request: _ResponsesRequest) -> dict[str, Any]:
     }
 
 
+def _chat_completion_object(request: _ChatRequest) -> dict[str, Any]:
+    """A non-streamed chat completion with a text answer."""
+    return {
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "created": 0,
+        "model": request.model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": f"answer to: {request.prompt()}"},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+
 # Seconds the stub waits before it answers a held prompt. The call answered at
 # once finishes and closes its client well inside this, while the held calls
 # beside it still wait for their answers.
@@ -175,20 +213,26 @@ class _ResponsesHandler(BaseHTTPRequestHandler):
         """Silent: the test reads ``server.seen`` instead."""
 
     def do_POST(self) -> None:
-        request = _ResponsesRequest.model_validate_json(
-            self.rfile.read(int(self.headers["Content-Length"]))
-        )
+        body = self.rfile.read(int(self.headers["Content-Length"]))
+        if self.path.endswith("/chat/completions"):
+            request = _ChatRequest.model_validate_json(body)
+            answer = _chat_completion_object(request)
+        else:
+            request = _ResponsesRequest.model_validate_json(body)
+            answer = _responses_object(request)
         self.server.seen.append(
             _SeenRequest(
                 path=self.path,
                 retry_count=self.headers.get("x-stainless-retry-count"),
                 connection=self.client_address[1],
                 prompt=request.prompt(),
+                session_id=self.headers.get("Langfuse-Session-Id"),
+                metadata=self.headers.get("Langfuse-Metadata"),
             )
         )
         if request.prompt() in self.server.held:
             time.sleep(_HELD_S)
-        payload = json.dumps(_responses_object(request)).encode()
+        payload = json.dumps(answer).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
@@ -210,7 +254,9 @@ def _serving(
         server.server_close()
 
 
-def _run_cells(cells: list[str], tmp_path: Path, base_url: str) -> list[_CellResult]:
+def _run_cells(
+    cells: list[str], tmp_path: Path, base_url: str, extra_env: dict[str, str] | None = None
+) -> list[_CellResult]:
     """Run ``cells`` in order in one pad process: the real boot script."""
     env = os.environ.copy()
     env.update(
@@ -221,6 +267,7 @@ def _run_cells(cells: list[str], tmp_path: Path, base_url: str) -> list[_CellRes
             "OPENAI_BASE_URL": base_url,
             "ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL": "0",
             "PYTHONPATH": str(REPO_ROOT),
+            **(extra_env or {}),
         }
     )
     completed = subprocess.run(
@@ -440,3 +487,319 @@ def test_side_by_side_calls_all_get_their_answers(tmp_path):
         "thread held",
     ], seen
     assert [request.retry_count for request in server.seen] == ["0"] * 5, seen
+
+
+# One call on the cell's own thread and one on a worker thread, which the
+# cell's context does not reach. QUESTION is set per turn.
+_TRACED_CELL = """
+from concurrent.futures import ThreadPoolExecutor
+
+def ask(prompt):
+    return get_llm().complete(system="Be brief.", messages=[{"role": "user", "content": prompt}]).content
+
+ask("QUESTION on the cell thread")
+with ThreadPoolExecutor(1) as pool:
+    pool.submit(ask, "QUESTION on a worker thread").result()
+"""
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("provider", "path"),
+    [("openai", "/v1/responses"), ("openai-compatible", "/v1/chat/completions")],
+    ids=["responses-api", "chat-completions"],
+)
+async def test_a_cells_model_calls_carry_its_turns_trace_and_role(
+    tmp_path, monkeypatch, provider, path
+):
+    """Two turns on one pad, then a cell outside any turn. Each call carries
+    the trace of the turn that ran its cell, not the one the pad started in,
+    and the cell outside a turn carries none."""
+    monkeypatch.setenv("ANTON_LANGFUSE_HEADERS", "1")
+    with _serving() as server:
+        pad = LocalScratchpadRuntime(
+            name="trace",
+            coding_provider=provider,
+            coding_model="stub-model",
+            coding_api_key="test-key",
+            coding_base_url=f"http://127.0.0.1:{server.server_port}/v1",
+            _venvs_base=tmp_path / "venvs",
+        )
+        await pad.start()
+        try:
+            for turn_id, question in enumerate(("q1", "q2"), start=1):
+                token = set_trace_context(
+                    TraceContext(
+                        session_id="conv-1",
+                        turn_id=turn_id,
+                        harness="anton",
+                        metadata={"question_id": question},
+                    )
+                )
+                try:
+                    cell = await pad.execute(_TRACED_CELL.replace("QUESTION", question))
+                finally:
+                    reset_trace_context(token)
+                assert cell.error is None, cell.error
+            cell = await pad.execute(_TRACED_CELL.replace("QUESTION", "none"))
+            assert cell.error is None, cell.error
+        finally:
+            await pad.cleanup()
+
+    def traced(request: _SeenRequest) -> tuple:
+        meta = json.loads(request.metadata) if request.metadata else {}
+        return (
+            request.prompt,
+            request.session_id,
+            meta.get("question_id"),
+            meta.get("turn_id"),
+            meta.get("role"),
+        )
+
+    assert {request.path for request in server.seen} == {path}
+    assert sorted(map(traced, server.seen)) == [
+        ("none on a worker thread", None, None, None, None),
+        ("none on the cell thread", None, None, None, None),
+        ("q1 on a worker thread", "conv-1", "q1", 1, "coding"),
+        ("q1 on the cell thread", "conv-1", "q1", 1, "coding"),
+        ("q2 on a worker thread", "conv-1", "q2", 2, "coding"),
+        ("q2 on the cell thread", "conv-1", "q2", 2, "coding"),
+    ]
+
+
+_ASK_CELL = 'print(get_llm().complete(system="s", messages=[{"role": "user", "content": "hi"}]).content)'
+
+
+async def _run_on_pad(tmp_path, base_url, code):
+    pad = LocalScratchpadRuntime(
+        name="usage",
+        coding_provider="openai-compatible",
+        coding_model="stub-model",
+        coding_api_key="test-key",
+        coding_base_url=base_url,
+        _venvs_base=tmp_path / "venvs",
+    )
+    await pad.start()
+    token = set_trace_context(TraceContext(session_id="conv-1", metadata={"turn": "1"}))
+    try:
+        return await pad.execute(code)
+    finally:
+        reset_trace_context(token)
+        await pad.cleanup()
+
+
+@pytest.mark.slow
+async def test_a_cells_model_call_is_logged_by_the_host_not_in_its_output(tmp_path, monkeypatch, usage_lines):
+    """The pad's log is the cell output the model reads, so a cell's call sends
+    its usage to the host, which logs it with the cell's turn."""
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    with _serving() as server:
+        cell = await _run_on_pad(tmp_path, f"http://127.0.0.1:{server.server_port}/v1", _ASK_CELL)
+
+    assert cell.error is None, cell.error
+    assert "llm_usage" not in cell.stdout + cell.stderr + cell.logs
+    (line,) = usage_lines()
+    assert (line["conversation"], line["turn"], line["role"]) == ("conv-1", "1", "coding")
+    assert (line["model"], line["input"], line["output"]) == ("stub-model", 1, 1)
+
+
+@pytest.mark.slow
+async def test_a_killed_cell_keeps_the_usage_of_the_calls_it_made(tmp_path, monkeypatch, usage_lines):
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "3")
+    with _serving() as server:
+        cell = await _run_on_pad(tmp_path, f"http://127.0.0.1:{server.server_port}/v1",
+                                 _ASK_CELL + "\nimport time\ntime.sleep(60)")
+
+    assert cell.error and "timed out" in cell.error
+    assert len(usage_lines()) == 1
+
+
+@pytest.mark.slow
+async def test_a_cell_sends_no_usage_when_the_host_log_is_off(tmp_path, monkeypatch, usage_lines):
+    monkeypatch.delenv("ANTON_USAGE_LOG", raising=False)
+    with _serving() as server:
+        cell = await _run_on_pad(tmp_path, f"http://127.0.0.1:{server.server_port}/v1", _ASK_CELL)
+
+    assert cell.error is None, cell.error
+    assert usage_lines() == []
+
+
+@pytest.mark.slow
+async def test_a_cell_cannot_write_a_usage_line_when_the_host_log_is_off(tmp_path, monkeypatch, usage_lines):
+    monkeypatch.delenv("ANTON_USAGE_LOG", raising=False)
+    forged = 'import sys\nsys.__stdout__.write(\'__ANTON_USAGE__ {"input": 1}\\n\')\nsys.__stdout__.flush()'
+    cell = await _run_on_pad(tmp_path, "http://127.0.0.1:9/v1", forged)
+
+    assert cell.error is None, cell.error
+    assert usage_lines() == []
+
+
+@pytest.mark.slow
+async def test_a_cell_cannot_put_its_usage_on_another_conversation(tmp_path, monkeypatch, usage_lines):
+    """The host names the conversation and turn; the pad only reports counts and models."""
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    sent = {"conversation": "conv-2", "turn": "9", "input": 1000000, "output": True,
+            "cache_read": -5, "model": "m", "note": "anything"}
+    forged = (f"import sys\nsys.__stdout__.write('__ANTON_USAGE__ {json.dumps(sent)}\\n')\n"
+              "sys.__stdout__.flush()")
+    cell = await _run_on_pad(tmp_path, "http://127.0.0.1:9/v1", forged)
+
+    assert cell.error is None, cell.error
+    (line,) = usage_lines()
+    assert (line["conversation"], line["turn"]) == ("conv-1", "1")
+    assert (line["input"], line["output"], line["cache_read"], line["model"]) == (1000000, 0, 0, "m")
+    assert "note" not in line
+
+
+@pytest.mark.slow
+async def test_an_unreadable_usage_line_is_logged_without_its_content(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    caplog.set_level("INFO")
+    broken = "import sys\nsys.__stdout__.write('__ANTON_USAGE__ token=secret-value\\n')\nsys.__stdout__.flush()"
+    cell = await _run_on_pad(tmp_path, "http://127.0.0.1:9/v1", broken)
+
+    assert cell.error is None, cell.error
+    assert "unreadable scratchpad usage line" in caplog.text
+    assert "secret-value" not in caplog.text
+
+
+def test_a_cell_line_that_starts_like_the_trace_marker_stays_code(tmp_path):
+    """Only the marker followed by a JSON object is a trace line."""
+    (cell,) = _run_cells(
+        ["__ANTON_CELL_TRACE__ = 1\nprint(__ANTON_CELL_TRACE__)"],
+        tmp_path,
+        base_url="http://127.0.0.1:9/v1",
+    )
+
+    assert cell.error is None, cell.error
+    assert cell.stdout.strip() == "1"
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("flavor", "path"),
+    [
+        (OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC, "/v1/chat/completions"),
+        (OpenAIProvider.FLAVOR_OPENAI, "/v1/responses"),
+    ],
+    ids=["chat-completions", "responses-api"],
+)
+async def test_a_cells_model_calls_use_the_api_its_coding_provider_sends_on(tmp_path, flavor, path):
+    """A pad's model calls go where the agent's coding provider sends its own.
+
+    Every OpenAIProvider exports the name "openai", and that name alone sends a
+    pad on a host that isn't MindsHub's to the Responses API. A provider on chat
+    completions behind a model route would then get pad calls on a path its
+    endpoint may not serve. Built from the provider's own export, through the
+    manager and the real local runtime, as ChatSession builds it.
+    """
+    with _serving() as server:
+        base_url = f"http://127.0.0.1:{server.server_port}/v1"
+        conn = OpenAIProvider(api_key="test-key", base_url=base_url, flavor=flavor).export_connection_info()
+        manager = ScratchpadManager(
+            runtime_factory=local_scratchpad_runtime_factory,
+            coding_provider=conn.provider,
+            coding_model="stub-model",
+            coding_api_key=conn.api_key or "",
+            coding_base_url=conn.base_url or "",
+            coding_flavor=conn.flavor,
+            workspace_path=tmp_path,
+        )
+        try:
+            pad = await manager.get_or_create("flavor")
+            cell = await pad.execute(_ASK_CELL)
+        finally:
+            await manager.close_all()
+
+    assert cell.error is None, cell.error
+    assert conn.provider == "openai"
+    assert [request.path for request in server.seen] == [path]
+
+
+@pytest.mark.slow
+async def test_a_pad_with_no_flavor_keeps_inferring_it_and_ignores_an_inherited_one(tmp_path, monkeypatch):
+    """A host that passes no flavor keeps today's inference, and an inherited
+    ANTON_SCRATCHPAD_FLAVOR must not reach the pad and override it."""
+    monkeypatch.setenv("ANTON_SCRATCHPAD_FLAVOR", OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC)
+    with _serving() as server:
+        pad = LocalScratchpadRuntime(
+            name="no-flavor",
+            coding_provider="openai",
+            coding_model="stub-model",
+            coding_api_key="test-key",
+            coding_base_url=f"http://127.0.0.1:{server.server_port}/v1",
+            _venvs_base=tmp_path / "venvs",
+        )
+        await pad.start()
+        try:
+            cell = await pad.execute(_ASK_CELL)
+        finally:
+            await pad.cleanup()
+
+    assert cell.error is None, cell.error
+    assert [request.path for request in server.seen] == ["/v1/responses"]
+
+
+def test_an_unknown_flavor_falls_back_to_the_inferred_one(tmp_path):
+    """A flavor the boot script doesn't know must not reach OpenAIProvider."""
+    with _serving() as server:
+        (cell,) = _run_cells(
+            [_ASK_CELL],
+            tmp_path,
+            base_url=f"http://127.0.0.1:{server.server_port}/v1",
+            extra_env={"ANTON_SCRATCHPAD_FLAVOR": "not-a-flavor"},
+        )
+
+    assert cell.error is None, cell.error
+    assert [request.path for request in server.seen] == ["/v1/responses"]
+
+
+# With internet research off the pad's web_search() raises before any model
+# call: the session answers from the connected data only.
+_WEB_SEARCH_CELL = 'print(web_search("latest news"))'
+
+
+def test_web_search_raises_without_a_model_call_when_internet_research_is_off(tmp_path):
+    with _serving() as server:
+        web, ask = _run_cells(
+            [_WEB_SEARCH_CELL, _ASK_CELL],
+            tmp_path,
+            base_url=f"http://127.0.0.1:{server.server_port}/v1",
+            extra_env={INTERNET_RESEARCH_ENV: "off"},
+        )
+
+    assert web.error is not None and "Internet research is turned off" in web.error
+    # get_llm() is not internet research: the pad's other model calls still work.
+    assert ask.error is None, ask.error
+    assert len(server.seen) == 1
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("enabled", [False, True], ids=["off", "on"])
+async def test_the_session_flag_decides_web_search_whatever_the_pad_inherits(tmp_path, monkeypatch, enabled):
+    """Through the manager and the real local runtime, as ChatSession builds
+    them. An inherited value must not decide it either way."""
+    monkeypatch.setenv(INTERNET_RESEARCH_ENV, "on" if not enabled else "off")
+    with _serving() as server:
+        manager = ScratchpadManager(
+            runtime_factory=local_scratchpad_runtime_factory,
+            coding_provider="openai",
+            coding_model="stub-model",
+            coding_api_key="test-key",
+            coding_base_url=f"http://127.0.0.1:{server.server_port}/v1",
+            workspace_path=tmp_path,
+            internet_research_enabled=enabled,
+        )
+        try:
+            pad = await manager.get_or_create("research")
+            cell = await pad.execute(_WEB_SEARCH_CELL)
+        finally:
+            await manager.close_all()
+
+    if enabled:
+        assert cell.error is None, cell.error
+        assert len(server.seen) == 1
+    else:
+        assert cell.error is not None and "Internet research is turned off" in cell.error
+        assert server.seen == []

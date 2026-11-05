@@ -1,0 +1,293 @@
+# Everyday cells a data-analysis agent writes, none of which changes a
+# database, a listed endpoint or a file that was there when the turn began.
+# Each must raise no card in each context below: a false hold costs an
+# unattended answer the whole card timeout, and a card on every plot teaches
+# the person who approves to click Approve without reading.
+#
+# Read by tests/test_write_check.py::test_everyday_cells_raise_no_card, which
+# runs every cell after every context's earlier cells, against a project
+# that holds stock.csv, with the HTTP rule below.
+#
+# Each context has:
+#   name     a short phrase saying what ran before; part of the test's id.
+#   earlier  the conversation's earlier cells, oldest first.
+#
+# Each cell has:
+#   name     a short phrase saying what the cell does; part of the test's id.
+#   code     the cell.
+
+rule: "POST https://erp.example.test/**"
+
+contexts:
+  - name: a fresh conversation
+    earlier: []
+
+  - name: after an exec of a script the check can't read
+    earlier:
+      - |-
+        SCRIPT = open('job.txt').read()
+      - |-
+        exec(compile(SCRIPT, 'job', 'exec'))
+
+  - name: after helpers and a literal exec
+    earlier:
+      - |-
+        import pandas as pd
+        def load(path):
+            return pd.read_csv(path)
+        def summarize(df):
+            return df.describe()
+      - |-
+        exec("def double(x):\n    return 2 * x\n")
+
+cells:
+  - name: read a csv and describe it
+    code: |-
+      import pandas as pd
+      df = pd.read_csv('stock.csv')
+      print(df.describe())
+      print(df.head())
+
+  - name: group and aggregate a frame
+    code: |-
+      import pandas as pd
+      df = pd.read_csv('stock.csv')
+      totals = df.groupby('site').agg(qty=('qty', 'sum'), lines=('qty', 'size')).reset_index()
+      print(totals.sort_values('qty', ascending=False).head(10))
+
+  - name: a plot with a flat subplots unpack, saved to a new file
+    code: |-
+      import matplotlib.pyplot as plt
+      fig, ax = plt.subplots(figsize=(8, 4))
+      ax.plot([1, 2, 3], [4, 5, 6])
+      fig.savefig('trend.png')
+
+  - name: a plot with a nested subplots unpack
+    code: |-
+      import matplotlib.pyplot as plt
+      fig, (ax1, ax2) = plt.subplots(1, 2)
+      ax1.plot([1, 2], [3, 4])
+      ax2.bar(['a', 'b'], [1, 2])
+      fig.savefig('two_panels.png')
+
+  - name: a grid of subplots unpacked by rows
+    code: |-
+      import matplotlib.pyplot as plt
+      fig, ((a, b), (c, d)) = plt.subplots(2, 2)
+      for axis in (a, b, c, d):
+          axis.set_title('panel')
+      plt.tight_layout()
+
+  - name: a train and test split unpacked in nested tuples
+    code: |-
+      import pandas as pd
+      df = pd.read_csv('stock.csv')
+      (train, test), n = (df[:5], df[5:]), 2
+      print(len(train), len(test), n)
+
+  - name: a seaborn chart
+    code: |-
+      import seaborn as sns
+      import pandas as pd
+      df = pd.read_csv('stock.csv')
+      sns.histplot(df['qty']).figure.savefig('qty_hist.png')
+
+  - name: a GET request with parameters
+    code: |-
+      import requests
+      r = requests.get('https://erp.example.test/api/orders', params={'status': 'open'}, timeout=30)
+      r.raise_for_status()
+      orders = r.json()
+      print(len(orders))
+
+  - name: GET requests over pages
+    code: |-
+      import requests
+      rows = []
+      page = 1
+      while True:
+          r = requests.get('https://erp.example.test/api/orders', params={'page': page}, timeout=30)
+          batch = r.json()
+          if not batch:
+              break
+          rows.extend(batch)
+          page += 1
+      print(len(rows))
+
+  - name: GET requests in a thread pool
+    code: |-
+      import requests
+      from concurrent.futures import ThreadPoolExecutor
+      def fetch(sid):
+          return requests.get(f'https://erp.example.test/api/suppliers/{sid}', timeout=30).json()
+      with ThreadPoolExecutor(max_workers=4) as pool:
+          suppliers = list(pool.map(fetch, ['S001', 'S002', 'S003']))
+      print(suppliers)
+
+  - name: a sqlite select on a new in-memory database
+    code: |-
+      import sqlite3
+      import pandas as pd
+      con = sqlite3.connect(':memory:')
+      pd.read_csv('stock.csv').to_sql('stock', con, index=False)
+      print(pd.read_sql('SELECT site, SUM(qty) AS qty FROM stock GROUP BY site', con))
+
+  - name: numpy and statistics
+    code: |-
+      import numpy as np
+      values = np.array([3.0, 4.5, 6.1, 2.2])
+      print(values.mean(), values.std(), np.percentile(values, 90))
+      print(np.corrcoef(values, values[::-1]))
+
+  - name: a helper function defined and called in the cell
+    code: |-
+      def pct(part, whole):
+          return round(100 * part / whole, 1) if whole else 0.0
+      print(pct(3, 4), pct(0, 0))
+
+  - name: a class with methods
+    code: |-
+      class Supplier:
+          def __init__(self, sid, lead_time_days):
+              self.sid = sid
+              self.lead_time_days = lead_time_days
+          def late(self, days):
+              return days > self.lead_time_days
+      s = Supplier('S005', 14)
+      print(s.late(21))
+
+  - name: a dataclass
+    code: |-
+      from dataclasses import dataclass
+      @dataclass
+      class Line:
+          part: str
+          qty: int
+      lines = [Line('P1', 3), Line('P2', 0)]
+      print([line for line in lines if line.qty])
+
+  - name: try and except around a parse
+    code: |-
+      import json
+      try:
+          data = json.loads('{"qty": 1}')
+      except json.JSONDecodeError as exc:
+          data = {}
+          print('bad json', exc)
+      print(data.get('qty'))
+
+  - name: comprehensions, enumerate and zip
+    code: |-
+      names = ['a', 'b', 'c']
+      sizes = [3, 1, 2]
+      ranked = sorted(zip(names, sizes), key=lambda pair: pair[1], reverse=True)
+      print({i: name for i, (name, _) in enumerate(ranked)})
+
+  - name: dates and f-strings
+    code: |-
+      from datetime import date, timedelta
+      start = date(2026, 10, 1)
+      days = [(start + timedelta(days=k)).isoformat() for k in range(7)]
+      print(f'{len(days)} days from {days[0]} to {days[-1]}')
+
+  - name: timeit with a lambda
+    code: |-
+      import timeit
+      print(timeit.timeit(lambda: sum(range(1000)), number=100))
+
+  - name: a csv export per row named by an origin column
+    code: |-
+      import pandas as pd
+      df = pd.DataFrame({'origin': ['JFK', 'SFO'], 'delay': [5, 9]})
+      for row in df.itertuples():
+          df[df['origin'] == row.origin].to_csv(f'delays_{row.origin}.csv', index=False)
+
+  - name: a report written to a new markdown file
+    code: |-
+      lines = ['# Report', '', 'All sites are within plan.']
+      with open('report.md', 'w') as f:
+          f.write('\n'.join(lines))
+
+  - name: model weights saved as a .pth file in the project
+    code: |-
+      import torch
+      model = torch.nn.Linear(4, 1)
+      with open('model.pth', 'wb') as f:
+          torch.save(model.state_dict(), f)
+
+  - name: model weights downloaded to a .pth file in the project
+    code: |-
+      import requests
+      r = requests.get('https://download.example.test/resnet18.pth', timeout=60)
+      with open('resnet18.pth', 'wb') as f:
+          f.write(r.content)
+
+  - name: an archive of results made with tar
+    code: |-
+      import subprocess
+      subprocess.run(['tar', 'czf', 'results.tgz', 'report.md'], check=True)
+
+  - name: an archive listed with unzip
+    code: |-
+      import subprocess
+      print(subprocess.run(['unzip', '-l', 'bundle.zip'], capture_output=True, text=True).stdout)
+
+  - name: an archive made with shutil
+    code: |-
+      import shutil
+      shutil.make_archive('results', 'zip', '.', 'report.md')
+
+  - name: a path appended to sys.path, then an installed package
+    code: |-
+      import sys
+      sys.path.append('helpers')
+      import pandas as pd
+      print(pd.__version__)
+
+  - name: an installed package by name
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-m', 'pip', 'install', 'openpyxl'], check=True)
+
+  - name: git and ls through subprocess
+    code: |-
+      import subprocess
+      print(subprocess.run(['git', 'status'], capture_output=True, text=True).stdout)
+      print(subprocess.run(['ls', '-la'], capture_output=True, text=True).stdout)
+
+  - name: an import of an installed module by name through importlib
+    code: |-
+      import importlib
+      json_module = importlib.import_module('json')
+      print(json_module.dumps({'ok': True}))
+
+  - name: a regular expression and files listed by glob
+    code: |-
+      import glob, re
+      pattern = re.compile(r'^report_(\d{4})\.md$')
+      print([name for name in glob.glob('*.md') if pattern.match(name)])
+
+  - name: a file read through a with block
+    code: |-
+      with open('stock.csv') as f:
+          text = f.read()
+      print(len(text.splitlines()))
+
+  - name: a chain of helpers each called many times
+    code: |-
+      def h0(x):
+          return str(x).strip()
+      def h1(x):
+          return [h0(x), h0(x), h0(x), h0(x), h0(x), h0(x)]
+      def h2(x):
+          return [h1(x), h1(x), h1(x), h1(x), h1(x), h1(x)]
+      def h3(x):
+          return [h2(x), h2(x), h2(x), h2(x), h2(x), h2(x)]
+      def h4(x):
+          return [h3(x), h3(x), h3(x), h3(x), h3(x), h3(x)]
+      print(len(h4(open('stock.csv').read())))
+
+  - name: the pad's progress helper
+    code: |-
+      for k in range(3):
+          progress(f'step {k + 1} of 3')

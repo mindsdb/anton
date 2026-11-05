@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -78,6 +79,56 @@ def test_cloud_turn_fails_on_a_non_terminal_event(smoke, monkeypatch):
     )
     (failure,) = smoke.check_cloud_turn()
     assert "turn_failed" in failure
+
+
+_TERMINAL = json.dumps({"kind": "turn_failed", "error": "JSONDecodeError: ..."}).encode() + b"\n"
+_DIRECT_RUN = b"cloud-turn launcher: running the turn directly: no resident process\n"
+_linux_only = pytest.mark.skipif(sys.platform != "linux", reason="the resident process is Linux only")
+
+
+def test_launcher_without_resident_passes_on_a_reported_direct_run(smoke, monkeypatch):
+    monkeypatch.setattr(smoke, "run_command", lambda _: _completed(0, _TERMINAL, _DIRECT_RUN))
+    assert smoke.check_launcher_without_resident() == []
+
+
+def test_launcher_without_resident_fails_when_the_direct_run_is_unreported(smoke, monkeypatch):
+    """With nothing listening the turn can only have run directly; not saying so
+    means the fallback's one diagnostic line is gone from the controller's logs."""
+    monkeypatch.setattr(smoke, "run_command", lambda _: _completed(0, _TERMINAL))
+    (failure,) = smoke.check_launcher_without_resident()
+    assert "without reporting the direct run" in failure
+
+
+def test_launcher_without_resident_fails_when_the_launcher_dies(smoke, monkeypatch):
+    monkeypatch.setattr(smoke, "run_command", lambda _: _completed(127, b"", b"cloud-turn: not found"))
+    (failure,) = smoke.check_launcher_without_resident()
+    assert "exited 127" in failure
+
+
+@_linux_only
+def test_launcher_through_resident_passes_against_the_real_resident(smoke, monkeypatch):
+    from anton.cloud_turn import launcher
+
+    monkeypatch.setattr(smoke, "LAUNCHER_CMD", [sys.executable, "-I", "-S", launcher.__file__])
+    monkeypatch.setattr(smoke, "RESIDENT_CMD", [sys.executable, "-m", "anton.cloud_turn.resident"])
+    assert smoke.check_launcher_through_resident() == []
+
+
+@_linux_only
+def test_launcher_through_resident_fails_when_the_resident_dies(smoke, monkeypatch):
+    monkeypatch.setattr(smoke, "RESIDENT_CMD", [sys.executable, "-c", "raise SystemExit(3)"])
+    failures = smoke.check_launcher_through_resident()
+    assert any("never became ready" in f for f in failures)
+    assert any("exited 3" in f for f in failures)
+
+
+@_linux_only
+def test_launcher_through_resident_fails_when_the_turn_ran_directly(smoke, monkeypatch):
+    """A terminal event alone does not prove the resident served the turn."""
+    monkeypatch.setattr(smoke, "RESIDENT_CMD", [sys.executable, "-m", "anton.cloud_turn.resident"])
+    monkeypatch.setattr(smoke, "run_command", lambda _: _completed(0, _TERMINAL, _DIRECT_RUN))
+    (failure,) = smoke.check_launcher_through_resident()
+    assert "ran the turn directly instead" in failure
 
 
 def test_a_check_that_raises_is_reported_not_swallowed(smoke):

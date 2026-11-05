@@ -106,6 +106,9 @@ class AntonSettings(CoreSettings):
     # (Exa or Brave); web_fetch always falls back to stdlib HTTP.
     web_search_enabled: bool = True
     web_fetch_enabled: bool = True
+    # False: the agent answers from the connected data only — see
+    # ChatSessionConfig.internet_research_enabled.
+    internet_research_enabled: bool = True
 
     # Case 3 fallback — only consulted when the LLM provider lacks native web
     # search and the user is on a generic OpenAI-compatible endpoint.
@@ -117,6 +120,12 @@ class AntonSettings(CoreSettings):
     # Read-only skill roots the host ships alongside its own tools (ENG-764).
     # Take precedence over anton's built-ins; user skills still shadow them.
     skills_extra_roots: list[Path] | None = None
+    # Folders whose skills marked `applies_to: artifacts` an artifact build
+    # follows without a recall, named by the host per turn. anton's built-ins
+    # are always followed. None: the host named none, so a session with
+    # extra roots (a host's) follows only the built-ins, and one without (the
+    # CLI) also follows `skills_root`. See `SkillStore.list_for_artifacts`.
+    skills_artifact_roots: list[Path] | None = None
     # Staging area for skills the agent builds, drained by the host at end of
     # turn. Unset means the agent gets no skill-authoring tool:
     # - a host with no drafts area has nowhere to put a built skill
@@ -149,6 +158,10 @@ class AntonSettings(CoreSettings):
     # inline instead of stopping to ask. False = cautious ask-first discipline.
     act_first: bool = True
 
+    # False drops the DIRECT REPORTS path from the prompts and tool texts, so
+    # every web artifact goes through `generate_artifact`.
+    direct_reports: bool = True
+
     disable_autoupdates: bool = False
 
     terms_consent: bool = False
@@ -176,6 +189,11 @@ class AntonSettings(CoreSettings):
     # "" to disable the direct sink.
     posthog_host: str = "https://us.i.posthog.com"
     posthog_key: str = "phc_ypFMKbvAwRsLuDCToox2AkEg5wx6ReBfkyi3kX2zw6VK"
+
+    # Names the deployment that sent an event (`prod`, `staging`, `dev`, ...).
+    # Set by the host that knows it; empty wherever none does, such as the CLI,
+    # so empty means "unknown", never "prod".
+    deployment_env: str = ""
 
     # Minds datasource integration
     minds_api_key: str | None = None
@@ -227,6 +245,12 @@ class AntonSettings(CoreSettings):
                     self.openai_base_url = f"{base}/v1"
 
     _workspace: Path = PrivateAttr(default=None)
+
+    @property
+    def effective_memory_mode(self) -> str:
+        """The mode the cortex runs in: `memory_mode`, or "off" when
+        `memory_enabled` is false, so a disabled memory writes nothing."""
+        return self.memory_mode if self.memory_enabled else "off"
 
     @property
     def workspace_path(self) -> Path:

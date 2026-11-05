@@ -28,6 +28,8 @@ from pathlib import Path
 
 from anton.core.artifacts.internal_files import DISCOVERY_FILENAME
 
+from ..state import DEFAULT_USER_LANGUAGE, language_name
+
 # ── Pipeline stages ─────────────────────────────────────────────────────────
 # Written at each transition. A failure or a budget stop does NOT advance the
 # stage: it stays at what the run actually completed, which is what makes a
@@ -79,7 +81,10 @@ def request_fingerprint(user_request: str) -> str:
 
 
 def call_fingerprint(
-    agent_understanding: str, known_data: str, user_preferences: str
+    agent_understanding: str,
+    known_data: str,
+    user_preferences: str,
+    user_language: str = "",
 ) -> str:
     """Identity of the CALL's soft fields. An optimization only.
 
@@ -87,7 +92,14 @@ def call_fingerprint(
     either direction is cheap: a needless redraw costs one call, a missed one
     shows the user an unchanged brief they will still see reflected in the PRD.
     """
-    return fingerprint(agent_understanding, known_data, user_preferences)
+    # The language the steps actually write in, casefolded: "" and "English",
+    # or "English" and "english", must not redraw a confirmed brief. English
+    # adds no field, so a checkpoint saved before the language existed still
+    # matches an English call.
+    language = language_name(user_language).casefold()
+    if language == DEFAULT_USER_LANGUAGE.casefold():
+        return fingerprint(agent_understanding, known_data, user_preferences)
+    return fingerprint(agent_understanding, known_data, user_preferences, language)
 
 
 @dataclass
@@ -113,6 +125,14 @@ class DiscoveryCheckpoint:
     # `Attachment.to_dict()` records: a resumed run must still know
     # which files the user provided, and which assets were already staged.
     attachments: list[dict] = field(default_factory=list)
+    # The data the calling agent passed in. A call that continues the same
+    # run and leaves `known_data` empty builds from this copy: a source
+    # verified by it on the earlier call must not reach the generators
+    # without its rows. A new iteration does not inherit it.
+    known_data: str = ""
+    # `GenState.known_data_verified`: what a new iteration without
+    # `known_data` has to read again.
+    known_data_verified: list[str] = field(default_factory=list)
 
 
 def load(artifact_path: Path) -> DiscoveryCheckpoint | None:

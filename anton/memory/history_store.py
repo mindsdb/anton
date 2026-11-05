@@ -86,8 +86,8 @@ def repair_replayed_tool_ids(history: list[dict]) -> tuple[list[dict], int]:
 
         Not `uuid4`, and that is the whole point. This repair is re-applied on
         every load and is never written back: cowork-server leaves
-        `history_store` unset, and it persists only `session.history[seed_len:]`
-        — this turn's messages — so the repaired seed never reaches the
+        `history_store` unset, and it persists only this turn's messages
+        (`ChatSession.turn_messages()`), so the repaired seed never reaches the
         `messages` table. A random id would therefore differ on every turn,
         changing the replayed prefix each time and missing the prompt cache on
         the WHOLE conversation, forever, for exactly the conversations being

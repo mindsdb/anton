@@ -67,11 +67,12 @@ def _build_scratchpad_manager(
     llm_client = llm_client or LLMClient.from_settings(settings)
     coding_conn = llm_client.coding_provider.export_connection_info()
     return ScratchpadManager(
-        runtime_factory=get_runtime_factory(settings),
+        runtime_factory=get_runtime_factory(settings, cancel_ends_turn=False),
         coding_provider=coding_conn.provider,
         coding_model=llm_client.coding_model,
         coding_api_key=coding_conn.api_key or "",
         coding_base_url=coding_conn.base_url or "",
+        coding_flavor=coding_conn.flavor,
         workspace_path=settings.workspace_path,
         # Without a vault the manager cannot derive a pad's DS_* and the pad
         # falls back to inheriting the whole process env.
@@ -664,6 +665,8 @@ def main(
     ),
 ) -> None:
     """Anton — a self-evolving autonomous system."""
+    from anton.diagnostics import configure_logging
+    configure_logging()
     from anton.config.settings import AntonSettings
 
     settings = AntonSettings()
@@ -1897,7 +1900,10 @@ def connect_data_source(
 
     llm_client = LLMClient.from_settings(settings)
     scratchpads = _build_scratchpad_manager(settings, llm_client)
-    session = ChatSession(ChatSessionConfig(llm_client=llm_client))
+    session = ChatSession(ChatSessionConfig(
+        llm_client=llm_client,
+        runtime_factory=get_runtime_factory(settings, cancel_ends_turn=False),
+    ))
 
     async def _run() -> None:
         await handle_connect_datasource(
@@ -1932,7 +1938,10 @@ def edit_data_source(
 
     llm_client = LLMClient.from_settings(settings)
     scratchpads = _build_scratchpad_manager(settings, llm_client)
-    session = ChatSession(ChatSessionConfig(llm_client=llm_client))
+    session = ChatSession(ChatSessionConfig(
+        llm_client=llm_client,
+        runtime_factory=get_runtime_factory(settings, cancel_ends_turn=False),
+    ))
 
     async def _run() -> None:
         await handle_connect_datasource(

@@ -67,6 +67,30 @@ def test_stray_then_failure_stays_clean(tmp_path):
     assert "boom" in events[-1]["error"]
 
 
+@pytest.mark.parametrize("mode", ["provider_fail", "provider_fail_root_configured"])
+def test_provider_bodies_stay_off_stderr_for_every_logger(tmp_path, mode):
+    """The real entrypoint filters at its stderr handler, so a record from any
+    logger, not only the entrypoint's own, prints without the provider body.
+    A root handler installed before main() is replaced, not kept unfiltered."""
+    from tests.cloud_turn_fake_entry import PROVIDER_PRIVATE
+
+    _, events, stdout, stderr = _run_cli(_req(), workspace=tmp_path, mode=mode)
+    assert events == [{"kind": "turn_failed", "error": "RuntimeError: could not finish the turn"}]
+    assert PROVIDER_PRIVATE not in stdout
+    assert PROVIDER_PRIVATE not in stderr
+    records = [json.loads(line) for line in stderr.splitlines()]
+    expected = {"anton.core.session": ("WARNING", "RuntimeError"),
+                "anton.cloud_turn.__main__.child": ("ERROR", "RateLimitError"),
+                "anton.cloud_turn.__main__": ("ERROR", "RuntimeError")}
+    for name, (level, error_type) in expected.items():
+        record = next(record for record in records if record["logger"] == name)
+        assert record["log_level"] == level
+        assert record["error_type"] == error_type
+        assert record["provider_error"] == "RateLimitError"
+        assert record["status_code"] == 429
+
+
+
 def test_malformed_input_clean_protocol(tmp_path):
     _, events, stdout, _ = _run_cli("{not valid json", workspace=tmp_path)
     assert len(events) == 1 and events[0]["kind"] == "turn_failed"

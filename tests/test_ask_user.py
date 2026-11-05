@@ -23,7 +23,11 @@ from anton.core.llm.provider import (
     StreamTaskProgress,
 )
 from anton.core.tools.tool_defs import ASK_USER_TOOL
-from anton.core.tools.tool_handlers import build_ask_request, handle_ask_user
+from anton.core.tools.tool_handlers import (
+    UNANSWERED_QUESTION_REASONS,
+    build_ask_request,
+    handle_ask_user,
+)
 
 
 def _choice(**over) -> AskRequest:
@@ -456,12 +460,33 @@ async def test_handler_serializes_each_status(make_session):
             AskAnswer(status="answered", values=("pg", "my"), text="and duckdb"),
             {"status": "answered", "values": ["pg", "my"], "text": "and duckdb"},
         ),
-        (AskAnswer(status="cancelled"), {"status": "cancelled"}),
-        (AskAnswer(status="timeout"), {"status": "timeout"}),
     ]
     for answer, expected in cases:
         session = _wired(make_session, _RecordingElicitor(answer=answer))
         assert json.loads(await handle_ask_user(session, _TC_INPUT)) == expected
+
+
+@pytest.mark.parametrize("status", ["timeout", "cancelled"])
+async def test_an_unanswered_question_tells_the_model_to_end_its_turn(make_session, status):
+    """An approval question that timed out once ended in the change it asked
+    about: "proceed on a stated assumption" made the assumption the approval."""
+    session = _wired(make_session, _RecordingElicitor(answer=AskAnswer(status=status)))
+    outcome = await handle_ask_user(session, _TC_INPUT)
+    result = json.loads(outcome.content)
+    assert result["status"] == status
+    assert "Do not act on an assumed answer" in result["message"]
+    assert "End your turn" in result["message"]
+    # The text only asks; the reason is what makes the turn loop stop.
+    assert outcome.ok is True
+    assert outcome.reason in UNANSWERED_QUESTION_REASONS
+
+
+def test_the_tool_text_no_longer_says_to_proceed_on_an_assumption():
+    from anton.core.tools.tool_defs import ASK_USER_TOOL
+
+    for text in (ASK_USER_TOOL.description, ASK_USER_TOOL.prompt):
+        assert "proceed on an assumption" not in text
+        assert "End your turn" in text or "end your turn" in text
 
 
 async def test_handler_maps_internal_statuses_onto_error(make_session):
@@ -1169,3 +1194,28 @@ def test_gui_answer_hint_mentions_buttons_text_and_skip():
     assert "buttons" in GUI_ANSWER_HINT
     assert "free-form" in GUI_ANSWER_HINT
     assert "skip" in GUI_ANSWER_HINT
+
+
+async def test_cli_choice_accepts_an_option_label_typed_out(cli_elicitor, monkeypatch):
+    """The labels are what the user sees, so typing one picks that option."""
+    monkeypatch.setattr(
+        "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value="MySQL")
+    )
+    assert await cli_elicitor.ask("q1", _choice()) == AskAnswer(status="answered", values=("my",))
+
+
+async def test_cli_closed_choice_asks_again_instead_of_returning_text(cli_elicitor, monkeypatch):
+    """`allow_custom=False` has no own wording: unrecognised input is asked
+    again, and the caption never invites typing an answer."""
+    prompt = AsyncMock(side_effect=["sqlite please", "2"])
+    monkeypatch.setattr("anton.utils.prompt.prompt_or_cancel", prompt)
+    answer = await cli_elicitor.ask("q1", _choice(allow_custom=False))
+    assert answer == AskAnswer(status="answered", values=("my",))
+    assert prompt.await_count == 2
+    assert "type your own" not in prompt.await_args_list[0].args[0]
+
+
+async def test_cli_closed_choice_can_still_be_cancelled(cli_elicitor, monkeypatch):
+    prompt = AsyncMock(side_effect=["nope", ""])
+    monkeypatch.setattr("anton.utils.prompt.prompt_or_cancel", prompt)
+    assert (await cli_elicitor.ask("q1", _choice(allow_custom=False))).status == "cancelled"

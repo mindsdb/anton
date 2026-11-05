@@ -84,13 +84,11 @@ async def run_connection_test(
                     {task}, timeout=CONNECTION_TEST_TIMEOUT_SECONDS
                 )
                 if task not in done:
-                    # The local backend catches its own internal
-                    # CancelledError and returns a Cell instead of
-                    # re-raising, so `await task` here would silently hand
-                    # back that Cell (with a generic kill-tree message)
-                    # rather than surfacing our timeout — cancel and
-                    # discard its result/exception either way, and always
-                    # report our own message.
+                    # Cancel the test and discard whatever it ends with: the
+                    # local backend kills the test's process, then propagates
+                    # the cancel or returns its Cell under the CLI policy. A
+                    # test finishing at the same moment also returns a Cell.
+                    # Either way the report carries our own timeout message.
                     task.cancel()
                     try:
                         await task

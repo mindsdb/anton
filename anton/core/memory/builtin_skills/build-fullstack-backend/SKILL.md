@@ -57,7 +57,7 @@ These are the same checks `generate_artifact` runs on its own output (see the `#
     * Do we need different/more data, or should the spec be revised?
   - If the answer to any question is "no" — go back to step 2 and revise the technical     specification based on what you learned about the actual data
 
-4. IMPLEMENT BACKEND: In a scratchpad **named exactly the artifact slug** (use the `slug` returned by `create_artifact` / `open_artifact` as the scratchpad name), implement the backend code. `launch_backend` runs the backend in this same scratchpad's venv, so any packages you install or imports you test here will be present at launch.
+4. IMPLEMENT BACKEND: In a scratchpad **named exactly the artifact slug** (use the `slug` returned by `create_artifact` or listed by `list_artifacts` as the scratchpad name), implement the backend code. `launch_backend` runs the backend in this same scratchpad's venv, so any packages you install or imports you test here will be present at launch.
 
   CANONICAL TEMPLATE (use this skeleton verbatim, add your routes inside the `# === API routes ===` block). It runs unchanged both locally (`python backend.py --port=NNN`) and on AWS Lambda (handler = `backend.handler`):
 
@@ -188,31 +188,47 @@ These are the same checks `generate_artifact` runs on its own output (see the `#
     from anton_state import Collection
     todos = Collection(get_store(), "todos")
     await todos.put("id1", {"text": "buy milk"})     # pk defaults to one partition
+    item = await todos.get("id1")                       # None if missing; an item written by put also carries pk, sk, _key, _v
     items = await todos.list()                          # all items in the collection
     n = await Collection(get_store(), "counters").increment("visits", field="n")
+    ```
+    CHANGE A STORED DOCUMENT by reading it, modifying it and putting it back with the `_v` it was read with. If another request wrote in between, the put raises `ConditionalCheckFailed` and writes nothing, instead of silently overwriting that write; answer 409. Handle a missing document first, and make sure some endpoint creates it, e.g. a "new game" route calling `await games.put("current", new_game(), if_not_exists=True)`; until then this route answers 404:
+    ```python
+    from fastapi import HTTPException
+    from anton_state import ConditionalCheckFailed
+
+    games = Collection(get_store(), "games")
+    game = await games.get("current")
+    if game is None:
+        raise HTTPException(status_code=404, detail="no game")
+    game["moves"].append(cell)
+    try:
+        await games.put("current", game, if_version=game["_v"])
+    except ConditionalCheckFailed:
+        raise HTTPException(status_code=409, detail="state changed, reload")
     ```
     Low-level `store` methods (all async; NO `scan()` / "list everything"):
     * `await store.get(pk, sk=None)` → one item or `None`
     * `await store.put(item)` → write (dict MUST include `pk` and, if the schema has a sort key, `sk`); `_v` is set by the store — never set it yourself
     * `await store.delete(pk, sk=None)`
     * `await store.query(pk, *, sk_prefix=None, filters=None, limit=None)` → items sharing partition key `pk` (NO secondary indexes in v1 — there is no `index=` argument)
-    * `await store.increment(pk, sk=None, *, field, by=1)` → atomic counter (use this for counters; do NOT hand-roll read-modify-write)
+    * `await store.increment(pk, sk=None, *, field, by=1)` → atomic counter (use this for counters; never read-modify-write a counter by hand)
     * `await store.update(pk, sk=None, *, set_fields=None, add_fields=None, if_version=None)` → atomic partial update
     DESIGN KEYS AROUND ACCESS PATTERNS: every "list" must map to a single `query(pk=...)` (or `Collection.list()`). Do NOT call the store in a loop — collect with one `query`. Do NOT wrap a STATE mutation (`put`/`delete`/`increment`/`update`) in your own retry loop: on a timeout the outcome is unknown and a retry can double-apply — surface the error instead.
 
 5. BUILD FRONTEND (if needed): In a separate scratchpad:
   - Build a single-file HTML dashboard or web interface
   - Include all CSS and JS inlined (no external file references)
-  - MANDATORY: call `recall_skill("build-html-dashboard")` and apply its full HTML output contract to the frontend — it is the single source of truth for dashboard/chart HTML, including the HOST CONTRACT list of static checks (explicit `<body>`, viewport meta, closed `<script>` blocks, no `window.__antonCommentsLayer`, no universal `* { !important }`, `z-index` <= 1000, stable `id` attributes on significant blocks, only the Tailwind and ECharts CDNs). Only if that skill cannot be recalled, fall back to these defaults: single self-contained HTML file; Tailwind CSS and Apache ECharts via CDN; dark theme #0d1117; responsive layout with a viewport meta tag.
+  - MANDATORY: call `recall_skill("build-html-dashboard")` and apply its full HTML output contract to the frontend — it is the single source of truth for dashboard/chart HTML, including the HOST CONTRACT list of static checks (explicit `<body>`, viewport meta, no root-relative `src`/`href`/`fetch()`/`new EventSource()`, closed `<script>` blocks, no `window.__antonCommentsLayer`, no universal `* { !important }`, `z-index` <= 1000, stable `id` attributes on significant blocks, only the Tailwind and ECharts CDNs). Only if that skill cannot be recalled, fall back to these defaults: single self-contained HTML file; Tailwind CSS and Apache ECharts via CDN; dark theme #0d1117; responsive layout with a viewport meta tag.
   - The frontend calls ONLY the endpoints of the technical specification from step 2, spelled exactly as the backend registers them (same method, same path segments). Keep the two in sync: a `fetch()` to a path the backend does not serve is a 404 at runtime that no static check catches on this path.
-  - UI text and the `<html lang>` attribute follow the language the user writes in.
-  - Save the entry-point to `<artifact_path>/static/index.html` (create the `static/` subfolder if needed). ANY additional frontend assets that don't end up inlined into `index.html` (separate CSS, JS, images, fonts, large data .js payloads, and any file the user uploaded or pasted that you bring into the artifact) MUST live under `<artifact_path>/static/` — never at the artifact root, since the backend only serves files from `static/` and publishing bundles nothing else.
-  - All backend endpoints MUST be called under the `/api/*` prefix (matches the backend route convention from step 4). The frontend never calls bare paths like `/items` — always `/api/items`.
+  - UI text and the `<html lang>` attribute follow the language the user writes in, unless they ask for another language for the page.
+  - Save the entry-point to `<artifact_path>/static/index.html` (create the `static/` subfolder if needed). ANY additional frontend assets that don't end up inlined into `index.html` (separate CSS, JS, images, fonts, large data .js payloads, and any file the user uploaded or pasted that you bring into the artifact) MUST live under `<artifact_path>/static/` — never at the artifact root, since the backend only serves files from `static/` and publishing bundles nothing else. The page itself is in `static/`, so reference such a file by its name there: `app.js`, not `static/app.js` or `/static/app.js`.
+  - All backend endpoints MUST be called under the `/api/*` prefix (matches the backend route convention from step 4). The frontend never calls bare paths like `/items` — always `api('/api/items')`.
   - API base URL is supplied via a `<meta>` tag so the same HTML works locally AND when deployed with frontend and backend on different origins (e.g. CloudFront/S3 + API Gateway/Lambda). Include this line in `<head>`:
     ```html
     <meta name="api-base" content="">
     ```
-    Empty `content` is the local default — fetch falls back to a relative path and hits the same FastAPI process that serves the page. At deploy time the publisher rewrites `content=""` to the real API root (e.g. `content="https://abc123.execute-api.us-east-1.amazonaws.com"`).
+    Empty `content` is the local default: `api('/api/items')` is then `/api/items` on the same FastAPI process that serves the page. At deploy time the publisher rewrites `content=""` to the real API root (e.g. `content="https://abc123.execute-api.us-east-1.amazonaws.com"`).
   - Read the meta tag once at startup and prepend it to every API call. Use this exact pattern (or an equivalent helper) — do NOT scatter `document.querySelector` calls across the codebase:
     ```js
     const API_BASE = document.querySelector('meta[name="api-base"]')?.content || "";
@@ -220,6 +236,7 @@ These are the same checks `generate_artifact` runs on its own output (see the `#
     // usage: fetch(api('/api/items'))
     ```
   - NEVER hardcode an absolute URL in the source — no `fetch('http://localhost:PORT/...')`, no `fetch('https://api.example.com/...')`, no `const API_BASE = 'http://...'`. The meta tag is the ONLY place the base URL is configured.
+  - API addresses go ONLY through `api()`, with the path's leading `/` kept: `api('/api/items')`. When one is needed in an attribute (a download link, an `<img>`), set it from JS — `a.href = api('/api/export')` — and never write `href="/api/export"` in the markup: a root-relative path drops the path prefix the page is served under, in the app preview and once published, and the request fails.
 
 6. LAUNCH THE BACKEND: Call the `launch_backend` tool with the artifact's slug:
   - `launch_backend(slug=<slug>, health_path="/api/health")` — the tool picks a free port, spawns `python backend.py --port <port>` as a standalone process with `<artifact_path>` as cwd, waits for readiness, writes the port into `metadata.json`, and returns a JSON envelope: the URL in `external_url` and `{slug, port, pid, log_path}` under `details`.

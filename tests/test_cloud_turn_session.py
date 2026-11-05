@@ -12,6 +12,10 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
 # Bound at import so the constants below are built from the real class, which
 # `_pin_today` later replaces on the module.
 from datetime import datetime as _stdlib_datetime
@@ -84,6 +88,8 @@ def test_all_cross_tenant_hazards_off(tmp_path, monkeypatch):
     assert cfg.tools == []               # no host connector/publish tools
     assert cfg.web_search_enabled is False
     assert cfg.web_fetch_enabled is False
+    # The pod is its own gVisor sandbox; the Landlock policy stays off there.
+    assert cfg.cell_sandbox is None
 
 
 def test_datasource_turn_carries_only_its_references_to_the_child(tmp_path, monkeypatch):
@@ -763,21 +769,6 @@ def test_memory_scratch_is_outside_the_mount_by_default():
     )
 
 
-def _real_cloud_session(tmp_path, monkeypatch, **req_overrides):
-    from unittest.mock import MagicMock
-
-    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
-    monkeypatch.setattr(
-        llm_client_mod.LLMClient, "from_settings",
-        classmethod(lambda cls, settings: _mock_llm()),
-    )
-    body = dict(protocol_version=1, conversation_id="c", input="hi")
-    body.update(req_overrides)
-    session = build_cloud_chat_session(TurnRequestV1(**body))  # REAL ChatSession
-    session._scratchpads = MagicMock(available_packages=[])
-    return session
-
-
 def test_memorize_is_offered_with_or_without_existing_memory(tmp_path, monkeypatch, memory_dir):
     """The allowlist names `memorize` unconditionally, and an allowlist name that
     matches no built tool is a hard error — so a cortex must always exist. Both
@@ -800,8 +791,6 @@ def _engram(**kw):
 
 
 async def test_encode_captures_instead_of_writing(tmp_path, monkeypatch, memory_dir):
-    from anton.cloud_turn.session import drain_pending_memory
-
     session, cfg = _build(tmp_path, monkeypatch, memory=_MEMORY)
     before = (memory_dir / "global" / "rules.md").read_text()
 
@@ -914,19 +903,6 @@ _SKILLS = {
 }
 
 
-@pytest.fixture()
-def skills_tmp(tmp_path_factory, monkeypatch):
-    """Route the per-turn mkdtemp staging into pytest tmp.
-
-    Outside `tmp_path` for the same reason as memory_dir: tmp_path is the
-    workspace mount, and the real staging lives outside the mount."""
-    import tempfile
-
-    root = tmp_path_factory.mktemp("skills-scratch")
-    monkeypatch.setattr(tempfile, "tempdir", str(root))
-    return root
-
-
 def test_skills_reach_the_skill_store(tmp_path, monkeypatch, skills_tmp):
     """The point of the feature: a server-sent skill is retrievable in the pod
     through the same SkillStore that recall_skill uses."""
@@ -937,6 +913,23 @@ def test_skills_reach_the_skill_store(tmp_path, monkeypatch, skills_tmp):
     root = session._skill_store.root
     assert (root / "csv-summary" / "references" / "recipe.md").is_file()
     assert root.is_relative_to(skills_tmp)
+
+
+def test_a_marked_org_skill_is_recalled_but_no_artifact_build_follows_it(
+    tmp_path, monkeypatch, skills_tmp
+):
+    """The org's tree holds every member's skills, and the pod names no
+    folder an artifact build may trust, so builds follow only built-ins."""
+    marked = {"chart-rules": {"files": {"SKILL.md": (
+        "---\nname: chart-rules\ndescription: d\napplies_to: artifacts\n---\n"
+        "Use only Chart.js.\n"
+    )}}}
+    session = _real_cloud_session(tmp_path, monkeypatch, skills=marked)
+    store = session._skill_store
+
+    assert store.artifact_roots == []
+    assert store.load("chart-rules") is not None
+    assert "chart-rules" not in [s.label for s in store.list_for_artifacts()]
 
 
 def test_skills_root_is_a_fresh_dir_outside_the_workspace(tmp_path, monkeypatch, skills_tmp):
@@ -1025,16 +1018,16 @@ def test_skills_never_land_in_the_tenant_workspace(tmp_path, monkeypatch, skills
 
 def test_each_turn_gets_a_fresh_root(tmp_path, monkeypatch, skills_tmp):
     # A skill deleted/renamed/disabled server-side must not survive into the
-    # next turn on this pod — and a fresh mkdtemp per turn also means two
-    # overlapping turns can never wipe each other's tree.
+    # next turn on this pod. A process runs one turn at a time, so staging the
+    # next turn also deletes the earlier turn's tree. A turn running in another
+    # process keeps its own (tests/cloud_turn/test_staged_skills_cleanup.py).
     _, cfg1 = _build(tmp_path, monkeypatch, skills=_SKILLS)
     assert (cfg1.settings.skills_root / "csv-summary" / "SKILL.md").is_file()
 
     _, cfg2 = _build(tmp_path, monkeypatch, skills={})
     assert cfg2.settings.skills_root != cfg1.settings.skills_root
     assert not (cfg2.settings.skills_root / "csv-summary").exists()
-    # the first turn's tree is untouched — no cross-turn interference
-    assert (cfg1.settings.skills_root / "csv-summary" / "SKILL.md").is_file()
+    assert not cfg1.settings.skills_root.exists()
 
 
 def test_bad_slugs_and_escaping_paths_are_dropped(tmp_path, monkeypatch, skills_tmp):
@@ -1377,8 +1370,8 @@ def test_no_pod_tool_can_capture_a_credential(tmp_path, monkeypatch):
         "scratchpad",
         "create_artifact",
         "list_artifacts",
-        "open_artifact",
         "update_artifact",
+        "read_text_file",
         "memorize",
         "recall_skill",
         "create_skill_draft",
@@ -1465,3 +1458,39 @@ def test_a_turn_without_connectors_never_falls_back_to_the_anton_registry(tmp_pa
     cowork-server's connectors, and a web turn must not render its notes."""
     _, cfg = _build(tmp_path, monkeypatch)
     assert cfg.connector_usage_notes == {}
+
+
+# ── provider SDK imports ─────────────────────────────────────────────────────
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_a_minds_cloud_turn_does_not_import_the_anthropic_sdk(tmp_path):
+    """The pod pays for every SDK a turn imports, and a MindsHub turn never
+    talks to Anthropic directly. A fresh interpreter, because this pytest
+    process has already imported anthropic through other tests."""
+    code = textwrap.dedent(
+        """
+        import sys
+        from anton.cloud_turn.contract import TurnRequestV1
+        from anton.cloud_turn.session import build_cloud_chat_session
+
+        build_cloud_chat_session(TurnRequestV1(
+            protocol_version=1,
+            conversation_id="conv_1",
+            input="hello",
+            llm={"provider": "minds-cloud", "api_key": "mdb_k", "base_url": "https://api.mindshub.ai"},
+        ))
+        loaded = [m for m in ("anthropic", "anton.core.llm.anthropic") if m in sys.modules]
+        assert not loaded, f"imported by a minds-cloud turn: {loaded}"
+        assert "openai" in sys.modules, "the turn did not build its provider"
+        """
+    )
+    # A developer's ANTON_ROUTER_PROVIDER=anthropic would build an Anthropic role.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("ANTON_")}
+    env[_WORKSPACE_PATH_ENV] = str(tmp_path)
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True, env=env, cwd=str(_REPO_ROOT),
+    )
+    assert result.returncode == 0, result.stderr

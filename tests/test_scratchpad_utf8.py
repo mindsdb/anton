@@ -62,7 +62,6 @@ def test_parent_venv_pth_is_written_as_utf8(tmp_path, monkeypatch):
     # UTF-8 mode, so the parent must *write* _parent_venv.pth as UTF-8 or a
     # non-ASCII site-packages path (e.g. a CJK Windows user dir) corrupts.
     # Pin the write encoding without spinning up a real venv.
-    import builtins
     import site
 
     # Force the "running inside a venv" branch deterministically.
@@ -74,19 +73,25 @@ def test_parent_venv_pth_is_written_as_utf8(tmp_path, monkeypatch):
     child_site.mkdir(parents=True)
 
     # Bypass the heavy __init__ (no network/subprocess) — the method only reads
-    # self._venv_dir.
+    # the venv folder and what picks the root its no-follow write starts from.
     runtime = object.__new__(local.LocalScratchpadRuntime)
     runtime._venv_dir = str(tmp_path)
+    runtime._venvs_base = tmp_path
+    runtime._explicit_workspace_path = None
+    runtime._cell_sandbox = None
+
+    # The write opens a descriptor without following links, then wraps it
+    # with os.fdopen, which is where the encoding is chosen.
+    from anton.utils import nofollow
 
     seen = {}
-    real_open = builtins.open
+    real_fdopen = nofollow.os.fdopen
 
-    def spy_open(file, *args, **kwargs):
-        if str(file).endswith("_parent_venv.pth"):
-            seen["encoding"] = kwargs.get("encoding")
-        return real_open(file, *args, **kwargs)
+    def spy_fdopen(fd, *args, **kwargs):
+        seen["encoding"] = kwargs.get("encoding")
+        return real_fdopen(fd, *args, **kwargs)
 
-    monkeypatch.setattr(builtins, "open", spy_open)
+    monkeypatch.setattr(nofollow.os, "fdopen", spy_fdopen)
     runtime._setup_parent_site_packages()
 
     assert seen.get("encoding") == "utf-8"  # assert before any later read

@@ -25,8 +25,8 @@ dependencies = [
     "openai>=3.0",
     # Declared, not inherited: it arrived transitively via anthropic/openai.
     # Same range those SDKs require, so the client we hand them matches theirs.
-    # Also what `generate_artifact` catches transport errors by type against
-    # when a tool-call stream dies mid-generation.
+    # Also what the providers catch transport errors by type against when a
+    # stream dies mid-response (`provider.STREAM_DROP_ERRORS`).
     "httpx2>=2.7,<3",
     # Floor for GHSA-8bx3-mgpq-m8m9 (IDNA 2003 vs IDNA 2009 host-name encoding
     # mismatch in TLSStream/connect_tcp() lets a hijacked connection to an
@@ -61,11 +61,12 @@ dependencies = [
     "pyyaml>=6.0",
     "dill==0.3.8",
     "truststore>=0.10.4",
-    # Reads .xlsx artifacts for the structural lint 
+    # Reads .xlsx artifacts for the structural lint
     "openpyxl>=3.1,<4",
     # MCP client (anton/core/mcp/) — v2 renamed FastMCP to MCPServer and
     # replaced the old in-memory test helper; pin the major version.
     "mcp>=2,<3",
+    "structlog==26.1.0",
 ]
 
 [project.optional-dependencies]
@@ -74,6 +75,9 @@ clipboard = [
 ]
 
 [dependency-groups]
+scratchpad = [
+    "boto3==1.43.117",
+]
 dev = [
     "pytest>=9.0.0",
     "pytest-asyncio>=0.24",
@@ -90,6 +94,9 @@ anton = "anton.cli:app"
 [tool.hatch.version]
 source = "vcs"
 fallback-version = "2.0.0-dev"
+
+[tool.uv]
+exclude-newer = "2026-10-21T20:14:43Z"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

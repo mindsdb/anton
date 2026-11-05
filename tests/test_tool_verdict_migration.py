@@ -434,8 +434,8 @@ _ALL_HANDLERS = frozenset({
     "handle_launch_backend",
     "handle_list_artifacts",
     "handle_memorize",
-    "handle_open_artifact",
     "handle_read_image",
+    "handle_read_text_file",
     "handle_recall",
     "handle_recall_skill",
     "handle_scratchpad",
@@ -448,6 +448,9 @@ _ALL_HANDLERS = frozenset({
 #: The subset of the above that declares at least one explicit `ToolOutcome`
 #: verdict. Not a wish list — a lock.
 _VERDICT_DECLARING_HANDLERS = frozenset({
+    # Tier 1 on a question that timed out or was skipped: the tool worked, and
+    # its reason ends the turn. Every other result stays a bare return.
+    "handle_ask_user",
     "handle_create_skill_draft",
     # Streaming handler: it YIELDS its verdicts rather than returning them.
     # Tier 1 on success (every listed file was statically verified by the
@@ -457,8 +460,8 @@ _VERDICT_DECLARING_HANDLERS = frozenset({
     "handle_generate_artifact",
     "handle_list_artifacts",
     "handle_memorize",
-    "handle_open_artifact",
     "handle_read_image",
+    "handle_read_text_file",
     "handle_recall_skill",
     "handle_scratchpad",          # partially migrated before this ticket
     "handle_web_fetch_fallback",  # ENG-2677: 2xx only; non-2xx stays tier 3
@@ -472,10 +475,10 @@ def test_the_set_of_verdict_declaring_handlers_is_pinned():
     The ticket asked for "an AST seam guard [that] fails when a handler returns
     a bare value where a `ToolOutcome` is expected". Taken literally that guard
     cannot exist while this migration is deliberately partial — 11 handlers are
-    still unmigrated on purpose, and three MIGRATED ones keep bare tier-3
-    returns by design (`recall_skill`'s NO MATCH family, `open_artifact`'s "no
-    artifact found", `memorize`'s "encoding is disabled"). A guard that failed
-    on a bare return would fail on all of those on day one.
+    still unmigrated on purpose, and two MIGRATED ones keep bare tier-3 returns
+    by design (`recall_skill`'s NO MATCH family, `memorize`'s "encoding is
+    disabled"). A guard that failed on a bare return would fail on all of those
+    on day one.
 
     So it is inverted into an inventory lock, which gets the property the
     ticket actually wanted — the nineteenth handler arrives LOUDLY — without

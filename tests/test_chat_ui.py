@@ -167,8 +167,16 @@ class TestStreamDisplay:
         # Also guards the tool_progress design decision: that phase returns
         # from update_progress() before reaching the PHASE_LABELS fallback
         # (see chat_ui.py's tool_progress branch), so it must NOT appear here.
-        expected = {"memory_recall", "planning", "executing", "complete", "failed", "scratchpad"}
+        # model_wait has an empty label: its message is the whole status line.
+        expected = {"memory_recall", "planning", "executing", "complete", "failed", "scratchpad", "model_wait"}
         assert expected == set(PHASE_LABELS.keys())
+
+    @patch("anton.chat_ui.Live")
+    def test_model_wait_status_is_the_message_alone(self, MockLive):
+        display, _ = self._make_display()
+        display.start()  # update_progress is a no-op on a display that is not running
+        display.update_progress("model_wait", "The answer was cut off — trying again")
+        assert display._line2_status == "The answer was cut off — trying again"
 
     @patch("anton.chat_ui.Live")
     def test_tool_progress_prints_permanent_line_and_restarts_spinner(self, MockLive):

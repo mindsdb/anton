@@ -6,8 +6,8 @@ from typing import NoReturn
 
 import anthropic
 
-from anton.utils.datasources import scrub_credentials
-
+from .effort import LONGEST_SILENCE_S
+from .prompt_builder import SESSION_CONTEXT_MARKER
 from .provider import register_provider, safe_parse_tool_input, unregister_provider
 from .provider import (
     ContextOverflowError,
@@ -16,6 +16,7 @@ from .provider import (
     ProviderAuthError,
     ProviderConnectionInfo,
     ProviderErrorBody,
+    STREAM_DROP_ERROR,
     StreamComplete,
     StreamEvent,
     StreamReasoningDelta,
@@ -23,16 +24,17 @@ from .provider import (
     StreamToolUseDelta,
     StreamToolUseEnd,
     StreamToolUseStart,
-    TokenLimitExceeded,
     ToolCall,
     TransientProviderError,
     Usage,
+    call_effort,
     classify_404,
     classify_content_rejection,
+    classify_markup_bad_request,
     classify_transient,
+    log_transient_provider_error,
     retry_after_seconds,
     compute_context_pressure,
-    origin_is_known_third_party,
     ensure_replayable_tool_call,
     mindshub_billing_stop,
     mindshub_model_restriction,
@@ -51,6 +53,12 @@ def _raise_for_bad_request(exc: anthropic.BadRequestError) -> None:
     matches a 400 first and its bare ``raise`` re-raises out of the whole
     ``try`` — ``_raise_for_status_error`` never sees a 400, on either provider.
     """
+    # First, because the checks below read the body as an API error and a
+    # markup body is not one.
+    misrouted = classify_markup_bad_request(exc.body)
+    if misrouted is not None:
+        raise misrouted from exc
+
     msg = str(exc).lower()
     if "prompt is too long" in msg or "context limit" in msg:
         raise ContextOverflowError(str(exc)) from exc
@@ -76,7 +84,6 @@ def _raise_for_status_error(
     classifier, and the generic "unavailable" copy is the last resort.
 
     - 401 → ProviderAuthError (canonical provider-credential refusal).
-    - 429 WITH a quota ``detail`` → TokenLimitExceeded (keeps its own card).
     - 402/429 with an M3 gate billing code (``wallet_empty`` /
       ``included_allowance_exhausted`` / ``free_air_daily_spend_fuse_exceeded``,
       body or X-MindsHub-Reason header) → the matching TokenLimitExceeded
@@ -89,8 +96,9 @@ def _raise_for_status_error(
     - 404 → ModelUnavailableError or EndpointConfigurationError via the
       shared ``classify_404`` (ENG-1139) — permanent, non-duplicated copy
       instead of the generic "temporarily unavailable, try again".
-    - overloaded/api_error (incl. the mid-stream HTTP-200 case), 5xx, plain 429
-      → TransientProviderError (retryable — see ENG-673).
+    - overloaded/api_error (incl. the mid-stream HTTP-200 case), 5xx, any 429
+      without a billing code (one whose body carries only a FastAPI ``detail``
+      included) → TransientProviderError (retryable — see ENG-673).
     - anything else → the generic "temporarily unavailable" ConnectionError.
     """
     if exc.status_code == 401:
@@ -100,23 +108,6 @@ def _raise_for_status_error(
 
     body = exc.body if isinstance(exc.body, dict) else {}
     parsed = ProviderErrorBody.parse(body)
-
-    # The `detail` branch below can mint a MindsHub billing verdict, so it must
-    # refuse a provably foreign origin; `mindshub_billing_stop`
-    # applies the same gate to the gate's billing codes itself.
-    _foreign = origin_is_known_third_party(exc)
-
-    # Origin-gated, and `str`-guarded to match the openai twin. Two bugs the
-    # twin already avoided and this one did not: an unguarded `detail` lets a
-    # FastAPI validation error (whose `detail` is a LIST) render as a Python
-    # repr next to our billing link, and an ungated one lets any BYOK endpoint
-    # mint the credits card from a single JSON key with attacker-authored prose
-    # in it.
-    _detail = parsed.top.detail
-    if not _foreign and exc.status_code == 429 and isinstance(_detail, str) and _detail:
-        msg = f"Server returned 429 — {_detail}"
-        msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
-        raise TokenLimitExceeded(msg) from exc
 
     # MindsHub M3 billing taxonomy, through the helper the openai twin uses so
     # the mapping can't drift. The gateway's Anthropic lane re-envelopes a gate
@@ -193,11 +184,7 @@ def _raise_for_status_error(
         velocity_confirmed=_velocity,
     )
     if transient is not None:
-        logger.warning(
-            "transient provider error (%s): status=%s retry_after=%s body=%s",
-            transient.code, exc.status_code, transient.retry_after,
-            scrub_credentials(str(exc.body))[:500],
-        )
+        log_transient_provider_error(logger=logger, error=transient)
         raise transient from exc
 
     raise ConnectionError(
@@ -236,6 +223,65 @@ def _build_native_web_tools(
     return entries, beta
 
 
+# Anthropic caches only prefixes that end at a marked block, at most 4 marks
+# per request. Thinking blocks cannot carry a mark.
+_CACHE_CONTROL = {"type": "ephemeral"}
+_UNMARKABLE_BLOCKS = frozenset({"thinking", "redacted_thinking"})
+
+
+def _cached_system(system: str) -> str | list[dict]:
+    """The system prompt as text blocks that each end in a cache mark.
+
+    Split at the session marker so the shared part stays cached when the
+    per-conversation tail (memory, workspace listing) changes.
+    """
+    if not system:
+        return system
+    if system.count(SESSION_CONTEXT_MARKER) == 1:
+        static, session = system.split(SESSION_CONTEXT_MARKER, 1)
+        parts = [static, SESSION_CONTEXT_MARKER + session]
+    else:
+        parts = [system]
+    return [{"type": "text", "text": p, "cache_control": _CACHE_CONTROL} for p in parts if p]
+
+
+def _cached_messages(messages: list[dict]) -> list[dict]:
+    """A copy of ``messages`` with a cache mark on the last message.
+
+    The caller's history is not modified: a mark left on an old message would
+    count against the 4-mark limit on every later request.
+    """
+    if not messages:
+        return messages
+    last = messages[-1]
+    content = last.get("content")
+    if isinstance(content, str) and content:
+        blocks = [{"type": "text", "text": content, "cache_control": _CACHE_CONTROL}]
+    elif isinstance(content, list):
+        blocks = list(content)
+        for i in range(len(blocks) - 1, -1, -1):
+            block = blocks[i]
+            if isinstance(block, dict) and block.get("type") not in _UNMARKABLE_BLOCKS:
+                blocks[i] = {**block, "cache_control": _CACHE_CONTROL}
+                break
+        else:
+            return messages
+    else:
+        return messages
+    return [*messages[:-1], {**last, "content": blocks}]
+
+
+def _usage_count(usage: object, field: str) -> int:
+    """A cache token count from usage; 0 when absent (older SDKs) or not a number."""
+    value = getattr(usage, field, 0)
+    return value if isinstance(value, int) else 0
+
+
+# The SDK's own 600 s read timeout would end a call that thinks in silence for
+# longer, before anton's own deadline (`LLMClient._idle_timeout_for`) does.
+_SDK_TIMEOUT = anthropic.Timeout(LONGEST_SILENCE_S, connect=5.0)
+
+
 class AnthropicProvider(LLMProvider):
     name: str = "anthropic"
 
@@ -244,6 +290,10 @@ class AnthropicProvider(LLMProvider):
         if client is not None:
             await client.close()
         unregister_provider(self)
+
+    @property
+    def accepts_large_output(self) -> bool:
+        return True
 
     def native_web_tools(self) -> set[str]:
         # Anthropic's Messages API ships both server-side web_search and
@@ -264,7 +314,7 @@ class AnthropicProvider(LLMProvider):
         kwargs = {}
         if api_key:
             kwargs["api_key"] = api_key
-        self._client = anthropic.AsyncAnthropic(**kwargs)
+        self._client = anthropic.AsyncAnthropic(**kwargs, timeout=_SDK_TIMEOUT)
         register_provider(self)
 
     def export_connection_info(self) -> ProviderConnectionInfo:
@@ -280,6 +330,7 @@ class AnthropicProvider(LLMProvider):
         tool_choice: dict | None = None,
         max_tokens: int = 4096,
         native_web_tools: set[str] | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         web_entries, beta_headers = _build_native_web_tools(native_web_tools)
         merged_tools = list(tools or []) + web_entries
@@ -287,15 +338,19 @@ class AnthropicProvider(LLMProvider):
         kwargs: dict = {
             "model": model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": _cached_system(system),
+            # No mark on the messages: one-off calls (structured output,
+            # compaction) never send the same history again. The planning
+            # loop goes through stream(), which marks them.
             "messages": messages,
         }
         if merged_tools:
             kwargs["tools"] = merged_tools
         if tool_choice:
             kwargs["tool_choice"] = tool_choice
-        if self._reasoning_effort:
-            kwargs["extra_body"] = {"output_config": {"effort": self._reasoning_effort}}
+        effort = call_effort(reasoning_effort, self._reasoning_effort)
+        if effort:
+            kwargs["extra_body"] = {"output_config": {"effort": effort}}
         if beta_headers:
             # Anthropic accepts a comma-separated list of beta features.
             kwargs["extra_headers"] = {"anthropic-beta": ",".join(beta_headers)}
@@ -340,25 +395,32 @@ class AnthropicProvider(LLMProvider):
             tool_calls[-1].repaired = True
 
 
+        input_tokens = response.usage.input_tokens
+        # Anthropic reports cache activity as separate fields and its
+        # input_tokens already excludes them — pass through as-is.
+        cache_read_tokens = _usage_count(response.usage, "cache_read_input_tokens")
+        cache_creation_tokens = _usage_count(response.usage, "cache_creation_input_tokens")
+        usage = Usage(
+            input_tokens=input_tokens,
+            output_tokens=response.usage.output_tokens,
+            # Cached tokens still fill the context window.
+            context_pressure=compute_context_pressure(
+                model, (input_tokens or 0) + cache_read_tokens + cache_creation_tokens
+            ),
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+        )
+        self.log_usage(model=model, usage=usage, served_model=getattr(response, "model", None))
+
         raise_on_empty_response(
             content=content_text, tool_calls=tool_calls,
             stop_reason=response.stop_reason, provider="Anthropic", model=model,
         )
 
-        input_tokens = response.usage.input_tokens
         return LLMResponse(
             content=content_text,
             tool_calls=tool_calls,
-            usage=Usage(
-                input_tokens=input_tokens,
-                output_tokens=response.usage.output_tokens,
-                context_pressure=compute_context_pressure(model, input_tokens),
-                # Anthropic reports cache activity as separate fields and its
-                # input_tokens already excludes them — pass through as-is
-                # (ENG-1288). getattr-guarded: absent on older SDK responses.
-                cache_read_tokens=getattr(response.usage, "cache_read_input_tokens", 0) or 0,
-                cache_creation_tokens=getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
-            ),
+            usage=usage,
             stop_reason=response.stop_reason,
             model=getattr(response, "model", None),
         )
@@ -372,6 +434,7 @@ class AnthropicProvider(LLMProvider):
         tools: list[dict] | None = None,
         max_tokens: int = 4096,
         native_web_tools: set[str] | None = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         web_entries, beta_headers = _build_native_web_tools(native_web_tools)
         merged_tools = list(tools or []) + web_entries
@@ -379,13 +442,14 @@ class AnthropicProvider(LLMProvider):
         kwargs: dict = {
             "model": model,
             "max_tokens": max_tokens,
-            "system": system,
-            "messages": messages,
+            "system": _cached_system(system),
+            "messages": _cached_messages(messages),
         }
         if merged_tools:
             kwargs["tools"] = merged_tools
-        if self._reasoning_effort:
-            kwargs["extra_body"] = {"output_config": {"effort": self._reasoning_effort}}
+        effort = call_effort(reasoning_effort, self._reasoning_effort)
+        if effort:
+            kwargs["extra_body"] = {"output_config": {"effort": effort}}
         if beta_headers:
             kwargs["extra_headers"] = {"anthropic-beta": ",".join(beta_headers)}
 
@@ -406,18 +470,20 @@ class AnthropicProvider(LLMProvider):
         # returned, so it never retried — the session must (ENG-673). A failure
         # BEFORE this (request establishment) was already SDK-retried → fail fast.
         stream_started = False
+        usage_seen = False
 
         try:
             async with self._client.messages.stream(**kwargs) as stream:
                 stream_started = True
                 async for event in stream:
                     if event.type == "message_start":
+                        usage_seen = True
                         served_model = getattr(event.message, "model", None) or served_model
                         usage = event.message.usage
                         input_tokens = usage.input_tokens
                         output_tokens = getattr(usage, "output_tokens", 0)
-                        cache_read_tokens = getattr(usage, "cache_read_input_tokens", 0) or 0
-                        cache_creation_tokens = getattr(usage, "cache_creation_input_tokens", 0) or 0
+                        cache_read_tokens = _usage_count(usage, "cache_read_input_tokens")
+                        cache_creation_tokens = _usage_count(usage, "cache_creation_input_tokens")
 
                     elif event.type == "content_block_start":
                         idx = event.index
@@ -446,7 +512,7 @@ class AnthropicProvider(LLMProvider):
                                 yield StreamToolUseStart(id=block.id, name=block.name)
                         elif block.type in ("thinking", "redacted_thinking"):
                             # Adaptive thinking (triggered by output_config.effort,
-                            # set above when self._reasoning_effort is configured)
+                            # set above when the call has an effort)
                             # — the model's own reasoning, not the final answer.
                             blocks[idx] = {"type": "thinking"}
                         else:
@@ -499,7 +565,7 @@ class AnthropicProvider(LLMProvider):
             raise
         except anthropic.APIStatusError as exc:
             _raise_for_status_error(exc, model=model)
-        except anthropic.APIConnectionError as exc:
+        except (anthropic.APIConnectionError, STREAM_DROP_ERROR) as exc:
             # A connection error here is retryable. If it dropped mid-stream
             # (after the 200), the SDK never retried it → the session must back
             # off and retry. If it failed during request establishment, the SDK
@@ -511,6 +577,21 @@ class AnthropicProvider(LLMProvider):
                 provider="Anthropic", code="connection_error",
                 session_backoff=stream_started, model=model,
             ) from exc
+        finally:
+            usage = Usage(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                # Cached tokens still fill the context window.
+                context_pressure=compute_context_pressure(
+                    model, (input_tokens or 0) + cache_read_tokens + cache_creation_tokens
+                ),
+                cache_read_tokens=cache_read_tokens,
+                cache_creation_tokens=cache_creation_tokens,
+            )
+            # Billed from message_start on, so a stream that then fails or that its
+            # consumer closes still writes its line.
+            if usage_seen:
+                self.log_usage(model=model, usage=usage, served_model=served_model)
 
         # Missing stop_reason is a genuine truncation only when the stream
         # produced NOTHING. A content/tool-bearing stream that lacks it is almost
@@ -541,13 +622,7 @@ class AnthropicProvider(LLMProvider):
             response=LLMResponse(
                 content=content_text,
                 tool_calls=tool_calls,
-                usage=Usage(
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    context_pressure=compute_context_pressure(model, input_tokens),
-                    cache_read_tokens=cache_read_tokens,
-                    cache_creation_tokens=cache_creation_tokens,
-                ),
+                usage=usage,
                 stop_reason=stop_reason,
                 model=served_model,
             )

@@ -15,7 +15,7 @@
     "@docusaurus/core": "3.10.2",
     "@docusaurus/preset-classic": "3.10.2",
     "@docusaurus/theme-mermaid": "3.10.2",
-    "@easyops-cn/docusaurus-search-local": "^0.55.1",
+    "@easyops-cn/docusaurus-search-local": "^0.55.3",
     "@mdx-js/react": "^3.0.0",
     "clsx": "^2.0.0",
     "prism-react-renderer": "^2.3.0",
@@ -44,8 +44,12 @@
     "node": ">=20.0"
   },
   "overrides": {
-    "serialize-javascript": "^7.0.7",
-    "undici": "^7.29.0",
-    "brace-expansion": "^5.0.8"
+    "serialize-javascript": "^7.1.2",
+    "undici": "^7.29.1",
+    "brace-expansion": "^5.0.10",
+    "mermaid": "^11.17.2",
+    "sockjs": {
+      "uuid": "^11.1.1"
+    }
   }
 }

@@ -3,13 +3,66 @@
 from __future__ import annotations
 
 import inspect
+import json
 import logging
+import os
+import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
-from anton.core.backends.base import Cell, ScratchpadRuntime, ScratchpadRuntimeFactory
+from anton.core.backends.base import ApiKeySupplier, Cell, ScratchpadRuntime, ScratchpadRuntimeFactory
+from anton.core.backends.sandbox import CellSandbox
 from anton.core.datasources.data_vault import DataVault
+from anton.utils.nofollow import read_text_nofollow, replace_text_nofollow
 
 logger = logging.getLogger(__name__)
+
+_AGENT_PADS_FILE = "_agent_pads.json"
+
+# Set once a factory without internet_research_enabled was warned about: hosts
+# build a manager for every message, and the factory doesn't change.
+_warned_no_internet_research_kwarg = False
+
+
+class _PathStamp(NamedTuple):
+    """A sys.path entry and its mtime, or None when it cannot be stat'ed."""
+
+    entry: str
+    mtime_ns: int | None
+
+
+@dataclass(frozen=True)
+class _PackageProbe:
+    """One probe's distribution names and the sys.path state they were read from."""
+
+    stamps: tuple[_PathStamp, ...]
+    names: tuple[str, ...]
+
+
+# A host that builds a ChatSession per turn (cowork-server) builds a manager,
+# and so a probe, per turn, and importlib.metadata re-reads every installed
+# distribution's METADATA on each call. The last probe is reused while
+# `_sys_path_stamps()` is unchanged.
+_last_probe: _PackageProbe | None = None
+
+
+def _sys_path_stamps() -> tuple[_PathStamp, ...]:
+    """sys.path with each entry's mtime.
+
+    Installers add or remove a whole *.dist-info directory in a sys.path entry,
+    which moves that entry's mtime. importlib.metadata keys its own listing of
+    each entry on the same mtime (FastPath.lookup), so a probe keyed on it sees
+    every install and removal a fresh probe would.
+    """
+    stamps: list[_PathStamp] = []
+    for entry in sys.path:
+        try:
+            mtime_ns: int | None = os.stat(entry or ".").st_mtime_ns
+        except OSError:
+            mtime_ns = None
+        stamps.append(_PathStamp(entry, mtime_ns))
+    return tuple(stamps)
 
 
 class ScratchpadManager:
@@ -27,13 +80,19 @@ class ScratchpadManager:
         session_id: str | None = None,
         data_vault: DataVault | None = None,
         workspace_env_overlay: dict[str, str] | None = None,
+        cell_sandbox: CellSandbox | None = None,
+        coding_api_key_supplier: ApiKeySupplier | None = None,
+        coding_flavor: str | None = None,
+        internet_research_enabled: bool = True,
     ) -> None:
         self._pads: dict[str, ScratchpadRuntime] = {}
         self._runtime_factory = runtime_factory
         self._coding_provider = coding_provider
         self._coding_model = coding_model
         self._coding_api_key = coding_api_key
+        self._coding_api_key_supplier = coding_api_key_supplier
         self._coding_base_url = coding_base_url
+        self._coding_flavor = coding_flavor
         self._cells = cells
         self._workspace_path = workspace_path
         # Conversation id, forwarded to each runtime so its namespace snapshot is
@@ -55,6 +114,34 @@ class ScratchpadManager:
         self._factory_takes_workspace_env_overlay = self._probe_factory_kwarg(
             runtime_factory, "workspace_env_overlay"
         )
+        self._factory_takes_api_key_supplier = self._probe_factory_kwarg(
+            runtime_factory, "coding_api_key_supplier"
+        )
+        self._factory_takes_coding_flavor = self._probe_factory_kwarg(
+            runtime_factory, "coding_flavor"
+        )
+        self._internet_research_enabled = internet_research_enabled
+        self._factory_takes_internet_research = self._probe_factory_kwarg(
+            runtime_factory, "internet_research_enabled"
+        )
+        global _warned_no_internet_research_kwarg
+        if (not internet_research_enabled and not self._factory_takes_internet_research
+                and not _warned_no_internet_research_kwarg):
+            _warned_no_internet_research_kwarg = True
+            logger.warning(
+                "this scratchpad runtime factory takes no internet_research_enabled, so "
+                "its pads keep web_search() although internet research is off"
+            )
+        # Unlike the kwargs above, a policy is never dropped: a factory that
+        # cannot take it would run agent code unlocked. It must name the
+        # parameter, since a bare **kwargs can swallow it, and get_or_create
+        # checks each runtime it builds reports the policy.
+        if cell_sandbox is not None and not self._factory_names_kwarg(runtime_factory, "cell_sandbox"):
+            raise TypeError(
+                "this scratchpad runtime factory does not name a cell_sandbox parameter, so it "
+                "cannot be trusted to run agent code under the sandbox policy"
+            )
+        self._cell_sandbox = cell_sandbox
         self._available_packages: list[str] = self.probe_packages()
 
     @staticmethod
@@ -68,6 +155,18 @@ class ScratchpadManager:
             return True
         return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
+    @staticmethod
+    def _factory_names_kwarg(factory, name: str) -> bool:
+        """Whether `factory` names keyword `name` in its signature. No if unintrospectable."""
+        try:
+            params = inspect.signature(factory).parameters
+        except (TypeError, ValueError):
+            return False
+        param = params.get(name)
+        return param is not None and param.kind in (
+            inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD
+        )
+
     @property
     def pads(self) -> dict[str, ScratchpadRuntime]:
         """Read-only view of the active scratchpad runtimes."""
@@ -78,19 +177,27 @@ class ScratchpadManager:
         """Project root this manager serves — discovery needs it for listings."""
         return self._workspace_path
 
-    def _agent_pads_file(self):
-        """Where this conversation's agent-chosen pad names are recorded, or None.
+    @property
+    def cell_sandbox(self) -> CellSandbox | None:
+        """The sandbox policy every pad's agent code runs under, or None for none.
+
+        The artifact verifier and the backend launcher read it off the pool.
+        """
+        return self._cell_sandbox
+
+    def _conversation_file(self, name: str) -> Path | None:
+        """Where a per-conversation record named `name` is kept, or None.
 
         Sits inside the namespace-snapshot directory so it is scoped per conversation
         and reclaimed by the same cleanup (cowork-server prunes that directory on
-        conversation delete). Underscore-prefixed so the `*.pkl` snapshot glob skips it.
+        conversation delete). Names are underscore-prefixed so the `*.pkl` snapshot
+        glob skips them.
 
         Returns None without a `session_id`, matching `snapshot_dir`, which refuses to
         hand out a directory at all when the conversation scope is unknown. That is also
-        the behaviour this record wants on its own terms: anything shared across unscoped
-        conversations (bare CLI, tests) would pool their pad names, and the guard would
-        start challenging on names from unrelated past sessions. Unscoped callers keep the
-        previous in-memory-only behaviour.
+        the behaviour these records want on their own terms: anything shared across
+        unscoped conversations (bare CLI, tests) would pool their contents. Unscoped
+        callers keep the previous in-memory-only behaviour.
         """
         if not self._session_id:
             return None
@@ -98,9 +205,47 @@ class ScratchpadManager:
             from anton.core.backends.local import default_venvs_base, snapshot_dir
 
             base = snapshot_dir(default_venvs_base(self._workspace_path), self._session_id)
-            return None if base is None else base / "_agent_pads.json"
+            return None if base is None else base / name
         except Exception:
             return None
+
+    def read_conversation_text(self, name: str) -> str | None:
+        """A per-conversation record's text, or None when there is none.
+
+        Under a sandbox policy the record is read from the workspace root without
+        following a link, as `write_conversation_text` writes it, so a linked folder or
+        file never shows another person's record.
+        """
+        path = self._conversation_file(name)
+        if path is None:
+            return None
+        try:
+            if self._cell_sandbox is not None and self._workspace_path is not None:
+                return read_text_nofollow(self._workspace_path, path)
+            return path.read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            return None
+
+    def write_conversation_text(self, name: str, text: str) -> None:
+        """Replace a per-conversation record. Best-effort: a failed write is dropped."""
+        path = self._conversation_file(name)
+        if path is None:
+            return
+        try:
+            # The snapshot folder sits in the project, which agent code can
+            # write, so on Linux and macOS neither it nor the file may be a
+            # link, and the file is written fresh and renamed in. Under a sandbox
+            # policy no folder below the workspace may be one either; without
+            # one, the sessions folder is opened as before, following a
+            # linked `.anton`.
+            if self._cell_sandbox is not None and self._workspace_path is not None:
+                root = self._workspace_path
+            else:
+                root = path.parent.parent
+            root.mkdir(parents=True, exist_ok=True)
+            replace_text_nofollow(root, path, text, create_parents=True)
+        except (OSError, ValueError):
+            pass
 
     def agent_pads(self) -> set[str]:
         """Pad names the AGENT has exec'd in this conversation, including earlier turns.
@@ -115,16 +260,19 @@ class ScratchpadManager:
         Deliberately NOT derived from `self._pads` or from the snapshot files: both
         include system-created pads (the artifact backend launcher's slug pad), which
         must never count against the agent. Only names the guard explicitly recorded.
+
+        Under a sandbox policy the record is read from the workspace root without
+        following a link, as `record_agent_pad` writes it, so a linked folder or
+        file never shows another person's pad names.
         """
-        path = self._agent_pads_file()
-        if path is None:
+        text = self.read_conversation_text(_AGENT_PADS_FILE)
+        if text is None:
             return set()
         try:
-            import json
 
-            names = json.loads(path.read_text(encoding="utf-8"))
+            names = json.loads(text)
             return {n for n in names if isinstance(n, str)} if isinstance(names, list) else set()
-        except (OSError, ValueError):
+        except ValueError:
             return set()
 
     def record_agent_pad(self, name: str) -> None:
@@ -132,21 +280,12 @@ class ScratchpadManager:
 
         Best-effort: losing this only returns the guard to its previous behaviour.
         """
-        path = self._agent_pads_file()
-        if path is None or not name:
+        if not name:
             return
-        try:
-            import json
 
-            current = self.agent_pads()
-            if name in current:
-                return
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(sorted(current | {name})), encoding="utf-8")
-            tmp.replace(path)
-        except OSError:
-            pass
+        current = self.agent_pads()
+        if name not in current:
+            self.write_conversation_text(_AGENT_PADS_FILE, json.dumps(sorted(current | {name})))
 
     @property
     def available_packages(self) -> list[str]:
@@ -155,10 +294,25 @@ class ScratchpadManager:
 
     @staticmethod
     def probe_packages() -> list[str]:
-        """Return sorted list of installed package distribution names."""
+        """Return sorted list of installed package distribution names.
+
+        These are the host interpreter's distributions on sys.path, not a
+        scratchpad venv's. Reuses the last probe while sys.path and each
+        entry's mtime are unchanged.
+        """
+        global _last_probe
         from importlib.metadata import distributions
 
-        return sorted({d.metadata["Name"] for d in distributions()})
+        # Stamped before probing, so a change made during the probe is seen next time.
+        stamps = _sys_path_stamps()
+        probe = _last_probe
+        if probe is None or probe.stamps != stamps:
+            probe = _PackageProbe(
+                stamps=stamps,
+                names=tuple(sorted({d.metadata["Name"] for d in distributions()})),
+            )
+            _last_probe = probe
+        return list(probe.names)
 
     def _derive_ds_env(self) -> dict[str, str] | None:
         """DS_* env values from the current vault state, fresh each call; None without a vault."""
@@ -209,7 +363,29 @@ class ScratchpadManager:
                     if self._factory_takes_workspace_env_overlay
                     else {}
                 ),
+                **(
+                    {"coding_api_key_supplier": self._coding_api_key_supplier}
+                    if self._factory_takes_api_key_supplier and self._coding_api_key_supplier is not None
+                    else {}
+                ),
+                **(
+                    {"coding_flavor": self._coding_flavor}
+                    if self._factory_takes_coding_flavor and self._coding_flavor is not None
+                    else {}
+                ),
+                **({"cell_sandbox": self._cell_sandbox} if self._cell_sandbox is not None else {}),
+                # Passed only when off, so a factory that predates it keeps working.
+                **(
+                    {"internet_research_enabled": False}
+                    if not self._internet_research_enabled and self._factory_takes_internet_research
+                    else {}
+                ),
             )
+            if self._cell_sandbox is not None and getattr(pad, "cell_sandbox", None) != self._cell_sandbox:
+                raise TypeError(
+                    f"the scratchpad runtime built for {name!r} does not run under the session's "
+                    "sandbox policy, so it was not started"
+                )
             await pad.start()
             self._pads[name] = pad
         if ds_env_override is not None:

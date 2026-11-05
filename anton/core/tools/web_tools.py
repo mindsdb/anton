@@ -390,11 +390,13 @@ async def _fetch_once(url: str, max_chars: int) -> _FetchResult:
 
 
 def _redact_url(url: str) -> str:
-    """Reduce a URL to scheme://host[:port]/path for logging.
+    """Reduce a URL to scheme://host[:port]/<N chars> for logging.
 
-    A model-supplied URL can carry credentials in the query (``?api_key=…``) or
-    in userinfo (``user:pass@host``); dropping both — plus the fragment — keeps
-    the audit line useful without leaking them.
+    A model-supplied URL can carry credentials in the query (``?api_key=…``),
+    in userinfo (``user:pass@host``), or in the path itself: Slack and Discord
+    webhooks and Telegram bot URLs put their token in a path segment. So the
+    log keeps the scheme and host, replaces a non-root path with its length,
+    marks a query as ``?<redacted>``, and drops userinfo and the fragment.
     """
     try:
         parts = urlparse(url)
@@ -403,7 +405,8 @@ def _redact_url(url: str) -> str:
             host = f"{host}:{parts.port}"
     except ValueError:
         return "<unparseable-url>"
-    base = f"{parts.scheme}://{host}{parts.path}"
+    path = parts.path if parts.path in ("", "/") else f"/<{len(parts.path)} chars>"
+    base = f"{parts.scheme}://{host}{path}"
     return f"{base}?<redacted>" if parts.query else base
 
 
