@@ -210,6 +210,71 @@ class TestWebSearchFallbackBrave:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# web_search fallback — Keenable
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestWebSearchFallbackKeenable:
+    async def test_keyless_uses_public_endpoint(self):
+        session = _session_with_settings(external_search_provider="keenable")
+        captured: dict = {}
+
+        async def _post(self, url, json=None, headers=None):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "title": "Keenable hit",
+                            "url": "https://k.example",
+                            "description": "A hit.",
+                            "snippet": "Longer text.",
+                        },
+                        {"title": "No URL", "description": "dropped"},
+                    ]
+                },
+                request=httpx.Request("POST", url),
+            )
+
+        with patch.object(httpx.AsyncClient, "post", new=_post):
+            out = await handle_web_search_fallback(session, {"query": "anton"})
+
+        assert captured["url"] == "https://api.keenable.ai/v1/search/public"
+        assert captured["json"] == {"query": "anton", "max_results": 5}
+        assert captured["headers"]["X-Keenable-Title"] == "Anton"
+        assert "X-API-Key" not in captured["headers"]
+        assert "Keenable hit" in _text(out)
+        assert "A hit." in _text(out)
+        assert "Longer text." not in _text(out)
+        assert "No URL" not in _text(out)
+
+    async def test_key_uses_keyed_endpoint_and_snippet_fallback(self):
+        session = _session_with_settings(external_search_provider="keenable")
+        session._settings.keenable_api_key = "kn-key"
+        captured: dict = {}
+
+        async def _post(self, url, json=None, headers=None):
+            captured["url"] = url
+            captured["headers"] = headers
+            return httpx.Response(
+                200,
+                json={"results": [{"title": "T", "url": "https://k.example", "snippet": "x" * 900}]},
+                request=httpx.Request("POST", url),
+            )
+
+        with patch.object(httpx.AsyncClient, "post", new=_post):
+            out = await handle_web_search_fallback(session, {"query": "anton"})
+
+        assert captured["url"] == "https://api.keenable.ai/v1/search"
+        assert captured["headers"]["X-API-Key"] == "kn-key"
+        assert "x" * 600 + "…" in _text(out)
+        assert "x" * 601 not in _text(out)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # web_fetch fallback
 # ─────────────────────────────────────────────────────────────────────────────
 
