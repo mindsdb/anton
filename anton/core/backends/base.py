@@ -396,4 +396,7 @@ class ScratchpadRuntimeFactory(Protocol):
         # False makes the pad's web_search() raise instead of searching. The
         # manager passes it only when False.
         internet_research_enabled: bool = True,
+        # The model the pad's generate_image() asks for. The manager passes it
+        # only when one is configured; without it the pad resolves its own.
+        image_model: str | None = None,
     ) -> ScratchpadRuntime: ...

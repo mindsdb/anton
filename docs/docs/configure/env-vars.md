@@ -31,6 +31,7 @@ to the local one.
 | `ANTON_PLANNING_MODEL` | `claude-sonnet-4-6` | Model used for planning and conversation |
 | `ANTON_CODING_PROVIDER` | `anthropic` | Provider for the coding model |
 | `ANTON_CODING_MODEL` | `claude-haiku-4-5-20251001` | Model used for code generation in the scratchpad |
+| `ANTON_IMAGE_MODEL` | unset | Model the `generate_image` tool and the scratchpad's `generate_image()` use. Unset: on MindsHub, its default image model; elsewhere `gpt-image-2.6-flare`. Images need a MindsHub or OpenAI connection |
 | `ANTON_MAX_TOKENS` | `8192` | Max output tokens per LLM call |
 | `ANTON_ANTHROPIC_API_KEY` | unset | Anthropic API key |
 | `ANTON_OPENAI_API_KEY` | unset | OpenAI (or OpenAI-compatible endpoint) API key |
@@ -76,6 +77,8 @@ see [Search providers](/configure/search-providers).
 | `ANTON_DEPLOYMENT_ENV` | unset | A short label for the deployment, such as `staging`, sent as `environment` on the measurement events — see [Analytics](/configure/analytics) |
 | `ANTON_LANGFUSE_HEADERS` | unset | Set to `1` to attach Langfuse trace headers on any OpenAI-compatible endpoint — see [Trace headers](/configure/trace-headers) |
 | `ANTON_PROACTIVE_DASHBOARDS` | `false` | When `true`, Anton builds HTML dashboards proactively; when `false`, CLI output only |
+| `ANTON_MAX_IMAGES_PER_TURN` | `8` | Most images the `generate_image` tool makes in one turn |
+| `ANTON_SCRATCHPAD_MAX_IMAGES` | `8` | Most images the scratchpad's `generate_image()` makes in one cell |
 | `ANTON_BACKEND` | `local` | Scratchpad backend: `local` or `remote` (remote requires Minds URL and API key) |
 | `ANTON_PUBLISH_URL` | `https://4nton.ai` | Publish service used when sharing artifacts |
 | `ANTON_TERMS_CONSENT` | `false` | Records that you accepted the terms screen (set by the first-run flow) |

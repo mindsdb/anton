@@ -876,6 +876,10 @@ def build_cloud_chat_session(
         # the built-in default, which the turn key may not be allowed to pay for.
         if llm.get("coding_model"):
             settings_kwargs["coding_model"] = llm["coding_model"]
+        # The user's image model (ENG-4024). Without it the turn resolves the
+        # MindsHub catalogue's `image` default.
+        if llm.get("image_model"):
+            settings_kwargs["image_model"] = llm["image_model"]
     settings = AntonSettings(**settings_kwargs)
     # Cloud turns do not inherit the desktop Minds datasource configuration. A
     # short-lived LLM key alone must never advertise or enable the static-key

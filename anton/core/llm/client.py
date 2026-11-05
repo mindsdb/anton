@@ -28,6 +28,8 @@ from .tracing import call_role
 if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
 
+    from .images import GeneratedImage, ReferenceImage
+
 _T = TypeVar("_T")
 
 
@@ -178,6 +180,7 @@ class LLMClient:
         router_model: str | None = None,
         max_tokens: int = 8192,
         model_call_idle_timeout_s: float = 600.0,
+        image_model: str | None = None,
     ) -> None:
         self._planning_provider = planning_provider
         self._planning_model = planning_model
@@ -224,6 +227,11 @@ class LLMClient:
         # attribute so the session can apply its own settings to a client the
         # host built.
         self.model_call_idle_timeout_s = model_call_idle_timeout_s
+        # Image role (ENG-4024): the model `generate_image` asks for. None
+        # resolves per call (`resolve_image_model`). A plain attribute for the
+        # same reason as the deadline above: the session applies its
+        # `image_model` setting to a client the host built.
+        self.image_model = image_model
 
     @property
     def call_tracker(self) -> ModelCallTracker | None:
@@ -591,6 +599,100 @@ class LLMClient:
     def router_model(self) -> str:
         """The model name used for the cheap router (summarization) role."""
         return self._router_model
+
+    @property
+    def image_provider(self) -> LLMProvider | None:
+        """The provider image calls go out on, or None when no role has one.
+
+        Images use the OpenAI images API, so only a role on an
+        `OpenAIProvider` can carry them, with that role's endpoint and key. A
+        role on MindsHub wins over another OpenAI endpoint. An all-Anthropic
+        setup has none.
+        """
+        from .images import is_mindshub_endpoint
+        from .openai import OpenAIProvider
+
+        candidates = [
+            p for p in (self._planning_provider, self._coding_provider, self._router_provider)
+            if isinstance(p, OpenAIProvider)
+        ]
+        for provider in candidates:
+            conn = provider.export_connection_info()
+            if is_mindshub_endpoint(conn.flavor, conn.base_url):
+                return provider
+        return candidates[0] if candidates else None
+
+    async def resolve_image_model(self) -> str:
+        """The model an image call asks for: `image_model`, else the alias
+        MindsHub's catalogue marks the default for the ``image`` role when the
+        image provider is on MindsHub, else `images.DEFAULT_IMAGE_MODEL`."""
+        from .images import DEFAULT_IMAGE_MODEL, is_mindshub_endpoint, resolve_image_model
+
+        configured = self.image_model if isinstance(self.image_model, str) else None
+        if configured and configured.strip():
+            return configured.strip()
+        provider = self.image_provider
+        if provider is None:
+            return DEFAULT_IMAGE_MODEL
+        conn = provider.export_connection_info()
+        mindshub = is_mindshub_endpoint(conn.flavor, conn.base_url)
+        api_key = await provider.current_api_key() if mindshub else None
+        return await asyncio.to_thread(
+            resolve_image_model,
+            None,
+            base_url=conn.base_url,
+            api_key=api_key,
+            verify=conn.ssl_verify,
+            mindshub=mindshub,
+        )
+
+    async def generate_image(
+        self,
+        *,
+        prompt: str,
+        size: str | None = None,
+        quality: str | None = None,
+        output_format: str | None = None,
+        reference_images: tuple[ReferenceImage, ...] | list[ReferenceImage] = (),
+        model: str | None = None,
+    ) -> GeneratedImage:
+        """One image on the image role: a generation, or an edit of ``reference_images``.
+
+        Counted under the ``image`` role by the usage listener, traced under
+        it, and held to the idle deadline like any other model call. Raises
+        ImageGenerationError (``code="unavailable"`` when no role can make
+        images), or ProviderAuthError after the one confirmation retry.
+        """
+        from .images import IMAGE_ROLE, ImageGenerationError
+
+        listener = self.usage_listener
+        provider = self.image_provider
+        if provider is None:
+            raise ImageGenerationError(
+                "Image generation needs a MindsHub or OpenAI connection, and this setup has "
+                "none, so no image was made.",
+                code="unavailable",
+            )
+        model = model or await self.resolve_image_model()
+        result = await self._guarded_call(
+            operation=lambda: _call_with_auth_confirmation(
+                lambda: provider.generate_image(
+                    model=model,
+                    prompt=prompt,
+                    size=size,
+                    quality=quality,
+                    output_format=output_format,
+                    reference_images=reference_images,
+                ),
+                role=IMAGE_ROLE,
+            ),
+            role=IMAGE_ROLE,
+            model=model,
+            # An image call has no output budget; this keeps the configured deadline.
+            max_tokens=0,
+        )
+        self._notify_usage(IMAGE_ROLE, model, result.usage, listener)
+        return result
 
     async def code(
         self,
@@ -963,4 +1065,5 @@ class LLMClient:
             router_model=getattr(settings, "router_model", None),
             max_tokens=getattr(settings, "max_tokens", 8192),
             model_call_idle_timeout_s=getattr(settings, "model_call_idle_timeout_s", 600.0),
+            image_model=getattr(settings, "image_model", None),
         )

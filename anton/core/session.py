@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import functools
 import hashlib
@@ -34,6 +35,7 @@ from anton.core.llm.effort import (
 )
 from anton.core.llm.endpoints import ENDPOINT_MINDSHUB, classify_base_url, classify_endpoint
 from anton.core.llm.identity import DeploymentIdentity, product_lines, serving_model_lines
+from anton.core.llm.images import DEFAULT_MAX_IMAGES
 from anton.core.llm.liveness import (
     MODEL_WAIT_PHASE,
     ModelCallTracker,
@@ -112,6 +114,7 @@ from anton.core.tools.tool_defs import (
     CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
     GENERATE_ARTIFACT_TOOL,
     GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
+    GENERATE_IMAGE_TOOL,
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
@@ -1599,6 +1602,11 @@ def _render_verify_transcript(
 _EXC_UNSET = object()
 
 
+def _named_model(value: object) -> str | None:
+    """``value`` when it names a model (a non-blank string), else None."""
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def _role_model(tc: TurnCost, role: str) -> str:
     """Model that ran ``role`` this turn ("" if the role never ran)."""
     slice_ = tc.by_role.get(role)
@@ -2016,6 +2024,20 @@ class ChatSession:
         # the client themselves (cowork-server) pass their settings to the
         # session, and this is how the deadline setting reaches their client.
         self._llm.model_call_idle_timeout_s = s.model_call_idle_timeout_s
+        # The image role's model, by the same route (ENG-4024). The client's
+        # own wins: `LLMClient.from_settings` already took it from settings.
+        image_model = _named_model(getattr(s, "image_model", None))
+        if image_model and not _named_model(getattr(self._llm, "image_model", None)):
+            with contextlib.suppress(AttributeError):
+                self._llm.image_model = image_model
+        max_images = getattr(s, "max_images_per_turn", DEFAULT_MAX_IMAGES)
+        # `generate_image` calls this turn, held to `max_images_per_turn`.
+        # Reset at each turn's start.
+        self._max_images_per_turn = (
+            max_images if isinstance(max_images, int) and not isinstance(max_images, bool)
+            else DEFAULT_MAX_IMAGES
+        )
+        self._images_this_turn = 0
         self._self_awareness = config.self_awareness
         self._cortex = config.cortex
         self._episodic = config.episodic
@@ -2187,6 +2209,7 @@ class ChatSession:
             workspace_env_overlay=config.workspace_env_overlay,
             cell_sandbox=config.cell_sandbox,
             internet_research_enabled=config.internet_research_enabled,
+            image_model=_named_model(getattr(self._llm, "image_model", None)),
         )
         # Sandboxed without live apps, nothing starts an app backend, so the
         # artifact tools and the prompt offer html-apps only.
@@ -3442,6 +3465,30 @@ class ChatSession:
             if fullstack:
                 self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
             self.tool_registry.register_tool(generate)
+            # Pictures, saved as image artifacts — so also only with a
+            # workspace, and only where a role can reach an images API.
+            if self._image_generation_available():
+                self.tool_registry.register_tool(GENERATE_IMAGE_TOOL)
+
+    def _image_generation_available(self) -> bool:
+        """Whether this session offers `generate_image` (ENG-4024).
+
+        It needs a role on an OpenAI-API endpoint to send the call to
+        (`LLMClient.image_provider`). MindsHub and OpenAI serve the images API;
+        another OpenAI-compatible server is assumed not to unless an image
+        model was configured for it, since a tool that can only answer 404
+        would still be called.
+        """
+        from anton.core.llm.images import is_mindshub_endpoint
+        from anton.core.llm.openai import OpenAIProvider
+
+        provider = getattr(self._llm, "image_provider", None)
+        if not isinstance(provider, OpenAIProvider):
+            return False
+        conn = provider.export_connection_info()
+        if conn.flavor == OpenAIProvider.FLAVOR_OPENAI or is_mindshub_endpoint(conn.flavor, conn.base_url):
+            return True
+        return _named_model(getattr(self._llm, "image_model", None)) is not None
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""
@@ -4345,6 +4392,16 @@ class ChatSession:
             if tc.jev_checks
             else {}
         )
+        # Only on turns that made images (ENG-4024), so other turns' line
+        # stays as before. by_role already carries `image=<model>:<tokens>/<calls>`.
+        _image_log_fields = (
+            {
+                "image_input": str(tc.image_input_tokens),
+                "image_output": str(tc.image_output_tokens),
+            }
+            if tc.image_input_tokens or tc.image_output_tokens
+            else {}
+        )
         logger.info(
             # `attempt` alongside `turn`: `turn_index` is a history position,
             # so two attempts of one turn used to produce two indistinguishable
@@ -4358,7 +4415,7 @@ class ChatSession:
             "verifier_failure=%s verifier_error_type=%s tokens_total=%d "
             "input=%d output=%d cache_read=%d cache_creation=%d "
             "llm_calls=%d rounds=%d continuations=%d peak_context=%d duration_ms=%d "
-            "by_role=%s %s%s",
+            "by_role=%s %s%s%s",
             self._session_id, turn_index, tc.attempt_id, tc.ended_by,
             str(tc.verification_skipped).lower(),
             tc.grace_granted or "-", tc.grace_tokens,
@@ -4378,6 +4435,7 @@ class ChatSession:
             # not depend on it.
             " ".join(f"{k}={v}" for k, v in _root_cause_fields.items()),
             "".join(f" {k}={v}" for k, v in _jev_fields.items()),
+            "".join(f" {k}={v}" for k, v in _image_log_fields.items()),
         )
 
         # Script traffic never reaches the analytics sink (ENG-1692).
@@ -4542,6 +4600,15 @@ class ChatSession:
                 router_model=_role_model(tc, "router"),
                 router_tokens=_role_tokens(tc, "router"),
                 router_calls=_role_calls(tc, "router"),
+                # Image role (ENG-4024): `generate_image` calls. `image_tokens`
+                # is text plus image tokens; the turn-wide image components
+                # below say how much of the turn was pictures, the part that
+                # bills at image rates.
+                image_model=_role_model(tc, "image"),
+                image_tokens=_role_tokens(tc, "image"),
+                image_calls=_role_calls(tc, "image"),
+                image_input_tokens=str(tc.image_input_tokens),
+                image_output_tokens=str(tc.image_output_tokens),
                 # Should always be 0. Emitted so the per-role sum reconciles
                 # with tokens_total for ANY role a caller passes — `TurnCost.add`
                 # folds anything outside `EVENT_ROLES` into this bucket, so a
@@ -5732,6 +5799,7 @@ class ChatSession:
         # reports only what the CURRENT turn touched. Hosts that build a fresh
         # session per turn get the same result either way.
         self._artifacts_touched = set()
+        self._images_this_turn = 0
         self._page_checks = {}
         self._geography_requirements = {}
         self._artifact_geography_request = ""
@@ -7349,6 +7417,16 @@ class ChatSession:
                                     "Do not repeat it. Here is the content for your reference:\n\n"
                                     + result_text
                                 )
+                            elif (
+                                tc.name == "generate_image"
+                                and tool_ok is True
+                                and isinstance(result_text, str)
+                            ):
+                                # The saved image's JSON (its project-relative
+                                # `path`, size, model, usage), so a host shows
+                                # the picture inline (ENG-4024). Only on
+                                # success: a failure has no picture to show.
+                                yield StreamToolResult(name=tc.name, content=result_text, id=tc.id)
                     except Exception as exc:
                         # A raise is a definitive failure verdict (ENG-1276).
                         result_text = f"Tool '{tc.name}' failed: {exc}"

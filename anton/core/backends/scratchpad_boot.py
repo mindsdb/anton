@@ -11,8 +11,11 @@ from anton.core.backends.wire import (
     CELL_DELIM,
     CELL_FILENAME,
     CELL_TRACE_MARKER,
+    ARTIFACTS_ROOT_ENV,
     EXPLAINABILITY_QUERIES_NAME,
+    IMAGE_MODEL_ENV,
     INTERNET_RESEARCH_ENV,
+    MAX_IMAGES_ENV,
     MISSING_MODULE_HINT,
     RESULT_START,
     RESULT_END,
@@ -465,6 +468,10 @@ namespace[EXPLAINABILITY_QUERIES_NAME] = []
 # loop sets it from the cell's CELL_TRACE_MARKER line.
 _cell_trace = None
 
+# Images generate_image() made in the running cell, held to MAX_IMAGES_ENV.
+# The main loop zeroes it before each cell.
+_cell_images = {"made": 0}
+
 # --- Inject get_llm() for LLM access from scratchpad code ---
 _scratchpad_model = os.environ.get("ANTON_SCRATCHPAD_MODEL", "")
 if _scratchpad_model:
@@ -611,7 +618,7 @@ if _scratchpad_model:
                 except _llm_asyncio.CancelledError:
                     pass
 
-        async def _with_fresh_provider(call):
+        async def _with_fresh_provider(call, role="coding"):
             """Await ``call(provider)`` on a provider built for this call, then close it.
 
             A provider's HTTP pool keeps each connection bound to the event
@@ -630,7 +637,7 @@ if _scratchpad_model:
             # does not reach an asyncio.run loop on a worker thread.
             trace_token = set_trace_context(_cell_trace)
             try:
-                with call_role("coding"):
+                with call_role(role):
                     return await _run_with_heartbeat(call(provider))
             finally:
                 reset_trace_context(trace_token)
@@ -910,8 +917,105 @@ if _scratchpad_model:
                 "unavailable. Answer from the connected data sources and the user's files."
             )
 
+        try:
+            _max_cell_images = int(os.environ.get(MAX_IMAGES_ENV, ""))
+        except ValueError:
+            _max_cell_images = 8  # images.DEFAULT_MAX_IMAGES; the host always sets it
+
+        def generate_image(prompt, *, size=None, quality=None, reference_images=None, path=None):
+            """Generate one image with the configured image model, save it, return its path.
+
+            ``reference_images`` (paths of PNG, JPEG or WebP files) makes it an
+            edit. ``size`` is WIDTHxHEIGHT (1024x1024, 1536x1024, 1024x1536) or
+            "auto"; ``quality`` is "auto", "low", "medium" or "high". The image
+            is written to ``path`` (relative to the project, or absolute, such
+            as a file in an artifact's folder; a taken name gets "-2", "-3",
+            ...; the extension .png, .jpg or .webp picks the format), else as
+            an image artifact of its own in the project's artifacts folder.
+            Returns the absolute path of the file written. Raises with a message to relay
+            when the provider refuses, and before any request once this cell
+            has made ANTON_SCRATCHPAD_MAX_IMAGES images.
+            """
+            from pathlib import Path as _Path
+
+            from anton.core.llm import images as _images
+
+            if _scratchpad_provider_name not in ("openai", "openai-compatible"):
+                raise RuntimeError(
+                    "generate_image() needs a MindsHub or OpenAI connection, and this "
+                    "scratchpad's model provider has no images API."
+                )
+            if not isinstance(prompt, str) or not prompt.strip():
+                raise ValueError("generate_image() needs a non-empty prompt")
+            if _cell_images["made"] >= _max_cell_images:
+                raise RuntimeError(
+                    f"generate_image() refused: this cell already asked for {_cell_images['made']} "
+                    f"images, the most one scratchpad run may (ANTON_SCRATCHPAD_MAX_IMAGES="
+                    f"{_max_cell_images}). No request was sent. Use the images made so far and "
+                    "ask the user before making more."
+                )
+            size = _images.normalize_size(size)
+            quality = _images.normalize_quality(quality)
+            output_format = _images.output_format_for(str(path) if path else None)
+            root = _Path(_resolved_workspace() or os.getcwd())
+            if isinstance(reference_images, (str, os.PathLike)):
+                reference_images = [reference_images]
+            refs = []
+            for ref in reference_images or []:
+                ref_path = _Path(os.fspath(ref)).expanduser()
+                refs.append(_images.load_reference_image(
+                    ref_path if ref_path.is_absolute() else root / ref_path
+                ))
+            api_key = _current_llm_api_key() or _llm_provider_kwargs.get("api_key")
+            model = _images.resolve_image_model(
+                os.environ.get(IMAGE_MODEL_ENV) or os.environ.get("ANTON_IMAGE_MODEL"),
+                base_url=_llm_base_url,
+                api_key=api_key,
+                verify=_llm_ssl_verify,
+                mindshub=_images.is_mindshub_endpoint(_llm_flavor, _llm_base_url),
+            )
+            # Counted before the call: a refused request may still be billed.
+            _cell_images["made"] += 1
+            result = _llm_asyncio.run(
+                _with_fresh_provider(
+                    lambda provider: provider.generate_image(
+                        model=model,
+                        prompt=prompt,
+                        size=size,
+                        quality=quality,
+                        output_format=output_format,
+                        reference_images=refs,
+                    ),
+                    role=_images.IMAGE_ROLE,
+                )
+            )
+            if path:
+                target = _Path(os.fspath(path)).expanduser()
+                target = target if target.is_absolute() else root / target
+                directory, stem = target.parent, target.stem or "image"
+            else:
+                # An image artifact of its own, like the tool's: the artifacts
+                # folder is the one every host keeps and shows, where a cloud
+                # pod's workspace may be a copy nothing syncs back.
+                from anton.core.artifacts.store import ArtifactStore
+
+                store = ArtifactStore(
+                    os.environ.get(ARTIFACTS_ROOT_ENV) or str(root / ".anton" / "artifacts")
+                )
+                stem = _images.file_stem(None, prompt)
+                artifact = store.create(
+                    name=_images.image_title(None, prompt),
+                    description=(("Edited image: " if refs else "Generated image: ") + prompt)[:500],
+                    type="image",
+                    primary=f"{stem}.{result.extension}",
+                )
+                directory = store.folder_for(artifact.slug)
+            saved = _images.write_new_image_file(result.data, directory, stem, result.extension)
+            return str(saved.resolve())
+
         _inject_helper("get_llm", get_llm)
         _inject_helper("agentic_loop", agentic_loop)
+        _inject_helper("generate_image", generate_image)
         # A stub rather than no name: a NameError would read as a missing package.
         _inject_helper(
             "web_search",
@@ -1543,6 +1647,7 @@ while True:
         # re-shipped duplicate chunk, never a skipped one.
         _cell_out["shipped"] = 0
         _cell_out["buf"] = out_buf
+        _cell_images["made"] = 0
         error = None
         # The line of its own code the cell stopped at, read from the
         # traceback rather than from the error's text, which the cell shapes.

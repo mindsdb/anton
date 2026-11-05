@@ -137,6 +137,7 @@ async def test_the_cell_spawn_is_unchanged(tmp_path, monkeypatch, parent_env):
         "OPENAI_BASE_URL": "https://llm.example/v1",
         "ANTON_OPENAI_BASE_URL": "https://llm.example/v1",
         "ANTON_CELL_INSTALL_TIMEOUT": str(CoreSettings().cell_install_timeout),
+        "ANTON_SCRATCHPAD_MAX_IMAGES": str(CoreSettings().scratchpad_max_images),
         "ANTON_SCRATCHPAD_WORKSPACE_PATH": str((tmp_path / "project").resolve()),
         "PYTHONPATH": anton_root,
     }

@@ -229,6 +229,21 @@ _SENTINEL_REASONS = {
     # input, or the refusal may have had another cause the provider only
     # worded around an image, so it stays out of every trip rung.
     "images_refused": (TIER_UNCLASSIFIED, "unclassified"),
+    # `generate_image` (ENG-4024), from `tool_handlers._IMAGE_FAILURE_REASONS`.
+    # A safety refusal is about the agent's own prompt, which it may reword.
+    "image_refused": (TIER_SELF, "invalid_argument"),
+    # The per-turn image cap: the agent's own call count, and the message tells
+    # it to stop, so never a wall.
+    "image_limit": (TIER_SELF, "invalid_argument"),
+    # A rate limit, a provider 5xx, a dropped connection, a reply with no
+    # image: retrying later can succeed.
+    "image_transient": (TIER_TRANSIENT, "image_transient"),
+    # No credits, a model that is not an image model or not on the plan, a
+    # refused key, no images API at the endpoint: only the user or the
+    # operator can fix these.
+    "image_unavailable": (TIER_WALL, "service_unavailable"),
+    # Any other refusal, or the file could not be written: nothing says which side.
+    "image_failed": (TIER_UNCLASSIFIED, "unclassified"),
     # MCP connectors (ENG-1816): a rejected/expired token needs a user
     # reconnect, same shape as a 401 (`_STATUS_WALLS["401"] = "auth_missing"`)
     # — the agent cannot fix this by retrying, so it's a genuine wall.

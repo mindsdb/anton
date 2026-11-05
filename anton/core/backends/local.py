@@ -29,10 +29,13 @@ from anton.core.backends.sandbox import (
 from anton.core.backends.wire import (
     CELL_DELIM,
     CELL_TRACE_MARKER,
+    ARTIFACTS_ROOT_ENV,
     HEARTBEAT_MARKER,
+    IMAGE_MODEL_ENV,
     INSTALL_END_MARKER,
     INSTALL_START_MARKER,
     INTERNET_RESEARCH_ENV,
+    MAX_IMAGES_ENV,
     MAX_OUTPUT,
     NOTHING_KEPT,
     PROGRESS_MARKER,
@@ -386,6 +389,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         coding_api_key_supplier: ApiKeySupplier | None = None,
         coding_flavor: str | None = None,
         internet_research_enabled: bool = True,
+        image_model: str | None = None,
         _venvs_base: Path | None = None,
     ) -> None:
         # The name becomes a folder the host deletes and recreates, so one that
@@ -426,6 +430,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._coding_flavor: str | None = coding_flavor
         # False: the boot script injects a web_search() that only raises.
         self._internet_research_enabled = internet_research_enabled
+        # The model the pad's generate_image() asks for; None lets the boot
+        # script resolve it (`anton.core.llm.images.resolve_image_model`).
+        self._image_model: str | None = image_model
         self._credential_path: Path | None = None
         self._credential_written: str | None = None
         # The Landlock policy every spawn of agent code runs under; None runs
@@ -1108,6 +1115,22 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             env["ANTON_SCRATCHPAD_FLAVOR"] = self._coding_flavor
         else:
             env.pop("ANTON_SCRATCHPAD_FLAVOR", None)
+        # The runtime's image model, else the host's ANTON_IMAGE_MODEL carried
+        # under the pad's own name: a sandbox policy passes only
+        # ANTON_SCRATCHPAD_* names to the pad.
+        image_model = self._image_model or env.get("ANTON_IMAGE_MODEL", "").strip()
+        if image_model:
+            env[IMAGE_MODEL_ENV] = image_model
+        else:
+            env.pop(IMAGE_MODEL_ENV, None)
+        # A cloud pod mounts the project's artifacts folder outside the
+        # workspace (anton.cloud_turn.session._ARTIFACTS_ROOT_ENV); elsewhere
+        # the pad finds it under the workspace.
+        cloud_artifacts = env.get("ANTON_CLOUD_ARTIFACTS_ROOT", "").strip()
+        if cloud_artifacts and os.path.isabs(cloud_artifacts):
+            env[ARTIFACTS_ROOT_ENV] = cloud_artifacts
+        else:
+            env.pop(ARTIFACTS_ROOT_ENV, None)
         # Set or cleared here, after the workspace overlay, so neither an
         # inherited value nor a project .env decides it.
         if self._internet_research_enabled:
@@ -1177,7 +1200,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # scratchpad_boot no longer auto-installs on ModuleNotFoundError, so
         # this var (and _read_result's install-span handling below) is dead;
         # left wired rather than reworking the kill-window logic in one pass.
-        env["ANTON_CELL_INSTALL_TIMEOUT"] = str(CoreSettings().cell_install_timeout)
+        _core_settings = CoreSettings()
+        env["ANTON_CELL_INSTALL_TIMEOUT"] = str(_core_settings.cell_install_timeout)
+        # Set, not inherited, so the pad reads a validated number.
+        env[MAX_IMAGES_ENV] = str(_core_settings.scratchpad_max_images)
 
         # Namespace snapshot path (ENG-1124). The boot script reads
         # ANTON_SCRATCHPAD_SESSION_PATH and nothing ever set it, so it fell back to a
@@ -2112,6 +2138,7 @@ def local_scratchpad_runtime_factory(
     coding_api_key_supplier: ApiKeySupplier | None = None,
     coding_flavor: str | None = None,
     internet_research_enabled: bool = True,
+    image_model: str | None = None,
 ) -> ScratchpadRuntime:
     return LocalScratchpadRuntime(
         name=name,
@@ -2129,4 +2156,5 @@ def local_scratchpad_runtime_factory(
         coding_api_key_supplier=coding_api_key_supplier,
         coding_flavor=coding_flavor,
         internet_research_enabled=internet_research_enabled,
+        image_model=image_model,
     )
