@@ -377,6 +377,14 @@ def parse_connection_slug(
     return None
 
 
+def _engine_fields(engine_def: "DatasourceEngine") -> list["DatasourceField"]:
+    """Return every field the engine definition declares, top level and per auth method."""
+    all_fields = list(engine_def.fields)
+    for am in engine_def.auth_methods or []:
+        all_fields.extend(am.fields)
+    return all_fields
+
+
 def register_secret_vars(
     engine_def: "DatasourceEngine", *, engine: str = "", name: str = ""
 ) -> None:
@@ -385,10 +393,7 @@ def register_secret_vars(
     If engine and name are given, registers namespaced vars (DS_ENGINE_NAME__FIELD).
     Otherwise registers flat vars (DS_FIELD) — for temporary test_snippet execution.
     """
-    all_fields = list(engine_def.fields)
-    for am in engine_def.auth_methods or []:
-        all_fields.extend(am.fields)
-    for f in all_fields:
+    for f in _engine_fields(engine_def):
         if engine and name:
             prefix = _slug_env_prefix(engine, name)
             key = f"{prefix}__{f.name.upper()}"
@@ -397,6 +402,28 @@ def register_secret_vars(
         _DS_KNOWN_VARS.add(key)
         if f.secret:
             _DS_SECRET_VARS.add(key)
+
+
+def _register_stored_username(
+    vault: DataVault, engine_def: "DatasourceEngine", *, engine: str, name: str
+) -> None:
+    """Mark a connection's stored ``username`` var as known when it is the engine's login name.
+
+    Connection forms store the login as ``username`` while the engine
+    definitions call it ``user``, so without this the value falls into the
+    unknown DS_* net and is hidden wherever it appears, including in the
+    connection's own var names and in auth errors. Registers it as known
+    only, never as secret, and only when the definition has a non secret
+    ``user`` field and the record's ``secure_keys`` does not list
+    ``username``. Reads the vault record; adds to ``_DS_KNOWN_VARS``.
+    """
+    if not any(f.name == "user" and not f.secret for f in _engine_fields(engine_def)):
+        return
+    record = vault.read_record(engine, name) if hasattr(vault, "read_record") else None
+    fields = (record or {}).get("fields") or {}
+    if "username" not in fields or "username" in ((record or {}).get("secure_keys") or ()):
+        return
+    _DS_KNOWN_VARS.add(f"{_slug_env_prefix(engine, name)}__USERNAME")
 
 
 def _register_unregistered_connection_vars(vault: DataVault, engine: str, name: str) -> None:
@@ -681,10 +708,12 @@ def scrub_credentials(text: str) -> str:
     Redacts, longest value first:
       * DS_* values registered as secret via register_secret_vars (driven by
         DatasourceField.secret=true). Non-secret fields of known engines
-        (DS_HOST, DS_PORT, DS_BASE_URL, …) stay readable so the LLM can reason
-        about connection errors.
-      * Unknown DS_* vars (custom engines not yet in the registry) — any long
-        value, conservatively.
+        (DS_HOST, DS_PORT, DS_BASE_URL, …), and a stored ``username`` that is
+        the engine's ``user``, stay readable so the LLM can reason about
+        connection errors.
+      * Unknown DS_* vars (custom engines not yet in the registry, or stored
+        fields a known engine's definition does not name) — any long value,
+        conservatively.
       * Provider credentials (ENG-463): the values of _PROVIDER_SECRET_VARS.
     Each value is matched in every form `_secret_forms` builds: as printed,
     URL-encoded, escaped, or in base64, but never inside a marker already in
@@ -1524,6 +1553,14 @@ def _rebuild_ds_registries(vault: DataVault) -> None:
                 "scrubbed from this turn's output",
                 engine, name, exc_info=True,
             )
+        if edef is not None and not oauth:
+            try:
+                _register_stored_username(vault, edef, engine=engine, name=name)
+            except Exception:
+                logger.warning(
+                    "Could not read %s/%s to classify its username; it stays hidden",
+                    engine, name, exc_info=True,
+                )
         try:
             env_values.update(vault.env_for(engine, name) or {})
         except Exception:
