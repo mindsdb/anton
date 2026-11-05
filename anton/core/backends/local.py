@@ -1712,7 +1712,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             try:
                 await asyncio.wait_for(self._proc.wait(), timeout=5)
             except asyncio.TimeoutError:
-                pass
+                logger.debug(
+                    "scratchpad %s: cell reported its process ended, but pid %s had not exited after 5s",
+                    self.name, self._proc.pid,
+                )
         # The process proved itself alive by completing this round trip —
         # whatever earlier death streak led here (if any) is over. This is
         # in addition to (not instead of) the reset inside _auto_resume()
