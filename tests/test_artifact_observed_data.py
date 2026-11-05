@@ -168,3 +168,71 @@ def test_figure_facts_are_embedded_only_when_asked_and_stripped_with_the_data():
     assert 2 * 6 * 235 in [item["value"] for item in facts["doubleCounts"]]
     assert observed_data.previous_data(checked) == data
     assert observed_data.strip_binding(checked) == page
+
+
+
+def _records(flagged, count=10):
+    return [{"Id": f"R-{i}", "Line": 1, "Status": "Flagged" if i in flagged else "Clear",
+             "UnitPrice": 10.0, "Value": 100.0 * i} for i in range(1, count + 1)]
+
+
+def _differences(value):
+    data, text = observed_data.collect(value)
+    found = [v for v in data.values() if list(v) == [observed_data.DIFFERENCES_KEY]]
+    return (found[0][observed_data.DIFFERENCES_KEY] if found else None), text
+
+
+def test_the_same_records_under_two_scenarios_get_their_counts_sums_and_differences():
+    found, text = _differences({"records": {"Scenario A": _records({2, 4, 6, 8}), "Scenario B": _records({2, 4})}})
+    compared = found["records / <scenario>"]
+    assert compared["matched on"] == "Id" and compared["changed fields"] == "Status"
+    flagged = compared["per scenario"]["Scenario A"]["by Status"]["Flagged"]
+    assert flagged == {"rows": 4, "Value": 2000.0}
+    assert compared["differences"]["Scenario B minus Scenario A"]["by Status"]["Flagged"] == {"rows": -2, "Value": -1400.0}
+    # A price per row and a field equal on every row do not add up to anything.
+    assert "UnitPrice" not in flagged and "Line" not in flagged
+    assert '"rows":-2,"Value":-1400.0' in text
+
+
+def test_a_scenario_that_adds_records_is_still_compared():
+    compared = _differences({"A": _records({2}), "B": _records({2, 3}, count=13)})[0]["<scenario>"]
+    assert compared["differences"]["B minus A"]["rows"] == 3
+    assert compared["differences"]["B minus A"]["by Status"]["Flagged"] == {"rows": 1, "Value": 300.0}
+
+
+def test_total_rows_beside_their_parts_are_counted_once():
+    later = [dict(r, sales=r["sales"] + (10 if r["category"] == "Books" else 0) + (10 if r["category"] == "Total" else 0))
+             for r in _sales_with_totals()]
+    compared = _differences({"A": _sales_with_totals(), "B": later})[0]["<scenario>"]
+    assert compared["matched on"] == "month, store, category"
+    assert compared["per scenario"]["A"]["sales"] == 6 * 235
+    assert compared["differences"]["B minus A"]["sales"] == 6 * 10
+
+
+def test_a_third_scenario_with_text_in_a_number_field_does_not_break_the_page_data():
+    odd = [dict(r, Value="n/a") for r in _records({5})]
+    found, _ = _differences({"A": _records(set()), "B": _records({3}), "C": odd})
+    summary = found["<scenario>"]["per scenario"]["C"]
+    assert summary["by Status"]["Flagged"] == {"rows": 1} and "Value" not in summary
+
+
+def test_sums_too_large_for_json_are_left_out():
+    huge = [dict(r, Value=1e308) for r in _records({1, 2})]
+    found, _ = _differences({"A": _records({1}), "B": huge})
+    assert "Value" not in found["<scenario>"]["per scenario"]["B"]
+
+
+def test_other_records_filtered_subsets_and_unchanged_copies_are_not_compared():
+    records = _records({2})
+    later = [dict(r, Id=f"S-{n}") for n, r in enumerate(_records({3}))]
+    assert _differences({"first": records, "second": later})[0] is None
+    assert _differences({"all": records, "some": records[:4]})[0] is None
+    assert _differences({"A": records, "B": [dict(r) for r in records]})[0] is None
+    assert _differences({"records": records, "parts": [{"Id": r["Id"], "Name": "x"} for r in records]})[0] is None
+
+
+def test_an_edit_keeps_the_differences_with_the_data_it_was_computed_from():
+    data, _ = observed_data.collect({"A": _records(set()), "B": _records({3})})
+    page = observed_data.bind("<html><head></head><body></body></html>", data)
+    restored, text = observed_data.collect(None, page)
+    assert restored == data and observed_data.DIFFERENCES_KEY in text
