@@ -923,7 +923,7 @@ def test_a_helper_many_errored_cells_redefine_is_read_once_per_call(snap):
     assert not writes.needs_approval()
 
 
-def test_a_long_conversation_of_literal_execs_is_read_in_well_under_a_second(snap):
+def test_a_long_conversation_of_literal_execs_is_read_in_under_two_seconds(snap):
     """What each cell adds to a name's list or dict is indexed once per
     check (`_Reader.growth`), so each literal exec's namespace, read for
     the calls through it, doesn't walk every earlier cell again. The bound
@@ -937,7 +937,9 @@ def test_a_long_conversation_of_literal_execs_is_read_in_well_under_a_second(sna
     assert not find_cell_writes(code="go1399()", earlier=_earlier(earlier), snapshots=(snap,)).needs_approval()
     started = time.perf_counter()
     writes = find_cell_writes(code="go1399()", earlier=_earlier(earlier), snapshots=(snap,))
-    assert time.perf_counter() - started < 1
+    # GitHub's runners take close to a second here, so a 1s bound failed on
+    # the slower ones.
+    assert time.perf_counter() - started < 2
     assert not writes.needs_approval()
 
 

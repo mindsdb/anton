@@ -1080,7 +1080,9 @@ _NOTE_PREFIXES = ("SYSTEM:", _CHECK_NOTE, ANTON_NOTE)
 _NO_GUESS_AT_LIMIT = (
     "Report only what your tool results actually showed. If you have not found the "
     "answer, say plainly that you could not find it; do not estimate, extrapolate or "
-    "state a figure you did not retrieve."
+    "state a figure you did not retrieve. A result your tools did compute is not a "
+    "guess: if you have one, give it with the assumptions it rests on, rather than "
+    "withholding it because something is still unexplained."
 )
 
 
