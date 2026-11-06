@@ -280,3 +280,7 @@ def test_write_prd_turns_assumptions_into_requirements():
 
 def test_write_prd_does_not_claim_an_agreement():
     assert "the user agreed to" not in prd._WRITE_PRD_INSTRUCTION
+
+
+def test_prd_copies_sample_rows_from_the_data_files():
+    assert "take the sample rows from it and name the file by its id" in prd._WRITE_PRD_INSTRUCTION

@@ -12,7 +12,9 @@ from anton.core.artifacts.geography_guidance import GEOGRAPHY_GUIDANCE
 from anton.core.llm.prompts import ANTON_NOTE
 
 from ..attachments import render_for_gathering
+from ..data_files import save_hint, state_files_section
 from ..prompts import KNOWN_DATA_HEADER, datasources_or_none, with_project_rules
+from ..state import settled_artifact_type
 from .state import PrdState
 
 
@@ -120,11 +122,13 @@ def build_call_kickoff(state: PrdState) -> str:
     connections = datasources_or_none(state)
     pads = (state.scratchpads_context or "").strip()
     attached = render_for_gathering(state.attachments)
+    saved = state_files_section(state, saved=True)
     return (
         f"## User request\n{state.user_request}\n\n"
         f"## Agent's understanding\n{state.agent_understanding}\n\n"
         f"{KNOWN_DATA_HEADER}\n{state.known_data or '(none provided)'}\n\n"
         + (f"{attached}\n\n" if attached else "")
+        + (f"{saved}\n\n" if saved else "")
         + (f"{pads}\n\n" if pads else "")
         + f"## User preferences\n{state.user_preferences or '(none known)'}\n\n"
         f"{connections}\n"
@@ -148,6 +152,9 @@ def restored_context(state: PrdState) -> str:
             "## Data sources declared earlier\n"
             + "\n".join(f"- {s}" for s in state.declared_sources)
         )
+    files = state_files_section(state)
+    if files:
+        parts.append(files)
     if state.data_notes.strip():
         parts.append(f"## Data gathered earlier\n{state.data_notes.strip()}")
     if state.web_notes.strip():
@@ -218,9 +225,24 @@ _GATHERING_TEMPLATE = (
     "themselves are already under `" + KNOWN_DATA_HEADER + "`: then record "
     "`verified_by: \"known_data\"` and do not fetch it again. A description "
     "of the data (where it lives, its columns) without the values does not "
-    "count. A source you name in `data_sources` that is not verified is "
+    "count. For an `html-app`, a reference to data in a scratchpad does not "
+    "count either: save that data to a data file. A source you name in `data_sources` that is not verified is "
     "fetched before generation starts — naming one is how you request "
     "that.\n"
+    "- For an `html-app`, data you read with code (from a scratchpad named under "
+    "`" + KNOWN_DATA_HEADER + "`, a connection or an attached file) is saved "
+    "for the page, never retyped. In a scratchpad cell, write what the page shows "
+    "to the data files folder named in the step message, one `<id>.json` per "
+    "dataset from the first free id up: the rows with only the fields the page "
+    "needs (aggregates only when the rows are too large), with "
+    "`df.to_json(path, orient=\"records\", date_format=\"iso\")` or "
+    "`json.dump(obj, f, default=str, allow_nan=False)`, and print only a short "
+    "summary (row count, fields). A derived figure a file holds (a total, "
+    "difference, share) is computed in that cell from the values, never "
+    "typed in as a literal — also when the values come from known data. "
+    "List every file in `data_files` with the "
+    "`data_sources` it covers. A file under `## Saved data files` is used again "
+    "by listing its id, without writing it.\n"
     "- Keep the whole `finish_gathering` call under about 30 lines.\n"
     "- Keep names of tables, fields, files and APIs as they are, whatever "
     "language you write in.\n\n"
@@ -246,6 +268,12 @@ _WHEN_TO_ASK_ACT_FIRST = (
     "point left open is decided by its default anyway — record that "
     "default as an assumption. One question with options beats several.\n"
 )
+
+
+def observed_data_handoff() -> bool:
+    """The static fast path hands the data over in `observed-data.json`, so
+    gathering does not save data files for the page."""
+    return os.environ.get("ANTON_STATIC_FAST_PATH") == "direct"
 
 
 def _gathering_instruction(act_first: bool, *, static_completion: bool = False) -> str:
@@ -293,6 +321,9 @@ _REDRAW_RESTATE = (
     "was declared with, whatever language you write in. For a source whose "
     "rows or values are under `" + KNOWN_DATA_HEADER + "`, also pass a "
     "`data_findings` entry with `verified_by: \"known_data\"`."
+    " For an html-app, list in `data_files` only ids shown under `## Data files` "
+    "or `## Saved data files`: this step cannot run code, so it cannot save new "
+    "data, and a source without such a file is fetched before generation."
 )
 
 _REDRAW_CORRECTION_ACT_FIRST = (
@@ -349,6 +380,8 @@ def step_message(step: str, state: PrdState, *, extra: str = "") -> str:
             "Questions you may still ask the user: "
             f"{gathering_question_budget(state.session, act_first=state.act_first)}\n"
         )
+        if settled_artifact_type(state) == "html-app" and not observed_data_handoff():
+            header += save_hint(state.artifact_path)
     from .. import static_gathering
     body = _step_instructions(state.act_first, static_completion=static_gathering.enabled(state))[step]
     # No history to continue → the step is handed the restored material

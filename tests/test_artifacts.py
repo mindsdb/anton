@@ -555,6 +555,7 @@ def test_housekeeping_files_contract():
 def test_non_content_names_is_the_union():
     """The publisher's state manifest is a deliverable and must stay content."""
     from anton.core.artifacts.internal_files import (
+        DATA_DIRNAME,
         GENERATION_INPUT_FILES,
         HOUSEKEEPING_DIRS,
         HOUSEKEEPING_FILES,
@@ -562,7 +563,7 @@ def test_non_content_names_is_the_union():
     )
 
     assert NON_CONTENT_NAMES == HOUSEKEEPING_FILES | GENERATION_INPUT_FILES | HOUSEKEEPING_DIRS
-    assert HOUSEKEEPING_DIRS == frozenset({".revisions"})
+    assert HOUSEKEEPING_DIRS == frozenset({".revisions", DATA_DIRNAME})
     assert "state_manifest.json" not in NON_CONTENT_NAMES
 
 

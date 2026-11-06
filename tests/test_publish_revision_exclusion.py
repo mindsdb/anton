@@ -3,7 +3,12 @@ from __future__ import annotations
 import io
 import zipfile
 
-from anton.core.artifacts.internal_files import GENERATION_INPUT_FILES
+from anton.core.artifacts.internal_files import (
+    DATA_DIRNAME,
+    GENERATION_INPUT_FILES,
+    NON_CONTENT_NAMES,
+)
+from anton.core.artifacts.store import iter_content_files
 from anton.publish_access import _pick_primary, _user_files
 from anton.publisher import _zip_html
 
@@ -43,3 +48,27 @@ def test_user_files_skip_generation_inputs_so_primary_is_real_content(tmp_path):
     files = _user_files(artifact)
     assert [p.name for p in files] == ["dashboard.html"]
     assert _pick_primary(artifact, files, primary_hint="missing.html").name == "dashboard.html"
+
+
+def test_directory_publish_never_bundles_data_files(tmp_path):
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    (artifact / "index.html").write_text("<h1>Current</h1>")
+    data = artifact / DATA_DIRNAME
+    data.mkdir()
+    (data / "1.json").write_text('[{"id": 1}]')
+
+    with zipfile.ZipFile(io.BytesIO(_zip_html(artifact))) as bundle:
+        assert bundle.namelist() == ["index.html"]
+
+
+def test_data_files_are_not_artifact_content(tmp_path):
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    (artifact / "index.html").write_text("<h1>UI</h1>")
+    (artifact / DATA_DIRNAME).mkdir()
+    (artifact / DATA_DIRNAME / "1.json").write_text("[]")
+
+    assert DATA_DIRNAME in NON_CONTENT_NAMES
+    assert [p.name for p, _ in iter_content_files(artifact)] == ["index.html"]
+    assert [p.name for p in _user_files(artifact)] == ["index.html"]

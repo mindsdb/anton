@@ -69,6 +69,16 @@ def test_tools_without_direct_reports_drop_the_path(tool):
         assert "DIRECT REPORTS" not in text and "fully specified" not in text
 
 
+@pytest.mark.parametrize("tool", [
+    tool_defs.GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
+    tool_defs.STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
+])
+def test_generate_without_direct_reports_takes_every_web_artifact(tool):
+    for text in (tool.description, tool.prompt):
+        assert "still need agreeing" not in text
+    assert "web artifacts, INSTEAD of writing their files yourself" in tool.prompt
+
+
 def test_every_html_app_goes_to_the_generator_without_direct_reports():
     assert "Every `html-app`" in llm_prompts.NO_DIRECT_REPORTS_ARTIFACTS_PROMPT
     assert "Every `html-app` goes to" in llm_prompts.NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT

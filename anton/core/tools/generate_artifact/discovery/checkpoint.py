@@ -133,6 +133,10 @@ class DiscoveryCheckpoint:
     # `GenState.known_data_verified`: what a new iteration without
     # `known_data` has to read again.
     known_data_verified: list[str] = field(default_factory=list)
+    # `DataFile.to_dict()` records of the files the page is built from.
+    data_files: list[dict] = field(default_factory=list)
+    # `GenState.data_not_saved`.
+    data_not_saved: bool = False
 
 
 def load(artifact_path: Path) -> DiscoveryCheckpoint | None:

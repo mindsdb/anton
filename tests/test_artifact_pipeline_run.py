@@ -8,6 +8,7 @@ reports are asserted where they are produced, in the FSM orchestrator.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -15,11 +16,14 @@ from unittest.mock import AsyncMock
 import pytest
 
 from anton.core.artifacts import ArtifactStore
-from anton.core.artifacts.internal_files import PRD_FILENAME
+from anton.core.artifacts.internal_files import DATA_DIRNAME, PRD_FILENAME
 from anton.core.interaction.elicit import AskAnswer
 from anton.core.llm.provider import LLMResponse, ToolCall, Usage
+from anton.core.tools.generate_artifact import orchestrator as pipeline
 from anton.core.tools.generate_artifact.discovery import brief, checkpoint as cp, orchestrator
 from anton.core.tools.generate_artifact.discovery.state import PrdState
+from anton.core.tools.generate_artifact.state import BrowserCheck
+from anton.core.tools.registry import ToolOutcome
 from tests.streaming_llm import StreamingLLM
 from anton.core.tools.generate_artifact.progress import MESSAGE_PREFIX
 
@@ -419,3 +423,63 @@ async def test_act_first_over_budget_does_not_show_the_brief(tmp_path, monkeypat
     assert calls == ["draft", "write_prd"]
     assert state.brief_shown is False
     assert _messages(state) == []
+
+
+_DATA_PAGE = (
+    '<html><head><meta name="viewport" content="width=device-width"></head><body><div id="a"></div>'
+    '<script type="application/json" data-anton-data="1"></script>'
+    "<script>const d=JSON.parse(document.querySelector('script[data-anton-data=\"1\"]').textContent);</script>"
+    "</body></html>"
+)
+
+
+async def test_an_html_app_page_is_built_from_the_data_file_gathering_saved(tmp_path, monkeypatch):
+    """One run from gathering to the finished page: the row a gathering cell
+    saved reaches the page through its data block, and the declared file
+    outlives the prune that ends the run while an undeclared one does not."""
+    state = _make_state(tmp_path, user_request="a dashboard of the orders",
+                        agent_understanding="one table of order lines")
+    folder = state.artifact_path / DATA_DIRNAME
+
+    async def fake_scratchpad(session, inp):
+        folder.mkdir(exist_ok=True)
+        (folder / "1.json").write_text(json.dumps([{"Id": "SO-5001", "Qty": 7}]))
+        (folder / "2.json").write_text("[]")
+        return ToolOutcome(content="saved .anton-data/1.json", ok=True)
+
+    async def fake_ask_via_elicit(session, request):
+        return AskAnswer(status="answered", values=("accept",))
+
+    async def fake_write_loop(**kw):
+        assert '"Id": "SO-5001"' in kw["kickoff"], "the generator sees the file's summary"
+        (state.artifact_path / "index.html").write_text(_DATA_PAGE)
+        return {"files_written": ["index.html"], "rounds_used": 1, "summary": "wrote the page"}
+
+    def no_browser(entry, *, cell_sandbox, screenshot=True, previous_html=None):
+        return BrowserCheck(status="unverified", reason="no browser in the test")
+
+    monkeypatch.setattr("anton.core.tools.tool_handlers.handle_scratchpad", fake_scratchpad)
+    monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_ask_via_elicit)
+    monkeypatch.setattr(pipeline.engine, "_run_loop", fake_write_loop)
+    monkeypatch.setattr(pipeline.verifiers, "verify_frontend_live", no_browser)
+    state.session._llm.plan = AsyncMock(side_effect=[
+        _tool_response("scratchpad", {"action": "exec", "name": "orders", "code": "save(rows)"}),
+        _text_response("## Goal\nAn orders table.\n"),  # draft_brief
+        _text_response("## Goal\nAn orders table, in full.\n"),  # write_prd
+        _text_response("## Layout\nOne table.\n"),  # make_tech_spec
+    ])
+    state.session._llm.code = AsyncMock(side_effect=[
+        _tool_response("finish_gathering", {
+            "summary": "saved the orders", "artifact_type": "html-app", "data_sources": ["orders"],
+            "data_files": [{"id": "1", "sources": ["orders"], "description": "order lines"}],
+        }),
+    ])
+
+    result = await pipeline.run(state, entry=cp.ENTRY_FULL)
+
+    assert isinstance(result, dict) and result["status"] == "generated", result
+    assert [s.outcome for s in state.trace if s.node == "data_check"] == ["skipped"]
+    page = (state.artifact_path / "index.html").read_text()
+    assert '<script type="application/json" data-anton-data="1">\n[{"Id":"SO-5001","Qty":7}]\n</script>' in page
+    assert (folder / "1.json").is_file()
+    assert not (folder / "2.json").exists()
