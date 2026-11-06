@@ -120,9 +120,9 @@ TOOL_ACCESS: dict[str, dict[str, str]] = {
     # writes, agent sessions, skills) is write-tier by the fail-closed default.
     # Every registered tool's schema is resent on every LLM call, and all 49
     # Notion tools came to ~57k tokens, enough to stall smaller models when
-    # another connector was connected too; these come to ~5k.
-    # `notion-query-data-sources` is a read but is left out on size alone (an
-    # 83k-character schema); `notion-query-multiple-data-sources` covers it.
+    # another connector was connected too; these come to ~13k, about 8k of
+    # it `notion-query-data-sources`, the only tool that reads one database's
+    # rows on every plan.
     "notion": {
         "notion-search": "read",
         "notion-fetch": "read",
@@ -134,6 +134,7 @@ TOOL_ACCESS: dict[str, dict[str, str]] = {
         "notion-list-shared-pages": "read",
         "notion-list-favorite-pages": "read",
         "notion-list-recent-pages": "read",
+        "notion-query-data-sources": "read",
         "notion-query-multiple-data-sources": "read",
         "notion-memory-search": "read",
         "notion-get-file-download-urls": "read",
@@ -174,7 +175,8 @@ TOOL_OUTPUT: dict[str, dict[str, ToolOutput]] = {
         "notion-search": "records",  # matching pages with content snippets
         "notion-fetch": "records",  # a page's or database's full content
         "notion-get-comments": "records",  # comments on a page
-        "notion-query-multiple-data-sources": "records",  # database rows
+        "notion-query-data-sources": "records",  # one database's rows
+        "notion-query-multiple-data-sources": "records",  # rows across databases
         "notion-memory-search": "records",  # workspace content matches
         # METADATA
         "notion-get-users": "metadata",  # workspace members
