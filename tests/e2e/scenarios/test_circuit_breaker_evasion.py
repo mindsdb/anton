@@ -13,6 +13,8 @@ from tests.e2e.harness import (
 
 _BAD_CODE = "def broken(:\n    pass\n"
 _GOOD_CODE = "print('ok')\n"
+# Pinned rather than read from the default, a high safety limit that a scripted
+# turn can't reasonably reach.
 _MAX_TOOL_ROUNDS = 25
 _EFFECTIVE_CAP = _MAX_TOOL_ROUNDS + _ROUND_CAP_GRACE_ROUNDS  # ENG-1893 grace
 
@@ -34,8 +36,9 @@ def test_alternating_errors_evade_circuit_breaker(cfg, stub, tmp_path):
         stub.queue_tool_call("scratchpad", {"action": "exec", "name": f"bad_{pairs}", "code": _BAD_CODE})
     stub.queue_finish_authorization(False)
     stub.queue_text("Max rounds hit. ROUNDS_EXHAUSTED")
+    env = {**base_env(stub), "ANTON_MAX_TOOL_ROUNDS": str(_MAX_TOOL_ROUNDS)}
     result = run_anton(["--folder", str(tmp_path)], ["keep trying", "2", "exit"],
-                       env=base_env(stub), timeout=cfg.timeout(60))
+                       env=env, timeout=cfg.timeout(60))
 
     assert_exit_ok(result)
     assert_not_output(result, "Traceback (most recent call last)")
