@@ -283,7 +283,7 @@ def test_developer_token_is_marked_secret_and_login_customer_id_is_not(monkeypat
 
 def test_method_passes_through_so_mcp_wiring_sees_the_connection(monkeypatch):
     """auth marks a HubSpot connection `_method: "mcp"`; without it anton
-    registers no HubSpot tools on a cloud turn and only injects the token."""
+    registers no HubSpot tools on a cloud turn."""
     from anton.core.mcp.wiring import _method_of
 
     monkeypatch.setattr(
@@ -292,8 +292,7 @@ def test_method_passes_through_so_mcp_wiring_sees_the_connection(monkeypatch):
     )
     vault = _vault(connections=[{"engine": "hubspot", "name": "acme"}])
     assert _method_of(vault, "hubspot", "acme") == "mcp"
-    env = vault.env_for("hubspot", "acme", flat=True)
-    assert env == {"DS_ACCESS_TOKEN": "tok", "DS_AUTH_TYPE": "oauth"}
+    assert vault.load("hubspot", "acme")["access_token"] == "tok"
 
 
 def test_response_without_method_is_not_treated_as_mcp(monkeypatch):
@@ -322,7 +321,6 @@ def test_access_mode_passes_through_but_never_reaches_the_env(monkeypatch, mode)
     for flat in (True, False):
         env = vault.env_for("hubspot", "acme", flat=flat)
         assert not any("ACCESS_MODE" in key or "METHOD" in key for key in env)
-        assert any(key.endswith("ACCESS_TOKEN") for key in env)
 
 
 def test_mcp_connection_without_access_mode_defaults_to_read(monkeypatch):
@@ -334,3 +332,20 @@ def test_mcp_connection_without_access_mode_defaults_to_read(monkeypatch):
     )
     vault = _vault(connections=[{"engine": "hubspot", "name": "acme"}])
     assert _access_mode_of(vault, "hubspot", "acme") == "read"
+
+
+@pytest.mark.parametrize("engine", ["hubspot", "notion"])
+def test_an_mcp_connections_token_never_reaches_the_env(monkeypatch, engine):
+    """Its access mode only limits the MCP tools; a token in the Scratchpad
+    env would let code call the provider's API directly and get past it."""
+    monkeypatch.setattr(
+        "anton.minds_client.minds_request",
+        lambda *a, **kw: b'{"access_token": "tok", "account_email": "a@b.com", "_method": "mcp", "_access_mode": "read"}',
+    )
+    vault = _vault(connections=[{"engine": engine, "name": "acme"}])
+    prefix = f"DS_{engine.upper()}_ACME"
+    assert vault.env_for(engine, "acme") == {
+        f"{prefix}__ACCOUNT_EMAIL": "a@b.com",
+        f"{prefix}__AUTH_TYPE": "oauth",
+    }
+    assert vault.env_for(engine, "acme", flat=True) == {"DS_ACCOUNT_EMAIL": "a@b.com", "DS_AUTH_TYPE": "oauth"}

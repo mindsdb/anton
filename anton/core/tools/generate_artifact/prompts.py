@@ -473,7 +473,7 @@ CRITICAL RULES:
 - LOGGING: `print()` and `logging.getLogger(__name__).info(...)` work everywhere.
 - DATA SOURCE CREDENTIALS: the user's connected data sources are exposed as
   environment variables named `DS_<ENGINE>_<NAME>__<FIELD>` (uppercase), e.g.
-  `DS_POSTGRES_PROD_DB__HOST`, `DS_HUBSPOT_MAIN__ACCESS_TOKEN`. Do NOT derive
+  `DS_POSTGRES_PROD_DB__HOST`, `DS_SHOPIFY_MAIN__CLIENT_SECRET`. Do NOT derive
   these names yourself — the `## Connected Data Sources` section below lists the
   full variable names verbatim (it writes the same pattern as
   `DS_<ENGINE_NAME>__<FIELD>`; both describe the names printed there). Copy them
