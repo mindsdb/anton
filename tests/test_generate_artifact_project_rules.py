@@ -15,7 +15,7 @@ import pytest
 
 from anton.core.tools.generate_artifact import engine, orchestrator, prompts
 from anton.core.tools.generate_artifact.state import GenState
-from anton.workspace import Workspace
+from anton.workspace import ANTON_MD_TEMPLATE, Workspace
 
 RULE = "Every page must show the text PROJECT-RULE-OK in its footer"
 RULES = prompts.project_rules_section(RULE)
@@ -90,6 +90,10 @@ def test_no_anton_md_leaves_every_prompt_as_it_was(tmp_path):
 @pytest.mark.parametrize("anton_md", ["", "   \n\t\n"])
 def test_a_blank_anton_md_renders_no_section(anton_md):
     assert prompts.project_rules_section(anton_md) == ""
+
+
+def test_the_untouched_template_renders_no_section():
+    assert prompts.project_rules_section(ANTON_MD_TEMPLATE.format(date="2026-11-05")) == ""
 
 
 def test_the_rules_never_travel_in_a_kickoff(tmp_path):

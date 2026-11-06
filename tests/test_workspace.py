@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from anton.workspace import Workspace
+from anton.workspace import ANTON_MD_TEMPLATE, Workspace, anton_md_user_text
 
 
 @pytest.fixture()
@@ -163,6 +163,36 @@ class TestAntonMd:
         context = ws.build_anton_md_context()
         assert "Project Context" in context
         assert "Python 3.11" in context
+
+    def test_build_context_skips_untouched_template(self, ws):
+        ws.initialize()
+        assert ws.build_anton_md_context() == ""
+
+    @pytest.mark.parametrize("date", ["2024-01-02", "2026-11-05"])
+    def test_untouched_template_has_no_user_text(self, date):
+        assert anton_md_user_text(ANTON_MD_TEMPLATE.format(date=date)) == ""
+
+    def test_crlf_template_has_no_user_text(self):
+        crlf = ANTON_MD_TEMPLATE.format(date="2026-11-05").replace("\n", "\r\n")
+        assert anton_md_user_text(crlf) == ""
+
+    def test_build_context_keeps_user_text_and_drops_boilerplate(self, ws, tmp_path):
+        ws.initialize()
+        with ws.anton_md_path.open("a", encoding="utf-8") as fh:
+            fh.write("\nUses Python 3.11 and pytest\n")
+        context = ws.build_anton_md_context()
+        assert "Python 3.11" in context
+        assert "# Anton Workspace" not in context
+        assert "Created:" not in context
+        assert "<!--" not in context
+
+    def test_user_text_keeps_other_headings_and_comments(self):
+        content = "# My project\n\n<!-- keep me -->\nRules here"
+        assert anton_md_user_text(content) == content
+
+    def test_template_heading_later_in_file_is_kept(self):
+        content = "Intro\n# Anton Workspace\n"
+        assert anton_md_user_text(content) == content.strip()
 
 
 class TestSecretVault:

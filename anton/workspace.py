@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import errno
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -24,6 +25,29 @@ Created: {date}
 <!-- Add project context, conventions, and notes below.
      Anton reads this file at the start of every conversation. -->
 """
+
+# Boilerplate of ANTON_MD_TEMPLATE, matched loosely so files created by any
+# anton version (any date, CRLF, reflowed comment) count as unedited.
+_TEMPLATE_HEADER_RE = re.compile(
+    r"\A\s*# Anton Workspace[ \t\r]*(?:\n|\Z)"
+    r"(?:\s*Created:[ \t]*\d{4}-\d{2}-\d{2}[ \t\r]*(?:\n|\Z))?"
+)
+_TEMPLATE_COMMENT_RE = re.compile(
+    r"<!--\s*Add project context, conventions, and notes below\.\s*"
+    r"Anton reads this file at the start of every conversation\.\s*-->"
+)
+
+
+def anton_md_user_text(content: str | None) -> str:
+    """What the user wrote in anton.md, without the template boilerplate.
+
+    Returns "" for a missing file, a blank file or the untouched template.
+    """
+    if not content:
+        return ""
+    text = _TEMPLATE_HEADER_RE.sub("", content, count=1)
+    text = _TEMPLATE_COMMENT_RE.sub("", text)
+    return text.strip()
 
 
 _SECRET_FILE_MODE = 0o600
@@ -267,14 +291,14 @@ class Workspace:
 
     def build_anton_md_context(self) -> str:
         """Build a prompt section from anton.md content, if any."""
-        content = self.read_anton_md_tracked()
-        if not content or not content.strip():
+        text = anton_md_user_text(self.read_anton_md_tracked())
+        if not text:
             return ""
 
         return (
             "\n\n## Project Context (anton.md)\n"
             "The following was written by the user in .anton/anton.md:\n\n"
-            f"{content.strip()}\n"
+            f"{text}\n"
         )
 
     # ── Secret vault (.env management) ───────────────────────────

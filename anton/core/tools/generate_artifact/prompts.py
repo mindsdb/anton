@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from anton.core.artifacts.geography_guidance import GEOGRAPHY_GUIDANCE
 from anton.utils.datasources import DATASOURCES_HEADER
+from anton.workspace import anton_md_user_text
 
 from .discovery.notes import EXEC_OUTPUT_MAX
 
@@ -786,13 +787,14 @@ OVER_DEFAULTS = (
 
 
 def project_rules_section(anton_md: str) -> str:
-    """The project's anton.md as a system-prompt section, or "" when blank.
+    """The project's anton.md as a system-prompt section, or "" when blank
+    or still the untouched template.
 
     A system-prompt section on purpose, never kickoff content: rules that
     reached the page writer only inside the brief or the PRD were read as
     content and printed on the page as text.
     """
-    text = anton_md.strip()
+    text = anton_md_user_text(anton_md)
     if not text:
         return ""
     return (
