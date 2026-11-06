@@ -1,5 +1,5 @@
 {
-  "description": "The commit list: which steps wait for the person's approval. Both hosts' holds and Anton's card read it. url is the page's address, element the element the step names (null for none), and held is \"commit\" (one approval runs this step once), \"position\" (one approval covers steps by position on this page address) or null (runs at once). A click holds when the element is named with submit, buy, pay, order, purchase, checkout, check out, send, delete, remove, transfer, confirm, post, publish, authorize or grant (whole words, any case), when it has no name, and anywhere on an OAuth authorization or consent page: a path segment authorize or consent, or a last segment auth under an oauth segment. type with submit true or a line break, and press of a key ending in Enter, hold outside a search field: role searchbox, or a name containing search. A click or drag with an x and y holds as position. Nothing else holds.",
+  "description": "The commit list: which steps wait for the person's approval. Both hosts' holds and Anton's card read it. url is the page's address; requested, when present, the address the page's navigation asked for before a redirect; element the element the step names, the one under the point for a step by position, or the focused one for a press (null for none); and held is \"commit\" (one approval runs this step once), \"position\" (one approval covers steps by position on this page address) or null (runs at once). A page is a consent page, an OAuth authorization or consent page, when its url or requested address has a query with client_id and response_type or redirect_uri, or a path segment authorize, authorization, oauth, oauth2, openid, openid-connect or login-actions, or one starting with consent. A click holds when the element is named with submit, buy, pay, order, purchase, checkout, check out, send, delete, remove, transfer, confirm, post, publish, authorize or grant (whole words, any case), with pays, paying, payment, payments, sends, sending, submits, submitting, submission or book, or with the same steps in German, French, Spanish, Portuguese, Italian, Dutch, Japanese, Chinese or Korean; when it has no name; and anywhere on a consent page. A drag holds as a click on its element would. type with submit true or a line break, and press of a chord with Enter anywhere in it, hold outside a search field: a textbox, searchbox or combobox with role searchbox or a name that starts with search. press of a chord with Space holds where a click on its element would, outside a textbox, searchbox or combobox. press of a chord with Space or Enter and any other key that is not a modifier (Tab, an arrow, a letter, a second Enter) holds wherever the focus is, since that key goes first and can move the focus onto a commit control. A click or drag with an x and y holds as position unless a click on its element would hold. A host may hold more than this list, never less.",
   "examples": {
     "a click on Submit": {
       "where": "commit list",
@@ -585,6 +585,417 @@
           "url": "https://shop.example.test/checkout"
         },
         "held": null
+      }
+    },
+    "press Space on Place order": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Place order"
+        },
+        "step": {
+          "action": "press",
+          "key": " ",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "press Enter+a on Place order": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Place order"
+        },
+        "step": {
+          "action": "press",
+          "key": "Enter+a",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "press Space in a message box": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "textbox",
+          "name": "Message"
+        },
+        "step": {
+          "action": "press",
+          "key": " ",
+          "element": 4
+        },
+        "held": null
+      }
+    },
+    "press Space on the consent page o/oauth2/v2/auth": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://accounts.example.test/o/oauth2/v2/auth?scope=y",
+        "element": {
+          "role": "button",
+          "name": "Continue"
+        },
+        "step": {
+          "action": "press",
+          "key": " ",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "press Enter on a button named Delete saved search": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Delete saved search"
+        },
+        "step": {
+          "action": "press",
+          "key": "Enter",
+          "element": 3
+        },
+        "held": "commit"
+      }
+    },
+    "press Enter in a message box named for #user-research": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "textbox",
+          "name": "Message #user-research"
+        },
+        "step": {
+          "action": "press",
+          "key": "Enter",
+          "element": 4
+        },
+        "held": "commit"
+      }
+    },
+    "a drag from Place order to itself": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Place order"
+        },
+        "step": {
+          "action": "drag",
+          "from": {
+            "element": 7
+          },
+          "to": {
+            "element": 7
+          }
+        },
+        "held": "commit"
+      }
+    },
+    "a drag by position onto Place order": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Place order"
+        },
+        "step": {
+          "action": "drag",
+          "from": {
+            "x": 40,
+            "y": 20
+          },
+          "to": {
+            "x": 40,
+            "y": 20
+          }
+        },
+        "held": "commit"
+      }
+    },
+    "a drag on the consent page signin/oauth/consent": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://accounts.example.test/signin/oauth/consent",
+        "element": {
+          "role": "button",
+          "name": "Allow"
+        },
+        "step": {
+          "action": "drag",
+          "from": {
+            "element": 3
+          },
+          "to": {
+            "element": 3
+          }
+        },
+        "held": "commit"
+      }
+    },
+    "any click on the consent page oauth/v2/authorization": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://www.linkedin.example.test/oauth/v2/authorization",
+        "element": {
+          "role": "button",
+          "name": "Allow"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "any click on the consent page dialog/oauth": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://www.facebook.example.test/v19.0/dialog/oauth",
+        "element": {
+          "role": "button",
+          "name": "Continue"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "any click on the consent page protocol/openid-connect/auth": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://sso.example.test/realms/r/protocol/openid-connect/auth",
+        "element": {
+          "role": "button",
+          "name": "Yes"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "any click on the consent page signin/oauth/v2/consentsummary": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://accounts.example.test/signin/oauth/v2/consentsummary",
+        "element": {
+          "role": "button",
+          "name": "Continue"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "any click on a page with an authorization query": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://www.example.test/ap/oa?client_id=x&response_type=code",
+        "element": {
+          "role": "button",
+          "name": "Allow"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "press Tab then Space in a text field": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "textbox",
+          "name": "Email"
+        },
+        "step": {
+          "action": "press",
+          "key": "Tab+ ",
+          "element": 4
+        },
+        "held": "commit"
+      }
+    },
+    "press Tab then Enter in a search box": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "searchbox",
+          "name": "Search"
+        },
+        "step": {
+          "action": "press",
+          "key": "Tab+Enter",
+          "element": 2
+        },
+        "held": "commit"
+      }
+    },
+    "press ArrowDown then Space on a menu item": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "menuitem",
+          "name": "Edit"
+        },
+        "step": {
+          "action": "press",
+          "key": "ArrowDown+ ",
+          "element": 5
+        },
+        "held": "commit"
+      }
+    },
+    "a click on Jetzt kaufen": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Jetzt kaufen"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "a click on Valider ma commande": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Valider ma commande"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "a click on Finalizar compra": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Finalizar compra"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "a click on 注文を確定する": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "注文を確定する"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "a click on Payment": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Payment"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "a click on Weiter": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Weiter"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": null
+      }
+    },
+    "any click on a page an authorization request was redirected to": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://login.example.test/setup/secur/RemoteAccessAuthorizationPage.apexp?source=x",
+        "requested": "https://login.example.test/services/oauth2/authorize?client_id=x&response_type=code",
+        "element": {
+          "role": "button",
+          "name": "Allow"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
       }
     }
   }

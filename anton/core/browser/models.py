@@ -12,7 +12,13 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    ValidationError,
+    ValidatorFunctionWrapHandler,
+    field_validator,
+)
 
 
 class _Answer(BaseModel):
@@ -136,16 +142,43 @@ class SavedTab(_Answer):
     saved_at: str = ""
 
 
+class HeldStep(_Answer):
+    """What a held step's approval will run, from the browser's own read of the
+    page in the read that would run it: the hold, the step's action, the names
+    of the elements that make it a commit (none for a hold by position) and
+    the page address it is bound to."""
+
+    kind: Literal["commit", "position"]
+    action: str
+    names: list[str] = []
+    url: str
+
+
 class ErrorBody(_Answer):
     """Every non-2xx answer: ``{"error": <code>, "message": <text>}``.
 
-    ``approval_required`` adds the held step's ``pending_id`` and the Unix
-    time its approval lapses, ``expires_at``."""
+    ``approval_required`` adds the held step's ``pending_id``, the Unix time
+    its approval lapses, ``expires_at``, and what the approval will run,
+    ``held``."""
 
     error: str
     message: str = ""
     pending_id: str | None = None
     expires_at: int | None = None
+    held: HeldStep | None = None
+
+    @field_validator("held", mode="wrap")
+    @classmethod
+    def _unreadable_held_is_none(
+        cls, value: object, handler: ValidatorFunctionWrapHandler
+    ) -> HeldStep | None:
+        # A held step stays held whatever its description says: an unreadable
+        # one makes the card fall back to the tool's own read, not the
+        # refusal unreadable.
+        try:
+            return handler(value)
+        except ValidationError:
+            return None
 
 
 class TabsAnswer(_Answer):

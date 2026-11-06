@@ -1,5 +1,5 @@
 {
-  "description": "Every refusal: {\"error\": <code>, \"message\": <text>}. The example's name is its code. Hosts check status and code against these; the messages are examples, and the router's own text may differ. approval_required adds pending_id and expires_at.",
+  "description": "Every refusal: {\"error\": <code>, \"message\": <text>}. The example's name is its code. Hosts check status and code against these; the messages are examples, and the router's own text may differ. approval_required adds pending_id, expires_at and held: what the approval will run, from the browser's own read of the page (kind \"commit\" or \"position\", the step's action, names: the sorted distinct names of the elements that make it a commit, none for position, and the url it is bound to).",
   "examples": {
     "unauthorized": {
       "where": "any route",
@@ -72,7 +72,15 @@
         "error": "approval_required",
         "message": "this step waits for the person's approval",
         "pending_id": "pa-0123456789abcdef01234567",
-        "expires_at": 1999999300
+        "expires_at": 1999999300,
+        "held": {
+          "kind": "commit",
+          "action": "click",
+          "names": [
+            "Pay $42.00"
+          ],
+          "url": "https://shop.example.test/cart"
+        }
       }
     },
     "bad_request": {
@@ -145,6 +153,15 @@
       "body": {
         "error": "daily_limit",
         "message": "today's browsing allowance is used up; it resets at 00:00 UTC"
+      }
+    },
+    "too_many_requests": {
+      "where": "any browser API route, through the router",
+      "kind": "response",
+      "status": 429,
+      "body": {
+        "error": "too_many_requests",
+        "message": "Too many browser calls are running at once. Wait for one to finish and try again."
       }
     },
     "browser_unavailable": {

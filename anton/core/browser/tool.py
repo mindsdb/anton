@@ -33,7 +33,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import httpx2 as httpx
 
@@ -43,7 +43,7 @@ from anton.core.browser.client import (
     BrowserClient,
     BrowserError,
 )
-from anton.core.browser.models import ActionResult, Element, Page, SavedTab, Site, Tab
+from anton.core.browser.models import ActionResult, Element, HeldStep, Page, SavedTab, Site, Tab
 from anton.core.browser.page import format_page, human_check, signature
 from anton.core.browser.policy import (
     StepDecision,
@@ -83,7 +83,43 @@ COMMIT_WORDS = (
     "submit", "buy", "pay", "order", "purchase", "checkout", "check out", "send", "delete", "remove",
     "transfer", "confirm", "post", "publish", "authorize", "grant",
 )
-_COMMIT_WORDS = re.compile(r"\b(" + "|".join(COMMIT_WORDS) + r")\b", re.IGNORECASE)
+_COMMIT_WORDS = re.compile(r"\b(" + "|".join(w.replace(" ", r"\s+") for w in COMMIT_WORDS) + r")\b", re.IGNORECASE)
+#: The same steps in other words, as the browser pod holds them: English
+#: inflections, "book", and German, French, Spanish, Portuguese, Italian and
+#: Dutch as whole words. The pod sets the person's language on every page, so
+#: a localized page is the normal case.
+_MORE_COMMIT_WORDS = (
+    "pays", "paying", "payment", "payments", "sends", "sending", "submits", "submitting", "submission", "book",
+    "kaufen", "bestellen", "bezahlen", "zahlen", "senden", "absenden", "abschicken", "versenden", "löschen", "entfernen",
+    "überweisen", "bestätigen", "buchen", "veröffentlichen", "posten", "autorisieren", "gewähren", "kasse",
+    "payer", "acheter", "commander", "valider", "envoyer", "supprimer", "retirer", "effacer", "virement", "confirmer",
+    "publier", "autoriser", "réserver", "soumettre", "régler", "paiement",
+    "pagar", "comprar", "compra", "pedido", "enviar", "eliminar", "borrar", "transferir", "confirmar", "publicar",
+    "autorizar", "reservar", "tramitar", "pago", "excluir", "apagar", "remover", "pagamento",
+    "paga", "pagare", "acquista", "ordina", "invia", "elimina", "cancella", "rimuovi", "trasferisci", "conferma",
+    "pubblica", "autorizza", "prenota",
+    "betalen", "betaal", "kopen", "bestel", "bestelling", "verzenden", "versturen", "verstuur", "verwijderen", "verwijder",
+    "overmaken", "bevestigen", "bevestig", "publiceren", "plaatsen", "autoriseren", "boeken", "afrekenen",
+)
+#: Japanese, Chinese and Korean put no space between words, so these hold
+#: anywhere in a name.
+_MORE_COMMIT_CJK = (
+    "購入", "注文", "支払", "送信", "削除", "確定", "送金", "投稿", "公開", "予約", "承認",
+    "购买", "購買", "支付", "付款", "下单", "下單", "提交", "发送", "發送", "删除", "刪除", "转账", "轉帳", "确认", "確認",
+    "发布", "發布", "授权", "授權",
+    "구매", "결제", "주문", "전송", "보내기", "삭제", "송금", "게시", "승인",
+)
+# \w is every script's letters and digits, so "überweisen" has edges too.
+_MORE_COMMIT_NAME = re.compile(
+    r"(?<!\w)(" + "|".join(_MORE_COMMIT_WORDS) + r")(?!\w)|" + "|".join(_MORE_COMMIT_CJK), re.IGNORECASE,
+)
+_TEXT_ENTRY_ROLES = frozenset({"textbox", "searchbox", "combobox"})
+#: Path segments of OAuth authorization and consent endpoints; a segment that
+#: starts with "consent" counts too.
+_CONSENT_SEGMENTS = frozenset({"authorize", "authorization", "oauth", "oauth2", "openid", "openid-connect", "login-actions"})
+_MODIFIER_KEYS = frozenset({"alt", "control", "meta", "shift"})
+_HOLD_RANK = {None: 0, "position": 1, "commit": 2}
+Hold = Literal["commit", "position"]
 
 
 @dataclass(frozen=True)
@@ -113,6 +149,11 @@ class _BrowserState:
     #: The page address where the user approved clicks by position. Approval
     #: lasts until the page moves to another address.
     position_url: str | None = None
+    #: The address the tool last asked the browser to load and the one it
+    #: landed on, when a redirect made them differ. The landing page is held
+    #: as the address it was asked for: a redirect from an authorization
+    #: request lands on a consent page with any address.
+    redirect: tuple[str, str] | None = None
     #: Steps the user declined, by (page address, step): never asked again.
     refused: set[tuple[str, str]] = field(default_factory=set)
     #: Addresses where the user finished a human check; their widget may stay
@@ -405,8 +446,11 @@ def _sites_line(sites: list[Site]) -> str:
 
 async def _do_open(session: "ChatSession", tc_input: dict) -> str:
     state = _state(session)
-    await _ensure_open(session, tc_input.get("url") or None)
+    url = tc_input.get("url") or None
+    await _ensure_open(session, url)
     page = await state.client.page(session_id=state.session_id)
+    if url:
+        _note_load(state, url, page.url)
     sites = await state.client.sites(session_id=state.session_id)
     lead = f"The browser is open and the user can see it beside the chat.\n{_sites_line(sites)}"
     checked = await _unless_human_check(session, page)
@@ -485,49 +529,127 @@ def _moved_element(*, seen: Page | None, current: Page, body: dict) -> str | Non
     return None
 
 
+def _is_text_entry(el: Element | None) -> bool:
+    return el is not None and el.role in _TEXT_ENTRY_ROLES
+
+
 def _is_search(el: Element | None) -> bool:
-    return el is not None and (el.role == "searchbox" or "search" in el.name.lower())
+    """A field where Enter only searches: a text field with role searchbox or a
+    name that starts with "search", never one with "search" further in
+    ("Message #user-research")."""
+    return _is_text_entry(el) and (el.role == "searchbox" or re.match(r"search\b", el.name, re.IGNORECASE) is not None)
+
+
+def _commit_name(name: str) -> bool:
+    return not name.strip() or bool(_COMMIT_WORDS.search(name)) or bool(_MORE_COMMIT_NAME.search(name))
+
+
+def _chord_keys(chord: object) -> list[str]:
+    """The keys of a chord such as "Shift+Enter", "Tab+ " or "Control++"."""
+    if not isinstance(chord, str) or not chord:
+        return []
+    if chord.endswith("++"):
+        return [*(k for k in chord[:-2].split("+") if k), "+"]
+    return chord.split("+")
 
 
 def _consent_page(url: str) -> bool:
-    """An OAuth authorization or consent endpoint, such as ``/login/oauth/authorize``,
-    ``/o/oauth2/v2/auth`` or ``/signin/oauth/consent``: every click there grants."""
-    segments = [s for s in urlparse(url).path.lower().split("/") if s]
-    if "authorize" in segments or "consent" in segments:
+    """An OAuth authorization or consent page, where every click grants: a query
+    with client_id and response_type or redirect_uri, as every authorization
+    request carries, or a path segment that names one (``/login/oauth/authorize``,
+    ``/o/oauth2/v2/auth``, ``/signin/oauth/consent``, Keycloak's ``login-actions``)."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    if "client_id" in query and ("response_type" in query or "redirect_uri" in query):
         return True
-    return bool(segments) and segments[-1] == "auth" and any(s.startswith("oauth") for s in segments)
+    return any(s in _CONSENT_SEGMENTS or s.startswith("consent") for s in parsed.path.lower().split("/") if s)
 
 
-def _commits(body: dict, element: Element | None, *, url: str) -> bool:
-    """Whether the step finishes something on the user's behalf: a click on a
-    submit, buy, send or delete control, on a control with no name, or
-    anywhere on an OAuth consent page, or text sent with Enter anywhere but
-    a search field."""
-    action = body.get("action")
-    if action == "click":
-        if element is None or not element.name.strip() or _consent_page(url):
-            return True
-        return bool(_COMMIT_WORDS.search(element.name))
+def _classify(step: dict, *, url: str, requested: str | None = None, element: Element | None) -> Hold | None:
+    """What the step needs before it runs, by the commit list: "commit" (one
+    approval runs it once), "position" (one approval covers steps by position
+    on this page) or None. ``element`` is the element the step names, the one
+    under the point for a step by position, or the focused one for a press.
+    ``requested`` is the address the page's navigation asked for before a
+    redirect."""
+    consent = _consent_page(url) or (requested is not None and _consent_page(requested))
+    commit_control = element is not None and _commit_name(element.name)
+    action = step.get("action")
+    if action in ("click", "drag"):
+        if consent or commit_control:
+            return "commit"
+        return "position" if _has_position(step) else None
     if action == "type":
-        text = str(body.get("text", ""))
+        text = str(step.get("text", ""))
         # A line break typed key by key presses Enter too.
-        sends = body.get("submit") is True or "\n" in text or "\r" in text
-        return sends and not _is_search(element)
+        sends = step.get("submit") is True or "\n" in text or "\r" in text
+        return "commit" if sends and not _is_search(element) else None
     if action == "press":
-        return str(body.get("key", "")).lower().endswith("enter") and not _is_search(element)
-    return False
+        keys = _chord_keys(step.get("key"))
+        enter = any(k.lower() == "enter" for k in keys)
+        space = " " in keys
+        # The keys before a chord's last go down first, so another key that is
+        # not a modifier (Tab, an arrow, a letter) can move the focus onto a
+        # commit control before Space or Enter lands.
+        if (enter or space) and sum(k.lower() not in _MODIFIER_KEYS for k in keys) > 1:
+            return "commit"
+        if enter and not _is_search(element):
+            return "commit"
+        if space and not _is_text_entry(element) and (consent or commit_control):
+            return "commit"
+    return None
+
+
+def _touched(page: Page, step: dict) -> list[Element | None]:
+    """The elements a step names on the page: a drag's ends, or the step's own.
+    A number the page doesn't list reads as an element with no name, which
+    holds: the tool can't tell what it is. A press with no element goes to
+    whatever holds the focus, which the tool can't see either."""
+    unknown = Element(id=-1, role="", name="")
+    named = [end["element"] for end in _ends(step) if end.get("element") is not None]
+    if named:
+        return [_element(page, element_id) or unknown for element_id in named]
+    if step.get("action") == "press":
+        return [unknown]
+    return [None]
+
+
+def _requested(state: _BrowserState, page: Page) -> str | None:
+    if state.redirect is not None and state.redirect[1] == page.url:
+        return state.redirect[0]
+    return None
+
+
+def _note_load(state: _BrowserState, asked: str | None, landed: str) -> None:
+    state.redirect = (asked, landed) if asked and landed != asked else None
+
+
+def _hold_of(state: _BrowserState, step: dict, page: Page) -> Hold | None:
+    """The strictest hold over every element the step touches."""
+    requested = _requested(state, page)
+    holds = [_classify(step, url=page.url, requested=requested, element=el) for el in _touched(page, step)]
+    return max(holds, key=_HOLD_RANK.__getitem__)
 
 
 def _step_key(body: dict) -> str:
     return json.dumps({k: v for k, v in body.items() if k != "include_page"}, sort_keys=True, default=str)
 
 
-def _step_words(body: dict, element: Element | None) -> str:
-    """The step as the approval card says it, with the element's role and name."""
+def _step_words(body: dict, element: Element | None, held: HeldStep | None = None) -> str:
+    """The step as the approval card says it: on the names the browser holds it
+    on when it gave them, else on the element's role and name."""
     action = body.get("action")
-    if element is None or _has_position(body):
+    if held is not None and held.names:
+        target = " and ".join(json.dumps(n, ensure_ascii=False) if n.strip() else "an element with no name" for n in held.names)
+        if _has_position(body) or action == "drag":
+            return f"{_describe(body)}, on {target}"
+    elif element is None or _has_position(body):
         return _describe(body)
-    target = _named(element)
+    else:
+        target = _named(element)
     if action == "type":
         enter = " and press Enter" if body.get("submit") is True else ""
         return f"type {json.dumps(str(body.get('text', '')), ensure_ascii=False)} into {target}{enter}"
@@ -563,8 +685,10 @@ def _not_approved(body: dict, why: str) -> ToolOutcome:
     )
 
 
-def _card_prompt(*, hold: Literal["commit", "position"], url: str, step: str) -> str:
+def _card_prompt(*, hold: Hold, url: str, step: str, changed: bool = False) -> str:
     shown = _fence(f"{url}\n{step}")
+    if changed:
+        shown += "\n\nThe page changed after it was last read, so this is the step as the browser will run it."
     if hold == "position":
         return (
             "**Approve clicks by position on this page?**\n\n"
@@ -601,12 +725,13 @@ async def _gate(session: "ChatSession", *, state: _BrowserState, body: dict, pag
     if body.get("action") in ("type", "press") and element is not None and element.secret:
         return _secret_field(body.get("element"))
     host_holds = not session._browser_config.in_app
-    if _has_position(body):
+    listed = _hold_of(state, body, page)
+    if listed == "position":
         if host_holds or state.position_url == page.url:
             return None
-        hold: Literal["commit", "position"] = "position"
+        hold: Hold = "position"
         approve = "Allow clicks by position on this page"
-    elif _commits(body, element, url=page.url):
+    elif listed == "commit":
         if host_holds:
             return None
         hold = "commit"
@@ -628,41 +753,79 @@ async def _gate(session: "ChatSession", *, state: _BrowserState, body: dict, pag
     return _not_approved(body, refusal_why(cause))
 
 
+#: What a step can answer that doesn't say whether the browser ran it: no
+#: answer at all, a 502 or a 504.
+_UNCONFIRMED = (0, 502, 504)
+
+
+def _unconfirmed(body: dict, exc: BrowserError) -> ToolOutcome:
+    return ToolOutcome(
+        content=(
+            f"The browser didn't confirm {_describe(body)} ({exc.code}), so it may have run. Read the page with "
+            "action=page before trying it again, and take it again only if the page shows it didn't happen."
+        ),
+        ok=False,
+        reason="browser_unreachable",
+    )
+
+
+async def _act_once(state: _BrowserState, body: dict) -> ActionResult | ToolOutcome:
+    """Send one step. A step whose answer doesn't say whether it ran comes back
+    as what to tell the model, so nothing sends it again blindly; any other
+    refusal raises."""
+    try:
+        result = await state.client.act(session_id=state.session_id, step=body)
+    except BrowserError as exc:
+        if exc.status in _UNCONFIRMED:
+            return _unconfirmed(body, exc)
+        raise
+    if body.get("action") == "navigate":
+        _note_load(state, body.get("url"), result.url)
+    return result
+
+
 async def _send_step(session: "ChatSession", *, state: _BrowserState, body: dict, page: Page) -> ActionResult | ToolOutcome:
     """Send one step. When the browser holds it for the user's approval
     (``approval_required``), show the card, and on Approve send the same step
-    once more with the held step's id. Anything else the browser refuses
+    once more with the held step's id. The card shows what the browser holds,
+    its own read of the page, when it says: the tool's read can be stale by
+    the time the browser runs the step. Anything else the browser refuses
     raises as usual."""
     from anton.core.interaction.elicit import AskOption
 
     try:
-        return await state.client.act(session_id=state.session_id, step=body)
+        return await _act_once(state, body)
     except BrowserError as exc:
         if exc.code != "approval_required":
             raise
-        held = exc
-    if not held.pending_id:
+        refusal = exc
+    if not refusal.pending_id:
         return _not_approved(body, "the browser held it and gave no way to approve it")
+    held = refusal.held
     element = _element(page, body.get("element"))
-    position = _has_position(body)
+    hold: Hold = held.kind if held is not None else ("position" if _has_position(body) else "commit")
+    changed = held is not None and bool(held.names) and element is not None and element.name not in held.names
     choice = await ask_approval_choice(
         session,
-        _card_prompt(hold="position" if position else "commit", url=page.url, step=_step_words(body, element)),
+        _card_prompt(
+            hold=hold, url=held.url if held is not None else page.url,
+            step=_step_words(body, element, held), changed=changed,
+        ),
         options=(AskOption(
             value="approve", label="Approve",
-            detail="Allow clicks by position on this page" if position else "Take this step once",
+            detail="Allow clicks by position on this page" if hold == "position" else "Take this step once",
         ),),
         cancel_detail="Leave the page as it is",
         log_label="browser step",
         # The web app reads both ids here and records the approval in the
         # browser before it answers the card.
-        question_id=f"browser:approve:{state.session_id}:{held.pending_id}",
+        question_id=f"browser:approve:{state.session_id}:{refusal.pending_id}",
     )
     if choice.cause is not None:
         state.refused.add((page.url, _step_key(body)))
         return _not_approved(body, refusal_why(choice.cause))
     try:
-        return await state.client.act(session_id=state.session_id, step={**body, "pending_id": held.pending_id})
+        return await _act_once(state, {**body, "pending_id": refusal.pending_id})
     except BrowserError as exc:
         if exc.code != "approval_required":
             raise
@@ -944,12 +1107,15 @@ async def _do_run(session: "ChatSession", tc_input: dict) -> str:
     raw_inputs = tc_input.get("inputs")
     inputs: dict = raw_inputs if isinstance(raw_inputs, dict) else {}
     state = _state(session)
-    await _ensure_open(session, tc_input.get("url") or None)
+    url = tc_input.get("url") or None
+    await _ensure_open(session, url)
     mode = _jev_mode(session)
     min_p = float(_setting(session, "browser_jev_min_p", DEFAULT_MIN_P))
     limit = int(_setting(session, "browser_max_steps", DEFAULT_MAX_STEPS))
     max_steps = max(1, min(int(tc_input.get("max_steps") or limit), limit))
     page = await state.client.page(session_id=state.session_id)
+    if url:
+        _note_load(state, url, page.url)
 
     if mode != "on":
         checked = await _unless_human_check(session, page)
@@ -1239,6 +1405,14 @@ def _refused(session: "ChatSession", exc: BrowserError) -> ToolOutcome:
             content=(
                 f"The browser is at capacity (at_capacity): {message} If another browser task of yours is open, "
                 "finish or close it first; otherwise try again in a few minutes, and tell the user if it keeps failing."
+            ),
+            ok=False, reason="browser_at_capacity",
+        )
+    if code == "too_many_requests":
+        return ToolOutcome(
+            content=(
+                f"Too many browser calls are running at once for this account (too_many_requests): {message} "
+                "Wait for one to finish, then try again."
             ),
             ok=False, reason="browser_at_capacity",
         )

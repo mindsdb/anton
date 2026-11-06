@@ -11,6 +11,7 @@ import httpx2 as httpx
 import pytest
 from pydantic import ValidationError
 
+from anton.core.browser import client as browser_client
 from anton.core.browser import tool as browser_tool
 from anton.core.browser.client import BrowserClient
 from anton.core.browser.config import BrowserConfig
@@ -92,6 +93,9 @@ class FakeHost:
         #: Whether the person's approval reached the browser before the card
         #: was answered, as the web app does it.
         self.approved_in_the_browser = True
+        #: What the browser says it holds in an approval_required answer:
+        #: none, as an older host answers, unless a test sets it.
+        self.held: dict | None = None
 
     def page(self):
         self.shown = self.pages[0] if len(self.pages) == 1 else self.pages.pop(0)
@@ -177,16 +181,17 @@ class FakeHost:
             return None
         page = self.shown
         element = next((browser_tool.Element.model_validate(e) for e in page["elements"] if e["id"] == step.get("element")), None)
-        if pending_id is None and not (
-            browser_tool._has_position(step) or browser_tool._commits(step, element, url=page["url"])
-        ):
+        if pending_id is None and browser_tool._classify(step, url=page["url"], element=element) is None:
             return None
         new_id = f"pa-{len(self.pending) + 1}"
         self.pending[new_id] = key
-        return httpx.Response(403, json={
+        refusal = {
             "error": "approval_required", "message": "this step waits for the person's approval",
             "pending_id": new_id, "expires_at": 1999999300,
-        })
+        }
+        if self.held is not None:
+            refusal["held"] = self.held
+        return httpx.Response(403, json=refusal)
 
     def posted(self, suffix: str) -> list[dict]:
         return [body for method, path, body, _ in self.calls if method == "POST" and path.endswith(suffix)]
@@ -633,7 +638,7 @@ async def test_act_reads_coordinates_as_screenshot_pixels(elicit_answers):
 
 
 async def test_on_the_desktop_act_drags_between_an_element_and_a_point(elicit_answers):
-    host = FakeHost()
+    host = FakeHost(pages=[CHECKOUT])
     session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
     elicit_answers.answers.append("approve")
     step = {"action": "drag", "from": {"element": 5}, "to": {"x": 600, "y": 300}}
@@ -878,6 +883,156 @@ async def test_on_the_web_a_click_by_position_gets_the_position_card(elicit_answ
     assert "Approve clicks by position on this page?" in elicit_answers.requests[0].prompt
     assert elicit_answers.requests[0].options[0].detail == "Allow clicks by position on this page"
     assert host.posted("/action")[-1]["pending_id"] == "pa-1"
+
+
+async def test_on_the_web_the_card_shows_what_the_browser_holds_and_says_the_page_changed(elicit_answers):
+    host = FakeHost(pages=[CHECKOUT])
+    # The page relabeled the button after the tool read it.
+    host.held = {"kind": "commit", "action": "click", "names": ["Place order for $5,000"], "url": "https://shop.example/checkout?step=2"}
+    session = make_session(host, elicitor=FakeElicitor())
+    elicit_answers.answers.append("cancel")
+    await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "element": 7}})
+    prompt = elicit_answers.requests[0].prompt
+    assert 'click "Place order for $5,000"' in prompt and "https://shop.example/checkout?step=2" in prompt
+    assert '"Place order"' not in prompt.replace('"Place order for', "")
+    assert "The page changed after it was last read" in prompt
+
+
+async def test_on_the_web_the_card_names_what_the_browser_holds_without_a_change_note_when_they_agree(elicit_answers):
+    host = FakeHost(pages=[CHECKOUT])
+    host.held = {"kind": "commit", "action": "click", "names": ["Place order"], "url": CHECKOUT["url"]}
+    session = make_session(host, elicitor=FakeElicitor())
+    elicit_answers.answers.append("cancel")
+    await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "element": 7}})
+    prompt = elicit_answers.requests[0].prompt
+    assert 'click "Place order"' in prompt and "changed" not in prompt
+
+
+async def test_on_the_web_a_position_step_the_browser_holds_as_a_commit_gets_the_one_step_card(elicit_answers):
+    host = FakeHost(pages=[PAGE])
+    host.held = {"kind": "commit", "action": "click", "names": ["Place order"], "url": PAGE["url"]}
+    session = make_session(host, elicitor=FakeElicitor())
+    elicit_answers.answers.append("approve")
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "x": 10, "y": 20}})
+    assert result.content.startswith("Done:")
+    card = elicit_answers.requests[0]
+    assert card.prompt.startswith("**Approve this browser step?**")
+    assert 'click at (10, 20), on "Place order"' in card.prompt
+    assert card.options[0].detail == "Take this step once"
+
+
+async def test_an_unreadable_held_description_still_reads_as_a_held_step():
+    body = {"error": "approval_required", "message": "held", "pending_id": "pa-1", "held": {"kind": "maybe"}}
+    host = FakeHost(pages=[CHECKOUT])
+    session = make_session(host)
+
+    def handler(request):
+        if request.url.path.endswith("/action"):
+            return httpx.Response(403, json=body)
+        return host.handler(request)
+
+    answer_with(session, handler)
+    with pytest.raises(browser_client.BrowserError) as raised:
+        await session._browser_state.client.act(session_id=SID, step={"action": "click", "element": 7})
+    assert (raised.value.code, raised.value.pending_id, raised.value.held) == ("approval_required", "pa-1", None)
+
+
+@pytest.mark.parametrize(("status", "code"), [(502, "browser_unavailable"), (504, "browser_starting")])
+async def test_a_step_with_no_clear_answer_may_have_run_and_is_never_sent_again(status, code):
+    host = FakeHost(pages=[CHECKOUT])
+    session = make_session(host)
+    sent: list[dict] = []
+
+    def handler(request):
+        if request.url.path.endswith("/action"):
+            sent.append(json.loads(request.content))
+            return httpx.Response(status, json={"error": code, "message": "no answer"})
+        return host.handler(request)
+
+    answer_with(session, handler)
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "type", "element": 9, "text": "hi"}})
+    assert result.ok is False and result.reason == "browser_unreachable"
+    assert "may have run" in result.content and "action=page" in result.content
+    assert len(sent) == 1
+
+
+async def test_a_busy_router_call_is_sent_again_after_a_short_wait(monkeypatch):
+    waits: list[float] = []
+
+    async def no_sleep(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr(browser_client.asyncio, "sleep", no_sleep)
+    host = FakeHost(pages=[CHECKOUT])
+    session = make_session(host)
+    busy = [2]
+
+    def handler(request):
+        if request.url.path.endswith("/action") and busy[0]:
+            busy[0] -= 1
+            return httpx.Response(429, json={"error": "too_many_requests", "message": "Too many browser calls are running at once."})
+        return host.handler(request)
+
+    answer_with(session, handler)
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "type", "element": 9, "text": "hi"}})
+    assert result.ok is True and waits == [0.5, 1.0]
+    assert len(host.posted("/action")) == 1
+
+
+async def test_a_router_that_stays_busy_reads_as_busy_and_a_daily_limit_is_never_retried(monkeypatch):
+    waits: list[float] = []
+
+    async def no_sleep(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr(browser_client.asyncio, "sleep", no_sleep)
+    session = make_session(FakeHost(pages=[CHECKOUT]))
+    answer_with(session, lambda r: httpx.Response(429, json={"error": "too_many_requests", "message": "busy"}))
+    busy = await browser_tool.handle_browser(session, {"action": "page"})
+    assert busy.reason == "browser_at_capacity" and waits == [0.5, 1.0, 2.0]
+
+    waits.clear()
+    answer_with(session, lambda r: httpx.Response(429, json={"error": "daily_limit", "message": "used up"}))
+    limited = await browser_tool.handle_browser(session, {"action": "page"})
+    assert limited.reason == "browser_daily_limit" and waits == []
+
+
+async def test_on_the_desktop_keys_and_drags_that_can_reach_a_commit_control_wait_for_approve(elicit_answers):
+    host = FakeHost(pages=[CHECKOUT])
+    session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+    for step in (
+        {"action": "press", "key": " ", "element": 7},
+        {"action": "press", "key": "Tab+ ", "element": 5},
+        {"action": "press", "key": "Tab+Enter", "element": 10},
+        {"action": "press", "key": " "},
+        {"action": "drag", "from": {"element": 7}, "to": {"element": 7}},
+    ):
+        before = len(elicit_answers.requests)
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+        assert result.reason == "browser_step_not_approved", step
+        assert len(elicit_answers.requests) == before + 1, step
+    assert host.posted("/action") == []
+    # Space in a text field types a space.
+    plain = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "press", "key": " ", "element": 9}})
+    assert plain.ok is True and not plain.reason
+
+
+async def test_on_the_desktop_a_page_an_authorization_request_was_redirected_to_holds_every_click(elicit_answers):
+    landed = {**PAGE, "url": "https://login.example/setup/secur/RemoteAccessAuthorizationPage.apexp?source=x"}
+    host = FakeHost(pages=[landed])
+    session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+    await browser_tool.handle_browser(session, {
+        "action": "open", "url": "https://login.example/services/oauth2/authorize?client_id=x&response_type=code",
+    })
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "element": 2}})
+    assert result.reason == "browser_step_not_approved" and len(elicit_answers.requests) == 1
+
+    # Opened at its own address, the same page holds nothing.
+    plain_host = FakeHost(pages=[landed])
+    plain = make_session(plain_host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+    await browser_tool.handle_browser(plain, {"action": "open", "url": landed["url"]})
+    done = await browser_tool.handle_browser(plain, {"action": "act", "step": {"action": "click", "element": 2}})
+    assert done.ok is True and len(elicit_answers.requests) == 1
 
 
 async def test_the_desktop_browser_never_calls_jev(fake_jev):

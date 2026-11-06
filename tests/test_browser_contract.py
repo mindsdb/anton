@@ -19,6 +19,7 @@ import httpx2 as httpx
 import pytest
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from anton.core.browser import client as client_module
 from anton.core.browser import tool as browser_tool
 from anton.core.browser.client import BrowserClient, BrowserError
 from anton.core.browser.config import BrowserConfig
@@ -26,6 +27,8 @@ from anton.core.browser.models import (
     ActionResult,
     Control,
     Element,
+    ErrorBody,
+    HeldStep,
     Page,
     SavedTabAnswer,
     SavedTabsAnswer,
@@ -160,12 +163,17 @@ def test_a_project_keeps_at_most_the_pinned_number_of_saved_tabs():
     assert "100" in _load("error").examples["too_many_saved_tabs"].body["message"]
 
 
+def test_a_held_step_reads_what_the_browser_says_it_holds():
+    body = _load("error").examples["approval_required"].body
+    assert set(body["held"]) == set(HeldStep.model_fields)
+    held = ErrorBody.model_validate(body).held
+    assert held == HeldStep(kind="commit", action="click", names=["Pay $42.00"], url="https://shop.example.test/cart")
+
+
 def _held(example: ContractExample) -> str | None:
     body = example.body
     element = Element.model_validate({"id": 7, **body["element"]}) if body["element"] is not None else None
-    if browser_tool._has_position(body["step"]):
-        return "position"
-    return "commit" if browser_tool._commits(body["step"], element, url=body["url"]) else None
+    return browser_tool._classify(body["step"], url=body["url"], requested=body.get("requested"), element=element)
 
 
 @pytest.mark.parametrize("name", sorted(_load("commit_steps").examples))
@@ -315,6 +323,7 @@ ERROR_REASONS = {
     "approval_required": "browser_step_not_approved",
     "too_many_saved_tabs": "browser_error",
     "browser_starting": "browser_error",
+    "too_many_requests": "browser_at_capacity",
 }
 
 
@@ -327,7 +336,8 @@ def test_every_error_body_is_named_by_its_code_and_mapped():
 
 
 @pytest.mark.parametrize("code", sorted(ERROR_REASONS))
-async def test_each_host_error_reaches_the_model_with_its_own_reason(code):
+async def test_each_host_error_reaches_the_model_with_its_own_reason(code, monkeypatch):
+    monkeypatch.setattr(client_module, "BUSY_RETRY_S", (0.0, 0.0, 0.0))
     example = _load("error").examples[code]
     client = BrowserClient(
         base_url=ROUTER, credential=_k, trust_env=True, first_call_timeout_s=45.0,

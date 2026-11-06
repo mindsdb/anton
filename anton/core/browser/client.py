@@ -9,6 +9,7 @@ made for this launch. Every call carries ``Authorization: Bearer
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TypeVar
@@ -21,6 +22,7 @@ from anton.core.browser.models import (
     ActionResult,
     Control,
     ErrorBody,
+    HeldStep,
     Page,
     SavedTab,
     SavedTabAnswer,
@@ -43,6 +45,10 @@ REQUEST_TIMEOUT_S = 45.0
 #: once: past that deadline, so the router's answer arrives first, and under
 #: the edge proxy's 125 s limit, so its HTML error page never does.
 FIRST_CALL_TIMEOUT_S = 115.0
+#: The router answers 429 too_many_requests when too many of the person's
+#: calls are in flight, before the call reaches the browser, so sending it
+#: again is safe, a step included. The waits before each new try:
+BUSY_RETRY_S = (0.5, 1.0, 2.0)
 
 _Model = TypeVar("_Model", bound=BaseModel)
 
@@ -55,8 +61,9 @@ class BrowserError(Exception):
     code: str
     message: str
     #: Set on ``approval_required``: the held step's id, for the person's
-    #: approval and the agent's one resend.
+    #: approval and the agent's one resend, and what that approval will run.
     pending_id: str | None = None
+    held: HeldStep | None = None
 
     def __str__(self) -> str:
         return f"{self.code}: {self.message}"
@@ -68,7 +75,7 @@ def _error(response: httpx.Response) -> BrowserError:
         body = ErrorBody.model_validate_json(response.content)
     except ValidationError:
         return BrowserError(response.status_code, "http_error", response.text[:300])
-    return BrowserError(response.status_code, body.error, body.message, body.pending_id)
+    return BrowserError(response.status_code, body.error, body.message, body.pending_id, body.held)
 
 
 class BrowserClient:
@@ -99,22 +106,28 @@ class BrowserClient:
         token = await self._credential()
         if not token:
             raise BrowserError(401, "no_credential", "no credential is available for the browser")
-        timeout = REQUEST_TIMEOUT_S if self._answered else self._first_call_timeout_s
-        try:
-            response = await self._http.request(
-                method,
-                f"{self._base}{path}",
-                json=json,
-                params=params,
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=timeout,
-            )
-        except httpx.HTTPError as exc:
-            raise BrowserError(0, "unreachable", f"the browser did not answer ({type(exc).__name__})") from exc
-        self._answered = True
-        if response.status_code >= 400:
-            raise _error(response)
-        return response
+        tries = 0
+        while True:
+            timeout = REQUEST_TIMEOUT_S if self._answered else self._first_call_timeout_s
+            try:
+                response = await self._http.request(
+                    method,
+                    f"{self._base}{path}",
+                    json=json,
+                    params=params,
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=timeout,
+                )
+            except httpx.HTTPError as exc:
+                raise BrowserError(0, "unreachable", f"the browser did not answer ({type(exc).__name__})") from exc
+            self._answered = True
+            if response.status_code < 400:
+                return response
+            error = _error(response)
+            if error.code != "too_many_requests" or tries == len(BUSY_RETRY_S):
+                raise error
+            await asyncio.sleep(BUSY_RETRY_S[tries])
+            tries += 1
 
     async def _read(
         self, model: type[_Model], method: str, path: str, *, json: dict | None = None, params: dict | None = None,
