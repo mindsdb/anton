@@ -264,7 +264,12 @@ assert query_minds_data(7, "SELECT odd_reason") == error("invalid_datasource_res
 assert query_minds_data(7, "SELECT wide_name") == error("result_too_large")
 print("ok")
 """
-    _assert_cell_printed_ok(_run_cell(cell, tmp_path))
+    completed = _run_cell(cell, tmp_path)
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout.split("__ANTON_RESULT__\n", 1)[1].splitlines()[0])
+    assert result["error"] is None
+    # The truncated results put the cut-result note ahead of "ok".
+    assert result["stdout"].endswith("ok\n") and result["stdout"] != "ok\n"
 
 
 @pytest.mark.parametrize(

@@ -552,7 +552,10 @@ class _VerifierVerdict(BaseModel):
             # A bare "came back empty" claimed the shape COMPLETE carves out as
             # a genuine none-found answer, and STUCK is the later bullet.
             "(blocked, no access, came back empty because the source failed "
-            "rather than because nothing matched, cannot be installed), or that "
+            "rather than because nothing matched, cannot be installed; looking in "
+            "several tables, fields, documents or endpoints and finding the value "
+            "in none of them, including guessed names rejected as unknown, is a "
+            "search that matched nothing, not failed approaches), or that "
             "the required tool is absent from this environment, and the assistant "
             "told the user plainly what it could not get instead of guessing — "
             "judged on the failed attempts in the transcript, not on the "
@@ -565,7 +568,14 @@ class _VerifierVerdict(BaseModel):
             # both, and the hand-back would re-ask what the assistant just did.
             "If the assistant instead asked the "
             "user to supply what it could not get, that is WAITING (above), not "
-            "STUCK."
+            "STUCK, even when the reply also calls the value unavailable; 'if you "
+            "have X, share it and I can check' is such an ask. "
+            # Correct "not in the data" answers matched the clause above by their
+            # lookups and rejected table-name guesses and ended as hand-backs.
+            "A source that returned its contents (it did not refuse, error, time "
+            "out, or say it has no access) but does not record what was asked has "
+            "not failed: when the assistant said so without substituting a related "
+            "figure, that is COMPLETE (above), not STUCK."
         )
     )
     reason: str = Field(description="One brief sentence explaining the verdict.")
@@ -1060,7 +1070,11 @@ _VERIFIER_JUDGMENT_RUBRIC = (
     "attempt. Conversely, an assistant that implied success "
     "while the data its answer relies on errored or came back empty is INCOMPLETE, "
     "not COMPLETE — and supplying such values with a disclaimer that they are "
-    "indicative or unverified is still implying success, not honesty."
+    "indicative or unverified is still implying success, not honesty. A source "
+    "that returned its contents but does not record what was asked has not "
+    "failed, and neither has a guessed table or field name rejected as unknown: "
+    "a reply that says the value is not recorded, without substituting a "
+    "related figure, is COMPLETE, not STUCK."
 )
 
 # Opens the verifier's continuation and stuck notes. A "SYSTEM:" note that says "do not
