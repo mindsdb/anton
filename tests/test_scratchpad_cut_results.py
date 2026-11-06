@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from anton.core.backends.local import LocalScratchpadRuntime
 
 _DEFAULTS = dict(
@@ -13,30 +15,57 @@ _DEFAULTS = dict(
 )
 
 
-def _sum_cell(body: dict) -> str:
+def _sum_cell(body: dict, rows_key: str) -> str:
     return (
         "import json\n"
         f"data = json.loads({json.dumps(json.dumps(body))})\n"
-        "rows = data.get('Rows') or data.get('data')\n"
-        "print('total', sum(r[1] for r in rows))\n"
+        f"print('total', sum(r['n'] for r in data[{rows_key!r}]))\n"
     )
 
 
-async def test_cut_result_is_named_and_whole_result_left_alone():
+_ROWS = [{"n": 1}, {"n": 2}]
+
+
+@pytest.mark.parametrize(
+    "body, rows_key, marker",
+    [
+        ({"data": _ROWS, "has_more": True}, "data", "has_more"),
+        ({"value": _ROWS, "@odata.nextLink": "https://example.test/next"}, "value", "@odata.nextLink"),
+        ({"items": _ROWS, "meta": {"next_cursor": "abc"}}, "items", "next_cursor"),
+        ({"rows": _ROWS, "truncated": True}, "rows", "truncated"),
+    ],
+)
+async def test_cut_result_is_named_ahead_of_the_output(body, rows_key, marker):
     pad = LocalScratchpadRuntime(name="cut-results", **_DEFAULTS)
     await pad.start()
     try:
-        cut = await pad.execute(_sum_cell({"Rows": [["a", 1], ["b", 2]], "RowCount": 2, "Truncated": True}))
-        whole = await pad.execute(_sum_cell({"Rows": [["a", 1], ["b", 2]], "RowCount": 2, "Truncated": False}))
-        nested = await pad.execute(_sum_cell({"data": [["a", 1]], "meta": {"next_cursor": "abc"}}))
-        last_page = await pad.execute(_sum_cell({"data": [["a", 1]], "meta": {"next_cursor": None}}))
+        cut = await pad.execute(_sum_cell(body, rows_key))
+        # The note is per cell: the next cell starts clean.
+        whole = await pad.execute(_sum_cell({rows_key: _ROWS}, rows_key))
     finally:
         await pad.close()
 
     assert cut.error is None
-    assert "Truncated" in cut.stdout.splitlines()[0]
+    assert marker in cut.stdout.splitlines()[0]
     assert cut.stdout.endswith("total 3\n")
-    # The note is per cell: the next cell starts clean.
     assert whole.stdout == "total 3\n"
-    assert "next_cursor" in nested.stdout.splitlines()[0]
-    assert last_page.stdout == "total 1\n"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"data": _ROWS, "has_more": False},
+        {"value": _ROWS, "@odata.nextLink": None},
+        {"items": _ROWS, "meta": {"next_cursor": ""}},
+    ],
+)
+async def test_last_page_is_left_alone(body):
+    rows_key = next(k for k in body if isinstance(body[k], list))
+    pad = LocalScratchpadRuntime(name="cut-results", **_DEFAULTS)
+    await pad.start()
+    try:
+        cell = await pad.execute(_sum_cell(body, rows_key))
+    finally:
+        await pad.close()
+
+    assert cell.stdout == "total 3\n"
