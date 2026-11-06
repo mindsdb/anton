@@ -27,9 +27,10 @@ Created: {date}
 """
 
 # Boilerplate of ANTON_MD_TEMPLATE, matched loosely so files created by any
-# anton version (any date, CRLF, reflowed comment) count as unedited.
+# anton version (any date, CRLF, BOM, reflowed comment) count as unedited.
+# The heading and the date line are each optional: a user may delete one.
 _TEMPLATE_HEADER_RE = re.compile(
-    r"\A\s*# Anton Workspace[ \t\r]*(?:\n|\Z)"
+    r"\A\ufeff?\s*(?:# Anton Workspace[ \t\r]*(?:\n|\Z))?"
     r"(?:\s*Created:[ \t]*\d{4}-\d{2}-\d{2}[ \t\r]*(?:\n|\Z))?"
 )
 _TEMPLATE_COMMENT_RE = re.compile(
@@ -45,7 +46,7 @@ def anton_md_user_text(content: str | None) -> str:
     """
     if not content:
         return ""
-    text = _TEMPLATE_HEADER_RE.sub("", content, count=1)
+    text = _TEMPLATE_HEADER_RE.sub("", content)
     text = _TEMPLATE_COMMENT_RE.sub("", text)
     return text.strip()
 

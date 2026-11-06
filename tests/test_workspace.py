@@ -176,7 +176,15 @@ class TestAntonMd:
         crlf = ANTON_MD_TEMPLATE.format(date="2026-11-05").replace("\n", "\r\n")
         assert anton_md_user_text(crlf) == ""
 
-    def test_build_context_keeps_user_text_and_drops_boilerplate(self, ws, tmp_path):
+    def test_bom_template_has_no_user_text(self):
+        assert anton_md_user_text("\ufeff" + ANTON_MD_TEMPLATE.format(date="2026-11-05")) == ""
+
+    def test_date_line_without_heading_is_dropped(self):
+        template = ANTON_MD_TEMPLATE.format(date="2026-11-05")
+        without_heading = template.replace("# Anton Workspace\n", "", 1)
+        assert anton_md_user_text(without_heading + "Rules here\n") == "Rules here"
+
+    def test_build_context_keeps_user_text_and_drops_boilerplate(self, ws):
         ws.initialize()
         with ws.anton_md_path.open("a", encoding="utf-8") as fh:
             fh.write("\nUses Python 3.11 and pytest\n")

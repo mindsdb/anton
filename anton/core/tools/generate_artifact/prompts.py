@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING
 
 from anton.core.artifacts.geography_guidance import GEOGRAPHY_GUIDANCE
 from anton.utils.datasources import DATASOURCES_HEADER
-from anton.workspace import anton_md_user_text
 
 from .discovery.notes import EXEC_OUTPUT_MAX
 
@@ -794,6 +793,8 @@ def project_rules_section(anton_md: str) -> str:
     reached the page writer only inside the brief or the PRD were read as
     content and printed on the page as text.
     """
+    from anton.workspace import anton_md_user_text
+
     text = anton_md_user_text(anton_md)
     if not text:
         return ""
