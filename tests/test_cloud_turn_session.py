@@ -11,6 +11,7 @@ Two layers:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import subprocess
@@ -1378,6 +1379,53 @@ def test_the_credential_context_states_parity_with_its_caveat(tmp_path, monkeypa
     assert "Cowork Desktop App" in suffix
     assert "not readable from this conversation" in suffix
     assert "does not make it usable in this conversation" in suffix
+
+
+#: sha256 of the credential block and the whole suffix as they read before a
+#: turn could build connector templates. A turn without the tool keeps them.
+_CREDENTIAL_CONTEXT_SHA256 = "196e8bd8c4c555fd1f5b99a0771454a40cd3a46fb52ffa2802c9573be5929552"
+_POD_SUFFIX_SHA256 = "a61d2d5379b5dd2b4d5252931a8049cc116de52a5c5dfc8a16a0d863394408f0"
+
+
+def test_without_connector_drafts_the_credential_text_is_unchanged(tmp_path, monkeypatch):
+    from anton.cloud_turn.session import _CREDENTIAL_CONTEXT
+
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert hashlib.sha256(_CREDENTIAL_CONTEXT.encode()).hexdigest() == _CREDENTIAL_CONTEXT_SHA256
+    assert hashlib.sha256(cfg.system_prompt_context.suffix.encode()).hexdigest() == _POD_SUFFIX_SHA256
+    assert "create_connector_draft" not in cfg.system_prompt_context.suffix
+
+
+def test_with_connector_drafts_the_turn_is_told_to_build_a_template(tmp_path, monkeypatch):
+    _, cfg = _build(tmp_path, monkeypatch, connector_drafts=True)
+    suffix = cfg.system_prompt_context.suffix
+
+    assert "build its template with create_connector_draft" in suffix
+    assert "still never ask for a value" in suffix
+    assert "saves the template from its card" in suffix
+    assert "credentials for it in Connect Apps and Data" in suffix
+    # Drivers and redirect sign-ins still go to the desktop app, with the caveat.
+    assert "a database that needs a driver" in suffix
+    assert "Cowork Desktop App" in suffix
+    assert "not readable from this conversation" in suffix
+    # The rest of the rule is the same text.
+    assert "Never ask the user to type a password" in suffix
+    assert "no tool call, no file and no store" in suffix
+    assert "If the user reports that the connector they need is not offered, say" not in suffix
+
+
+def test_the_template_guidance_reaches_the_built_prompt(tmp_path, monkeypatch):
+    from anton.core.llm.prompt_builder import ChatSystemPromptBuilder
+
+    _, cfg = _build(tmp_path, monkeypatch, connector_drafts=True)
+    prompt = ChatSystemPromptBuilder().build(
+        conversation_started="2026-09-10T12:00:00+00:00",
+        system_prompt_context=cfg.system_prompt_context,
+        proactive_dashboards=False,
+        output_dir="",
+        tool_defs=[],
+    )
+    assert "build its template with create_connector_draft" in prompt
 
 
 def test_the_credential_context_names_no_connector(tmp_path, monkeypatch):

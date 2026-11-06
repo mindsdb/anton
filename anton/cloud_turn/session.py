@@ -92,8 +92,9 @@ CLOUD_TOOL_ALLOWLIST = frozenset(
 #: prompt still invites asking for them and is left alone to keep this fix
 #: web-only, so this text has to claim precedence instead of winning it by
 #: position, and it names no connector because the pod cannot see which ones
-#: auth offers.
-_CREDENTIAL_CONTEXT = (
+#: auth offers. The middle sentence is the one that changes when the turn can
+#: build a connector template.
+_CREDENTIAL_HEAD = (
     "CREDENTIALS ON THIS SURFACE: no tool here can capture a credential, and "
     "none will appear mid-turn. Never ask the user to type a password, API "
     "key, token, connection string, or private key into this conversation. "
@@ -105,11 +106,28 @@ _CREDENTIAL_CONTEXT = (
     "Apps and Data, which reads Connected Apps and Data once something is "
     "connected. You cannot see which connectors it offers, so never state "
     "that a particular one is or is not available there. When a task needs a "
-    "connection that does not exist yet, name that entry. If the user reports "
+    "connection that does not exist yet, name that entry. "
+)
+_DESKTOP_REFERRAL = (
+    "If the user reports "
     "that the connector they need is not offered, say that it is not on Cloud "
     "yet and that it can be used in the Cowork Desktop App instead, and be "
     "exact about what that means: the work itself would move to that app, "
     "because a credential added there is not readable from this conversation. "
+)
+_TEMPLATE_REFERRAL = (
+    "If the user reports that the connector they need is not offered and it "
+    "is an API that takes keys or tokens, build its template with "
+    "create_connector_draft, and still never ask for a value: the user saves "
+    "the template from its card in this chat, then enters their credentials "
+    "for it in Connect Apps and Data. Anything else that is not offered, such "
+    "as a database that needs a driver or a sign-in that redirects to the "
+    "provider, is not on Cloud yet and can be used in the Cowork Desktop App "
+    "instead; be exact about what that means: the work itself would move to "
+    "that app, because a credential added there is not readable from this "
+    "conversation. "
+)
+_CREDENTIAL_TAIL = (
     "Never offer another location inside this app: saving a credential "
     "somewhere else does not make it usable in this conversation. If a "
     "credential arrives here anyway, say plainly that it is now in the "
@@ -117,6 +135,8 @@ _CREDENTIAL_CONTEXT = (
     "it into no tool call, no file and no store: nothing here can vault it, "
     "so having it rotated is the whole of the correct response."
 )
+_CREDENTIAL_CONTEXT = _CREDENTIAL_HEAD + _DESKTOP_REFERRAL + _CREDENTIAL_TAIL
+_CREDENTIAL_CONTEXT_WITH_TEMPLATES = _CREDENTIAL_HEAD + _TEMPLATE_REFERRAL + _CREDENTIAL_TAIL
 
 #: Per-turn staging: Hippocampus reads slots from disk, so the payload has to land
 #: as files. Used only as a fallback when no shared mount is configured (desktop,
@@ -830,6 +850,10 @@ CLOUD_ARTIFACT_DELIVERY_GUIDANCE = (
 _POD_PROMPT_SUFFIX = "\n\n".join(
     (CLOUD_ARTIFACT_DELIVERY_GUIDANCE, _CREDENTIAL_CONTEXT)
 )
+#: The same, for a turn that has `create_connector_draft`.
+_POD_PROMPT_SUFFIX_WITH_TEMPLATES = "\n\n".join(
+    (CLOUD_ARTIFACT_DELIVERY_GUIDANCE, _CREDENTIAL_CONTEXT_WITH_TEMPLATES)
+)
 
 
 def _connector_usage_notes(connectors: dict | None) -> dict[str, str]:
@@ -1027,7 +1051,10 @@ def build_cloud_chat_session(
             # the desktop harness injects its own via `_turn_style_context`.
             # Org and team skills cowork marks always-on follow, so they hold
             # on every turn rather than only when recalled.
-            suffix=_POD_PROMPT_SUFFIX + render_always_on_skills(_always_on_skills(turn_skills)),
+            suffix=(
+                (_POD_PROMPT_SUFFIX_WITH_TEMPLATES if connector_drafts is not None else _POD_PROMPT_SUFFIX)
+                + render_always_on_skills(_always_on_skills(turn_skills))
+            ),
         ),
         # WHERE the user was, which this pod cannot know on its own — only the
         # deployment does, so cowork sends it (ENG-1459). Absent when the pod is
