@@ -243,6 +243,17 @@ The same host supplies `learned_memory_scope` as `personal`, `shared`, `off` or 
 
 These are in-process session inputs. The cloud-turn wire does not transport deployment identity or learned-memory scope.
 
+## The shared browser
+
+A host gives a session the `browser` tool by passing `ChatSessionConfig.browser`, a `BrowserConfig` from `anton.core.browser.config`. Nothing else turns it on: no setting, environment variable or `.env` line gives a session a browser. It takes one of two forms:
+
+- **A browser router**, for cloud turns: an `https` base URL with no credential. The cloud turn reads it from the turn request's `params.browser` block (`{base_url, profile, project?}`), and the tool calls the router with the turn's own key.
+- **The Cowork desktop app's own browser**: exactly `http://127.0.0.1:<port>` and the app's per-launch key, built by the host in its own process. It never travels in a turn request, and its client ignores system proxies.
+
+The tool reads pages as numbered elements and acts on them by number. The person shares the browser: only they hand it back after a hand-over, with Done in the browser. A step that commits something (submit, buy, send, delete, grant access) or acts by position waits for the person's Approve on a card. On the router, the browser itself holds those steps and anton shows the card when it answers `approval_required`; on the desktop, anton shows the card before it sends the step. The desktop app's browser sends no page content to MindsHub's decision service.
+
+`tests/fixtures/browser_contract/` pins the HTTP contract both hosts serve, including the commit list both read; each host's tests keep a copy. Its README explains the format.
+
 ## Shared live-app slots
 
 Hosts that enable live apps can set `ANTON_LIVE_APPS_PER_PERSON` from zero through their configured slot count. Empty uses the slot count; zero refuses launches and leaves running apps alone. At the cap, or when every slot is full, the person chooses one of their own apps to replace. Cancel, Skip and unanswered cards leave the apps running.

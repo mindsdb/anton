@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -482,5 +483,9 @@ def test_page_rejects_unknown_themes():
 
 def test_importable_without_side_effects_from_a_plain_interpreter(tmp_path):
     """The scratchpad imports it from the installed package; nothing is copied into folders."""
-    assert Path(rt.__file__).name == "report_tools.py"
+    proc = subprocess.run(
+        [sys.executable, "-c", "import anton.core.artifacts.report_tools"],
+        cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
     assert not list(tmp_path.iterdir())

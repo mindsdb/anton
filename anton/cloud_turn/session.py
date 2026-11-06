@@ -896,6 +896,10 @@ def build_cloud_chat_session(
     settings.resolve_workspace(str(base))
     if request.model:
         settings.planning_model = request.model
+    if not request.jev_decisions:
+        # The organization opted out of Jev: the completion check uses the
+        # LLM verifier alone.
+        settings.verifier_jev = "off"
     # The request's skills block is the complete set this turn may recall or
     # list, read once here and staged outside the workspace (that PVC outlives
     # the turn and cells could read anything left under it). Only a request
@@ -977,16 +981,13 @@ def build_cloud_chat_session(
 
     # `ask_user` only with an elicitor: core registers the tool only then, and
     # an allowlist name that matches no registered tool is fatal.
-    # `browser` only with an instance to drive (ENG-3296): core registers the
-    # tool only then, and the allowlist must not name a missing tool.
-    from anton.core.browser.config import BrowserConfig
-
-    browser = BrowserConfig.from_dict(request.browser)
+    # `browser` only with a router to drive, for the same reason: core
+    # registers the tool only when the request carried one.
     tool_allowlist = (
         CLOUD_TOOL_ALLOWLIST
         | {td.name for td in mcp_tool_defs}
         | ({"ask_user"} if elicitor is not None else set())
-        | ({"browser"} if browser is not None else set())
+        | ({"browser"} if request.browser is not None else set())
     )
 
     config = ChatSessionConfig(
@@ -1052,7 +1053,7 @@ def build_cloud_chat_session(
         workspace_env_overlay=_datasource_workspace_env(request, settings),
         web_search_enabled=False,
         web_fetch_enabled=False,
-        browser=browser,
+        browser=request.browser,
     )
 
     try:

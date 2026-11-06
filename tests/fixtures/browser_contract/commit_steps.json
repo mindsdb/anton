@@ -1,0 +1,591 @@
+{
+  "description": "The commit list: which steps wait for the person's approval. Both hosts' holds and Anton's card read it. url is the page's address, element the element the step names (null for none), and held is \"commit\" (one approval runs this step once), \"position\" (one approval covers steps by position on this page address) or null (runs at once). A click holds when the element is named with submit, buy, pay, order, purchase, checkout, check out, send, delete, remove, transfer, confirm, post, publish, authorize or grant (whole words, any case), when it has no name, and anywhere on an OAuth authorization or consent page: a path segment authorize or consent, or a last segment auth under an oauth segment. type with submit true or a line break, and press of a key ending in Enter, hold outside a search field: role searchbox, or a name containing search. A click or drag with an x and y holds as position. Nothing else holds.",
+  "examples": {
+    "a click on Submit": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Submit"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "a click on Buy now": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Buy now"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "a click on Pay $42.00": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Pay $42.00"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "a click on Place order": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Place order"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "a click on Complete purchase": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Complete purchase"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "a click on Checkout": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Checkout"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "a click on Check out": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Check out"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "a click on Send": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Send"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "a click on Delete account": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Delete account"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "a click on Remove item": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Remove item"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "a click on Transfer funds": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Transfer funds"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "a click on Confirm": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Confirm"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "a click on Post": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Post"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "a click on Publish": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Publish"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "a click on Authorize app": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Authorize app"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "a click on Grant access": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Grant access"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "a click on a control with no name": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": ""
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "a click on a link named Order history": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "link",
+          "name": "Order history"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "a click on Next": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Next"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": null
+      }
+    },
+    "a click on a link named Details": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "link",
+          "name": "Details"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": null
+      }
+    },
+    "any click on the consent page login/oauth/authorize": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://github.example.test/login/oauth/authorize?client_id=x",
+        "element": {
+          "role": "button",
+          "name": "Continue"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "any click on the consent page o/oauth2/v2/auth": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://accounts.example.test/o/oauth2/v2/auth?scope=y",
+        "element": {
+          "role": "button",
+          "name": "Continue"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "any click on the consent page signin/oauth/consent": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://accounts.example.test/signin/oauth/consent",
+        "element": {
+          "role": "button",
+          "name": "Continue"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "any click on the consent page common/oauth2/v2.0/authorize": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://login.example.test/common/oauth2/v2.0/authorize",
+        "element": {
+          "role": "button",
+          "name": "Continue"
+        },
+        "step": {
+          "action": "click",
+          "element": 7
+        },
+        "held": "commit"
+      }
+    },
+    "type and submit in a message box": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "textbox",
+          "name": "Message"
+        },
+        "step": {
+          "action": "type",
+          "element": 4,
+          "text": "hello",
+          "submit": true
+        },
+        "held": "commit"
+      }
+    },
+    "type a line break in a message box": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "textbox",
+          "name": "Message"
+        },
+        "step": {
+          "action": "type",
+          "element": 4,
+          "text": "hello\n"
+        },
+        "held": "commit"
+      }
+    },
+    "type with no submit": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "textbox",
+          "name": "Message"
+        },
+        "step": {
+          "action": "type",
+          "element": 4,
+          "text": "hello"
+        },
+        "held": null
+      }
+    },
+    "type and submit in a search box": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "searchbox",
+          "name": "Search"
+        },
+        "step": {
+          "action": "type",
+          "element": 2,
+          "text": "MacBook Air",
+          "submit": true
+        },
+        "held": null
+      }
+    },
+    "type and submit in a field named search": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "textbox",
+          "name": "Search products"
+        },
+        "step": {
+          "action": "type",
+          "element": 2,
+          "text": "MacBook Air",
+          "submit": true
+        },
+        "held": null
+      }
+    },
+    "press Enter in a message box": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "textbox",
+          "name": "Message"
+        },
+        "step": {
+          "action": "press",
+          "key": "Enter",
+          "element": 4
+        },
+        "held": "commit"
+      }
+    },
+    "press Enter in a search box": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "searchbox",
+          "name": "Search"
+        },
+        "step": {
+          "action": "press",
+          "key": "Enter",
+          "element": 2
+        },
+        "held": null
+      }
+    },
+    "press Tab in a message box": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "textbox",
+          "name": "Message"
+        },
+        "step": {
+          "action": "press",
+          "key": "Tab",
+          "element": 4
+        },
+        "held": null
+      }
+    },
+    "a click by position": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": null,
+        "step": {
+          "action": "click",
+          "x": 412,
+          "y": 230,
+          "coords": "screenshot"
+        },
+        "held": "position"
+      }
+    },
+    "a drag to a position": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": {
+          "role": "button",
+          "name": "Slider"
+        },
+        "step": {
+          "action": "drag",
+          "from": {
+            "element": 5
+          },
+          "to": {
+            "x": 600,
+            "y": 300
+          }
+        },
+        "held": "position"
+      }
+    },
+    "a scroll": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": null,
+        "step": {
+          "action": "scroll",
+          "direction": "down"
+        },
+        "held": null
+      }
+    },
+    "a navigate": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "element": null,
+        "step": {
+          "action": "navigate",
+          "url": "https://shop.example.test/checkout"
+        },
+        "held": null
+      }
+    }
+  }
+}

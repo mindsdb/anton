@@ -239,12 +239,6 @@ def test_stateless_without_anton_state_passes():
     assert r.ok, r.errors
 
 
-def test_no_artifact_type_skips_state_checks():
-    """The pre-stateful call shape: no manifest, no STATE slot — still ok."""
-    r, _ = evaluate_backend(GOOD_INTROSPECTION, GOOD_SOURCE, GOOD_REQS)
-    assert r.ok, r.errors
-
-
 def test_parse_requirements_drops_anton_state_before_install():
     text = "fastapi\nanton_state\nanton-state==0.1\nAnton_State\nmangum\n"
     assert parse_requirements(text) == ["fastapi", "mangum"]

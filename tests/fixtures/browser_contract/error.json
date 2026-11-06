@@ -1,0 +1,187 @@
+{
+  "description": "Every refusal: {\"error\": <code>, \"message\": <text>}. The example's name is its code. Hosts check status and code against these; the messages are examples, and the router's own text may differ. approval_required adds pending_id and expires_at.",
+  "examples": {
+    "unauthorized": {
+      "where": "any route",
+      "kind": "response",
+      "status": 401,
+      "body": {
+        "error": "unauthorized",
+        "message": "missing or invalid credential"
+      }
+    },
+    "unscoped": {
+      "where": "any route, through the router",
+      "kind": "response",
+      "status": 403,
+      "body": {
+        "error": "unscoped",
+        "message": "this turn key was not scoped to a conversation"
+      }
+    },
+    "out_of_scope": {
+      "where": "any route, through the router",
+      "kind": "response",
+      "status": 403,
+      "body": {
+        "error": "out_of_scope",
+        "message": "this turn key is scoped to another session or project"
+      }
+    },
+    "forbidden": {
+      "where": "any route, through the router",
+      "kind": "response",
+      "status": 403,
+      "body": {
+        "error": "forbidden",
+        "message": "this kind of credential is not accepted here"
+      }
+    },
+    "not_entitled": {
+      "where": "any route, through the router",
+      "kind": "response",
+      "status": 403,
+      "body": {
+        "error": "not_entitled",
+        "message": "the browser is not available for this account"
+      }
+    },
+    "person_only": {
+      "where": "POST /sessions/{id}/control",
+      "kind": "response",
+      "status": 403,
+      "body": {
+        "error": "person_only",
+        "message": "only the person hands the browser back"
+      }
+    },
+    "password_field": {
+      "where": "POST /sessions/{id}/action",
+      "kind": "response",
+      "status": 403,
+      "body": {
+        "error": "password_field",
+        "message": "element 3 is a secret field"
+      }
+    },
+    "approval_required": {
+      "where": "POST /sessions/{id}/action",
+      "kind": "response",
+      "status": 403,
+      "body": {
+        "error": "approval_required",
+        "message": "this step waits for the person's approval",
+        "pending_id": "pa-0123456789abcdef01234567",
+        "expires_at": 1999999300
+      }
+    },
+    "bad_request": {
+      "where": "POST /sessions/{id}/action",
+      "kind": "response",
+      "status": 400,
+      "body": {
+        "error": "bad_request",
+        "message": "click needs a positive integer \"element\""
+      }
+    },
+    "tab_not_found": {
+      "where": "POST /sessions/{id}/tabs/{tab}/activate",
+      "kind": "response",
+      "status": 404,
+      "body": {
+        "error": "tab_not_found",
+        "message": "no tab t9"
+      }
+    },
+    "too_many_saved_tabs": {
+      "where": "POST /saved-tabs",
+      "kind": "response",
+      "status": 409,
+      "body": {
+        "error": "too_many_saved_tabs",
+        "message": "a project keeps at most 100 saved tabs; delete one first"
+      }
+    },
+    "human_in_control": {
+      "where": "page, action, screenshot and tabs routes",
+      "kind": "response",
+      "status": 409,
+      "body": {
+        "error": "human_in_control",
+        "message": "The person is using the browser (Please sign in to Example Shop)."
+      }
+    },
+    "stale_element": {
+      "where": "POST /sessions/{id}/action",
+      "kind": "response",
+      "status": 409,
+      "body": {
+        "error": "stale_element",
+        "message": "element 99 is no longer on the page"
+      }
+    },
+    "page_blocked": {
+      "where": "page and action routes",
+      "kind": "response",
+      "status": 409,
+      "body": {
+        "error": "page_blocked",
+        "message": "a dialog is open on the page"
+      }
+    },
+    "page_busy": {
+      "where": "GET /sessions/{id}/page",
+      "kind": "response",
+      "status": 409,
+      "body": {
+        "error": "page_busy",
+        "message": "the page did not answer in time"
+      }
+    },
+    "daily_limit": {
+      "where": "POST /sessions, through the router",
+      "kind": "response",
+      "status": 429,
+      "body": {
+        "error": "daily_limit",
+        "message": "today's browsing allowance is used up; it resets at 00:00 UTC"
+      }
+    },
+    "browser_unavailable": {
+      "where": "any route, in the desktop app",
+      "kind": "response",
+      "status": 503,
+      "body": {
+        "error": "browser_unavailable",
+        "message": "the app's window is closed"
+      }
+    },
+    "at_capacity": {
+      "where": "POST /sessions, through the router, or a fifth concurrent task",
+      "kind": "response",
+      "status": 503,
+      "body": {
+        "error": "at_capacity",
+        "message": "Every browser is busy right now. Try again in a few minutes."
+      }
+    },
+    "entitlements_unavailable": {
+      "where": "any route, through the router",
+      "kind": "response",
+      "status": 503,
+      "body": {
+        "error": "entitlements_unavailable",
+        "message": "could not check the account's browser entitlement"
+      }
+    },
+    "browser_starting": {
+      "where": "any route, through the router",
+      "kind": "response",
+      "status": 504,
+      "body": {
+        "error": "browser_starting",
+        "message": "Your browser is taking too long to start. Try again in a moment."
+      }
+    }
+  }
+}
