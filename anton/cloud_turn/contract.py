@@ -77,7 +77,12 @@ Events written back on stdout (JSONL):
   {"kind": "ask_user_answer_rejected", "id", "answer_id", "reason"}  - a stdin
       answer that did not close its question; reason is invalid_option |
       not_found | already_answered. The question stays open on invalid_option.
-  {"kind": "turn_completed"}          - terminal success (no payload)
+  {"kind": "turn_completed", "artifacts_touched": [slug, ...]}  - terminal
+      success. `artifacts_touched` is the sorted folder names of the artifacts
+      this turn created, generated, updated or edited through its artifact
+      tools (the session's `artifacts_touched`); the host stats only those at
+      turn end. Omitted by a session without that record, and the host then
+      diffs the whole artifacts folder.
   {"kind": "turn_failed", "error": "..."}  - terminal failure (scrubbed string)
       `error` is "TypeName: message", so a consumer reads the failure's kind
       off the class name. A MindsHub billing stop that knows when its limit
