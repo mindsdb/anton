@@ -145,6 +145,7 @@ ARTIFACTS_TOUCHED_KEY = "artifacts_touched"
 # `tracked_artifacts_from_reply` (`cowork/services/task_objects.py`) reads one
 # as absent, both against the same cap.
 MAX_ARTIFACTS_TOUCHED = 1000
+logger = logging.getLogger(__name__)
 
 
 def _is_version(value: object, expected: int) -> bool:
@@ -275,23 +276,38 @@ def _is_skill_name(slug: object) -> bool:
 TURN_LIMIT_MINIMUMS = {"max_tool_rounds": 1, "max_continuations": 0, "max_turn_tokens": 1}
 
 
-def _parse_limits(value: object) -> dict[str, int]:
+def _parse_limits(value: object, conversation_id: str) -> dict[str, int]:
     """The usable limits in a request's ``limits`` block.
 
     Keeps known names with integer values at or above their minimum and drops
     the rest, so one bad value leaves that limit at the pod's default instead of
-    failing the turn.
+    failing the turn. Each drop is logged by name and reason, never by value:
+    dropping in silence would look exactly like a controller that sent nothing.
     """
-    if not isinstance(value, dict):
+    if value is None:
         return {}
-    return {
-        name: limit
-        for name, limit in value.items()
-        if name in TURN_LIMIT_MINIMUMS
-        and isinstance(limit, int)
-        and not isinstance(limit, bool)
-        and limit >= TURN_LIMIT_MINIMUMS[name]
-    }
+    if not isinstance(value, dict):
+        logger.warning(
+            "cloud turn ignoring a limits block that is not an object (%s) conversation=%s",
+            type(value).__name__, conversation_id,
+        )
+        return {}
+    limits: dict[str, int] = {}
+    for name, limit in value.items():
+        if name not in TURN_LIMIT_MINIMUMS:
+            reason = "unknown limit"
+        elif not isinstance(limit, int) or isinstance(limit, bool):
+            reason = f"not an integer ({type(limit).__name__})"
+        elif limit < TURN_LIMIT_MINIMUMS[name]:
+            reason = f"below its minimum of {TURN_LIMIT_MINIMUMS[name]}"
+        else:
+            limits[name] = limit
+            continue
+        logger.warning(
+            "cloud turn ignoring limit %r: %s conversation=%s",
+            str(name)[:64], reason, conversation_id,
+        )
+    return limits
 
 
 @dataclass
@@ -425,5 +441,5 @@ class TurnRequestV1:
                 d.get("connectors") if isinstance(d.get("connectors"), dict) else None
             ),
             browser=BrowserConfig.from_dict(d.get("browser")),
-            limits=_parse_limits(d.get("limits")),
+            limits=_parse_limits(d.get("limits"), str(d["conversation_id"])),
         )
