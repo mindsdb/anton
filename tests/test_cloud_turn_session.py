@@ -10,6 +10,7 @@ Two layers:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -30,6 +31,7 @@ from anton.cloud_turn.session import (
     _ARTIFACTS_ROOT_ENV,
     _WORKSPACE_PATH_ENV,
     build_cloud_chat_session,
+    drain_pending_connectors,
     resolve_trusted_artifacts_root,
     resolve_trusted_workspace_path,
 )
@@ -657,6 +659,32 @@ def test_final_tool_set_equals_allowlist_after_real_build(tmp_path, monkeypatch)
     assert names == set(CLOUD_TOOL_ALLOWLIST), (
         f"cloud tool set drifted from the allowlist: {sorted(names)}"
     )
+
+
+def test_connector_drafts_add_only_the_draft_tool(tmp_path, monkeypatch):
+    _, cfg = _build(tmp_path, monkeypatch, connector_drafts=True)
+    assert cfg.tool_allowlist == CLOUD_TOOL_ALLOWLIST | {"create_connector_draft"}
+    assert [t.name for t in cfg.tools] == ["create_connector_draft"]
+
+
+def test_without_connector_drafts_there_is_no_draft_tool(tmp_path, monkeypatch):
+    session, cfg = _build(tmp_path, monkeypatch)
+    assert "create_connector_draft" not in cfg.tool_allowlist
+    assert cfg.tools == []
+    assert drain_pending_connectors(session) == []
+
+
+def test_a_real_turn_with_connector_drafts_registers_and_drains_the_tool(tmp_path, monkeypatch):
+    session = _real_cloud_session(tmp_path, monkeypatch, connector_drafts=True)
+    session._build_tools()
+    names = {t.name for t in session.tool_registry.get_tool_defs()}
+    assert names == set(CLOUD_TOOL_ALLOWLIST) | {"create_connector_draft"}
+
+    draft = {"connector_id": "acme", "label": "Acme", "fields": [{"name": "api_key", "label": "Key"}]}
+    tool = next(t for t in session._extra_tools if t.name == "create_connector_draft")
+    assert asyncio.run(tool.handler(session, draft)).ok is True
+    assert [d["connector_id"] for d in drain_pending_connectors(session)] == ["acme"]
+    assert drain_pending_connectors(session) == []
 
 
 def test_tool_allowlist_none_preserves_desktop_tools(tmp_path):

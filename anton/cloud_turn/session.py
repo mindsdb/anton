@@ -37,6 +37,7 @@ from urllib.parse import urlsplit
 from anton.cloud_turn.contract import TurnRequestV1, TurnSkillEntry, parse_turn_skills
 from anton.core.llm.tracing import HARNESS_ANTON
 from anton.core.memory.always_on_skills import AlwaysOnSkill, render_always_on_skills
+from anton.core.tools.connector_draft import ConnectorDraftBox, connector_draft_tool
 from anton.core.tools.skill_format import SKILL_FILE
 
 if TYPE_CHECKING:
@@ -643,6 +644,16 @@ def drain_pending_skills(session) -> list[dict]:
     return entries
 
 
+def drain_pending_connectors(session) -> list[dict]:
+    """Connector templates this turn built, as ``ConnectorDraft.to_dict()``.
+
+    Empty when the turn had no `create_connector_draft` tool. Clears as it
+    reads, so a second call cannot repeat them.
+    """
+    box = getattr(session, "_connector_drafts", None)
+    return box.drain() if box is not None else []
+
+
 def resolve_trusted_workspace_path() -> Path:
     """Resolve the trusted workspace mount path (never from the wire request).
 
@@ -982,6 +993,14 @@ def build_cloud_chat_session(
         | {td.name for td in mcp_tool_defs}
         | ({"ask_user"} if elicitor is not None else set())
     )
+    # Only when cowork-server asked for it: the template a member saves can be
+    # connected only where the host offers that, so the tool is off by default.
+    connector_drafts = ConnectorDraftBox() if request.connector_drafts else None
+    extra_tools = list(mcp_tool_defs)
+    if connector_drafts is not None:
+        draft_tool = connector_draft_tool(connector_drafts)
+        extra_tools.append(draft_tool)
+        tool_allowlist |= {draft_tool.name}
 
     config = ChatSessionConfig(
         llm_client=llm_client,
@@ -1034,10 +1053,10 @@ def build_cloud_chat_session(
         data_vault=data_vault,              # connectors ON iff request.oauth is set
         connector_usage_notes=_connector_usage_notes(request.connectors),
         history_store=None,                 # disk history OFF (DB authoritative)
-        tools=mcp_tool_defs,                 # ENG-1816: this turn's MCP connections, if any
-        # Static CLOUD_TOOL_ALLOWLIST plus this turn's own discovered MCP
+        tools=extra_tools,                   # this turn's MCP tools, and the connector draft tool
+        # Static CLOUD_TOOL_ALLOWLIST plus this turn's own MCP and draft
         # tool names — _build_tools() re-enforces the allowlist on every
-        # call (not just the first), so an MCP tool left out of it would
+        # call (not just the first), so an extra tool left out of it would
         # survive exactly one round then vanish on the turn's next rebuild.
         tool_allowlist=tool_allowlist,
         mcp_sessions=mcp_sessions,           # closed in ChatSession.close()
@@ -1069,6 +1088,7 @@ def build_cloud_chat_session(
     # from earlier turns are already on the workspace, so without this every
     # turn would re-report all of them.
     session._skill_drafts_before = _snapshot_skill_drafts(settings.skill_drafts_root)
+    session._connector_drafts = connector_drafts
     logger.info(
         "cloud session built conversation=%s workspace=%s tools=%s",
         request.conversation_id, base, sorted(tool_allowlist),

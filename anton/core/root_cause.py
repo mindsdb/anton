@@ -185,6 +185,10 @@ _SENTINEL_REASONS = {
     "not_text": (TIER_SELF, "invalid_argument"),
     "invalid_range": (TIER_SELF, "invalid_argument"),
     "invalid_fields": (TIER_SELF, "invalid_argument"),
+    # `create_connector_draft`: a draft outside the allowlist, or a fourth
+    # template in one turn. The message says which field or the cap.
+    "invalid_draft": (TIER_SELF, "invalid_argument"),
+    "draft_limit": (TIER_SELF, "invalid_argument"),
     # Genuine walls: the environment is missing something the agent cannot add.
     "package_install_failed": (TIER_WALL, "missing_dependency"),
     "store_unavailable": (TIER_WALL, "service_unavailable"),
