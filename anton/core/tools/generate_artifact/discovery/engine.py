@@ -206,6 +206,9 @@ async def run_gathering_loop(state: "PrdState") -> None:
             reason = sub_tools.rejection_for(
                 step, name, questions_left=budget - questions_asked
             )
+            if reason is None and name in ("web_search", "web_fetch") and not state.internet_research:
+                reason = (f"`{name}` is not available: internet research is turned off for "
+                          "this session. Use the connected data sources and the user's files.")
             if reason is not None:
                 state.trace_log.tool_rejected(node=step, tool=name, reason=reason)
                 result_blocks.append(protocol.tool_result(tc.id, reason))

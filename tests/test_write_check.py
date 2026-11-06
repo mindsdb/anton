@@ -78,6 +78,15 @@ def _held(code: str, snap, *, earlier=()) -> bool:
     return find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,)).needs_approval()
 
 
+def _parses(code: str) -> bool:
+    """Whether this Python's parser reads `code`; 3.11 and 3.12.0 give up on very long expressions."""
+    try:
+        ast.parse(code)
+    except RecursionError:
+        return False
+    return True
+
+
 def _statements(code: str, snap, *, earlier=()) -> list[str]:
     return [w.statement for w in find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,)).sql]
 
@@ -905,6 +914,8 @@ def test_a_long_chain_in_a_cell_is_read_with_no_deep_recursion(earlier, code, ca
     many parts from its first part on (`_interpreter_text`), so a long one
     neither exhausts the stack, which would hold the cell for no reason,
     nor reads past what binds it."""
+    if not _parses(code):
+        card = "unchecked"
     writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
     assert writes.unchecked is (card == "unchecked")
     assert writes.needs_approval() is (card != "none")
@@ -923,7 +934,7 @@ def test_a_helper_many_errored_cells_redefine_is_read_once_per_call(snap):
     assert not writes.needs_approval()
 
 
-def test_a_long_conversation_of_literal_execs_is_read_in_well_under_a_second(snap):
+def test_a_long_conversation_of_literal_execs_is_read_in_under_two_seconds(snap):
     """What each cell adds to a name's list or dict is indexed once per
     check (`_Reader.growth`), so each literal exec's namespace, read for
     the calls through it, doesn't walk every earlier cell again. The bound
@@ -937,7 +948,9 @@ def test_a_long_conversation_of_literal_execs_is_read_in_well_under_a_second(sna
     assert not find_cell_writes(code="go1399()", earlier=_earlier(earlier), snapshots=(snap,)).needs_approval()
     started = time.perf_counter()
     writes = find_cell_writes(code="go1399()", earlier=_earlier(earlier), snapshots=(snap,))
-    assert time.perf_counter() - started < 1
+    # GitHub's runners take close to a second here, so a 1s bound failed on
+    # the slower ones.
+    assert time.perf_counter() - started < 2
     assert not writes.needs_approval()
 
 
@@ -1310,7 +1323,8 @@ def test_a_statement_name_bound_again_shows_only_what_runs(snap):
 
 def test_a_long_concatenation_does_not_exhaust_recursion(snap):
     code = "html = " + " + ".join(f"'<td>{i}</td>'" for i in range(3000)) + "\nprint(html)"
-    assert not _held(code, snap)
+    # A parser too shallow for it holds the cell, since the pad may run another Python.
+    assert _held(code, snap) is not _parses(code)
 
 
 def test_a_concatenation_is_read_once(snap, monkeypatch):

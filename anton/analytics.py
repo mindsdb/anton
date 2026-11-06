@@ -268,6 +268,11 @@ _pending_lock = threading.Lock()
 #                    value as a pre-ENG-2243 build, never as "no parent".
 #                    (anton/core/session.py::_emit_tool_completed)
 #
+# Every event listed here also carries `environment`: the deployment that sent
+# it, from ANTON_DEPLOYMENT_ENV (`prod`, `staging`, `dev`, ...). It is "" wherever
+# no host set it, such as the CLI, so "" means unknown, not production. Absent
+# on builds that predate it.
+#
 # An event NOT listed here keeps the collector path, so moving one is an
 # explicit decision rather than something that happens by default.
 _POSTHOG_EVENTS = frozenset(
@@ -399,6 +404,19 @@ def get_installation_id() -> str:
     except Exception:
         _cached_aid = "unknown"
     return _cached_aid
+
+
+def _deployment_env(value: object) -> str:
+    """The operator's environment label, or "" when unset or not a short slug.
+
+    Bounded so an environment variable cannot carry free text into an event.
+    """
+    label = str(value or "").strip().lower()
+    if 0 < len(label) <= 32 and label[0].isalnum() and all(
+        ch.isascii() and (ch.isalnum() or ch in "-_") for ch in label
+    ):
+        return label
+    return ""
 
 
 def _account_id(value: str | None) -> str | None:
@@ -645,6 +663,10 @@ def send_event(settings: "AntonSettings", action: str, **extra: str) -> None:
             host = (getattr(settings, "posthog_host", "") or "").rstrip("/")
             if not key or not host:
                 return
+            # Always present, "" included, so a query can tell a build that
+            # carries the field from one that predates it.
+            params["environment"] = _deployment_env(
+                getattr(settings, "deployment_env", ""))
             _spawn(_fire_posthog,
                    f"{host}/capture/", _posthog_body(key, action, params))
         else:

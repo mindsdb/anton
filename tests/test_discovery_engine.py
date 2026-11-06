@@ -650,3 +650,25 @@ async def test_marked_rows_skip_the_data_loop_and_reach_the_page_builder(tmp_pat
     assert await orchestrator._data_phase(state) is None
     assert [s.outcome for s in state.trace if s.node == "data_check"] == ["skipped"]
     assert _SITES in orchestrator._spec_context(state)
+
+
+async def test_a_web_call_is_refused_when_the_session_has_internet_research_off(monkeypatch):
+    """The tool isn't offered then, but a model can still name it."""
+    import anton.core.tools.web_tools as web_tools
+
+    fetch = AsyncMock(return_value="page body")
+    monkeypatch.setattr(web_tools, "handle_web_fetch_fallback", fetch)
+    session = _session_with_plan_sequence(
+        _response(tool_calls=[_tc("web_fetch", {"url": "https://example.com/a"})]),
+        _response(tool_calls=[_tc("finish_gathering", {
+            "artifact_type": "html-app", "notes": "n", "data_sources": [],
+        })]),
+    )
+    session._internet_research_enabled = False
+    state = _state(session)
+
+    await engine.run_gathering_loop(state)
+
+    fetch.assert_not_awaited()
+    assert state.web_calls == []
+    assert any("internet research is turned off" in str(m.get("content")) for m in state.messages)

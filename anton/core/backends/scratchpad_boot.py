@@ -12,6 +12,7 @@ from anton.core.backends.wire import (
     CELL_FILENAME,
     CELL_TRACE_MARKER,
     EXPLAINABILITY_QUERIES_NAME,
+    INTERNET_RESEARCH_ENV,
     MISSING_MODULE_HINT,
     RESULT_START,
     RESULT_END,
@@ -902,9 +903,20 @@ if _scratchpad_model:
             )
             return response.content
 
+        def _web_search_off(query, *, max_tokens=4096):
+            """Raise: this session answers from the connected data only."""
+            raise RuntimeError(
+                "Internet research is turned off for this session, so web_search() is "
+                "unavailable. Answer from the connected data sources and the user's files."
+            )
+
         _inject_helper("get_llm", get_llm)
         _inject_helper("agentic_loop", agentic_loop)
-        _inject_helper("web_search", web_search)
+        # A stub rather than no name: a NameError would read as a missing package.
+        _inject_helper(
+            "web_search",
+            _web_search_off if os.environ.get(INTERNET_RESEARCH_ENV) == "off" else web_search,
+        )
     except Exception:
         pass  # LLM not available — not fatal (e.g. anthropic not installed)
 

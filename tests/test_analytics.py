@@ -192,6 +192,85 @@ def test_scratchpad_package_installed_goes_to_posthog_not_the_collector(monkeypa
     assert body["properties"]["package"] == "numpy"
 
 
+@pytest.mark.parametrize("event", sorted(analytics._POSTHOG_EVENTS))
+def test_every_posthog_event_names_the_deployment_that_sent_it(monkeypatch, event):
+    """A staging or eval turn must be separable from a user's without reading
+    the version string, which the same build shares with real users."""
+    _clear_ci(monkeypatch)
+    captured = _capture_posthog(monkeypatch)
+
+    class _Staging(_PosthogSettings):
+        deployment_env = "staging"
+
+    analytics.send_event(_Staging(), event)
+
+    assert captured[0][1]["properties"]["environment"] == "staging"
+
+
+def test_an_unconfigured_install_sends_an_empty_environment(monkeypatch):
+    """Present but empty, so a query can tell "nobody said" from a build that
+    predates the field — and never reads an unlabelled install as production."""
+    _clear_ci(monkeypatch)
+    captured = _capture_posthog(monkeypatch)
+
+    analytics.send_event(_PosthogSettings(), "turn_completed")
+
+    assert captured[0][1]["properties"]["environment"] == ""
+
+
+@pytest.mark.parametrize("raw, sent", [
+    (" Staging ", "staging"),
+    ("pr-1648", "pr-1648"),
+    ("user@example.com", ""),
+    ("x" * 33, ""),
+    ("-dev", ""),
+    ("prod\nfake", ""),
+    ("ståging", ""),
+])
+def test_the_environment_label_cannot_carry_free_text(monkeypatch, raw, sent):
+    _clear_ci(monkeypatch)
+    captured = _capture_posthog(monkeypatch)
+
+    class _Labelled(_PosthogSettings):
+        deployment_env = raw
+
+    analytics.send_event(_Labelled(), "turn_completed")
+
+    assert captured[0][1]["properties"]["environment"] == sent
+
+
+def test_the_deployment_label_is_read_from_the_process_environment(monkeypatch):
+    """Hosts set it as ANTON_DEPLOYMENT_ENV; the real settings must pick it up."""
+    from anton.config.settings import AntonSettings
+
+    _clear_ci(monkeypatch)
+    monkeypatch.setenv("ANTON_DEPLOYMENT_ENV", "eval")
+    captured = _capture_posthog(monkeypatch)
+    settings = AntonSettings()
+    settings.posthog_host = "https://ph.example.test"
+    settings.posthog_key = "phc_test"  # conftest blanks the real one
+    settings.analytics_url = "https://example.test/collect"
+    settings.analytics_enabled = True
+
+    analytics.send_event(settings, "turn_completed")
+
+    assert captured[0][1]["properties"]["environment"] == "eval"
+
+
+def test_collector_events_do_not_gain_the_environment_label(monkeypatch):
+    """The collector allowlists its parameters, so the label would be dropped
+    there anyway; it is scoped to the direct events on purpose."""
+    _clear_ci(monkeypatch)
+    captured = _capture_url(monkeypatch)
+
+    class _Staging(_Settings):
+        deployment_env = "staging"
+
+    analytics.send_event(_Staging(), "anton_started")
+
+    assert "environment" not in urllib.parse.parse_qs(urllib.parse.urlparse(captured[0]).query)
+
+
 def test_unregistered_events_still_use_the_collector(monkeypatch):
     """Scope guard. Only names in `_POSTHOG_EVENTS` move; nothing else does.
 
