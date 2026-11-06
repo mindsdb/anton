@@ -134,8 +134,24 @@ def test_a_boolean_must_be_a_boolean():
         parse_connector_draft(_draft(fields=[{"name": "k", "label": "K", "secret": "false"}]))
 
 
+@pytest.mark.parametrize("hidden", ["\u200b", "\u2060", "\ufeff", "\u2028", "\u2029", "\U000e0041"])
+@pytest.mark.parametrize("key", ["label", "usage_notes"])
+def test_an_invisible_character_is_refused_so_it_cannot_split_a_token(key, hidden):
+    value = _TOKEN_SHAPES["github"]
+    split = value[:12] + hidden + value[12:]
+    with pytest.raises(ConnectorDraftError, match="invisible characters") as exc:
+        parse_connector_draft(_draft(**{key: split}))
+    assert value[12:] not in str(exc.value)
+
+
+def test_help_url_may_not_carry_a_query_string():
+    with pytest.raises(ConnectorDraftError, match="query string"):
+        parse_connector_draft(_draft(help_url="https://docs.acme.example/keys?ref=abc"))
+    parse_connector_draft(_draft(help_url="https://docs.acme.example/keys#create"))
+
+
 def test_control_characters_are_refused_in_short_texts():
-    with pytest.raises(ConnectorDraftError, match="control characters"):
+    with pytest.raises(ConnectorDraftError, match="control or invisible characters"):
         parse_connector_draft(_draft(label="Acme\nCRM"))
     parse_connector_draft(_draft(usage_notes="Line one.\nLine two."))
 
@@ -165,7 +181,7 @@ def test_a_token_in_a_short_field_text_is_refused_without_the_value(key, shape):
 def test_a_token_in_help_url_is_refused_without_the_value(shape):
     value = _TOKEN_SHAPES[shape]
     with pytest.raises(ConnectorDraftError, match="help_url") as exc:
-        parse_connector_draft(_draft(help_url=f"https://acme.example/?k={value}"))
+        parse_connector_draft(_draft(help_url=f"https://acme.example/{value}"))
     assert value not in str(exc.value)
 
 

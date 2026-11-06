@@ -34,6 +34,8 @@ _FIELD_NAME = re.compile(r"[a-z][a-z0-9_]{0,39}")
 #: letters and digits, reads as a key or token. Words and digitless ids pass.
 _TOKEN_RUN = re.compile(r"[A-Za-z0-9_-]{20,}")
 
+_HIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+
 _TOP_TEXT_CAPS = {"label": 80, "description": 300, "category": 40, "usage_notes": 1600}
 _FIELD_TEXT_CAPS = {"label": 80, "placeholder": 120, "help": 300}
 _HELP_URL_MAX = 500
@@ -101,9 +103,11 @@ def _check_text(value: Any, where: str, cap: int, *, long_text: bool) -> str | N
     text = value.strip()
     if len(text) > cap:
         raise ConnectorDraftError(f"{where} must be at most {cap} characters.")
-    allowed_controls = {"\n"} if long_text else set()
-    if any(unicodedata.category(c) == "Cc" and c not in allowed_controls for c in text):
-        raise ConnectorDraftError(f"{where} must not contain control characters.")
+    # Format characters and line separators are invisible on the card and can
+    # split a key so the run rule below misses it.
+    allowed = {"\n"} if long_text else set()
+    if any(unicodedata.category(c) in _HIDDEN_CATEGORIES and c not in allowed for c in text):
+        raise ConnectorDraftError(f"{where} must not contain control or invisible characters.")
     # The scrubber misses common key shapes in prose (GitHub, AWS), so the run
     # rule applies to every text, the notes included.
     if scrub_output(text) != text or _looks_like_token(text):
@@ -142,6 +146,8 @@ def _check_help_url(value: Any) -> str | None:
         raise ConnectorDraftError("help_url must be an https:// URL.") from e
     if parts.scheme != "https" or not parts.hostname or "@" in parts.netloc or any(c.isspace() for c in text):
         raise ConnectorDraftError("help_url must be an https:// URL.")
+    if parts.query:
+        raise ConnectorDraftError("help_url must not have a query string.")
     return text
 
 
