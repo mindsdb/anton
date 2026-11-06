@@ -46,10 +46,19 @@ def log_background_done(trace: TraceContext) -> None:
 
 def _usage_record(*, role: str | None, model: str | None, served_model: str | None,
                   input_tokens: int, output_tokens: int, cache_read: int,
-                  cache_creation: int) -> dict:
-    """One call's usage, named by the conversation, turn and tags of the current trace."""
+                  cache_creation: int, image_input: int = 0, image_output: int = 0) -> dict:
+    """One call's usage, named by the conversation, turn and tags of the current trace.
+
+    An image call's image tokens ride as ``image_input`` / ``image_output``,
+    present only when non-zero, so a chat call's record is unchanged.
+    """
     ctx = get_trace_context()
     metadata = (ctx.metadata or {}) if ctx else {}
+    images = {
+        key: value
+        for key, value in (("image_input", image_input), ("image_output", image_output))
+        if value
+    }
     return {
         # End-of-turn work runs detached from the session, its conversation in the metadata.
         "conversation": (ctx.session_id or metadata.get("conversation_id")) if ctx else None,
@@ -62,6 +71,7 @@ def _usage_record(*, role: str | None, model: str | None, served_model: str | No
         "output": output_tokens,
         "cache_read": cache_read,
         "cache_creation": cache_creation,
+        **images,
     }
 
 
@@ -87,6 +97,7 @@ def scratchpad_usage_record(sent: object) -> dict | None:
         role=text("role"), model=text("model"), served_model=text("served_model"),
         input_tokens=count("input"), output_tokens=count("output"),
         cache_read=count("cache_read"), cache_creation=count("cache_creation"),
+        image_input=count("image_input"), image_output=count("image_output"),
     )
 
 
@@ -204,6 +215,10 @@ class Usage:
     - Total context for a call = input + cache_read + cache_creation
       (cache tokens ARE context; dropping them understates a warm-cache
       call by ~10x).
+    - ``image_input_tokens`` / ``image_output_tokens``: an image call's image
+      tokens (reference images in, the picture out). Zero on chat calls. On
+      an image call ``input_tokens`` / ``output_tokens`` are its TEXT tokens
+      only, so nothing is counted twice — the split MindsHub bills by.
     """
 
     input_tokens: int = 0
@@ -211,6 +226,8 @@ class Usage:
     context_pressure: float = 0.0
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
+    image_input_tokens: int = 0
+    image_output_tokens: int = 0
 
     @property
     def context_tokens(self) -> int:
@@ -2441,6 +2458,7 @@ class LLMProvider(ABC):
             role=get_call_role() or self.trace_role, model=model, served_model=served_model,
             input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
             cache_read=usage.cache_read_tokens, cache_creation=usage.cache_creation_tokens,
+            image_input=usage.image_input_tokens, image_output=usage.image_output_tokens,
         )
         if self.usage_sink is not None:
             self.usage_sink(record)

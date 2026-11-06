@@ -256,7 +256,8 @@ class TurnRequestV1:
     #: DB-authoritative ordered history ({"role","content"} dicts). The pod never
     #: loads its own history; cowork-server owns persistence.
     history: list = field(default_factory=list)
-    #: Optional per-turn LLM credential set by cowork ({"provider","api_key","base_url"}).
+    #: Optional per-turn LLM credential set by cowork ({"provider","api_key","base_url"},
+    #: optionally "coding_model" and "image_model" — the user's image model, ENG-4024).
     #: MVP: always MindsHub (provider="minds-cloud"). None falls back to env settings.
     llm: dict | None = None
     #: Optional memory cowork resolved for this tenant: {"global": {slot: text},

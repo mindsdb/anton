@@ -14,7 +14,7 @@ the LLM drives like a notebook. The code lives in `anton/core/backends/`:
 | `local.py` | `LocalScratchpadRuntime` — per-name venv + subprocess (the CLI default) |
 | `remote.py` | `RemoteScratchpadRuntime` — same ABC, delegates execution over REST + SSE |
 | `manager.py` | `ScratchpadManager` — lifecycle of named runtimes |
-| `scratchpad_boot.py` | The boot script that runs *inside* the subprocess: REPL loop, `get_llm()`, `progress()`, `sample()`, `agentic_loop()`, `web_search()` |
+| `scratchpad_boot.py` | The boot script that runs *inside* the subprocess: REPL loop, `get_llm()`, `progress()`, `sample()`, `agentic_loop()`, `web_search()`, `generate_image()` |
 | `wire.py` | Protocol markers (cell delimiter, progress marker, result delimiters) |
 | `sandbox.py` | `CellSandbox`, the per-session Landlock policy, and the launcher call each spawn goes through when a policy is set |
 | `landlock_launcher.py` | The launcher: locks itself with Landlock, then execs the target in place (standard library only) |
@@ -468,6 +468,12 @@ inside the subprocess:
 
 The boot script also provides `agentic_loop(...)` (a sync tool-call loop),
 `web_search(query)` (routes through the configured LLM's native web search),
+`generate_image(prompt, *, size, quality, reference_images, path)` (one image
+from the OpenAI images API on the coding provider's endpoint and key, saved to
+`path` or else as an `image` artifact of its own, returning the saved file's
+absolute path; its model is `ANTON_SCRATCHPAD_IMAGE_MODEL`, which the host sets
+from the session's image model or `ANTON_IMAGE_MODEL`, and at most
+`ANTON_SCRATCHPAD_MAX_IMAGES` per cell),
 `progress(message)` (inactivity-timer reset), and `sample(var)` (type-aware
 variable inspection).
 

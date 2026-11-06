@@ -484,10 +484,14 @@ async def generate(
     # supposed to be inside of; a session without one (bench, some tests)
     # gets the strict reading, not a permissive one.
     ws_base = getattr(getattr(session, "_workspace", None), "base", None)
+    # The artifacts root is anton's own, so an image `generate_image` saved
+    # there can go into the page.
+    artifacts_root = getattr(getattr(session, "_workspace", None), "artifacts_dir", None)
     kept, dropped = resolve_attachments(
         attachments,
         workspace=ws_base if isinstance(ws_base, Path) else None,
         policy=cell_sandbox_of(getattr(session, "_scratchpads", None)),
+        owned_roots=(artifacts_root,) if isinstance(artifacts_root, Path) else (),
     )
     state.attachments = kept
     if kept or dropped:

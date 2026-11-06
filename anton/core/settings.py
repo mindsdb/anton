@@ -75,7 +75,8 @@ class CoreSettings(BaseSettings):
     # (`write_hold.held_by_relay`). A bad entry is skipped with a WARNING.
     write_relay_hosts: str = ""
     # Per-turn spend ceiling in RAW tokens — input + output + cache_read +
-    # cache_creation, i.e. `TurnCost.total_tokens` (ENG-1286). 0 disables it.
+    # cache_creation, plus an image call's image tokens, i.e.
+    # `TurnCost.total_tokens` (ENG-1286). 0 disables it.
     #
     # RAW is deliberate, and the instinct to discount cache reads here is wrong:
     # they bill at ~a tenth, but they draw the user's included-token allowance at
@@ -90,6 +91,13 @@ class CoreSettings(BaseSettings):
     # of the runaway session this exists for (1,480,766) and you stop catching
     # it — 1.5M misses it by 20k tokens.
     max_turn_tokens: int = 1_250_000
+    # Calls the `generate_image` TOOL may make in one turn
+    # (ANTON_MAX_IMAGES_PER_TURN); a call past it is refused before any request
+    # is sent. It does not bound the scratchpad's `generate_image()`, which has
+    # its own per-cell cap (`scratchpad_max_images`), so a turn's pictures are
+    # bounded by this plus that cap per cell, and the pad's image spend is not
+    # in the turn cost (see `turn_cost`'s stated gaps).
+    max_images_per_turn: int = 8
     context_pressure_threshold: float = 0.7
     max_consecutive_errors: int = 5
     resilience_nudge_at: int = 2
@@ -107,5 +115,9 @@ class CoreSettings(BaseSettings):
     # while capping how long an agent-supplied estimate can extend a hang.
     cell_total_max: int = 3600
     cell_install_timeout: int = 120  # pip/uv install timeout (s)
+    # Images the scratchpad's `generate_image()` may make in one cell
+    # (ANTON_SCRATCHPAD_MAX_IMAGES). A call past it raises before any request.
+    # Per cell, not per turn: each cell a turn runs gets this many again.
+    scratchpad_max_images: int = 8
     cell_keep_recent: int = 5  # Recent cells preserved during compaction
 
