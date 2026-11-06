@@ -238,3 +238,49 @@ async def test_a_new_turn_starts_from_the_base_time_limit(workspace, clock):
     assert second.requests[0].prompt.startswith(
         "This task reached its time limit of 3 minutes per request."
     )
+
+
+async def test_no_tool_call_starts_after_the_limit_has_passed(workspace, clock):
+    """anton checks the clock between rounds, and a round runs its tool calls
+    one after another. Without a check per call, three 15-minute cells in one
+    round overran the limit by 45 minutes before the question was asked, and
+    the turn's key (sized for one last cell) expired first. Only the call that
+    was running when the limit passed finishes; the rest are not run."""
+    from anton.core.llm.provider import LLMResponse, ToolCall
+    from anton.core.tools.registry import ToolOutcome
+
+    from tests.test_spend_ceiling import _usage
+
+    cell_s = 900
+
+    def _cell(*_args, **_kwargs):
+        clock[0] += cell_s
+        return ToolOutcome(content="cell output", ok=True)
+
+    three_cells = LLMResponse(
+        content="working",
+        tool_calls=[
+            ToolCall(id=f"cell_{i}", name="scratchpad", input={"action": "view", "name": "main"})
+            for i in range(3)
+        ],
+        usage=_usage(),
+        stop_reason="tool_use",
+    )
+    session = _timed_session(workspace, [three_cells, _tool_call(9)], clock)
+    session.tool_registry.dispatch_tool = AsyncMock(side_effect=_cell)
+    session.elicitor = _ScriptedElicitor(STOP_HERE)
+
+    _, kwargs = await _run(session)
+
+    assert session.tool_registry.dispatch_tool.await_count == 1
+    assert kwargs["ended_by"] == "time_limit"
+    results = {
+        block["tool_use_id"]: block
+        for message in session._history
+        if isinstance(message.get("content"), list)
+        for block in message["content"]
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    }
+    for skipped in ("cell_1", "cell_2"):
+        assert results[skipped]["is_error"] is True
+        assert "time limit" in results[skipped]["content"]

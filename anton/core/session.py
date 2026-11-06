@@ -326,6 +326,25 @@ _NOT_RUN_AFTER_UNANSWERED_QUESTION = (
 )
 
 
+_NOT_RUN_PAST_TIME_LIMIT = (
+    "Not run: this task reached its time limit before this step started"
+)
+
+
+def _not_run_past_time_limit(tc: ToolCall) -> dict:
+    """The `tool_result` for a call the time limit kept from starting.
+
+    The round's next check asks the user; a "Keep going" lets the model send
+    the call again.
+    """
+    return {
+        "type": "tool_result",
+        "tool_use_id": tc.id,
+        "content": f"{_NOT_RUN_PAST_TIME_LIMIT}.",
+        "is_error": True,
+    }
+
+
 def _not_run_after_unanswered_question(tc: ToolCall) -> dict:
     """The `tool_result` for a call that came after an unanswered question.
 
@@ -7073,6 +7092,16 @@ class ChatSession:
                         tool_results.append(_not_run_after_unanswered_question(tc))
                         for event in _discarded_tool_call_events(
                             tc, _NOT_RUN_AFTER_UNANSWERED_QUESTION
+                        ):
+                            yield event
+                        continue
+                    # The limit is checked per round, but a round runs its calls
+                    # one after another: without this, every cell in the round
+                    # would overrun it, past what the turn's key was sized for.
+                    if self._time_limit_reached():
+                        tool_results.append(_not_run_past_time_limit(tc))
+                        for event in _discarded_tool_call_events(
+                            tc, _NOT_RUN_PAST_TIME_LIMIT
                         ):
                             yield event
                         continue
