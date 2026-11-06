@@ -15,6 +15,7 @@ import json
 import logging
 import re
 import sys
+import time
 from typing import TYPE_CHECKING, List, Literal, get_args
 import os
 import uuid
@@ -323,6 +324,25 @@ def _known_scratchpad_action(tc: ToolCall) -> str | None:
 _NOT_RUN_AFTER_UNANSWERED_QUESTION = (
     "Not run: an earlier question in this turn went unanswered, so the turn stopped there"
 )
+
+
+_NOT_RUN_PAST_TIME_LIMIT = (
+    "Not run: this task reached its time limit before this step started"
+)
+
+
+def _not_run_past_time_limit(tc: ToolCall) -> dict:
+    """The `tool_result` for a call the time limit kept from starting.
+
+    The round's next check asks the user; a "Keep going" lets the model send
+    the call again.
+    """
+    return {
+        "type": "tool_result",
+        "tool_use_id": tc.id,
+        "content": f"{_NOT_RUN_PAST_TIME_LIMIT}.",
+        "is_error": True,
+    }
 
 
 def _not_run_after_unanswered_question(tc: ToolCall) -> dict:
@@ -968,6 +988,17 @@ _ROUND_CAP_GRACE_ROUNDS = 3
 # 120 interrupted-then-finished runs complete after one question; one more
 # equal window removed none of the repeat stops.
 _LIMIT_CONTINUE_MULTIPLIER = 4
+
+# The time limit grows by one window per "Keep going", not four: four more
+# hours on one answer would hold a hosted pod, its model key and the user's
+# allowance far longer than anyone agreed to by clicking once.
+_TIME_LIMIT_CONTINUE_MULTIPLIER = 1
+
+# How many times the time limit asks before it hands back without asking:
+# the limit plus three more windows. The hosting side's hard ceiling and the
+# turn key's lifetime sit just above that, so the turn ends with a summary
+# rather than being cut off.
+_TIME_LIMIT_MAX_CONTINUES = 3
 
 # Closes every hand-back notice. The notices reach the model as user-role
 # messages, so without this it reads the pause as the user's request and tells
@@ -1962,6 +1993,13 @@ class ChatSession:
         # limit. Reset per turn in turn_stream.
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
+        # Wall-clock limit per turn (0 = none) and the seconds "Keep going" has
+        # added to it. The clock starts when turn_stream starts the turn, and
+        # counts time spent waiting on the user: the turn holds its pod and key
+        # for all of it.
+        self._max_turn_seconds = getattr(s, "max_turn_seconds", 0) or 0
+        self._time_limit_continued_s = 0
+        self._turn_started_monotonic: float | None = None
         # The tool calls this turn ran, for the report `_stream_handback_diagnosis`
         # writes when the content filter stops every hand-back. Reset per turn in
         # turn_stream.
@@ -4896,13 +4934,21 @@ class ChatSession:
         if limit == "spend_ceiling":
             ceiling = self._max_turn_tokens + self._spend_ceiling_continued_tokens
             return f"This task reached its limit of {ceiling:,} tokens per request"
+        if limit == "time_limit":
+            minutes = (self._max_turn_seconds + self._time_limit_continued_s) // 60
+            return f"This task reached its time limit of {minutes} minutes per request"
         cap = self._max_tool_rounds + self._round_cap_continued_rounds
         return f"This task reached its limit of {cap} steps per request"
 
     def _grant_limit(self, limit: str) -> None:
-        """Raise `limit` by `_LIMIT_CONTINUE_MULTIPLIER` times its configured
-        size for the rest of the turn."""
-        if limit == "spend_ceiling":
+        """Raise `limit` for the rest of the turn: by `_LIMIT_CONTINUE_MULTIPLIER`
+        times its configured size, or by `_TIME_LIMIT_CONTINUE_MULTIPLIER` for
+        the time limit."""
+        if limit == "time_limit":
+            self._time_limit_continued_s += (
+                _TIME_LIMIT_CONTINUE_MULTIPLIER * self._max_turn_seconds
+            )
+        elif limit == "spend_ceiling":
             self._spend_ceiling_continued_tokens += (
                 _LIMIT_CONTINUE_MULTIPLIER * self._max_turn_tokens
             )
@@ -4914,10 +4960,9 @@ class ChatSession:
     async def _ask_to_continue_past_limit(self, limit: str, user_message: str = ""):
         """Decide whether the turn keeps going past a limit.
 
-        `limit` is "spend_ceiling" or "round_cap". Yields ``("event", ev)``,
-        then ``("result", granted)``. Granted raises that limit by
-        `_LIMIT_CONTINUE_MULTIPLIER` times its configured size for the rest of
-        the turn. Two ways to grant, in order:
+        `limit` is "spend_ceiling", "round_cap" or "time_limit". Yields
+        ``("event", ev)``, then ``("result", granted)``. Granted raises that
+        limit for the rest of the turn (`_grant_limit`). Two ways to grant, in order:
 
         1. The message that started this turn already says to keep going or
            finish. Honored once per limit per turn, with a progress line
@@ -4926,7 +4971,16 @@ class ChatSession:
            here", Skip, a timeout, or a host that cannot ask returns False
            and the caller hands back as before.
         """
-        if limit not in self._limits_passed_by_message and await self._user_authorized_finishing(
+        if limit == "time_limit" and self._max_turn_seconds > 0 and (
+            self._time_limit_continued_s
+            >= _TIME_LIMIT_MAX_CONTINUES * _TIME_LIMIT_CONTINUE_MULTIPLIER * self._max_turn_seconds
+        ):
+            yield "result", False
+            return
+        # The time limit always asks: "don't stop" in the message can't speak
+        # for the extra hour, and the host extends the turn's credentials only
+        # when the question is answered. With nobody to ask it hands back.
+        if limit != "time_limit" and limit not in self._limits_passed_by_message and await self._user_authorized_finishing(
             user_message
         ):
             # Named before the grant, which would report the raised limit.
@@ -4994,6 +5048,10 @@ class ChatSession:
         if limit == "spend_ceiling":
             more = f"Allow up to {_LIMIT_CONTINUE_MULTIPLIER * self._max_turn_tokens:,} more tokens"
             cost = " Continuing uses more tokens."
+        elif limit == "time_limit":
+            minutes = _TIME_LIMIT_CONTINUE_MULTIPLIER * self._max_turn_seconds // 60
+            more = f"Allow up to {minutes} more minutes"
+            cost = ""
         else:
             more = f"Allow up to {_LIMIT_CONTINUE_MULTIPLIER * self._max_tool_rounds} more steps"
             cost = ""
@@ -5009,8 +5067,31 @@ class ChatSession:
             allow_custom=False,
             timeout_s=getattr(self.elicitor, "timeout_s", None),
         )
-        answer = await elicit(self, f"limit:{uuid.uuid4().hex}", request)
+        # The time limit asks outside the model's question budget: a turn that
+        # spent its questions would otherwise end at the limit without asking.
+        answer = await elicit(
+            self, f"limit:{uuid.uuid4().hex}", request, counted=limit != "time_limit",
+        )
         return answer.status == "answered" and answer.values == ("continue",)
+
+    def _time_limit_reached(self) -> bool:
+        """Whether this turn has run past its time limit. Never on a host that
+        sets no limit, or outside a turn."""
+        if self._max_turn_seconds <= 0 or self._turn_started_monotonic is None:
+            return False
+        allowed = self._max_turn_seconds + self._time_limit_continued_s
+        return time.monotonic() - self._turn_started_monotonic >= allowed
+
+    def _time_limit_notice(self) -> str:
+        """The notice for a time-limit stop, worded like the other limits'."""
+        return (
+            f"{ANTON_NOTE} This task has run for as long as one request may. "
+            "Pause here. Summarize what you have accomplished so far and what remains. "
+            f"{_NO_GUESS_AT_LIMIT} "
+            "Do NOT retry automatically — wait for the user's response. "
+            + _limit_handback_clause(self._limit_reached("time_limit"))
+            + _HANDBACK_NOT_USER_CLAUSE
+        )
 
     def _spend_ceiling_notice(self) -> str:
         """The SYSTEM injection for a ceiling stop.
@@ -5144,7 +5225,7 @@ class ChatSession:
         label: str,
         answered: bool,
         cancels_continuation: bool = False,
-        limit: Literal["round_cap", "spend_ceiling"] | None = None,
+        limit: Literal["round_cap", "spend_ceiling", "time_limit"] | None = None,
     ):
         """Stream a hand-back diagnosis and persist exactly what the user read.
 
@@ -5856,6 +5937,8 @@ class ChatSession:
         self._round_cap_grace_used = False
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
+        self._time_limit_continued_s = 0
+        self._turn_started_monotonic = time.monotonic()
         self._turn_steps = []
         self._finish_authorized = None
         self._limits_passed_by_message = set()
@@ -6770,6 +6853,9 @@ class ChatSession:
         # would both cost more of the budget we just declared spent and risk
         # forcing a continuation past it.
         _spend_ceiling_hit = False
+        # Set when the turn's time limit stopped it. Suppresses verification for
+        # the same reason as the two above.
+        _time_limit_hit = False
         # Set per verification-loop iteration (see below): tells the post-loop
         # fallback the current reply is already in history, so it must not append
         # it a second time (ENG-1155 double-append).
@@ -6938,6 +7024,40 @@ class ChatSession:
                             yield event
                         break
 
+                # Time limit, checked per round like the spend ceiling and after
+                # it, so a turn that breaches both still reports the ceiling. A
+                # round's own tools and model call run to the end first, so a
+                # turn can overrun by one round.
+                if self._time_limit_reached():
+                    agen = self._ask_to_continue_past_limit("time_limit", user_message)
+                    try:
+                        async for _kind, _payload in agen:
+                            if _kind == "event":
+                                yield _payload
+                    finally:
+                        await agen.aclose()
+                    if self._time_limit_reached():
+                        _time_limit_hit = True
+                        if self._turn_cost is not None:
+                            self._turn_cost.ended_by = "time_limit"
+                        self._append_history(
+                            {"role": "assistant", "content": llm_response.content or ""}
+                        )
+                        self._append_history(
+                            {"role": "user", "content": self._time_limit_notice()}
+                        )
+                        _reply_persisted = True
+                        yield StreamTaskProgress(
+                            phase="analyzing",
+                            message="Reached this task's time limit — checking in with you...",
+                        )
+                        async for event in self._stream_handback_diagnosis(
+                            system=system, label="time-limit", answered=False,
+                            cancels_continuation=continuation > 0, limit="time_limit",
+                        ):
+                            yield event
+                        break
+
                 # Build assistant message with content blocks
                 self._ensure_replayable_calls(llm_response)
                 for tc in llm_response.tool_calls:
@@ -6972,6 +7092,16 @@ class ChatSession:
                         tool_results.append(_not_run_after_unanswered_question(tc))
                         for event in _discarded_tool_call_events(
                             tc, _NOT_RUN_AFTER_UNANSWERED_QUESTION
+                        ):
+                            yield event
+                        continue
+                    # The limit is checked per round, but a round runs its calls
+                    # one after another: without this, every cell in the round
+                    # would overrun it, past what the turn's key was sized for.
+                    if self._time_limit_reached():
+                        tool_results.append(_not_run_past_time_limit(tc))
+                        for event in _discarded_tool_call_events(
+                            tc, _NOT_RUN_PAST_TIME_LIMIT
                         ):
                             yield event
                         continue
@@ -7618,6 +7748,7 @@ class ChatSession:
                 tool_round < self._verify_min_tool_rounds
                 or _max_rounds_hit
                 or _spend_ceiling_hit
+                or _time_limit_hit
                 or self._unanswered_question is not None
             ):
                 break
@@ -8138,6 +8269,34 @@ class ChatSession:
                     async for event in self._stream_handback_diagnosis(
                         system=system, label="spend-ceiling", answered=bool(reply.strip()),
                         cancels_continuation=continuation > 0, limit="spend_ceiling",
+                    ):
+                        yield event
+                    break
+
+            # The time limit at the same gate, for the same reason: a
+            # continuation that answers in text never reaches the per-round check.
+            if self._time_limit_reached():
+                agen = self._ask_to_continue_past_limit("time_limit", user_message)
+                try:
+                    async for _kind, _payload in agen:
+                        if _kind == "event":
+                            yield _payload
+                finally:
+                    await agen.aclose()
+                if self._time_limit_reached():
+                    _time_limit_hit = True
+                    if self._turn_cost is not None:
+                        self._turn_cost.ended_by = "time_limit"
+                    self._append_history(
+                        {"role": "user", "content": self._time_limit_notice()}
+                    )
+                    yield StreamTaskProgress(
+                        phase="analyzing",
+                        message="Reached this task's time limit — checking in with you...",
+                    )
+                    async for event in self._stream_handback_diagnosis(
+                        system=system, label="time-limit", answered=bool(reply.strip()),
+                        cancels_continuation=continuation > 0, limit="time_limit",
                     ):
                         yield event
                     break
