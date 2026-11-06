@@ -27,7 +27,7 @@ from anton.core.artifacts.internal_files import (
     is_bytecode_name,
 )
 from anton.core.artifacts.models import Artifact, artifact_key as artifact_key_for
-from anton.core.datasources.data_vault import DataVault, LocalDataVault
+from anton.core.datasources.data_vault import DataVault, LocalDataVault, withheld_from_env
 from anton.minds_client import minds_request
 from anton.publish_access import access_from_owner_side
 from anton.utils.datasources import scrub_credentials
@@ -533,12 +533,13 @@ def _collect_datasource_secrets(
     secrets: dict[str, str] = {}
     missing: list[str] = []
     for ref in artifact.datasources:
-        fields = vault.load(ref.engine, ref.name)
+        record = vault.read_record(ref.engine, ref.name)
+        fields = (record or {}).get("fields")
         if not fields:
             missing.append(ref.slug)
             continue
         for key, value in fields.items():
-            if value is None:
+            if value is None or withheld_from_env(fields, key, record.get("secure_keys")):
                 continue
             env_name = f"{ref.env_prefix}__{key.upper()}"
             secrets[env_name] = str(value)
