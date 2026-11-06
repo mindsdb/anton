@@ -145,7 +145,6 @@ ARTIFACTS_TOUCHED_KEY = "artifacts_touched"
 # `tracked_artifacts_from_reply` (`cowork/services/task_objects.py`) reads one
 # as absent, both against the same cap.
 MAX_ARTIFACTS_TOUCHED = 1000
-logger = logging.getLogger(__name__)
 
 
 def _is_version(value: object, expected: int) -> bool:
@@ -283,29 +282,36 @@ def _parse_limits(value: object, conversation_id: str) -> dict[str, int]:
     the rest, so one bad value leaves that limit at the pod's default instead of
     failing the turn. Each drop is logged by name and reason, never by value:
     dropping in silence would look exactly like a controller that sent nothing.
+    The name and reason go in log fields, not %-args, because the pod's
+    formatter keeps only the static template of a call with args.
     """
     if value is None:
         return {}
     if not isinstance(value, dict):
         logger.warning(
-            "cloud turn ignoring a limits block that is not an object (%s) conversation=%s",
-            type(value).__name__, conversation_id,
+            "cloud turn ignoring a limits block that is not an object",
+            extra={
+                "event": "turn_limits_ignored",
+                "reason": "limits_block_not_an_object",
+                "conversation_id": conversation_id,
+            },
         )
         return {}
     limits: dict[str, int] = {}
     for name, limit in value.items():
         if name not in TURN_LIMIT_MINIMUMS:
-            reason = "unknown limit"
+            # An unknown name is not echoed: it comes off the wire.
+            reason = "unknown_limit"
         elif not isinstance(limit, int) or isinstance(limit, bool):
-            reason = f"not an integer ({type(limit).__name__})"
+            reason = f"{name}_not_an_integer"
         elif limit < TURN_LIMIT_MINIMUMS[name]:
-            reason = f"below its minimum of {TURN_LIMIT_MINIMUMS[name]}"
+            reason = f"{name}_below_minimum"
         else:
             limits[name] = limit
             continue
         logger.warning(
-            "cloud turn ignoring limit %r: %s conversation=%s",
-            str(name)[:64], reason, conversation_id,
+            "cloud turn ignoring a limit",
+            extra={"event": "turn_limit_ignored", "reason": reason, "conversation_id": conversation_id},
         )
     return limits
 

@@ -259,9 +259,19 @@ def test_zero_auto_continues_is_a_real_limit():
     assert _limits_request({"max_continuations": 0}).limits == {"max_continuations": 0}
 
 
-def test_each_dropped_limit_is_logged_by_name_and_reason_never_its_value(caplog):
+def _pod_log_lines(caplog):
+    """Each captured record as the pod's formatter writes it, which is what
+    reaches the logs: caplog's own formatting keeps args the pod drops."""
+    from anton.diagnostics import make_formatter
+
+    formatter = make_formatter()
+    return [json.loads(formatter.format(r)) for r in caplog.records]
+
+
+def test_each_dropped_limit_is_logged_by_name_and_reason_never_its_value(caplog, monkeypatch):
     """Dropping in silence would look exactly like a controller that sent no
     block, and the only symptom would be a web turn stopping at the default."""
+    monkeypatch.setenv("LOG_FORMAT", "json")
     with caplog.at_level("WARNING", logger="anton.cloud_turn.contract"):
         request = _limits_request({
             "max_tool_rounds": 250,
@@ -271,20 +281,25 @@ def test_each_dropped_limit_is_logged_by_name_and_reason_never_its_value(caplog)
         })
 
     assert request.limits == {"max_tool_rounds": 250}
-    lines = [r.getMessage() for r in caplog.records]
-    assert len(lines) == 3
-    assert any("'max_turn_tokens'" in m and "below its minimum of 1" in m for m in lines)
-    assert any("'max_continuations'" in m and "not an integer (str)" in m for m in lines)
-    assert any("'later_limit'" in m and "unknown limit" in m for m in lines)
-    assert all("conversation=conv-7" in m for m in lines)
-    assert "7777" not in caplog.text and "31337" not in caplog.text
+    lines = _pod_log_lines(caplog)
+    assert {line["reason"] for line in lines} == {
+        "max_turn_tokens_below_minimum",
+        "max_continuations_not_an_integer",
+        "unknown_limit",
+    }
+    assert all(line["event"] == "turn_limit_ignored" for line in lines)
+    assert all(line["conversation_id"] == "conv-7" for line in lines)
+    written = json.dumps(lines)
+    assert "7777" not in written and "31337" not in written and "later_limit" not in written
 
 
-def test_a_limits_block_that_is_not_an_object_is_logged(caplog):
+def test_a_limits_block_that_is_not_an_object_is_logged(caplog, monkeypatch):
+    monkeypatch.setenv("LOG_FORMAT", "json")
     with caplog.at_level("WARNING", logger="anton.cloud_turn.contract"):
         assert _limits_request([250]).limits == {}
-    assert "not an object (list)" in caplog.text
-    assert "conversation=conv-7" in caplog.text
+    [line] = _pod_log_lines(caplog)
+    assert line["reason"] == "limits_block_not_an_object"
+    assert line["conversation_id"] == "conv-7"
 
 
 def test_no_limits_block_logs_nothing(caplog):
