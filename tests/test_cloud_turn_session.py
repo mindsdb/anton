@@ -341,6 +341,14 @@ def test_model_override_applied(tmp_path, monkeypatch):
     assert cfg.settings.planning_model == "claude-opus-4-8"
 
 
+@pytest.mark.parametrize(("jev_decisions", "verifier_jev"), [(False, "off"), (True, "on")])
+def test_jev_decisions_set_the_completion_check(tmp_path, monkeypatch, jev_decisions, verifier_jev):
+    # The default under test, not a developer's shell.
+    monkeypatch.delenv("ANTON_VERIFIER_JEV", raising=False)
+    _, cfg = _build(tmp_path, monkeypatch, jev_decisions=jev_decisions)
+    assert cfg.settings.verifier_jev == verifier_jev
+
+
 def test_cloud_session_uses_turn_key_from_request(tmp_path, monkeypatch):
     # No minds env set; the credential must come from the request's llm block.
     monkeypatch.delenv("ANTON_MINDS_API_KEY", raising=False)
