@@ -4,6 +4,8 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from anton.core.artifacts.models import Artifact, DatasourceRef
+from anton.core.datasources.data_vault import LocalDataVault
 from anton.publisher import (
     _FULLSTACK_EXCLUDED,
     _read_state_manifest,
@@ -181,3 +183,37 @@ def test_publish_blocks_on_collection_drop_without_uploading(tmp_path, monkeypat
     with pytest.raises(_pub.StatePublishBlocked):
         _pub.publish(d, api_key="k", report_id="rid-1")
     assert called["n"] == 0  # aborted before any upload
+
+
+def test_collect_datasource_secrets_leaves_hidden_fields_out(tmp_path):
+    vault = LocalDataVault(tmp_path / "vault")
+    vault.save(
+        "databricks",
+        "genie",
+        {
+            "_method": "genie-mcp",
+            "workspace_url": "https://example.cloud.databricks.com",
+            "client_id": "client-1",
+            "_client_secret": "sentinel-secret-1",
+        },
+    )
+    vault.save("databricks", "pat", {"host": "h.example.com", "token": "pat-token-1"})
+    artifact = Artifact.model_construct(
+        datasources=[
+            DatasourceRef(engine="databricks", name="genie"),
+            DatasourceRef(engine="databricks", name="pat"),
+        ]
+    )
+
+    secrets, missing = _pub._collect_datasource_secrets(artifact, vault)
+
+    assert missing == []
+    assert not any("sentinel-secret-1" in v for v in secrets.values())
+    assert set(secrets) == {
+        "DS_DATABRICKS_GENIE__WORKSPACE_URL",
+        "DS_DATABRICKS_GENIE__CLIENT_ID",
+        "DS_DATABRICKS_PAT__HOST",
+        "DS_DATABRICKS_PAT__TOKEN",
+    }
+    assert secrets["DS_DATABRICKS_PAT__TOKEN"] == "pat-token-1"
+    assert secrets["DS_DATABRICKS_GENIE__CLIENT_ID"] == "client-1"

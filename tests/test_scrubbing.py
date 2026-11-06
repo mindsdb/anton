@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
-from anton.core.datasources.data_vault import _slug_env_prefix
+from anton.core.datasources.data_vault import LocalDataVault, _slug_env_prefix
 from anton.core.session import _scrub_user_input
 from anton.tools import SCRUBBED_VALUE_RE
 from anton.utils import datasources
@@ -22,9 +22,12 @@ from anton.utils.datasources import (
     _DS_SECRET_VARS,
     _PROVIDER_SECRET_VARS,
     _reset_registered_ds_vars,
+    begin_ds_turn_scope,
     exact_secret_prefix_at_end,
     exact_secret_suffix_at_start,
+    hold_secret_value,
     longest_exact_secret,
+    restore_namespaced_env,
     scrub_credentials,
     scrub_output,
     set_ds_env_values,
@@ -1285,6 +1288,89 @@ class TestOAuthEngineRegistryCollision:
         # registered these as known.
         assert email in result
         assert "gmail.readonly" in result
+
+
+class TestGenieConnectionClassification:
+    """A Genie connection shares the `databricks` engine with the PAT
+    connector, whose field list lacks its fields, so it must classify from
+    its own record."""
+
+    _WORKSPACE = "dbc-1.cloud.databricks.com"
+    _CLIENT_ID = "0a1b2c3d-genie-client-id"
+
+    def test_plain_fields_stay_and_secret_and_token_are_hidden(self, tmp_path):
+        vault = LocalDataVault(vault_dir=tmp_path / "vault")
+        vault.save(
+            "databricks",
+            "genie",
+            {
+                "workspace_url": self._WORKSPACE,
+                "client_id": self._CLIENT_ID,
+                "_client_secret": "sentinel-secret-1",
+                "_method": "genie-mcp",
+            },
+            secure_keys=["_client_secret"],
+        )
+        begin_ds_turn_scope()
+        restore_namespaced_env(vault)
+        label = _slug_env_prefix("databricks", "genie")
+        hold_secret_value(f"{label}__CLIENT_SECRET", "sentinel-secret-1")
+        hold_secret_value(f"{label}__ACCESS_TOKEN", "sentinel-token")
+
+        plain = f"[Explore](https://{self._WORKSPACE}/one/chat) as {self._CLIENT_ID}"
+        assert scrub_credentials(plain) == plain
+        hidden = scrub_credentials("secret sentinel-secret-1 token sentinel-token")
+        assert "sentinel-secret-1" not in hidden
+        assert "sentinel-token" not in hidden
+        assert f"[{label}__CLIENT_SECRET]" in hidden
+        assert f"[{label}__ACCESS_TOKEN]" in hidden
+
+    def test_the_stored_secret_is_hidden_before_any_genie_tool_runs(self, tmp_path):
+        """A scratchpad cell can print the vault record before a Genie tool
+        has held the secret, so the turn's rebuild must hide it already."""
+        vault = LocalDataVault(vault_dir=tmp_path / "vault")
+        vault.save(
+            "databricks",
+            "genie",
+            {
+                "workspace_url": self._WORKSPACE,
+                "client_id": self._CLIENT_ID,
+                "_client_secret": "sentinel-secret-2",
+                "_method": "genie-mcp",
+            },
+            secure_keys=["_client_secret"],
+        )
+        begin_ds_turn_scope()
+        restore_namespaced_env(vault)
+        label = _slug_env_prefix("databricks", "genie")
+
+        hidden = scrub_credentials('{"_client_secret": "sentinel-secret-2", "_method": "genie-mcp"}')
+        assert "sentinel-secret-2" not in hidden
+        assert f"[{label}__CLIENT_SECRET]" in hidden
+        assert "genie-mcp" in hidden
+
+    def test_a_pat_connection_keeps_the_engine_field_list(self, tmp_path):
+        vault = LocalDataVault(vault_dir=tmp_path / "vault")
+        vault.save(
+            "databricks",
+            "pat",
+            {
+                "server_hostname": "dbc-2.cloud.databricks.com",
+                "http_path": "/sql/1.0/warehouses/abc123",
+                "access_token": "dapi-pat-sentinel-0001",
+            },
+            secure_keys=["access_token"],
+        )
+        begin_ds_turn_scope()
+        restore_namespaced_env(vault)
+        prefix = _slug_env_prefix("databricks", "pat")
+
+        assert {f"{prefix}__{f}" for f in ("SERVER_HOSTNAME", "HTTP_PATH", "ACCESS_TOKEN", "CATALOG")} <= set(_DS_KNOWN_VARS)
+        assert set(_DS_SECRET_VARS) == {f"{prefix}__ACCESS_TOKEN"}
+        result = scrub_credentials("host dbc-2.cloud.databricks.com token dapi-pat-sentinel-0001")
+        assert "dbc-2.cloud.databricks.com" in result
+        assert "dapi-pat-sentinel-0001" not in result
+        assert f"[{prefix}__ACCESS_TOKEN]" in result
 
 
 class TestTurnMapIsAuthoritative:

@@ -141,3 +141,18 @@ def test_a_write_tier_tool_listed_as_records_still_does_not_return_records(monke
     tool, so a table mistake never turns a write tool's output into evidence."""
     monkeypatch.setitem(TOOL_OUTPUT, "hubspot", {**TOOL_OUTPUT["hubspot"], "manage_crm_objects": "records"})
     assert returns_records(engine="hubspot", tool="manage_crm_objects") is False
+
+
+GENIE_TOOLS = ("genie_ask", "genie_poll_response", "genie_get_query_result", "genie_cancel_response")
+
+
+def test_a_read_mode_genie_connection_gets_the_four_genie_tools():
+    for tool in GENIE_TOOLS:
+        assert allowed_for_mode("databricks", tool, "read") is True, tool
+    assert allowed_for_mode("databricks", "view_ask", "read") is False
+
+
+def test_genie_answers_count_as_records():
+    for tool in ("genie_ask", "genie_poll_response", "genie_get_query_result"):
+        assert returns_records(engine="databricks", tool=tool) is True, tool
+    assert returns_records(engine="databricks", tool="genie_cancel_response") is False
