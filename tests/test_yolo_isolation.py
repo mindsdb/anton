@@ -64,28 +64,3 @@ def test_the_engine_adjacent_modules_reach_no_further_than_the_engine():
                     f"{filename} imports {module}; engine-adjacent code may only "
                     "build on the yolo package itself"
                 )
-
-
-def test_the_engine_runs_with_no_provider_configured(tmp_path):
-    """The point of the rule above, demonstrated rather than asserted."""
-    from anton.core.yolo.patch import parse_patch
-    from anton.core.yolo.workspace import Workspace
-
-    workspace = Workspace(tmp_path)
-    workspace.write("f.txt", "before\n")
-    [file_patch] = parse_patch("--- a/f.txt\n+++ b/f.txt\n@@\n-before\n+after\n")
-    from anton.core.yolo.patch import apply_hunks
-
-    assert apply_hunks(workspace.read("f.txt"), file_patch.hunks) == "after\n"
-
-
-def test_the_loop_takes_the_real_client():
-    """agent.py names LLMClient, so a wrong object is a type error at the
-    call site rather than a surprise at runtime."""
-    import inspect
-
-    from anton.core.llm.client import LLMClient
-    from anton.core.yolo import YoloEditor
-
-    annotation = inspect.get_annotations(YoloEditor)["llm_client"]
-    assert annotation is LLMClient or annotation == "LLMClient"

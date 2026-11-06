@@ -92,6 +92,8 @@ controller's stall timer.
 A `tool_result` with `action: "message"` is a tool's message to the user,
 rendered as an agent message; the pod sends it only when the request set
 `tool_messages`.
+A request with `jev_decisions` set to false never asks Jev, MindsHub's
+decision model, whether the agent finished: the organization opted out.
 
 Answer lines on stdin (interactive turns only), one JSON object per line,
 at most 64 KB:
@@ -312,6 +314,11 @@ class TurnRequestV1:
     #: messages and the tool hands the content to the agent instead. Anything
     #: but a JSON `true` reads as False.
     tool_messages: bool = False
+    #: Whether the turn may ask Jev, MindsHub's decision model, whether the
+    #: agent finished. A missing field or a JSON `true` keeps it on, so a
+    #: controller that does not forward the field changes nothing; anything
+    #: else turns it off, since a malformed opt-out must not read as consent.
+    jev_decisions: bool = True
     #: Per-engine connector data cowork-server resolved for this turn:
     #: {engine: {"usage_notes": str}}. Rendered only for engines the turn's
     #: vault connects. Absent when no connected engine has notes.
@@ -347,6 +354,7 @@ class TurnRequestV1:
             ),
             interactive=d.get("interactive") is True,
             tool_messages=d.get("tool_messages") is True,
+            jev_decisions=d.get("jev_decisions", True) is True,
             # Same defensive isinstance check as oauth/trace.
             connectors=(
                 d.get("connectors") if isinstance(d.get("connectors"), dict) else None

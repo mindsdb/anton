@@ -281,26 +281,57 @@ def test_developer_token_is_marked_secret_and_login_customer_id_is_not(monkeypat
     assert record["secure_keys"] == ["access_token", "developer_token"]
 
 
-def test_method_passes_through_so_mcp_wiring_sees_the_connection(monkeypatch):
+@pytest.mark.parametrize("engine", ["hubspot", "notion"])
+def test_method_passes_through_so_mcp_wiring_sees_the_connection(monkeypatch, engine):
+    """auth marks a HubSpot or Notion connection `_method: "mcp"`; without it
+    anton registers none of its tools on a cloud turn and only injects the token."""
     from anton.core.mcp.wiring import _method_of
 
     monkeypatch.setattr(
         "anton.minds_client.minds_request",
         lambda *a, **kw: b'{"access_token": "tok", "_method": "mcp"}',
     )
-    vault = _vault(connections=[{"engine": "notion", "name": "acme"}])
-    assert _method_of(vault, "notion", "acme") == "mcp"
-    env = vault.env_for("notion", "acme", flat=True)
+    vault = _vault(connections=[{"engine": engine, "name": "acme"}])
+    assert _method_of(vault, engine, "acme") == "mcp"
+    env = vault.env_for(engine, "acme", flat=True)
     assert env == {"DS_ACCESS_TOKEN": "tok", "DS_AUTH_TYPE": "oauth"}
 
 
 def test_response_without_method_is_not_treated_as_mcp(monkeypatch):
-    """HubSpot on cloud: auth sends no `_method`, so wiring keeps skipping it."""
+    from anton.core.mcp.wiring import _method_of
+
     monkeypatch.setattr(
         "anton.minds_client.minds_request",
         lambda *a, **kw: b'{"access_token": "tok", "account_email": "a@b.com"}',
     )
-    from anton.core.mcp.wiring import _method_of
+    vault = _vault(connections=[{"engine": "gmail", "name": "acme"}])
+    assert _method_of(vault, "gmail", "acme") is None
 
+
+@pytest.mark.parametrize("mode", ["none", "read", "write"])
+def test_access_mode_passes_through_but_never_reaches_the_env(monkeypatch, mode):
+    """Dropping `_access_mode` made wiring default to "read": a "none"
+    HubSpot connection gained read tools and a "write" one lost write tools."""
+    from anton.core.mcp.wiring import _access_mode_of
+
+    monkeypatch.setattr(
+        "anton.minds_client.minds_request",
+        lambda *a, **kw: f'{{"access_token": "tok", "_method": "mcp", "_access_mode": "{mode}"}}'.encode(),
+    )
     vault = _vault(connections=[{"engine": "hubspot", "name": "acme"}])
-    assert _method_of(vault, "hubspot", "acme") is None
+    assert _access_mode_of(vault, "hubspot", "acme") == mode
+    for flat in (True, False):
+        env = vault.env_for("hubspot", "acme", flat=flat)
+        assert not any("ACCESS_MODE" in key or "METHOD" in key for key in env)
+        assert any(key.endswith("ACCESS_TOKEN") for key in env)
+
+
+def test_mcp_connection_without_access_mode_defaults_to_read(monkeypatch):
+    from anton.core.mcp.wiring import _access_mode_of
+
+    monkeypatch.setattr(
+        "anton.minds_client.minds_request",
+        lambda *a, **kw: b'{"access_token": "tok", "_method": "mcp"}',
+    )
+    vault = _vault(connections=[{"engine": "hubspot", "name": "acme"}])
+    assert _access_mode_of(vault, "hubspot", "acme") == "read"

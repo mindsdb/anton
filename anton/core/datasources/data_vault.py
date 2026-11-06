@@ -391,8 +391,9 @@ _TURNKEY_RESPONSE_FIELDS = ("access_token", "account_email", "token_type", "scop
 _TURNKEY_EXTRA_FIELDS = ("developer_token", "login_customer_id")
 
 #: `_`-prefixed bookkeeping auth returns for some connectors. Never injected
-#: as env vars; `_method` marks an MCP connection for anton/core/mcp/wiring.py.
-_TURNKEY_BOOKKEEPING_FIELDS = ("_method",)
+#: as env vars; anton/core/mcp/wiring.py reads `_method` to spot an MCP
+#: connection and `_access_mode` to pick which of its tools to register.
+_TURNKEY_BOOKKEEPING_FIELDS = ("_method", "_access_mode")
 _TURNKEY_SECURE_KEYS = ("access_token", "developer_token")
 
 

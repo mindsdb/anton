@@ -896,6 +896,10 @@ def build_cloud_chat_session(
     settings.resolve_workspace(str(base))
     if request.model:
         settings.planning_model = request.model
+    if not request.jev_decisions:
+        # The organization opted out of Jev: the completion check uses the
+        # LLM verifier alone.
+        settings.verifier_jev = "off"
     # The request's skills block is the complete set this turn may recall or
     # list, read once here and staged outside the workspace (that PVC outlives
     # the turn and cells could read anything left under it). Only a request
