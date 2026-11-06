@@ -81,6 +81,21 @@ class TestBuildContext:
         assert "__LABEL" not in ctx
         assert "DS_GMAIL_SUPPORT__EMAIL" in ctx  # real fields still listed
 
+    def test_an_mcp_connections_withheld_token_is_not_listed(self, tmp_path):
+        # env_for keeps it out of the pad, so listing it sends the agent to a
+        # variable that is not there.
+        v = LocalDataVault(tmp_path)
+        v.save(
+            "notion", "acme",
+            {"access_token": "tok", "account_email": "a@b.com", "_method": "mcp"},
+            secure_keys=["access_token"],
+        )
+        v.save("hubspot", "pat", {"access_token": "pat-na1-x", "_method": "private-app"}, secure_keys=["access_token"])
+        ctx = build_datasource_context(v)
+        assert "DS_NOTION_ACME__ACCESS_TOKEN" not in ctx
+        assert "DS_NOTION_ACME__ACCOUNT_EMAIL" in ctx
+        assert "DS_HUBSPOT_PAT__ACCESS_TOKEN" in ctx
+
     def test_label_and_email_both_shown(self, tmp_path):
         v = LocalDataVault(tmp_path)
         v.save(
