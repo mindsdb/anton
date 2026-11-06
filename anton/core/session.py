@@ -7533,8 +7533,13 @@ class ChatSession:
                 # so the LLM sees the alarm before its next decision.
                 self._acc_maybe_nudge(tool_results)
 
+                # Only on turns with MCP tools: without them the scratchpad is
+                # the only way to the data, and the notice points at tools the
+                # turn does not have.
                 idle_scratchpad_rounds = (
-                    idle_scratchpad_rounds + 1 if round_is_idle(llm_response.tool_calls) else 0
+                    idle_scratchpad_rounds + 1
+                    if self._mcp_sessions and round_is_idle(llm_response.tool_calls)
+                    else 0
                 )
                 withhold_scratchpad = idle_scratchpad_rounds >= IDLE_ROUNDS_BEFORE_WITHHOLD
                 if withhold_scratchpad:
@@ -8190,7 +8195,9 @@ class ChatSession:
                 message=f"Task incomplete — continuing ({continuation}/{self._max_continuations})...",
             )
 
-            # Re-enter tool loop: get next LLM response with tools available
+            # Re-enter tool loop: get next LLM response with tools available.
+            # Rebuilt so a scratchpad withheld for the last round is back.
+            tools = self._build_tools()
             response = None
             async for event in self.plan_stream_with_recovery(
                 system=system, tools=tools

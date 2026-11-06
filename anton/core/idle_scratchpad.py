@@ -10,9 +10,13 @@ model has to call a real tool or answer.
 from __future__ import annotations
 
 import ast
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
 from anton.core.llm.prompts import ANTON_NOTE
+from anton.core.utils.scratchpad import scratchpad_action
+
+if TYPE_CHECKING:
+    from anton.core.llm.provider import ToolCall
 
 SCRATCHPAD = "scratchpad"
 IDLE_ROUNDS_BEFORE_WITHHOLD = 2
@@ -36,7 +40,7 @@ def _is_inert_statement(node: ast.stmt) -> bool:
     return (
         isinstance(value, ast.Call)
         and isinstance(value.func, ast.Name)
-        and value.func.id == "print"
+        and value.func.id in ("print", "progress")
         and all(isinstance(arg, ast.Constant) for arg in value.args)
         and all(isinstance(kw.value, ast.Constant) for kw in value.keywords)
     )
@@ -44,24 +48,28 @@ def _is_inert_statement(node: ast.stmt) -> bool:
 
 def is_idle_scratchpad_call(name: str, tool_input: Any) -> bool:
     """A scratchpad call that does no work: removing a pad, or running code
-    that is empty, comments only, or prints only literals. Anything that
-    computes, reads a variable or fails to parse counts as real work."""
+    that is comments only or prints only literals (with `print` or
+    `progress`). Anything that computes, reads a variable or fails to parse
+    counts as real work, and so does empty or non-text `code`: an oversized
+    cell can arrive empty, and the size nudge asks for the scratchpad again."""
     if name != SCRATCHPAD or not isinstance(tool_input, dict):
         return False
-    action = tool_input.get("action")
+    action = scratchpad_action(tool_input)
     if action == "remove":
         return True
     if action != "exec":
         return False
-    code = tool_input.get("code") or ""
+    code = tool_input.get("code")
+    if not isinstance(code, str) or not code.strip():
+        return False
     try:
         tree = ast.parse(code)
-    except SyntaxError:
+    except (SyntaxError, RecursionError, MemoryError):
         return False
     return all(_is_inert_statement(node) for node in tree.body)
 
 
-def round_is_idle(tool_calls: Iterable[Any]) -> bool:
+def round_is_idle(tool_calls: "Iterable[ToolCall]") -> bool:
     calls = list(tool_calls)
     return bool(calls) and all(is_idle_scratchpad_call(tc.name, tc.input) for tc in calls)
 

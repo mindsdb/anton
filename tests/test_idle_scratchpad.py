@@ -17,8 +17,8 @@ from anton.core.tools.registry import ToolOutcome
 
 
 @pytest.mark.parametrize("code", [
-    "", "   ", "# fetch with the Notion tool next", "print('')", "print('Ready to query HubSpot.')",
-    "pass", "print('a')\nprint('b', end='')", "'just a note'",
+    "# fetch with the Notion tool next", "print('')", "print('Ready to query HubSpot.')",
+    "pass", "print('a')\nprint('b', end='')", "'just a note'", "progress('Querying HubSpot')",
 ])
 def test_code_that_does_no_work_is_idle(code):
     assert is_idle_scratchpad_call("scratchpad", {"action": "exec", "code": code}) is True
@@ -27,9 +27,17 @@ def test_code_that_does_no_work_is_idle(code):
 @pytest.mark.parametrize("code", [
     "import os\nprint(os.environ.get('X'))", "x = 1", "print(f'{len(rows)} rows')", "print(rows)",
     "this is not python (",
+    # An oversized cell can arrive empty; the size nudge asks for the scratchpad again.
+    "", "   ", None,
+    # Not text: ast.parse raised TypeError, which escaped the tool loop's handler.
+    ["print('x')"], 5,
 ])
 def test_code_that_does_work_is_not_idle(code):
     assert is_idle_scratchpad_call("scratchpad", {"action": "exec", "code": code}) is False
+
+
+def test_a_call_without_an_action_reads_as_exec():
+    assert is_idle_scratchpad_call("scratchpad", {"code": "print('Ready.')"}) is True
 
 
 def test_removing_a_pad_is_idle_and_other_tools_never_are():
@@ -57,9 +65,9 @@ def _call(i: int, name: str = "scratchpad", code: str = "print('Ready.')") -> LL
     )
 
 
-def _session(workspace, responses):
+def _session(workspace, responses, *, mcp=True):
     """Session whose LLM plays `responses`, then answers in text; records the
-    tool names offered on every model call."""
+    tool names offered on every model call. `mcp`: the turn has MCP tools."""
     mock_llm = make_mock_llm()
     script = list(responses)
     offered: list[set[str]] = []
@@ -79,7 +87,9 @@ def _session(workspace, responses):
     mock_llm.usage_listener = None
     mock_llm.plan_stream = _plan_stream
     mock_llm.plan = _plan
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session = ChatSession(ChatSessionConfig(
+        llm_client=mock_llm, workspace=workspace, mcp_sessions=[MagicMock()] if mcp else [],
+    ))
     session.tool_registry.dispatch_tool = AsyncMock(return_value=ToolOutcome(content="ok", ok=True))
 
     async def _dispatch_stream(*args, **kwargs):
@@ -125,3 +135,27 @@ async def test_real_scratchpad_work_is_never_interrupted(workspace):
 
     assert all("scratchpad" in names for names in offered)
     assert _notices(session) == 0
+
+
+async def test_turns_without_mcp_tools_never_lose_the_scratchpad(workspace):
+    # A database connection is read through DS_* vars in the scratchpad, so it
+    # is the only way to the data, and there are no <service>__<tool> tools.
+    session, offered = _session(workspace, [_call(i) for i in range(1, 5)], mcp=False)
+    await _run(session)
+
+    assert all("scratchpad" in names for names in offered)
+    assert _notices(session) == 0
+
+
+async def test_a_continuation_after_the_withheld_round_offers_the_scratchpad_again(workspace):
+    from anton.core.session import _VerifierVerdict
+
+    session, offered = _session(workspace, [_call(1), _call(2)])
+    session._llm.generate_object_code = AsyncMock(side_effect=[
+        _VerifierVerdict(status="INCOMPLETE", reason="not done"),
+        _VerifierVerdict(status="COMPLETE", reason="done"),
+    ])
+    await _run(session)
+
+    assert "scratchpad" not in offered[2]  # the withheld round, answered in text
+    assert "scratchpad" in offered[3]  # the continuation call
