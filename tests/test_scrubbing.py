@@ -1177,6 +1177,26 @@ class TestCustomEngineRegistration:
         assert "ak_1234567890abcdef" not in result
         assert "[DS_ACME_CRM_LEGACY__API_KEY]" in result
 
+    @pytest.mark.parametrize("engine", ["hubspot", "notion"])
+    def test_an_mcp_token_kept_out_of_the_env_is_still_scrubbed(self, tmp_path, engine):
+        """env_for withholds an MCP connection's token, but an MCP error that
+        echoes it must still be redacted."""
+        from anton.utils.datasources import restore_namespaced_env
+
+        vault = self._vault(tmp_path)
+        token = "ntn_1234567890abcdefghij"
+        vault.save(
+            engine, "acme",
+            {"access_token": token, "account_email": "a@b.com", "_method": "mcp"},
+            secure_keys=["access_token"],
+        )
+        assert vault.env_for(engine, "acme") == {f"DS_{engine.upper()}_ACME__ACCOUNT_EMAIL": "a@b.com"}
+        restore_namespaced_env(vault)
+
+        result = scrub_credentials(f"401 from the MCP server: Bearer {token} is invalid")
+        assert token not in result
+        assert f"[DS_{engine.upper()}_ACME__ACCESS_TOKEN]" in result
+
     def test_custom_engine_legacy_passphrase_is_scrubbed(self, tmp_path):
         from anton.utils.datasources import restore_namespaced_env
 
