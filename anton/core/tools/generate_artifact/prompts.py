@@ -786,16 +786,13 @@ OVER_DEFAULTS = (
 
 
 def project_rules_section(anton_md: str) -> str:
-    """The project's anton.md as a system-prompt section, or "" when blank
-    or still the untouched template.
+    """The project's anton.md as a system-prompt section, or "" when blank.
 
     A system-prompt section on purpose, never kickoff content: rules that
     reached the page writer only inside the brief or the PRD were read as
     content and printed on the page as text.
     """
-    from anton.workspace import anton_md_user_text
-
-    text = anton_md_user_text(anton_md)
+    text = anton_md.strip()
     if not text:
         return ""
     return (

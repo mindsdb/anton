@@ -30,8 +30,9 @@ Created: {date}
 # anton version (any date, CRLF, BOM, reflowed comment) count as unedited.
 # The heading and the date line are each optional: a user may delete one.
 _TEMPLATE_HEADER_RE = re.compile(
-    r"\A\ufeff?\s*(?:# Anton Workspace[ \t\r]*(?:\n|\Z))?"
-    r"(?:\s*Created:[ \t]*\d{4}-\d{2}-\d{2}[ \t\r]*(?:\n|\Z))?"
+    r"\A\ufeff?\s*(?:# Anton Workspace[ \t\r]*$)?"
+    r"(?:\s*Created:[ \t]*\d{4}-\d{2}-\d{2}[ \t\r]*$)?",
+    re.MULTILINE,
 )
 _TEMPLATE_COMMENT_RE = re.compile(
     r"<!--\s*Add project context, conventions, and notes below\.\s*"
@@ -289,6 +290,13 @@ class Workspace:
         if content is not None:
             self._anton_md_last_read = datetime.now()
         return content
+
+    def read_anton_md_user_text(self) -> str:
+        """anton.md without the template boilerplate, or "" when nothing is left.
+
+        Unlike ``read_anton_md_tracked`` it does not mark the file as read.
+        """
+        return anton_md_user_text(self.read_anton_md())
 
     def build_anton_md_context(self) -> str:
         """Build a prompt section from anton.md content, if any."""

@@ -168,16 +168,13 @@ class TestAntonMd:
         ws.initialize()
         assert ws.build_anton_md_context() == ""
 
-    @pytest.mark.parametrize("date", ["2024-01-02", "2026-11-05"])
-    def test_untouched_template_has_no_user_text(self, date):
-        assert anton_md_user_text(ANTON_MD_TEMPLATE.format(date=date)) == ""
-
-    def test_crlf_template_has_no_user_text(self):
-        crlf = ANTON_MD_TEMPLATE.format(date="2026-11-05").replace("\n", "\r\n")
-        assert anton_md_user_text(crlf) == ""
-
-    def test_bom_template_has_no_user_text(self):
-        assert anton_md_user_text("\ufeff" + ANTON_MD_TEMPLATE.format(date="2026-11-05")) == ""
+    @pytest.mark.parametrize(
+        "variant",
+        [lambda t: t, lambda t: t.replace("\n", "\r\n"), lambda t: "\ufeff" + t],
+        ids=["plain", "crlf", "bom"],
+    )
+    def test_untouched_template_has_no_user_text(self, variant):
+        assert anton_md_user_text(variant(ANTON_MD_TEMPLATE.format(date="2024-01-02"))) == ""
 
     def test_date_line_without_heading_is_dropped(self):
         template = ANTON_MD_TEMPLATE.format(date="2026-11-05")
@@ -194,13 +191,13 @@ class TestAntonMd:
         assert "Created:" not in context
         assert "<!--" not in context
 
-    def test_user_text_keeps_other_headings_and_comments(self):
-        content = "# My project\n\n<!-- keep me -->\nRules here"
+    @pytest.mark.parametrize(
+        "content",
+        ["# My project\n\n<!-- keep me -->\nRules here", "Intro\n# Anton Workspace"],
+        ids=["other-heading-and-comment", "template-heading-later"],
+    )
+    def test_text_without_leading_boilerplate_is_kept(self, content):
         assert anton_md_user_text(content) == content
-
-    def test_template_heading_later_in_file_is_kept(self):
-        content = "Intro\n# Anton Workspace\n"
-        assert anton_md_user_text(content) == content.strip()
 
 
 class TestSecretVault:
