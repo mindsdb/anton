@@ -11555,10 +11555,11 @@ def _quiet_parses() -> None:
     filters back without it. It names the check's file alone, so a check
     running in any thread changes no warning other code raises, and no
     filter is saved and put back around each parse."""
+    # Warning, not SyntaxWarning: Python 3.11 raises an invalid escape as a DeprecationWarning.
     first = warnings.filters[0] if warnings.filters else None
-    if not (first is not None and first[0] == "ignore" and first[2] is SyntaxWarning and first[3] is not None
+    if not (first is not None and first[0] == "ignore" and first[2] is Warning and first[3] is not None
             and first[3].pattern == _CHECK_MODULE):
-        warnings.filterwarnings("ignore", category=SyntaxWarning, module=_CHECK_MODULE)
+        warnings.filterwarnings("ignore", category=Warning, module=_CHECK_MODULE)
 
 
 def _parse(code: str) -> ast.Module:
@@ -16170,6 +16171,9 @@ def find_cell_writes(
         if earlier and earlier[-1].ended_process:
             return find_cell_writes(code="", earlier=earlier, snapshots=snapshots, http_rules=http_rules)
         return CellWrites()
+    except (RecursionError, MemoryError):
+        # Too deep for this Python's parser, and the pad may run another Python (remote backend): hold it.
+        return CellWrites(unchecked=True)
     cells: list[_Cell] = []
     errored: set[int] = set()
     stopped_at: dict[int, int] = {}
