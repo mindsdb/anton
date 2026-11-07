@@ -396,10 +396,9 @@ async def _stream_turn(
                       "action": event.action,
                       "content": _clip_result_content(event.content or "")})
             elif isinstance(event, StreamBrowserSession):
-                # cowork opens the viewer beside the chat (ENG-3296).
+                # cowork shows the browser beside the chat.
                 logger.info("browser session opened: %s", event.session_id)
-                emit({"kind": "browser", "session_id": event.session_id,
-                      "view_url": event.view_url, "expires_at": event.expires_at})
+                wire({"kind": "browser", "session_id": event.session_id})
             elif isinstance(event, StreamContextCompacted):
                 logger.debug("Context compacted", extra={"event": "context_compacted"})
                 wire({"kind": "compacted", "message": event.message})

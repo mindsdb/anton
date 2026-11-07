@@ -43,15 +43,11 @@ class CoreSettings(BaseSettings):
     verifier_jev_timeout_s: float = 2.0
     # Minimum probability of Jev's COMPLETE/WAITING for it to decide without the LLM.
     verifier_jev_min_p: float = 0.8
-    # The shared browser (ENG-3296). `browser_url` is the user's MindsHub
-    # browser instance for the CLI; hosts pass their own via ChatSessionConfig.
-    browser_url: str = ""
-    browser_profile: str = "main"
-    # A standalone browser service's BROWSER_SERVICE_TOKEN. Empty = MindsHub,
-    # where the session's MindsHub credential is the bearer.
-    browser_token: str = ""
-    # How much Jev steers the browser: "on" takes its confident steps,
-    # "shadow" only records its picks against the model's, "off" never asks.
+    # The `browser` tool. Where the browser is comes only from the host
+    # (ChatSessionConfig.browser), never from settings. These tune the tool:
+    # how much Jev steers it ("on" takes its confident steps, "shadow" only
+    # records its picks against the model's, "off" never asks), the bar a Jev
+    # step must clear, Jev's time limit, and the most steps one `run` takes.
     browser_jev: Literal["on", "shadow", "off"] = "shadow"
     browser_jev_min_p: float = 0.8
     browser_jev_timeout_s: float = 4.0

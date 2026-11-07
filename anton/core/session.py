@@ -1630,17 +1630,6 @@ def _record_grace(turn_cost: TurnCost | None, tag: str) -> None:
         turn_cost.grace_granted = ",".join(sorted(tags))
 
 
-def _browser_from_settings(settings) -> "BrowserConfig | None":
-    """The CLI's browser: ``ANTON_BROWSER_URL`` when the user set one, with
-    ``ANTON_BROWSER_TOKEN`` for a standalone service."""
-    from anton.core.browser.config import BrowserConfig
-
-    url = getattr(settings, "browser_url", "") or ""
-    profile = getattr(settings, "browser_profile", "") or ""
-    token = getattr(settings, "browser_token", "") or ""
-    return BrowserConfig.from_dict({"base_url": url, "profile": profile, "token": token}) if url else None
-
-
 @functools.cache
 def _jev_questions() -> dict:
     """The verifier's rubric as a Jev question, built from the same text."""
@@ -1915,9 +1904,10 @@ class ChatSessionConfig:
     # `ChatSession.close()` can tear them down at turn end, the same way it
     # already closes the LLM client's transports.
     mcp_sessions: list["McpSession"] = field(default_factory=list)
-    # The user's MindsHub browser instance (ENG-3296). When set, the `browser`
-    # tool is registered. Hosts pass it (cowork-server desktop, the cloud pod);
-    # the CLI falls back to `settings.browser_url`. None = no browser tool.
+    # The browser the `browser` tool drives; the tool is registered only with
+    # one. Hosts pass it: cowork-server for the Cowork desktop app's own
+    # browser, and the cloud pod for the MindsHub browser router. None means no
+    # browser tool, and nothing falls back to settings or the environment.
     browser: "BrowserConfig | None" = None
 
 
@@ -2052,7 +2042,7 @@ class ChatSession:
         # skill is recalled. Populated in `_build_tools`.
         self._deferred_bundles: dict[str, list["ToolDef"]] = {}
         self._workspace = config.workspace
-        self._browser_config = config.browser or _browser_from_settings(config.settings)
+        self._browser_config = config.browser
         self._browser_state = None
         self._data_vault = config.data_vault
         self._connector_usage_notes = config.connector_usage_notes
@@ -3463,9 +3453,9 @@ class ChatSession:
                 self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
             self.tool_registry.register_tool(generate)
 
-        # The shared browser (ENG-3296): only with an instance to drive. The
-        # credential is resolved per call, so a session without one still
-        # registers it and the tool reports the missing login itself.
+        # The shared browser: only when the host gave one. The credential is
+        # resolved per call, so a session without one still registers it and
+        # the tool reports the missing login itself.
         if self._browser_config is not None:
             from anton.core.browser.tool import build_browser_tool
 
@@ -3493,7 +3483,7 @@ class ChatSession:
                 # steps above raise, or the pool outlives the process.
                 try:
                     if self._browser_state is not None:
-                        await self._browser_state.client.aclose()
+                        await self._browser_state.aclose()
                     if self._jev_http is not None:
                         await self._jev_http.aclose()
                 finally:

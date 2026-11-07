@@ -172,6 +172,30 @@ def test_step_events_go_on_the_wire():
     assert events[-1] == {"kind": "turn_completed"}
 
 
+def test_the_browser_line_carries_the_session_only_through_the_wire_clock(monkeypatch):
+    """The line is what cowork stores, so it carries no link or key, and it
+    counts as activity on the wire like every line but the heartbeat."""
+    from anton.cloud_turn import __main__ as entrypoint
+    from anton.core.llm.provider import StreamBrowserSession
+
+    clocked: list[dict] = []
+    original = entrypoint._WireClock.__call__
+
+    def record(self, event):
+        clocked.append(event)
+        return original(self, event)
+
+    monkeypatch.setattr(entrypoint._WireClock, "__call__", record)
+
+    class _S(_FakeSession):
+        async def turn_stream(self, user_input, **kwargs):
+            yield StreamBrowserSession(session_id="t-1")
+
+    events = _drive(_S())
+    assert [e for e in events if e.get("kind") == "browser"] == [{"kind": "browser", "session_id": "t-1"}]
+    assert {"kind": "browser", "session_id": "t-1"} in clocked
+
+
 def test_handback_reason_goes_on_the_wire_before_the_terminal():
     class _S(_FakeSession):
         async def turn_stream(self, user_input, **kwargs):
