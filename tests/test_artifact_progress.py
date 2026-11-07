@@ -29,7 +29,9 @@ from anton.core.tools.generate_artifact.progress import (
     plan_steps,
 )
 from anton.core.llm.provider import StreamTextDelta
-from anton.core.tools.generate_artifact.state import GenState, VerifyResult
+from anton.core.tools.generate_artifact.state import (
+    FetchVerdict, GenState, RequiredData, RequiredDataItem, VerifyResult,
+)
 
 
 async def _one_event_stream(response):
@@ -168,6 +170,13 @@ def test_every_step_started_call_site_has_a_label():
     assert called <= set(STEP_LABELS), (
         f"nodes with no label: {sorted(called - set(STEP_LABELS))}"
     )
+    # A planned step nobody announces would leave the count short of its total.
+    # `write_prd` goes through `sub_tools.plan_step(state, STEP_WRITE_PRD)`.
+    planned = set(plan_steps(is_fullstack=True))
+    assert sub_tools.STEP_WRITE_PRD == "write_prd"
+    missing = planned - called - {sub_tools.STEP_WRITE_PRD}
+    assert not missing, f"planned steps never announced: {sorted(missing)}"
+    assert planned <= set(STEP_LABELS)
 
 
 # ── GenState.step_started ────────────────────────────────────────────────────
@@ -273,20 +282,6 @@ def test_the_plan_follows_the_artifact_type_and_the_entry_point():
         assert plan_steps(is_fullstack=True, entry=entry)[0] == "write_prd"
 
 
-def test_every_planned_step_has_a_label_and_a_call_site():
-    """A plan naming a step the orchestrator never announces would leave the
-    count short of its total; one the label table lacks would print nothing."""
-    src = Path(orchestrator.__file__).read_text(encoding="utf-8")
-    # `write_prd` is announced by the discovery phase through
-    # `sub_tools.STEP_WRITE_PRD`; the rest by the orchestrator itself.
-    from anton.core.tools.generate_artifact.discovery import sub_tools
-    assert sub_tools.STEP_WRITE_PRD == "write_prd"
-    for step in plan_steps(is_fullstack=True):
-        assert step in STEP_LABELS, step
-        if step != "write_prd":
-            assert f'step_started("{step}"' in src, step
-
-
 def test_the_counter_numbers_steps_in_start_order():
     """The two generation loops run in parallel, so the plan's order is not
     the order steps start in — and a count that jumped back would read as a
@@ -342,13 +337,51 @@ def test_a_resumed_run_counts_only_the_steps_ahead(tmp_path: Path):
     assert _drain(st) == ["Writing the backend (step 1 of 6)", "Writing the frontend (step 2 of 6)"]
 
 
-def test_the_data_phase_reports_its_iteration_as_the_attempt():
+async def test_the_data_phase_reports_its_iteration_as_the_attempt(tmp_path: Path, monkeypatch):
     """Its three steps repeat up to `DATA_LOOP_MAX` times with the same
     names; the iteration number is what tells the lines apart."""
-    src = Path(orchestrator.__file__).read_text(encoding="utf-8")
-    for step in ("define_required_data", "is_possible_to_fetch", "fetch_data_sample"):
-        assert f'step_started("{step}", attempt=state.data_iterations)' in src, step
-    assert "state.entry = entry" in src
+    st = _state(tmp_path)
+    st.gathering_complete = False  # never finished: the loop has to run
+    st.public_sources = ""
+    st.session._llm.generate_object = AsyncMock(
+        side_effect=lambda schema_class, **kw: (
+            RequiredData(items=[RequiredDataItem(name="x", where="db", why="y")], reasoning="r")
+            if schema_class is RequiredData
+            else FetchVerdict(possible=True, reasoning="yes")
+        )
+    )
+    fetches = iter([("failed", False), ("pulled a sample", True)])
+
+    async def fake_fetch(state, required_text=""):
+        return next(fetches)
+
+    monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
+
+    assert await orchestrator._data_phase(st) is None
+    assert _drain(st) == [
+        "Working out what data is still missing (step 1 of 5)",
+        "Checking whether the missing data can be obtained (step 2 of 6)",
+        "Fetching a data sample (step 3 of 7)",
+        "Working out what data is still missing (step 1 of 7, attempt 2)",
+        "Checking whether the missing data can be obtained (step 2 of 7, attempt 2)",
+        "Fetching a data sample (step 3 of 7, attempt 2)",
+    ]
+
+
+async def test_a_run_counts_from_the_point_it_resumes_at(tmp_path: Path, monkeypatch):
+    """`run` records its entry point, so a resumed run's total covers only the
+    steps ahead of it."""
+    st = _state(tmp_path)
+
+    async def fake_frontend(state):
+        state.step_started("generate_frontend")
+        return "stop"
+
+    monkeypatch.setattr(orchestrator, "_gen_verify_frontend", fake_frontend)
+    monkeypatch.setattr(orchestrator, "_stage_attachments", lambda state: None)
+
+    assert await orchestrator.run(st, entry=cp.ENTRY_GENERATE) == "stop"
+    assert _drain(st) == ["Writing the page (step 1 of 2)"]
 
 
 # ── live peek ───────────────────────────────────────────────────────────────

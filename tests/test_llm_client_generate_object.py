@@ -136,6 +136,7 @@ class TestSingleModel:
         assert kwargs["system"] == "custom system"
         assert kwargs["messages"] == [{"role": "user", "content": "custom user"}]
         assert kwargs["model"] == "test-model"
+        assert kwargs["max_tokens"] == 8192  # the client default
 
     @pytest.mark.asyncio
     async def test_invalid_payload_raises_validation_error(self):
@@ -168,22 +169,6 @@ class TestSingleModel:
                 system="x",
                 messages=[{"role": "user", "content": "y"}],
             )
-
-    @pytest.mark.asyncio
-    async def test_max_tokens_uses_default_when_not_specified(self):
-        provider = _FakePlanningProvider(
-            _tool_call_response("SimpleAnswer", {"answer": "x", "confidence": 0.5})
-        )
-        client = _make_client(provider)
-
-        await client.generate_object(
-            SimpleAnswer,
-            system="x",
-            messages=[{"role": "user", "content": "y"}],
-        )
-
-        kwargs = provider.complete_mock.call_args.kwargs
-        assert kwargs["max_tokens"] == 8192  # the client default
 
     @pytest.mark.asyncio
     async def test_max_tokens_override(self):
@@ -243,7 +228,7 @@ class TestListModel:
         )
         client = _make_client(provider)
 
-        await client.generate_object(
+        result = await client.generate_object(
             list[Lesson],
             system="x",
             messages=[{"role": "user", "content": "y"}],
@@ -252,20 +237,6 @@ class TestListModel:
         kwargs = provider.complete_mock.call_args.kwargs
         assert kwargs["tool_choice"] == {"type": "tool", "name": "Lesson_array"}
         assert kwargs["tools"][0]["name"] == "Lesson_array"
-
-    @pytest.mark.asyncio
-    async def test_empty_list_is_valid(self):
-        provider = _FakePlanningProvider(
-            _tool_call_response("Lesson_array", {"items": []})
-        )
-        client = _make_client(provider)
-
-        result = await client.generate_object(
-            list[Lesson],
-            system="x",
-            messages=[{"role": "user", "content": "y"}],
-        )
-
         assert result == []
 
 

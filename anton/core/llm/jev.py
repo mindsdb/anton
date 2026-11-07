@@ -100,7 +100,7 @@ async def classify(
         return JevVerdict(ms=elapsed(), error="timeout")
     except httpx.HTTPError:
         return JevVerdict(ms=elapsed(), error="transport")
-    except Exception as exc:  # the shadow must never raise into the turn
+    except Exception as exc:  # the completion check must never raise into the turn
         return JevVerdict(ms=elapsed(), error=type(exc).__name__)
     finally:
         if owned:
