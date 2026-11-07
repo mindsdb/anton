@@ -49,6 +49,23 @@ FIRST_CALL_TIMEOUT_S = 115.0
 #: calls are in flight, before the call reaches the browser, so sending it
 #: again is safe, a step included. The waits before each new try:
 BUSY_RETRY_S = (0.5, 1.0, 2.0)
+#: The longest hand-over reason a host takes (spec §5.4, A.4). The hosts
+#: count it as JavaScript's .length does, in UTF-16 units, and answer a longer
+#: one 400.
+REASON_UNITS = 300
+
+
+def cut_reason(reason: str) -> str:
+    """The reason cut to REASON_UNITS UTF-16 units, as the hosts count it.
+    A character past the Basic Multilingual Plane, such as an emoji, counts
+    2, and the cut never splits one."""
+    units = 0
+    for i, ch in enumerate(reason):
+        units += 2 if ord(ch) > 0xFFFF else 1
+        if units > REASON_UNITS:
+            return reason[:i]
+    return reason
+
 
 _Model = TypeVar("_Model", bound=BaseModel)
 
@@ -186,7 +203,7 @@ class BrowserClient:
         the agent's actions and page reads, and shows them it's their turn.
         Only the person hands it back, with Done in the browser; the agent
         never asks for it back."""
-        body = {"holder": "human", "reason": reason[:300]}
+        body = {"holder": "human", "reason": cut_reason(reason)}
         return await self._read(Control, "POST", f"/sessions/{quote(session_id)}/control", json=body)
 
     async def tabs(self, *, session_id: str) -> list[Tab]:

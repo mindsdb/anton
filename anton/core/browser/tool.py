@@ -43,6 +43,7 @@ from anton.core.browser.client import (
     REQUEST_TIMEOUT_S,
     BrowserClient,
     BrowserError,
+    cut_reason,
 )
 from anton.core.browser.models import ActionResult, Element, HeldStep, Page, SavedTab, Site, StepKey, Tab
 from anton.core.browser.page import format_page, human_check, signature
@@ -957,11 +958,6 @@ async def _do_screenshot(session: "ChatSession", tc_input: dict):
 # ── hand-overs ─────────────────────────────────────────────────────────────
 
 
-#: The most of the model's reason the hand-over card shows, as the browser's
-#: banner cuts it.
-_REASON_CHARS = 300
-
-
 def _page_host(url: str | None) -> str | None:
     """The host a page is on; a blob: page is on its creator's host."""
     if url and url.startswith("blob:"):
@@ -991,7 +987,7 @@ async def _hand_over(session: "ChatSession", *, reason: str) -> str | None:
     host = _page_host(url)
     # One line and as long as the browser's own banner, so a reason a page
     # steered can't print a host line of its own under this one.
-    reason = " ".join(reason.split())[:_REASON_CHARS]
+    reason = cut_reason(" ".join(reason.split()))
     handed = await state.client.hand_to_person(session_id=state.session_id, reason=reason)
 
     async def done_in_the_browser() -> str | None:

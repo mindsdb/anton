@@ -275,6 +275,21 @@ STEPS = {
 }
 
 
+@pytest.mark.parametrize(("reason", "sent"), [
+    ("a" * 299 + "\U0001F600", "a" * 299),
+    ("\U0001F600" * 150, "\U0001F600" * 150),
+    ("a" * 300 + "b", "a" * 300),
+])
+async def test_the_hand_over_reason_fits_the_hosts_utf16_limit(reason, sent):
+    """The hosts count the reason in UTF-16 units and answer a longer one
+    400, so an emoji counts 2 and the cut never splits one."""
+    recorder = _Recorder()
+    await _client(recorder).hand_to_person(session_id=PROFILE, reason=reason)
+    body = recorder.sent[0][2]
+    assert body["reason"] == sent
+    assert len(body["reason"].encode("utf-16-le")) // 2 <= client_module.REASON_UNITS
+
+
 def test_every_accepted_request_is_one_the_client_sends():
     accepted = {(f, n) for f, n, e in _examples("request") if not e.refused}
     assert accepted == set(REQUESTS) | {("action", n) for n in STEPS}
