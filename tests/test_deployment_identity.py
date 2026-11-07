@@ -83,15 +83,15 @@ def test_default_product_lines_are_byte_identical(surface, line):
 
 
 @pytest.mark.parametrize(("surface", "digest"), [
-    (None, "3c2a3239002fdf205ad65b3f697736a24cf479473c2322c8664cebaa1f2b5986"),
-    ("desktop", "8412ea8bc41018090fcd1fd59a360353cc520259629b9c2351d272e79807674d"),
-    ("web", "ca478ffde7ff2f96c9d2d885dcb2caa36b4120fcc40f655f82dc1214d73b8cd4"),
-    ("cli", "6d3aca524f321f98c2709a3bd42f82b095f44c9ea5aa69e4d9895ec7724a0695"),
+    (None, "b7f0948f6aadb7919afd58fdd03b83c7ea2acdd6d4fbfb55a057ae46b77625e1"),
+    ("desktop", "8c2e2e952ab20a6f020c5e52e1e8022d30ba3057affbfd319badd636eff60b22"),
+    ("web", "49af92a81de9fd5d5cc0f1c45f44c39c78458b3680886de6157f9dca5320d346"),
+    ("cli", "0deec3f10f88bab46773af8c9540cd0af4d9add582ac78c0a471e2177a7c15d0"),
 ])
 def test_complete_default_builder_output_is_byte_identical(surface, digest):
-    # Pinned digests of the full prompt; regenerate them when the prompt text
-    # changes on purpose.
-    # Compare the full prompt, including its session context, rather than just PRODUCT.
+    # Snapshot the current complete default prompt for each surface, including
+    # shared geography guidance and session context. Update only after reviewing
+    # the full assembled-prompt diff for intentional changes.
     prompt = ChatSystemPromptBuilder().build(
         conversation_started="Sunday, October 18, 2026",
         system_prompt_context=SystemPromptContext(

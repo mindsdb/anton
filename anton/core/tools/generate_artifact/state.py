@@ -500,8 +500,18 @@ class GenState:
         if self._pipeline_tools is None:
             from .discovery.sub_tools import pipeline_tool_schemas
 
-            self._pipeline_tools = pipeline_tool_schemas(self.buildable_types)
+            self._pipeline_tools = pipeline_tool_schemas(
+                self.buildable_types, internet_research=self.internet_research,
+            )
         return self._pipeline_tools
+
+    @property
+    def internet_research(self) -> bool:
+        """False when the session answers from the connected data only
+        (`ChatSessionConfig.internet_research_enabled`): no web tools and no
+        public-data-sources catalog in this run. A session object without the
+        attribute (a test double) keeps them."""
+        return getattr(self.session, "_internet_research_enabled", True) is not False
 
     @property
     def buildable_types(self) -> tuple[str, ...]:

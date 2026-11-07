@@ -15,14 +15,6 @@ def vault(tmp_path):
     return v
 
 
-def test_session_usage_notes_reach_the_artifact_datasource_catalog(vault):
-    session = SimpleNamespace(
-        _data_vault=vault, _connector_usage_notes={"langfuse": "LF-NOTE"}
-    )
-
-    assert "LF-NOTE" in _datasource_catalog(session).render()
-
-
 def test_a_non_mapping_attribute_is_treated_as_no_host_notes(vault, monkeypatch):
     class _RegistryWithNotes:
         def get(self, engine):

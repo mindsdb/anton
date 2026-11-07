@@ -35,6 +35,16 @@ def test_binding_ignores_comment_tags_and_respects_quoted_tag_delimiters():
     assert observed_data.previous_data(result) == data
 
 
+@pytest.mark.parametrize("end_tag", ["</SCRIPT >", "</script\t\n bar>", "</script/>"])
+def test_binding_is_read_and_stripped_at_every_end_tag_a_browser_accepts(end_tag):
+    value = {"rows": [1, 2, 3]}
+    data = {observed_data.identity(value): value}
+    page = "<!doctype html><html><head></head><body></body></html>"
+    edited = observed_data.bind(page, data).replace("</script>", end_tag)
+    assert observed_data.previous_data(edited) == data
+    assert observed_data.strip_binding(edited) == page
+
+
 @pytest.mark.parametrize("key", ["access_token", "apiKey", "x-api-key", "private_key", "aws_secret_access_key", "dsn"])
 def test_credential_keys_are_recognized_in_common_spellings(key):
     assert observed_data.credential_bearing({"source": {key: "value"}})

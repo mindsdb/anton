@@ -31,7 +31,7 @@ import time
 from collections.abc import Callable
 from typing import BinaryIO, TextIO
 
-from anton.cloud_turn.contract import TurnRequestV1
+from anton.cloud_turn.contract import ARTIFACTS_TOUCHED_KEY, MAX_ARTIFACTS_TOUCHED, TurnRequestV1
 from anton.cloud_turn.elicitor import (
     CloudElicitor,
     ask_user_answered_event,
@@ -44,6 +44,7 @@ from anton.cloud_turn.session import (
     drain_pending_memory,
     resolve_trusted_workspace_path,
     drain_pending_skills,
+    remove_staged_skills,
 )
 from anton.cloud_turn.stdin import start_answer_reader
 from anton.core.llm.liveness import MODEL_WAIT_PHASE, MODEL_WAIT_TICK_S
@@ -241,9 +242,10 @@ async def _stream_turn(
     """Parse the request, run one turn, and emit exactly one terminal event.
 
     Streaming: assistant text is emitted as ``delta`` events as it arrives, then
-    a bare ``turn_completed``. Any failure (parse or turn) -> one ``turn_failed``
-    with a scrubbed error string, plus ``reset_at`` when the failure is a
-    MindsHub billing stop that knows when its limit lifts.
+    a ``turn_completed`` naming the artifacts the turn touched. Any failure
+    (parse or turn) -> one ``turn_failed`` with a scrubbed error string, plus
+    ``reset_at`` when the failure is a MindsHub billing stop that knows when
+    its limit lifts.
 
     A background ticker emits a bare ``heartbeat`` event every
     ``ANTON_CLOUD_TURN_HEARTBEAT_SECONDS`` (default 5) so long-but-alive turns
@@ -462,13 +464,16 @@ async def _stream_turn(
                 wire({"kind": "history", "rows": rows})
         logger.info("cloud turn completed")
         completed = {"kind": "turn_completed"}
-        # The slugs this turn's artifact tools touched, so the host stats only
-        # those folders at turn end instead of the whole artifacts folder.
-        # `getattr`: a session double (or a build predating the record) sends
-        # none, and the host then diffs the whole folder.
+        # The folders this turn's tools and cells touched, so the host stats
+        # only those at turn end instead of the whole artifacts folder. Left
+        # out, and the host then diffs the whole folder, when the session
+        # keeps no such record (`getattr`: a session double), when a snapshot
+        # around a cell could not read the folder, and when the list is
+        # longer than the host reads.
         touched = getattr(session, "artifacts_touched", None)
-        if touched is not None:
-            completed["artifacts_touched"] = sorted(touched)
+        complete = getattr(session, "artifacts_touched_complete", False)
+        if touched is not None and complete is True and len(touched) <= MAX_ARTIFACTS_TOUCHED:
+            completed[ARTIFACTS_TOUCHED_KEY] = sorted(touched)
         wire(completed)
         terminal_emitted = True
     except Exception as exc:
@@ -501,6 +506,9 @@ async def _stream_turn(
             await hb
         if session is not None:
             await _close(session)
+        # After close, so none of this turn's cells still reads it. Not tied to
+        # the session: a build that raised after staging leaves none to close.
+        remove_staged_skills()
 
 
 def main(argv: list[str] | None = None) -> int:

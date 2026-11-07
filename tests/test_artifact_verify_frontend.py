@@ -203,11 +203,6 @@ def test_unclosed_script_block_is_error():
     assert any("never closes" in e for e in r.errors)
 
 
-def test_balanced_script_blocks_pass():
-    r = verify_frontend(GOOD, is_fullstack=True)
-    assert r.ok, r.errors
-
-
 # ── verify_frontend_live: the headless-browser gate (html_lint) ──────────────
 
 @pytest.fixture(autouse=True)

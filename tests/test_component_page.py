@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -21,7 +20,10 @@ def test_program_round_trip_preserves_source_and_passes_existing_static_checks()
     assert component_page.existing_program(bound) == PROGRAM
 
 
-@pytest.mark.parametrize("bad", ["<html></html>", "await CoworkPage({title:'</script>'});", "42"])
+@pytest.mark.parametrize("bad", [
+    "<html></html>", "await CoworkPage({title:'</script>'});", "await CoworkPage({title:'</script foo>'});",
+    "await CoworkPage({title:'</script\t'});", "42",
+])
 def test_non_program_or_script_termination_requires_repair(bad):
     with pytest.raises(ValueError):
         component_page.document(bad)
@@ -99,10 +101,20 @@ async def test_the_component_writer_is_told_how_render_receives_controls(tmp_pat
     assert "object keyed by control IDs" in systems[0]
 
 
-def test_maps_get_label_placement_and_legends_and_motion_only_on_request():
+async def test_maps_get_label_placement_and_legends_and_motion_only_on_request(tmp_path, monkeypatch):
     page = component_page.document("await CoworkPage({title:'T',sections:[]});")
     assert "CoworkMapLabels" in page and "CoworkGeoLegend" in page
-    assert "Only when the user asks for motion" in Path(fast_static.__file__).read_text()
+    monkeypatch.setenv("ANTON_STATIC_COMPONENT_WRITER", "on")
+    (tmp_path / "observed-data.json").write_text(json.dumps({"revenue": 42}))
+    systems = []
+    async def stream(**kwargs):
+        systems.append(kwargs["system"])
+        yield StreamComplete(LLMResponse(content=PROGRAM))
+    monkeypatch.setattr(fast_static.verifiers, "verify_frontend_live", lambda *a, **kw: BrowserCheck(status="passed"))
+    state = GenState(session=SimpleNamespace(history=[], _llm=SimpleNamespace(code_stream=stream)),
+                     artifact_type="html-app", artifact_path=tmp_path, slug="page", act_first=True)
+    assert (await fast_static.run(state))["status"] == "generated"
+    assert "Only when the user asks for motion" in systems[0]
 
 
 @pytest.mark.parametrize("section,bound", [

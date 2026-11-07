@@ -30,15 +30,15 @@ async def test_retry_reuses_the_memory_section_built_at_turn_start():
     assert all("memory v1" in s for s in systems)
 
 
-async def test_each_turn_builds_the_memory_section_fresh():
+async def test_later_turns_keep_the_memory_section_the_first_turn_built():
     session = _session()
     session._llm.plan = AsyncMock(return_value=LLMResponse(content="done", stop_reason="end_turn"))
 
     await run_turn(session, "hello")
     await run_turn(session, "hello")
 
-    assert session._cortex.build_memory_context.await_count == 2
-    assert "memory v2" in session._llm.plan.await_args_list[-1].kwargs["system"]
+    assert session._cortex.build_memory_context.await_count == 1
+    assert "memory v1" in session._llm.plan.await_args_list[-1].kwargs["system"]
 
 
 async def test_memory_read_counts_the_memory_section_the_turn_built(tmp_path):

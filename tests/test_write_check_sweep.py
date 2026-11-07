@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from anton.core.utils.write_check import ProjectSnapshot, find_cell_writes, snapshot_project_files
+from anton.core.utils.write_check import EarlierCell, ProjectSnapshot, find_cell_writes, snapshot_project_files
 
 PG = ("import os, psycopg2\nconn = psycopg2.connect(host=os.environ['DS_POSTGRES_QA__HOST'], "
       "dbname=os.environ['DS_POSTGRES_QA__DATABASE'])\ncur = conn.cursor()\n")
@@ -434,8 +434,8 @@ os.replace(tmp, 'lead_times.md')""",
 }
 
 EARLIER = {
-    "duckdb-earlier-cell-handle": ("import duckdb\ncon = duckdb.connect()\ncon.execute(\"CREATE TABLE stock AS SELECT * FROM read_csv('stock.csv')\")",),
-    "earlier-statement-run": (PG + "fix = \"UPDATE suppliers SET lead_time_days = 21 WHERE supplier_id = 'S005'\"\nprint(fix)",),
+    "duckdb-earlier-cell-handle": (EarlierCell(code="import duckdb\ncon = duckdb.connect()\ncon.execute(\"CREATE TABLE stock AS SELECT * FROM read_csv('stock.csv')\")"),),
+    "earlier-statement-run": (EarlierCell(code=PG + "fix = \"UPDATE suppliers SET lead_time_days = 21 WHERE supplier_id = 'S005'\"\nprint(fix)"),),
 }
 
 
@@ -465,13 +465,13 @@ def test_sweep_corpus_counts() -> None:
 
 @pytest.mark.parametrize("name, code", READ_AND_REPORT_CASES.items(), ids=READ_AND_REPORT_CASES)
 def test_read_and_report_cells_need_no_card(name: str, code: str, project_snapshot: ProjectSnapshot) -> None:
-    changes = find_cell_writes(code=code, earlier_code=EARLIER.get(name, ()), snapshots=(project_snapshot,))
+    changes = find_cell_writes(code=code, earlier=EARLIER.get(name, ()), snapshots=(project_snapshot,))
     assert not changes.needs_approval(), changes
 
 
 @pytest.mark.parametrize("name, code", ALLOWED_WRITE_CASES.items(), ids=ALLOWED_WRITE_CASES)
 def test_allowed_writes_need_no_card(name: str, code: str, project_snapshot: ProjectSnapshot) -> None:
-    changes = find_cell_writes(code=code, earlier_code=EARLIER.get(name, ()), snapshots=(project_snapshot,))
+    changes = find_cell_writes(code=code, earlier=EARLIER.get(name, ()), snapshots=(project_snapshot,))
     assert not changes.needs_approval(), changes
     if name == "anton-output-temp":
         # The agent's own file is overwritten without a card, but logged.
@@ -483,7 +483,7 @@ def test_allowed_writes_need_no_card(name: str, code: str, project_snapshot: Pro
 def test_known_limitations_should_need_a_card(name: str, code: str, project_snapshot: ProjectSnapshot) -> None:
     # _database_files follows connect/create_engine paths, not an ATTACH on an
     # in-memory handle. A fix that holds it turns this test into an XPASS.
-    changes = find_cell_writes(code=code, earlier_code=EARLIER.get(name, ()), snapshots=(project_snapshot,))
+    changes = find_cell_writes(code=code, earlier=EARLIER.get(name, ()), snapshots=(project_snapshot,))
     assert changes.needs_approval(), changes
 
 
@@ -491,7 +491,7 @@ def test_known_limitations_should_need_a_card(name: str, code: str, project_snap
 @pytest.mark.parametrize("name, code", FALSE_CARD_CASES.items(), ids=FALSE_CARD_CASES)
 def test_false_cards_should_need_no_card(name: str, code: str, project_snapshot: ProjectSnapshot) -> None:
     # A fix that frees report prose turns this test into an XPASS.
-    changes = find_cell_writes(code=code, earlier_code=EARLIER.get(name, ()), snapshots=(project_snapshot,))
+    changes = find_cell_writes(code=code, earlier=EARLIER.get(name, ()), snapshots=(project_snapshot,))
     assert not changes.needs_approval(), changes
 
 
@@ -499,5 +499,5 @@ def test_false_cards_should_need_no_card(name: str, code: str, project_snapshot:
 def test_cells_that_change_data_or_existing_files_need_a_card(
     name: str, code: str, project_snapshot: ProjectSnapshot,
 ) -> None:
-    changes = find_cell_writes(code=code, earlier_code=EARLIER.get(name, ()), snapshots=(project_snapshot,))
+    changes = find_cell_writes(code=code, earlier=EARLIER.get(name, ()), snapshots=(project_snapshot,))
     assert changes.needs_approval(), changes

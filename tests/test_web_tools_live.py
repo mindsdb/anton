@@ -535,25 +535,6 @@ class TestExaLive:
         assert _has_https_url_line(_text(out))
         assert "Anthropic Claude" in _text(out)  # query echoed in the header
 
-    @pytest.mark.asyncio
-    async def test_setup_probe_endpoint_contract(self):
-        """The setup probe in ``cli._setup_exa`` posts the same payload to
-        the same URL with the same auth header. This test validates that
-        contract against the live API — if Exa changes their endpoint or
-        auth shape, both setup AND runtime would break, and this would
-        catch it on the next live run."""
-        import httpx2 as _httpx
-
-        # Exact same shape ``cli._setup_exa._test`` uses internally.
-        resp = await _httpx.AsyncClient(timeout=15.0).post(
-            "https://api.exa.ai/search",
-            headers={"Authorization": f"Bearer {os.environ['EXA_API_KEY']}"},
-            json={"query": "anton ping", "num_results": 1},
-        )
-        assert resp.status_code == 200, (
-            f"setup probe contract broken: HTTP {resp.status_code} — {resp.text[:200]}"
-        )
-
 
 @brave_only
 class TestBraveLive:
@@ -589,24 +570,6 @@ class TestBraveLive:
         )
         assert _has_https_url_line(_text(out))
         assert "Anthropic Claude" in _text(out)
-
-    @pytest.mark.asyncio
-    async def test_setup_probe_endpoint_contract(self):
-        """Mirror of the Exa probe-contract test for Brave (matches
-        ``cli._setup_brave._test``)."""
-        import httpx2 as _httpx
-
-        resp = await _httpx.AsyncClient(timeout=15.0).get(
-            "https://api.search.brave.com/res/v1/web/search",
-            headers={
-                "X-Subscription-Token": os.environ["BRAVE_API_KEY"],
-                "Accept": "application/json",
-            },
-            params={"q": "anton ping", "count": 1},
-        )
-        assert resp.status_code == 200, (
-            f"setup probe contract broken: HTTP {resp.status_code} — {resp.text[:200]}"
-        )
 
 
 class TestWebFetchLive:

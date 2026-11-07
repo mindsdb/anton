@@ -8,7 +8,6 @@ agent hears, what anton puts back, and what closes the turn.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import os
 import threading
@@ -21,6 +20,8 @@ import anton.core.tools.generate_artifact as gen_pkg
 from anton.core.artifacts import ArtifactStore
 from anton.core.artifacts.page_copies import TurnPages
 from anton.core.artifacts.render_check import Comparison
+from anton.core.backends.base import Cell
+from anton.core.llm.provider import StreamComplete
 from anton.core.session import ChatSession
 from anton.core.tools.generate_artifact import engine, orchestrator, verifiers
 from anton.core.tools.generate_artifact.state import BrowserCheckFailed
@@ -113,12 +114,65 @@ async def test_with_less_than_a_whole_check_left_the_page_goes_without_its_copy(
     assert "previous_html" not in service.requests[0]["body"]
 
 
-def test_both_exec_paths_keep_the_turns_copies_before_their_snapshot():
-    """`handle_scratchpad` and the session's inline streaming exec each keep
-    the copies before the snapshot a cell's check diffs against."""
-    for source in (inspect.getsource(tool_handlers.handle_scratchpad), inspect.getsource(ChatSession)):
-        capture = source.index("capture_turn_pages(")
-        assert capture < source.index("snapshot_existing_artifacts(", capture)
+class _EditingPad:
+    """A pad whose cell rewrites the page, with the mtime set back as in `_cell`."""
+
+    def __init__(self, page: Path) -> None:
+        self.page = page
+
+    def _edit(self, code: str) -> Cell:
+        os.utime(self.page, ns=(1_000_000_000, 1_000_000_000))
+        self.page.write_text(_PAGE.replace("hi", "edited"))
+        return Cell(code=code, stdout="saved", stderr="", error=None)
+
+    async def execute(self, code, **kwargs):
+        return self._edit(code)
+
+    async def execute_streaming(self, code, **kwargs):
+        yield self._edit(code)
+
+
+async def test_both_exec_paths_keep_the_turns_copies_before_their_snapshot(service, tmp_path, monkeypatch):
+    """`handle_scratchpad` and the session's inline streaming exec each send
+    the page as the turn found it, not the page their cell wrote."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from anton.core.session import ChatSessionConfig
+    from tests.conftest import make_mock_llm
+    from tests.test_streaming_exec_artifact_lint import _FakeAsyncIter, _scratchpad_exec_response, _text_response
+
+    store, slug = _artifact(tmp_path)
+    pad = _EditingPad(store.root / slug / "index.html")
+    session = _session(
+        _workspace=SimpleNamespace(artifacts_dir=store.root),
+        _record_cell_explainability=lambda **kw: None,
+    )
+
+    async def prepared(session, tc_input):
+        return pad, tc_input["code"], "edit", "", 5
+
+    monkeypatch.setattr(tool_handlers, "prepare_scratchpad_exec", prepared)
+    await tool_handlers.handle_scratchpad(session, {"action": "exec", "name": "main", "code": "edit()"})
+
+    assert [request["body"].get("previous_html") for request in service.requests] == [_BEFORE]
+
+    service.requests.clear()
+    store, slug = _artifact(tmp_path / "streamed")
+    pad = _EditingPad(store.root / slug / "index.html")
+    workspace = MagicMock(base=tmp_path)
+    workspace.artifacts_dir = store.root
+    llm = make_mock_llm()
+    responses = iter([_scratchpad_exec_response("Edit"), _text_response("Done")])
+    llm.plan_stream = lambda **kw: _FakeAsyncIter([StreamComplete(response=next(responses, _text_response("Done")))])
+    chat = ChatSession(ChatSessionConfig(llm_client=llm, workspace=workspace))
+    chat._scratchpads.get_or_create = AsyncMock(return_value=pad)
+    try:
+        async for _ in chat.turn_stream("Edit the page"):
+            pass
+    finally:
+        await chat.close()
+
+    assert service.requests and service.requests[0]["body"].get("previous_html") == _BEFORE
 
 
 # ── What the agent hears ─────────────────────────────────────────────────────
@@ -242,11 +296,73 @@ async def test_a_page_the_turn_broke_past_its_repair_cells_goes_back_as_it_was(s
     assert last.messages == [f"{slug}/index.html — {tool_handlers._RESTORED}"]
     assert (store.root / slug / "index.html").read_text() == _BEFORE
     assert session._page_checks == {key: "passed"}
+    assert last.out_of_repairs == frozenset({key})
     assert session._failed_views == {}
     # Only the line for the page put back: what the broken version lost is not the user's page any more.
     assert ChatSession._unverified_page_lines(session) == [
         "“Control tower”: the edit could not be made safely, so the page is back as it was before this turn."
     ]
+
+
+async def test_a_cell_that_edits_a_page_put_back_past_its_repair_cells_writes_it_back_again(service, tmp_path):
+    """The page went back as the turn found it. A fourth cell edits it anyway:
+    it goes back again, unchecked."""
+    store, slug = _artifact(tmp_path)
+    session = _session(_out_of_repairs=set())
+    service.answer(_FAILED_MAP)
+
+    for text in ("breaks the map", "first repair", "second repair"):
+        await _cell(session, store, slug, text)
+    again = await _cell(session, store, slug, "edits it anyway")
+
+    assert (store.root / slug / "index.html").read_text() == _BEFORE
+    assert len(service.requests) == 3
+    assert again.messages == [f"{slug}/index.html — {tool_handlers._HELD_BACK}"]
+    assert again.edited == frozenset()
+
+
+async def test_a_cell_that_edits_a_held_main_page_checks_no_other_page_in_its_place(service, tmp_path):
+    """The main page went back as the turn found it. A fourth cell edits it
+    anyway: it goes back again, and the artifact's other page, which the cell
+    left alone, is not checked in its place."""
+    store, slug = _artifact(tmp_path)
+    (store.root / slug / "report.html").write_text(_PAGE.replace("hi", "report"))
+    session = _session(_out_of_repairs=set())
+    service.answer(_FAILED_MAP)
+
+    for text in ("breaks the map", "first repair", "second repair"):
+        await _cell(session, store, slug, text)
+    again = await _cell(session, store, slug, "edits it anyway")
+
+    assert len(service.requests) == 3
+    assert again.messages == [f"{slug}/index.html — {tool_handlers._HELD_BACK}"]
+    assert again.page_checks == {}
+
+
+async def test_a_rebuild_with_no_repair_cells_left_puts_back_the_page_the_turn_found(service, tmp_path, monkeypatch):
+    """The turn breaks the page, which passes only on its second repair, so
+    both repair cells are spent. A later rebuild fails only its browser
+    check: the page goes back as the turn found it, and the result says so."""
+    store, slug = _artifact(tmp_path)
+    session = _session(_out_of_repairs=set(), _workspace=SimpleNamespace(artifacts_dir=store.root))
+    key = PageKey(slug, "index.html")
+    service.answer(_FAILED_MAP, _FAILED_MAP, _passed())
+    for text in ("breaks the map", "first repair", "second repair passes"):
+        await _cell(session, store, slug, text)
+    assert session._repair_cells == {key: 2}
+    monkeypatch.setattr(gen_pkg, "generate", _run(_LEFT_TO_REPAIR))
+
+    result = await _result(session, slug)
+
+    assert (store.root / slug / "index.html").read_text() == _BEFORE
+    body = json.loads(result.content)
+    assert body["instruction"] == tool_handlers._BUILD_RESTORED_NO_REPAIRS_LEFT
+    assert body["instruction"].endswith(
+        "do not call the edit or any view it changed browser-verified, tested or working."
+    )
+    assert "findings" not in body
+    assert session._out_of_repairs == {key}
+    assert session._page_checks == {key: "passed"}
 
 
 async def test_a_page_that_failed_the_same_way_before_the_turn_stays(service, tmp_path):
