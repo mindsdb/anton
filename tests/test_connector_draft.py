@@ -122,7 +122,7 @@ def test_an_over_long_field_text_is_refused(key, cap):
 
 @pytest.mark.parametrize("url", [
     "http://docs.acme.example", "javascript:alert(1)", "https://", "https://user@acme.example",
-    "https://acme.example/a b", "https://acme.example/" + "a" * 500,
+    "https://acme.example/a b", "https://acme.example/" + "a" * 500, "https://acme.example:99999/keys",
 ])
 def test_help_url_must_be_a_plain_https_url(url):
     with pytest.raises(ConnectorDraftError, match="help_url"):

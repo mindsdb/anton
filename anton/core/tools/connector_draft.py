@@ -53,6 +53,8 @@ class ConnectorDraftError(ValueError):
 
 @dataclass(frozen=True)
 class ConnectorDraftField:
+    """One credential field the member fills in; it describes, never holds, a value."""
+
     name: str
     label: str
     secret: bool = True
@@ -63,6 +65,8 @@ class ConnectorDraftField:
 
 @dataclass(frozen=True)
 class ConnectorDraft:
+    """A connector template as the allowlist accepted it, ready to show or save."""
+
     connector_id: str
     label: str
     fields: tuple[ConnectorDraftField, ...]
@@ -142,6 +146,8 @@ def _check_help_url(value: Any) -> str | None:
         return None
     try:
         parts = urlsplit(text)
+        # Reading the port validates it; an out-of-range one raises here.
+        parts.port
     except ValueError as e:
         raise ConnectorDraftError("help_url must be an https:// URL.") from e
     if parts.scheme != "https" or not parts.hostname or "@" in parts.netloc or any(c.isspace() for c in text):
