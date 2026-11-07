@@ -1637,6 +1637,94 @@ def test_editing_keys_selects_and_number_fields_hold_as_the_pod_holds_them(step,
     assert browser_tool._classify(step, url="https://shop.example/", element=el) == held, step
 
 
+def _click_holds(name: str) -> bool:
+    button = browser_tool.Element(id=7, role="button", name=name)
+    return browser_tool._classify({"action": "click", "element": 7}, url="https://shop.example/", element=button) == "commit"
+
+
+def test_a_shared_list_word_ends_where_a_latin_letter_does_as_in_the_pod():
+    """A letter of another script is a word's edge, as a space is, so a commit
+    word written beside Japanese or Korean holds; one inside a Latin word
+    ("Payé", "Repost") doesn't."""
+    for name in ("Postする", "Buy今すぐ", "今すぐBuy", "Checkoutへ進む", "Post하기", "Bestellenする", "Pay!", "«Pay»", "Pay-now"):
+        assert _click_holds(name), name
+    for name in ("Payé", "Confirmé", "Postämter", "Repost", "Paystub", "Pay2go", "Sendé"):
+        assert not _click_holds(name), name
+
+
+def _select_hold(name: str, value: str | list[str]) -> str | None:
+    options = value if isinstance(value, list) else [value]
+    select = browser_tool.Element(id=3, role="combobox", name=name, options=options)
+    return browser_tool._classify({"action": "select", "element": 3, "value": value}, url="https://shop.example/", element=select)
+
+
+@pytest.mark.parametrize(("name", "value"), [
+    # A click on each option it picks, unless the select sorts or filters.
+    ("With selected", "Delete selected"),
+    ("", "Delete"),
+    # A commit verb alone, in any of the pod's languages, or what a bulk
+    # action's select says.
+    ("Delete", "Newest"), ("Delete:", "Newest"), ("Transfer", "Newest"), ("Löschen", "Newest"), ("Apagar", "Newest"),
+    ("Delete messages", "Newest"), ("Remove all", "Newest"), ("Nachrichten löschen", "Newest"), ("Berichten verwijderen", "Newest"),
+    ("Bulk delete", "Newest"), ("Publish selected", "Newest"), ("Supprimer la sélection", "Newest"),
+    ("選択項目を削除", "Newest"), ("선택 삭제", "Newest"), ("批量删除", "Newest"), ("一括送信", "Newest"), ("メッセージの削除", "Newest"),
+    ("Supprimer ce que vous avez coché", "Newest"),
+    # A removal verb picking what a bulk action takes, or a lone verb set to
+    # how often or a mode, which can name the list it deletes.
+    ("Delete messages", "All"), ("Delete history", "All time"), ("Delete selected", "Never"), ("Nachrichten löschen", "Mai"),
+    ("Delete", "Default"), ("Löschen", "Täglich"), ("削除", "毎日"),
+    # "Every" so many things is a count, not a time.
+    ("Nachrichten löschen", "Alle 12 Nachrichten"), ("Delete all", "12件ごと"), ("すべて削除", "每12条"), ("Delete messages", "10개마다"),
+    # "ログ" ends "ブログ" (blog), so this is no cleanup of logs.
+    ("ブログの削除", "すべて"),
+    # The pod reads a select its form's submit button stages by its whole
+    # name only; this tool can't see that button, so it holds by the bulk
+    # action's name, which holds more, never less.
+    ("Delete inactive accounts", "Newest"),
+])
+def test_a_select_holds_by_each_option_it_picks_and_by_a_name_that_reads_as_an_action(name, value):
+    assert _select_hold(name, value) == "commit", (name, value)
+
+
+@pytest.mark.parametrize(("name", "value"), [
+    ("With selected", "Archive"), ("", "Newest"), ("Sort by", "Newest"),
+    # A field's name, and a select that sorts or filters holds by none of its options.
+    ("Sort order", "Price: low to high"), ("Sort by Relevance Order date", "Order date"), ("Payment method Card Bank account", "Bank account"),
+    ("Order", "Newest"), ("Post type", "Pages"), ("Filter by status", "Pending payment"), ("Ordina", "Newest"),
+    # A verb with a preposition, a setting a commit verb begins, a noun that
+    # names a field, or one that says it happens by itself.
+    ("Send to", "Newest"), ("Pay from", "Newest"), ("Pay period", "Newest"), ("Grant type", "Newest"), ("支払方法", "Newest"),
+    ("Send me emails", "Newest"), ("Publish date", "Newest"), ("公開範囲", "Newest"), ("Automatisch löschen", "Newest"), ("自動削除", "Newest"),
+    ("Zahlen", "Newest"), ("Plaatsen", "Newest"), ("Selected payment method", "Newest"), ("Bulk order quantity", "Newest"),
+    # A comparison, or what a cleanup strips.
+    ("Remove duplicates", "Newest"), ("Delete messages older than", "Newest"), ("Berichten ouder dan verwijderen", "Newest"),
+    ("履歴の削除", "Newest"), ("キャッシュの削除", "Newest"),
+    # A cleanup's setting: each option it picks names a setting's value.
+    ("Delete history", "Never"), ("Delete history", "After 30 days"), ("Remove background", "Off"), ("Delete", "Always"),
+    ("Delete history", "Every 7 days"), ("Delete history", "Daily"), ("Verlauf löschen", "Alle 7 Tage"), ("Elimina messaggi", "Mai"),
+    ("閲覧履歴を削除", "30日後"), ("閲覧履歴を削除", "7日ごと"), ("删除历史记录", "每3天"), ("기록 삭제", "3일마다"),
+])
+def test_a_select_whose_name_is_a_field_or_a_setting_runs_at_once(name, value):
+    assert _select_hold(name, value) is None, (name, value)
+
+
+def test_an_arrow_on_a_select_holds_as_picking_any_of_its_options():
+    def arrow(name: str, options: list[str], role: str = "combobox") -> str | None:
+        select = browser_tool.Element(id=3, role=role, name=name, options=options)
+        return browser_tool._classify({"action": "press", "element": 3, "key": "ArrowDown"}, url="https://shop.example/", element=select)
+
+    assert arrow("With selected", ["", "Delete selected"]) == "commit"
+    assert arrow("Delete", []) == "commit", "a list whose options the page read leaves out holds by its name"
+    assert arrow("Delete history", ["Never", "On exit"]) is None, "it can pick only settings"
+    assert arrow("Delete history", ["Never", "All time"]) == "commit", "it can pick another"
+    assert arrow("Sort order", ["Newest", "Price: low to high"]) is None
+    assert arrow("", ["Newest"]) is None
+    tab = browser_tool.Element(id=3, role="combobox", name="Delete", options=["Messages"])
+    assert browser_tool._classify({"action": "press", "element": 3, "key": "Tab"}, url="https://shop.example/", element=tab) is None, (
+        "Tab leaves the select without picking"
+    )
+
+
 async def test_on_the_desktop_a_position_approval_ends_when_the_page_goes_to_another_address(elicit_answers):
     host = FakeHost(pages=[CHECKOUT])
     session = _desktop(host)

@@ -85,7 +85,20 @@ COMMIT_WORDS = (
     "submit", "buy", "pay", "order", "purchase", "checkout", "check out", "send", "delete", "remove",
     "transfer", "confirm", "post", "publish", "authorize", "grant",
 )
-_COMMIT_WORDS = re.compile(r"\b(" + "|".join(w.replace(" ", r"\s+") for w in COMMIT_WORDS) + r")\b", re.IGNORECASE)
+#: A word's edges: no Latin letter, digit or underscore beside it, as the pod
+#: reads them. A letter of another script is an edge, as a space is ("Postする",
+#: "Buy今すぐ"), and "Payé" has none after "Pay". The ranges are Unicode's
+#: Latin script; NFKC has already folded full-width letters and ligatures.
+_LATIN_LETTERS = (
+    "A-Za-z\u00aa\u00ba\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u02b8\u02e0-\u02e4\u1d00-\u1d25\u1d2c-\u1d5c"
+    "\u1d62-\u1d65\u1d6b-\u1d77\u1d79-\u1dbe\u1e00-\u1eff\u2071\u207f\u2090-\u209c\u212a\u212b\u2132\u214e"
+    "\u2160-\u2188\u2c60-\u2c7f\ua722-\ua787\ua78b-\ua7ff\uab30-\uab5a\uab5c-\uab64\uab66-\uab69"
+    "\ufb00-\ufb06\uff21-\uff3a\uff41-\uff5a"
+)
+_WORD_CHAR = rf"[{_LATIN_LETTERS}\d_]"
+_COMMIT_WORDS = re.compile(
+    rf"(?<!{_WORD_CHAR})(" + "|".join(w.replace(" ", r"\s+") for w in COMMIT_WORDS) + rf")(?!{_WORD_CHAR})", re.IGNORECASE,
+)
 #: The same steps in other words, as the browser pod holds them: English
 #: inflections, "book", and German, French, Spanish, Portuguese, Italian and
 #: Dutch as whole words. The pod sets the person's language on every page, so
@@ -114,18 +127,154 @@ _MORE_COMMIT_CJK = (
     "付款", "下单", "下單", "提交", "发送", "發送", "删除", "刪除", "转账", "轉帳", "确认", "確認", "发布", "發布", "授权", "授權", "结算",
     "結算", "结账", "結帳", "구매", "결제", "주문", "전송", "보내기", "삭제", "송금", "게시", "승인",
 )
-# \w is every script's letters and digits, so "überweisen" has edges too.
 _MORE_COMMIT_NAME = re.compile(
-    r"(?<!\w)(" + "|".join(_MORE_COMMIT_WORDS) + r")(?!\w)|" + "|".join(_MORE_COMMIT_CJK), re.IGNORECASE,
+    rf"(?<!{_WORD_CHAR})(" + "|".join(_MORE_COMMIT_WORDS) + rf")(?!{_WORD_CHAR})|" + "|".join(_MORE_COMMIT_CJK), re.IGNORECASE,
 )
+#: One word that is one of _MORE_COMMIT_WORDS, lowercased (with fullmatch).
+_MORE_COMMIT_WORD = re.compile("|".join(_MORE_COMMIT_WORDS))
 #: Roles of fields a key types into; a number field is a spinbutton.
 _TEXT_ENTRY_ROLES = frozenset({"textbox", "searchbox", "combobox", "spinbutton"})
 #: Characters a label can carry inside a word that a person never sees: a
 #: soft hyphen (German labels break long words with one) and the zero-width
 #: ones. The pod takes out the same ones.
 _INVISIBLE = re.compile("[\u00ad\u200b-\u200d\u2060\ufeff]")
-#: Commit words that also name a field a select sorts or filters by.
-_FIELD_NOUNS = frozenset({"order", "post"})
+#: Commit words that also name a field ("Order by", "Payment method", "Book
+#: format"), in the pod's languages: a select whose name starts with one is a
+#: field, not an action. The shared list's other nouns name one only with more
+#: after them ("Pay period", "Grant type"); alone they read as the action.
+_FIELD_NOUNS_BEFORE = frozenset({
+    "pay", "purchase", "checkout", "transfer", "grant",
+})
+_FIELD_NOUNS = frozenset({
+    "order", "post", "payment", "payments", "book", "booking", "bookings", "submission", "bestellung", "bezahlung",
+    "zahlung", "überweisung", "kauf", "kasse", "posten", "paiement", "achat", "commande", "commandes", "virement",
+    "transfert", "caisse", "pago", "compra", "pedido", "transferencia", "caja", "pagamento", "encomenda", "paga",
+    "acquisto", "ordine", "bonifico", "cassa", "betaling", "aankoop", "bestelling", "overboeking", "kassa",
+})
+#: The same nouns in Japanese, Chinese and Korean, found anywhere in a name.
+_FIELD_NOUNS_CJK = (
+    "注文", "支払", "投稿", "予約", "購入", "お会計", "购买", "購買", "支付", "付款", "结算", "結算", "结账", "結帳", "주문", "결제", "구매", "게시",
+)
+#: Words that make a commit verb before them name a field it fills ("Send to",
+#: "Pay from", "Delete after").
+_PREPOSITIONS = frozenset({
+    "from", "to", "via", "with", "using", "as", "by", "after", "before", "on", "in", "into", "at", "for", "per",
+    "von", "an", "nach", "mit", "über", "als", "aus", "zu", "ab", "bis", "de", "du", "des", "à", "au", "aux", "vers",
+    "avec", "par", "depuis", "sur", "en", "pour", "après", "del", "a", "al", "desde", "con", "por", "para", "hacia",
+    "tras", "do", "da", "com", "em", "após", "di", "su", "verso", "dopo", "van", "naar", "aan", "met", "op", "bij",
+    "na", "vanaf", "beim",
+})
+#: Verbs that take things away, which make a select's name a bulk action
+#: ("Delete messages"), first or, in German and Dutch, last ("Nachrichten
+#: löschen"). Spanish "apagar" also turns a thing off ("Apagar pantalla"), so it
+#: holds alone only.
+_REMOVE_VERBS = frozenset({
+    "delete", "remove", "löschen", "entfernen", "supprimer", "retirer", "effacer", "eliminar", "borrar", "excluir",
+    "apagar", "remover", "elimina", "cancella", "rimuovi", "verwijderen", "verwijder",
+})
+_REMOVE_LAST = frozenset({
+    "löschen", "entfernen", "verwijderen", "verwijder",
+})
+_TURNS_OFF = "apagar"
+#: Words that make a removal verb the name of a cleanup's setting, not of what
+#: a bulk action takes: a comparison ("Delete messages older than") or what a
+#: cleanup strips ("Remove duplicates", "Remove formatting").
+_CLEANUP_WORDS = frozenset({
+    "than", "duplicates", "duplicate", "formatting", "duplikate", "formatierung", "doublons", "formatage",
+    "duplicados", "formato", "formatação", "duplicati", "formattazione", "duplicaten", "opmaak",
+})
+#: A comparison in French, Spanish, Portuguese and Dutch, as a pair of words:
+#: "que" and "dan" alone also mean "what" and "then".
+_COMPARISON = re.compile(r"(^| )((plus|moins|más|menos|mais) [^\W\d_]+ que|(ouder|nieuwer|groter|kleiner|meer|minder) dan)( |$)")
+#: What a Japanese cleanup setting's noun phrase removes ("履歴の削除").
+_CLEANUP_CJK = (
+    "履歴", "キャッシュ", "クッキー", "cookie", "ログ", "書式", "重複",
+)
+#: A name that ends in katakana, its long vowel mark included.
+_KATAKANA_LAST = re.compile("[\u30a1-\u30fa\u30fc-\u30ff\u31f0-\u31ff]$")
+#: The value of a setting an option names: never, off, on, always, ask, on
+#: exit, or after a time ("After 30 days", "30日後"). "All", "Last hour",
+#: "Yes" and "No" are none: what a bulk action takes, or an answer to one.
+#: Italian "mai" (never) is May in German and French, so it names a setting
+#: only beside an Italian removal verb.
+_SETTING_VALUES = frozenset({
+    "never", "off", "on", "always", "ask", "on exit", "disabled", "enabled", "nie", "niemals", "aus", "an", "ein",
+    "immer", "fragen", "beim beenden", "deaktiviert", "aktiviert", "jamais", "désactivé", "activé", "toujours",
+    "demander", "à la fermeture", "nunca", "desactivado", "activado", "siempre", "preguntar", "al salir",
+    "desativado", "ativado", "sempre", "perguntar", "ao sair", "disattivato", "attivato", "chiedi", "all'uscita",
+    "nooit", "uit", "aan", "altijd", "vragen", "bij afsluiten", "しない", "オフ", "オン", "常に", "確認する", "終了時", "無効", "有効",
+    "从不", "從不", "关闭", "關閉", "开启", "開啟", "始终", "始終", "退出时", "退出時", "안 함", "끄기", "켜기", "항상", "종료 시",
+})
+_AFTER_A_TIME = re.compile(
+    r"^(after|nach|après|después de|após|depois de|dopo|na) [0-9]+ [^\W\d_]+$|^[0-9]+ ?[^\W\d_]{1,3} ?[後后후]$"
+)
+#: How often ("Daily", "Every 7 days", "毎週") or a mode ("Automatic",
+#: "Default"): a setting's value for a select that names what it removes
+#: ("Delete history"). A lone "Delete" picking one can delete the list or
+#: profile it names, so it holds.
+_SCHEDULE_VALUES = frozenset({
+    "daily", "weekly", "monthly", "every day", "every week", "every month", "auto", "automatic", "automatically",
+    "manual", "manually", "default", "täglich", "wöchentlich", "monatlich", "jeden tag", "jede woche", "jeden monat",
+    "automatisch", "manuell", "standard", "quotidien", "quotidienne", "hebdomadaire", "mensuel", "mensuelle",
+    "tous les jours", "chaque jour", "chaque semaine", "toutes les semaines", "chaque mois", "tous les mois",
+    "automatique", "automatiquement", "manuel", "manuelle", "manuellement", "par défaut", "diario", "diariamente",
+    "semanal", "semanalmente", "mensual", "mensualmente", "todos los días", "cada día", "cada semana", "cada mes",
+    "automático", "automática", "automáticamente", "manualmente", "predeterminado", "por defecto", "diário", "mensal",
+    "todos os dias", "cada dia", "toda semana", "todas as semanas", "todo mês", "todos os meses", "automaticamente",
+    "padrão", "giornaliero", "quotidiano", "settimanale", "mensile", "ogni giorno", "ogni settimana", "ogni mese",
+    "automatico", "automatica", "manuale", "predefinito", "dagelijks", "wekelijks", "maandelijks", "elke dag",
+    "elke week", "elke maand", "iedere dag", "iedere week", "iedere maand", "handmatig", "毎日", "毎週", "毎月", "自動", "手動",
+    "デフォルト", "既定", "每天", "每日", "每周", "每週", "每月", "自动", "手动", "默认", "預設", "매일", "매주", "매월", "자동", "수동", "기본값",
+})
+#: Every so many units of time ("Every 7 days", "7日ごと"), never of things
+#: ("Alle 12 Nachrichten", "12件ごと").
+_TIME_UNITS = (
+    "minutes?", "hours?", "days?", "weeks?", "months?", "years?", "minuten?", "stunden?", "tag(e|en)?", "wochen?",
+    "monat(e|en)?", "jahr(e|en)?", "heures?", "jours?", "semaines?", "mois", "ans?", "années?", "minutos?", "horas?",
+    "días?", "dias?", "semanas?", "mes(es)?", "mês", "años?", "anos?", "minut[oi]", "or[ae]", "giorn[oi]",
+    "settiman[ae]", "mes[ei]", "ann[oi]", "minuut", "minuten", "uur", "uren", "dag(en)?", "weken", "maand(en)?",
+    "jaar", "jaren",
+)
+_CJK_TIME_UNITS = (
+    "分", "分間", "分钟", "分鐘", "時間", "小时", "小時", "日", "天", "週", "週間", "周", "星期", "か月", "ヶ月", "ヵ月", "カ月", "ケ月", "个月", "個月",
+    "月", "年", "분", "시간", "일", "주", "개월", "달", "년",
+)
+_EVERY_SO_OFTEN = re.compile(
+    r"^(every|alle|tous les|toutes les|cada|a cada|ogni|elke|iedere) [0-9]+ (" + "|".join(_TIME_UNITS) + r")$"
+    r"|^[0-9]+ ?(" + "|".join(_CJK_TIME_UNITS) + r") ?(ごと|毎|마다)$|^每 ?[0-9]+ ?(" + "|".join(_CJK_TIME_UNITS) + r")$"
+)
+_ITALIAN_NEVER = "mai"
+_ITALIAN_REMOVE = frozenset({
+    "elimina", "cancella", "rimuovi",
+})
+_SELECTED_WORDS = frozenset({
+    "selected", "checked", "marked", "chosen", "ausgewählte", "ausgewählten", "markierte", "markierten", "auswahl",
+    "sélection", "sélectionnés", "sélectionnées", "sélectionné", "sélectionnée", "seleccionados", "seleccionadas",
+    "seleccionado", "seleccionada", "selección", "selecionados", "selecionadas", "selecionado", "selecionada",
+    "seleção", "selezionati", "selezionate", "selezionato", "selezionata", "selezione", "geselecteerde",
+    "geselecteerd", "selectie",
+})
+_AUTOMATIC_WORDS = frozenset({
+    "auto", "automatic", "automatically", "automatisch", "automatiquement", "automáticamente", "automaticamente",
+})
+_REMOVE_CJK = (
+    "削除", "删除", "刪除", "삭제",
+)
+_SELECTED_CJK = (
+    "所选", "所選", "选中", "選取", "選択した", "選択中", "選択項目", "선택한", "선택된", "선택 항목", "一括", "批量", "일괄",
+)
+_AUTOMATIC_CJK = (
+    "自動", "自动", "자동",
+)
+#: The start of a select's name when it sorts or filters, whatever its options
+#: say ("Sort by: Order date").
+_SORT_OR_FILTER = re.compile(
+    r"^\s*((sort|sorted|order by|filter|group by|sortieren|sortiert|filtern|trier|filtrer|ordenar|filtrar|ordina per|ordinare"
+    r"|filtra|sorteren|filteren)(?!\w)|並べ替え|並び替え|排序|筛选|정렬)",
+    re.IGNORECASE,
+)
+#: Italian "Ordina" (sort, and order) as a select's whole name is its sort field.
+_SORTS_ALONE = re.compile(r"^\s*ordina[\s:]*$", re.IGNORECASE)
 #: Path segments of OAuth authorization and consent endpoints; a segment that
 #: starts with "consent" counts too.
 _CONSENT_SEGMENTS = frozenset({"authorize", "authorization", "oauth", "oauth2", "openid", "openid-connect", "login-actions"})
@@ -580,11 +729,119 @@ def _commit_name(name: str) -> bool:
     return not text.strip() or bool(_COMMIT_WORDS.search(text)) or bool(_MORE_COMMIT_NAME.search(text))
 
 
-def _is_action_name(name: str) -> bool:
-    """A select's own name that reads as an action: one word of the shared list,
-    other than the nouns that name a field ("Order", "Post type")."""
-    words = _folded(name).split()
-    return len(words) == 1 and bool(_COMMIT_WORDS.search(words[0])) and words[0].lower() not in _FIELD_NOUNS
+def _trim_word(word: str) -> str:
+    """A word without the marks around it ("Delete:", "«Pay»"): no character
+    that is not a letter or a digit at either end, as the pod trims one."""
+    start, end = 0, len(word)
+    while start < end and not word[start].isalnum():
+        start += 1
+    while end > start and not word[end - 1].isalnum():
+        end -= 1
+    return word[start:end]
+
+
+def _trim_end(text: str) -> str:
+    end = len(text)
+    while end and not text[end - 1].isalnum():
+        end -= 1
+    return text[:end]
+
+
+def _sets_value(picks: list[str], *, italian: bool, lone: bool = False) -> bool:
+    """Whether each option a step picks names a setting's value
+    (_SETTING_VALUES or after a time), with "mai" one only beside an Italian
+    removal verb (``italian``), and how often or a mode one only for a select
+    that names more than its verb (not ``lone``)."""
+    if not picks:
+        return False
+    for name in picks:
+        value = re.sub(r"\s+", " ", _trim_word(_folded(name).lower()))
+        if value in _SETTING_VALUES or _AFTER_A_TIME.search(value) or (italian and value == _ITALIAN_NEVER):
+            continue
+        if not lone and (value in _SCHEDULE_VALUES or _EVERY_SO_OFTEN.search(value)):
+            continue
+        return False
+    return True
+
+
+def _is_action_name(name: str, picks: list[str]) -> bool:
+    """A select whose own name reads as an action, as the pod reads one that may
+    act on change: a verb of the shared list alone ("Delete", "Transfer"), one
+    that takes things away in any of the pod's languages ("Löschen", "削除"),
+    or what a bulk action's select says ("Delete messages", "Nachrichten
+    löschen", "Publish selected", "Bulk delete"). A name that sorts or filters,
+    starts with a noun naming a field ("Order by", "Payment method"), or with a
+    verb and a preposition ("Send to"), is a field, and so is a setting a
+    commit verb begins ("Send me emails", "Publish date"). ``picks`` are the
+    options the step picks: a name a removal verb makes an action is a
+    cleanup's setting when each one names a setting's value ("Delete history":
+    "Never", "After 30 days").
+
+    The pod also reads whether a submit button of the select's form stages its
+    value, and the select's label apart from its options' text. The page this
+    tool reads carries neither, so every select reads as one that acts on
+    change, by its name: a staged "Delete messages" holds here and not in the
+    pod, and nothing the pod holds runs here."""
+    text = _folded(name).strip().lower()
+    if _SORT_OR_FILTER.search(text) or _SORTS_ALONE.search(text):
+        return False
+    words = [w for w in (_trim_word(word) for word in text.split()) if w]
+    first = words[0] if words else ""
+    second = words[1] if len(words) > 1 else ""
+    if first in _FIELD_NOUNS or (second and first in _FIELD_NOUNS_BEFORE) or second in _PREPOSITIONS:
+        return False
+    italian = any(w in _ITALIAN_REMOVE for w in words)
+    setting = _sets_value(picks, italian=italian)
+    if len(words) == 1 and (first in _REMOVE_VERBS or first in _REMOVE_CJK):
+        return not _sets_value(picks, italian=italian, lone=True)
+    if len(words) == 1 and _COMMIT_WORDS.search(first):
+        return True
+
+    def has(words_of: frozenset[str]) -> bool:
+        return any(w in words_of for w in words)
+
+    def is_verb(word: str) -> bool:
+        return word not in _FIELD_NOUNS and (bool(_COMMIT_WORDS.search(word)) or bool(_MORE_COMMIT_WORD.fullmatch(word)))
+
+    removes = (first in _REMOVE_VERBS and first != _TURNS_OFF) or (bool(words) and words[-1] in _REMOVE_LAST)
+    if (has(_SELECTED_WORDS) or first == "bulk") and any(is_verb(w) for w in words[1 if first == "bulk" else 0:]):
+        return True
+    cleanup = has(_CLEANUP_WORDS) or bool(_COMPARISON.search(" ".join(words)))
+    if len(words) > 1 and removes and not has(_PREPOSITIONS) and not has(_AUTOMATIC_WORDS) and not cleanup:
+        return not setting
+    if any(w in text for w in _AUTOMATIC_CJK):
+        return False
+    bare = _trim_end(text)
+
+    def names_a_cleanup(verb: str) -> bool:
+        # The whole noun before の: "ログ" ends "ブログ" (blog), while a kanji
+        # noun after katakana is a compound ("チャット履歴").
+        for noun in _CLEANUP_CJK:
+            phrase = f"{noun}の{verb}"
+            if bare.endswith(phrase) and not (_KATAKANA_LAST.search(noun) and _KATAKANA_LAST.search(bare[: -len(phrase)])):
+                return True
+        return False
+
+    if any(bare.endswith(verb) and not names_a_cleanup(verb) for verb in _REMOVE_CJK):
+        return not setting
+    return any(w in text for w in _SELECTED_CJK) and any(w in text and w not in _FIELD_NOUNS_CJK for w in _MORE_COMMIT_CJK)
+
+
+def _picks(step: dict) -> list[str]:
+    """The options a select step picks, by the names the model gave."""
+    value = step.get("value", step.get("values"))
+    return [str(v) for v in (value if isinstance(value, list) else [value]) if v is not None]
+
+
+def _select_holds(select: Element | None, picks: list[str]) -> bool:
+    """Whether picking ``picks`` in ``select`` commits something, as the pod
+    holds it: by the select's own name when that reads as an action, or as a
+    click on each option it picks, unless the select sorts or filters ("Order
+    date" in "Sort by" sorts)."""
+    name = select.name if select is not None else ""
+    if select is not None and _is_action_name(name, picks):
+        return True
+    return not _SORT_OR_FILTER.search(_folded(name)) and any(_commit_name(pick) for pick in picks)
 
 
 def _is_editing_key(key: str) -> bool:
@@ -652,6 +909,14 @@ def _classify(step: dict, *, url: str, requested: str | None = None, element: El
         # commit control before Space or Enter lands.
         if (enter or space) and sum(k.lower() not in _MODIFIER_KEYS for k in keys) > 1:
             return "commit"
+        # On a select, any key but a modifier, Tab or Escape (an arrow, a
+        # letter) picks an option and fires its change, as a select step does,
+        # so it holds as one that could pick any named option. A list whose
+        # options the page read leaves out still holds by its own name.
+        choosing = any(k.lower() not in _MODIFIER_KEYS and k not in ("Tab", "Escape") for k in keys)
+        if choosing and element is not None and (element.options or element.role in ("combobox", "listbox")):
+            if consent or _select_holds(element, [option for option in element.options if option.strip()]):
+                return "commit"
         if enter and not _is_search(element):
             return "commit"
         if space and not _is_text_entry(element) and (consent or commit_control):
@@ -662,10 +927,10 @@ def _classify(step: dict, *, url: str, requested: str | None = None, element: El
             return "commit"
         return "commit" if clicks_it else None
     if action == "select":
-        # A select's label names a field ("Sort order", "Payment method"), so
-        # it holds only when it is one commit word alone, as a bulk action's
-        # select may be ("Delete").
-        return "commit" if consent or (element is not None and _is_action_name(element.name)) else None
+        # A select's name mostly names a field ("Sort order", "Payment
+        # method"), so it holds by its name only when that reads as an action;
+        # each option it picks is a click (_select_holds).
+        return "commit" if consent or _select_holds(element, _picks(step)) else None
     return None
 
 
