@@ -339,3 +339,41 @@ class TestGoogleDrivePickerContext:
         ctx = build_datasource_context(v, active_only="google_drive-work")
         assert "Connected Google Drive accounts are available" in ctx
         assert "Roadmap.gdoc" not in ctx
+
+
+class TestGoogleDriveGrantedScope:
+    """Google shows drive.readonly as its own checkbox on the consent screen,
+    and connections made before it was requested only carry drive.file, so
+    the agent is told when a connection can't read the user's other files."""
+
+    _FILE = "https://www.googleapis.com/auth/drive.file"
+    _READONLY = "https://www.googleapis.com/auth/drive.readonly"
+
+    def _ctx(self, tmp_path, scope):
+        v = LocalDataVault(tmp_path)
+        v.save("google_drive", "work", {"auth_type": "oauth", "scope": scope})
+        return build_datasource_context(v)
+
+    def test_drive_file_only_token_says_access_is_limited(self, tmp_path):
+        ctx = self._ctx(tmp_path, f"openid {self._FILE}")
+        assert "Access: limited to files this app created" in ctx
+        assert "reconnect Google Drive" in ctx
+
+    def test_drive_readonly_token_is_not_limited(self, tmp_path):
+        ctx = self._ctx(tmp_path, f"openid {self._FILE} {self._READONLY}")
+        assert "Access: limited" not in ctx
+        assert "Connected Google Drive accounts are available" in ctx
+
+    def test_full_drive_scope_is_not_limited(self, tmp_path):
+        ctx = self._ctx(tmp_path, "https://www.googleapis.com/auth/drive")
+        assert "Access: limited" not in ctx
+
+    def test_no_stored_scope_is_not_judged(self, tmp_path):
+        v = LocalDataVault(tmp_path)
+        v.save("google_drive", "work", {"auth_type": "oauth"})
+        assert "Access: limited" not in build_datasource_context(v)
+
+    def test_other_engines_are_not_judged(self, tmp_path):
+        v = LocalDataVault(tmp_path)
+        v.save("gmail", "work", {"auth_type": "oauth", "scope": f"openid {self._FILE}"})
+        assert "Access: limited" not in build_datasource_context(v)
