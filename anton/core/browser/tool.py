@@ -1,0 +1,894 @@
+"""The ``browser`` tool: drive the user's MindsHub browser, side by side with them.
+
+The model states a goal; Jev (``/v1/decisions``) picks each click, scroll
+and select on the way to it; the model writes any text and takes over
+whenever Jev is unsure. The user watches in the viewer the host opens next
+to the chat, and takes over for sign-ins, CAPTCHAs and confirmations.
+
+``browser_jev`` (settings) decides how much Jev does:
+
+- ``on``: ``run`` executes Jev's confident steps itself.
+- ``shadow`` (default): ``run`` only reads the page. Jev's pick is recorded
+  and compared with the step the model then takes, so we can measure
+  agreement before letting Jev act.
+- ``off``: no Jev calls at all.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import logging
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+from urllib.parse import urlparse
+
+from anton.core.browser.client import BrowserClient, BrowserError
+from anton.core.browser.page import format_page, human_check, signature
+from anton.core.browser.policy import (
+    StepDecision,
+    parse_step,
+    signed_in_request,
+    step_request,
+)
+from anton.core.tools.registry import ToolOutcome
+
+if TYPE_CHECKING:
+    from anton.core.session import ChatSession
+
+logger = logging.getLogger(__name__)
+
+#: A step Jev may take on its own needs at least this probability, the same
+#: bar as the completion verifier's ``verifier_jev_min_p`` default.
+DEFAULT_MIN_P = 0.8
+#: Above this, a step is treated as committing something: ask first.
+RISKY_P = 0.5
+#: Steps one ``run`` may take before handing back to the model.
+DEFAULT_MAX_STEPS = 15
+#: A step that leaves the page unchanged this many times in a row ends the run.
+MAX_STALLS = 2
+SCROLL_PX = 700
+
+ACTIONS = (
+    "open", "run", "page", "act", "screenshot", "hand_to_user", "note_login",
+    "tabs", "new_tab", "switch_tab", "close_tab", "save_tab", "saved_tabs", "close",
+)
+STEP_ACTIONS = ("click", "type", "press", "select", "scroll", "hover", "drag", "back", "forward", "reload", "wait", "navigate")
+
+
+@dataclass
+class _BrowserState:
+    """Per-session browser state, kept on the ChatSession."""
+
+    client: BrowserClient
+    session_id: str
+    opened: bool = False
+    # Shadow mode: Jev's pick for the page the model is looking at, keyed by
+    # that page's signature so a stale prediction is never compared.
+    shadow: dict | None = None
+    steps: list[str] = field(default_factory=list)
+
+
+# ── session plumbing ───────────────────────────────────────────────────────
+
+
+def _setting(session: "ChatSession", name: str, default):
+    return getattr(getattr(session, "_settings", None), name, default)
+
+
+def _mindshub_connection(session: "ChatSession"):
+    """(base_url, provider) when the session's LLM is MindsHub, else (None, None)."""
+    from anton.core.llm.endpoints import ENDPOINT_MINDSHUB, classify_base_url
+
+    llm = getattr(session, "_llm", None)
+    provider = getattr(llm, "coding_provider", None)
+    if provider is None or not hasattr(provider, "export_connection_info"):
+        return None, None
+    base_url = provider.export_connection_info().base_url or ""
+    if classify_base_url(base_url) != ENDPOINT_MINDSHUB or not hasattr(provider, "current_api_key"):
+        return None, None
+    return base_url, provider
+
+
+async def _credential(session: "ChatSession") -> str:
+    """The bearer the browser checks.
+
+    A standalone service's own token when the host gave one. Otherwise the
+    MindsHub credential the router checks: the turn key in a cloud pod, the
+    user's key or token on desktop and the CLI.
+    """
+    token = getattr(session._browser_config, "token", "")
+    if token:
+        return token
+    _, provider = _mindshub_connection(session)
+    if provider is not None:
+        try:
+            key = await provider.current_api_key()
+        except Exception:
+            key = ""
+        if key:
+            return key
+    return _setting(session, "minds_api_key", "") or ""
+
+
+def _reconnect_hint(session: "ChatSession") -> str:
+    if getattr(session._browser_config, "token", ""):
+        return "The browser service's API key in the browser settings may be wrong or rotated."
+    return "The user may need to reconnect MindsHub."
+
+
+def _state(session: "ChatSession") -> _BrowserState:
+    state = getattr(session, "_browser_state", None)
+    if state is None:
+        config = session._browser_config
+        state = _BrowserState(
+            client=BrowserClient(config.base_url, lambda: _credential(session)),
+            session_id=config.profile,
+        )
+        session._browser_state = state
+    return state
+
+
+def _jev_mode(session: "ChatSession") -> str:
+    mode = str(_setting(session, "browser_jev", "shadow")).lower()
+    return mode if mode in ("on", "shadow", "off") else "shadow"
+
+
+async def _jev(session: "ChatSession", state: dict, questions: dict):
+    """One Jev decision, or None when Jev is off or the session isn't on MindsHub."""
+    if _jev_mode(session) == "off":
+        return None
+    base_url, provider = _mindshub_connection(session)
+    if provider is None:
+        return None
+    try:
+        api_key = await provider.current_api_key()
+    except Exception:
+        return None
+    if not api_key:
+        return None
+    from anton.core.llm import jev
+
+    return await jev.decide(
+        base_url=base_url,
+        api_key=api_key,
+        model=_setting(session, "verifier_jev_model", "jev-1.13.0"),
+        state=state,
+        questions=questions,
+        timeout_s=float(_setting(session, "browser_jev_timeout_s", 4.0)),
+    )
+
+
+def _track(session: "ChatSession", event: str, **props) -> None:
+    """Content-free analytics. Never raises."""
+    try:
+        from anton.analytics import send_event
+        from anton.core.tools.tool_handlers import _ask_user_telemetry_settings
+
+        settings = _ask_user_telemetry_settings(session)
+        if settings:
+            send_event(settings, event, **{k: str(v) for k, v in props.items()})
+    except Exception:
+        pass
+
+
+#: How often a hand-over checks whether the person clicked Done in the viewer.
+HANDBACK_POLL_S = 2.0
+
+
+async def _ask(
+    session: "ChatSession",
+    prompt: str,
+    options: list[tuple[str, str]],
+    *,
+    answered_elsewhere=None,
+) -> str | None:
+    """Ask the user to pick one option; the value, or None when nobody can answer.
+
+    ``answered_elsewhere`` is an optional async check, polled while the
+    question is open, that returns the option value when the person answered
+    some other way (Done in the browser viewer). The chat card is then retired
+    with that answer, so the user never has to answer twice.
+    """
+    elicitor = getattr(session, "elicitor", None)
+    if elicitor is None or "choice" not in getattr(elicitor, "supported_kinds", ()):
+        return None
+    import uuid
+
+    from anton.core.interaction.elicit import AskOption, AskRequest, elicit
+
+    request = AskRequest(
+        prompt=prompt,
+        kind="choice",
+        timeout_s=getattr(elicitor, "timeout_s", None),
+        options=tuple(AskOption(value=v, label=label, style="primary" if i == 0 else "default") for i, (v, label) in enumerate(options)),
+        allow_custom=False,
+    )
+    question_id = f"browser:{uuid.uuid4().hex}"
+    if answered_elsewhere is None:
+        answer = await elicit(session, question_id, request)
+    else:
+        answer = await _elicit_or_elsewhere(session, question_id, request, answered_elsewhere)
+    if answer.status != "answered" or not answer.values:
+        return answer.status
+    return answer.values[0]
+
+
+async def _elicit_or_elsewhere(session, question_id, request, answered_elsewhere):
+    """Run the question and the poll side by side; whichever answers first wins."""
+    from anton.core.interaction.elicit import AskAnswer, elicit
+    from anton.core.llm.provider import StreamAskUserAnswered
+
+    async def poll() -> str:
+        while True:
+            await asyncio.sleep(HANDBACK_POLL_S)
+            try:
+                value = await answered_elsewhere()
+            except Exception:
+                value = None
+            if value:
+                return value
+
+    ask = asyncio.ensure_future(elicit(session, question_id, request))
+    watch = asyncio.ensure_future(poll())
+    try:
+        done, _ = await asyncio.wait({ask, watch}, return_when=asyncio.FIRST_COMPLETED)
+        if ask in done:
+            return ask.result()
+        value = watch.result()
+        ask.cancel()
+        await asyncio.gather(ask, return_exceptions=True)
+        # elicit() leaves a cancelled card for the host to retire only when the
+        # whole run ends; this run carries on, so retire it here with the answer
+        # the person gave in the viewer.
+        answer = AskAnswer(status="answered", values=(value,))
+        await session.emit(StreamAskUserAnswered(id=question_id, answer=answer))
+        return answer
+    finally:
+        for task in (ask, watch):
+            task.cancel()
+        await asyncio.gather(ask, watch, return_exceptions=True)
+
+
+# ── actions ────────────────────────────────────────────────────────────────
+
+
+async def _ensure_open(session: "ChatSession", url: str | None = None) -> dict:
+    """Open the profile's browser session once per conversation turn chain and
+    tell the host to show it. Returns the session's info from the service."""
+    state = _state(session)
+    if state.opened:
+        # The service relaunches Chromium on the same profile by itself if it
+        # was reaped for idleness, so only a new URL needs a call here.
+        if url:
+            await state.client.act(state.session_id, {"action": "navigate", "url": url, "include_page": False})
+        return {}
+    info = await state.client.open_session(state.session_id, url)
+    if not state.opened:
+        state.opened = True
+        try:
+            embed = await state.client.embed(state.session_id)
+            from anton.core.llm.provider import StreamBrowserSession
+
+            await session.emit(StreamBrowserSession(
+                session_id=state.session_id,
+                view_url=embed.get("view_url", ""),
+                expires_at=int(embed.get("expires_at") or 0),
+            ))
+        except BrowserError as exc:
+            # The browser still works without a viewer; say so instead of failing.
+            logger.warning("browser embed failed: %s", exc)
+    return info
+
+
+def _sites_line(sites: list[dict]) -> str:
+    if not sites:
+        return "Signed-in sites on record: none yet."
+    live = [s for s in sites if s.get("cookies_present")]
+    gone = [s for s in sites if not s.get("cookies_present")]
+
+    def name(s: dict) -> str:
+        return f"{s['site']} ({s['account_hint']})" if s.get("account_hint") else s["site"]
+
+    parts = []
+    if live:
+        parts.append("still signed in (cookies present): " + ", ".join(name(s) for s in live))
+    if gone:
+        parts.append("session looks expired: " + ", ".join(name(s) for s in gone))
+    return "Signed-in sites on record: " + "; ".join(parts) + "."
+
+
+async def _do_open(session: "ChatSession", tc_input: dict) -> str:
+    state = _state(session)
+    await _ensure_open(session, tc_input.get("url") or None)
+    page = await state.client.page(state.session_id)
+    sites = await state.client.sites(state.session_id)
+    lead = f"The browser is open and the user can see it beside the chat.\n{_sites_line(sites)}"
+    checked = await _unless_human_check(session, page)
+    if checked is not None:
+        return f"{lead}\n\n{checked}"
+    return f"{lead}\n\n{format_page(page)}"
+
+
+async def _do_page(session: "ChatSession", tc_input: dict) -> str:
+    state = _state(session)
+    await _ensure_open(session)
+    page = await state.client.page(state.session_id)
+    return await _unless_human_check(session, page) or format_page(page)
+
+
+def _step_body(tc_input: dict) -> dict:
+    step = tc_input.get("step")
+    if not isinstance(step, dict) or step.get("action") not in STEP_ACTIONS:
+        raise ValueError(f"act needs `step` with an action in {', '.join(STEP_ACTIONS)}")
+    body = {**step, "include_page": True}
+    # The model only ever reads coordinates off a screenshot, which the service
+    # scales down on a wide viewport: say so, and the service scales them back.
+    ends = [step, step.get("from"), step.get("to")]
+    if any(isinstance(end, dict) and "x" in end for end in ends):
+        body.setdefault("coords", "screenshot")
+    return body
+
+
+async def _do_act(session: "ChatSession", tc_input: dict) -> str:
+    state = _state(session)
+    body = _step_body(tc_input)
+    await _ensure_open(session)
+    _record_shadow_agreement(session, state, body)
+    result = await state.client.act(state.session_id, body)
+    state.steps.append(_describe(body))
+    page = result.get("page") or await state.client.page(state.session_id)
+    checked = await _unless_human_check(session, page)
+    return f"Done: {_describe(body)}.\n\n{checked or format_page(page)}"
+
+
+async def _do_screenshot(session: "ChatSession", tc_input: dict):
+    state = _state(session)
+    await _ensure_open(session)
+    image, size = await state.client.screenshot(state.session_id, annotate=tc_input.get("annotate", True) is not False)
+    sized = f", {size[0]}x{size[1]} pixels" if size else ""
+    return ToolOutcome(
+        content=[
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.standard_b64encode(image).decode("ascii")}},
+            {"type": "text", "text": (
+                f"Screenshot of the browser{sized}. Red labels are element ids from the page list. "
+                "x/y in act steps are pixels on this image."
+            )},
+        ],
+        ok=True,
+    )
+
+
+async def _set_control(session: "ChatSession", holder: str, reason: str = "") -> None:
+    """Best effort: an older browser service has no control endpoint, and the
+    hand-over still works there through the chat card alone."""
+    state = _state(session)
+    try:
+        await state.client.set_control(state.session_id, holder, reason)
+    except BrowserError as exc:
+        if exc.status != 404:
+            logger.info("browser control -> %s failed: %s", holder, exc)
+
+
+async def _hand_over(session: "ChatSession", reason: str) -> str:
+    """Give the person the browser until they say they're done.
+
+    The viewer switches to "your turn" (and the service holds off the agent's
+    actions) while the chat shows a Done/Stop card. Done in either place ends
+    the hand-over. Returns "done", "stop"/"timeout"/"cancelled", or None when
+    nobody can answer in this conversation (the browser stays theirs).
+    """
+    state = _state(session)
+    await _ensure_open(session)
+    await _set_control(session, "human", reason)
+
+    async def handed_back_in_viewer() -> str | None:
+        control = await state.client.control(state.session_id)
+        return "done" if control.get("holder") == "agent" else None
+
+    answer = await _ask(
+        session,
+        f"{reason}\n\nUse the browser beside the chat. Choose Done here or in the browser when you're finished.",
+        [("done", "Done"), ("stop", "Stop")],
+        answered_elsewhere=handed_back_in_viewer,
+    )
+    if answer is not None:
+        await _set_control(session, "agent")
+    return answer
+
+
+async def _after_hand_over(session: "ChatSession", answer: str | None, lead: str = "The user finished in the browser.") -> str:
+    state = _state(session)
+    if answer is None:
+        return (
+            "No one can answer in this conversation right now. The browser is now the user's (the viewer "
+            "shows it's their turn). Tell them what to do there and to click Done in the browser when "
+            "finished, then end your turn and wait for them."
+        )
+    if answer != "done":
+        return f"The user did not take over ({answer}). Do not retry the step; ask how they want to continue."
+    page = await state.client.page(state.session_id)
+    lines = [lead]
+    if human_check(page):
+        lines.append("The page still shows a human check. Ask the user whether it went through; do not click it yourself.")
+    noted = await _maybe_note_login(session, page)
+    if noted:
+        lines.append(noted)
+    return "\n".join(lines) + f"\n\n{format_page(page)}"
+
+
+async def _do_hand_to_user(session: "ChatSession", tc_input: dict) -> str:
+    reason = (tc_input.get("reason") or "").strip() or "This step needs you."
+    return await _after_hand_over(session, await _hand_over(session, reason))
+
+
+async def _unless_human_check(session: "ChatSession", page: dict) -> str | None:
+    """When ``page`` is a human-verification page, hand it to the user at once
+    and return what to tell the model; None for an ordinary page."""
+    kind = human_check(page)
+    if not kind:
+        return None
+    site = urlparse(page.get("url", "")).hostname or "This site"
+    _track(session, "browser_human_check", kind=kind)
+    answer = await _hand_over(
+        session,
+        f"{site} wants to confirm you're a person ({kind}). Complete the check in the browser.",
+    )
+    return await _after_hand_over(
+        session, answer,
+        lead=f"{site} showed a human check ({kind}); it was handed to the user and they finished.",
+    )
+
+
+async def _maybe_note_login(session: "ChatSession", page: dict) -> str:
+    """After a hand-over, ask Jev whether the user is now signed in; record it if so."""
+    state_, questions = signed_in_request(page)
+    decision = await _jev(session, state_, questions)
+    if decision is None or decision.error:
+        return ""
+    min_p = float(_setting(session, "browser_jev_min_p", DEFAULT_MIN_P))
+    if decision.yes("signed_in") < min_p:
+        return ""
+    host = urlparse(page.get("url", "")).hostname or ""
+    if not host:
+        return ""
+    return await _note_login(session, host, "")
+
+
+async def _note_login(session: "ChatSession", site: str, account_hint: str) -> str:
+    state = _state(session)
+    record = await state.client.note_site(state.session_id, site, account_hint)
+    site = record.get("site") or site
+    hint = record.get("account_hint") or account_hint
+    _remember_login(session, site, hint)
+    who = f" as {hint}" if hint else ""
+    return f"Noted: the user is signed in to {site}{who}. Logins stay in this browser between conversations."
+
+
+def _remember_login(session: "ChatSession", site: str, hint: str) -> None:
+    """A global profile memory, so later conversations know the system exists and
+    that the browser holds the login. Never a credential."""
+    cortex = getattr(session, "_cortex", None)
+    if cortex is None or getattr(cortex, "mode", "off") == "off":
+        return
+    import asyncio
+
+    from anton.core.memory.base import Engram
+
+    who = f" as {hint}" if hint else ""
+    engram = Engram(
+        text=(
+            f"The user is signed in to {site}{who} in their shared browser. For work in {site}, use "
+            "the browser tool instead of asking for credentials; if the session has expired, hand over "
+            "so they can sign in again."
+        ),
+        kind="profile",
+        scope="global",
+        confidence="high",
+        topic="browser",
+        source="user",
+    )
+
+    async def _encode():
+        try:
+            await cortex.encode([engram])
+        except Exception:
+            pass
+
+    track = getattr(session, "_track_memory_write", None)
+    task = asyncio.create_task(_encode())
+    if track is not None:
+        track(task)
+
+
+async def _do_note_login(session: "ChatSession", tc_input: dict) -> str:
+    site = (tc_input.get("site") or "").strip()
+    if not site:
+        raise ValueError("note_login needs `site`, e.g. salesforce.com")
+    await _ensure_open(session)
+    return await _note_login(session, site, (tc_input.get("account_hint") or "").strip())
+
+
+async def _do_close(session: "ChatSession", tc_input: dict) -> str:
+    state = _state(session)
+    await state.client.close_session(state.session_id)
+    state.opened = False
+    return "Closed the browser. The profile and its logins are kept for next time."
+
+
+# ── run: the Jev step loop ─────────────────────────────────────────────────
+
+
+def _describe_end(end) -> str:
+    if not isinstance(end, dict):
+        return "?"
+    return f"[{end['element']}]" if end.get("element") is not None else f"({end.get('x')}, {end.get('y')})"
+
+
+def _describe(step: dict) -> str:
+    action = step.get("action", "")
+    if step.get("element") is not None:
+        text = f" {step['text']!r}" if "text" in step else ""
+        return f"{action} [{step['element']}]{text}"
+    if action == "navigate":
+        return f"navigate {step.get('url', '')}"
+    if action == "drag":
+        return f"drag {_describe_end(step.get('from'))} to {_describe_end(step.get('to'))}"
+    if "x" in step:
+        return f"{action} at ({step.get('x')}, {step.get('y')})"
+    if action == "scroll":
+        return f"scroll {step.get('direction', 'down')}"
+    if action == "press":
+        return f"press {step.get('key', '')}"
+    return action
+
+
+def _record_shadow_agreement(session: "ChatSession", state: _BrowserState, body: dict) -> None:
+    """Shadow mode: compare the model's step with what Jev picked for the same page."""
+    shadow, state.shadow = state.shadow, None
+    if not shadow:
+        return
+    jev_action = shadow["action"]
+    llm_action = body.get("action", "")
+    if llm_action == "scroll":
+        llm_action = f"scroll_{body.get('direction', 'down')}"
+    _track(
+        session,
+        "browser_jev_shadow",
+        jev_action=jev_action,
+        llm_action=llm_action,
+        agree_action=jev_action == llm_action,
+        agree_target=shadow["target"] is not None and shadow["target"] == body.get("element"),
+        p_action=f"{shadow['action_p']:.2f}",
+        p_target=f"{shadow['target_p']:.2f}",
+    )
+
+
+def _step_from(decision: StepDecision, inputs: dict, page: dict) -> dict | None:
+    """The service action for a confident Jev step, or None when Jev can't take it alone."""
+    if decision.action in ("scroll_down", "scroll_up"):
+        return {"action": "scroll", "direction": decision.action.split("_")[1], "amount": SCROLL_PX}
+    if decision.action == "back":
+        return {"action": "back"}
+    if decision.target is None:
+        return None
+    if decision.action == "click":
+        return {"action": "click", "element": decision.target}
+    if decision.action == "type":
+        if decision.input_key is None or decision.input_key not in inputs:
+            return None
+        return {"action": "type", "element": decision.target, "text": str(inputs[decision.input_key])}
+    if decision.action == "select":
+        if decision.input_key is None or decision.input_key not in inputs:
+            return None
+        return {"action": "select", "element": decision.target, "value": str(inputs[decision.input_key])}
+    return None
+
+
+def _handback(reason: str, taken: list[str], page: dict) -> str:
+    steps = "\n".join(f"  {i + 1}. {s}" for i, s in enumerate(taken)) or "  (none)"
+    return f"{reason}\nSteps taken:\n{steps}\n\n{format_page(page)}"
+
+
+async def _do_run(session: "ChatSession", tc_input: dict) -> str:
+    goal = (tc_input.get("goal") or "").strip()
+    if not goal:
+        raise ValueError("run needs a `goal`")
+    inputs = tc_input.get("inputs") if isinstance(tc_input.get("inputs"), dict) else {}
+    state = _state(session)
+    await _ensure_open(session, tc_input.get("url") or None)
+    mode = _jev_mode(session)
+    min_p = float(_setting(session, "browser_jev_min_p", DEFAULT_MIN_P))
+    max_steps = int(tc_input.get("max_steps") or _setting(session, "browser_max_steps", DEFAULT_MAX_STEPS))
+    page = await state.client.page(state.session_id)
+
+    if mode != "on":
+        checked = await _unless_human_check(session, page)
+        if checked is not None:
+            return checked + "\n\nContinue step by step with action=act."
+        if mode == "shadow":
+            jev_state, questions, _ = step_request(goal, page, inputs, state.steps)
+            decision = await _jev(session, jev_state, questions)
+            if decision is not None and not decision.error:
+                step = parse_step(decision)
+                state.shadow = {"action": step.action, "action_p": step.action_p, "target": step.target, "target_p": step.target_p}
+        return (
+            "Step-by-step mode: read the page and take the next step with action=act, "
+            "then repeat until the goal is done.\n\n" + format_page(page)
+        )
+
+    taken: list[str] = []
+    stalls = 0
+    for _ in range(max_steps):
+        checked = await _unless_human_check(session, page)
+        if checked is not None:
+            return _handback(checked + "\nContinue toward the goal from here.", taken, await state.client.page(state.session_id))
+        jev_state, questions, _ = step_request(goal, page, inputs, state.steps)
+        decision = await _jev(session, jev_state, questions)
+        if decision is None or decision.error:
+            reason = "Jev is not available here" if decision is None else f"Jev failed ({decision.error})"
+            return _handback(f"{reason}; continue step by step with action=act.", taken, page)
+        step = parse_step(decision)
+        _track(session, "browser_jev_step", action=step.action, p_action=f"{step.action_p:.2f}", ms=step.ms)
+
+        if step.needs_user_p >= min_p or step.action == "needs_user":
+            return _handback(
+                "The page needs the user (sign-in, CAPTCHA, code or confirmation). "
+                "Call action=hand_to_user with a one-line reason.",
+                taken,
+                page,
+            )
+        if step.action == "done" and step.action_p >= min_p:
+            return _handback("Jev reports the goal is done. Check the page and answer.", taken, page)
+        if step.action_p < min_p or step.action in ("unsure", "done", ""):
+            return _handback("Not sure of the next step; take it with action=act.", taken, page)
+
+        body = _step_from(step, inputs, page)
+        if body is None:
+            hint = f" on [{step.target}]" if step.target is not None else ""
+            what = "text to type" if step.action in ("type", "select") else "a target"
+            return _handback(f"The next step is {step.action}{hint}, but it needs {what} from you; use action=act.", taken, page)
+        if body.get("element") is not None and step.target_p < min_p:
+            return _handback(f"Not sure which element to {step.action}; take it with action=act.", taken, page)
+
+        if step.risky_p >= RISKY_P and body["action"] in ("click", "type", "select"):
+            answer = await _ask(
+                session,
+                f"Anton is about to {_describe(body)} on {page.get('title') or page.get('url', 'this page')}. "
+                "This may commit something (a purchase, a message, a deletion or a form). Go ahead?",
+                [("proceed", "Go ahead"), ("stop", "Stop")],
+            )
+            if answer != "proceed":
+                return _handback(f"Paused before {_describe(body)}: the user didn't confirm it.", taken, page)
+
+        before = signature(page)
+        result = await state.client.act(state.session_id, {**body, "include_page": True})
+        description = _describe(body)
+        taken.append(description)
+        state.steps.append(description)
+        page = result.get("page") or await state.client.page(state.session_id)
+        stalls = stalls + 1 if signature(page) == before else 0
+        if stalls >= MAX_STALLS:
+            return _handback("The last steps changed nothing on the page; take over with action=act.", taken, page)
+
+    return _handback(f"Stopped after {max_steps} steps without finishing.", taken, page)
+
+
+# ── tabs ───────────────────────────────────────────────────────────────────
+
+
+def _tab_line(tab: dict) -> str:
+    active = " (active)" if tab.get("active") else ""
+    title = json.dumps(tab.get("title") or "", ensure_ascii=False)
+    return f"- {tab.get('id', '?')}{active} {title} {tab.get('url', '')}"
+
+
+def _tab_id(tc_input: dict, action: str) -> str:
+    tab = str(tc_input.get("tab") or "").strip()
+    if not tab:
+        raise ValueError(f"{action} needs `tab`, a tab id from action=tabs, e.g. t2")
+    return tab
+
+
+async def _after_tab_change(session: "ChatSession", lead: str) -> str:
+    """The active tab's page after a tab change, the same way act returns one."""
+    state = _state(session)
+    page = await state.client.page(state.session_id)
+    checked = await _unless_human_check(session, page)
+    return f"{lead}\n\n{checked or format_page(page)}"
+
+
+async def _do_tabs(session: "ChatSession", tc_input: dict) -> str:
+    state = _state(session)
+    await _ensure_open(session)
+    tabs = await state.client.tabs(state.session_id)
+    if not tabs:
+        return "No tabs are open."
+    return "Open tabs (actions and page reads use the active one):\n" + "\n".join(_tab_line(t) for t in tabs)
+
+
+async def _do_new_tab(session: "ChatSession", tc_input: dict) -> str:
+    state = _state(session)
+    await _ensure_open(session)
+    tab = await state.client.new_tab(state.session_id, tc_input.get("url") or None)
+    return await _after_tab_change(session, f"Opened tab {tab.get('id', '')} and switched to it.")
+
+
+async def _do_switch_tab(session: "ChatSession", tc_input: dict) -> str:
+    tab_id = _tab_id(tc_input, "switch_tab")
+    state = _state(session)
+    await _ensure_open(session)
+    await state.client.activate_tab(state.session_id, tab_id)
+    return await _after_tab_change(session, f"Switched to tab {tab_id}.")
+
+
+async def _do_close_tab(session: "ChatSession", tc_input: dict) -> str:
+    tab_id = _tab_id(tc_input, "close_tab")
+    state = _state(session)
+    await _ensure_open(session)
+    await state.client.close_tab(state.session_id, tab_id)
+    return await _after_tab_change(session, f"Closed tab {tab_id}. This is the active tab now.")
+
+
+def _project(session: "ChatSession") -> str:
+    project = getattr(session._browser_config, "project", "")
+    if not project:
+        raise ValueError(
+            "saved tabs belong to a project, and this conversation isn't in one. "
+            "Keep the tab open instead, or tell the user the URL."
+        )
+    return project
+
+
+async def _do_save_tab(session: "ChatSession", tc_input: dict) -> str:
+    project = _project(session)
+    name = (tc_input.get("name") or "").strip()
+    if not name:
+        raise ValueError("save_tab needs `name`, a short label the user will recognise")
+    state = _state(session)
+    url = (tc_input.get("url") or "").strip()
+    if not url:
+        await _ensure_open(session)
+        active = [t for t in await state.client.tabs(state.session_id) if t.get("active")]
+        url = active[0].get("url", "") if active else ""
+    if not url.startswith(("http://", "https://")):
+        raise ValueError("save_tab needs an http(s) `url`, or an active tab showing one")
+    tab = await state.client.save_tab(project, name, url, (tc_input.get("notes") or "").strip())
+    return f"Saved {tab.get('name') or name!r} ({tab.get('url') or url}) to this project's tabs."
+
+
+async def _do_saved_tabs(session: "ChatSession", tc_input: dict) -> str:
+    project = _project(session)
+    tabs = await _state(session).client.saved_tabs(project)
+    if not tabs:
+        return "No saved tabs in this project yet."
+    lines = []
+    for t in tabs:
+        notes = f" ({t['notes']})" if t.get("notes") else ""
+        lines.append(f"- {json.dumps(t.get('name', ''), ensure_ascii=False)} {t.get('url', '')}{notes}")
+    return "Saved tabs in this project (open one with action=new_tab and its url):\n" + "\n".join(lines)
+
+
+_HANDLERS = {
+    "open": _do_open,
+    "run": _do_run,
+    "page": _do_page,
+    "act": _do_act,
+    "screenshot": _do_screenshot,
+    "hand_to_user": _do_hand_to_user,
+    "note_login": _do_note_login,
+    "tabs": _do_tabs,
+    "new_tab": _do_new_tab,
+    "switch_tab": _do_switch_tab,
+    "close_tab": _do_close_tab,
+    "save_tab": _do_save_tab,
+    "saved_tabs": _do_saved_tabs,
+    "close": _do_close,
+}
+
+
+async def handle_browser(session: "ChatSession", tc_input: dict):
+    action = tc_input.get("action")
+    handler = _HANDLERS.get(action)
+    if handler is None:
+        return ToolOutcome(content=f"Unknown action {action!r}; use one of {', '.join(ACTIONS)}.", ok=False, reason="browser_bad_input")
+    try:
+        result = await handler(session, tc_input)
+    except ValueError as exc:
+        return ToolOutcome(content=f"Error: {exc}", ok=False, reason="browser_bad_input")
+    except BrowserError as exc:
+        if exc.code == "stale_element":
+            return ToolOutcome(content=f"{exc.message}", ok=False, reason="browser_stale_element")
+        if exc.code == "human_in_control":
+            return ToolOutcome(
+                content=(
+                    f"{exc.message} The user has the browser. Don't act or read the page until they click "
+                    "Done in the browser; if you need them, say so in chat and end your turn."
+                ),
+                ok=False, reason="browser_human_in_control",
+            )
+        if exc.status in (401, 403):
+            return ToolOutcome(
+                content=f"The browser refused this session's credentials ({exc.code}). {_reconnect_hint(session)}",
+                ok=False, reason="browser_unauthorized",
+            )
+        if exc.status in (0, 502, 503):
+            return ToolOutcome(
+                content=f"The browser is not reachable right now ({exc.code}): {exc.message}. It may be starting; try again shortly.",
+                ok=False, reason="browser_unreachable",
+            )
+        return ToolOutcome(content=f"Browser error {exc.status} {exc.code}: {exc.message}", ok=False, reason="browser_error")
+    if isinstance(result, ToolOutcome):
+        return result
+    return ToolOutcome(content=result, ok=True)
+
+
+BROWSER_TOOL_PROMPT = """\
+BROWSER: you and the user share a real browser (Chromium, their own browser instance). The user sees it beside this chat and can click and type in it at any time.
+- Prefer a connector or API when one can do the job; use the browser for sites without one, or when the user asks.
+- Only open sites the user named or that the task plainly needs. Never invent URLs.
+- Start a task with action=run and a goal; give values to type in `inputs`. run takes the steps it is sure of and hands back with the page when it isn't.
+- To act yourself, use action=act with a step: {"action":"click","element":17}, {"action":"type","element":4,"text":"…","submit":true}, {"action":"select","element":9,"value":"Blue"}, {"action":"scroll","direction":"down"}, {"action":"press","key":"Enter"}, {"action":"back"}, {"action":"navigate","url":"…"}. Element numbers come from the latest page.
+- Where the page list has nothing to point at (a canvas, a drawing, a map), use pixels from your latest screenshot: {"action":"click","x":412,"y":230}. Clicks also take "button":"right" and "clicks":2. Drag with {"action":"drag","from":{"element":5} or {"x":…,"y":…},"to":{…}}; that's how shapes get drawn, sliders moved and items reordered.
+- Never ask for, read out, or type a password, one-time code, or card number. For sign-ins, CAPTCHAs, two-factor codes and payments, call action=hand_to_user with a short reason and let the user do it in the browser.
+- hand_to_user is only for those. Never use it to hand over work you found hard; if you can't do something with these actions, stop and say so in the chat, with what you tried and another way to get it done.
+- Never click or try to solve a "verify you are human" check (Cloudflare, reCAPTCHA, hCaptcha). The tool hands those to the user by itself; wait for them.
+- After the user signs in to a site, call action=note_login with the site (and an account hint they'd recognise, never a secret) so later conversations know the login is there.
+- Use tabs (action=new_tab, switch_tab, close_tab, tabs) to keep a reference page open while you work in another. When the user will want a page again in this project, save it with action=save_tab (action=saved_tabs lists them).
+- Ask before anything that commits on the user's behalf: buying, paying, sending, deleting, or submitting a form.
+- Only report what the page actually shows. If a step fails or the page didn't change, say so.
+- Use action=screenshot when the page list can't show what you need (canvas, maps, charts, text in images), or when you seem stuck: a step failed or timed out, the page didn't change, or you're about to try the same thing again. Usually something is in the way (a modal, cookie banner or overlay); close it, then go on. Don't take one after every step.
+"""
+
+BROWSER_TOOL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "action": {
+            "type": "string",
+            "enum": list(ACTIONS),
+            "description": (
+                "open: open the browser (optionally at url) and list signed-in sites. "
+                "run: work toward a goal, taking the steps that are clear. "
+                "page: read the current page. act: take one step. screenshot: see the page, e.g. when stuck. "
+                "hand_to_user: let the user take over (sign-in, CAPTCHA, payment). "
+                "note_login: record that the user is signed in to a site. "
+                "tabs: list open tabs. new_tab: open a tab (optionally at url) and switch to it. "
+                "switch_tab / close_tab: by tab id. save_tab: save a page to this project's tabs. "
+                "saved_tabs: list them. close: close the browser."
+            ),
+        },
+        "url": {"type": "string", "description": "open / run / new_tab: page to start on. save_tab: page to save (default: the active tab's)."},
+        "tab": {"type": "string", "description": "switch_tab / close_tab: tab id from action=tabs, e.g. t2."},
+        "name": {"type": "string", "description": "save_tab: short label, e.g. \"Q3 pipeline report\". Saving the same name again replaces it."},
+        "notes": {"type": "string", "description": "save_tab: optional note on what the page is for."},
+        "goal": {"type": "string", "description": "run: what to achieve on the site, in one sentence."},
+        "inputs": {
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+            "description": "run: values run may type or select, by a short name, e.g. {\"search\": \"MacBook Air\"}. Never secrets.",
+        },
+        "step": {"type": "object", "description": "act: one step, e.g. {\"action\": \"click\", \"element\": 17}, {\"action\": \"click\", \"x\": 412, \"y\": 230}, or {\"action\": \"drag\", \"from\": {\"element\": 5}, \"to\": {\"x\": 600, \"y\": 300}}."},
+        "reason": {"type": "string", "description": "hand_to_user: what the user needs to do (sign in, CAPTCHA, payment), in one line."},
+        "site": {"type": "string", "description": "note_login: the site, e.g. salesforce.com."},
+        "account_hint": {"type": "string", "description": "note_login: which account, e.g. jorge@acme. Never a secret."},
+        "annotate": {"type": "boolean", "description": "screenshot: draw element numbers (default true)."},
+        "max_steps": {"type": "integer", "description": "run: step limit (default 15)."},
+    },
+    "required": ["action"],
+}
+
+
+def build_browser_tool():
+    from anton.core.tools.tool_defs import ToolDef
+
+    return ToolDef(
+        name="browser",
+        description=(
+            "Use the browser you share with the user: open sites, read pages as numbered elements, "
+            "click, type, select and scroll, and hand over to the user for sign-ins and confirmations."
+        ),
+        input_schema=BROWSER_TOOL_SCHEMA,
+        handler=handle_browser,
+        prompt=BROWSER_TOOL_PROMPT,
+    )

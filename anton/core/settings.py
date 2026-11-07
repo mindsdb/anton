@@ -43,6 +43,19 @@ class CoreSettings(BaseSettings):
     verifier_jev_timeout_s: float = 2.0
     # Minimum probability of Jev's COMPLETE/WAITING for it to decide without the LLM.
     verifier_jev_min_p: float = 0.8
+    # The shared browser (ENG-3296). `browser_url` is the user's MindsHub
+    # browser instance for the CLI; hosts pass their own via ChatSessionConfig.
+    browser_url: str = ""
+    browser_profile: str = "main"
+    # A standalone browser service's BROWSER_SERVICE_TOKEN. Empty = MindsHub,
+    # where the session's MindsHub credential is the bearer.
+    browser_token: str = ""
+    # How much Jev steers the browser: "on" takes its confident steps,
+    # "shadow" only records its picks against the model's, "off" never asks.
+    browser_jev: Literal["on", "shadow", "off"] = "shadow"
+    browser_jev_min_p: float = 0.8
+    browser_jev_timeout_s: float = 4.0
+    browser_max_steps: int = 15
     # Hold a scratchpad cell that changes a database; deletes, renames, moves
     # or overwrites a file that existed when the turn began; or sends an HTTP
     # PUT, PATCH or DELETE, until the user picks Approve; anything else
