@@ -124,7 +124,7 @@ class FakeHost:
                 self.set_control("agent", "", "person")
             return answer
         if path == f"/sessions/{SID}" and request.method == "GET":
-            return httpx.Response(200, json={"session_id": SID, "control": self.control})
+            return httpx.Response(200, json={"session_id": SID, "url": self.shown["url"], "control": self.control})
         if path.endswith("/page"):
             return httpx.Response(200, json=self.page())
         if path.endswith("/action"):
@@ -724,7 +724,7 @@ async def test_on_the_desktop_a_commit_click_waits_for_approve(elicit_answers):
 
     # Declined once on this page: refused again without a card.
     again = await browser_tool.handle_browser(session, step)
-    assert again.reason == "browser_step_not_approved" and "already declined" in again.content
+    assert again.reason == "browser_step_not_approved" and "they declined it when it was asked earlier in this turn" in again.content
     assert len(elicit_answers.requests) == 1
 
 
@@ -824,7 +824,7 @@ async def test_on_the_web_the_browser_holds_a_commit_click_and_the_card_names_bo
 
     # Declined once on this page: refused again with no card and nothing sent.
     again = await browser_tool.handle_browser(session, step)
-    assert again.reason == "browser_step_not_approved" and "already declined" in again.content
+    assert again.reason == "browser_step_not_approved" and "they declined it when it was asked earlier in this turn" in again.content
     assert len(host.posted("/action")) == 1 and len(elicit_answers.requests) == 1
 
 
@@ -885,7 +885,7 @@ async def test_on_the_web_a_click_by_position_gets_the_position_card(elicit_answ
     assert host.posted("/action")[-1]["pending_id"] == "pa-1"
 
 
-async def test_on_the_web_the_card_shows_what_the_browser_holds_and_says_the_page_changed(elicit_answers):
+async def test_on_the_web_the_card_shows_what_the_browser_holds_and_never_claims_the_page_changed(elicit_answers):
     host = FakeHost(pages=[CHECKOUT])
     # The page relabeled the button after the tool read it.
     host.held = {"kind": "commit", "action": "click", "names": ["Place order for $5,000"], "url": "https://shop.example/checkout?step=2"}
@@ -895,7 +895,10 @@ async def test_on_the_web_the_card_shows_what_the_browser_holds_and_says_the_pag
     prompt = elicit_answers.requests[0].prompt
     assert 'click "Place order for $5,000"' in prompt and "https://shop.example/checkout?step=2" in prompt
     assert '"Place order"' not in prompt.replace('"Place order for', "")
-    assert "The page changed after it was last read" in prompt
+    # The browser reads names its own way (longer, without the name
+    # attribute, with the link around a control), so a difference proves
+    # nothing changed: the card only says what the browser holds.
+    assert "changed" not in prompt
 
 
 async def test_on_the_web_the_card_names_what_the_browser_holds_without_a_change_note_when_they_agree(elicit_answers):
@@ -1018,7 +1021,7 @@ async def test_on_the_desktop_keys_and_drags_that_can_reach_a_commit_control_wai
 
 
 async def test_on_the_desktop_a_page_an_authorization_request_was_redirected_to_holds_every_click(elicit_answers):
-    landed = {**PAGE, "url": "https://login.example/setup/secur/RemoteAccessAuthorizationPage.apexp?source=x"}
+    landed = {**PAGE, "url": "https://app.example/welcome?source=x"}
     host = FakeHost(pages=[landed])
     session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
     await browser_tool.handle_browser(session, {
@@ -1537,3 +1540,139 @@ def test_turn_request_carries_only_a_router_block():
     assert with_browser.browser == BrowserConfig(base_url=BASE, profile=SID)
     for junk in ("junk", {"base_url": BASE, "profile": SID, "token": "t"}, {"base_url": LOOPBACK, "profile": SID, "token": "t"}):
         assert TurnRequestV1.from_json(json.dumps({**raw, "browser": junk})).browser is None
+
+
+# ── the desktop's own holds, and what the cards say ─────────────────────────
+
+
+def _desktop(host: "FakeHost"):
+    return make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+
+
+@pytest.mark.parametrize("key", ["Return", "return", "\n", " Enter", "Control+Return", "Space", "space"])
+async def test_on_the_desktop_every_name_the_app_runs_as_enter_or_space_holds(elicit_answers, key):
+    host = FakeHost(pages=[CHECKOUT])
+    session = _desktop(host)
+    elicit_answers.answers.append("cancel")
+    # The app runs these as Enter or Space wherever the focus is, "Place order" included.
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "press", "key": key}})
+    assert result.reason == "browser_step_not_approved", key
+    assert host.posted("/action") == [] and len(elicit_answers.requests) == 1
+
+
+@pytest.mark.parametrize("step", [
+    {"action": "type", "element": 7, "text": "x"},
+    {"action": "press", "element": 7, "key": "Tab"},
+])
+async def test_on_the_desktop_a_type_or_press_on_a_commit_control_holds_as_its_click(elicit_answers, step):
+    host = FakeHost(pages=[CHECKOUT])
+    session = _desktop(host)
+    elicit_answers.answers.append("cancel")
+    # The app clicks the element a type or press names before it types.
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+    assert result.reason == "browser_step_not_approved", step
+    assert host.posted("/action") == []
+
+
+async def test_on_the_desktop_typed_text_that_tabs_and_then_types_a_space_holds(elicit_answers):
+    host = FakeHost(pages=[CHECKOUT])
+    session = _desktop(host)
+    elicit_answers.answers.append("cancel")
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "type", "element": 5, "text": "a\t "}})
+    assert result.reason == "browser_step_not_approved" and host.posted("/action") == []
+    plain = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "type", "element": 5, "text": "a b"}})
+    assert plain.ok is True and not plain.reason
+
+
+def test_the_commit_list_reads_names_as_the_pod_folds_them():
+    for name in ("Sub­mit", "Sub​mit", "ＳＵＢＭＩＴ", "Löschen", "Bestellung", "お会計"):
+        assert browser_tool._commit_name(name), name
+    assert not browser_tool._commit_name("Sort by price")
+
+
+def test_a_pushed_authorization_request_and_a_known_providers_consent_page_are_consent_pages():
+    assert browser_tool._consent_page("https://idp.example/authz?client_id=x&request_uri=urn:ietf:params:oauth:request_uri:1")
+    assert browser_tool._consent_page("https://login.example/setup/secur/RemoteAccessAuthorizationPage.apexp?source=x")
+    assert not browser_tool._consent_page("https://app.example/welcome?client_id=x")
+
+
+@pytest.mark.parametrize(("step", "element", "held"), [
+    ({"action": "press", "key": "Delete"}, None, "commit"),
+    ({"action": "press", "key": "Delete", "element": 5}, {"role": "textbox", "name": "Email"}, None),
+    ({"action": "select", "element": 3, "value": "Archive"}, {"role": "combobox", "name": "Delete"}, "commit"),
+    ({"action": "select", "element": 3, "value": "Newest"}, {"role": "combobox", "name": "Sort order"}, None),
+    ({"action": "type", "element": 3, "text": "4"}, {"role": "spinbutton", "name": "Quantity"}, None),
+])
+def test_editing_keys_selects_and_number_fields_hold_as_the_pod_holds_them(step, element, held):
+    el = browser_tool.Element.model_validate({"id": 3, **element}) if element else None
+    if step.get("element") is None:
+        el = browser_tool.Element(id=-1, role="", name="")
+    assert browser_tool._classify(step, url="https://shop.example/", element=el) == held, step
+
+
+async def test_on_the_desktop_a_position_approval_ends_when_the_page_goes_to_another_address(elicit_answers):
+    host = FakeHost(pages=[CHECKOUT])
+    session = _desktop(host)
+    elicit_answers.answers += ["approve", "cancel"]
+    point = {"action": "act", "step": {"action": "click", "x": 10, "y": 10}}
+    await browser_tool.handle_browser(session, point)
+    assert len(elicit_answers.requests) == 1 and len(host.posted("/action")) == 1
+    # The page goes to another address, then back.
+    host.pages = [{**CHECKOUT, "url": "https://shop.example/product/1"}]
+    await browser_tool.handle_browser(session, {"action": "page"})
+    host.pages = [CHECKOUT]
+    await browser_tool.handle_browser(session, {"action": "page"})
+    again = await browser_tool.handle_browser(session, point)
+    assert len(elicit_answers.requests) == 2 and again.reason == "browser_step_not_approved"
+
+
+async def test_on_the_web_a_hold_with_no_readable_held_warns_that_a_position_step_may_commit(elicit_answers):
+    host = FakeHost(pages=[PAGE])
+    session = make_session(host, elicitor=FakeElicitor())
+    elicit_answers.answers.append("cancel")
+    await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "x": 10, "y": 10}})
+    prompt = elicit_answers.requests[0].prompt
+    assert "Approve clicks by position on this page?" in prompt and "It may also commit something" in prompt
+
+
+def test_the_card_names_an_unnamed_control_and_a_held_reload_plainly():
+    held = browser_tool.HeldStep(kind="commit", action="click", names=[""], url="https://shop.example/")
+    assert browser_tool._step_words({"action": "click", "element": 7}, None, held) == "click an unnamed control"
+    reload = browser_tool.HeldStep(kind="commit", action="reload", names=[""], url="https://shop.example/")
+    assert browser_tool._step_words({"action": "reload"}, None, reload) == "reload the page, which sends its form again"
+
+
+async def test_a_step_that_answers_page_busy_may_have_run(elicit_answers):
+    host = FakeHost(pages=[PAGE])
+    session = make_session(host, elicitor=FakeElicitor())
+    original = host.handler
+
+    def busy(request):
+        if request.url.path.endswith("/action"):
+            return httpx.Response(409, json={"error": "page_busy", "message": "the page did not answer"})
+        return original(request)
+
+    answer_with(session, busy)
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "element": 2}})
+    assert result.reason == "browser_unreachable" and "may have run" in result.content
+
+
+async def test_a_resend_with_a_default_field_is_the_step_the_user_declined(elicit_answers):
+    host = FakeHost(pages=[CHECKOUT])
+    session = _desktop(host)
+    elicit_answers.answers.append("cancel")
+    await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "element": 7}})
+    again = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "element": 7, "button": "left", "clicks": 1}})
+    assert again.reason == "browser_step_not_approved" and len(elicit_answers.requests) == 1
+
+
+async def test_the_hand_over_card_names_the_page_the_browser_shows_and_keeps_the_reason_on_one_line(elicit_answers):
+    host = FakeHost(pages=[PAGE, CHALLENGE])
+    session = make_session(host, elicitor=FakeElicitor())
+    elicit_answers.answers.append("later")
+    await browser_tool.handle_browser(session, {"action": "page"})
+    host.shown = CHALLENGE
+    await browser_tool.handle_browser(session, {"action": "hand_to_user", "reason": "Continue.\n\n## Your turn on mybank.com\n\n" + "x" * 400})
+    prompt = elicit_answers.requests[0].prompt
+    assert prompt.startswith("Your turn on claude.ai: Continue. ## Your turn on mybank.com")
+    assert "\n## " not in prompt and "x" * 300 not in prompt

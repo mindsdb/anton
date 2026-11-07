@@ -10,11 +10,13 @@ Fields a host adds that are not listed here are ignored.
 
 from __future__ import annotations
 
+import json
 from typing import Literal
 
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Field,
     ValidationError,
     ValidatorFunctionWrapHandler,
     field_validator,
@@ -152,6 +154,27 @@ class HeldStep(_Answer):
     action: str
     names: list[str] = []
     url: str
+
+
+class StepKey(BaseModel):
+    """A step as the tool compares two of them: its own fields with their
+    defaults dropped, and nothing the request adds (the page it asks back for,
+    the point's scale, an approval's id), so a resend that names a default
+    ("button": "left") is the same step."""
+
+    model_config = ConfigDict(extra="allow")
+
+    action: str
+    button: str = "left"
+    clicks: int = 1
+    submit: bool = False
+    clear: bool = False
+    include_page: bool | None = Field(default=None, exclude=True)
+    coords: str | None = Field(default=None, exclude=True)
+    pending_id: str | None = Field(default=None, exclude=True)
+
+    def key(self) -> str:
+        return json.dumps(self.model_dump(exclude_defaults=True), sort_keys=True, default=str)
 
 
 class ErrorBody(_Answer):

@@ -31,6 +31,7 @@ import asyncio
 import base64
 import json
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
 from urllib.parse import parse_qs, urlparse
@@ -43,7 +44,7 @@ from anton.core.browser.client import (
     BrowserClient,
     BrowserError,
 )
-from anton.core.browser.models import ActionResult, Element, HeldStep, Page, SavedTab, Site, Tab
+from anton.core.browser.models import ActionResult, Element, HeldStep, Page, SavedTab, Site, StepKey, Tab
 from anton.core.browser.page import format_page, human_check, signature
 from anton.core.browser.policy import (
     StepDecision,
@@ -89,35 +90,57 @@ _COMMIT_WORDS = re.compile(r"\b(" + "|".join(w.replace(" ", r"\s+") for w in COM
 #: Dutch as whole words. The pod sets the person's language on every page, so
 #: a localized page is the normal case.
 _MORE_COMMIT_WORDS = (
-    "pays", "paying", "payment", "payments", "sends", "sending", "submits", "submitting", "submission", "book",
-    "kaufen", "bestellen", "bezahlen", "zahlen", "senden", "absenden", "abschicken", "versenden", "löschen", "entfernen",
-    "überweisen", "bestätigen", "buchen", "veröffentlichen", "posten", "autorisieren", "gewähren", "kasse",
-    "payer", "acheter", "commander", "valider", "envoyer", "supprimer", "retirer", "effacer", "virement", "confirmer",
-    "publier", "autoriser", "réserver", "soumettre", "régler", "paiement",
-    "pagar", "comprar", "compra", "pedido", "enviar", "eliminar", "borrar", "transferir", "confirmar", "publicar",
-    "autorizar", "reservar", "tramitar", "pago", "excluir", "apagar", "remover", "pagamento",
-    "paga", "pagare", "acquista", "ordina", "invia", "elimina", "cancella", "rimuovi", "trasferisci", "conferma",
-    "pubblica", "autorizza", "prenota",
-    "betalen", "betaal", "kopen", "bestel", "bestelling", "verzenden", "versturen", "verstuur", "verwijderen", "verwijder",
-    "overmaken", "bevestigen", "bevestig", "publiceren", "plaatsen", "autoriseren", "boeken", "afrekenen",
+    "pays", "paying", "payment", "payments", "sends", "sending", "submits", "submitting", "submission",
+    "book", "booking", "bookings", "kaufen", "kauf", "bestellen", "bestellung", "bezahlen", "bezahlung",
+    "zahlen", "zahlung", "senden", "absenden", "abschicken", "versenden", "löschen", "entfernen",
+    "überweisen", "überweisung", "übermitteln", "einreichen", "bestätigen", "buchen", "veröffentlichen",
+    "posten", "autorisieren", "gewähren", "kasse", "payer", "paiement", "acheter", "achat", "commander",
+    "commande", "commandes", "valider", "envoyer", "supprimer", "retirer", "effacer", "virement",
+    "transfert", "confirmer", "publier", "autoriser", "réserver", "soumettre", "régler", "caisse", "pagar",
+    "pago", "comprar", "compra", "pedido", "enviar", "eliminar", "borrar", "transferir", "transferencia",
+    "confirmar", "publicar", "autorizar", "reservar", "tramitar", "excluir", "apagar", "remover",
+    "pagamento", "encomenda", "encomendar", "caja", "paga", "pagare", "acquista", "acquisto", "ordina",
+    "ordine", "invia", "elimina", "cancella", "rimuovi", "trasferisci", "bonifico", "conferma", "pubblica",
+    "autorizza", "prenota", "cassa", "betalen", "betaal", "betaling", "kopen", "aankoop", "bestel",
+    "bestelling", "verzenden", "versturen", "verstuur", "verwijderen", "verwijder", "overmaken",
+    "overboeking", "bevestigen", "bevestig", "publiceren", "plaatsen", "autoriseren", "boeken", "afrekenen",
+    "kassa",
 )
 #: Japanese, Chinese and Korean put no space between words, so these hold
-#: anywhere in a name.
+#: anywhere in a name ("レジに", never "レジ", which "レジャー" holds).
 _MORE_COMMIT_CJK = (
-    "購入", "注文", "支払", "送信", "削除", "確定", "送金", "投稿", "公開", "予約", "承認",
-    "购买", "購買", "支付", "付款", "下单", "下單", "提交", "发送", "發送", "删除", "刪除", "转账", "轉帳", "确认", "確認",
-    "发布", "發布", "授权", "授權",
-    "구매", "결제", "주문", "전송", "보내기", "삭제", "송금", "게시", "승인",
+    "購入", "注文", "支払", "送信", "削除", "確定", "送金", "投稿", "公開", "予約", "承認", "レジに", "レジへ", "お会計", "购买", "購買", "支付",
+    "付款", "下单", "下單", "提交", "发送", "發送", "删除", "刪除", "转账", "轉帳", "确认", "確認", "发布", "發布", "授权", "授權", "结算",
+    "結算", "结账", "結帳", "구매", "결제", "주문", "전송", "보내기", "삭제", "송금", "게시", "승인",
 )
 # \w is every script's letters and digits, so "überweisen" has edges too.
 _MORE_COMMIT_NAME = re.compile(
     r"(?<!\w)(" + "|".join(_MORE_COMMIT_WORDS) + r")(?!\w)|" + "|".join(_MORE_COMMIT_CJK), re.IGNORECASE,
 )
-_TEXT_ENTRY_ROLES = frozenset({"textbox", "searchbox", "combobox"})
+#: Roles of fields a key types into; a number field is a spinbutton.
+_TEXT_ENTRY_ROLES = frozenset({"textbox", "searchbox", "combobox", "spinbutton"})
+#: Characters a label can carry inside a word that a person never sees: a
+#: soft hyphen (German labels break long words with one) and the zero-width
+#: ones. The pod takes out the same ones.
+_INVISIBLE = re.compile("[\u00ad\u200b-\u200d\u2060\ufeff]")
+#: Commit words that also name a field a select sorts or filters by.
+_FIELD_NOUNS = frozenset({"order", "post"})
 #: Path segments of OAuth authorization and consent endpoints; a segment that
 #: starts with "consent" counts too.
 _CONSENT_SEGMENTS = frozenset({"authorize", "authorization", "oauth", "oauth2", "openid", "openid-connect", "login-actions"})
+#: Path ends of major identity providers' consent pages and authorization
+#: endpoints whose addresses carry no other marker, as the pod lists them
+#: (Salesforce, PingFederate, WSO2, Gluu and Janssen, Microsoft accounts,
+#: Login with Amazon).
+_CONSENT_PATHS = (
+    "/setup/secur/remoteaccessauthorizationpage.apexp", "/as/authorization.oauth2", "/as/authorization.ping",
+    "/authenticationendpoint/oauth2_consent.do", "/authorize.htm", "/oauth20_authorize.srf", "/ap/oa",
+)
 _MODIFIER_KEYS = frozenset({"alt", "control", "meta", "shift"})
+#: Other names a host runs as Enter and Space: the desktop app's bridge
+#: takes "Return", a typed line break and "Space" too, so they hold as
+#: Enter and Space do.
+_KEY_ALIASES = {"enter": "Enter", "return": "Enter", "\n": "Enter", "\r": "Enter", "space": " ", "spacebar": " "}
 _HOLD_RANK = {None: 0, "position": 1, "commit": 2}
 Hold = Literal["commit", "position"]
 
@@ -154,8 +177,9 @@ class _BrowserState:
     #: as the address it was asked for: a redirect from an authorization
     #: request lands on a consent page with any address.
     redirect: tuple[str, str] | None = None
-    #: Steps the user declined, by (page address, step): never asked again.
-    refused: set[tuple[str, str]] = field(default_factory=set)
+    #: Steps the user didn't approve, by (page address, step), with why: never
+    #: asked again.
+    refused: dict[tuple[str, str], str] = field(default_factory=dict)
     #: Addresses where the user finished a human check; their widget may stay
     #: on the page, and it is never handed over again there.
     checked_urls: set[str] = field(default_factory=set)
@@ -417,6 +441,9 @@ def _show(state: _BrowserState, page: Page) -> str:
     """``page`` as the model reads it. It becomes the page the model's element
     numbers come from."""
     state.page = page
+    # A position approval lasts until the page goes to another address.
+    if state.position_url is not None and state.position_url != page.url:
+        state.position_url = None
     text = format_page(page)
     kind = human_check(page)
     if kind and page.url in state.checked_urls:
@@ -540,17 +567,37 @@ def _is_search(el: Element | None) -> bool:
     return _is_text_entry(el) and (el.role == "searchbox" or re.match(r"search\b", el.name, re.IGNORECASE) is not None)
 
 
+def _folded(name: str) -> str:
+    """A name as the commit list matches it, as the pod folds it: composed
+    ("löschen" typed as o and a combining umlaut), compatibility forms folded
+    (full-width letters, half-width katakana), invisible characters out."""
+    return _INVISIBLE.sub("", unicodedata.normalize("NFKC", name))
+
+
 def _commit_name(name: str) -> bool:
-    return not name.strip() or bool(_COMMIT_WORDS.search(name)) or bool(_MORE_COMMIT_NAME.search(name))
+    text = _folded(name)
+    return not text.strip() or bool(_COMMIT_WORDS.search(text)) or bool(_MORE_COMMIT_NAME.search(text))
+
+
+def _is_action_name(name: str) -> bool:
+    """A select's own name that reads as an action: one word of the shared list,
+    other than the nouns that name a field ("Order", "Post type")."""
+    words = _folded(name).split()
+    return len(words) == 1 and bool(_COMMIT_WORDS.search(words[0])) and words[0].lower() not in _FIELD_NOUNS
+
+
+def _is_editing_key(key: str) -> bool:
+    """A key that types a character or takes one out, other than Space and
+    Enter, which have rules of their own."""
+    return key not in (" ", "Enter") and (key in ("Backspace", "Delete", "Insert") or (len(key) == 1 and key.isprintable()))
 
 
 def _chord_keys(chord: object) -> list[str]:
     """The keys of a chord such as "Shift+Enter", "Tab+ " or "Control++"."""
     if not isinstance(chord, str) or not chord:
         return []
-    if chord.endswith("++"):
-        return [*(k for k in chord[:-2].split("+") if k), "+"]
-    return chord.split("+")
+    keys = [*(k for k in chord[:-2].split("+") if k), "+"] if chord.endswith("++") else chord.split("+")
+    return [_KEY_ALIASES.get(k if len(k) == 1 else k.strip().lower(), k) for k in keys]
 
 
 def _consent_page(url: str) -> bool:
@@ -563,9 +610,10 @@ def _consent_page(url: str) -> bool:
     except ValueError:
         return False
     query = parse_qs(parsed.query, keep_blank_values=True)
-    if "client_id" in query and ("response_type" in query or "redirect_uri" in query):
+    if "client_id" in query and ("response_type" in query or "redirect_uri" in query or "request_uri" in query):
         return True
-    return any(s in _CONSENT_SEGMENTS or s.startswith("consent") for s in parsed.path.lower().split("/") if s)
+    path = parsed.path.lower()
+    return any(s in _CONSENT_SEGMENTS or s.startswith("consent") for s in path.split("/") if s) or path.endswith(_CONSENT_PATHS)
 
 
 def _classify(step: dict, *, url: str, requested: str | None = None, element: Element | None) -> Hold | None:
@@ -582,14 +630,21 @@ def _classify(step: dict, *, url: str, requested: str | None = None, element: El
         if consent or commit_control:
             return "commit"
         return "position" if _has_position(step) else None
+    # The desktop app clicks the element a type or press names before it types
+    # or presses, so that step holds as a click on the element would.
+    clicks_it = step.get("element") is not None and not _is_text_entry(element) and (consent or commit_control)
     if action == "type":
         text = str(step.get("text", ""))
         # A line break typed key by key presses Enter too.
         sends = step.get("submit") is True or "\n" in text or "\r" in text
-        return "commit" if sends and not _is_search(element) else None
+        # Typed key by key, a Tab moves the focus, and a space after it presses
+        # the control it lands on.
+        tab = text.find("\t")
+        tabs_on = tab >= 0 and " " in text[tab:]
+        return "commit" if (sends and not _is_search(element)) or tabs_on or clicks_it else None
     if action == "press":
         keys = _chord_keys(step.get("key"))
-        enter = any(k.lower() == "enter" for k in keys)
+        enter = "Enter" in keys
         space = " " in keys
         # The keys before a chord's last go down first, so another key that is
         # not a modifier (Tab, an arrow, a letter) can move the focus onto a
@@ -600,6 +655,16 @@ def _classify(step: dict, *, url: str, requested: str | None = None, element: El
             return "commit"
         if space and not _is_text_entry(element) and (consent or commit_control):
             return "commit"
+        # Outside a text field a key that types or deletes is the page's
+        # shortcut: Delete deletes the selected message or file.
+        if any(_is_editing_key(k) for k in keys) and not _is_text_entry(element):
+            return "commit"
+        return "commit" if clicks_it else None
+    if action == "select":
+        # A select's label names a field ("Sort order", "Payment method"), so
+        # it holds only when it is one commit word alone, as a bulk action's
+        # select may be ("Delete").
+        return "commit" if consent or (element is not None and _is_action_name(element.name)) else None
     return None
 
 
@@ -635,15 +700,22 @@ def _hold_of(state: _BrowserState, step: dict, page: Page) -> Hold | None:
 
 
 def _step_key(body: dict) -> str:
-    return json.dumps({k: v for k, v in body.items() if k != "include_page"}, sort_keys=True, default=str)
+    """The step as the declined-step memory compares it: a resend that adds a
+    field with its default ("button": "left") or a pending id is the same step."""
+    try:
+        return StepKey.model_validate(body).key()
+    except ValueError:
+        return json.dumps(body, sort_keys=True, default=str)
 
 
 def _step_words(body: dict, element: Element | None, held: HeldStep | None = None) -> str:
     """The step as the approval card says it: on the names the browser holds it
     on when it gave them, else on the element's role and name."""
     action = body.get("action")
+    if action == "reload" and held is not None:
+        return "reload the page, which sends its form again"
     if held is not None and held.names:
-        target = " and ".join(json.dumps(n, ensure_ascii=False) if n.strip() else "an element with no name" for n in held.names)
+        target = " and ".join(json.dumps(n, ensure_ascii=False) if n.strip() else "an unnamed control" for n in held.names)
         if _has_position(body) or action == "drag":
             return f"{_describe(body)}, on {target}"
     elif element is None or _has_position(body):
@@ -685,15 +757,17 @@ def _not_approved(body: dict, why: str) -> ToolOutcome:
     )
 
 
-def _card_prompt(*, hold: Hold, url: str, step: str, changed: bool = False) -> str:
+def _card_prompt(*, hold: Hold, url: str, step: str, may_commit: bool = False) -> str:
     shown = _fence(f"{url}\n{step}")
-    if changed:
-        shown += "\n\nThe page changed after it was last read, so this is the step as the browser will run it."
     if hold == "position":
+        commits = (
+            "It may also commit something for you, such as a purchase, a payment, a message, a deletion or a form. "
+            if may_commit else ""
+        )
         return (
             "**Approve clicks by position on this page?**\n\n"
             "This step clicks or drags at a point the page's element list doesn't name, so it can't be "
-            f"checked first:\n\n{shown}\n\n"
+            f"checked first:\n\n{shown}\n\n{commits}"
             "Approve covers clicks and drags by position on this page until it goes to another address. "
             "Cancel, Skip or no answer stops it."
         )
@@ -718,13 +792,16 @@ async def _gate(session: "ChatSession", *, state: _BrowserState, body: dict, pag
     Only a step Jev alone flags gets the card first there. The desktop app's
     browser holds nothing, so this card is the only one it gets."""
     key = _step_key(body)
-    if (page.url, key) in state.refused:
-        return _not_approved(body, "the user already declined it here")
+    refused = state.refused.get((page.url, key))
+    if refused is not None:
+        return _not_approved(body, f"{refused} when it was asked earlier in this turn")
     element = _element(page, body.get("element"))
     # Keys pressed into a secret field type into it just the same.
     if body.get("action") in ("type", "press") and element is not None and element.secret:
         return _secret_field(body.get("element"))
     host_holds = not session._browser_config.in_app
+    if state.position_url is not None and state.position_url != page.url:
+        state.position_url = None
     listed = _hold_of(state, body, page)
     if listed == "position":
         if host_holds or state.position_url == page.url:
@@ -749,12 +826,12 @@ async def _gate(session: "ChatSession", *, state: _BrowserState, body: dict, pag
         if hold == "position":
             state.position_url = page.url
         return None
-    state.refused.add((page.url, key))
+    state.refused[(page.url, key)] = refusal_why(cause)
     return _not_approved(body, refusal_why(cause))
 
 
 #: What a step can answer that doesn't say whether the browser ran it: no
-#: answer at all, a 502 or a 504.
+#: answer at all, a 502 or a 504, and page_busy (below).
 _UNCONFIRMED = (0, 502, 504)
 
 
@@ -776,7 +853,9 @@ async def _act_once(state: _BrowserState, body: dict) -> ActionResult | ToolOutc
     try:
         result = await state.client.act(session_id=state.session_id, step=body)
     except BrowserError as exc:
-        if exc.status in _UNCONFIRMED:
+        # The pod reads the page after a step, so a page_busy answer can come
+        # from a step that ran.
+        if exc.status in _UNCONFIRMED or exc.code == "page_busy":
             return _unconfirmed(body, exc)
         raise
     if body.get("action") == "navigate":
@@ -803,13 +882,14 @@ async def _send_step(session: "ChatSession", *, state: _BrowserState, body: dict
         return _not_approved(body, "the browser held it and gave no way to approve it")
     held = refusal.held
     element = _element(page, body.get("element"))
+    # With no readable held, a step by position may land on a commit control
+    # the tool can't see, so its card says it may commit something.
     hold: Hold = held.kind if held is not None else ("position" if _has_position(body) else "commit")
-    changed = held is not None and bool(held.names) and element is not None and element.name not in held.names
     choice = await ask_approval_choice(
         session,
         _card_prompt(
             hold=hold, url=held.url if held is not None else page.url,
-            step=_step_words(body, element, held), changed=changed,
+            step=_step_words(body, element, held), may_commit=held is None,
         ),
         options=(AskOption(
             value="approve", label="Approve",
@@ -822,7 +902,7 @@ async def _send_step(session: "ChatSession", *, state: _BrowserState, body: dict
         question_id=f"browser:approve:{state.session_id}:{refusal.pending_id}",
     )
     if choice.cause is not None:
-        state.refused.add((page.url, _step_key(body)))
+        state.refused[(page.url, _step_key(body))] = refusal_why(choice.cause)
         return _not_approved(body, refusal_why(choice.cause))
     try:
         return await _act_once(state, {**body, "pending_id": refusal.pending_id})
@@ -877,6 +957,18 @@ async def _do_screenshot(session: "ChatSession", tc_input: dict):
 # ── hand-overs ─────────────────────────────────────────────────────────────
 
 
+#: The most of the model's reason the hand-over card shows, as the browser's
+#: banner cuts it.
+_REASON_CHARS = 300
+
+
+def _page_host(url: str | None) -> str | None:
+    """The host a page is on; a blob: page is on its creator's host."""
+    if url and url.startswith("blob:"):
+        url = url[len("blob:"):]
+    return urlparse(url or "").hostname
+
+
 async def _hand_over(session: "ChatSession", *, reason: str) -> str | None:
     """Give the person the browser. Only they hand it back, with Done in the
     browser; the agent never takes it back.
@@ -893,8 +985,13 @@ async def _hand_over(session: "ChatSession", *, reason: str) -> str | None:
     await _ensure_open(session)
     # The card names the page's host, as the browser's own banner does, so
     # a lookalike page can't pass its words off as this site's request.
-    url = state.page.url if state.page is not None else (await state.client.session_info(session_id=state.session_id)).url
-    host = urlparse(url or "").hostname
+    # It reads the page the browser shows now: a step or a new tab can land on
+    # another host after the tool's last read.
+    url = (await state.client.session_info(session_id=state.session_id)).url
+    host = _page_host(url)
+    # One line and as long as the browser's own banner, so a reason a page
+    # steered can't print a host line of its own under this one.
+    reason = " ".join(reason.split())[:_REASON_CHARS]
     handed = await state.client.hand_to_person(session_id=state.session_id, reason=reason)
 
     async def done_in_the_browser() -> str | None:
@@ -907,7 +1004,7 @@ async def _hand_over(session: "ChatSession", *, reason: str) -> str | None:
 
     return await _ask(
         session,
-        f"{f'Your turn on {host}: ' if host else ''}{reason}\n\n"
+        f"{f'Your turn on {host}' if host else 'Your turn on a page with no web address'}: {reason}\n\n"
         "Use the browser beside the chat, and click Done in the browser when you're finished.",
         [("later", "Finish later"), ("stop", "Stop")],
         answered_elsewhere=done_in_the_browser,
@@ -1378,9 +1475,9 @@ def _refused(session: "ChatSession", exc: BrowserError) -> ToolOutcome:
     if code == "out_of_scope":
         return ToolOutcome(
             content=(
-                "The browser refused a call outside this conversation's own browser session or project "
-                "(out_of_scope). This tool only ever names its own session, so code that used the turn's "
-                "credential directly made that call. Use the browser only through this tool, and don't retry it."
+                "The browser refused this call as outside this conversation's own browser session or project "
+                "(out_of_scope). This tool only names its own session, so this turn's browser access is set up "
+                "wrong. Don't retry it; tell the user the browser isn't available for this task."
             ),
             ok=False, reason="browser_out_of_scope",
         )
@@ -1419,9 +1516,10 @@ def _refused(session: "ChatSession", exc: BrowserError) -> ToolOutcome:
     if code == "http_error" and exc.status == 403:
         return ToolOutcome(
             content=(
-                "The site's edge firewall blocked the request before it reached the browser (an HTML 403 page, "
-                "not the browser's own answer). Typed text that looks like code, such as a <script tag, sets it "
-                "off. It isn't a credential problem: rephrase or split the text, or ask the user to type it."
+                "The firewall in front of the browser service blocked the request before it reached the browser "
+                "(an HTML 403 page, not the browser's own answer). It isn't a credential problem. If the step typed "
+                "text, text that looks like code, such as a <script tag, sets it off: rephrase or split it, or ask "
+                "the user to type it."
             ),
             ok=False, reason="browser_edge_blocked",
         )
@@ -1462,7 +1560,7 @@ BROWSER: you and the user share a real browser. The user sees it beside this cha
 - Prefer a connector or API when one can do the job; use the browser for sites without one, or when the user asks.
 - Only open sites the user named or that the task plainly needs. Never invent URLs.
 - Start a task with action=run and a goal; give values to type in `inputs`. run takes the steps it is sure of and hands back with the page when it isn't.
-- To act yourself, use action=act with a step: {"action":"click","element":17}, {"action":"type","element":4,"text":"…","submit":true}, {"action":"select","element":9,"value":"Blue"}, {"action":"scroll","direction":"down"}, {"action":"press","key":"Enter"}, {"action":"back"}, {"action":"navigate","url":"…"}. Element numbers come from the latest page.
+- To act yourself, use action=act with a step: {"action":"click","element":17}, {"action":"type","element":4,"text":"…","submit":true}, {"action":"select","element":9,"value":"Blue"}, {"action":"scroll","direction":"down"}, {"action":"press","element":4,"key":"Enter"}, {"action":"back"}, {"action":"navigate","url":"…"}. Element numbers come from the latest page.
 - Where the page list has nothing to point at (a canvas, a drawing, a map), use pixels from your latest screenshot: {"action":"click","x":412,"y":230}. Clicks also take "button":"right" and "clicks":2. Drag with {"action":"drag","from":{"element":5} or {"x":…,"y":…},"to":{…}}; that's how shapes get drawn, sliders moved and items reordered.
 - Never ask for, read out, or type a password, one-time code, or card number; the tool refuses to type into a secret field. For sign-ins, CAPTCHAs, two-factor codes and payments, call action=hand_to_user with a short reason and let the user do it in the browser.
 - hand_to_user is only for those. Never use it to hand over work you found hard; if you can't do something with these actions, stop and say so in the chat, with what you tried and another way to get it done.
