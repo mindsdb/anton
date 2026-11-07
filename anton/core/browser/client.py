@@ -40,10 +40,11 @@ from anton.core.browser.models import (
 #: own navigation at 30 s, so leave room for that plus the router hop.
 REQUEST_TIMEOUT_S = 45.0
 #: The router starts the person's browser when the host scopes the turn, and
-#: answers its own typed 504 when one request passes its deadline of about
-#: 105 s. A router client's calls wait this long until the router has answered
-#: once: past that deadline, so the router's answer arrives first, and under
-#: the edge proxy's 125 s limit, so its HTML error page never does.
+#: answers its own typed 503 browser_starting when one request passes its
+#: deadline of about 105 s. A router client's calls wait this long until the
+#: router has answered once: past that deadline, so the router's answer
+#: arrives first, and under the edge proxy's 125 s limit, so its HTML error
+#: page never does.
 FIRST_CALL_TIMEOUT_S = 115.0
 #: The router answers 429 too_many_requests when too many of the person's
 #: calls are in flight, before the call reaches the browser, so sending it

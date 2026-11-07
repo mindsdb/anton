@@ -940,8 +940,18 @@ async def test_an_unreadable_held_description_still_reads_as_a_held_step():
     assert (raised.value.code, raised.value.pending_id, raised.value.held) == ("approval_required", "pa-1", None)
 
 
-@pytest.mark.parametrize(("status", "code"), [(502, "browser_unavailable"), (504, "browser_starting")])
-async def test_a_step_with_no_clear_answer_may_have_run_and_is_never_sent_again(status, code):
+_CLOUDFLARE_PAGE = "<!DOCTYPE html><title>Bad gateway | cowork.mindshub.ai | Cloudflare</title>"
+
+
+@pytest.mark.parametrize("answer", [
+    # The router's two codes, sent as 503 so their body passes Cloudflare.
+    httpx.Response(503, json={"error": "browser_unavailable", "message": "Your browser didn't answer. Try again."}),
+    httpx.Response(503, json={"error": "browser_starting", "message": "No answer in time."}),
+    # Cloudflare's own page in place of a 502 or 504 body.
+    httpx.Response(502, text=_CLOUDFLARE_PAGE, headers={"content-type": "text/html"}),
+    httpx.Response(504, text=_CLOUDFLARE_PAGE, headers={"content-type": "text/html"}),
+], ids=["503-browser_unavailable", "503-browser_starting", "502-cloudflare", "504-cloudflare"])
+async def test_a_step_with_no_clear_answer_may_have_run_and_is_never_sent_again(answer):
     host = FakeHost(pages=[CHECKOUT])
     session = make_session(host)
     sent: list[dict] = []
@@ -949,7 +959,7 @@ async def test_a_step_with_no_clear_answer_may_have_run_and_is_never_sent_again(
     def handler(request):
         if request.url.path.endswith("/action"):
             sent.append(json.loads(request.content))
-            return httpx.Response(status, json={"error": code, "message": "no answer"})
+            return answer
         return host.handler(request)
 
     answer_with(session, handler)
@@ -957,6 +967,23 @@ async def test_a_step_with_no_clear_answer_may_have_run_and_is_never_sent_again(
     assert result.ok is False and result.reason == "browser_unreachable"
     assert "may have run" in result.content and "action=page" in result.content
     assert len(sent) == 1
+
+
+async def test_a_503_refused_before_the_pod_is_not_a_step_that_may_have_run():
+    """Only the router's two codes say the pod may have the step: any other 503
+    is refused before the call reaches the pod."""
+    host = FakeHost(pages=[CHECKOUT])
+    session = make_session(host)
+
+    def handler(request):
+        if request.url.path.endswith("/action"):
+            return httpx.Response(503, json={"error": "entitlements_unavailable", "message": "could not check"})
+        return host.handler(request)
+
+    answer_with(session, handler)
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "type", "element": 9, "text": "hi"}})
+    assert result.ok is False and result.reason == "browser_entitlements_unavailable"
+    assert "may have run" not in result.content
 
 
 async def test_a_busy_router_call_is_sent_again_after_a_short_wait(monkeypatch):

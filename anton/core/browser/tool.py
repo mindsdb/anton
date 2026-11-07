@@ -832,8 +832,13 @@ async def _gate(session: "ChatSession", *, state: _BrowserState, body: dict, pag
 
 
 #: What a step can answer that doesn't say whether the browser ran it: no
-#: answer at all, a 502 or a 504, and page_busy (below).
-_UNCONFIRMED = (0, 502, 504)
+#: answer at all; a 502 or a 504, which is Cloudflare's own page, since it
+#: swaps an origin's 502 or 504 body; and the codes below, whatever the
+#: status. The router sends browser_unavailable and browser_starting as 503 so
+#: their body passes Cloudflare. The pod reads the page after a step, so a
+#: page_busy answer can come from a step that ran.
+_UNCONFIRMED_STATUSES = (0, 502, 504)
+_UNCONFIRMED_CODES = ("browser_unavailable", "browser_starting", "page_busy")
 
 
 def _unconfirmed(body: dict, exc: BrowserError) -> ToolOutcome:
@@ -854,9 +859,7 @@ async def _act_once(state: _BrowserState, body: dict) -> ActionResult | ToolOutc
     try:
         result = await state.client.act(session_id=state.session_id, step=body)
     except BrowserError as exc:
-        # The pod reads the page after a step, so a page_busy answer can come
-        # from a step that ran.
-        if exc.status in _UNCONFIRMED or exc.code == "page_busy":
+        if exc.status in _UNCONFIRMED_STATUSES or exc.code in _UNCONFIRMED_CODES:
             return _unconfirmed(body, exc)
         raise
     if body.get("action") == "navigate":
@@ -1526,7 +1529,7 @@ def _refused(session: "ChatSession", exc: BrowserError) -> ToolOutcome:
             content=f"The browser refused this session's credentials ({code}). {_reconnect_hint(session)}",
             ok=False, reason="browser_unauthorized",
         )
-    if exc.status in (0, 502, 503):
+    if exc.status in (0, 502, 503, 504):
         return ToolOutcome(
             content=f"The browser is not reachable right now ({code}): {message}. It may be starting; try again shortly.",
             ok=False, reason="browser_unreachable",

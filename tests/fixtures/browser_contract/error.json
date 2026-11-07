@@ -165,7 +165,7 @@
       }
     },
     "browser_unavailable": {
-      "where": "any route, in the desktop app",
+      "where": "any route: in the desktop app, its window closed; through the router, the browser didn't answer",
       "kind": "response",
       "status": 503,
       "body": {
@@ -194,7 +194,7 @@
     "browser_starting": {
       "where": "any route, through the router",
       "kind": "response",
-      "status": 504,
+      "status": 503,
       "body": {
         "error": "browser_starting",
         "message": "Your browser is taking too long to start. Try again in a moment."

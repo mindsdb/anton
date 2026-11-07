@@ -337,7 +337,7 @@ ERROR_REASONS = {
     "at_capacity": "browser_at_capacity",
     "approval_required": "browser_step_not_approved",
     "too_many_saved_tabs": "browser_error",
-    "browser_starting": "browser_error",
+    "browser_starting": "browser_unreachable",
     "too_many_requests": "browser_at_capacity",
 }
 
