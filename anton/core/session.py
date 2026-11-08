@@ -161,7 +161,7 @@ from anton.core.tools.tool_handlers import (
     page_check_lines,
     preliminary_cell,
     resolve_artifact_store,
-    snapshot_existing_artifacts,
+    snapshot_cell_artifacts,
     unanswered_question_line,
 )
 from anton.core.artifacts.page_copies import TurnPages
@@ -2224,6 +2224,11 @@ class ChatSession:
         # project-wide) directory can never be mistaken for this turn's work.
         # Reset at the top of every turn.
         self._artifacts_touched: set[str] = set()
+        # False once a snapshot around one of this turn's cells could not
+        # read the artifacts folder or an entry in it, so an edit there may
+        # be missing from `_artifacts_touched`
+        # (`tool_handlers.snapshot_cell_artifacts`). Reset every turn.
+        self._artifacts_touched_complete = True
         # (artifact slug, page) -> how that page last fared in a browser this
         # turn (`passed`, `failed` or `unverified`), from generate_artifact
         # and the checks after each cell. On a sandboxed deployment the turn
@@ -2417,6 +2422,15 @@ class ChatSession:
         surface, and must not be able to mutate the session's own record.
         """
         return set(self._artifacts_touched)
+
+    @property
+    def artifacts_touched_complete(self) -> bool:
+        """Whether `artifacts_touched` names every artifact this turn's cells
+        edited. False once a snapshot around a cell could not read the
+        artifacts folder or an entry in it, since an edit there goes unseen;
+        a host should then diff the whole artifacts folder instead.
+        """
+        return self._artifacts_touched_complete
 
     def _unverified_page_lines(self) -> list[str]:
         """The lines that end the turn's final message on a sandboxed
@@ -5764,6 +5778,7 @@ class ChatSession:
         # reports only what the CURRENT turn touched. Hosts that build a fresh
         # session per turn get the same result either way.
         self._artifacts_touched = set()
+        self._artifacts_touched_complete = True
         self._page_checks = {}
         self._geography_requirements = {}
         self._artifact_geography_request = ""
@@ -7127,7 +7142,7 @@ class ChatSession:
                                 if artifact_store is not None:
                                     await capture_turn_pages(self, artifact_store)
                                 before_artifacts = (
-                                    snapshot_existing_artifacts(artifact_store)
+                                    await snapshot_cell_artifacts(session=self, store=artifact_store)
                                     if artifact_store is not None
                                     else {}
                                 )

@@ -205,16 +205,71 @@ def _artifact_files(folder: Path) -> ArtifactFiles:
     })
 
 
-def snapshot_existing_artifacts(store) -> dict[str, ArtifactFiles]:
-    """slug -> its content files, for every artifact folder that exists right now."""
+class ArtifactsSnapshot(NamedTuple):
+    """Every artifact folder's content files at one moment, by folder name,
+    and the names of the entries the read could not stat, so it cannot say
+    whether they are artifact folders."""
+
+    folders: dict[str, ArtifactFiles]
+    unreadable: frozenset[str]
+
+
+def read_artifacts_snapshot(*, store) -> ArtifactsSnapshot:
+    """The artifacts folder as it stands now. An entry whose stat fails (a
+    folder at mode 0, EIO, a stale NFS handle) is skipped and named in
+    `unreadable`, so one such entry cannot stop every cell in the project.
+    Raises OSError when the artifacts folder itself cannot be read."""
     root = store.root
     if not root.is_dir():
-        return {}
-    snapshot: dict[str, ArtifactFiles] = {}
+        return ArtifactsSnapshot(folders={}, unreadable=frozenset())
+    folders: dict[str, ArtifactFiles] = {}
+    unreadable: set[str] = set()
     for child in root.iterdir():
-        if child.is_dir() and (child / "metadata.json").is_file():
-            snapshot[child.name] = _artifact_files(child)
-    return snapshot
+        try:
+            is_artifact = child.is_dir() and (child / "metadata.json").is_file()
+        except OSError:
+            unreadable.add(child.name)
+            continue
+        if is_artifact:
+            folders[child.name] = _artifact_files(child)
+    return ArtifactsSnapshot(folders=folders, unreadable=frozenset(unreadable))
+
+
+def snapshot_existing_artifacts(store) -> dict[str, ArtifactFiles]:
+    """slug -> its content files, for every artifact folder that exists right
+    now. An entry that cannot be read is left out (`read_artifacts_snapshot`)."""
+    return read_artifacts_snapshot(store=store).folders
+
+
+async def snapshot_cell_artifacts(*, session: "ChatSession", store) -> dict[str, ArtifactFiles]:
+    """`snapshot_existing_artifacts` around one exec cell, read off the event
+    loop so a slow mount cannot hold up the turn's heartbeat.
+
+    An edit in an entry this read skipped, or in a folder it could not read
+    at all, would go unseen, so either marks the turn's artifact record
+    incomplete (`ChatSession.artifacts_touched_complete`) and the cloud turn
+    then sends no list. A folder it could not read reads as empty, so the
+    cell still runs. Raises no OSError.
+    """
+    import asyncio
+
+    try:
+        snapshot = await asyncio.to_thread(read_artifacts_snapshot, store=store)
+    except OSError:
+        _log.warning(
+            "could not read the artifacts folder around a cell",
+            exc_info=True,
+            extra={"event": "artifact_snapshot_incomplete", "reason": "artifacts_folder_unreadable"},
+        )
+        session._artifacts_touched_complete = False
+        return {}
+    if snapshot.unreadable:
+        _log.warning(
+            "skipped an artifacts folder entry that could not be read around a cell",
+            extra={"event": "artifact_snapshot_incomplete", "reason": "entry_unreadable"},
+        )
+        session._artifacts_touched_complete = False
+    return snapshot.folders
 
 
 # Bounded: never lint a huge file inline on the agent's turn.
@@ -1146,7 +1201,8 @@ async def check_cell_artifacts(
 
     from anton.core.artifacts.page_copies import turn_pages_of
 
-    track_edits_since(session, store, before)
+    after = await snapshot_cell_artifacts(session=session, store=store)
+    track_edits_since(session, store, before, after=after)
     turn_pages = turn_pages_of(session)
     spent = getattr(session, "_out_of_repairs", None)
     held_back: frozenset[PageKey] = frozenset()
@@ -1155,7 +1211,16 @@ async def check_cell_artifacts(
             held_back = await asyncio.to_thread(turn_pages.put_held_back, frozenset(spent), store)
         except Exception:
             _log.warning("could not put back the pages out of repair cells", exc_info=True)
-    live_app_lines = await _relaunch_live_apps(session, store, before)
+    if held_back:
+        # Putting those pages back rewrote them after `after` was read, and a
+        # running live app relaunches on its files as they are now. The edits
+        # this cell made were attributed from the read before. A failed read
+        # here keeps that one, so an app this cell edited still relaunches.
+        try:
+            after = await asyncio.to_thread(snapshot_existing_artifacts, store)
+        except OSError:
+            _log.warning("could not read the artifacts folder after putting pages back", exc_info=True)
+    live_app_lines = await _relaunch_live_apps(session, store, before, after=after)
     refused = render_screenshots_refused(session)
     listed = getattr(session, "_unverified_findings_listed", None)
     findings_listed_earlier = frozenset(listed) if isinstance(listed, set) else frozenset()
@@ -1200,16 +1265,17 @@ async def check_cell_artifacts(
     return replace(lint, live_app_lines=live_app_lines)
 
 
-async def _relaunch_live_apps(session: "ChatSession", store, before: dict[str, ArtifactFiles]) -> list[str]:
-    """Relaunch each running live app whose launch files this cell changed,
-    so the app serves the edit without a launch call. Empty unless live apps
-    run in app slots. Never raises."""
+async def _relaunch_live_apps(
+    session: "ChatSession", store, before: dict[str, ArtifactFiles], *, after: dict[str, ArtifactFiles]
+) -> list[str]:
+    """Relaunch each running live app whose launch files this cell changed
+    between `before` and `after`, so the app serves the edit without a launch
+    call. Empty unless live apps run in app slots. Never raises."""
     from anton.core.artifacts import live_app_slots
 
     if not live_app_slots.live_apps_enabled() or cell_sandbox_of(getattr(session, "_scratchpads", None)) is None:
         return []
     try:
-        after = snapshot_existing_artifacts(store)
         # A slug generate_artifact is building is its run step's to launch.
         building = getattr(session, "_live_apps_building", None) or set()
         slugs = [
@@ -1237,8 +1303,11 @@ async def _relaunch_after_metadata(session: "ChatSession", store, slug: str) -> 
         return []
 
 
-def track_edits_since(session: "ChatSession", store, before: dict[str, ArtifactFiles]) -> None:
-    """Attribute the artifact edits one scratchpad cell made.
+def track_edits_since(
+    session: "ChatSession", store, before: dict[str, ArtifactFiles], *, after: dict[str, ArtifactFiles]
+) -> None:
+    """Attribute the artifact edits one scratchpad cell made, from the
+    snapshots taken right before it ran (`before`) and right after (`after`).
 
     The agent edits artifact files from scratchpad cells, which the tool layer
     never sees, so this is how such an edit reaches `_artifacts_touched` and the
@@ -1253,7 +1322,6 @@ def track_edits_since(session: "ChatSession", store, before: dict[str, ArtifactF
     accepts for Hermes's edits.
     """
     already_touched = getattr(session, "_artifacts_touched", None) or ()
-    after = snapshot_existing_artifacts(store)
     for slug, files_before in before.items():
         files = after.get(slug)
         if files is not None and files != files_before and slug not in already_touched:
@@ -2644,7 +2712,7 @@ async def handle_scratchpad(
             # Before anything this cell writes: the pages as the turn found them.
             await capture_turn_pages(session, artifact_store)
         before_artifacts = (
-            snapshot_existing_artifacts(artifact_store)
+            await snapshot_cell_artifacts(session=session, store=artifact_store)
             if artifact_store is not None
             else {}
         )

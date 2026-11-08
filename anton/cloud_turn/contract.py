@@ -81,7 +81,21 @@ Events written back on stdout (JSONL):
       reopened) the person's browser session. cowork shows the browser beside
       the chat, with a viewer link it mints with the person's own credential.
       The line carries no link and no key.
-  {"kind": "turn_completed"}          - terminal success (no payload)
+  {"kind": "turn_completed", "artifacts_touched": [slug, ...]}  - terminal
+      success. `artifacts_touched` (ARTIFACTS_TOUCHED_KEY) is the sorted
+      folder names of the artifacts this turn created or updated through its
+      artifact tools, or edited by a scratchpad cell (the session's
+      `artifacts_touched`); `[]` means the turn touched none. The list is what
+      the tools and cells reported, not every write: a process a cell started
+      that writes into an artifact after the cell returns goes unlisted.
+      cowork-server reads it in `tracked_artifacts_from_reply` and then opens
+      only the listed folders at turn end, plus the folders it queued a repair
+      in and its `.locks` folder. The key is left out, and the host then
+      diffs the whole artifacts folder, when the session keeps no such
+      record, when a snapshot around a cell could not read the artifacts
+      folder or an entry in it (`ChatSession.artifacts_touched_complete`),
+      and when the list would name more than MAX_ARTIFACTS_TOUCHED (1,000)
+      folders.
   {"kind": "turn_failed", "error": "..."}  - terminal failure (scrubbed string)
       `error` is "TypeName: message", so a consumer reads the failure's kind
       off the class name. A MindsHub billing stop that knows when its limit
@@ -121,6 +135,16 @@ logger = logging.getLogger(__name__)
 TURN_PROTOCOL_VERSION = 1
 DATASOURCE_PROTOCOL_VERSION = 1
 MAX_DATASOURCE_CONNECTIONS = 100
+
+# The `turn_completed` key that names the artifact folders the turn touched.
+# scratchpad-controller's `scratchpad_controller/anton_turn.py` relays it and
+# cowork-server's `cowork/services/task_objects.py` reads it, under the same name.
+ARTIFACTS_TOUCHED_KEY = "artifacts_touched"
+# The most folder names that list carries. The entrypoint leaves out a longer
+# list; scratchpad-controller's `anton_turn.py` relays none and cowork-server's
+# `tracked_artifacts_from_reply` (`cowork/services/task_objects.py`) reads one
+# as absent, both against the same cap.
+MAX_ARTIFACTS_TOUCHED = 1000
 
 
 def _is_version(value: object, expected: int) -> bool:

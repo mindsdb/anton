@@ -271,6 +271,12 @@ export ANTON_MODEL_CALL_IDLE_TIMEOUT_S=600
 
 While a model call is silent, hosts can show that the turn is still working. `ChatSession.model_calls` is `None` before the first turn. Its `snapshot()` returns the oldest call waiting on the model, or `None` when nothing is waiting, a question is open, or the turn has ended. The cloud turn entrypoint uses it: when a call is waiting and nothing else has gone out for 20 seconds, it writes a progress line with phase `model_wait`, such as "Waiting for the model (2m 40s)". A hung tool or cell reports no wait, so it still goes quiet and the host's idle limits still end it.
 
+## Artifacts a turn touched
+
+`ChatSession.artifacts_touched` names the artifact folders the current turn created or updated through its artifact tools, or edited from a scratchpad cell. Anton finds a cell's edits by reading every artifact folder's files just before and just after the cell, on a worker thread, so a slow mount does not hold up the turn. A process a cell starts that writes into an artifact after the cell returns goes unlisted. An entry in the artifacts folder that one of those reads cannot stat is skipped, so the cell still runs, and `ChatSession.artifacts_touched_complete` turns false for the rest of the turn. When the artifacts folder itself cannot be read, that read counts as empty: the cell still runs, without lint, live-app relaunch or edit tracking for that cell, and `ChatSession.artifacts_touched_complete` turns false. An artifact is named by its folder, even when its `metadata.json` holds an older `slug`, so every write goes back to the folder it was read from.
+
+The cloud turn entrypoint sends the list as `artifacts_touched` on `turn_completed`. It leaves the key out when the record is incomplete or would name more than 1,000 folders, and the host then reads the whole artifacts folder. `anton/cloud_turn/contract.py` holds the key and the cap.
+
 ## Cloud turn skills
 
 A cloud turn's request (`TurnRequestV1` in `anton/cloud_turn/contract.py`) can carry a `skills` block: the skills cowork-server resolved for that turn's person and project. Each key is a skill's slug. Each entry holds the skill's files, by their path inside the skill's folder, and `always_on`, which cowork-server leaves out or sets to false for a skill the agent recalls on demand:
