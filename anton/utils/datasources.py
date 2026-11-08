@@ -1195,6 +1195,26 @@ _GOOGLE_DRIVE_PARAGRAPH = (
     "in the injected `DS_GOOGLE_DRIVE_<CONNECTION>__...` environment variables. "
     "Only claim Google Drive access if you can actually use those credentials successfully."
 )
+_GOOGLE_DRIVE_READ_SCOPES = frozenset({
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/drive",
+})
+_GOOGLE_DRIVE_LIMITED_ACCESS_LINE = (
+    "Access: limited to files this app created or the user added from Google Drive. "
+    "The user didn't allow \"See and download all your Google Drive files\" when "
+    "connecting; to read their other files, ask them to reconnect Google Drive "
+    "and tick that permission."
+)
+
+
+def _google_drive_access_is_limited(fields: Mapping) -> bool:
+    """True when a Drive OAuth token's granted scopes can't read the whole
+    Drive: Google lets the user untick each scope on the consent screen, and
+    connections made before drive.readonly was requested only carry
+    drive.file. A record with no stored scope reads as not limited, since
+    there is nothing to judge it by."""
+    granted = str(fields.get("scope") or "").split()
+    return bool(granted) and _GOOGLE_DRIVE_READ_SCOPES.isdisjoint(granted)
 
 
 @dataclass(frozen=True)
@@ -1281,11 +1301,10 @@ def collect_datasource_catalog(
             type(usage_notes).__name__,
         )
         usage_notes = {}
-    # Google Drive's drive.file OAuth scope only covers files the app created
-    # itself, plus files explicitly granted via the Google Picker (persisted
-    # as a `_picked_files` vault field).
+    # Google Drive files the user added with the Google Picker are persisted
+    # as a `_picked_files` vault field.
     #
-    # Those granted files are deliberately NOT listed here. Listing them needs
+    # Those files are deliberately NOT listed here. Listing them needs
     # the *current project* to scope by, and `projects` is a cowork concept
     # this function has no access to — so the list rendered here was
     # unscoped, and named files from other projects. cowork-server renders the
@@ -1351,6 +1370,8 @@ def collect_datasource_catalog(
             lines.append(f"Database: {database}")
         if email and "email" not in (secure_keys or []) and "account_email" not in (secure_keys or []):
             lines.append(f"Account: {email}")
+        if engine == "google_drive" and _google_drive_access_is_limited(fields):
+            lines.append(_GOOGLE_DRIVE_LIMITED_ACCESS_LINE)
         lines.append("Credential env vars:")
         for var in var_names:
             lines.append(f" - {var}")
