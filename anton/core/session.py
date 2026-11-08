@@ -6807,6 +6807,10 @@ class ChatSession:
         # fallback the current reply is already in history, so it must not append
         # it a second time (ENG-1155 double-append).
         _reply_persisted = False
+        # Counted across the whole turn, continuations included: the step limit
+        # is per task, so a verifier-forced continuation does not start a fresh
+        # count against the cap.
+        tool_round = 0
 
         while True:  # Completion verification loop
             # Per-iteration, NOT per-turn: the flag means "the reply currently in
@@ -6814,10 +6818,11 @@ class ChatSession:
             # `llm_response`, so a stale True would make the post-loop fallback
             # skip a reply that was never persisted — dropping the answer the
             # user just read on any INCOMPLETE turn whose continuation needs no
-            # tools (tool_round stays 0, so the loop breaks at the gate below
-            # before the append).
+            # tools (attempt_rounds stays 0, so the loop breaks at the gate
+            # below before the append).
             _reply_persisted = False
-            tool_round = 0
+            # This attempt's rounds alone, for the verifier gate below.
+            attempt_rounds = 0
             error_streak: dict[str, int] = {}
             resilience_nudged: set[str] = set()
             # Per-continuation, unlike `_round_cap_grace_used`: only the
@@ -6830,6 +6835,7 @@ class ChatSession:
 
             while llm_response.tool_calls:
                 tool_round += 1
+                attempt_rounds += 1
                 # One-time extension (ENG-1893), unconditional like the
                 # mid-loop spend-ceiling grace — no verdict exists yet at
                 # this point, so the grant is a single small window rather
@@ -6862,13 +6868,8 @@ class ChatSession:
                                 )
                     finally:
                         await agen.aclose()
-                # Accumulate, don't assign: `tool_round` is loop-local and
-                # resets to 0 on every verifier-forced continuation, so
-                # assigning reported only the last continuation's rounds —
-                # breaking the metric for exactly the expensive shape it
-                # exists to classify. Counted before the cap check so a
-                # capped turn reports the (possibly grace-extended) cap, not
-                # cap+1 (#309 review).
+                # Counted before the cap check so a capped turn reports the
+                # (possibly grace-extended) cap, not cap+1 (#309 review).
                 if self._turn_cost is not None and tool_round <= effective_round_cap:
                     self._turn_cost.rounds += 1
                 if tool_round > effective_round_cap:
@@ -7648,7 +7649,7 @@ class ChatSession:
             # default of 2, single-round turns), when we hit the max-rounds
             # hard stop, or after an unanswered question.
             if (
-                tool_round < self._verify_min_tool_rounds
+                attempt_rounds < self._verify_min_tool_rounds
                 or _max_rounds_hit
                 or _spend_ceiling_hit
                 or self._unanswered_question is not None

@@ -11,6 +11,7 @@ plus an elicitor that answers from a script.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -31,6 +32,7 @@ from tests.test_spend_ceiling import (
     _session,
     _text,
     _tool_call,
+    _usage,
     workspace,  # noqa: F401 — fixture
 )
 
@@ -339,3 +341,39 @@ async def test_typing_keep_going_in_the_cli_continues(workspace, monkeypatch):
     _, kwargs = await _run(session)
     assert kwargs["ended_by"] == "completed"
     assert kwargs["limit_continues"] == "1"
+
+
+def _verdicts(session, *statuses: str) -> None:
+    """Answer each completion-verifier call with the next status."""
+    pending = list(statuses)
+
+    async def _answer(schema, **_kwargs):
+        if schema is _FinishAuthorization:
+            return _FinishAuthorization(quote="", authorized=False)
+        status = pending.pop(0) if pending else "COMPLETE"
+        return _VerifierVerdict(status=status, reason="scripted", close_to_done=False)
+
+    session._llm.generate_object_code = AsyncMock(side_effect=_answer)
+
+
+def _small(response):
+    """The response with a usage well under the output budget, so the
+    truncation retry stays out of the way."""
+    return replace(response, usage=_usage(1_000))
+
+
+async def test_the_step_limit_counts_the_whole_task_not_each_attempt(workspace):
+    """TL-02: with "Max steps per task" at 5, a task that used 5 steps, was
+    sent back by the verifier and used 5 more ran 10 steps with no limit
+    message, because the count restarted on the continuation."""
+    cap = 5
+    attempt = [_small(_tool_call(i)) for i in range(1, cap + 1)] + [_small(_text("partial"))]
+    session = _session(workspace, responses=attempt * 2, per_call=1_000)
+    session._max_tool_rounds = cap
+    elicitor = _ScriptedElicitor(STOP_HERE)
+    session.elicitor = elicitor
+    _verdicts(session, "INCOMPLETE", "COMPLETE")
+    _, kwargs = await _run(session)
+    assert len(elicitor.requests) == 1, "the limit must be reached on the continuation"
+    assert f"reached its limit of {cap} steps per request" in elicitor.requests[0].prompt
+    assert kwargs["ended_by"] == "round_cap"
