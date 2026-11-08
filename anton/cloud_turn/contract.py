@@ -77,6 +77,10 @@ Events written back on stdout (JSONL):
   {"kind": "ask_user_answer_rejected", "id", "answer_id", "reason"}  - a stdin
       answer that did not close its question; reason is invalid_option |
       not_found | already_answered. The question stays open on invalid_option.
+  {"kind": "browser", "session_id": "..."}  - the browser tool opened (or
+      reopened) the person's browser session. cowork shows the browser beside
+      the chat, with a viewer link it mints with the person's own credential.
+      The line carries no link and no key.
   {"kind": "turn_completed", "artifacts_touched": [slug, ...]}  - terminal
       success. `artifacts_touched` (ARTIFACTS_TOUCHED_KEY) is the sorted
       folder names of the artifacts this turn created or updated through its
@@ -123,6 +127,7 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ConfigDict
 
+from anton.core.browser.config import BrowserConfig
 from anton.core.tools.skill_format import validate_name
 
 logger = logging.getLogger(__name__)
@@ -347,6 +352,12 @@ class TurnRequestV1:
     #: {engine: {"usage_notes": str}}. Rendered only for engines the turn's
     #: vault connects. Absent when no connected engine has notes.
     connectors: dict | None = None
+    #: The MindsHub browser router, when cowork-server turned the browser on for
+    #: this turn: {"base_url", "profile", "project"?}, read by
+    #: BrowserConfig.from_dict. The pod reaches the router with this turn's
+    #: `llm` key. A block with a `token`, or with any address but the https
+    #: router, is refused. Absent or malformed means no browser tool this turn.
+    browser: BrowserConfig | None = None
 
     @staticmethod
     def from_json(raw: str) -> "TurnRequestV1":
@@ -383,4 +394,5 @@ class TurnRequestV1:
             connectors=(
                 d.get("connectors") if isinstance(d.get("connectors"), dict) else None
             ),
+            browser=BrowserConfig.from_dict(d.get("browser")),
         )

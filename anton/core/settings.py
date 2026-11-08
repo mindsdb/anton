@@ -43,6 +43,15 @@ class CoreSettings(BaseSettings):
     verifier_jev_timeout_s: float = 2.0
     # Minimum probability of Jev's COMPLETE/WAITING for it to decide without the LLM.
     verifier_jev_min_p: float = 0.8
+    # The `browser` tool. Where the browser is comes only from the host
+    # (ChatSessionConfig.browser), never from settings. These tune the tool:
+    # how much Jev steers it ("on" takes its confident steps, "shadow" only
+    # records its picks against the model's, "off" never asks), the bar a Jev
+    # step must clear, Jev's time limit, and the most steps one `run` takes.
+    browser_jev: Literal["on", "shadow", "off"] = "shadow"
+    browser_jev_min_p: float = 0.8
+    browser_jev_timeout_s: float = 4.0
+    browser_max_steps: int = 15
     # Hold a scratchpad cell that changes a database; deletes, renames, moves
     # or overwrites a file that existed when the turn began; or sends an HTTP
     # PUT, PATCH or DELETE, until the user picks Approve; anything else
