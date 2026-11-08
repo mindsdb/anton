@@ -1,0 +1,117 @@
+{
+  "description": "BrowserConfig. A turn request's params.browser is the router block, written by BrowserConfig.to_dict and read by BrowserConfig.from_dict, which refuses any block with a token key or any address but the https router. The in-app desktop browser's config is built in the host's process with the constructor, from exactly http://127.0.0.1:<port> and that launch's key, and has no dict form.",
+  "examples": {
+    "the router block": {
+      "where": "params.browser",
+      "kind": "turn_block",
+      "body": {
+        "base_url": "https://app.example.test/browser",
+        "profile": "t-0123456789abcdef01234567",
+        "project": "p-89abcdef0123456789abcdef"
+      }
+    },
+    "the router block without a project": {
+      "where": "params.browser",
+      "kind": "turn_block",
+      "body": {
+        "base_url": "https://app.example.test/browser",
+        "profile": "t-0123456789abcdef01234567"
+      }
+    },
+    "a block with a token": {
+      "where": "params.browser",
+      "kind": "turn_block",
+      "refused": true,
+      "body": {
+        "base_url": "https://app.example.test/browser",
+        "profile": "t-0123456789abcdef01234567",
+        "token": "tok-example"
+      }
+    },
+    "a block with a null token": {
+      "where": "params.browser",
+      "kind": "turn_block",
+      "refused": true,
+      "body": {
+        "base_url": "https://app.example.test/browser",
+        "profile": "t-0123456789abcdef01234567",
+        "token": null
+      }
+    },
+    "a loopback block": {
+      "where": "params.browser",
+      "kind": "turn_block",
+      "refused": true,
+      "body": {
+        "base_url": "http://127.0.0.1:51234",
+        "profile": "t-0123456789abcdef01234567",
+        "token": "launch-key-example"
+      }
+    },
+    "a plain-http router": {
+      "where": "params.browser",
+      "kind": "turn_block",
+      "refused": true,
+      "body": {
+        "base_url": "http://app.example.test/browser",
+        "profile": "t-0123456789abcdef01234567"
+      }
+    },
+    "a block without a profile": {
+      "where": "params.browser",
+      "kind": "turn_block",
+      "refused": true,
+      "body": {
+        "base_url": "https://app.example.test/browser"
+      }
+    },
+    "the in-app browser": {
+      "where": "ChatSessionConfig.browser",
+      "kind": "constructor",
+      "body": {
+        "base_url": "http://127.0.0.1:51234",
+        "profile": "t-0123456789abcdef01234567",
+        "project": "p-89abcdef0123456789abcdef",
+        "token": "launch-key-example"
+      }
+    },
+    "the in-app browser without a project": {
+      "where": "ChatSessionConfig.browser",
+      "kind": "constructor",
+      "body": {
+        "base_url": "http://127.0.0.1:51234",
+        "profile": "t-0123456789abcdef01234567",
+        "token": "launch-key-example"
+      }
+    },
+    "the in-app browser on localhost": {
+      "where": "ChatSessionConfig.browser",
+      "kind": "constructor",
+      "refused": true,
+      "body": {
+        "base_url": "http://localhost:51234",
+        "profile": "t-0123456789abcdef01234567",
+        "token": "launch-key-example"
+      }
+    },
+    "the in-app browser without its key": {
+      "where": "ChatSessionConfig.browser",
+      "kind": "constructor",
+      "refused": true,
+      "body": {
+        "base_url": "http://127.0.0.1:51234",
+        "profile": "t-0123456789abcdef01234567"
+      }
+    },
+    "the router with a token": {
+      "where": "ChatSessionConfig.browser",
+      "kind": "constructor",
+      "refused": true,
+      "body": {
+        "base_url": "https://app.example.test/browser",
+        "profile": "t-0123456789abcdef01234567",
+        "token": "launch-key-example"
+      }
+    }
+  }
+}

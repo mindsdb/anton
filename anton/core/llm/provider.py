@@ -360,19 +360,17 @@ class StreamReasoningDelta:
 
 @dataclass
 class StreamBrowserSession:
-    """The browser tool opened (or re-opened) the user's browser session.
+    """The browser tool opened (or reopened) the user's browser session.
 
-    Hosts show ``view_url`` beside the chat so the user can watch and take
-    over. It is an embed URL: the worker only lets it open this one
-    session's viewer and event stream, until ``expires_at`` (epoch seconds),
-    after which the host asks its server for a fresh one. Emitted out of
+    Hosts show the browser beside the chat so the user can watch and take
+    over: the Cowork desktop app shows its own browser, and the web app mints
+    a viewer link for the session with the person's own credential. The
+    event carries the session id only, never a link or a key. Emitted out of
     band through ``session.emit``; ``tool_use_id`` is not known to the
     handler, so hosts correlate by ``session_id``.
     """
 
     session_id: str
-    view_url: str
-    expires_at: int = 0
 
 
 @dataclass

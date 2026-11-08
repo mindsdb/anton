@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from anton.core.browser.models import Element, Page
 from anton.core.browser.page import element_line, shortlist
 
 ACTIONS = {
@@ -46,23 +47,30 @@ class StepDecision:
     error: str = ""
 
 
-def step_request(goal: str, page: dict, inputs: dict | None, history: list[str]) -> tuple[dict, dict, list[dict]]:
-    """(state, questions, shortlisted elements) for one step."""
-    candidates = shortlist(page.get("elements", []), goal, inputs)
+def step_request(
+    *, goal: str, page: Page, inputs: dict | None, history: list[str], redact: bool,
+) -> tuple[dict, dict, list[Element]]:
+    """(state, questions, shortlisted elements) for one step.
+
+    ``redact`` leaves out what is in the page's fields and the values in
+    ``inputs``, for a call that only measures how often Jev agrees with the
+    model: the ``input_key`` question still lists the inputs by name.
+    """
+    candidates = shortlist(page.elements, goal, inputs)
     state = {
         "goal": goal,
         "page": {
-            "url": page.get("url", ""),
-            "title": page.get("title", ""),
-            "elements": [element_line(el) for el in candidates],
-            "text": (page.get("text") or "")[:1500],
+            "url": page.url,
+            "title": page.title,
+            "elements": [element_line(el, values=not redact) for el in candidates],
+            "text": page.text[:1500],
         },
         "steps_so_far": history[-8:],
     }
-    if inputs:
+    if inputs and not redact:
         state["inputs"] = {str(k): str(v) for k, v in inputs.items()}
 
-    targets = {f"e{el['id']}": element_line(el) for el in candidates}
+    targets = {f"e{el.id}": element_line(el, values=not redact) for el in candidates}
     targets[NO_TARGET] = "No listed element is the right one to act on next."
     questions: dict = {
         "next_action": {
@@ -126,12 +134,14 @@ def parse_step(decision) -> StepDecision:
     )
 
 
-def signed_in_request(page: dict) -> tuple[dict, dict]:
+def signed_in_request(page: Page) -> tuple[dict, dict]:
+    """Whether the person is signed in, asked after they hand the browser back.
+    The page's field values stay out: the question needs only its shape."""
     state = {
-        "url": page.get("url", ""),
-        "title": page.get("title", ""),
-        "elements": [element_line(el) for el in page.get("elements", [])[:80]],
-        "text": (page.get("text") or "")[:1500],
+        "url": page.url,
+        "title": page.title,
+        "elements": [element_line(el, values=False) for el in page.elements[:80]],
+        "text": page.text[:1500],
     }
     questions = {
         "signed_in": {

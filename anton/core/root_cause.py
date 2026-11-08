@@ -242,19 +242,52 @@ _SENTINEL_REASONS = {
     # wall, with nothing here to tell them apart — stays out of every trip
     # rung, same reasoning as `read_failed`/`bmp_convert_failed` above.
     "mcp_tool_error": (TIER_UNCLASSIFIED, "unclassified"),
-    # The browser tool (ENG-3296). A malformed step, or an element number from
+    # The browser tool. A malformed step, or an element number from
     # a page that has since changed: the agent re-reads the page and fixes it.
     "browser_bad_input": (TIER_SELF, "invalid_argument"),
     "browser_stale_element": (TIER_SELF, "unknown_resource"),
     # The agent tried to act while the user holds the browser (a hand-over in
     # progress). Waiting is the fix, and the agent caused the clash: self.
     "browser_human_in_control": (TIER_SELF, "invalid_argument"),
-    # The worker refused the session's credential: the user has to reconnect
-    # MindsHub, the agent cannot fix it by retrying (same as a 401).
+    # The agent tried to type into a password, code or card field, which only
+    # the user fills. The tool or the browser refused it; handing over is the fix.
+    "browser_secret_field": (TIER_SELF, "invalid_argument"),
+    # A step held for the user's Approve and not approved: their call, like a
+    # held cell, never a wall.
+    "browser_step_not_approved": (TIER_SELF, "invalid_argument"),
+    # A dialog is open, or the page didn't answer a read in time. Closing the
+    # dialog or waiting is the fix.
+    "browser_page_blocked": (TIER_TRANSIENT, "browser_page_blocked"),
+    # The browser refused the session's credential: the user has to reconnect
+    # MindsHub, or the desktop app's browser restarted. The agent cannot fix
+    # it by retrying (same as a 401).
     "browser_unauthorized": (TIER_WALL, "auth_missing"),
-    # The instance is starting, waking from idle, or unreachable for a moment.
+    # The router doesn't know this turn's key: the host never scoped the turn,
+    # so no call in it can work. The next message's turn is scoped afresh.
+    "browser_unscoped": (TIER_WALL, "browser_unscoped"),
+    # The user's account doesn't have the browser.
+    "browser_not_entitled": (TIER_WALL, "browser_not_entitled"),
+    # The account used today's browsing allowance; nothing works until it resets.
+    "browser_daily_limit": (TIER_WALL, "browser_daily_limit"),
+    # A call outside the turn's own browser session or project, or with a
+    # credential the browser never takes: the tool sends neither, so code
+    # that used the turn's key directly did. Retrying can't fix it.
+    "browser_out_of_scope": (TIER_WALL, "browser_out_of_scope"),
+    "browser_forbidden": (TIER_WALL, "browser_forbidden"),
+    # MindsHub couldn't confirm the account's browser access for a moment.
+    "browser_entitlements_unavailable": (TIER_TRANSIENT, "service_unavailable"),
+    # Every browser is busy, or this person's browser runs its most tasks at once.
+    "browser_at_capacity": (TIER_TRANSIENT, "browser_at_capacity"),
+    # The site's edge firewall blocked typed text before it reached the
+    # browser; rewording the text is the fix.
+    "browser_edge_blocked": (TIER_SELF, "invalid_argument"),
+    # A host refused the agent a change only the person may make. The tool
+    # never asks for one, so reaching this says nothing about whose fault it is.
+    "browser_person_only": (TIER_UNCLASSIFIED, "unclassified"),
+    # The browser is starting, waking from idle, or unreachable for a moment.
     "browser_unreachable": (TIER_TRANSIENT, "service_unavailable"),
-    # Any other error the service reported; its code doesn't say whose fault.
+    # Any other error the browser reported, or an answer the tool couldn't
+    # read; its code doesn't say whose fault.
     "browser_error": (TIER_UNCLASSIFIED, "unclassified"),
 }
 
