@@ -27,8 +27,8 @@ full-weight against the gateway TPM limiter).
 Stated gaps (by design, documented on ENG-1288):
 - usage on errored/aborted calls may be absent from the provider — the turn
   undercounts rather than crashes;
-- LLM use inside scratchpad user code (``get_llm``) happens in a separate
-  process and is never seen here;
+- LLM and image use inside scratchpad user code (``get_llm``,
+  ``generate_image``) happens in a separate process and is never seen here;
 - post-turn background work (cerebellum flush, identity extraction) runs
   after the turn's books close and is not attributed to any turn;
 - retried calls count every attempt — retries cost real money.
@@ -54,15 +54,17 @@ from anton.core.llm.provider import Usage
 # the log line keeps the model (`unknown=haiku:320/1`), which is usually enough
 # to find the caller.
 UNKNOWN_ROLE = "unknown"
-EVENT_ROLES = ("planning", "coding", "router", UNKNOWN_ROLE)
+# `image` (ENG-4024): calls to the images API, through `LLMClient.generate_image`.
+# Its tokens are mostly image tokens, which `TurnCost` also keeps apart.
+EVENT_ROLES = ("planning", "coding", "router", "image", UNKNOWN_ROLE)
 
 
 @dataclass
 class RoleCost:
     """One role's slice of a turn: which model ran it and what it spent.
 
-    Roles are a closed set (planning / coding / router), which is why the turn
-    event can carry this as flat properties instead of a nested blob.
+    Roles are a closed set (planning / coding / router / image), which is why
+    the turn event can carry this as flat properties instead of a nested blob.
 
     ``model`` is the alias anton REQUESTED. The gateway may resolve or fail
     over to a different model server-side; it does echo the resolved id on the
@@ -96,6 +98,11 @@ class TurnCost:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
+    # Image tokens of image calls (ENG-4024): reference images in, pictures
+    # out. Kept apart from the text components above because they bill at
+    # their own rates; an image call's text prompt counts in `input_tokens`.
+    image_input_tokens: int = 0
+    image_output_tokens: int = 0
     llm_calls: int = 0
     # Largest single-call context (input + cache_read + cache_creation) seen
     # this turn. Together with ``rounds`` this classifies expensive turns by
@@ -314,6 +321,14 @@ class TurnCost:
         self.output_tokens += usage.output_tokens
         self.cache_read_tokens += usage.cache_read_tokens
         self.cache_creation_tokens += usage.cache_creation_tokens
+        # getattr: a host or test double may hand in a Usage-like object that
+        # predates the image fields.
+        image_tokens = (
+            getattr(usage, "image_input_tokens", 0) or 0,
+            getattr(usage, "image_output_tokens", 0) or 0,
+        )
+        self.image_input_tokens += image_tokens[0]
+        self.image_output_tokens += image_tokens[1]
         self.peak_context_tokens = max(self.peak_context_tokens, usage.context_tokens)
         self.last_activity_monotonic = time.monotonic()
         # Any role the event doesn't emit — empty OR novel (a future caller
@@ -330,17 +345,24 @@ class TurnCost:
             usage.input_tokens
             + usage.output_tokens
             + usage.cache_read_tokens
-            + usage.cache_creation_tokens,
+            + usage.cache_creation_tokens
+            + sum(image_tokens),
         )
 
     @property
     def total_tokens(self) -> int:
-        """All four components summed — ENG-1286's ceiling reads this."""
+        """Every component summed — ENG-1286's ceiling reads this.
+
+        Image tokens are in it, so the per-role sums still reconcile with the
+        total and a turn's pictures count against its spend ceiling too.
+        """
         return (
             self.input_tokens
             + self.output_tokens
             + self.cache_read_tokens
             + self.cache_creation_tokens
+            + self.image_input_tokens
+            + self.image_output_tokens
         )
 
     @property

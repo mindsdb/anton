@@ -431,6 +431,7 @@ _ALL_HANDLERS = frozenset({
     "handle_create_artifact",
     "handle_create_skill_draft",
     "handle_generate_artifact",
+    "handle_generate_image",
     "handle_launch_backend",
     "handle_list_artifacts",
     "handle_memorize",
@@ -458,6 +459,10 @@ _VERDICT_DECLARING_HANDLERS = frozenset({
     # deliberately mapped to `unclassified` in root_cause.py because the string
     # the FSM returns names the node it stopped at, not the cause.
     "handle_generate_artifact",
+    # ENG-4024, streaming: tier 1 when the image is saved, tier 2 on every
+    # failure, each with a reason tiered in root_cause.py (a safety refusal
+    # self-inflicted, a rate limit transient, no credits a wall).
+    "handle_generate_image",
     "handle_list_artifacts",
     "handle_memorize",
     "handle_read_image",

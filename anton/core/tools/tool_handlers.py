@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -1258,6 +1259,33 @@ def track_edits_since(session: "ChatSession", store, before: dict[str, ArtifactF
         files = after.get(slug)
         if files is not None and files != files_before and slug not in already_touched:
             _track_artifact(session, store, slug, summary="Edited via scratchpad")
+    # Artifacts the cell CREATED, such as the image artifact the pad's
+    # `generate_image()` registers. A sibling conversation can create one in
+    # the same window, so a new folder is claimed only when its provenance
+    # names this conversation, which the helper stamps the way
+    # `_track_artifact` does (cowork-server's cloud path claims by the same
+    # stamp). A session with no conversation (the CLI) shares its folder with
+    # nobody and claims what appeared. Added to the set directly: the folder
+    # already carries this turn's provenance.
+    conversation = str(getattr(session, "_session_id", "") or "")
+    for slug in sorted(after.keys() - before.keys()):
+        if slug in already_touched:
+            continue
+        if conversation and _provenance_origin(store, slug) != conversation:
+            continue
+        with contextlib.suppress(AttributeError):
+            session._artifacts_touched.add(slug)
+
+
+def _provenance_origin(store, slug: str) -> str | None:
+    """The conversation that created `slug`: the first in its provenance."""
+    try:
+        artifact = store.read_metadata(slug)
+    except (OSError, ValueError):
+        return None
+    if artifact is None or not artifact.provenance:
+        return None
+    return artifact.provenance[0].conversation
 
 
 async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> ToolOutcome:
@@ -2939,6 +2967,362 @@ async def handle_read_image(
         ],
         ok=True,
     )
+
+
+# `ImageGenerationError.code` -> the tool's failure reason, each tiered in
+# `root_cause._SENTINEL_REASONS`. A code not listed is `image_failed`.
+_IMAGE_FAILURE_REASONS = {
+    "moderation_blocked": "image_refused",
+    "rate_limited": "image_transient",
+    "provider_error": "image_transient",
+    "connection_error": "image_transient",
+    "no_image": "image_transient",
+    "unavailable": "image_unavailable",
+    "unsupported_model_kind": "image_unavailable",
+    "model_not_found": "image_unavailable",
+    "model_restricted": "image_unavailable",
+    "model_access_denied": "image_unavailable",
+    "model_disabled": "image_unavailable",
+    "wallet_empty": "image_unavailable",
+    "included_allowance_exhausted": "image_unavailable",
+    "free_air_daily_spend_fuse_exceeded": "image_unavailable",
+    "payment_required": "image_unavailable",
+    "auth": "image_unavailable",
+}
+
+# Where the project keeps its artifacts, as a project path, on every host: the
+# desktop has them under the workspace, and a cloud pod mounts the project's
+# folder at a path of its own (ANTON_CLOUD_ARTIFACTS_ROOT). Cowork reads a
+# file by its project path (`files-raw/<path>`).
+_PROJECT_ARTIFACTS = (".anton", "artifacts")
+
+
+def _image_roots(session: "ChatSession") -> "tuple[Path, Path | None]":
+    """The workspace base, and the artifacts root when the session has one."""
+    workspace = getattr(session, "_workspace", None)
+    base = getattr(workspace, "base", None)
+    artifacts = getattr(workspace, "artifacts_dir", None)
+    return (
+        Path(base) if isinstance(base, (str, Path)) else Path.cwd(),
+        Path(artifacts) if isinstance(artifacts, (str, Path)) else None,
+    )
+
+
+def _image_path(session: "ChatSession", text: str, policy: "CellSandbox | None") -> Path:
+    """`text` as an absolute path, unresolved: as given when absolute (or
+    `~`), under the artifacts root when it starts `.anton/artifacts/` (true on
+    a cloud pod, whose artifacts sit outside its workspace), else under the
+    workspace."""
+    path = _expand_home(text, policy)
+    if path.is_absolute():
+        return path
+    base, artifacts = _image_roots(session)
+    parts = Path(text.replace("\\", "/")).parts
+    if artifacts is not None and parts[: len(_PROJECT_ARTIFACTS)] == _PROJECT_ARTIFACTS:
+        return artifacts.joinpath(*parts[len(_PROJECT_ARTIFACTS):])
+    return base / path
+
+
+def _project_path(session: "ChatSession", saved: Path) -> str:
+    """`saved` as a path relative to the project root, the form Cowork's
+    `files-raw` route resolves; the absolute path when it is in neither root."""
+    base, artifacts = _image_roots(session)
+    for root, prefix in ((base, ()), (artifacts, _PROJECT_ARTIFACTS)):
+        if root is None:
+            continue
+        try:
+            rel = saved.resolve().relative_to(root.resolve())
+        except (ValueError, OSError):
+            continue
+        return Path(*prefix, rel).as_posix()
+    return str(saved)
+
+
+def _relative_inside(target: Path, root: Path) -> "Path | None":
+    """`target` relative to `root` when it is inside it, as written or once
+    links resolve (a path copied from a resolved listing); else None."""
+    try:
+        return target.relative_to(os.path.normpath(root))
+    except ValueError:
+        pass
+    try:
+        return target.resolve().relative_to(root.resolve())
+    except (ValueError, OSError, RuntimeError):
+        return None
+
+
+class _ImageDestination(NamedTuple):
+    """Where `generate_image` writes: ``slug`` None makes a new image artifact."""
+
+    directory: Path | None
+    root: Path | None
+    stem: str | None
+    slug: str | None
+
+
+def _image_destination(session: "ChatSession", store, filename: str | None) -> "_ImageDestination | str":
+    """Where the `filename` argument says to write, or the reason it may not.
+
+    A bare name (or none) makes a new image artifact. A path writes there: in
+    an existing artifact's folder (`.anton/artifacts/<slug>/...`, so the
+    artifact can use the image) or elsewhere in the project. Never in a
+    dot-folder otherwise, never outside the project, never through `..`.
+    """
+    if filename is None or ("/" not in filename and "\\" not in filename):
+        return _ImageDestination(None, None, None, None)
+    if ".." in Path(filename.replace("\\", "/")).parts:
+        return f"filename may not climb out of a folder with '..': {filename}"
+    policy = cell_sandbox_of(getattr(session, "_scratchpads", None))
+    try:
+        target = Path(os.path.normpath(_image_path(session, filename, policy)))
+    except (OSError, RuntimeError, ValueError) as exc:
+        return f"invalid filename '{filename}': {exc}"
+    base, artifacts = _image_roots(session)
+    if not target.name or not target.stem:
+        return f"filename must end in a file name: {filename}"
+    for root, is_artifacts in ((artifacts, True), (base, False)):
+        if root is None:
+            continue
+        rel = _relative_inside(target, root)
+        if rel is None or not rel.parts:
+            continue
+        directory = root.joinpath(*rel.parts[:-1])
+        if is_artifacts:
+            if len(rel.parts) < 2:
+                return f"name an artifact's folder and a file in it, as in .anton/artifacts/<slug>/image.png: {filename}"
+            if any(part.startswith(".") for part in rel.parts):
+                return f"filename may not be a dot-file or in a dot-folder: {filename}"
+            if store.read_metadata(rel.parts[0]) is None:
+                return (
+                    f"there is no artifact '{rel.parts[0]}': register it with create_artifact "
+                    "first, or pass a bare file name to save the image as an artifact of its own."
+                )
+            return _ImageDestination(directory, root, target.stem, rel.parts[0])
+        if any(part.startswith(".") for part in rel.parts):
+            return (
+                f"filename may not be a dot-file or in a dot-folder, except an artifact's "
+                f"folder under .anton/artifacts/: {filename}"
+            )
+        return _ImageDestination(directory, root, target.stem, None)
+    return f"filename must be inside the project: {filename}"
+
+
+def _image_references(session: "ChatSession", raw: object) -> "tuple[list, str | None]":
+    """The `reference_images` argument read into `ReferenceImage`s, or an error.
+
+    Resolved like `read_image` resolves its path: relative to the project
+    (`.anton/artifacts/...` under the artifacts root), `~` as the person's
+    cells see it, and under a sandbox policy only what their cells may read.
+    """
+    from anton.core.llm.images import MAX_REFERENCE_IMAGES, load_reference_image
+
+    if raw is None or raw == "" or raw == []:
+        return [], None
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        return [], "reference_images must be a list of image file paths."
+    texts = [item.strip() for item in raw if item.strip()]
+    if len(texts) > MAX_REFERENCE_IMAGES:
+        return [], f"at most {MAX_REFERENCE_IMAGES} reference images can be passed, not {len(texts)}."
+    policy = cell_sandbox_of(getattr(session, "_scratchpads", None))
+    refs = []
+    for text in texts:
+        try:
+            path = _image_path(session, text, policy).resolve()
+        except (OSError, RuntimeError, ValueError) as exc:
+            return [], f"invalid path '{text}': {exc}"
+        if policy is not None and not policy.allows_read(path):
+            return [], (
+                f"access denied: {text} is outside the files this conversation may read. "
+                "If the user wants it edited, ask them to attach it to the conversation."
+            )
+        try:
+            refs.append(load_reference_image(path))
+        except ValueError as exc:
+            return [], f"reference image {text}: {exc}."
+    return refs, None
+
+
+async def handle_generate_image(session: "ChatSession", tc_input: dict):
+    """Generate (or, with `reference_images`, edit) one image and save it
+    (ENG-4024): as a new `image` artifact, or where `filename` says — in an
+    existing artifact's folder, or elsewhere in the project.
+
+    An async generator: a progress line while the provider works, then the
+    `ToolOutcome`. The result is JSON naming the saved file, never the image
+    itself — base64 in a tool result would fill the context with nothing the
+    model can read. Its `path` is relative to the project root, the form
+    Cowork reads a file by; `ChatSession` relays the same JSON to the host as
+    a `StreamToolResult` so the picture can show inline.
+
+    Refused before any request when the turn has made `max_images_per_turn`
+    images already, or when `filename` names a place it may not write.
+    """
+    from anton.core.llm.images import (
+        DEFAULT_MAX_IMAGES,
+        ImageGenerationError,
+        file_stem,
+        image_title,
+        normalize_quality,
+        normalize_size,
+        output_format_for,
+        usage_summary,
+        write_new_image_file,
+    )
+    import asyncio
+
+    from anton.core.llm.provider import ProviderAuthError
+    from anton.core.tools.progress import ToolProgress
+
+    prompt = tc_input.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        yield ToolOutcome(content="Error: prompt is required.", ok=False, reason="missing_name")
+        return
+    prompt = prompt.strip()
+    filename = tc_input.get("filename")
+    filename = filename.strip() if isinstance(filename, str) and filename.strip() else None
+    try:
+        size = normalize_size(tc_input.get("size"))
+        quality = normalize_quality(tc_input.get("quality"))
+        output_format = output_format_for(filename)
+    except ValueError as exc:
+        yield ToolOutcome(content=f"Error: {exc}.", ok=False, reason="invalid_type")
+        return
+
+    store = resolve_artifact_store(session)
+    if store is None:
+        yield ToolOutcome(
+            content="Error: no project is bound to this session, so there is nowhere to save an image.",
+            ok=False, reason="store_unavailable",
+        )
+        return
+
+    destination = _image_destination(session, store, filename)
+    if isinstance(destination, str):
+        yield ToolOutcome(content=f"Error: {destination}", ok=False, reason="invalid_path")
+        return
+
+    limit = getattr(session, "_max_images_per_turn", DEFAULT_MAX_IMAGES)
+    used = getattr(session, "_images_this_turn", 0)
+    if used >= limit:
+        yield ToolOutcome(
+            content=(
+                f"Error: no image was made. This turn already asked for {used} image(s), the most "
+                f"one turn may (ANTON_MAX_IMAGES_PER_TURN={limit}), so no request was sent. Finish "
+                "with the images you have and tell the user; they can ask for more in their next message."
+            ),
+            ok=False, reason="image_limit",
+        )
+        return
+
+    # Off the event loop: a reference image can be tens of megabytes, and the
+    # host serves other turns from this loop.
+    refs, ref_error = await asyncio.to_thread(
+        _image_references, session, tc_input.get("reference_images")
+    )
+    if ref_error is not None:
+        yield ToolOutcome(content=f"Error: {ref_error}", ok=False, reason="invalid_path")
+        return
+    # Counted before the call: a refused or failed request may still be billed,
+    # and a loop of refusals must hit the cap too.
+    with contextlib.suppress(AttributeError):
+        session._images_this_turn = used + 1
+
+    llm = session._llm
+    model = await llm.resolve_image_model()
+    yield ToolProgress(f"{'Editing an image' if refs else 'Generating an image'} with {model}")
+    try:
+        result = await llm.generate_image(
+            prompt=prompt,
+            size=size,
+            quality=quality,
+            output_format=output_format,
+            reference_images=refs,
+            model=model,
+        )
+    except ImageGenerationError as exc:
+        yield ToolOutcome(
+            content=f"Error: {exc}",
+            ok=False, reason=_IMAGE_FAILURE_REASONS.get(exc.code, "image_failed"),
+        )
+        return
+    except ProviderAuthError as exc:
+        yield ToolOutcome(
+            content=f"Error: {exc} No image was made; tell the user to check their sign-in or API key.",
+            ok=False, reason=_IMAGE_FAILURE_REASONS["auth"],
+        )
+        return
+
+    title = image_title(filename, prompt)
+    new_artifact = destination.directory is None
+    if new_artifact:
+        stem = file_stem(filename, prompt)
+        artifact = store.create(
+            name=title,
+            description=(("Edited image: " if refs else "Generated image: ") + prompt)[:500],
+            type="image",
+            primary=f"{stem}.{result.extension}",
+        )
+        slug = artifact.slug
+        directory, root = store.folder_for(slug), store.root
+    else:
+        slug = destination.slug
+        directory, root = destination.directory, destination.root
+        stem = file_stem(destination.stem, prompt)
+    try:
+        saved = write_new_image_file(result.data, directory, stem, result.extension, root=root)
+    except (OSError, ValueError) as exc:
+        if new_artifact:
+            from anton.utils.nofollow import rmtree_nofollow
+
+            with contextlib.suppress(OSError, ValueError):
+                rmtree_nofollow(store.root, directory)
+        yield ToolOutcome(
+            content=f"Error: the image was generated but could not be saved: {exc}",
+            ok=False, reason="image_failed",
+        )
+        return
+    if slug is not None:
+        _track_artifact(
+            session, store, slug,
+            summary=f"Generated image: {title}" if new_artifact else f"Added image {saved.name}",
+        )
+
+    payload: dict = {
+        "status": "generated",
+        # Relative to the project root, so a host can read it by that path;
+        # `absolute_path` is what this process's tools and cells open.
+        "path": _project_path(session, saved),
+        "absolute_path": str(saved),
+        "artifact_slug": slug,
+        "mime_type": result.mime_type,
+        "width": result.width,
+        "height": result.height,
+        "bytes": len(result.data),
+        "model": result.model,
+        "usage": usage_summary(result.usage),
+        "images_left_this_turn": max(0, limit - used - 1),
+    }
+    if refs:
+        payload["edited_from"] = [ref.name for ref in refs]
+    if result.revised_prompt:
+        payload["revised_prompt"] = result.revised_prompt
+    if new_artifact:
+        where = f"Saved as the image artifact `{slug}`, which the user can open."
+    elif slug is not None:
+        where = (
+            f"Saved in the folder of artifact `{slug}`: reference it from that artifact by its "
+            f"path inside the folder ({saved.relative_to(store.folder_for(slug)).as_posix()})."
+        )
+    else:
+        where = "Saved in the project."
+    payload["note"] = (
+        f"{where} The picture is not in your context: describe it from your prompt, or "
+        "read_image `absolute_path` if you must check it. To use it in a page generate_artifact "
+        "builds, pass `absolute_path` in its `attachments`."
+    )
+    yield ToolOutcome(content=json.dumps(payload), ok=True)
 
 
 def _expand_home(file_path: str, policy: "CellSandbox | None") -> Path:

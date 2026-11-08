@@ -92,6 +92,14 @@ class AntonSettings(CoreSettings):
     router_provider: str | None = None
     router_model: str | None = None
 
+    # Image role (ENG-4024) — the model the `generate_image` tool and the
+    # scratchpad's `generate_image()` ask for (ANTON_IMAGE_MODEL). It has no
+    # provider of its own: images go to the OpenAI images API on the endpoint
+    # and key of a role already on MindsHub or OpenAI. Unset resolves per call:
+    # on MindsHub, the alias its catalogue marks `default_for: ["image"]`; else
+    # `anton.core.llm.images.DEFAULT_IMAGE_MODEL`.
+    image_model: str | None = None
+
     max_tokens: int = 8192  # max output tokens per LLM call
 
     anthropic_api_key: str | None = None

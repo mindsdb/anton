@@ -278,12 +278,8 @@ def list_models(base_url: str, api_key: str, verify: bool = True) -> list[str]:
     Short timeout: the catalogue is advisory (callers fall back to defaults),
     so it must not double the worst-case spinner hang of the probe itself.
     """
-    url = f"{minds_v1_base(base_url)}/models"
-    raw = minds_request(url, api_key, verify=verify, timeout=10)
-    data = _json.loads(raw.decode())
-    entries = data.get("data") if isinstance(data, dict) else data
     ids: list[str] = []
-    for entry in entries or []:
+    for entry in fetch_model_catalog(base_url, api_key, verify=verify):
         if not isinstance(entry, dict) or not entry.get("id"):
             continue
         # Older hosts send no kind; their rows fall through to the
@@ -298,6 +294,49 @@ def list_models(base_url: str, api_key: str, verify: bool = True) -> list[str]:
             continue
         ids.append(model_id)
     return ids
+
+
+def fetch_model_catalog(
+    base_url: str, api_key: str, verify: bool = True, *, timeout: int = 10
+) -> list[dict]:
+    """The rows of ``GET /v1/models``, unfiltered. Raises like `minds_request`.
+
+    `list_models` reads the chat models from it and `role_default_model` the
+    alias auth names as a role's default.
+    """
+    url = f"{minds_v1_base(base_url)}/models"
+    raw = minds_request(url, api_key, verify=verify, timeout=timeout)
+    data = _json.loads(raw.decode())
+    entries = data.get("data") if isinstance(data, dict) else data
+    return [entry for entry in entries or [] if isinstance(entry, dict)]
+
+
+def usable_models_of_kind(entries: list[dict], kind: str) -> list[str]:
+    """The ids of the catalogue rows of ``kind`` the key may use (not ``enabled: false``)."""
+    return [
+        str(entry["id"])
+        for entry in entries
+        if entry.get("id") and entry.get("kind") == kind and entry.get("enabled") is not False
+    ]
+
+
+def role_default_model(entries: list[dict], role: str, *, kind: str | None = None) -> str | None:
+    """The id of the catalogue row whose ``default_for`` names ``role``, or None.
+
+    ``kind`` also requires the row's ``kind``, so a misconfigured catalogue
+    cannot hand a chat model to the images API. A row the key may not use
+    (``enabled: false``) is skipped like `list_models` skips it.
+    """
+    for entry in entries:
+        default_for = entry.get("default_for")
+        if not entry.get("id") or not isinstance(default_for, list) or role not in default_for:
+            continue
+        if kind is not None and entry.get("kind") != kind:
+            continue
+        if entry.get("enabled") is False:
+            continue
+        return str(entry["id"])
+    return None
 
 
 @dataclass

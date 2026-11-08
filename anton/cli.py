@@ -73,6 +73,7 @@ def _build_scratchpad_manager(
         coding_api_key=coding_conn.api_key or "",
         coding_base_url=coding_conn.base_url or "",
         coding_flavor=coding_conn.flavor,
+        image_model=llm_client.image_model,
         workspace_path=settings.workspace_path,
         # Without a vault the manager cannot derive a pad's DS_* and the pad
         # falls back to inheriting the whole process env.

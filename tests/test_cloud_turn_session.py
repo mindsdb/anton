@@ -391,6 +391,20 @@ def test_llm_block_without_coding_model_keeps_default(tmp_path, monkeypatch):
     assert cfg.settings.coding_model == default
 
 
+@pytest.mark.parametrize("block, expected", [
+    ({"image_model": "gpt-image-2.6-sunburst"}, "gpt-image-2.6-sunburst"),
+    ({}, None),  # unset: the session reads the MindsHub catalogue (ENG-4024)
+])
+def test_llm_block_image_model_applied(tmp_path, monkeypatch, block, expected):
+    monkeypatch.delenv("ANTON_IMAGE_MODEL", raising=False)
+    _, cfg = _build(
+        tmp_path, monkeypatch,
+        llm={"provider": "minds-cloud", "api_key": "mdb_turnkey",
+             "base_url": "https://api.mindshub.ai/v1", **block},
+    )
+    assert cfg.settings.image_model == expected
+
+
 def test_cloud_session_without_llm_block_falls_back_to_env(tmp_path, monkeypatch):
     # Back-compat: no llm block on the request means env-based settings, same
     # as before this request field existed. Hermetic env: earlier tests that
@@ -668,7 +682,9 @@ def test_final_tool_set_equals_allowlist_after_real_build(tmp_path, monkeypatch)
 
     session._build_tools()
     names = {t.name for t in session.tool_registry.get_tool_defs()}
-    assert names == set(CLOUD_TOOL_ALLOWLIST), (
+    # `generate_image` is withheld where no images API serves it, as with
+    # this mock client (ENG-4024); every other allowlisted tool is built.
+    assert names == set(CLOUD_TOOL_ALLOWLIST) - {"generate_image"}, (
         f"cloud tool set drifted from the allowlist: {sorted(names)}"
     )
 
@@ -884,7 +900,8 @@ def test_memorize_is_offered_with_or_without_existing_memory(tmp_path, monkeypat
         session = _real_cloud_session(tmp_path, monkeypatch, **overrides)
         session._build_tools()
         names = {t.name for t in session.tool_registry.get_tool_defs()}
-        assert names == set(CLOUD_TOOL_ALLOWLIST)
+        # `generate_image` is withheld with no images API (ENG-4024).
+        assert names == set(CLOUD_TOOL_ALLOWLIST) - {"generate_image"}
         assert "memorize" in names
 
 
@@ -1481,6 +1498,8 @@ def test_no_pod_tool_can_capture_a_credential(tmp_path, monkeypatch):
         "memorize",
         "recall_skill",
         "create_skill_draft",
+        # Takes a prompt and image paths: nothing a credential could ride in.
+        "generate_image",
     }
 
 

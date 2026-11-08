@@ -84,6 +84,7 @@ class ScratchpadManager:
         coding_api_key_supplier: ApiKeySupplier | None = None,
         coding_flavor: str | None = None,
         internet_research_enabled: bool = True,
+        image_model: str | None = None,
     ) -> None:
         self._pads: dict[str, ScratchpadRuntime] = {}
         self._runtime_factory = runtime_factory
@@ -124,6 +125,10 @@ class ScratchpadManager:
         self._factory_takes_internet_research = self._probe_factory_kwarg(
             runtime_factory, "internet_research_enabled"
         )
+        # The image model the pads' generate_image() asks for; None leaves a
+        # pad to resolve it itself (`anton.core.llm.images.resolve_image_model`).
+        self._image_model = image_model.strip() if isinstance(image_model, str) and image_model.strip() else None
+        self._factory_takes_image_model = self._probe_factory_kwarg(runtime_factory, "image_model")
         global _warned_no_internet_research_kwarg
         if (not internet_research_enabled and not self._factory_takes_internet_research
                 and not _warned_no_internet_research_kwarg):
@@ -378,6 +383,11 @@ class ScratchpadManager:
                 **(
                     {"internet_research_enabled": False}
                     if not self._internet_research_enabled and self._factory_takes_internet_research
+                    else {}
+                ),
+                **(
+                    {"image_model": self._image_model}
+                    if self._factory_takes_image_model and self._image_model is not None
                     else {}
                 ),
             )
