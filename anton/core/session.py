@@ -392,6 +392,7 @@ if TYPE_CHECKING:
     from rich.console import Console
     from anton.context.self_awareness import SelfAwarenessContext
     from anton.chat_ui import EscapeWatcher
+    from anton.core.browser.config import BrowserConfig
     from anton.core.artifacts.live_app_slots import LiveAppHost
     from anton.core.llm.client import LLMClient
     from anton.core.mcp.client import McpSession
@@ -1903,6 +1904,11 @@ class ChatSessionConfig:
     # `ChatSession.close()` can tear them down at turn end, the same way it
     # already closes the LLM client's transports.
     mcp_sessions: list["McpSession"] = field(default_factory=list)
+    # The browser the `browser` tool drives; the tool is registered only with
+    # one. Hosts pass it: cowork-server for the Cowork desktop app's own
+    # browser, and the cloud pod for the MindsHub browser router. None means no
+    # browser tool, and nothing falls back to settings or the environment.
+    browser: "BrowserConfig | None" = None
 
 
 class ChatSession:
@@ -2036,6 +2042,8 @@ class ChatSession:
         # skill is recalled. Populated in `_build_tools`.
         self._deferred_bundles: dict[str, list["ToolDef"]] = {}
         self._workspace = config.workspace
+        self._browser_config = config.browser
+        self._browser_state = None
         self._data_vault = config.data_vault
         self._connector_usage_notes = config.connector_usage_notes
         # Kept so an artifact backend can be given the same project .env the
@@ -3445,6 +3453,14 @@ class ChatSession:
                 self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
             self.tool_registry.register_tool(generate)
 
+        # The shared browser: only when the host gave one. The credential is
+        # resolved per call, so a session without one still registers it and
+        # the tool reports the missing login itself.
+        if self._browser_config is not None:
+            from anton.core.browser.tool import build_browser_tool
+
+            self.tool_registry.register_tool(build_browser_tool())
+
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""
         try:
@@ -3466,6 +3482,8 @@ class ChatSession:
                 # Provider clients own an HTTP pool. This runs even if the
                 # steps above raise, or the pool outlives the process.
                 try:
+                    if self._browser_state is not None:
+                        await self._browser_state.aclose()
                     if self._jev_http is not None:
                         await self._jev_http.aclose()
                 finally:

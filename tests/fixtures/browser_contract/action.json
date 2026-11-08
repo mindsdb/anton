@@ -1,0 +1,110 @@
+{
+  "description": "POST /sessions/{id}/action: one step. x and y with coords \"screenshot\" are pixels on the latest screenshot, which the host scales back to the page. A point wins over an element when a step has both. The answer carries the page after the step when include_page is true.",
+  "examples": {
+    "click an element": {
+      "where": "POST /sessions/{id}/action",
+      "kind": "request",
+      "body": {
+        "action": "click",
+        "element": 7,
+        "include_page": true
+      }
+    },
+    "type and submit": {
+      "where": "POST /sessions/{id}/action",
+      "kind": "request",
+      "body": {
+        "action": "type",
+        "element": 1,
+        "text": "MacBook Air",
+        "submit": true,
+        "include_page": true
+      }
+    },
+    "click at a point on the screenshot": {
+      "where": "POST /sessions/{id}/action",
+      "kind": "request",
+      "body": {
+        "action": "click",
+        "x": 412,
+        "y": 230,
+        "include_page": true,
+        "coords": "screenshot"
+      }
+    },
+    "press Enter in an element": {
+      "where": "POST /sessions/{id}/action",
+      "kind": "request",
+      "body": {
+        "action": "press",
+        "key": "Enter",
+        "element": 2,
+        "include_page": true
+      }
+    },
+    "drag from an element to a point": {
+      "where": "POST /sessions/{id}/action",
+      "kind": "request",
+      "body": {
+        "action": "drag",
+        "from": {
+          "element": 5
+        },
+        "to": {
+          "x": 600,
+          "y": 300
+        },
+        "include_page": true,
+        "coords": "screenshot"
+      }
+    },
+    "the answer with the page after": {
+      "where": "POST /sessions/{id}/action",
+      "kind": "response",
+      "status": 200,
+      "body": {
+        "ok": true,
+        "url": "https://shop.example.test/cart",
+        "page": {
+          "url": "https://shop.example.test/cart",
+          "title": "Your cart",
+          "scroll": {
+            "y": 0,
+            "height": 2400,
+            "viewport": 800
+          },
+          "elements": [
+            {
+              "id": 1,
+              "role": "searchbox",
+              "name": "Search"
+            },
+            {
+              "id": 2,
+              "role": "textbox",
+              "name": "Gift message",
+              "value": "Happy birthday"
+            },
+            {
+              "id": 3,
+              "role": "button",
+              "name": "Place order"
+            }
+          ],
+          "truncated": true,
+          "text": "Your cart. 1 item. Total $999.",
+          "challenges": []
+        }
+      }
+    },
+    "the answer without a page": {
+      "where": "POST /sessions/{id}/action",
+      "kind": "response",
+      "status": 200,
+      "body": {
+        "ok": true,
+        "url": "https://shop.example.test/cart"
+      }
+    }
+  }
+}
