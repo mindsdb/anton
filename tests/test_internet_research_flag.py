@@ -18,6 +18,7 @@ from anton.core.llm.prompts import (
     RESILIENCE_NUDGE,
     SCRATCHPAD_INSTALL_NUDGE,
 )
+from anton.core.llm.static_artifact_prompt import ARTIFACTS
 from anton.core.memory import skills as skills_mod
 from anton.core.session import ChatSession, ChatSessionConfig
 from anton.core.tools.generate_artifact.orchestrator import _public_data_sources_skill
@@ -98,7 +99,7 @@ async def test_the_prompt_variant_differs_only_where_it_cuts(tmp_path):
 
     assert system.startswith("You are Anton")
     for section in (
-        "ARTIFACTS (applies to all user-facing output):",
+        ARTIFACTS.splitlines()[0],
         "CONVERSATION DISCIPLINE (critical):",
         "RUNTIME IDENTITY:",
         "GENERAL RULES:",

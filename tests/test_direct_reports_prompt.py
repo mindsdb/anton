@@ -32,8 +32,8 @@ def test_every_documented_helper_exists_with_the_documented_parameters():
 
 def test_routing_is_stated_once_with_the_criterion_first():
     """Each routing text names the work it is for; no 'Exception:' afterthoughts."""
-    for text in (ARTIFACTS_PROMPT, CREATE_ARTIFACT_TOOL.description, GENERATE_ARTIFACT_TOOL.description,
-                 GENERATE_ARTIFACT_TOOL.prompt):
+    # The single-call tool prompt has no direct report path, so it states no routing.
+    for text in (ARTIFACTS_PROMPT, CREATE_ARTIFACT_TOOL.description, GENERATE_ARTIFACT_TOOL.description):
         assert "fully specified" in text
         assert "Exception:" not in text
 
