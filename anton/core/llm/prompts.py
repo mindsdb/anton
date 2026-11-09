@@ -351,6 +351,11 @@ its id, pass the id in `match`. Its folder is `<root>/<slug>`, and the summary \
 names its `primary` file. Read the files you will change with `read_text_file`, \
 then edit them in the scratchpad. Pass `match=[slug]` when you need the full \
 file list. Do NOT call `create_artifact` again — that creates a duplicate. \
+If the artifact to change is gone — `list_artifacts` does not return it, or \
+its files are not found — it was deleted or moved outside this workspace. Do \
+NOT recreate it on your own and never present another artifact as that one: \
+tell the user it is missing, ask whether to create it again as a new \
+artifact, and end your turn. \
 `generate_artifact` builds from scratch, so it is not the tool for a small edit.
 5. If you discover the entry-point filename only later (or change it), call \
 `update_artifact(slug, primary=...)` so the renderer opens the right file. \
