@@ -599,14 +599,15 @@ def _public_data_sources_skill(session) -> str:
 def _project_rules(session) -> str:
     """The workspace's anton.md as the `Project rules` section, or "".
 
-    Read with `read_anton_md`, not `build_anton_md_context`: that one frames
+    Read with `read_anton_md_user_text` (no template boilerplate), not
+    `build_anton_md_context`: that one frames
     the file for the main agent ("Project Context") and records the read for
     `anton_md_modified_since_last_read`. In tests the session is an
     `AsyncMock`, whose call returns a coroutine, closed here as in
     `_public_data_sources_skill`. A session without a workspace (the bench,
     some tests) has no project rules.
     """
-    read = getattr(getattr(session, "_workspace", None), "read_anton_md", None)
+    read = getattr(getattr(session, "_workspace", None), "read_anton_md_user_text", None)
     if read is None:
         return ""
     try:
