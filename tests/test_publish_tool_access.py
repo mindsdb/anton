@@ -210,12 +210,12 @@ def _recording_request(sent: list):
     """Stands in for the upload service; the real publish() builds the payload."""
     def fake_request(url, api_key, *, method="POST", payload=None, verify=True, timeout=30):
         sent.append(json.loads(payload.decode())["access"])
-        return json.dumps({"view_url": "u", "report_id": "r", "md5": f"m{len(sent)}", "version": len(sent)})
+        return 200, json.dumps({"view_url": "u", "report_id": "r", "md5": f"m{len(sent)}", "version": len(sent)}).encode()
     return fake_request
 
 
 async def _tool_publish(tmp_path, f, tc_input: dict, sent: list) -> str:
-    with mock.patch("anton.publisher.minds_request", _recording_request(sent)), \
+    with mock.patch("anton.publisher.minds_request_with_status", _recording_request(sent)), \
          mock.patch("anton.config.settings.AntonSettings", return_value=_settings(f.parent.parent)), \
          mock.patch("webbrowser.open"):
         return await tools.handle_publish_or_preview(
@@ -342,7 +342,7 @@ async def test_tool_says_why_the_upload_service_refused(tmp_path):
     refusal = _http_error(400, "Bad Request", json.dumps({"error": reason}).encode())
     session = _session(tmp_path)
     session._console = Console(record=True, width=300)
-    with mock.patch("anton.publisher.minds_request", side_effect=refusal), \
+    with mock.patch("anton.publisher.minds_request_with_status", side_effect=refusal), \
          mock.patch("anton.config.settings.AntonSettings", return_value=_settings(f.parent.parent)), \
          mock.patch("webbrowser.open"):
         out = await tools.handle_publish_or_preview(
@@ -381,7 +381,7 @@ async def test_tool_tells_the_agent_not_to_widen_the_audience_after_a_share_org_
     session = _session(tmp_path)
     session._console = Console(record=True, width=300)
     request = mock.Mock(side_effect=_share_org_refusal(reason))
-    with mock.patch("anton.publisher.minds_request", request), \
+    with mock.patch("anton.publisher.minds_request_with_status", request), \
          mock.patch("anton.config.settings.AntonSettings", return_value=_settings(f.parent.parent)), \
          mock.patch("webbrowser.open"):
         out = await tools.handle_publish_or_preview(
@@ -417,7 +417,7 @@ async def test_tool_tells_the_agent_not_to_widen_the_audience_when_the_fresh_pub
         _http_error(404, "Not Found"),
         _share_org_refusal(_SHARE_ORG_REASON),
     ])
-    with mock.patch("anton.publisher.minds_request", request), \
+    with mock.patch("anton.publisher.minds_request_with_status", request), \
          mock.patch("anton.config.settings.AntonSettings", return_value=_settings(f.parent.parent)), \
          mock.patch("webbrowser.open"):
         out = await tools.handle_publish_or_preview(
