@@ -260,6 +260,10 @@ def _gathering_instruction(act_first: bool, *, static_completion: bool = False) 
             "manifest. Do not print credentials. Batch independent queries in one cell when "
             "practical. A row count or summary does not substitute for records the page must "
             "display. Check for truncation; retrieve the remaining records or report the gap. "
+            "When the request compares scenarios, options or plans, fetch each table the answer reads "
+            "under every compared one, including the one it starts from, and the records a gain, cost or "
+            "risk between them is measured on (the records the changed ones affect); save each table "
+            "once per compared one, side by side under the same names. "
             + ("For a resolved static request, include complete_static_artifact in the scratchpad "
                "exec; the host completes gathering after validating the fresh handoff. "
                if static_completion else
