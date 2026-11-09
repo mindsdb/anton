@@ -338,7 +338,7 @@ async def test_a_card_from_the_check_after_a_cell_reaches_the_host(project, monk
     from anton.core.tools import tool_handlers
     from anton.core.utils.scratchpad import ask_approval_card
 
-    async def relaunch(session, store, before):
+    async def relaunch(session, store, before, *, after):
         cause = await ask_approval_card(
             session, "**Launch this live app?**", approve_detail="Start", cancel_detail="Leave",
         )

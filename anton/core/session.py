@@ -161,7 +161,7 @@ from anton.core.tools.tool_handlers import (
     page_check_lines,
     preliminary_cell,
     resolve_artifact_store,
-    snapshot_existing_artifacts,
+    snapshot_cell_artifacts,
     unanswered_question_line,
 )
 from anton.core.artifacts.page_copies import TurnPages
@@ -392,6 +392,7 @@ if TYPE_CHECKING:
     from rich.console import Console
     from anton.context.self_awareness import SelfAwarenessContext
     from anton.chat_ui import EscapeWatcher
+    from anton.core.browser.config import BrowserConfig
     from anton.core.artifacts.live_app_slots import LiveAppHost
     from anton.core.llm.client import LLMClient
     from anton.core.mcp.client import McpSession
@@ -956,12 +957,6 @@ _SPEND_CEILING_RESERVE = 200_000
 # roughly ONE more, so granting it does not cancel the reserve outright and
 # put the turn back up near the ceiling. See `_grant_spend_ceiling_grace`.
 _SPEND_CEILING_GRACE_FLOOR = 100_000
-
-# One-time round-cap extension (ENG-1893), granted the first time a turn
-# breaches max_tool_rounds. Sized to the "2-3 more tool calls" this exists
-# for — add a closing step, save, verify — not a way to talk past the cap
-# repeatedly: see the grant sites for the one-shot guard.
-_ROUND_CAP_GRACE_ROUNDS = 3
 
 # What one "Keep going" at a turn limit buys: the limit rises by this many times
 # its configured size. Replayed against 30 days of limit stops, 4x let 116 of
@@ -1617,18 +1612,6 @@ def _role_calls(tc: TurnCost, role: str) -> str:
     return str(slice_.calls if slice_ else 0)
 
 
-def _record_grace(turn_cost: TurnCost | None, tag: str) -> None:
-    """Add `tag` ("round" or "ceiling") to `turn_cost.grace_granted`,
-    comma-joined, deduplicated, and sorted — alphabetical rather than
-    firing order, so the two-grace value is one fixed string either way."""
-    if turn_cost is None:
-        return
-    tags = turn_cost.grace_granted.split(",") if turn_cost.grace_granted else []
-    if tag not in tags:
-        tags.append(tag)
-        turn_cost.grace_granted = ",".join(sorted(tags))
-
-
 @functools.cache
 def _jev_questions() -> dict:
     """The verifier's rubric as a Jev question, built from the same text."""
@@ -1903,6 +1886,11 @@ class ChatSessionConfig:
     # `ChatSession.close()` can tear them down at turn end, the same way it
     # already closes the LLM client's transports.
     mcp_sessions: list["McpSession"] = field(default_factory=list)
+    # The browser the `browser` tool drives; the tool is registered only with
+    # one. Hosts pass it: cowork-server for the Cowork desktop app's own
+    # browser, and the cloud pod for the MindsHub browser router. None means no
+    # browser tool, and nothing falls back to settings or the environment.
+    browser: "BrowserConfig | None" = None
 
 
 class ChatSession:
@@ -1957,11 +1945,18 @@ class ChatSession:
         # this is __init__ so a long CLI session gets it too.
         self._spend_ceiling_grace_used = False
         self._spend_ceiling_grace_tokens = 0
-        self._round_cap_grace_used = False
         # Headroom the user granted this turn by answering "Keep going" at a
         # limit. Reset per turn in turn_stream.
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
+        # Tool rounds this turn has run. The step limit is per task, so the
+        # count spans verifier continuations and provider-error retries alike.
+        # Reset per turn in turn_stream.
+        self._turn_tool_rounds = 0
+        # Verifier-forced continuations this turn has run, against
+        # `max_continuations`. Per turn for the same reason: a retry must
+        # not hand out a fresh set. Reset per turn in turn_stream.
+        self._turn_continuations = 0
         # The tool calls this turn ran, for the report `_stream_handback_diagnosis`
         # writes when the content filter stops every hand-back. Reset per turn in
         # turn_stream.
@@ -2036,6 +2031,8 @@ class ChatSession:
         # skill is recalled. Populated in `_build_tools`.
         self._deferred_bundles: dict[str, list["ToolDef"]] = {}
         self._workspace = config.workspace
+        self._browser_config = config.browser
+        self._browser_state = None
         self._data_vault = config.data_vault
         self._connector_usage_notes = config.connector_usage_notes
         # Kept so an artifact backend can be given the same project .env the
@@ -2216,6 +2213,11 @@ class ChatSession:
         # project-wide) directory can never be mistaken for this turn's work.
         # Reset at the top of every turn.
         self._artifacts_touched: set[str] = set()
+        # False once a snapshot around one of this turn's cells could not
+        # read the artifacts folder or an entry in it, so an edit there may
+        # be missing from `_artifacts_touched`
+        # (`tool_handlers.snapshot_cell_artifacts`). Reset every turn.
+        self._artifacts_touched_complete = True
         # (artifact slug, page) -> how that page last fared in a browser this
         # turn (`passed`, `failed` or `unverified`), from generate_artifact
         # and the checks after each cell. On a sandboxed deployment the turn
@@ -2409,6 +2411,15 @@ class ChatSession:
         surface, and must not be able to mutate the session's own record.
         """
         return set(self._artifacts_touched)
+
+    @property
+    def artifacts_touched_complete(self) -> bool:
+        """Whether `artifacts_touched` names every artifact this turn's cells
+        edited. False once a snapshot around a cell could not read the
+        artifacts folder or an entry in it, since an edit there goes unseen;
+        a host should then diff the whole artifacts folder instead.
+        """
+        return self._artifacts_touched_complete
 
     def _unverified_page_lines(self) -> list[str]:
         """The lines that end the turn's final message on a sandboxed
@@ -3445,6 +3456,14 @@ class ChatSession:
                 self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
             self.tool_registry.register_tool(generate)
 
+        # The shared browser: only when the host gave one. The credential is
+        # resolved per call, so a session without one still registers it and
+        # the tool reports the missing login itself.
+        if self._browser_config is not None:
+            from anton.core.browser.tool import build_browser_tool
+
+            self.tool_registry.register_tool(build_browser_tool())
+
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""
         try:
@@ -3466,6 +3485,8 @@ class ChatSession:
                 # Provider clients own an HTTP pool. This runs even if the
                 # steps above raise, or the pool outlives the process.
                 try:
+                    if self._browser_state is not None:
+                        await self._browser_state.aclose()
                     if self._jev_http is not None:
                         await self._jev_http.aclose()
                 finally:
@@ -4788,10 +4809,10 @@ class ChatSession:
         message for a task that never started.
 
         `TurnCost.rounds` is turn-wide (it accumulates across verifier-forced
-        continuations rather than resetting with the loop-local counter), so
-        `> 1` means at least one round has completed its dispatch — including
-        rounds from an earlier continuation, which is why a continuation cannot
-        hand out a fresh free round.
+        continuations, as does `self._turn_tool_rounds`), so `> 1` means at
+        least one round has completed its dispatch — including rounds from an
+        earlier continuation, which is why a continuation cannot hand out a
+        fresh free round.
 
         Belt and braces with the reserve cap in `_spend_ceiling_gate`: that cap
         keeps the gate proportional to the ceiling, this keeps the guarantee true
@@ -4876,7 +4897,7 @@ class ChatSession:
         self._spend_ceiling_grace_used = True
         if self._turn_cost is not None:
             self._turn_cost.grace_tokens = self._spend_ceiling_grace_tokens
-        _record_grace(self._turn_cost, "ceiling")
+            self._turn_cost.grace_granted = "ceiling"
 
     def _limit_reached(self, limit: str) -> str:
         """Names the limit that stopped the turn.
@@ -5746,6 +5767,7 @@ class ChatSession:
         # reports only what the CURRENT turn touched. Hosts that build a fresh
         # session per turn get the same result either way.
         self._artifacts_touched = set()
+        self._artifacts_touched_complete = True
         self._page_checks = {}
         self._geography_requirements = {}
         self._artifact_geography_request = ""
@@ -5849,13 +5871,15 @@ class ChatSession:
         _screenshot_drop_unconfirmed = False
         _tool_images_dropped = False
         _tool_image_drop_unconfirmed = False
-        # One-time cap grace, reset once per turn_stream() call rather than in
-        # `_stream_and_handle_tools`, which retries re-enter and would re-arm.
+        # Per-turn limit state, reset once per turn_stream() call rather than
+        # in `_stream_and_handle_tools`, which retries re-enter: the grace
+        # would re-arm and the step and auto-continue counts would restart.
         self._spend_ceiling_grace_used = False
         self._spend_ceiling_grace_tokens = 0
-        self._round_cap_grace_used = False
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
+        self._turn_tool_rounds = 0
+        self._turn_continuations = 0
         self._turn_steps = []
         self._finish_authorized = None
         self._limits_passed_by_message = set()
@@ -6762,7 +6786,6 @@ class ChatSession:
         # Tool-call loop with circuit breaker, wrapped in a completion
         # verification outer loop that can restart the tool loop if the
         # task isn't actually done yet.
-        continuation = 0
         _max_rounds_hit = False
         # Set when the per-turn spend ceiling stopped the turn (ENG-1286). Like
         # `_max_rounds_hit` it also suppresses verification: the turn is already
@@ -6781,64 +6804,39 @@ class ChatSession:
             # `llm_response`, so a stale True would make the post-loop fallback
             # skip a reply that was never persisted — dropping the answer the
             # user just read on any INCOMPLETE turn whose continuation needs no
-            # tools (tool_round stays 0, so the loop breaks at the gate below
-            # before the append).
+            # tools (attempt_rounds stays 0, so the loop breaks at the gate
+            # below before the append).
             _reply_persisted = False
-            tool_round = 0
+            # This attempt's rounds alone, for the verifier gate below.
+            attempt_rounds = 0
             error_streak: dict[str, int] = {}
             resilience_nudged: set[str] = set()
-            # Per-continuation, unlike `_round_cap_grace_used`: only the
-            # continuation that actually earns the grant (the first ever
-            # breach this turn) gets the wider cap. Without this,
-            # `_round_cap_grace_used` staying True for the rest of the turn
-            # let EVERY later continuation start pre-extended to M+3, turning
-            # a one-shot +3 into +3 per continuation.
-            _round_cap_grace_active = False
 
             while llm_response.tool_calls:
-                tool_round += 1
-                # One-time extension (ENG-1893), unconditional like the
-                # mid-loop spend-ceiling grace — no verdict exists yet at
-                # this point, so the grant is a single small window rather
-                # than a self-report. Decided before the accounting below so
-                # the granted round is counted like any other. `> 0` excludes
-                # a configured 0 (or negative) cap — "no tool rounds", not
-                # "one round of free grace".
-                if (
-                    tool_round > self._max_tool_rounds
-                    and not self._round_cap_grace_used
-                    and self._max_tool_rounds > 0
-                ):
-                    self._round_cap_grace_used = True
-                    _round_cap_grace_active = True
-                    _record_grace(self._turn_cost, "round")
-                effective_round_cap = (
-                    self._max_tool_rounds
-                    + (_ROUND_CAP_GRACE_ROUNDS if _round_cap_grace_active else 0)
-                    + self._round_cap_continued_rounds
-                )
-                if tool_round > effective_round_cap and self._max_tool_rounds > 0:
+                self._turn_tool_rounds += 1
+                attempt_rounds += 1
+                # The configured cap plus whatever "Keep going" answers have
+                # added this turn. There is no silent extension: the user's
+                # step limit is the step limit.
+                effective_round_cap = self._max_tool_rounds + self._round_cap_continued_rounds
+                if self._turn_tool_rounds > effective_round_cap and self._max_tool_rounds > 0:
                     agen = self._ask_to_continue_past_limit("round_cap", user_message)
                     try:
                         async for _kind, _payload in agen:
                             if _kind == "event":
                                 yield _payload
-                            elif _payload:
-                                effective_round_cap += (
-                                    _LIMIT_CONTINUE_MULTIPLIER * self._max_tool_rounds
-                                )
                     finally:
                         await agen.aclose()
-                # Accumulate, don't assign: `tool_round` is loop-local and
-                # resets to 0 on every verifier-forced continuation, so
-                # assigning reported only the last continuation's rounds —
-                # breaking the metric for exactly the expensive shape it
-                # exists to classify. Counted before the cap check so a
-                # capped turn reports the (possibly grace-extended) cap, not
-                # cap+1 (#309 review).
-                if self._turn_cost is not None and tool_round <= effective_round_cap:
+                    # A grant raised `_round_cap_continued_rounds`; re-read it
+                    # rather than repeating `_grant_limit`'s arithmetic here.
+                    effective_round_cap = (
+                        self._max_tool_rounds + self._round_cap_continued_rounds
+                    )
+                # Counted before the cap check so a capped turn reports the
+                # cap, not cap+1.
+                if self._turn_cost is not None and self._turn_tool_rounds <= effective_round_cap:
                     self._turn_cost.rounds += 1
-                if tool_round > effective_round_cap:
+                if self._turn_tool_rounds > effective_round_cap:
                     _max_rounds_hit = True
                     if self._turn_cost is not None:
                         self._turn_cost.ended_by = "round_cap"
@@ -6846,7 +6844,7 @@ class ChatSession:
                         "cap_exhausted",
                         {"cap": effective_round_cap, "configured_cap": self._max_tool_rounds},
                         severity=9,
-                        round_idx=tool_round,
+                        round_idx=self._turn_tool_rounds,
                     )
                     self._append_history(
                         {"role": "assistant", "content": llm_response.content or ""}
@@ -6875,7 +6873,7 @@ class ChatSession:
                     _reply_persisted = True
                     async for event in self._stream_handback_diagnosis(
                         system=system, label="max-tool-rounds", answered=False,
-                        cancels_continuation=continuation > 0, limit="round_cap",
+                        cancels_continuation=self._turn_continuations > 0, limit="round_cap",
                     ):
                         yield event
                     break
@@ -6914,7 +6912,7 @@ class ChatSession:
                             "tool_round=%d continuation=%d — pausing to ask the user",
                             self._turn_cost.total_tokens if self._turn_cost else 0,
                             self._max_turn_tokens, self._spend_ceiling_gate(),
-                            tool_round, continuation,
+                            self._turn_tool_rounds, self._turn_continuations,
                         )
                         self._append_history(
                             {"role": "assistant", "content": llm_response.content or ""}
@@ -6933,7 +6931,7 @@ class ChatSession:
                         )
                         async for event in self._stream_handback_diagnosis(
                             system=system, label="spend-ceiling", answered=False,
-                            cancels_continuation=continuation > 0, limit="spend_ceiling",
+                            cancels_continuation=self._turn_continuations > 0, limit="spend_ceiling",
                         ):
                             yield event
                         break
@@ -6985,7 +6983,7 @@ class ChatSession:
                         "tool_call",
                         {"name": tc.name, "args_summary": str(tc.input)[:120]},
                         severity=1,
-                        round_idx=tool_round,
+                        round_idx=self._turn_tool_rounds,
                     )
                     if self._episodic is not None:
                         self._episodic.log_turn(
@@ -7109,7 +7107,7 @@ class ChatSession:
                                 if artifact_store is not None:
                                     await capture_turn_pages(self, artifact_store)
                                 before_artifacts = (
-                                    snapshot_existing_artifacts(artifact_store)
+                                    await snapshot_cell_artifacts(session=self, store=artifact_store)
                                     if artifact_store is not None
                                     else {}
                                 )
@@ -7464,7 +7462,7 @@ class ChatSession:
                             "tool_result",
                             {"name": tc.name, "success": tool_ok is not False, "error": ""},
                             severity=5 if tool_ok is False else 1,
-                            round_idx=tool_round,
+                            round_idx=self._turn_tool_rounds,
                         )
                         tool_results.append(
                             {
@@ -7510,7 +7508,7 @@ class ChatSession:
                             "error": result_text[:300] if _failed else "",
                         },
                         severity=5 if _failed else 1,
-                        round_idx=tool_round,
+                        round_idx=self._turn_tool_rounds,
                     )
                     tool_results.append(
                         {
@@ -7535,7 +7533,7 @@ class ChatSession:
                 # one would get to answer the question itself. The answer, when
                 # it comes, starts the next turn.
                 if self._unanswered_question is not None:
-                    for event in self._unanswered_question_events(cancels_continuation=continuation > 0):
+                    for event in self._unanswered_question_events(cancels_continuation=self._turn_continuations > 0):
                         yield event
                     _reply_persisted = True
                     break
@@ -7615,7 +7613,7 @@ class ChatSession:
             # default of 2, single-round turns), when we hit the max-rounds
             # hard stop, or after an unanswered question.
             if (
-                tool_round < self._verify_min_tool_rounds
+                attempt_rounds < self._verify_min_tool_rounds
                 or _max_rounds_hit
                 or _spend_ceiling_hit
                 or self._unanswered_question is not None
@@ -7630,7 +7628,7 @@ class ChatSession:
             self._append_history({"role": "assistant", "content": reply})
             _reply_persisted = True
 
-            if continuation >= self._max_continuations:
+            if self._turn_continuations >= self._max_continuations:
                 # Budget exhausted — ask LLM to diagnose and present to user
                 self._append_history(
                     {
@@ -7655,7 +7653,7 @@ class ChatSession:
                     self._turn_cost.ended_by = "handback_budget"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="budget-exhausted", answered=bool(reply.strip()),
-                    cancels_continuation=continuation > 0,
+                    cancels_continuation=self._turn_continuations > 0,
                 ):
                     yield event
                 # Consolidation still runs after diagnosis
@@ -7699,8 +7697,8 @@ class ChatSession:
                         f"{self._verifier_latch.no_verdict_failures} verdict "
                         "call(s) with no successful verdict since",
                         self._verifier_latch.skips,
-                        reprobe_turns, continuation,
-                        self._max_continuations, tool_round,
+                        reprobe_turns, self._turn_continuations,
+                        self._max_continuations, self._turn_tool_rounds,
                     )
                     # Stamp the books: this turn books ended_by="completed"
                     # but was NOT verified — without the flag it is
@@ -8006,7 +8004,7 @@ class ChatSession:
                 logger.warning(
                     "completion-verifier verdict=ERROR continuation=%d/%d tool_rounds=%d "
                     "model=%s — failing toward an honest diagnosis, not a silent COMPLETE",
-                    continuation, self._max_continuations, tool_round,
+                    self._turn_continuations, self._max_continuations, self._turn_tool_rounds,
                     self._llm.coding_model,
                 )
                 self._append_history(
@@ -8038,7 +8036,7 @@ class ChatSession:
                     self._turn_cost.ended_by = "handback_verifier_failure"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="verifier-failure", answered=bool(reply.strip()),
-                    cancels_continuation=continuation > 0,
+                    cancels_continuation=self._turn_continuations > 0,
                 ):
                     yield event
                 break
@@ -8048,7 +8046,7 @@ class ChatSession:
                 # from the user's conversation, and this is an ordinary app log.
                 # It stays in the Langfuse trace, where that content belongs.
                 "completion-verifier verdict=%s continuation=%d/%d tool_rounds=%d",
-                status, continuation, self._max_continuations, tool_round,
+                status, self._turn_continuations, self._max_continuations, self._turn_tool_rounds,
             )
 
             if status in ("COMPLETE", "WAITING"):
@@ -8078,7 +8076,7 @@ class ChatSession:
                     self._turn_cost.ended_by = "handback_stuck"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="stuck", answered=bool(reply.strip()),
-                    cancels_continuation=continuation > 0,
+                    cancels_continuation=self._turn_continuations > 0,
                 ):
                     yield event
                 break
@@ -8122,7 +8120,7 @@ class ChatSession:
                         "spend ceiling reached at the continuation gate: tokens=%d "
                         "ceiling=%d continuation=%d — pausing to ask the user",
                         self._turn_cost.total_tokens if self._turn_cost else 0,
-                        self._max_turn_tokens, continuation,
+                        self._max_turn_tokens, self._turn_continuations,
                     )
                     self._append_history(
                         {"role": "user", "content": self._spend_ceiling_notice()}
@@ -8137,20 +8135,20 @@ class ChatSession:
                     )
                     async for event in self._stream_handback_diagnosis(
                         system=system, label="spend-ceiling", answered=bool(reply.strip()),
-                        cancels_continuation=continuation > 0, limit="spend_ceiling",
+                        cancels_continuation=self._turn_continuations > 0, limit="spend_ceiling",
                     ):
                         yield event
                     break
 
-            continuation += 1
+            self._turn_continuations += 1
             if self._turn_cost is not None:
-                self._turn_cost.continuations = continuation
+                self._turn_cost.continuations = self._turn_continuations
             self._append_history(
                 {
                     "role": "user",
                     "content": (
                         f"{_CHECK_NOTE} The check judged the answer above unfinished "
-                        f"(attempt {continuation}/{self._max_continuations}): {reason}\n\n"
+                        f"(attempt {self._turn_continuations}/{self._max_continuations}): {reason}\n\n"
                         "Continue the user's original request where you left off; do not "
                         "redo tool work already done. If the data truly does not hold what "
                         "was asked, saying so plainly is a complete answer. Your next reply "
@@ -8167,7 +8165,7 @@ class ChatSession:
             # otherwise. `analyzing` is emitted from several unrelated sites.
             yield StreamTaskProgress(
                 phase="continuation",
-                message=f"Task incomplete — continuing ({continuation}/{self._max_continuations})...",
+                message=f"Task incomplete — continuing ({self._turn_continuations}/{self._max_continuations})...",
             )
 
             # Re-enter tool loop: get next LLM response with tools available

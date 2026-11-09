@@ -243,10 +243,10 @@ async def test_late_finalizer_cannot_close_a_newer_turns_books(workspace):
 
 
 async def test_rounds_accumulate_across_verifier_continuations(workspace):
-    """``tool_round`` is loop-local and resets on each continuation, so
-    assigning it reported only the last continuation's rounds — breaking the
-    rounds x context shape metric for exactly the expensive turns it exists
-    to classify.
+    """`rounds` equals the rounds dispatched across every continuation, not
+    only the last one; an earlier version reported the last continuation's
+    count alone, breaking the rounds x context shape metric for exactly the
+    expensive turns it exists to classify.
     """
     mock_llm = make_mock_llm()
     # 2 tool rounds, reply; INCOMPLETE verdict; 1 tool round, reply; COMPLETE.
@@ -278,10 +278,7 @@ async def test_rounds_accumulate_across_verifier_continuations(workspace):
 
 
 async def test_round_cap_reports_the_cap_not_cap_plus_one(workspace):
-    """Reports the *effective* cap — the configured cap plus the one-time
-    grace extension (ENG-1893) — not effective_cap + 1."""
-    from anton.core.session import _ROUND_CAP_GRACE_ROUNDS
-
+    """Reports the cap, not cap + 1."""
     mock_llm = make_mock_llm()
     mock_llm.plan_stream = MagicMock(
         side_effect=lambda **kw: _Iter([StreamComplete(response=_tool_call())])
@@ -303,10 +300,7 @@ async def test_round_cap_reports_the_cap_not_cap_plus_one(workspace):
     notes = [m["content"] for m in session.history
              if m.get("role") == "user" and "tool-call rounds on this turn" in str(m.get("content"))]
     assert notes and "you could not find it" in notes[-1]
-    expected = 2 + _ROUND_CAP_GRACE_ROUNDS
-    assert kwargs["rounds"] == str(expected), (
-        f"effective cap is {expected}, reported {kwargs['rounds']}"
-    )
+    assert kwargs["rounds"] == "2", f"cap is 2, reported {kwargs['rounds']}"
 
 
 # The three hand-back terminals: STUCK, budget-exhausted, verifier-failure.

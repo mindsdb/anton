@@ -11,6 +11,7 @@ plus an elicitor that answers from a script.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -29,6 +30,7 @@ from tests.test_spend_ceiling import (
     PER_CALL,
     _history_text,
     _session,
+    _small,
     _text,
     _tool_call,
     workspace,  # noqa: F401 — fixture
@@ -141,16 +143,20 @@ async def test_stop_at_the_round_cap_hands_back(workspace):
     assert _HANDBACK_NOT_USER_CLAUSE in _history_text(session)
 
 
-def _structured_calls(session, *, authorized: bool) -> AsyncMock:
-    """Answer the finish-authorization check, and let any verifier verdict
-    through as COMPLETE."""
+def _structured_calls(
+    session, *, authorized: bool, verdicts: Sequence[str] = ()
+) -> AsyncMock:
+    """Answer the finish-authorization check, and answer each completion-verifier
+    call with the next of `verdicts`, then COMPLETE."""
+    pending = list(verdicts)
 
     async def _answer(schema, **_kwargs):
         if schema is _FinishAuthorization:
             return _FinishAuthorization(
                 quote="Keep going, don't stop" if authorized else "", authorized=authorized
             )
-        return _VerifierVerdict(status="COMPLETE", reason="done")
+        status = pending.pop(0) if pending else "COMPLETE"
+        return _VerifierVerdict(status=status, reason="done")
 
     calls = AsyncMock(side_effect=_answer)
     session._llm.generate_object_code = calls
@@ -339,3 +345,34 @@ async def test_typing_keep_going_in_the_cli_continues(workspace, monkeypatch):
     _, kwargs = await _run(session)
     assert kwargs["ended_by"] == "completed"
     assert kwargs["limit_continues"] == "1"
+
+
+async def test_the_step_limit_counts_the_whole_task_not_each_attempt(workspace):
+    """TL-02: with "Max steps per task" at 5, a task that used 5 steps, was
+    sent back by the verifier and used 5 more ran 10 steps with no limit
+    message, because the count restarted on the continuation."""
+    cap = 5
+    attempt = [_small(_tool_call(i)) for i in range(1, cap + 1)] + [_small(_text("partial"))]
+    session = _session(workspace, responses=attempt * 2, per_call=1_000)
+    session._max_tool_rounds = cap
+    elicitor = _ScriptedElicitor(STOP_HERE)
+    session.elicitor = elicitor
+    _structured_calls(session, authorized=False, verdicts=("INCOMPLETE", "COMPLETE"))
+    _, kwargs = await _run(session)
+    assert len(elicitor.requests) == 1, "the limit must be reached on the continuation"
+    assert f"reached its limit of {cap} steps per request" in elicitor.requests[0].prompt
+    assert kwargs["ended_by"] == "round_cap"
+
+
+async def test_the_step_limit_is_exact(workspace):
+    """A cap of 5 asks at the sixth step. There used to be a silent window of
+    three more steps first, so a user who set 5 saw 8 run with no message."""
+    cap = 5
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, cap + 4)], per_call=1_000)
+    session._max_tool_rounds = cap
+    elicitor = _ScriptedElicitor(STOP_HERE)
+    session.elicitor = elicitor
+    _, kwargs = await _run(session)
+    assert len(elicitor.requests) == 1
+    assert kwargs["rounds"] == str(cap)
+    assert kwargs["ended_by"] == "round_cap"

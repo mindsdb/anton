@@ -4,17 +4,21 @@ relaunch after a cell. With live apps off, each answers as before."""
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import NamedTuple
 
 import pytest
 
 from anton.core.artifacts import backend_launcher
 from anton.core.artifacts import live_app_slots as las
 from anton.core.artifacts.live_app_slots import LiveAppLaunchError, LiveAppLaunchResult, MissingConnection, ProbeResult
+from anton.core.artifacts.page_copies import TurnPages
+from anton.core.artifacts.store import ArtifactStore
 from anton.core.backends.sandbox import BACKENDS_OFF_MESSAGE, CellSandbox
 from anton.core.tools import tool_handlers
 from anton.core.tools.generate_artifact import orchestrator, prompts, verifiers
@@ -907,7 +911,9 @@ async def test_a_cell_that_edits_a_running_app_relaunches_it(tmp_path, policy, l
 
     monkeypatch.setattr(las, "relaunch_changed_apps", relaunch)
     session = SimpleNamespace(_scratchpads=SimpleNamespace(cell_sandbox=policy))
-    lines = await tool_handlers._relaunch_live_apps(session, store, before)
+    lines = await tool_handlers._relaunch_live_apps(
+        session, store, before, after=tool_handlers.snapshot_existing_artifacts(store)
+    )
     assert asked == [["app"]]
     text = tool_handlers.cell_content_with_lint("[output]\nok", tool_handlers.ArtifactLint(live_app_lines=lines),
                                                 cell_ok=True)
@@ -932,7 +938,8 @@ async def test_a_cell_that_edits_only_the_prd_relaunches_nothing(tmp_path, polic
 
     monkeypatch.setattr(las, "relaunch_changed_apps", relaunch)
     session = SimpleNamespace(_scratchpads=SimpleNamespace(cell_sandbox=policy))
-    assert await tool_handlers._relaunch_live_apps(session, store, before) == []
+    after = tool_handlers.snapshot_existing_artifacts(store)
+    assert await tool_handlers._relaunch_live_apps(session, store, before, after=after) == []
     assert asked == [[]]
 
 
@@ -945,7 +952,7 @@ async def test_with_live_apps_off_a_cell_relaunches_nothing(tmp_path, policy, li
 
     monkeypatch.setattr(las, "relaunch_changed_apps", relaunch)
     session = SimpleNamespace(_scratchpads=SimpleNamespace(cell_sandbox=policy))
-    assert await tool_handlers._relaunch_live_apps(session, SimpleNamespace(root=tmp_path), {}) == []
+    assert await tool_handlers._relaunch_live_apps(session, SimpleNamespace(root=tmp_path), {}, after={}) == []
     assert asked == []
     text = tool_handlers.cell_content_with_lint("[output]\nok", tool_handlers.ArtifactLint(), cell_ok=True)
     assert text == "[output]\nok"
@@ -961,6 +968,35 @@ def _running_app(root: Path) -> tuple[str, Path]:
     (folder / "static").mkdir(parents=True, exist_ok=True)
     (folder / "static" / "index.html").write_text("v1", encoding="utf-8")
     return artifact.slug, folder
+
+
+class _HeldPage(NamedTuple):
+    """A running app whose launch page is out of repair cells (`_held_launch_page`)."""
+
+    slug: str
+    store: ArtifactStore
+    page: Path
+    key: tool_handlers.PageKey
+    turn_pages: TurnPages
+    before: dict[str, tool_handlers.ArtifactFiles]
+
+
+def _held_launch_page(*, root: Path) -> _HeldPage:
+    """A running app under ROOT (`_running_app`) whose launch page is held
+    as its last check left it, then changed to text of another length, and
+    the snapshot of ROOT taken after that change, as a cell's `before`. An
+    app made under ROOT first is in that snapshot too."""
+    slug, folder = _running_app(root)
+    store = ArtifactStore(root)
+    page = folder / "static" / "index.html"
+    key = tool_handlers.PageKey(slug, "static/index.html")
+    turn_pages = TurnPages()
+    turn_pages.hold({key}, store)
+    page.write_text("changed before the cell", encoding="utf-8")
+    return _HeldPage(
+        slug=slug, store=store, page=page, key=key, turn_pages=turn_pages,
+        before=tool_handlers.snapshot_existing_artifacts(store),
+    )
 
 
 async def test_a_cells_relaunch_reaches_its_result_through_the_check(tmp_path, policy, live_apps_on, monkeypatch):
@@ -982,6 +1018,80 @@ async def test_a_cells_relaunch_reaches_its_result_through_the_check(tmp_path, p
     assert lint.live_app_lines == [f"Relaunched live app `{slug}`."]
 
 
+async def test_a_held_launch_page_a_cell_left_alone_goes_back_and_relaunches_the_app(
+    tmp_path, policy, live_apps_on, monkeypatch,
+):
+    """The app's launch page is out of repair cells and held as its last
+    check left it, then changes before a cell that leaves it alone. The
+    cell's own snapshot sees no change, but anton writes the held page back
+    through a rename, and the running app relaunches on the page as put back."""
+    held = _held_launch_page(root=tmp_path / "artifacts")
+    asked: list[list[str]] = []
+
+    async def relaunch(session, store_arg, slugs):
+        asked.append(list(slugs))
+        return [f"Relaunched live app `{s}`." for s in slugs]
+
+    monkeypatch.setattr(las, "relaunch_changed_apps", relaunch)
+    monkeypatch.delenv("ANTON_RENDER_CHECK_URL", raising=False)
+    session = SimpleNamespace(
+        _scratchpads=SimpleNamespace(cell_sandbox=policy), _artifacts_touched=set(),
+        _turn_pages=held.turn_pages, _out_of_repairs={held.key},
+    )
+    lint = await tool_handlers.check_cell_artifacts(session, store=held.store, before=held.before)
+
+    assert held.page.read_text(encoding="utf-8") == "v1"
+    assert asked == [[held.slug]]
+    assert lint.live_app_lines == [f"Relaunched live app `{held.slug}`."]
+
+
+async def test_a_put_back_whose_read_after_fails_still_relaunches_the_cells_own_edit(
+    tmp_path, policy, live_apps_on, monkeypatch, caplog,
+):
+    """One app's held launch page goes back while the cell edits another
+    app's launch page, and the read of the artifacts folder after the
+    put-back fails. A warning names the failed read, the held page is still
+    back, and the app the cell edited relaunches from the cell's own read."""
+    root = tmp_path / "artifacts"
+    edited_slug, edited_folder = _running_app(root)
+    held = _held_launch_page(root=root)
+    (edited_folder / "static" / "index.html").write_text("version two", encoding="utf-8")
+    asked: list[list[str]] = []
+
+    async def relaunch(session, store_arg, slugs):
+        asked.append(list(slugs))
+        return [f"Relaunched live app `{s}`." for s in slugs]
+
+    real_snapshot = tool_handlers.snapshot_existing_artifacts
+    reads: list[object] = []
+
+    def snapshot_failing_once(store_arg):
+        # Only the read after the put-back fails; the lint's read after it succeeds.
+        reads.append(store_arg)
+        if len(reads) == 1:
+            raise OSError("artifacts folder unreadable")
+        return real_snapshot(store_arg)
+
+    monkeypatch.setattr(las, "relaunch_changed_apps", relaunch)
+    monkeypatch.setattr(tool_handlers, "snapshot_existing_artifacts", snapshot_failing_once)
+    monkeypatch.delenv("ANTON_RENDER_CHECK_URL", raising=False)
+    session = SimpleNamespace(
+        _scratchpads=SimpleNamespace(cell_sandbox=policy), _artifacts_touched=set(),
+        _turn_pages=held.turn_pages, _out_of_repairs={held.key},
+    )
+    with caplog.at_level(logging.WARNING, logger=tool_handlers.__name__):
+        lint = await tool_handlers.check_cell_artifacts(session, store=held.store, before=held.before)
+
+    assert held.page.read_text(encoding="utf-8") == "v1"
+    assert asked == [[edited_slug]]
+    assert lint.live_app_lines == [f"Relaunched live app `{edited_slug}`."]
+    warnings = [
+        record.getMessage() for record in caplog.records
+        if record.name == tool_handlers.__name__ and record.levelno == logging.WARNING
+    ]
+    assert warnings == ["could not read the artifacts folder after putting pages back"]
+
+
 async def test_a_cell_inside_a_generation_leaves_its_app_alone(tmp_path, policy, live_apps_on, monkeypatch):
     root = tmp_path / "artifacts"
     slug, folder = _running_app(root)
@@ -996,7 +1106,7 @@ async def test_a_cell_inside_a_generation_leaves_its_app_alone(tmp_path, policy,
 
     monkeypatch.setattr(las, "relaunch_changed_apps", relaunch)
     session = SimpleNamespace(_scratchpads=SimpleNamespace(cell_sandbox=policy), _live_apps_building={slug})
-    await tool_handlers._relaunch_live_apps(session, store, before)
+    await tool_handlers._relaunch_live_apps(session, store, before, after=tool_handlers.snapshot_existing_artifacts(store))
     assert asked == [[]]
 
 
