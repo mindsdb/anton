@@ -34,7 +34,7 @@ from pydantic import BaseModel, TypeAdapter
 
 from anton.core.backends.local import LocalScratchpadRuntime, local_scratchpad_runtime_factory
 from anton.core.backends.manager import ScratchpadManager
-from anton.core.backends.wire import CELL_DELIM, RESULT_START
+from anton.core.backends.wire import CELL_DELIM, INTERNET_RESEARCH_ENV, RESULT_START
 from anton.core.llm.openai import OpenAIProvider
 from anton.core.llm.tracing import TraceContext, reset_trace_context, set_trace_context
 
@@ -753,3 +753,53 @@ def test_an_unknown_flavor_falls_back_to_the_inferred_one(tmp_path):
 
     assert cell.error is None, cell.error
     assert [request.path for request in server.seen] == ["/v1/responses"]
+
+
+# With internet research off the pad's web_search() raises before any model
+# call: the session answers from the connected data only.
+_WEB_SEARCH_CELL = 'print(web_search("latest news"))'
+
+
+def test_web_search_raises_without_a_model_call_when_internet_research_is_off(tmp_path):
+    with _serving() as server:
+        web, ask = _run_cells(
+            [_WEB_SEARCH_CELL, _ASK_CELL],
+            tmp_path,
+            base_url=f"http://127.0.0.1:{server.server_port}/v1",
+            extra_env={INTERNET_RESEARCH_ENV: "off"},
+        )
+
+    assert web.error is not None and "Internet research is turned off" in web.error
+    # get_llm() is not internet research: the pad's other model calls still work.
+    assert ask.error is None, ask.error
+    assert len(server.seen) == 1
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("enabled", [False, True], ids=["off", "on"])
+async def test_the_session_flag_decides_web_search_whatever_the_pad_inherits(tmp_path, monkeypatch, enabled):
+    """Through the manager and the real local runtime, as ChatSession builds
+    them. An inherited value must not decide it either way."""
+    monkeypatch.setenv(INTERNET_RESEARCH_ENV, "on" if not enabled else "off")
+    with _serving() as server:
+        manager = ScratchpadManager(
+            runtime_factory=local_scratchpad_runtime_factory,
+            coding_provider="openai",
+            coding_model="stub-model",
+            coding_api_key="test-key",
+            coding_base_url=f"http://127.0.0.1:{server.server_port}/v1",
+            workspace_path=tmp_path,
+            internet_research_enabled=enabled,
+        )
+        try:
+            pad = await manager.get_or_create("research")
+            cell = await pad.execute(_WEB_SEARCH_CELL)
+        finally:
+            await manager.close_all()
+
+    if enabled:
+        assert cell.error is None, cell.error
+        assert len(server.seen) == 1
+    else:
+        assert cell.error is not None and "Internet research is turned off" in cell.error
+        assert server.seen == []

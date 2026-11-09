@@ -334,6 +334,14 @@ def make_llm_response():
 
 
 @pytest.fixture(autouse=True)
+def _no_shared_memory_pins():
+    """Memory pins live in the process by conversation id, and tests reuse ids."""
+    from anton.core import session
+
+    session._MEMORY_PINS.clear()
+
+
+@pytest.fixture(autouse=True)
 def _no_browser_windows(monkeypatch):
     """No test may pop a real browser window.
 

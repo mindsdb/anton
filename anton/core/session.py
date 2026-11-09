@@ -7,6 +7,7 @@ import hashlib
 import httpx2 as httpx
 import inspect
 import random
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
@@ -51,6 +52,8 @@ from anton.core.tools.skill_draft import CREATE_SKILL_DRAFT_TOOL
 from anton.memory.history_store import is_user_turn, repair_replayed_tool_ids
 from anton.core.llm.prompts import (
     ANTON_NOTE,
+    NO_INTERNET_RESILIENCE_NUDGE,
+    NO_INTERNET_SCRATCHPAD_INSTALL_NUDGE,
     RESILIENCE_NUDGE,
     SCRATCHPAD_INSTALL_NUDGE,
     SCRATCHPAD_SIZE_NUDGE,
@@ -112,6 +115,7 @@ from anton.core.tools.tool_defs import (
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
+    NO_INTERNET_SCRATCHPAD_TOOL,
     READ_IMAGE_TOOL,
     READ_TEXT_FILE_TOOL,
     RECALL_TOOL,
@@ -131,7 +135,9 @@ from anton.core.interaction.emitter import TurnEmitter
 from anton.core.utils.scratchpad import (
     CELL_NOT_RUN_REASONS,
     WriteGate,
-    build_workspace_discovery_context,
+    render_workspace_discovery,
+    valid_workspace_names,
+    workspace_discovery_names,
     cell_failure_reason,
     prepare_scratchpad_exec,
     format_cell_result,
@@ -155,7 +161,7 @@ from anton.core.tools.tool_handlers import (
     page_check_lines,
     preliminary_cell,
     resolve_artifact_store,
-    snapshot_existing_artifacts,
+    snapshot_cell_artifacts,
     unanswered_question_line,
 )
 from anton.core.artifacts.page_copies import TurnPages
@@ -182,6 +188,19 @@ from anton.utils.datasources import (
 )
 from anton.core.settings import CoreSettings
 
+# Memory and workspace text each conversation's prompt was first built with, by conversation id.
+# Only the workspace names are saved for a new process: agent code can write the saved file,
+# so the memory and scratchpad text it could forge stay in the process.
+_MEMORY_PINS: OrderedDict[str, dict] = OrderedDict()
+_MEMORY_PINS_MAX = 512
+_MEMORY_PIN_FILE = "_memory_prompt.json"
+
+# The nudges that name internet workarounds or web_search(), and the versions
+# a session without internet research sends instead.
+_NO_INTERNET_NUDGES = {
+    RESILIENCE_NUDGE: NO_INTERNET_RESILIENCE_NUDGE,
+    SCRATCHPAD_INSTALL_NUDGE: NO_INTERNET_SCRATCHPAD_INSTALL_NUDGE,
+}
 
 # Sentinel prefixing a compacted-history summary so later compactions can
 # recognize and update it in place rather than summarize a summary.
@@ -373,6 +392,7 @@ if TYPE_CHECKING:
     from rich.console import Console
     from anton.context.self_awareness import SelfAwarenessContext
     from anton.chat_ui import EscapeWatcher
+    from anton.core.browser.config import BrowserConfig
     from anton.core.artifacts.live_app_slots import LiveAppHost
     from anton.core.llm.client import LLMClient
     from anton.core.mcp.client import McpSession
@@ -938,12 +958,6 @@ _SPEND_CEILING_RESERVE = 200_000
 # put the turn back up near the ceiling. See `_grant_spend_ceiling_grace`.
 _SPEND_CEILING_GRACE_FLOOR = 100_000
 
-# One-time round-cap extension (ENG-1893), granted the first time a turn
-# breaches max_tool_rounds. Sized to the "2-3 more tool calls" this exists
-# for — add a closing step, save, verify — not a way to talk past the cap
-# repeatedly: see the grant sites for the one-shot guard.
-_ROUND_CAP_GRACE_ROUNDS = 3
-
 # What one "Keep going" at a turn limit buys: the limit rises by this many times
 # its configured size. Replayed against 30 days of limit stops, 4x let 116 of
 # 120 interrupted-then-finished runs complete after one question; one more
@@ -1055,7 +1069,9 @@ _NOTE_PREFIXES = ("SYSTEM:", _CHECK_NOTE, ANTON_NOTE)
 _NO_GUESS_AT_LIMIT = (
     "Report only what your tool results actually showed. If you have not found the "
     "answer, say plainly that you could not find it; do not estimate, extrapolate or "
-    "state a figure you did not retrieve."
+    "state a figure you did not retrieve. A result your tools did compute is not a "
+    "guess: if you have one, give it with the assumptions it rests on, rather than "
+    "withholding it because something is still unexplained."
 )
 
 
@@ -1596,18 +1612,6 @@ def _role_calls(tc: TurnCost, role: str) -> str:
     return str(slice_.calls if slice_ else 0)
 
 
-def _record_grace(turn_cost: TurnCost | None, tag: str) -> None:
-    """Add `tag` ("round" or "ceiling") to `turn_cost.grace_granted`,
-    comma-joined, deduplicated, and sorted — alphabetical rather than
-    firing order, so the two-grace value is one fixed string either way."""
-    if turn_cost is None:
-        return
-    tags = turn_cost.grace_granted.split(",") if turn_cost.grace_granted else []
-    if tag not in tags:
-        tags.append(tag)
-        turn_cost.grace_granted = ",".join(sorted(tags))
-
-
 @functools.cache
 def _jev_questions() -> dict:
     """The verifier's rubric as a Jev question, built from the same text."""
@@ -1841,6 +1845,12 @@ class ChatSessionConfig:
     # (registered on the tool registry). See ChatSession.__init__.
     web_search_enabled: bool = True
     web_fetch_enabled: bool = True
+    # False: the agent must not get information from the internet. Turns off
+    # both web tools, makes the scratchpad's web_search() raise, and swaps the
+    # prompt's internet guidance for "use the connected data only". A rule for
+    # the agent, not a network block. Separate from the web tool flags:
+    # cloud_turn turns those off while its scratchpads keep the internet.
+    internet_research_enabled: bool = True
     # When the task (conversation) was created. Rendered as a fixed
     # "Conversation started: …" line in the cache-stable prompt prefix — it
     # never changes across turns, so it doesn't bust the prefix cache. The
@@ -1876,6 +1886,11 @@ class ChatSessionConfig:
     # `ChatSession.close()` can tear them down at turn end, the same way it
     # already closes the LLM client's transports.
     mcp_sessions: list["McpSession"] = field(default_factory=list)
+    # The browser the `browser` tool drives; the tool is registered only with
+    # one. Hosts pass it: cowork-server for the Cowork desktop app's own
+    # browser, and the cloud pod for the MindsHub browser router. None means no
+    # browser tool, and nothing falls back to settings or the environment.
+    browser: "BrowserConfig | None" = None
 
 
 class ChatSession:
@@ -1930,11 +1945,18 @@ class ChatSession:
         # this is __init__ so a long CLI session gets it too.
         self._spend_ceiling_grace_used = False
         self._spend_ceiling_grace_tokens = 0
-        self._round_cap_grace_used = False
         # Headroom the user granted this turn by answering "Keep going" at a
         # limit. Reset per turn in turn_stream.
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
+        # Tool rounds this turn has run. The step limit is per task, so the
+        # count spans verifier continuations and provider-error retries alike.
+        # Reset per turn in turn_stream.
+        self._turn_tool_rounds = 0
+        # Verifier-forced continuations this turn has run, against
+        # `max_continuations`. Per turn for the same reason: a retry must
+        # not hand out a fresh set. Reset per turn in turn_stream.
+        self._turn_continuations = 0
         # The tool calls this turn ran, for the report `_stream_handback_diagnosis`
         # writes when the content filter stops every hand-back. Reset per turn in
         # turn_stream.
@@ -1947,8 +1969,8 @@ class ChatSession:
         # carried past once.
         self._finish_authorized: bool | None = None
         self._limits_passed_by_message: set[str] = set()
-        # Memory section by user message, reused within one turn. None outside a turn.
-        self._turn_memory: dict[str, str] | None = None
+        # Memory text the conversation's prompt was first built with (see _memory_pin).
+        self._memory_pin_values: dict | None = None
         # Tally of classified tool failures (ENG-1492). MEASUREMENT ONLY —
         # nothing reads this to change behaviour. The control that will
         # (ENG-1531) is deliberately unbuilt until this has reported real
@@ -2009,6 +2031,8 @@ class ChatSession:
         # skill is recalled. Populated in `_build_tools`.
         self._deferred_bundles: dict[str, list["ToolDef"]] = {}
         self._workspace = config.workspace
+        self._browser_config = config.browser
+        self._browser_state = None
         self._data_vault = config.data_vault
         self._connector_usage_notes = config.connector_usage_notes
         # Kept so an artifact backend can be given the same project .env the
@@ -2146,6 +2170,7 @@ class ChatSession:
         key_supplier = getattr(coding_provider, "current_api_key", None)
         if not inspect.iscoroutinefunction(key_supplier):
             key_supplier = None
+        self._internet_research_enabled = config.internet_research_enabled
         self._scratchpads = ScratchpadManager(
             runtime_factory=config.runtime_factory,
             coding_provider=coding_conn.provider,
@@ -2160,6 +2185,7 @@ class ChatSession:
             data_vault=config.data_vault,
             workspace_env_overlay=config.workspace_env_overlay,
             cell_sandbox=config.cell_sandbox,
+            internet_research_enabled=config.internet_research_enabled,
         )
         # Sandboxed without live apps, nothing starts an app backend, so the
         # artifact tools and the prompt offer html-apps only.
@@ -2187,6 +2213,11 @@ class ChatSession:
         # project-wide) directory can never be mistaken for this turn's work.
         # Reset at the top of every turn.
         self._artifacts_touched: set[str] = set()
+        # False once a snapshot around one of this turn's cells could not
+        # read the artifacts folder or an entry in it, so an edit there may
+        # be missing from `_artifacts_touched`
+        # (`tool_handlers.snapshot_cell_artifacts`). Reset every turn.
+        self._artifacts_touched_complete = True
         # (artifact slug, page) -> how that page last fared in a browser this
         # turn (`passed`, `failed` or `unverified`), from generate_artifact
         # and the checks after each cell. On a sandboxed deployment the turn
@@ -2334,9 +2365,9 @@ class ChatSession:
         # we run ourselves via handler-dispatched ToolDefs (registered in
         # ``_build_core_tools``). The two sets are disjoint by construction.
         desired_web: set[str] = set()
-        if config.web_search_enabled:
+        if config.web_search_enabled and config.internet_research_enabled:
             desired_web.add("web_search")
-        if config.web_fetch_enabled:
+        if config.web_fetch_enabled and config.internet_research_enabled:
             desired_web.add("web_fetch")
         provider_native = self._llm.planning_provider.native_web_tools()
         self._native_web_tools: set[str] = desired_web & provider_native
@@ -2381,6 +2412,15 @@ class ChatSession:
         """
         return set(self._artifacts_touched)
 
+    @property
+    def artifacts_touched_complete(self) -> bool:
+        """Whether `artifacts_touched` names every artifact this turn's cells
+        edited. False once a snapshot around a cell could not read the
+        artifacts folder or an entry in it, since an edit there goes unseen;
+        a host should then diff the whole artifacts folder instead.
+        """
+        return self._artifacts_touched_complete
+
     def _unverified_page_lines(self) -> list[str]:
         """The lines that end the turn's final message on a sandboxed
         deployment: one per artifact with a page that did not pass its last
@@ -2409,7 +2449,67 @@ class ChatSession:
         model (Cortex.memory_read). A host reads it after the turn to record
         it. None without a Cortex, or before the first turn built its prompt.
         """
-        return self._cortex.memory_read if self._cortex is not None else None
+        if self._cortex is None:
+            return None
+        pinned = self._memory_pin().get("read")
+        return pinned if pinned is not None else self._cortex.memory_read
+
+    def _memory_pin(self) -> dict:
+        """The memory and workspace text this conversation's prompt was first built with, by part.
+
+        Both sit ahead of the whole conversation in the request, and end-of-turn
+        consolidation or a new file changes them after most turns, which re-wrote the
+        conversation to the prompt cache. Changes reach the prompt from the next conversation.
+        """
+        if self._memory_pin_values is None:
+            # Shared by id: the host builds a session per message.
+            sid = self._session_id
+            pin = _MEMORY_PINS.get(sid) if sid else None
+            if pin is None and sid:
+                # A new process (every cloud turn, or after a restart) starts from the saved copy.
+                pin = self._load_memory_pin()
+            # A change of learned-memory scope must reach the prompt at once.
+            scope = getattr(self, "_learned_memory_scope", None)
+            if pin is None or pin.get("scope") != scope:
+                pin = {"scope": scope}
+            if sid:
+                _MEMORY_PINS[sid] = pin
+                _MEMORY_PINS.move_to_end(sid)
+                while len(_MEMORY_PINS) > _MEMORY_PINS_MAX:
+                    _MEMORY_PINS.popitem(last=False)
+            self._memory_pin_values = pin
+        return self._memory_pin_values
+
+    def _set_memory_pin(self, part: str, value: object) -> None:
+        self._memory_pin()[part] = value
+
+    def _save_memory_pin(self) -> None:
+        pin = self._memory_pin()
+        if self._scratchpads is not None and "workspace" in pin:
+            saved = {"scope": pin.get("scope"), "workspace": pin["workspace"]}
+            self._scratchpads.write_conversation_text(_MEMORY_PIN_FILE, json.dumps(saved))
+
+    def _load_memory_pin(self) -> dict | None:
+        text = self._scratchpads.read_conversation_text(_MEMORY_PIN_FILE)
+        try:
+            data = json.loads(text) if isinstance(text, str) and text else None
+        except ValueError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        names = valid_workspace_names(data.get("workspace"))
+        scope = data.get("scope")
+        if names is None or not (scope is None or isinstance(scope, str)):
+            return None
+        return {"scope": scope, "workspace": names}
+
+    def _drop_memory_pin(self) -> None:
+        self._memory_pin_values = None
+        if self._session_id:
+            _MEMORY_PINS.pop(self._session_id, None)
+        if self._scratchpads is not None:
+            # An empty record is no pin: the next turn builds the prompt afresh.
+            self._scratchpads.write_conversation_text(_MEMORY_PIN_FILE, "")
 
     @property
     def last_compaction(self) -> dict | None:
@@ -2557,6 +2657,8 @@ class ChatSession:
         streak = error_streak.get(tool_name, 0)
         if streak >= self._resilience_nudge_at and tool_name not in resilience_nudged:
             nudge = self._select_resilience_nudge(tool_name, result_text)
+            if not getattr(self, "_internet_research_enabled", True):
+                nudge = _NO_INTERNET_NUDGES.get(nudge, nudge)
             if nudge:
                 result_text += nudge
                 resilience_nudged.add(tool_name)
@@ -2978,14 +3080,14 @@ class ChatSession:
         _started = self._started_at or _dt.datetime.now()
         _conversation_started = _started.strftime("%A, %B %d, %Y")
 
-        # Inject memory context (replaces old self_awareness)
+        # Inject memory context (replaces old self_awareness). Pinned for the
+        # conversation, which also keeps a retry from repeating the rule filter calls.
         memory_section = ""
         learned_memory_scope = getattr(self, "_learned_memory_scope", None)
         if self._cortex is not None:
-            # Once per turn: a retry must not repeat the rule filter model calls.
-            turn_memory = self._turn_memory
-            if turn_memory is not None and user_message in turn_memory:
-                memory_section = turn_memory[user_message]
+            pin = self._memory_pin()
+            if "system" in pin:
+                memory_section = pin["system"]
             else:
                 if learned_memory_scope is None:
                     memory_section = await self._cortex.build_memory_context(user_message)
@@ -2993,8 +3095,7 @@ class ChatSession:
                     memory_section = await self._cortex.build_memory_context(
                         user_message, learned_memory_scope=learned_memory_scope
                     )
-                if turn_memory is not None:
-                    turn_memory[user_message] = memory_section
+                self._set_memory_pin("system", memory_section)
         elif learned_memory_scope is not None:
             from anton.core.memory.cortex import learned_memory_notice
 
@@ -3018,18 +3119,23 @@ class ChatSession:
             usage_notes=self._connector_usage_notes,
         )
 
-        # Turn-start workspace discovery (ENG-578): volatile, so it rides the
-        # tail — never the cache-stable prefix. Best-effort; a failure here
-        # must not break the turn.
+        # Workspace listing, pinned like memory: a new file or pad would
+        # otherwise re-write the conversation to the prompt cache. Best-effort;
+        # a failure here must not break the turn.
         workspace_ctx = ""
         if self._scratchpads is not None:
-            try:
-                workspace_ctx = build_workspace_discovery_context(self._scratchpads)
-            except Exception:
-                workspace_ctx = ""
+            pin = self._memory_pin()
+            if "workspace" not in pin:
+                self._set_memory_pin("workspace", workspace_discovery_names(self._scratchpads))
+                self._save_memory_pin()
+            workspace_ctx = render_workspace_discovery(pin["workspace"])
 
         # Ensure the registry is populated before we extract tool prompts.
         self._build_tools()
+        if self._cortex is not None and "read" not in self._memory_pin():
+            read = self._cortex.memory_read
+            if isinstance(read, MemoryRead):
+                self._set_memory_pin("read", read)
 
         # Which model is serving THIS conversation (ENG-1638): what the planning
         # provider reported on its last response, else the id we requested,
@@ -3055,6 +3161,7 @@ class ChatSession:
             ),
             deployment_identity=getattr(self, "_deployment_identity", None),
             fullstack_offered=getattr(self, "_fullstack_offered", True),
+            internet_research=getattr(self, "_internet_research_enabled", True),
             direct_reports=self._direct_reports_enabled(),
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
@@ -3204,7 +3311,8 @@ class ChatSession:
         # Copy — SCRATCHPAD_TOOL is a module-level singleton; mutating its
         # .description in place would leak across every session/user sharing
         # this process instead of resetting per session.
-        scratchpad_tool = replace(SCRATCHPAD_TOOL)
+        scratchpad_tool = replace(SCRATCHPAD_TOOL if getattr(self, "_internet_research_enabled", True)
+                                  else NO_INTERNET_SCRATCHPAD_TOOL)
         pkg_list = self._scratchpads.available_packages
         if pkg_list:
             notable = sorted(p for p in pkg_list if p.lower() in self._NOTABLE_PACKAGES)
@@ -3215,15 +3323,21 @@ class ChatSession:
                 extra = f"\n\nInstalled packages: {len(pkg_list)} total (standard library plus dependencies)."
             scratchpad_tool.description = scratchpad_tool.description + extra
 
-        # Inject scratchpad wisdom from memory (procedural priming)
+        # Inject scratchpad wisdom from memory, pinned like the system memory:
+        # tools come first in the request.
         if self._cortex is not None:
-            learned_memory_scope = getattr(self, "_learned_memory_scope", None)
-            if learned_memory_scope is None:
-                wisdom = self._cortex.get_scratchpad_context()
+            pin = self._memory_pin()
+            if "scratchpad" in pin:
+                wisdom = pin["scratchpad"]
             else:
-                wisdom = self._cortex.get_scratchpad_context(
-                    learned_memory_scope=learned_memory_scope
-                )
+                learned_memory_scope = getattr(self, "_learned_memory_scope", None)
+                if learned_memory_scope is None:
+                    wisdom = self._cortex.get_scratchpad_context()
+                else:
+                    wisdom = self._cortex.get_scratchpad_context(
+                        learned_memory_scope=learned_memory_scope
+                    )
+                self._set_memory_pin("scratchpad", wisdom)
             if wisdom:
                 scratchpad_tool.description += (
                     f"\n\nLessons from past sessions:\n{wisdom}"
@@ -3342,6 +3456,14 @@ class ChatSession:
                 self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
             self.tool_registry.register_tool(generate)
 
+        # The shared browser: only when the host gave one. The credential is
+        # resolved per call, so a session without one still registers it and
+        # the tool reports the missing login itself.
+        if self._browser_config is not None:
+            from anton.core.browser.tool import build_browser_tool
+
+            self.tool_registry.register_tool(build_browser_tool())
+
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""
         try:
@@ -3363,6 +3485,8 @@ class ChatSession:
                 # Provider clients own an HTTP pool. This runs even if the
                 # steps above raise, or the pool outlives the process.
                 try:
+                    if self._browser_state is not None:
+                        await self._browser_state.aclose()
                     if self._jev_http is not None:
                         await self._jev_http.aclose()
                 finally:
@@ -3684,6 +3808,8 @@ class ChatSession:
         self._seed_covered = covered
         if recorded and not self._compaction_sealed:
             self._last_compaction = {"summary": summary_body, "covered_through": covered}
+        # The conversation is written to cache again anyway, so memory can catch up.
+        self._drop_memory_pin()
         return True
 
     def _compact_scratchpads(self) -> bool:
@@ -4683,10 +4809,10 @@ class ChatSession:
         message for a task that never started.
 
         `TurnCost.rounds` is turn-wide (it accumulates across verifier-forced
-        continuations rather than resetting with the loop-local counter), so
-        `> 1` means at least one round has completed its dispatch — including
-        rounds from an earlier continuation, which is why a continuation cannot
-        hand out a fresh free round.
+        continuations, as does `self._turn_tool_rounds`), so `> 1` means at
+        least one round has completed its dispatch — including rounds from an
+        earlier continuation, which is why a continuation cannot hand out a
+        fresh free round.
 
         Belt and braces with the reserve cap in `_spend_ceiling_gate`: that cap
         keeps the gate proportional to the ceiling, this keeps the guarantee true
@@ -4771,7 +4897,7 @@ class ChatSession:
         self._spend_ceiling_grace_used = True
         if self._turn_cost is not None:
             self._turn_cost.grace_tokens = self._spend_ceiling_grace_tokens
-        _record_grace(self._turn_cost, "ceiling")
+            self._turn_cost.grace_granted = "ceiling"
 
     def _limit_reached(self, limit: str) -> str:
         """Names the limit that stopped the turn.
@@ -4970,7 +5096,7 @@ class ChatSession:
         if self._jev_http is None:
             # Same TLS setting as the provider, e.g. behind an intercepting proxy.
             self._jev_http = httpx.AsyncClient(timeout=self._jev_timeout_s, verify=info.ssl_verify is not False)
-        return await _jev.classify(
+        result = await _jev.classify(
             base_url=base_url,
             api_key=api_key,
             headers=headers,
@@ -4983,6 +5109,18 @@ class ChatSession:
             timeout_s=self._jev_timeout_s,
             client=self._jev_http,
         )
+        if result.error == "http_403":
+            # MindsHub refuses Jev to this organization, for zero data retention
+            # or an admin's model rule, and will refuse every later check too:
+            # this session's later checks use the LLM verifier alone. A desktop
+            # session spans the conversation; a hosted turn builds its own
+            # session, so there it lasts the turn.
+            self._jev_enabled = False
+            logger.info("Jev refused (HTTP 403); verifying with the LLM for the rest of this session")
+            client, self._jev_http = self._jev_http, None
+            if client is not None:
+                await client.aclose()
+        return result
 
     def _jev_decides(self, result: "_jev.JevVerdict | None") -> bool:
         """Jev settles only a confident COMPLETE or WAITING; the rest needs the LLM's reason."""
@@ -5629,6 +5767,7 @@ class ChatSession:
         # reports only what the CURRENT turn touched. Hosts that build a fresh
         # session per turn get the same result either way.
         self._artifacts_touched = set()
+        self._artifacts_touched_complete = True
         self._page_checks = {}
         self._geography_requirements = {}
         self._artifact_geography_request = ""
@@ -5732,17 +5871,18 @@ class ChatSession:
         _screenshot_drop_unconfirmed = False
         _tool_images_dropped = False
         _tool_image_drop_unconfirmed = False
-        # One-time cap grace, reset once per turn_stream() call rather than in
-        # `_stream_and_handle_tools`, which retries re-enter and would re-arm.
+        # Per-turn limit state, reset once per turn_stream() call rather than
+        # in `_stream_and_handle_tools`, which retries re-enter: the grace
+        # would re-arm and the step and auto-continue counts would restart.
         self._spend_ceiling_grace_used = False
         self._spend_ceiling_grace_tokens = 0
-        self._round_cap_grace_used = False
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
+        self._turn_tool_rounds = 0
+        self._turn_continuations = 0
         self._turn_steps = []
         self._finish_authorized = None
         self._limits_passed_by_message = set()
-        self._turn_memory = {}
         # ENG-673: a mid-stream provider failure that had NO prior retry (an
         # overload smuggled into an HTTP-200 stream) gets budget-bounded
         # backoff-and-retry — separate from the instant, count-bounded recovery
@@ -6337,7 +6477,6 @@ class ChatSession:
             _turn_raised = True
             raise
         finally:
-            self._turn_memory = None
             # A cancelled turn drops the failed cells the cerebellum buffered,
             # so neither this turn's flush nor the next one learns from a turn
             # the person backed out of. Same cancel test the books use below.
@@ -6647,7 +6786,6 @@ class ChatSession:
         # Tool-call loop with circuit breaker, wrapped in a completion
         # verification outer loop that can restart the tool loop if the
         # task isn't actually done yet.
-        continuation = 0
         _max_rounds_hit = False
         # Set when the per-turn spend ceiling stopped the turn (ENG-1286). Like
         # `_max_rounds_hit` it also suppresses verification: the turn is already
@@ -6666,64 +6804,39 @@ class ChatSession:
             # `llm_response`, so a stale True would make the post-loop fallback
             # skip a reply that was never persisted — dropping the answer the
             # user just read on any INCOMPLETE turn whose continuation needs no
-            # tools (tool_round stays 0, so the loop breaks at the gate below
-            # before the append).
+            # tools (attempt_rounds stays 0, so the loop breaks at the gate
+            # below before the append).
             _reply_persisted = False
-            tool_round = 0
+            # This attempt's rounds alone, for the verifier gate below.
+            attempt_rounds = 0
             error_streak: dict[str, int] = {}
             resilience_nudged: set[str] = set()
-            # Per-continuation, unlike `_round_cap_grace_used`: only the
-            # continuation that actually earns the grant (the first ever
-            # breach this turn) gets the wider cap. Without this,
-            # `_round_cap_grace_used` staying True for the rest of the turn
-            # let EVERY later continuation start pre-extended to M+3, turning
-            # a one-shot +3 into +3 per continuation.
-            _round_cap_grace_active = False
 
             while llm_response.tool_calls:
-                tool_round += 1
-                # One-time extension (ENG-1893), unconditional like the
-                # mid-loop spend-ceiling grace — no verdict exists yet at
-                # this point, so the grant is a single small window rather
-                # than a self-report. Decided before the accounting below so
-                # the granted round is counted like any other. `> 0` excludes
-                # a configured 0 (or negative) cap — "no tool rounds", not
-                # "one round of free grace".
-                if (
-                    tool_round > self._max_tool_rounds
-                    and not self._round_cap_grace_used
-                    and self._max_tool_rounds > 0
-                ):
-                    self._round_cap_grace_used = True
-                    _round_cap_grace_active = True
-                    _record_grace(self._turn_cost, "round")
-                effective_round_cap = (
-                    self._max_tool_rounds
-                    + (_ROUND_CAP_GRACE_ROUNDS if _round_cap_grace_active else 0)
-                    + self._round_cap_continued_rounds
-                )
-                if tool_round > effective_round_cap and self._max_tool_rounds > 0:
+                self._turn_tool_rounds += 1
+                attempt_rounds += 1
+                # The configured cap plus whatever "Keep going" answers have
+                # added this turn. There is no silent extension: the user's
+                # step limit is the step limit.
+                effective_round_cap = self._max_tool_rounds + self._round_cap_continued_rounds
+                if self._turn_tool_rounds > effective_round_cap and self._max_tool_rounds > 0:
                     agen = self._ask_to_continue_past_limit("round_cap", user_message)
                     try:
                         async for _kind, _payload in agen:
                             if _kind == "event":
                                 yield _payload
-                            elif _payload:
-                                effective_round_cap += (
-                                    _LIMIT_CONTINUE_MULTIPLIER * self._max_tool_rounds
-                                )
                     finally:
                         await agen.aclose()
-                # Accumulate, don't assign: `tool_round` is loop-local and
-                # resets to 0 on every verifier-forced continuation, so
-                # assigning reported only the last continuation's rounds —
-                # breaking the metric for exactly the expensive shape it
-                # exists to classify. Counted before the cap check so a
-                # capped turn reports the (possibly grace-extended) cap, not
-                # cap+1 (#309 review).
-                if self._turn_cost is not None and tool_round <= effective_round_cap:
+                    # A grant raised `_round_cap_continued_rounds`; re-read it
+                    # rather than repeating `_grant_limit`'s arithmetic here.
+                    effective_round_cap = (
+                        self._max_tool_rounds + self._round_cap_continued_rounds
+                    )
+                # Counted before the cap check so a capped turn reports the
+                # cap, not cap+1.
+                if self._turn_cost is not None and self._turn_tool_rounds <= effective_round_cap:
                     self._turn_cost.rounds += 1
-                if tool_round > effective_round_cap:
+                if self._turn_tool_rounds > effective_round_cap:
                     _max_rounds_hit = True
                     if self._turn_cost is not None:
                         self._turn_cost.ended_by = "round_cap"
@@ -6731,7 +6844,7 @@ class ChatSession:
                         "cap_exhausted",
                         {"cap": effective_round_cap, "configured_cap": self._max_tool_rounds},
                         severity=9,
-                        round_idx=tool_round,
+                        round_idx=self._turn_tool_rounds,
                     )
                     self._append_history(
                         {"role": "assistant", "content": llm_response.content or ""}
@@ -6760,7 +6873,7 @@ class ChatSession:
                     _reply_persisted = True
                     async for event in self._stream_handback_diagnosis(
                         system=system, label="max-tool-rounds", answered=False,
-                        cancels_continuation=continuation > 0, limit="round_cap",
+                        cancels_continuation=self._turn_continuations > 0, limit="round_cap",
                     ):
                         yield event
                     break
@@ -6799,7 +6912,7 @@ class ChatSession:
                             "tool_round=%d continuation=%d — pausing to ask the user",
                             self._turn_cost.total_tokens if self._turn_cost else 0,
                             self._max_turn_tokens, self._spend_ceiling_gate(),
-                            tool_round, continuation,
+                            self._turn_tool_rounds, self._turn_continuations,
                         )
                         self._append_history(
                             {"role": "assistant", "content": llm_response.content or ""}
@@ -6818,7 +6931,7 @@ class ChatSession:
                         )
                         async for event in self._stream_handback_diagnosis(
                             system=system, label="spend-ceiling", answered=False,
-                            cancels_continuation=continuation > 0, limit="spend_ceiling",
+                            cancels_continuation=self._turn_continuations > 0, limit="spend_ceiling",
                         ):
                             yield event
                         break
@@ -6870,7 +6983,7 @@ class ChatSession:
                         "tool_call",
                         {"name": tc.name, "args_summary": str(tc.input)[:120]},
                         severity=1,
-                        round_idx=tool_round,
+                        round_idx=self._turn_tool_rounds,
                     )
                     if self._episodic is not None:
                         self._episodic.log_turn(
@@ -6994,7 +7107,7 @@ class ChatSession:
                                 if artifact_store is not None:
                                     await capture_turn_pages(self, artifact_store)
                                 before_artifacts = (
-                                    snapshot_existing_artifacts(artifact_store)
+                                    await snapshot_cell_artifacts(session=self, store=artifact_store)
                                     if artifact_store is not None
                                     else {}
                                 )
@@ -7349,7 +7462,7 @@ class ChatSession:
                             "tool_result",
                             {"name": tc.name, "success": tool_ok is not False, "error": ""},
                             severity=5 if tool_ok is False else 1,
-                            round_idx=tool_round,
+                            round_idx=self._turn_tool_rounds,
                         )
                         tool_results.append(
                             {
@@ -7395,7 +7508,7 @@ class ChatSession:
                             "error": result_text[:300] if _failed else "",
                         },
                         severity=5 if _failed else 1,
-                        round_idx=tool_round,
+                        round_idx=self._turn_tool_rounds,
                     )
                     tool_results.append(
                         {
@@ -7420,7 +7533,7 @@ class ChatSession:
                 # one would get to answer the question itself. The answer, when
                 # it comes, starts the next turn.
                 if self._unanswered_question is not None:
-                    for event in self._unanswered_question_events(cancels_continuation=continuation > 0):
+                    for event in self._unanswered_question_events(cancels_continuation=self._turn_continuations > 0):
                         yield event
                     _reply_persisted = True
                     break
@@ -7500,7 +7613,7 @@ class ChatSession:
             # default of 2, single-round turns), when we hit the max-rounds
             # hard stop, or after an unanswered question.
             if (
-                tool_round < self._verify_min_tool_rounds
+                attempt_rounds < self._verify_min_tool_rounds
                 or _max_rounds_hit
                 or _spend_ceiling_hit
                 or self._unanswered_question is not None
@@ -7515,7 +7628,7 @@ class ChatSession:
             self._append_history({"role": "assistant", "content": reply})
             _reply_persisted = True
 
-            if continuation >= self._max_continuations:
+            if self._turn_continuations >= self._max_continuations:
                 # Budget exhausted — ask LLM to diagnose and present to user
                 self._append_history(
                     {
@@ -7540,7 +7653,7 @@ class ChatSession:
                     self._turn_cost.ended_by = "handback_budget"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="budget-exhausted", answered=bool(reply.strip()),
-                    cancels_continuation=continuation > 0,
+                    cancels_continuation=self._turn_continuations > 0,
                 ):
                     yield event
                 # Consolidation still runs after diagnosis
@@ -7584,8 +7697,8 @@ class ChatSession:
                         f"{self._verifier_latch.no_verdict_failures} verdict "
                         "call(s) with no successful verdict since",
                         self._verifier_latch.skips,
-                        reprobe_turns, continuation,
-                        self._max_continuations, tool_round,
+                        reprobe_turns, self._turn_continuations,
+                        self._max_continuations, self._turn_tool_rounds,
                     )
                     # Stamp the books: this turn books ended_by="completed"
                     # but was NOT verified — without the flag it is
@@ -7891,7 +8004,7 @@ class ChatSession:
                 logger.warning(
                     "completion-verifier verdict=ERROR continuation=%d/%d tool_rounds=%d "
                     "model=%s — failing toward an honest diagnosis, not a silent COMPLETE",
-                    continuation, self._max_continuations, tool_round,
+                    self._turn_continuations, self._max_continuations, self._turn_tool_rounds,
                     self._llm.coding_model,
                 )
                 self._append_history(
@@ -7923,7 +8036,7 @@ class ChatSession:
                     self._turn_cost.ended_by = "handback_verifier_failure"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="verifier-failure", answered=bool(reply.strip()),
-                    cancels_continuation=continuation > 0,
+                    cancels_continuation=self._turn_continuations > 0,
                 ):
                     yield event
                 break
@@ -7933,7 +8046,7 @@ class ChatSession:
                 # from the user's conversation, and this is an ordinary app log.
                 # It stays in the Langfuse trace, where that content belongs.
                 "completion-verifier verdict=%s continuation=%d/%d tool_rounds=%d",
-                status, continuation, self._max_continuations, tool_round,
+                status, self._turn_continuations, self._max_continuations, self._turn_tool_rounds,
             )
 
             if status in ("COMPLETE", "WAITING"):
@@ -7963,7 +8076,7 @@ class ChatSession:
                     self._turn_cost.ended_by = "handback_stuck"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="stuck", answered=bool(reply.strip()),
-                    cancels_continuation=continuation > 0,
+                    cancels_continuation=self._turn_continuations > 0,
                 ):
                     yield event
                 break
@@ -8007,7 +8120,7 @@ class ChatSession:
                         "spend ceiling reached at the continuation gate: tokens=%d "
                         "ceiling=%d continuation=%d — pausing to ask the user",
                         self._turn_cost.total_tokens if self._turn_cost else 0,
-                        self._max_turn_tokens, continuation,
+                        self._max_turn_tokens, self._turn_continuations,
                     )
                     self._append_history(
                         {"role": "user", "content": self._spend_ceiling_notice()}
@@ -8022,20 +8135,20 @@ class ChatSession:
                     )
                     async for event in self._stream_handback_diagnosis(
                         system=system, label="spend-ceiling", answered=bool(reply.strip()),
-                        cancels_continuation=continuation > 0, limit="spend_ceiling",
+                        cancels_continuation=self._turn_continuations > 0, limit="spend_ceiling",
                     ):
                         yield event
                     break
 
-            continuation += 1
+            self._turn_continuations += 1
             if self._turn_cost is not None:
-                self._turn_cost.continuations = continuation
+                self._turn_cost.continuations = self._turn_continuations
             self._append_history(
                 {
                     "role": "user",
                     "content": (
                         f"{_CHECK_NOTE} The check judged the answer above unfinished "
-                        f"(attempt {continuation}/{self._max_continuations}): {reason}\n\n"
+                        f"(attempt {self._turn_continuations}/{self._max_continuations}): {reason}\n\n"
                         "Continue the user's original request where you left off; do not "
                         "redo tool work already done. If the data truly does not hold what "
                         "was asked, saying so plainly is a complete answer. Your next reply "
@@ -8052,7 +8165,7 @@ class ChatSession:
             # otherwise. `analyzing` is emitted from several unrelated sites.
             yield StreamTaskProgress(
                 phase="continuation",
-                message=f"Task incomplete — continuing ({continuation}/{self._max_continuations})...",
+                message=f"Task incomplete — continuing ({self._turn_continuations}/{self._max_continuations})...",
             )
 
             # Re-enter tool loop: get next LLM response with tools available

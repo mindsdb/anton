@@ -153,12 +153,17 @@ def _upload_error(err: urllib.error.HTTPError) -> Exception:
     if err.code == 409 and answer.code == OWNED_BY_OTHER_USER_CODE:
         return ArtifactOwnedByOtherUserError()
     if err.code == 403 and answer.code == SHARE_ORG_REQUIRED_CODE:
-        return ArtifactShareOrgRequiredError(
+        raised = ArtifactShareOrgRequiredError(
             err.filename, err.code, answer.error or err.msg, err.hdrs, io.BytesIO(body)
         )
-    return urllib.error.HTTPError(
-        err.filename, err.code, answer.error or err.msg, err.hdrs, io.BytesIO(body)
-    )
+    else:
+        raised = urllib.error.HTTPError(
+            err.filename, err.code, answer.error or err.msg, err.hdrs, io.BytesIO(body)
+        )
+    # What describe_minds_request_failure reads off a minds_request error.
+    raised.body = body
+    raised.request_line = getattr(err, "request_line", None)
+    return raised
 
 
 DEFAULT_PUBLISH_URL = "https://view.mindshub.ai"

@@ -21,6 +21,9 @@ STDOUT_CHUNK_MARKER = "__ANTON_STDOUT_CHUNK__"
 # when the host sets USAGE_MARKER_ENV in the pad's environment.
 USAGE_MARKER = "__ANTON_USAGE__"
 USAGE_MARKER_ENV = "ANTON_SCRATCHPAD_USAGE"
+# "off" when the session has internet research turned off: the pad's
+# web_search() then raises instead of searching.
+INTERNET_RESEARCH_ENV = "ANTON_SCRATCHPAD_INTERNET_RESEARCH"
 # A cell's stdout limit, and how much more the worker sends for the parent to
 # scrub before it cuts, so a secret across the limit can still match whole.
 MAX_OUTPUT = 10_000

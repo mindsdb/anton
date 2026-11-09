@@ -32,6 +32,7 @@ from anton.core.backends.wire import (
     HEARTBEAT_MARKER,
     INSTALL_END_MARKER,
     INSTALL_START_MARKER,
+    INTERNET_RESEARCH_ENV,
     MAX_OUTPUT,
     NOTHING_KEPT,
     PROGRESS_MARKER,
@@ -384,6 +385,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         cell_sandbox: CellSandbox | None = None,
         coding_api_key_supplier: ApiKeySupplier | None = None,
         coding_flavor: str | None = None,
+        internet_research_enabled: bool = True,
         _venvs_base: Path | None = None,
     ) -> None:
         # The name becomes a folder the host deletes and recreates, so one that
@@ -422,6 +424,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # The coding provider's OpenAI transport; None leaves the boot script
         # to infer it from the provider name and base URL.
         self._coding_flavor: str | None = coding_flavor
+        # False: the boot script injects a web_search() that only raises.
+        self._internet_research_enabled = internet_research_enabled
         self._credential_path: Path | None = None
         self._credential_written: str | None = None
         # The Landlock policy every spawn of agent code runs under; None runs
@@ -1104,6 +1108,12 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             env["ANTON_SCRATCHPAD_FLAVOR"] = self._coding_flavor
         else:
             env.pop("ANTON_SCRATCHPAD_FLAVOR", None)
+        # Set or cleared here, after the workspace overlay, so neither an
+        # inherited value nor a project .env decides it.
+        if self._internet_research_enabled:
+            env.pop(INTERNET_RESEARCH_ENV, None)
+        else:
+            env[INTERNET_RESEARCH_ENV] = "off"
         # Propagate provider credentials from the ANTON_* names into the SDK
         # names the scratchpad's nested get_llm() expects.
         if "ANTHROPIC_API_KEY" not in env and "ANTON_ANTHROPIC_API_KEY" in env:
@@ -1696,6 +1706,17 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         )
         self._running_code = None
         cell = self._record_cell(cell)
+        if cell.ended_process and self._proc is not None and self._proc.returncode is None:
+            # The exit can be reaped after the result arrives; until then the
+            # next cell sees a live process and writes to its closed pipe.
+            try:
+                await asyncio.wait_for(self._proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                logger.debug(
+                    "scratchpad %s: cell reported its process ended, but pid %s had not exited after 5s",
+                    self.name, self._proc.pid,
+                )
+                await self._stop_process()
         # The process proved itself alive by completing this round trip —
         # whatever earlier death streak led here (if any) is over. This is
         # in addition to (not instead of) the reset inside _auto_resume()
@@ -2101,6 +2122,7 @@ def local_scratchpad_runtime_factory(
     cell_sandbox: CellSandbox | None = None,
     coding_api_key_supplier: ApiKeySupplier | None = None,
     coding_flavor: str | None = None,
+    internet_research_enabled: bool = True,
 ) -> ScratchpadRuntime:
     return LocalScratchpadRuntime(
         name=name,
@@ -2117,4 +2139,5 @@ def local_scratchpad_runtime_factory(
         cell_sandbox=cell_sandbox,
         coding_api_key_supplier=coding_api_key_supplier,
         coding_flavor=coding_flavor,
+        internet_research_enabled=internet_research_enabled,
     )

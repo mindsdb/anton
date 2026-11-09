@@ -534,56 +534,77 @@ class TestTheWiringIsPinned:
         assert len(response.tool_calls) == 1
         assert response.tool_calls[0].id and response.tool_calls[0].name
 
-    def test_the_belt_runs_BEFORE_the_history_block_is_built(self):
-        """Position, not presence — order is the whole point of the belt.
+    async def test_the_belt_runs_BEFORE_the_history_block_is_built(self):
+        """A turn whose model reply carries a blank call must leave history replayable:
+        every tool_use has an id and name, and its tool_result points at that id."""
+        from anton.core.llm.provider import LLMResponse
+        from anton.core.session import ChatSession, ChatSessionConfig
+        from tests.conftest import make_mock_llm
 
-        A set of called names only asserts the belt runs *somewhere*: moving
-        the call to after `_append_history(...)` writes the unsanitised ids
-        into history — the exact failure the belt exists to prevent — and left
-        the suite green (review: pnewsam on #471).
-        """
-        import inspect
-        import re
+        llm = make_mock_llm()
+        llm.plan = AsyncMock(side_effect=[
+            LLMResponse(content="", tool_calls=[ToolCall(id="", name="", input={"a": 1})],
+                        stop_reason="tool_use"),
+            LLMResponse(content="done", stop_reason="end_turn"),
+        ])
+        session = ChatSession(ChatSessionConfig(llm_client=llm))
+        try:
+            async for _ in session.turn_stream("hi"):
+                pass
+        finally:
+            await session.close()
 
-        from anton.core.session import ChatSession
+        uses = [b for m in session.history if isinstance(m.get("content"), list)
+                for b in m["content"] if b.get("type") == "tool_use"]
+        result_ids = {b["tool_use_id"] for m in session.history
+                      if isinstance(m.get("content"), list)
+                      for b in m["content"] if b.get("type") == "tool_result"}
+        assert uses and all(b["id"] and b["name"] for b in uses)
+        assert {b["id"] for b in uses} == result_ids
 
-        src = inspect.getsource(ChatSession._stream_and_handle_tools)
-        belt = src.index("_ensure_replayable_calls(")
-        # The first `tool_use` block built from this round's calls; everything
-        # that reaches history goes through it.
-        block = re.search(r'"type":\s*"tool_use"', src)
-        assert block is not None, "the tool_use block construction moved"
-        assert belt < block.start(), (
-            "the belt must run before the tool_use blocks are built, or the "
-            "unsanitised ids are already in history by the time it fires"
-        )
-
-    def test_the_scratchpad_boot_belt_runs_before_its_history_block(self):
-        """Same property, same reason. Read from source rather than imported:
-        importing `scratchpad_boot` reads stdin at import time.
-
-        Scoped to the enclosing function rather than the whole module — the
-        earlier version parsed the entire file, so the call could migrate to
-        any function in it and still pass (review: pnewsam on #471).
-        """
-        import pathlib as _pathlib
-        import re
+    def test_the_scratchpad_boot_belt_runs_before_its_history_block(self, tmp_path):
+        """A blank call in the boot script's agentic_loop must reach the next request
+        with a non-empty id and name, paired with its tool_result."""
+        import json
+        import os
+        import pathlib
+        import subprocess
+        import sys
 
         import anton
 
-        src = (_pathlib.Path(anton.__file__).parent
-               / "core" / "backends" / "scratchpad_boot.py").read_text()
-        # The CALL, not the definition: `def _ensure_replayable_calls(response)`
-        # contains the same substring, and matching it pinned nothing at all.
-        call = re.search(r"\n\s+_ensure_replayable_calls\(response\)\s*\n", src)
-        assert call is not None, "the boot belt's call site is gone"
-        block = re.search(r'"type":\s*"tool_use"', src[call.end():])
-        assert block is not None, "the boot loop's tool_use block moved"
-        # Same function: no new `def` at module or class level in between.
-        between = src[call.end():call.end() + block.start()]
-        assert not re.search(r"\n\s{0,4}def ", between), (
-            "the belt and the history block are no longer in the same function"
+        repo = pathlib.Path(anton.__file__).resolve().parents[1]
+        cell = """
+import copy, json
+from anton.core.llm.provider import LLMResponse, ToolCall
+seen = []
+replies = [
+    LLMResponse(content="", tool_calls=[ToolCall(id="", name="", input={"a": 1})]),
+    LLMResponse(content="done"),
+]
+def fake_complete(**kw):
+    seen.append(copy.deepcopy(kw["messages"]))
+    return replies.pop(0)
+get_llm().complete = fake_complete
+agentic_loop(system="s", user_message="hi", tools=[], handle_tool=lambda n, i: "ok")
+print("SEEN=" + json.dumps(seen[1]))
+"""
+        env = {**os.environ, "PYTHONPATH": str(repo),
+               "ANTON_SCRATCHPAD_MODEL": "m", "ANTON_SCRATCHPAD_PROVIDER": "anthropic",
+               "ANTON_ANTHROPIC_API_KEY": "k", "ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL": "0"}
+        done = subprocess.run(
+            [sys.executable, str(repo / "anton" / "core" / "backends" / "scratchpad_boot.py")],
+            input=cell + "\n__ANTON_CELL_END__\n", text=True, capture_output=True,
+            cwd=tmp_path, env=env, timeout=30, check=False,
         )
+        out = done.stdout.split("__ANTON_RESULT__\n", 1)[1].split("\n__ANTON_RESULT_END__")[0]
+        result = json.loads(out)
+        assert result["error"] is None, result
+        messages = json.loads(result["stdout"].split("SEEN=", 1)[1])
+        uses = [b for b in messages[1]["content"] if b["type"] == "tool_use"]
+        results = [b for b in messages[2]["content"] if b["type"] == "tool_result"]
+        assert uses and all(b["id"] and b["name"] for b in uses)
+        assert [b["id"] for b in uses] == [b["tool_use_id"] for b in results]
 
     def test_a_bad_call_reaching_the_loop_never_lands_in_history(self):
         """Behaviour, not shape: drives a poisoned `LLMResponse` through the

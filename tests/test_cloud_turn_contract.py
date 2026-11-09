@@ -6,11 +6,21 @@ from pydantic import ValidationError
 
 from anton.cloud_turn import contract
 from anton.cloud_turn.contract import (
+    ARTIFACTS_TOUCHED_KEY,
+    MAX_ARTIFACTS_TOUCHED,
     DatasourceBlockV1,
     TurnRequestV1,
     TurnSkillEntry,
     parse_turn_skills,
 )
+
+
+def test_the_touched_artifacts_key_and_cap_match_the_controller_and_the_host():
+    """scratchpad-controller's `anton_turn.py` and cowork-server's
+    `cowork/services/task_objects.py` hold the same key and cap; a change here
+    is a change to both."""
+    assert ARTIFACTS_TOUCHED_KEY == "artifacts_touched"
+    assert MAX_ARTIFACTS_TOUCHED == 1000
 
 
 def test_turn_request_parses_versioned_datasource_refs():
@@ -191,3 +201,22 @@ def test_a_slug_that_is_not_a_string_is_dropped():
     assert parse_turn_skills({7: {"files": {"SKILL.md": "x"}}, "ok": {"files": {}}}) == {
         "ok": TurnSkillEntry(files={}),
     }
+
+
+def _jev_request(value):
+    body = {"protocol_version": 1, "conversation_id": "c", "input": "hi"}
+    if value is not ...:
+        body["jev_decisions"] = value
+    return TurnRequestV1.from_json(json.dumps(body))
+
+
+@pytest.mark.parametrize("value", [..., True])
+def test_jev_decisions_stay_on_when_missing_or_true(value):
+    """A controller that does not forward the field changes nothing."""
+    assert _jev_request(value).jev_decisions is True
+
+
+@pytest.mark.parametrize("value", [False, None, 0, "true", "false", {"on": True}])
+def test_jev_decisions_turn_off_on_anything_else(value):
+    """A malformed opt-out must not read as consent."""
+    assert _jev_request(value).jev_decisions is False

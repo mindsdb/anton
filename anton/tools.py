@@ -618,6 +618,7 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     # Publish flow
     import urllib.error
 
+    from anton.minds_client import describe_minds_request_failure
     from anton.publisher import (
         ArtifactOwnedByOtherUserError,
         ArtifactShareOrgRequiredError,
@@ -746,13 +747,15 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
                 except ArtifactShareOrgRequiredError as e2:
                     return _share_org_refused(console, e2)
                 except Exception as e2:
-                    console.print(f"  [anton.error]Publish failed: {escape(str(e2))}[/]")
+                    failure = describe_minds_request_failure(e2) or str(e2)
+                    console.print(f"  [anton.error]Publish failed: {escape(failure)}[/]")
                     console.print()
-                    return f"PUBLISH FAILED: {e2}"
+                    return f"PUBLISH FAILED: {failure}"
             else:
-                console.print(f"  [anton.error]Publish failed: {escape(str(e))}[/]")
+                failure = describe_minds_request_failure(e) or str(e)
+                console.print(f"  [anton.error]Publish failed: {escape(failure)}[/]")
                 console.print()
-                return f"PUBLISH FAILED: {e}"
+                return f"PUBLISH FAILED: {failure}"
 
     view_url = result.get("view_url", "")
     returned_report_id = result.get("report_id", "")
