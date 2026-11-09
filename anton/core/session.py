@@ -7065,7 +7065,7 @@ class ChatSession:
                         )
                         async for event in self._stream_handback_diagnosis(
                             system=system, label="time-limit", answered=False,
-                            cancels_continuation=continuation > 0, limit="time_limit",
+                            cancels_continuation=self._turn_continuations > 0, limit="time_limit",
                         ):
                             yield event
                         break
