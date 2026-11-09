@@ -1,0 +1,97 @@
+{
+  "description": "Who holds the browser. seq rises by one with every change, and by says who made it. The agent hands the browser to the person with POST /sessions/{id}/control holder \"human\". Only the person hands it back, with Done in the browser, which records holder \"agent\" by \"person\". The API refuses holder \"agent\" with 403 person_only. GET /sessions/{id} answers even while the person holds control. since is epoch milliseconds. The session record also carries the active tab's title and url; url is null before a page loads.",
+  "examples": {
+    "a session the agent holds": {
+      "where": "GET /sessions/{id}",
+      "kind": "response",
+      "status": 200,
+      "body": {
+        "session_id": "t-0123456789abcdef01234567",
+        "running": true,
+        "url": "https://shop.example.test/signin",
+        "title": "Sign in - Example Shop",
+        "viewers": 1,
+        "control": {
+          "holder": "agent",
+          "reason": "",
+          "since": 1762365600000,
+          "seq": 0,
+          "by": "agent"
+        },
+        "created_at": "2026-11-05T18:00:00.000Z",
+        "last_active_at": "2026-11-05T18:00:00.000Z"
+      }
+    },
+    "a session before a page loads": {
+      "where": "GET /sessions/{id}",
+      "kind": "response",
+      "status": 200,
+      "body": {
+        "session_id": "t-0123456789abcdef01234567",
+        "running": true,
+        "url": null,
+        "title": "",
+        "viewers": 0,
+        "control": {
+          "holder": "agent",
+          "reason": "",
+          "since": 1762365600000,
+          "seq": 0,
+          "by": "agent"
+        },
+        "created_at": "2026-11-05T18:00:00.000Z",
+        "last_active_at": "2026-11-05T18:00:00.000Z"
+      }
+    },
+    "hand to the person": {
+      "where": "POST /sessions/{id}/control",
+      "kind": "request",
+      "body": {
+        "holder": "human",
+        "reason": "Please sign in to Example Shop"
+      }
+    },
+    "handed to the person": {
+      "where": "POST /sessions/{id}/control",
+      "kind": "response",
+      "status": 200,
+      "body": {
+        "holder": "human",
+        "reason": "Please sign in to Example Shop",
+        "since": 1762365660000,
+        "seq": 1,
+        "by": "agent"
+      }
+    },
+    "done by the person": {
+      "where": "GET /sessions/{id}",
+      "kind": "response",
+      "status": 200,
+      "body": {
+        "session_id": "t-0123456789abcdef01234567",
+        "running": true,
+        "url": "https://shop.example.test/account",
+        "title": "Your account - Example Shop",
+        "viewers": 1,
+        "control": {
+          "holder": "agent",
+          "reason": "",
+          "since": 1762365720000,
+          "seq": 2,
+          "by": "person"
+        },
+        "created_at": "2026-11-05T18:00:00.000Z",
+        "last_active_at": "2026-11-05T18:02:00.000Z"
+      }
+    },
+    "the agent asks for the browser back": {
+      "where": "POST /sessions/{id}/control",
+      "kind": "request",
+      "refused": true,
+      "body": {
+        "holder": "agent",
+        "reason": ""
+      }
+    }
+  }
+}
