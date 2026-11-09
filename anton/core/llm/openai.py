@@ -136,13 +136,19 @@ def _with_claude_cache_breakpoints(messages: list[dict], model: str) -> list[dic
     conversation, so every conversation re-wrote the shared rules. Any mark we
     send turns MindsHub's own off, so the history marks come from here too.
     """
-    from .anthropic import _cached_system
+    from .prompt_builder import SESSION_CONTEXT_MARKER
 
     if not messages or not any(word in model.lower() for word in _CLAUDE_MODEL_WORDS):
         return messages
     out = list(messages)
-    if out[0].get("role") == "system" and isinstance(out[0].get("content"), str):
-        out[0] = {**out[0], "content": _cached_system(out[0]["content"])}
+    system = out[0].get("content") if out[0].get("role") == "system" else None
+    if isinstance(system, str) and system:
+        parts = [system]
+        if system.count(SESSION_CONTEXT_MARKER) == 1:
+            static, session = system.split(SESSION_CONTEXT_MARKER, 1)
+            parts = [static, SESSION_CONTEXT_MARKER + session]
+        out[0] = {**out[0], "content": [
+            {"type": "text", "text": p, "cache_control": _EPHEMERAL} for p in parts if p]}
     # Where the previous request ended (just before the latest assistant turn),
     # so it is read back without relying on Anthropic's 20-block lookback; and
     # the newest message, for the next request.
