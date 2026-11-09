@@ -306,7 +306,7 @@ def test_a_draft_without_a_check_has_none():
     7,
 ])
 def test_a_check_path_that_could_name_a_host_or_carry_a_value_is_refused(path):
-    with pytest.raises(ConnectorDraftError):
+    with pytest.raises(ConnectorDraftError, match=r"^check\b"):
         parse_connector_draft(_draft(check={**_CHECK, "path": path}))
 
 
@@ -331,13 +331,13 @@ def test_a_check_path_that_could_name_a_host_or_carry_a_value_is_refused(path):
     {"X-Region": "{region}"},
 ])
 def test_a_check_header_that_could_steer_or_inject_is_refused(headers):
-    with pytest.raises(ConnectorDraftError):
+    with pytest.raises(ConnectorDraftError, match=r"^check\b"):
         parse_connector_draft(_draft(check={**_CHECK, "headers": headers}))
 
 
 @pytest.mark.parametrize("check", [{"path": "/v2/me"}, {**_CHECK, "method": "POST"}, {**_CHECK, "host": "x"}, "/v2/me"])
 def test_a_check_of_the_wrong_shape_is_refused(check):
-    with pytest.raises(ConnectorDraftError):
+    with pytest.raises(ConnectorDraftError, match=r"^check\b"):
         parse_connector_draft(_draft(check=check))
 
 
@@ -348,7 +348,7 @@ def test_a_value_in_a_check_is_refused_without_echoing_it(name):
         {**_CHECK, "headers": {"Authorization": f"Bearer {value}"}},
         {**_CHECK, "path": f"/v2/me?key={value}"},
     ):
-        with pytest.raises(ConnectorDraftError) as exc:
+        with pytest.raises(ConnectorDraftError, match=r"^check\b") as exc:
             parse_connector_draft(_draft(check=check))
         assert value not in str(exc.value)
 
@@ -356,14 +356,14 @@ def test_a_value_in_a_check_is_refused_without_echoing_it(name):
 def test_a_token_shaped_header_name_is_refused_without_echoing_it():
     name = "X-" + _TOKEN_SHAPES["bare"]
 
-    with pytest.raises(ConnectorDraftError) as exc:
+    with pytest.raises(ConnectorDraftError, match=r"^check\b") as exc:
         parse_connector_draft(_draft(check={**_CHECK, "headers": {name: "Bearer {api_key}"}}))
 
     assert _TOKEN_SHAPES["bare"] not in str(exc.value)
 
 
 def test_base_url_is_reserved_for_the_address_the_member_types():
-    with pytest.raises(ConnectorDraftError):
+    with pytest.raises(ConnectorDraftError, match="reserved"):
         parse_connector_draft(_draft(fields=[{"name": "base_url", "label": "Base URL"}]))
 
 
