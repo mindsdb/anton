@@ -177,10 +177,9 @@ _pending_lock = threading.Lock()
 #                    rounds, continuations, peak_context_tokens, duration_ms,
 #                    {planning,coding,router}_{model,tokens,calls},
 #                    unknown_{tokens,calls}, llm_provider, endpoint_class,
-#                    error_type, grace_granted + grace_tokens ("", "round",
-#                    "ceiling", or "ceiling,round" — the one-time round-cap /
-#                    spend-ceiling extensions granted this turn, and the
-#                    ceiling one's size), limit_continues (times the user
+#                    error_type, grace_granted + grace_tokens ("" or "ceiling":
+#                    the one-time spend-ceiling extension granted this turn,
+#                    and its size), limit_continues (times the user
 #                    answered "Keep going" at the spend ceiling or round
 #                    cap), limit_message_continues (times the turn's own
 #                    message carried it past one of those limits without

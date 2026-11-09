@@ -5,14 +5,12 @@ from __future__ import annotations
 import json
 import pytest
 
-from anton.core.session import _ROUND_CAP_GRACE_ROUNDS
 from tests.e2e.harness import (
     assert_exit_ok, assert_not_output, assert_output, base_env, run_anton,
 )
 
 
 _MAX_TOOL_ROUNDS = 25
-_EFFECTIVE_CAP = _MAX_TOOL_ROUNDS + _ROUND_CAP_GRACE_ROUNDS  # ENG-1893 grace
 
 
 def _verified_env(stub):
@@ -24,7 +22,7 @@ def _verified_env(stub):
 def test_keep_going_at_the_round_cap_finishes_the_turn(cfg, stub, tmp_path):
     """Answering 1 ("Keep going") at the cap raises it, and the same turn
     finishes: no hand-back, no second prompt from the user."""
-    for i in range(_EFFECTIVE_CAP + 1):
+    for i in range(_MAX_TOOL_ROUNDS + 1):
         stub.queue_tool_call("scratchpad", {"action": "exec", "name": f"loop_{i}", "code": f"print({i})"})
     stub.queue_finish_authorization(False)
     for i in range(3):
@@ -45,12 +43,10 @@ def test_keep_going_at_the_round_cap_finishes_the_turn(cfg, stub, tmp_path):
 
 @pytest.mark.stub_only
 def test_max_tool_rounds_circuit_breaker_fires(cfg, stub, tmp_path):
-    # Backstop fires at effective_cap + 1 — the one-time grace extension
-    # (ENG-1893) runs first, so it takes effective_cap + 1 queued tool calls
-    # to actually reach the cap. There the turn checks whether the user already
-    # said "keep going" (queued: no) and asks; answering 2 ("Stop here") must
-    # still hand back.
-    for i in range(_EFFECTIVE_CAP + 1):
+    # Backstop fires at the cap + 1 queued tool calls. There the turn checks
+    # whether the user already said "keep going" (queued: no) and asks;
+    # answering 2 ("Stop here") must still hand back.
+    for i in range(_MAX_TOOL_ROUNDS + 1):
         stub.queue_tool_call("scratchpad", {"action": "exec", "name": f"loop_{i}", "code": f"print({i})"})
     stub.queue_finish_authorization(False)
     stub.queue_text("Summarising. CIRCUIT_FIRED")
@@ -62,7 +58,7 @@ def test_max_tool_rounds_circuit_breaker_fires(cfg, stub, tmp_path):
     assert_output(result, "Keep going?")
     assert_output(result, "CIRCUIT_FIRED")
     assert any(
-        f"You have used {_EFFECTIVE_CAP} tool-call rounds" in json.dumps(r.get("messages", []))
+        f"You have used {_MAX_TOOL_ROUNDS} tool-call rounds" in json.dumps(r.get("messages", []))
         for r in stub.requests
     ), f"Max-rounds message not found. Request count: {stub.request_count}"
 
