@@ -415,13 +415,10 @@ async def test_round_cap_filtered_twice_reports_the_limit_and_the_steps(workspac
     )
     session = _plain(workspace, mock_llm)
     session._max_tool_rounds = 2
-    # The second step reports a failure and the fourth raises: both count as failed.
+    # The second step reports a failure, so it is listed as failed.
     session.tool_registry.dispatch_tool = AsyncMock(side_effect=[
         ToolOutcome(content="revenue total = 48213", ok=True),
         ToolOutcome(content="join failed", ok=False),
-        ToolOutcome(content="revenue total = 48213", ok=True),
-        RuntimeError("renderer crashed"),
-        ToolOutcome(content="saved", ok=True),
     ])
     events, booked = await _drain(session)
     shown = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
@@ -430,10 +427,7 @@ async def test_round_cap_filtered_twice_reports_the_limit_and_the_steps(workspac
         "\n\nThe model provider's content filter stopped my summary of this request. "
         "This is what I did before I stopped:\n\n"
         "- Load the sales table\n"
-        "- Join the regions (failed)\n"
-        "- Sum revenue by region\n"
-        "- Chart the totals (failed)\n"
-        "- Save the chart\n\n"
+        "- Join the regions (failed)\n\n"
         'Reply "keep going" to continue from where I stopped.'
     )
     # It quotes no tool output, so the figure a step returned stays out.

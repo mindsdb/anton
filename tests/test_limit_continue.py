@@ -377,3 +377,17 @@ async def test_the_step_limit_counts_the_whole_task_not_each_attempt(workspace):
     assert len(elicitor.requests) == 1, "the limit must be reached on the continuation"
     assert f"reached its limit of {cap} steps per request" in elicitor.requests[0].prompt
     assert kwargs["ended_by"] == "round_cap"
+
+
+async def test_the_step_limit_is_exact(workspace):
+    """A cap of 5 asks at the sixth step. There used to be a silent window of
+    three more steps first, so a user who set 5 saw 8 run with no message."""
+    cap = 5
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, cap + 4)], per_call=1_000)
+    session._max_tool_rounds = cap
+    elicitor = _ScriptedElicitor(STOP_HERE)
+    session.elicitor = elicitor
+    _, kwargs = await _run(session)
+    assert len(elicitor.requests) == 1
+    assert kwargs["rounds"] == str(cap)
+    assert kwargs["ended_by"] == "round_cap"

@@ -958,12 +958,6 @@ _SPEND_CEILING_RESERVE = 200_000
 # put the turn back up near the ceiling. See `_grant_spend_ceiling_grace`.
 _SPEND_CEILING_GRACE_FLOOR = 100_000
 
-# One-time round-cap extension (ENG-1893), granted the first time a turn
-# breaches max_tool_rounds. Sized to the "2-3 more tool calls" this exists
-# for — add a closing step, save, verify — not a way to talk past the cap
-# repeatedly: see the grant sites for the one-shot guard.
-_ROUND_CAP_GRACE_ROUNDS = 3
-
 # What one "Keep going" at a turn limit buys: the limit rises by this many times
 # its configured size. Replayed against 30 days of limit stops, 4x let 116 of
 # 120 interrupted-then-finished runs complete after one question; one more
@@ -1619,7 +1613,7 @@ def _role_calls(tc: TurnCost, role: str) -> str:
 
 
 def _record_grace(turn_cost: TurnCost | None, tag: str) -> None:
-    """Add `tag` ("round" or "ceiling") to `turn_cost.grace_granted`,
+    """Add `tag` ("ceiling") to `turn_cost.grace_granted`,
     comma-joined, deduplicated, and sorted — alphabetical rather than
     firing order, so the two-grace value is one fixed string either way."""
     if turn_cost is None:
@@ -1963,7 +1957,6 @@ class ChatSession:
         # this is __init__ so a long CLI session gets it too.
         self._spend_ceiling_grace_used = False
         self._spend_ceiling_grace_tokens = 0
-        self._round_cap_grace_used = False
         # Headroom the user granted this turn by answering "Keep going" at a
         # limit. Reset per turn in turn_stream.
         self._spend_ceiling_continued_tokens = 0
@@ -5882,11 +5875,10 @@ class ChatSession:
         _screenshot_drop_unconfirmed = False
         _tool_images_dropped = False
         _tool_image_drop_unconfirmed = False
-        # One-time cap grace, reset once per turn_stream() call rather than in
+        # One-time ceiling grace, reset once per turn_stream() call rather than in
         # `_stream_and_handle_tools`, which retries re-enter and would re-arm.
         self._spend_ceiling_grace_used = False
         self._spend_ceiling_grace_tokens = 0
-        self._round_cap_grace_used = False
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
         self._turn_steps = []
@@ -6825,37 +6817,14 @@ class ChatSession:
             attempt_rounds = 0
             error_streak: dict[str, int] = {}
             resilience_nudged: set[str] = set()
-            # Per-continuation, unlike `_round_cap_grace_used`: only the
-            # continuation that actually earns the grant (the first ever
-            # breach this turn) gets the wider cap. Without this,
-            # `_round_cap_grace_used` staying True for the rest of the turn
-            # let EVERY later continuation start pre-extended to M+3, turning
-            # a one-shot +3 into +3 per continuation.
-            _round_cap_grace_active = False
 
             while llm_response.tool_calls:
                 tool_round += 1
                 attempt_rounds += 1
-                # One-time extension (ENG-1893), unconditional like the
-                # mid-loop spend-ceiling grace — no verdict exists yet at
-                # this point, so the grant is a single small window rather
-                # than a self-report. Decided before the accounting below so
-                # the granted round is counted like any other. `> 0` excludes
-                # a configured 0 (or negative) cap — "no tool rounds", not
-                # "one round of free grace".
-                if (
-                    tool_round > self._max_tool_rounds
-                    and not self._round_cap_grace_used
-                    and self._max_tool_rounds > 0
-                ):
-                    self._round_cap_grace_used = True
-                    _round_cap_grace_active = True
-                    _record_grace(self._turn_cost, "round")
-                effective_round_cap = (
-                    self._max_tool_rounds
-                    + (_ROUND_CAP_GRACE_ROUNDS if _round_cap_grace_active else 0)
-                    + self._round_cap_continued_rounds
-                )
+                # The configured cap plus whatever "Keep going" answers have
+                # added this turn. There is no silent extension: the user's
+                # step limit is the step limit.
+                effective_round_cap = self._max_tool_rounds + self._round_cap_continued_rounds
                 if tool_round > effective_round_cap and self._max_tool_rounds > 0:
                     agen = self._ask_to_continue_past_limit("round_cap", user_message)
                     try:
@@ -6869,7 +6838,7 @@ class ChatSession:
                     finally:
                         await agen.aclose()
                 # Counted before the cap check so a capped turn reports the
-                # (possibly grace-extended) cap, not cap+1 (#309 review).
+                # cap, not cap+1 (#309 review).
                 if self._turn_cost is not None and tool_round <= effective_round_cap:
                     self._turn_cost.rounds += 1
                 if tool_round > effective_round_cap:
