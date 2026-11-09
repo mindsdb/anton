@@ -207,7 +207,8 @@ def _check_path(value: Any) -> str:
 
     A path the request URL could read as naming another host (``//``, ``\\``,
     a ``.`` or ``..`` segment) is refused, and so is anything a placeholder
-    could reach: a value never goes into the URL.
+    could reach: a value never goes into the URL. ``%`` is refused too, so an
+    encoded value cannot pass the token rule.
     """
     text = _check_text(value, "check.path", _CHECK_PATH_MAX, long_text=False)
     if text is None:
@@ -216,7 +217,7 @@ def _check_path(value: Any) -> str:
         not text.startswith("/")
         or "//" in text
         or not _is_printable_ascii(text, space=False)
-        or any(c in text for c in "\\#{}")
+        or any(c in text for c in "\\#{}%")
     ):
         raise ConnectorDraftError("check.path must be a path such as /v1/me, with no host.")
     segments = text.split("?", 1)[0].split("/")

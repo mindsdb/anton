@@ -297,6 +297,8 @@ def test_a_draft_without_a_check_has_none():
     "v2/me",
     "/v2/{api_key}",
     "/v2/me#frag",
+    "/v2/me?key=sk%5Flive%5F4eC39HqLyjWDarjtT1zdp7dc",
+    "/v2/%2e%2e/me",
     "/v2/m e",
     "/v2/\u00e9",
     "",
