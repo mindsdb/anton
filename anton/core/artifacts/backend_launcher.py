@@ -80,8 +80,8 @@ def build_datasource_env(vault, datasources, *, slug: str = "") -> dict[str, str
                 slug, ref.engine, ref.name,
             )
             continue
-        # Enforced here, not left to the vault: TurnKeyDataVault.env_for does
-        # not drop `_`-prefixed bookkeeping though its contract says it does.
+        # Enforced here too, not only in each vault's env_for, so a vault
+        # that misses one still can't pass `_`-prefixed bookkeeping through.
         field_prefix = f"{ref.env_prefix}__"
         for key, value in env.items():
             field = key[len(field_prefix):] if key.startswith(field_prefix) else key

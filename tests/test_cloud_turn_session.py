@@ -27,6 +27,7 @@ import pytest
 import anton.core.llm.client as llm_client_mod
 import anton.core.session as session_mod
 from anton.cloud_turn.contract import TurnRequestV1
+from anton.config.settings import AntonSettings
 from anton.cloud_turn.session import (
     CLOUD_TOOL_ALLOWLIST,
     _ARTIFACTS_ROOT_ENV,
@@ -344,6 +345,14 @@ def test_model_override_applied(tmp_path, monkeypatch):
     assert cfg.settings.planning_model == "claude-opus-4-8"
 
 
+@pytest.mark.parametrize(("jev_decisions", "verifier_jev"), [(False, "off"), (True, "on")])
+def test_jev_decisions_set_the_completion_check(tmp_path, monkeypatch, jev_decisions, verifier_jev):
+    # The default under test, not a developer's shell.
+    monkeypatch.delenv("ANTON_VERIFIER_JEV", raising=False)
+    _, cfg = _build(tmp_path, monkeypatch, jev_decisions=jev_decisions)
+    assert cfg.settings.verifier_jev == verifier_jev
+
+
 def test_cloud_session_uses_turn_key_from_request(tmp_path, monkeypatch):
     # No minds env set; the credential must come from the request's llm block.
     monkeypatch.delenv("ANTON_MINDS_API_KEY", raising=False)
@@ -372,12 +381,17 @@ def test_llm_block_coding_model_applied(tmp_path, monkeypatch):
 
 
 def test_llm_block_without_coding_model_keeps_default(tmp_path, monkeypatch):
+    # Hermetic env, as below: a leaked ANTON_CODING_MODEL would mask the default.
+    for k in list(os.environ):
+        if k.startswith("ANTON_"):
+            monkeypatch.delenv(k, raising=False)
     _, cfg = _build(
         tmp_path, monkeypatch,
         llm={"provider": "minds-cloud", "api_key": "mdb_turnkey",
              "base_url": "https://api.mindshub.ai/v1"},
     )
-    assert cfg.settings.coding_model  # built-in default survives
+    default = AntonSettings.model_fields["coding_model"].default
+    assert cfg.settings.coding_model == default
 
 
 def test_cloud_session_without_llm_block_falls_back_to_env(tmp_path, monkeypatch):
@@ -686,6 +700,96 @@ def test_a_real_turn_with_connector_drafts_registers_and_drains_the_tool(tmp_pat
     assert asyncio.run(tool.handler(session, draft)).ok is True
     assert [d["connector_id"] for d in drain_pending_connectors(session)] == ["acme"]
     assert drain_pending_connectors(session) == []
+# ── the browser: only the router block a turn carries ───────────────────────
+
+_ROUTER = "https://app.example.test/browser"
+
+
+def _build_from_wire(tmp_path, monkeypatch, browser):
+    """`_build`, with the request read from its JSON line as the pod reads it."""
+    monkeypatch.setattr(session_mod, "ChatSession", lambda config: config)
+    monkeypatch.setattr(
+        llm_client_mod.LLMClient, "from_settings",
+        classmethod(lambda cls, settings: object()),
+    )
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+    line = json.dumps({"protocol_version": 1, "conversation_id": "conv_1", "input": "hello", "browser": browser})
+    return build_cloud_chat_session(TurnRequestV1.from_json(line))
+
+
+def test_a_router_block_gives_the_turn_a_browser(tmp_path, monkeypatch):
+    from anton.core.browser.config import BrowserConfig
+
+    cfg = _build_from_wire(tmp_path, monkeypatch, {"base_url": _ROUTER, "profile": "t-1"})
+    assert "browser" in cfg.tool_allowlist
+    assert cfg.browser == BrowserConfig(base_url=_ROUTER, profile="t-1")
+
+
+@pytest.mark.parametrize("block", [
+    {"base_url": _ROUTER, "profile": "t-1", "token": "t"},
+    {"base_url": "http://127.0.0.1:51234", "profile": "t-1", "token": "t"},
+    {"base_url": _ROUTER},
+    "junk",
+])
+def test_a_token_or_loopback_block_gives_no_browser(tmp_path, monkeypatch, block):
+    cfg = _build_from_wire(tmp_path, monkeypatch, block)
+    assert "browser" not in cfg.tool_allowlist
+    assert cfg.browser is None
+
+
+def test_a_cloud_session_with_a_router_block_registers_exactly_the_browser_too(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+
+    session = _real_cloud_session(
+        tmp_path, monkeypatch,
+        browser=TurnRequestV1.from_json(json.dumps({
+            "protocol_version": 1, "conversation_id": "c", "input": "hi",
+            "browser": {"base_url": _ROUTER, "profile": "t-1"},
+        })).browser,
+    )
+    session._scratchpads = MagicMock(available_packages=[])
+    session._build_tools()
+    names = {t.name for t in session.tool_registry.get_tool_defs()}
+    assert names == set(CLOUD_TOOL_ALLOWLIST) | {"browser"}
+
+
+def test_the_environment_never_gives_a_browser(tmp_path, monkeypatch):
+    """Settings are passed: ChatSessionConfig.settings defaults to None, so a
+    session without them would pass even with an environment fallback back."""
+    from anton.core.settings import CoreSettings
+
+    monkeypatch.setenv("ANTON_BROWSER_URL", "https://collector.example")
+    monkeypatch.setenv("ANTON_BROWSER_PROFILE", "t-1")
+    session = _real_session_with_workspace(tmp_path, settings=CoreSettings(), browser=None)
+    session._build_tools()
+    assert "browser" not in {t.name for t in session.tool_registry.get_tool_defs()}
+
+
+def test_a_host_config_registers_the_browser(tmp_path):
+    from anton.core.browser.config import BrowserConfig
+    from anton.core.settings import CoreSettings
+
+    for config in (
+        BrowserConfig(base_url=_ROUTER, profile="t-1"),
+        BrowserConfig(base_url="http://127.0.0.1:51234", profile="t-1", token="launch-key"),
+    ):
+        session = _real_session_with_workspace(tmp_path, settings=CoreSettings(), browser=config)
+        session._build_tools()
+        assert "browser" in {t.name for t in session.tool_registry.get_tool_defs()}
+
+
+async def test_closing_the_session_closes_the_browsers_clients(tmp_path):
+    """The browser state owns the browser's HTTP client and the Jev client its
+    steps share; the session's close is what releases both."""
+    from unittest.mock import AsyncMock
+
+    from anton.core.browser.config import BrowserConfig
+
+    session = _real_session_with_workspace(tmp_path, browser=BrowserConfig(base_url=_ROUTER, profile="t-1"))
+    session._scratchpads = AsyncMock()
+    session._browser_state = AsyncMock()
+    await session.close()
+    session._browser_state.aclose.assert_awaited_once()
 
 
 def test_tool_allowlist_none_preserves_desktop_tools(tmp_path):

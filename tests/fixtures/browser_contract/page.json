@@ -1,0 +1,126 @@
+{
+  "description": "GET /sessions/{id}/page: the active tab as numbered elements and text. Secret fields (password, one-time code, card) carry value_hidden and never their value. challenges lists only check frames the person can see: a non-empty box in the viewport, not hidden.",
+  "examples": {
+    "a sign-in page with a check frame": {
+      "where": "GET /sessions/{id}/page",
+      "kind": "response",
+      "status": 200,
+      "body": {
+        "url": "https://shop.example.test/signin",
+        "title": "Sign in",
+        "scroll": {
+          "y": 0,
+          "height": 1800,
+          "viewport": 800
+        },
+        "elements": [
+          {
+            "id": 1,
+            "role": "searchbox",
+            "name": "Search"
+          },
+          {
+            "id": 2,
+            "role": "textbox",
+            "name": "Email",
+            "value": "ada@example.test"
+          },
+          {
+            "id": 3,
+            "role": "textbox",
+            "name": "Password",
+            "type": "password",
+            "value_hidden": true
+          },
+          {
+            "id": 4,
+            "role": "textbox",
+            "name": "One-time code",
+            "value_hidden": true
+          },
+          {
+            "id": 5,
+            "role": "checkbox",
+            "name": "Keep me signed in",
+            "checked": false
+          },
+          {
+            "id": 6,
+            "role": "combobox",
+            "name": "Country",
+            "value": "Mexico",
+            "options": [
+              "Mexico",
+              "Canada"
+            ]
+          },
+          {
+            "id": 7,
+            "role": "button",
+            "name": "Sign in"
+          },
+          {
+            "id": 8,
+            "role": "button",
+            "name": "Create account",
+            "disabled": true
+          },
+          {
+            "id": 9,
+            "role": "clickable",
+            "name": "Widget containing a Cloudflare security challenge"
+          },
+          {
+            "id": 10,
+            "role": "link",
+            "name": "Forgot password?",
+            "offscreen": true
+          }
+        ],
+        "truncated": false,
+        "text": "Sign in to Example Shop. Keep me signed in.",
+        "challenges": [
+          {
+            "host": "challenges.cloudflare.com",
+            "kind": "cloudflare"
+          }
+        ]
+      }
+    },
+    "a page with no check": {
+      "where": "GET /sessions/{id}/page",
+      "kind": "response",
+      "status": 200,
+      "body": {
+        "url": "https://shop.example.test/cart",
+        "title": "Your cart",
+        "scroll": {
+          "y": 0,
+          "height": 2400,
+          "viewport": 800
+        },
+        "elements": [
+          {
+            "id": 1,
+            "role": "searchbox",
+            "name": "Search"
+          },
+          {
+            "id": 2,
+            "role": "textbox",
+            "name": "Gift message",
+            "value": "Happy birthday"
+          },
+          {
+            "id": 3,
+            "role": "button",
+            "name": "Place order"
+          }
+        ],
+        "truncated": true,
+        "text": "Your cart. 1 item. Total $999.",
+        "challenges": []
+      }
+    }
+  }
+}

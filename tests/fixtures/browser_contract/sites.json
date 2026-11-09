@@ -1,0 +1,50 @@
+{
+  "description": "Sites the person signed in to in this browser, recorded by the browser with its profile. cookies_present says whether the browser still holds a live cookie for the site.",
+  "examples": {
+    "the sites on record": {
+      "where": "GET /sessions/{id}/sites",
+      "kind": "response",
+      "status": 200,
+      "body": {
+        "sites": [
+          {
+            "site": "salesforce.com",
+            "account_hint": "ada@example.test",
+            "noted_at": "2026-11-05T18:00:00.000Z",
+            "cookies_present": true,
+            "cookies_expire_at": "2026-12-05T18:00:00.000Z"
+          },
+          {
+            "site": "github.com",
+            "account_hint": "",
+            "noted_at": "2026-10-01T09:00:00.000Z",
+            "cookies_present": false,
+            "cookies_expire_at": null
+          }
+        ]
+      }
+    },
+    "note a site": {
+      "where": "POST /sessions/{id}/sites",
+      "kind": "request",
+      "body": {
+        "site": "github.com",
+        "account_hint": "ada"
+      }
+    },
+    "the noted site": {
+      "where": "POST /sessions/{id}/sites",
+      "kind": "response",
+      "status": 200,
+      "body": {
+        "site": {
+          "site": "github.com",
+          "account_hint": "ada",
+          "noted_at": "2026-11-05T18:00:00.000Z",
+          "cookies_present": true,
+          "cookies_expire_at": null
+        }
+      }
+    }
+  }
+}

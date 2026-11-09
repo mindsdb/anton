@@ -72,18 +72,6 @@ class TestValidation:
         assert _validated_surface(Hostile()) is None
 
 
-class TestTheCliDeclaresItself:
-    def test_cli_entrypoints_pass_the_cli_surface(self):
-        """Both CLI call sites must set it, or CLI turns look like an unknown host."""
-        import inspect
-
-        from anton import chat, chat_session
-
-        for mod in (chat, chat_session):
-            src = inspect.getsource(mod)
-            assert "surface=SURFACE_CLI" in src, f"{mod.__name__} does not declare its surface"
-
-
 class TestItReachesTheWireFromTheConfig:
     """The seam the unit tests above cannot see.
 

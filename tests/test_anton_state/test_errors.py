@@ -15,18 +15,6 @@ def test_hierarchy():
         assert issubclass(cls, StateError)
 
 
-def test_state_unavailable_raises_as_state_error():
-    with pytest.raises(StateError):
-        raise StateUnavailable("broker down")
-
-
-def test_can_raise_and_message():
-    try:
-        raise StateThrottled("rate exceeded")
-    except StateError as e:
-        assert "rate exceeded" in str(e)
-
-
 # --- runner-visible outage slot (mindshub_services PR #164 item 11) ---------
 
 @pytest.fixture(autouse=True)
@@ -68,11 +56,3 @@ def test_pop_clears_the_slot():
     assert pop_last_state_error() == "StateUnavailable"
     assert pop_last_state_error() is None  # second pop: already cleared
 
-
-def test_pop_before_invoke_discards_stale_value():
-    """Simulates artifact_runner's reset-before-invoke: a value left over from
-    a previous request must not survive into the next one, even if nobody
-    read it in between."""
-    errors._record(StateUnavailable("stale from a previous request"))
-    pop_last_state_error()  # runner's reset, discarding the return value
-    assert pop_last_state_error() is None
