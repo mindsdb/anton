@@ -109,6 +109,53 @@ def _rejects_cache_breakpoint(exc: "openai.BadRequestError") -> bool:
 _CACHE_BREAKPOINT_REFUSED: set[tuple[str, str]] = set()
 
 
+_CLAUDE_MODEL_WORDS = ("claude", "sonnet", "opus", "haiku", "fable")
+_EPHEMERAL = {"type": "ephemeral"}
+
+
+def _cache_marked(message: dict) -> dict | None:
+    """``message`` with a cache mark on its last non-empty text, or None if it has none."""
+    if message.get("role") == "tool":
+        return {**message, "cache_control": _EPHEMERAL}
+    content = message.get("content")
+    if isinstance(content, str) and content:
+        return {**message, "content": [{"type": "text", "text": content, "cache_control": _EPHEMERAL}]}
+    if isinstance(content, list):
+        # The last text part: MindsHub drops a mark on an image part.
+        for i in range(len(content) - 1, -1, -1):
+            part = content[i]
+            if isinstance(part, dict) and part.get("type") == "text" and part.get("text"):
+                return {**message, "content": [*content[:i], {**part, "cache_control": _EPHEMERAL}, *content[i + 1:]]}
+    return None
+
+
+def _with_claude_cache_breakpoints(messages: list[dict], model: str) -> list[dict]:
+    """Chat messages for MindsHub with the Anthropic cache marks placed here.
+
+    MindsHub marks the system prompt as one block whose tail differs per
+    conversation, so every conversation re-wrote the shared rules. Any mark we
+    send turns MindsHub's own off, so the history marks come from here too.
+    """
+    from .anthropic import _cached_system
+
+    if not messages or not any(word in model.lower() for word in _CLAUDE_MODEL_WORDS):
+        return messages
+    out = list(messages)
+    if out[0].get("role") == "system" and isinstance(out[0].get("content"), str):
+        out[0] = {**out[0], "content": _cached_system(out[0]["content"])}
+    # Where the previous request ended (just before the latest assistant turn),
+    # so it is read back without relying on Anthropic's 20-block lookback; and
+    # the newest message, for the next request.
+    last_assistant = max((i for i, m in enumerate(out) if m.get("role") == "assistant"), default=None)
+    targets = {len(out) - 1}
+    if last_assistant is not None and last_assistant > 1:
+        targets.add(last_assistant - 1)
+    for i in sorted(targets):
+        if i > 0 and (marked := _cache_marked(out[i])) is not None:
+            out[i] = marked
+    return out
+
+
 def _shared_prompt_input(static: str, session: str) -> list[dict]:
     """The system prompt as two developer messages, the shared part cacheable."""
     return [
@@ -1255,6 +1302,8 @@ class OpenAIProvider(LLMProvider):
             )
 
         oai_messages = _translate_messages(system, messages, supports_vision=self._supports_vision, vision_format=self._vision_format)
+        if self._flavor == self.FLAVOR_MINDS_PASSTHROUGH:
+            oai_messages = _with_claude_cache_breakpoints(oai_messages, model)
 
         kwargs = build_chat_completion_kwargs(
             model=model,
@@ -1378,6 +1427,8 @@ class OpenAIProvider(LLMProvider):
             return
 
         oai_messages = _translate_messages(system, messages, supports_vision=self._supports_vision, vision_format=self._vision_format)
+        if self._flavor == self.FLAVOR_MINDS_PASSTHROUGH:
+            oai_messages = _with_claude_cache_breakpoints(oai_messages, model)
 
         kwargs = build_chat_completion_kwargs(
             model=model,
