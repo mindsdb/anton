@@ -1953,6 +1953,10 @@ class ChatSession:
         # count spans verifier continuations and provider-error retries alike.
         # Reset per turn in turn_stream.
         self._turn_tool_rounds = 0
+        # Verifier-forced continuations this turn has run, against
+        # `max_continuations`. Per turn for the same reason: a retry must
+        # not hand out a fresh set. Reset per turn in turn_stream.
+        self._turn_continuations = 0
         # The tool calls this turn ran, for the report `_stream_handback_diagnosis`
         # writes when the content filter stops every hand-back. Reset per turn in
         # turn_stream.
@@ -5869,12 +5873,13 @@ class ChatSession:
         _tool_image_drop_unconfirmed = False
         # Per-turn limit state, reset once per turn_stream() call rather than
         # in `_stream_and_handle_tools`, which retries re-enter: the grace
-        # would re-arm and the step count would restart.
+        # would re-arm and the step and auto-continue counts would restart.
         self._spend_ceiling_grace_used = False
         self._spend_ceiling_grace_tokens = 0
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
         self._turn_tool_rounds = 0
+        self._turn_continuations = 0
         self._turn_steps = []
         self._finish_authorized = None
         self._limits_passed_by_message = set()
@@ -6781,7 +6786,6 @@ class ChatSession:
         # Tool-call loop with circuit breaker, wrapped in a completion
         # verification outer loop that can restart the tool loop if the
         # task isn't actually done yet.
-        continuation = 0
         _max_rounds_hit = False
         # Set when the per-turn spend ceiling stopped the turn (ENG-1286). Like
         # `_max_rounds_hit` it also suppresses verification: the turn is already
@@ -6869,7 +6873,7 @@ class ChatSession:
                     _reply_persisted = True
                     async for event in self._stream_handback_diagnosis(
                         system=system, label="max-tool-rounds", answered=False,
-                        cancels_continuation=continuation > 0, limit="round_cap",
+                        cancels_continuation=self._turn_continuations > 0, limit="round_cap",
                     ):
                         yield event
                     break
@@ -6908,7 +6912,7 @@ class ChatSession:
                             "tool_round=%d continuation=%d — pausing to ask the user",
                             self._turn_cost.total_tokens if self._turn_cost else 0,
                             self._max_turn_tokens, self._spend_ceiling_gate(),
-                            self._turn_tool_rounds, continuation,
+                            self._turn_tool_rounds, self._turn_continuations,
                         )
                         self._append_history(
                             {"role": "assistant", "content": llm_response.content or ""}
@@ -6927,7 +6931,7 @@ class ChatSession:
                         )
                         async for event in self._stream_handback_diagnosis(
                             system=system, label="spend-ceiling", answered=False,
-                            cancels_continuation=continuation > 0, limit="spend_ceiling",
+                            cancels_continuation=self._turn_continuations > 0, limit="spend_ceiling",
                         ):
                             yield event
                         break
@@ -7529,7 +7533,7 @@ class ChatSession:
                 # one would get to answer the question itself. The answer, when
                 # it comes, starts the next turn.
                 if self._unanswered_question is not None:
-                    for event in self._unanswered_question_events(cancels_continuation=continuation > 0):
+                    for event in self._unanswered_question_events(cancels_continuation=self._turn_continuations > 0):
                         yield event
                     _reply_persisted = True
                     break
@@ -7624,7 +7628,7 @@ class ChatSession:
             self._append_history({"role": "assistant", "content": reply})
             _reply_persisted = True
 
-            if continuation >= self._max_continuations:
+            if self._turn_continuations >= self._max_continuations:
                 # Budget exhausted — ask LLM to diagnose and present to user
                 self._append_history(
                     {
@@ -7649,7 +7653,7 @@ class ChatSession:
                     self._turn_cost.ended_by = "handback_budget"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="budget-exhausted", answered=bool(reply.strip()),
-                    cancels_continuation=continuation > 0,
+                    cancels_continuation=self._turn_continuations > 0,
                 ):
                     yield event
                 # Consolidation still runs after diagnosis
@@ -7693,7 +7697,7 @@ class ChatSession:
                         f"{self._verifier_latch.no_verdict_failures} verdict "
                         "call(s) with no successful verdict since",
                         self._verifier_latch.skips,
-                        reprobe_turns, continuation,
+                        reprobe_turns, self._turn_continuations,
                         self._max_continuations, self._turn_tool_rounds,
                     )
                     # Stamp the books: this turn books ended_by="completed"
@@ -8000,7 +8004,7 @@ class ChatSession:
                 logger.warning(
                     "completion-verifier verdict=ERROR continuation=%d/%d tool_rounds=%d "
                     "model=%s — failing toward an honest diagnosis, not a silent COMPLETE",
-                    continuation, self._max_continuations, self._turn_tool_rounds,
+                    self._turn_continuations, self._max_continuations, self._turn_tool_rounds,
                     self._llm.coding_model,
                 )
                 self._append_history(
@@ -8032,7 +8036,7 @@ class ChatSession:
                     self._turn_cost.ended_by = "handback_verifier_failure"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="verifier-failure", answered=bool(reply.strip()),
-                    cancels_continuation=continuation > 0,
+                    cancels_continuation=self._turn_continuations > 0,
                 ):
                     yield event
                 break
@@ -8042,7 +8046,7 @@ class ChatSession:
                 # from the user's conversation, and this is an ordinary app log.
                 # It stays in the Langfuse trace, where that content belongs.
                 "completion-verifier verdict=%s continuation=%d/%d tool_rounds=%d",
-                status, continuation, self._max_continuations, self._turn_tool_rounds,
+                status, self._turn_continuations, self._max_continuations, self._turn_tool_rounds,
             )
 
             if status in ("COMPLETE", "WAITING"):
@@ -8072,7 +8076,7 @@ class ChatSession:
                     self._turn_cost.ended_by = "handback_stuck"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="stuck", answered=bool(reply.strip()),
-                    cancels_continuation=continuation > 0,
+                    cancels_continuation=self._turn_continuations > 0,
                 ):
                     yield event
                 break
@@ -8116,7 +8120,7 @@ class ChatSession:
                         "spend ceiling reached at the continuation gate: tokens=%d "
                         "ceiling=%d continuation=%d — pausing to ask the user",
                         self._turn_cost.total_tokens if self._turn_cost else 0,
-                        self._max_turn_tokens, continuation,
+                        self._max_turn_tokens, self._turn_continuations,
                     )
                     self._append_history(
                         {"role": "user", "content": self._spend_ceiling_notice()}
@@ -8131,20 +8135,20 @@ class ChatSession:
                     )
                     async for event in self._stream_handback_diagnosis(
                         system=system, label="spend-ceiling", answered=bool(reply.strip()),
-                        cancels_continuation=continuation > 0, limit="spend_ceiling",
+                        cancels_continuation=self._turn_continuations > 0, limit="spend_ceiling",
                     ):
                         yield event
                     break
 
-            continuation += 1
+            self._turn_continuations += 1
             if self._turn_cost is not None:
-                self._turn_cost.continuations = continuation
+                self._turn_cost.continuations = self._turn_continuations
             self._append_history(
                 {
                     "role": "user",
                     "content": (
                         f"{_CHECK_NOTE} The check judged the answer above unfinished "
-                        f"(attempt {continuation}/{self._max_continuations}): {reason}\n\n"
+                        f"(attempt {self._turn_continuations}/{self._max_continuations}): {reason}\n\n"
                         "Continue the user's original request where you left off; do not "
                         "redo tool work already done. If the data truly does not hold what "
                         "was asked, saying so plainly is a complete answer. Your next reply "
@@ -8161,7 +8165,7 @@ class ChatSession:
             # otherwise. `analyzing` is emitted from several unrelated sites.
             yield StreamTaskProgress(
                 phase="continuation",
-                message=f"Task incomplete — continuing ({continuation}/{self._max_continuations})...",
+                message=f"Task incomplete — continuing ({self._turn_continuations}/{self._max_continuations})...",
             )
 
             # Re-enter tool loop: get next LLM response with tools available

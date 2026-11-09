@@ -1,4 +1,5 @@
-"""The round cap (`max_tool_rounds`) in isolation.
+"""The round cap (`max_tool_rounds`) in isolation, and the auto-continue
+count (`max_continuations`) it shares its retry behaviour with.
 
 Drives the spend-ceiling suite's scripted LLM with `per_call` usage kept tiny
 relative to the ceiling, so the ceiling never interferes, and `max_tool_rounds`
@@ -69,6 +70,27 @@ async def test_the_step_limit_survives_a_mid_loop_retry(workspace):
     kwargs = await _run(session)
     assert kwargs["ended_by"] == "round_cap"
     assert kwargs["rounds"] == str(cap)
+
+
+async def test_the_auto_continue_count_survives_a_mid_loop_retry(workspace):
+    """The same retry re-entry restarted the auto-continue count. With one
+    continuation allowed and the verifier never satisfied, a provider error
+    during the continuation let the verifier send the task back once more
+    instead of handing it to the user."""
+    attempt = [_tool_call(1), _tool_call(2), _small(_text("partial"))]
+    session = _session(
+        workspace, max_tool_rounds=100,
+        responses=attempt + [RuntimeError("provider blip")] + attempt,
+    )
+    session._max_continuations = 1
+    verdict = _VerifierVerdict(status="INCOMPLETE", reason="not done", close_to_done=False)
+    session._llm.generate_object_code = AsyncMock(return_value=verdict)
+    kwargs = await _run(session)
+    assert kwargs["ended_by"] == "handback_budget"
+    assert kwargs["continuations"] == "1"
+    # The continuation already spent the budget, so the retried attempt is
+    # handed back without a second verdict.
+    assert session._llm.generate_object_code.await_count == 1
 
 
 async def test_the_step_limit_does_not_multiply_across_continuations(workspace):
