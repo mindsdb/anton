@@ -134,8 +134,8 @@ class TurnCost:
     content_filtered: bool = False
     # The one-time spend-ceiling grace, if granted this turn: "" or "ceiling".
     # Without this a turn that used the grace and finished is
-    # byte-identical in `turn_completed` to one that never neared a limit —
-    # `ended_by=round_cap`/`spend_ceiling` counts drop while actual spend
+    # byte-identical in `turn_completed` to one that never neared the
+    # ceiling — `ended_by=spend_ceiling` counts drop while actual spend
     # rises, unmeasurably.
     grace_granted: str = ""
     # Size of the spend-ceiling grace actually granted, 0 if none. Queryable

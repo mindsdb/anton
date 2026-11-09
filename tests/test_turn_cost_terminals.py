@@ -243,10 +243,10 @@ async def test_late_finalizer_cannot_close_a_newer_turns_books(workspace):
 
 
 async def test_rounds_accumulate_across_verifier_continuations(workspace):
-    """``tool_round`` is loop-local and resets on each continuation, so
-    assigning it reported only the last continuation's rounds — breaking the
-    rounds x context shape metric for exactly the expensive turns it exists
-    to classify.
+    """`rounds` equals the rounds dispatched across every continuation, not
+    only the last one; an earlier version reported the last continuation's
+    count alone, breaking the rounds x context shape metric for exactly the
+    expensive turns it exists to classify.
     """
     mock_llm = make_mock_llm()
     # 2 tool rounds, reply; INCOMPLETE verdict; 1 tool round, reply; COMPLETE.

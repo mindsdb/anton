@@ -8,10 +8,11 @@ script.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 from anton.core.session import ChatSession, _VerifierVerdict
 
+from tests.test_limit_continue import _run as _run_turn
 from tests.test_spend_ceiling import (
     _session as _ceiling_session,
     _small,
@@ -29,10 +30,8 @@ def _session(workspace, *, max_tool_rounds: int, responses=None) -> ChatSession:
 
 async def _run(session, prompt="do the thing") -> dict:
     """Run one turn and return the `turn_completed` event's fields."""
-    with patch("anton.analytics.send_event") as send:
-        async for _ in session.turn_stream(prompt):
-            pass
-    return send.call_args.kwargs
+    _, kwargs = await _run_turn(session, prompt)
+    return kwargs
 
 
 async def test_round_under_the_cap_is_untouched(workspace):

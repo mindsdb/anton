@@ -4805,10 +4805,10 @@ class ChatSession:
         message for a task that never started.
 
         `TurnCost.rounds` is turn-wide (it accumulates across verifier-forced
-        continuations rather than resetting with the loop-local counter), so
-        `> 1` means at least one round has completed its dispatch — including
-        rounds from an earlier continuation, which is why a continuation cannot
-        hand out a fresh free round.
+        continuations, as does `self._turn_tool_rounds`), so `> 1` means at
+        least one round has completed its dispatch — including rounds from an
+        earlier continuation, which is why a continuation cannot hand out a
+        fresh free round.
 
         Belt and braces with the reserve cap in `_spend_ceiling_gate`: that cap
         keeps the gate proportional to the ceiling, this keeps the guarantee true
@@ -6821,12 +6821,13 @@ class ChatSession:
                         async for _kind, _payload in agen:
                             if _kind == "event":
                                 yield _payload
-                            elif _payload:
-                                effective_round_cap += (
-                                    _LIMIT_CONTINUE_MULTIPLIER * self._max_tool_rounds
-                                )
                     finally:
                         await agen.aclose()
+                    # A grant raised `_round_cap_continued_rounds`; re-read it
+                    # rather than repeating `_grant_limit`'s arithmetic here.
+                    effective_round_cap = (
+                        self._max_tool_rounds + self._round_cap_continued_rounds
+                    )
                 # Counted before the cap check so a capped turn reports the
                 # cap, not cap+1.
                 if self._turn_cost is not None and self._turn_tool_rounds <= effective_round_cap:
