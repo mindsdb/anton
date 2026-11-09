@@ -1478,6 +1478,42 @@ _cell_log_handler = _CellLogHandler()
 _logging.root.addHandler(_cell_log_handler)
 _logging.root.setLevel(_logging.INFO)
 
+# --- Cut results ---
+# A source that caps a result says so in the body, and the agent summed capped
+# rows as the whole even after printing the flag. httpx, requests (unless
+# simplejson is installed) and json.load decode through json.loads.
+_CUT_RESULT_KEYS = frozenset({
+    "truncated", "hasmore", "incompleteresults", "nextpagetoken", "nextcursor",
+    "nextlink", "odatanextlink", "nextrecordsurl", "nextpageurl",
+})
+_cut_result_keys = []
+_json_loads = json.loads
+
+
+def _cut_result_key(obj):
+    for key, value in obj.items():
+        if value and isinstance(key, str) and "".join(c for c in key.lower() if c.isalnum()) in _CUT_RESULT_KEYS:
+            return key
+    return None
+
+
+def _loads_noting_cut_results(*args, **kwargs):
+    obj = _json_loads(*args, **kwargs)
+    try:
+        if isinstance(obj, dict):
+            # One level down too: paging often sits under "meta" or "pagination".
+            for part in (obj, *(v for v in obj.values() if isinstance(v, dict))):
+                key = _cut_result_key(part)
+                if key:
+                    _cut_result_keys.append(key)
+                    break
+    except Exception:
+        pass
+    return obj
+
+
+json.loads = _loads_noting_cut_results
+
 
 while True:
     lines = []
@@ -1549,6 +1585,7 @@ while True:
         stopped_at = None
         compiled = None
         namespace[EXPLAINABILITY_QUERIES_NAME] = []
+        _cut_result_keys.clear()
         _cell_log_handler.buf = log_buf
 
         sys.stdout = out_buf
@@ -1574,6 +1611,15 @@ while True:
             _cell_log_handler.buf = None
 
         stdout_full = out_buf.getvalue()
+        if _cut_result_keys:
+            # Ahead of the output, so clipping a long output cannot drop it.
+            stdout_full = (
+                f"Note: {len(_cut_result_keys)} JSON result(s) read in this cell said they "
+                f"hold only part of the data ({', '.join(sorted(set(_cut_result_keys)))}). "
+                "Rows from a cut result are not all the rows: page or split the query until "
+                "no result is cut, or say the figure is partial, before counting, totalling "
+                "or ranking them.\n" + stdout_full
+            )
         stdout_val = stdout_full
         if len(stdout_val) > MAX_OUTPUT:
             stdout_val = (

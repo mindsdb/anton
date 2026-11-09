@@ -572,7 +572,16 @@ class ArtifactStore:
     def read_metadata(self, slug: str) -> Artifact | None:
         """The artifact's metadata as stored, without reconciling its file
         list, so nothing is rewritten; None when the slug escapes the store or
-        the metadata is missing or does not parse."""
+        the metadata is missing or does not parse.
+
+        Its `slug` is the folder it was read from, not the stored value: a
+        host that moves a task renames a colliding folder without rewriting
+        its metadata, and `_save` writes to `folder_for(artifact.slug)`, so
+        the stored value would send the next write into the other folder.
+        The folder is named from resolved paths, the form `folder_for` checks
+        containment in, so a slug that reaches it through another path form
+        (an absolute path, or the real path of a root reached by a link)
+        names it too."""
         try:
             path = self.metadata_path(slug)
         except ValueError:
@@ -583,10 +592,12 @@ class ArtifactStore:
             return None
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            return Artifact.model_validate(data)
+            artifact = Artifact.model_validate(data)
         except Exception:
             logger.warning("Could not load artifact metadata at %s", path, exc_info=True)
             return None
+        artifact.slug = path.parent.resolve().relative_to(self._root.resolve()).as_posix()
+        return artifact
 
     @staticmethod
     def _render_readme_text(artifact: Artifact) -> str:

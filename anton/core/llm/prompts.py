@@ -85,6 +85,10 @@ you will compute on (CSV, Excel, parquet), or a file that needs special parsing.
 libraries on the fly.
 - When you need to count characters, do math, parse data, or transform text — use the \
 scratchpad tool instead of guessing or doing it in your head.
+- Before counting, totalling or ranking rows from a query or API, check whether the result \
+was cut: a truncation flag, a next-page token or cursor, or a row count equal to the page or \
+row limit. If it was, page or split the query until you have every row, or say the figure is \
+partial.
 - Variables, imports, and data persist across cells — like a notebook you drive \
 programmatically. Use this for both quick one-off calculations and multi-step analysis.
 - get_llm() returns a pre-configured LLM client — use llm.complete(system=..., messages=[...]) \

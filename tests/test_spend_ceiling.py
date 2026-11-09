@@ -12,6 +12,7 @@ reaching the gate.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -86,12 +87,19 @@ def _text(text: str = "done") -> LLMResponse:
                        stop_reason="end_turn")
 
 
+def _small(response: LLMResponse) -> LLMResponse:
+    """The response with a usage well under the output budget, so the
+    truncation retry stays out of the way."""
+    return replace(response, usage=_usage(1_000))
+
+
 def _session(workspace, *, ceiling: int = CEILING, responses=None,
              per_call: int = PER_CALL) -> ChatSession:
     """Session whose LLM emits `responses` in order and reports usage per call.
 
     Falls back to a text reply once the script runs out, so a test that fails to
-    trip the gate terminates instead of looping.
+    trip the gate terminates instead of looping. An exception in `responses` is
+    raised by that call, to model a provider error the turn retries.
     """
     mock_llm = make_mock_llm()
     script = list(responses or [])
@@ -99,6 +107,8 @@ def _session(workspace, *, ceiling: int = CEILING, responses=None,
     def _plan_stream(**kwargs):
         async def _gen():
             resp = script.pop(0) if script else _text()
+            if isinstance(resp, Exception):
+                raise resp
             # Exactly what LLMClient does on every completion (ENG-1288).
             if mock_llm.usage_listener is not None:
                 mock_llm.usage_listener("planning", "test-model", _usage(per_call))
