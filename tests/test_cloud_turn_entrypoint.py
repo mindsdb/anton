@@ -13,7 +13,7 @@ import logging
 
 import pytest
 
-from anton.cloud_turn.contract import TurnRequestV1
+from anton.cloud_turn.contract import ARTIFACTS_TOUCHED_KEY, MAX_ARTIFACTS_TOUCHED, TurnRequestV1
 from anton.cloud_turn.__main__ import _clip_result_content, stream_turn
 from anton.core.llm.provider import (
     AllowanceExhaustedError,
@@ -142,6 +142,54 @@ def test_text_only_no_deltas_still_completes():
     assert events == [{"kind": "turn_completed"}]
 
 
+class _TouchingSession(_FakeSession):
+    """A session whose turn touched artifacts through its tools."""
+
+    def __init__(self, touched, *, complete=True, **kwargs):
+        super().__init__(**kwargs)
+        self._touched = set(touched)
+        self.artifacts_touched_complete = complete
+
+    @property
+    def artifacts_touched(self):
+        # Reverse-sorted, so a list that goes out in the order it came fails
+        # on every hash seed.
+        return sorted(self._touched, reverse=True)
+
+
+def test_completed_names_the_artifacts_the_turn_touched_sorted():
+    events = _drive(_TouchingSession({"report-b2", "deck-a1", "chart-c3"}, deltas=["ok"]))
+    assert events[-1] == {"kind": "turn_completed", "artifacts_touched": ["chart-c3", "deck-a1", "report-b2"]}
+
+
+def test_completed_says_so_when_the_turn_touched_no_artifact():
+    """An empty list, not a missing key: the host stats nothing, rather than
+    diffing the whole folder as it does for a session without the record."""
+    events = _drive(_TouchingSession(set(), deltas=["ok"]))
+    assert events[-1] == {"kind": "turn_completed", "artifacts_touched": []}
+
+
+def test_completed_leaves_the_list_out_when_a_snapshot_missed_part_of_the_folder():
+    """A cell whose snapshot could not read the artifacts folder may have an
+    edit the record lacks, so the host must diff the whole folder."""
+    events = _drive(_TouchingSession({"deck-a1"}, complete=False, deltas=["ok"]))
+    assert events[-1] == {"kind": "turn_completed"}
+
+
+def test_completed_carries_a_list_of_up_to_the_cap():
+    names = {f"a{i:04d}" for i in range(MAX_ARTIFACTS_TOUCHED)}
+    events = _drive(_TouchingSession(names, deltas=["ok"]))
+    assert events[-1] == {"kind": "turn_completed", ARTIFACTS_TOUCHED_KEY: sorted(names)}
+
+
+def test_completed_leaves_out_a_list_longer_than_the_host_reads():
+    """The host reads a longer list as absent, so it is never sent through
+    the controller and the reply stream at all."""
+    names = {f"a{i:04d}" for i in range(MAX_ARTIFACTS_TOUCHED + 1)}
+    events = _drive(_TouchingSession(names, deltas=["ok"]))
+    assert events[-1] == {"kind": "turn_completed"}
+
+
 def test_step_events_go_on_the_wire():
     """Tool/progress/round events are emitted as structured wire events so the
     cowork step UI can render them; tool args accumulate pod-side and ship once
@@ -170,6 +218,30 @@ def test_step_events_go_on_the_wire():
     assert {"kind": "round_end", "stop_reason": "end_turn",
             "had_tool_calls": False} in events
     assert events[-1] == {"kind": "turn_completed"}
+
+
+def test_the_browser_line_carries_the_session_only_through_the_wire_clock(monkeypatch):
+    """The line is what cowork stores, so it carries no link or key, and it
+    counts as activity on the wire like every line but the heartbeat."""
+    from anton.cloud_turn import __main__ as entrypoint
+    from anton.core.llm.provider import StreamBrowserSession
+
+    clocked: list[dict] = []
+    original = entrypoint._WireClock.__call__
+
+    def record(self, event):
+        clocked.append(event)
+        return original(self, event)
+
+    monkeypatch.setattr(entrypoint._WireClock, "__call__", record)
+
+    class _S(_FakeSession):
+        async def turn_stream(self, user_input, **kwargs):
+            yield StreamBrowserSession(session_id="t-1")
+
+    events = _drive(_S())
+    assert [e for e in events if e.get("kind") == "browser"] == [{"kind": "browser", "session_id": "t-1"}]
+    assert {"kind": "browser", "session_id": "t-1"} in clocked
 
 
 def test_handback_reason_goes_on_the_wire_before_the_terminal():

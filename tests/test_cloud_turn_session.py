@@ -673,6 +673,98 @@ def test_final_tool_set_equals_allowlist_after_real_build(tmp_path, monkeypatch)
     )
 
 
+# ── the browser: only the router block a turn carries ───────────────────────
+
+_ROUTER = "https://app.example.test/browser"
+
+
+def _build_from_wire(tmp_path, monkeypatch, browser):
+    """`_build`, with the request read from its JSON line as the pod reads it."""
+    monkeypatch.setattr(session_mod, "ChatSession", lambda config: config)
+    monkeypatch.setattr(
+        llm_client_mod.LLMClient, "from_settings",
+        classmethod(lambda cls, settings: object()),
+    )
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+    line = json.dumps({"protocol_version": 1, "conversation_id": "conv_1", "input": "hello", "browser": browser})
+    return build_cloud_chat_session(TurnRequestV1.from_json(line))
+
+
+def test_a_router_block_gives_the_turn_a_browser(tmp_path, monkeypatch):
+    from anton.core.browser.config import BrowserConfig
+
+    cfg = _build_from_wire(tmp_path, monkeypatch, {"base_url": _ROUTER, "profile": "t-1"})
+    assert "browser" in cfg.tool_allowlist
+    assert cfg.browser == BrowserConfig(base_url=_ROUTER, profile="t-1")
+
+
+@pytest.mark.parametrize("block", [
+    {"base_url": _ROUTER, "profile": "t-1", "token": "t"},
+    {"base_url": "http://127.0.0.1:51234", "profile": "t-1", "token": "t"},
+    {"base_url": _ROUTER},
+    "junk",
+])
+def test_a_token_or_loopback_block_gives_no_browser(tmp_path, monkeypatch, block):
+    cfg = _build_from_wire(tmp_path, monkeypatch, block)
+    assert "browser" not in cfg.tool_allowlist
+    assert cfg.browser is None
+
+
+def test_a_cloud_session_with_a_router_block_registers_exactly_the_browser_too(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+
+    session = _real_cloud_session(
+        tmp_path, monkeypatch,
+        browser=TurnRequestV1.from_json(json.dumps({
+            "protocol_version": 1, "conversation_id": "c", "input": "hi",
+            "browser": {"base_url": _ROUTER, "profile": "t-1"},
+        })).browser,
+    )
+    session._scratchpads = MagicMock(available_packages=[])
+    session._build_tools()
+    names = {t.name for t in session.tool_registry.get_tool_defs()}
+    assert names == set(CLOUD_TOOL_ALLOWLIST) | {"browser"}
+
+
+def test_the_environment_never_gives_a_browser(tmp_path, monkeypatch):
+    """Settings are passed: ChatSessionConfig.settings defaults to None, so a
+    session without them would pass even with an environment fallback back."""
+    from anton.core.settings import CoreSettings
+
+    monkeypatch.setenv("ANTON_BROWSER_URL", "https://collector.example")
+    monkeypatch.setenv("ANTON_BROWSER_PROFILE", "t-1")
+    session = _real_session_with_workspace(tmp_path, settings=CoreSettings(), browser=None)
+    session._build_tools()
+    assert "browser" not in {t.name for t in session.tool_registry.get_tool_defs()}
+
+
+def test_a_host_config_registers_the_browser(tmp_path):
+    from anton.core.browser.config import BrowserConfig
+    from anton.core.settings import CoreSettings
+
+    for config in (
+        BrowserConfig(base_url=_ROUTER, profile="t-1"),
+        BrowserConfig(base_url="http://127.0.0.1:51234", profile="t-1", token="launch-key"),
+    ):
+        session = _real_session_with_workspace(tmp_path, settings=CoreSettings(), browser=config)
+        session._build_tools()
+        assert "browser" in {t.name for t in session.tool_registry.get_tool_defs()}
+
+
+async def test_closing_the_session_closes_the_browsers_clients(tmp_path):
+    """The browser state owns the browser's HTTP client and the Jev client its
+    steps share; the session's close is what releases both."""
+    from unittest.mock import AsyncMock
+
+    from anton.core.browser.config import BrowserConfig
+
+    session = _real_session_with_workspace(tmp_path, browser=BrowserConfig(base_url=_ROUTER, profile="t-1"))
+    session._scratchpads = AsyncMock()
+    session._browser_state = AsyncMock()
+    await session.close()
+    session._browser_state.aclose.assert_awaited_once()
+
+
 def test_tool_allowlist_none_preserves_desktop_tools(tmp_path):
     session = _real_session_with_workspace(tmp_path)  # allowlist defaults to None
     assert session._tool_allowlist is None

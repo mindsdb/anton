@@ -77,7 +77,25 @@ Events written back on stdout (JSONL):
   {"kind": "ask_user_answer_rejected", "id", "answer_id", "reason"}  - a stdin
       answer that did not close its question; reason is invalid_option |
       not_found | already_answered. The question stays open on invalid_option.
-  {"kind": "turn_completed"}          - terminal success (no payload)
+  {"kind": "browser", "session_id": "..."}  - the browser tool opened (or
+      reopened) the person's browser session. cowork shows the browser beside
+      the chat, with a viewer link it mints with the person's own credential.
+      The line carries no link and no key.
+  {"kind": "turn_completed", "artifacts_touched": [slug, ...]}  - terminal
+      success. `artifacts_touched` (ARTIFACTS_TOUCHED_KEY) is the sorted
+      folder names of the artifacts this turn created or updated through its
+      artifact tools, or edited by a scratchpad cell (the session's
+      `artifacts_touched`); `[]` means the turn touched none. The list is what
+      the tools and cells reported, not every write: a process a cell started
+      that writes into an artifact after the cell returns goes unlisted.
+      cowork-server reads it in `tracked_artifacts_from_reply` and then opens
+      only the listed folders at turn end, plus the folders it queued a repair
+      in and its `.locks` folder. The key is left out, and the host then
+      diffs the whole artifacts folder, when the session keeps no such
+      record, when a snapshot around a cell could not read the artifacts
+      folder or an entry in it (`ChatSession.artifacts_touched_complete`),
+      and when the list would name more than MAX_ARTIFACTS_TOUCHED (1,000)
+      folders.
   {"kind": "turn_failed", "error": "..."}  - terminal failure (scrubbed string)
       `error` is "TypeName: message", so a consumer reads the failure's kind
       off the class name. A MindsHub billing stop that knows when its limit
@@ -109,6 +127,7 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ConfigDict
 
+from anton.core.browser.config import BrowserConfig
 from anton.core.tools.skill_format import validate_name
 
 logger = logging.getLogger(__name__)
@@ -116,6 +135,16 @@ logger = logging.getLogger(__name__)
 TURN_PROTOCOL_VERSION = 1
 DATASOURCE_PROTOCOL_VERSION = 1
 MAX_DATASOURCE_CONNECTIONS = 100
+
+# The `turn_completed` key that names the artifact folders the turn touched.
+# scratchpad-controller's `scratchpad_controller/anton_turn.py` relays it and
+# cowork-server's `cowork/services/task_objects.py` reads it, under the same name.
+ARTIFACTS_TOUCHED_KEY = "artifacts_touched"
+# The most folder names that list carries. The entrypoint leaves out a longer
+# list; scratchpad-controller's `anton_turn.py` relays none and cowork-server's
+# `tracked_artifacts_from_reply` (`cowork/services/task_objects.py`) reads one
+# as absent, both against the same cap.
+MAX_ARTIFACTS_TOUCHED = 1000
 
 
 def _is_version(value: object, expected: int) -> bool:
@@ -323,6 +352,12 @@ class TurnRequestV1:
     #: {engine: {"usage_notes": str}}. Rendered only for engines the turn's
     #: vault connects. Absent when no connected engine has notes.
     connectors: dict | None = None
+    #: The MindsHub browser router, when cowork-server turned the browser on for
+    #: this turn: {"base_url", "profile", "project"?}, read by
+    #: BrowserConfig.from_dict. The pod reaches the router with this turn's
+    #: `llm` key. A block with a `token`, or with any address but the https
+    #: router, is refused. Absent or malformed means no browser tool this turn.
+    browser: BrowserConfig | None = None
 
     @staticmethod
     def from_json(raw: str) -> "TurnRequestV1":
@@ -359,4 +394,5 @@ class TurnRequestV1:
             connectors=(
                 d.get("connectors") if isinstance(d.get("connectors"), dict) else None
             ),
+            browser=BrowserConfig.from_dict(d.get("browser")),
         )
