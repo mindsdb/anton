@@ -14,6 +14,7 @@ import pytest
 
 from anton.core.tools.connector_draft import (
     MAX_DRAFTS_PER_TURN,
+    MAX_FIELDS,
     ConnectorDraftBox,
     ConnectorDraftError,
     connector_draft_tool,
@@ -99,7 +100,7 @@ def test_duplicate_field_names_are_refused():
         parse_connector_draft(_draft(fields=fields))
 
 
-@pytest.mark.parametrize("fields", [[], [{"name": f"f{i}", "label": "L"} for i in range(13)], "api_key"])
+@pytest.mark.parametrize("fields", [[], [{"name": f"f{i}", "label": "L"} for i in range(12)], "api_key"])
 def test_the_field_count_is_bounded(fields):
     with pytest.raises(ConnectorDraftError, match="fields must be"):
         parse_connector_draft(_draft(fields=fields))
@@ -262,3 +263,118 @@ def test_the_tool_refuses_a_bad_draft_without_the_value():
     assert outcome.ok is False and outcome.reason == "invalid_draft"
     assert value not in outcome.content
     assert box.drain() == []
+
+
+_CHECK = {"path": "/v2/me", "headers": {"Authorization": "Bearer {api_key}", "Accept": "application/json"}}
+
+
+def test_a_check_parses_and_round_trips():
+    draft = parse_connector_draft(_draft(check=_CHECK))
+
+    assert draft.check.path == "/v2/me"
+    assert draft.check.headers == (("Authorization", "Bearer {api_key}"), ("Accept", "application/json"))
+    assert draft.to_dict()["check"] == _CHECK
+    assert parse_connector_draft(draft.to_dict()) == draft
+
+
+def test_a_check_may_carry_a_query():
+    assert parse_connector_draft(_draft(check={**_CHECK, "path": "/v2/me?fields=id"})).check.path == "/v2/me?fields=id"
+
+
+def test_a_draft_without_a_check_has_none():
+    assert parse_connector_draft(_draft()).check is None
+    assert "check" not in parse_connector_draft(_draft()).to_dict()
+
+
+@pytest.mark.parametrize("path", [
+    "//evil.example/x",
+    "/..//evil.example",
+    "/v2//me",
+    "/./me",
+    "/v2/../me",
+    "/\\evil.example",
+    "https://evil.example/me",
+    "v2/me",
+    "/v2/{api_key}",
+    "/v2/me#frag",
+    "/v2/m e",
+    "/v2/\u00e9",
+    "",
+    None,
+    7,
+])
+def test_a_check_path_that_could_name_a_host_or_carry_a_value_is_refused(path):
+    with pytest.raises(ConnectorDraftError):
+        parse_connector_draft(_draft(check={**_CHECK, "path": path}))
+
+
+@pytest.mark.parametrize("headers", [
+    {"Host": "evil.example", "Authorization": "Bearer {api_key}"},
+    {"host": "evil.example", "Authorization": "Bearer {api_key}"},
+    {"Cookie": "{api_key}"},
+    {"Proxy-Authorization": "Bearer {api_key}"},
+    {"X-HTTP-Method-Override": "DELETE", "Authorization": "Bearer {api_key}"},
+    {"Accept-Encoding": "gzip", "Authorization": "Bearer {api_key}"},
+    {"Authorization": "Bearer {api_key}", "authorization": "Bearer {api_key}"},
+    {"X Bad": "{api_key}"},
+    {f"X-{i}": "{api_key}" for i in range(6)},
+    {},
+    "Authorization: Bearer {api_key}",
+    {"Authorization": "Bearer {token}"},
+    {"Authorization": "{api_key.__class__}"},
+    {"Authorization": "Bearer {api_key}}"},
+    {"Authorization": "Bearer {api_key}\r\nX-Injected: 1"},
+    {"Authorization": "Bearer {api_key}\u00e9"},
+    {"Authorization": 7},
+    {"X-Region": "{region}"},
+])
+def test_a_check_header_that_could_steer_or_inject_is_refused(headers):
+    with pytest.raises(ConnectorDraftError):
+        parse_connector_draft(_draft(check={**_CHECK, "headers": headers}))
+
+
+@pytest.mark.parametrize("check", [{"path": "/v2/me"}, {**_CHECK, "method": "POST"}, {**_CHECK, "host": "x"}, "/v2/me"])
+def test_a_check_of_the_wrong_shape_is_refused(check):
+    with pytest.raises(ConnectorDraftError):
+        parse_connector_draft(_draft(check=check))
+
+
+@pytest.mark.parametrize("name", _TOKEN_SHAPES)
+def test_a_value_in_a_check_is_refused_without_echoing_it(name):
+    value = _TOKEN_SHAPES[name]
+    for check in (
+        {**_CHECK, "headers": {"Authorization": f"Bearer {value}"}},
+        {**_CHECK, "path": f"/v2/me?key={value}"},
+    ):
+        with pytest.raises(ConnectorDraftError) as exc:
+            parse_connector_draft(_draft(check=check))
+        assert value not in str(exc.value)
+
+
+def test_a_token_shaped_header_name_is_refused_without_echoing_it():
+    name = "X-" + _TOKEN_SHAPES["bare"]
+
+    with pytest.raises(ConnectorDraftError) as exc:
+        parse_connector_draft(_draft(check={**_CHECK, "headers": {name: "Bearer {api_key}"}}))
+
+    assert _TOKEN_SHAPES["bare"] not in str(exc.value)
+
+
+def test_base_url_is_reserved_for_the_address_the_member_types():
+    with pytest.raises(ConnectorDraftError):
+        parse_connector_draft(_draft(fields=[{"name": "base_url", "label": "Base URL"}]))
+
+
+def test_a_template_holds_at_most_eleven_fields():
+    assert MAX_FIELDS == 11
+    parse_connector_draft(_draft(fields=[{"name": f"f{i}", "label": "L"} for i in range(11)]))
+
+
+def test_the_tool_describes_the_check():
+    tool = connector_draft_tool(ConnectorDraftBox())
+
+    check = tool.input_schema["properties"]["check"]
+    assert check["required"] == ["path", "headers"]
+    assert check["additionalProperties"] is False
+    assert "check" in tool.description
+    assert "base URL" not in tool.input_schema["properties"]["usage_notes"]["description"]

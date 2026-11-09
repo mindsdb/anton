@@ -2,7 +2,9 @@
 
 A cloud turn may build the template for an API connector the user has no
 connector for: its id, label, the credential fields the member will fill in,
-and usage notes. Never a value. The pod emits the drafts at end of turn, the
+usage notes, and a check: one GET whose path and headers say how to test the
+credentials. Never a value, and never the API's address: the member types
+that when they connect, so a template cannot choose where a key is sent. The pod emits the drafts at end of turn, the
 host shows each as a card, and the member saves it explicitly. The member then
 enters credentials outside the conversation.
 
@@ -26,7 +28,11 @@ from anton.utils.datasources import scrub_output
 
 #: Drafts one turn may hold. A second call with the same id replaces the first.
 MAX_DRAFTS_PER_TURN = 3
-MAX_FIELDS = 12
+#: One below the store's limit, which also keeps the address the member types.
+MAX_FIELDS = 11
+#: Field names the host stores beside the member's values.
+RESERVED_FIELD_NAMES = frozenset({"base_url"})
+MAX_CHECK_HEADERS = 5
 
 _CONNECTOR_ID = re.compile(r"[a-z][a-z0-9_]{1,40}")
 _FIELD_NAME = re.compile(r"[a-z][a-z0-9_]{0,39}")
@@ -42,8 +48,20 @@ _HELP_URL_MAX = 500
 #: Prose texts, the only ones that may span lines.
 _LONG_TEXTS = frozenset({"usage_notes", "help"})
 
-_TOP_KEYS = frozenset({"connector_id", "help_url", "fields", *_TOP_TEXT_CAPS})
+_TOP_KEYS = frozenset({"connector_id", "help_url", "fields", "check", *_TOP_TEXT_CAPS})
 _FIELD_KEYS = frozenset({"name", "secret", "required", *_FIELD_TEXT_CAPS})
+_CHECK_KEYS = frozenset({"path", "headers"})
+
+_CHECK_PATH_MAX = 300
+_CHECK_HEADER_VALUE_MAX = 200
+_HEADER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,40}")
+_PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]{0,39})\}")
+#: Headers the request itself owns, or that would change what it does or where it goes.
+_REFUSED_HEADERS = frozenset({
+    "host", "cookie", "content-length", "transfer-encoding", "connection", "keep-alive", "te",
+    "trailer", "upgrade", "expect", "accept-encoding",
+    "x-http-method-override", "x-http-method", "x-method-override",
+})
 
 
 class ConnectorDraftError(ValueError):
@@ -64,6 +82,22 @@ class ConnectorDraftField:
 
 
 @dataclass(frozen=True)
+class ConnectorDraftCheck:
+    """How to test the credentials: one GET of ``path`` on the address the member types.
+
+    ``headers`` pairs each header name with its value, where ``{field}`` stands
+    for that field's value.
+    """
+
+    path: str
+    headers: tuple[tuple[str, str], ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        """The check as JSON-ready data, its headers as a name-to-value object."""
+        return {"path": self.path, "headers": dict(self.headers)}
+
+
+@dataclass(frozen=True)
 class ConnectorDraft:
     """A connector template as the allowlist accepted it, ready to show or save."""
 
@@ -74,13 +108,18 @@ class ConnectorDraft:
     category: str | None = None
     help_url: str | None = None
     usage_notes: str | None = None
+    check: ConnectorDraftCheck | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """The draft as JSON-ready data, with unset optional keys left out."""
-        out = {k: v for k, v in asdict(self).items() if k != "fields" and v is not None}
+        out = {
+            k: v for k, v in asdict(self).items() if k not in ("fields", "check") and v is not None
+        }
         out["fields"] = [
             {k: v for k, v in asdict(f).items() if v is not None} for f in self.fields
         ]
+        if self.check is not None:
+            out["check"] = self.check.to_dict()
         return out
 
 
@@ -157,6 +196,81 @@ def _check_help_url(value: Any) -> str | None:
     return text
 
 
+def _is_printable_ascii(text: str, *, space: bool) -> bool:
+    """Whether every character of ``text`` is printable ASCII, the space only when allowed."""
+    low = 0x20 if space else 0x21
+    return all(low <= ord(c) <= 0x7E for c in text)
+
+
+def _check_path(value: Any) -> str:
+    """Return the check's path: an absolute path with an optional query, never a host.
+
+    A path the request URL could read as naming another host (``//``, ``\\``,
+    a ``.`` or ``..`` segment) is refused, and so is anything a placeholder
+    could reach: a value never goes into the URL.
+    """
+    text = _check_text(value, "check.path", _CHECK_PATH_MAX, long_text=False)
+    if text is None:
+        raise ConnectorDraftError("check.path is required.")
+    if (
+        not text.startswith("/")
+        or "//" in text
+        or not _is_printable_ascii(text, space=False)
+        or any(c in text for c in "\\#{}")
+    ):
+        raise ConnectorDraftError("check.path must be a path such as /v1/me, with no host.")
+    segments = text.split("?", 1)[0].split("/")
+    if any(segment in (".", "..") for segment in segments):
+        raise ConnectorDraftError("check.path must not have . or .. segments.")
+    return text
+
+
+def _check_headers(value: Any, fields: tuple[ConnectorDraftField, ...]) -> tuple[tuple[str, str], ...]:
+    """Return the check's headers; a value may place a declared field as ``{name}``.
+
+    At least one header places a secret field, or the check cannot tell a
+    working key from a wrong one.
+    """
+    if not isinstance(value, dict) or not 1 <= len(value) <= MAX_CHECK_HEADERS:
+        raise ConnectorDraftError(f"check.headers must be an object of 1 to {MAX_CHECK_HEADERS} headers.")
+    by_name = {f.name: f for f in fields}
+    seen: set[str] = set()
+    headers: list[tuple[str, str]] = []
+    places_secret = False
+    for name, header_value in value.items():
+        # A header name is model text: one that reads as a token is refused before any message names it.
+        if not isinstance(name, str) or not _HEADER_NAME.fullmatch(name) or _looks_like_token(name):
+            raise ConnectorDraftError("check.headers has a header name that is not allowed.")
+        lowered = name.lower()
+        if lowered in _REFUSED_HEADERS or lowered.startswith("proxy-") or lowered in seen:
+            raise ConnectorDraftError("check.headers has a header name that is not allowed.")
+        seen.add(lowered)
+        where = f"check.headers.{name}"
+        text = _check_text(header_value, where, _CHECK_HEADER_VALUE_MAX, long_text=False)
+        if text is None or not _is_printable_ascii(text, space=True):
+            raise ConnectorDraftError(f"{where} must be printable text.")
+        placed = _PLACEHOLDER.findall(text)
+        if "{" in _PLACEHOLDER.sub("", text) or "}" in _PLACEHOLDER.sub("", text):
+            raise ConnectorDraftError(f"{where} may use braces only as {{field_name}}.")
+        if any(name_ not in by_name for name_ in placed):
+            raise ConnectorDraftError(f"{where} names a field the draft does not declare.")
+        places_secret = places_secret or any(by_name[name_].secret for name_ in placed)
+        headers.append((name, text))
+    if not places_secret:
+        raise ConnectorDraftError("check.headers must place a secret field, such as {api_key}.")
+    return tuple(headers)
+
+
+def _parse_check(data: Any, fields: tuple[ConnectorDraftField, ...]) -> ConnectorDraftCheck | None:
+    """Parse the optional ``check``, or return None when absent."""
+    if data is None:
+        return None
+    if not isinstance(data, dict):
+        raise ConnectorDraftError("check must be an object.")
+    _check_keys(data, _CHECK_KEYS, "check")
+    return ConnectorDraftCheck(path=_check_path(data.get("path")), headers=_check_headers(data.get("headers"), fields))
+
+
 def _parse_field(data: Any, index: int) -> ConnectorDraftField:
     """Parse one entry of ``fields``."""
     where = f"fields[{index}]"
@@ -169,6 +283,8 @@ def _parse_field(data: Any, index: int) -> ConnectorDraftField:
             f"{where}.name must be lowercase letters, digits and underscores, "
             "starting with a letter, at most 40 characters."
         )
+    if name in RESERVED_FIELD_NAMES:
+        raise ConnectorDraftError(f"{where}.name is reserved; the member types the API address when connecting.")
     texts = {
         key: _check_text(data.get(key), f"{where}.{key}", cap, long_text=key in _LONG_TEXTS)
         for key, cap in _FIELD_TEXT_CAPS.items()
@@ -227,6 +343,7 @@ def parse_connector_draft(data: Any) -> ConnectorDraft:
         category=texts["category"],
         help_url=_check_help_url(data.get("help_url")),
         usage_notes=texts["usage_notes"],
+        check=_parse_check(data.get("check"), fields),
     )
 
 
@@ -258,7 +375,11 @@ _DESCRIPTION = (
     "Build the template for a connector to an API the user needs and has no "
     "connector for. Pass the connector's id, a label, the credential fields "
     "the user will fill in (for example api_key, or client_id and "
-    "client_secret), and usage notes on how to call the API with them. Never "
+    "client_secret), usage notes on how to call the API with them, and a "
+    "check: the path of one GET that answers only with valid credentials (for "
+    "example /v1/me) and the header that carries them (for example "
+    "Authorization: Bearer {api_key}). The user types the API's address "
+    "when connecting, so leave it out of the check. Never "
     "pass a credential value: no key, token, password or secret goes into any "
     "field of this tool, and never ask the user for one. The template is "
     "staged, not saved: the user sees it as a card in the chat and saves it, "
@@ -281,7 +402,7 @@ _INPUT_SCHEMA = {
         "help_url": {"type": "string", "description": "https link to the provider's API key docs."},
         "usage_notes": {
             "type": "string",
-            "description": "How to call the API: base URL, auth header and scheme, key endpoints. No values.",
+            "description": "How to call the API: auth header and scheme, key endpoints. No values.",
         },
         "fields": {
             "type": "array",
@@ -303,6 +424,21 @@ _INPUT_SCHEMA = {
         },
     },
     "required": ["connector_id", "label", "fields"],
+    "additionalProperties": False,
+}
+_INPUT_SCHEMA["properties"]["check"] = {
+    "type": "object",
+    "description": "How to test the credentials: one GET, on the address the user types.",
+    "properties": {
+        "path": {"type": "string", "description": "The request path, e.g. '/v1/me'. No host."},
+        "headers": {
+            "type": "object",
+            "description": "Header name to value; {field_name} places a field's value, e.g. 'Bearer {api_key}'.",
+            "additionalProperties": {"type": "string"},
+            "maxProperties": MAX_CHECK_HEADERS,
+        },
+    },
+    "required": ["path", "headers"],
     "additionalProperties": False,
 }
 
