@@ -19,7 +19,6 @@ from anton.core.utils.scratchpad import SCRATCHPAD_ACTIONS
 from anton.core.utils.write_hold import handle_approve_held_write
 from anton.core.tools.text_file import DEFAULT_LINE_COUNT, MAX_OUTPUT_CHARS
 
-import os
 from dataclasses import dataclass, replace
 from typing import Callable, Optional
 
@@ -724,41 +723,46 @@ STATIC_CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(STATIC_C
 GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(GENERATE_ARTIFACT_TOOL)
 STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(STATIC_GENERATE_ARTIFACT_TOOL)
 
+_single_call_instructions = (
+    "For a NEW web artifact, call generate_artifact directly with name, user_request, "
+    "user_language and agent_understanding; omit slug. It registers the artifact and "
+    "runs source discovery, generation and the normal verifiers in one operation. "
+    "Do not make a separate create_artifact call or pre-fetch data solely for this "
+    "handoff. Preserve the user's request verbatim. For an EDIT, pass the existing "
+    "slug instead of name so the existing artifact is updated."
+)
 
 
-if os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on":
-    _single_call_instructions = (
-        "For a NEW web artifact, call generate_artifact directly with name, user_request, "
-        "user_language and agent_understanding; omit slug. It registers the artifact and "
-        "runs source discovery, generation and the normal verifiers in one operation. "
-        "Do not make a separate create_artifact call or pre-fetch data solely for this "
-        "handoff. Preserve the user's request verbatim. For an EDIT, pass the existing "
-        "slug instead of name so the existing artifact is updated."
+# No top-level anyOf: providers reject it in tool schemas. The handler requires slug or name.
+def _single_call(tool: ToolDef) -> ToolDef:
+    return replace(
+        tool,
+        description=_single_call_instructions + "\n\n" + tool.description,
+        input_schema={
+            **tool.input_schema,
+            "properties": {**tool.input_schema["properties"],
+                           "name": {"type": "string", "description": "Name of a NEW artifact; omit for an existing-slug edit."}},
+            "required": [key for key in tool.input_schema["required"] if key != "slug"],
+        },
+        prompt="ARTIFACT GENERATION:\n" + _single_call_instructions +
+               "\n`user_language` is the language the user writes to you in; talk to the user in that "
+               "language while the artifact is built and when you report the result. "
+               "`needs_confirmation` means show `brief_summary` and, if the user agrees, call again "
+               "with the SAME `user_request` and `user_language`."
+               "\nFollow the returned instruction; the existing approval and verification rules still apply.",
     )
 
-    # No top-level anyOf: providers reject it in tool schemas. The handler requires slug or name.
-    def _single_call(tool: ToolDef) -> ToolDef:
-        return replace(
-            tool,
-            description=_single_call_instructions + "\n\n" + tool.description,
-            input_schema={
-                **tool.input_schema,
-                "properties": {**tool.input_schema["properties"],
-                               "name": {"type": "string", "description": "Name of a NEW artifact; omit for an existing-slug edit."}},
-                "required": [key for key in tool.input_schema["required"] if key != "slug"],
-            },
-            prompt="ARTIFACT GENERATION:\n" + _single_call_instructions +
-                   "\nFollow the returned instruction; the existing approval and verification rules still apply.",
-        )
 
-    def _registration_only(tool: ToolDef) -> ToolDef:
-        return replace(tool, description="For end-to-end generation, prefer generate_artifact(name=...) directly. "
-                                         "Use this registration-only tool when writing the files manually.\n\n" + tool.description)
+def _registration_only(tool: ToolDef) -> ToolDef:
+    return replace(tool, description="For end-to-end generation, prefer generate_artifact(name=...) directly. "
+                                     "Use this registration-only tool when writing the files manually.\n\n" + tool.description)
 
-    GENERATE_ARTIFACT_TOOL = _single_call(GENERATE_ARTIFACT_TOOL)
-    STATIC_GENERATE_ARTIFACT_TOOL = _single_call(STATIC_GENERATE_ARTIFACT_TOOL)
-    CREATE_ARTIFACT_TOOL = _registration_only(CREATE_ARTIFACT_TOOL)
-    STATIC_CREATE_ARTIFACT_TOOL = _registration_only(STATIC_CREATE_ARTIFACT_TOOL)
+
+GENERATE_ARTIFACT_TOOL = _single_call(GENERATE_ARTIFACT_TOOL)
+STATIC_GENERATE_ARTIFACT_TOOL = _single_call(STATIC_GENERATE_ARTIFACT_TOOL)
+CREATE_ARTIFACT_TOOL = _registration_only(CREATE_ARTIFACT_TOOL)
+STATIC_CREATE_ARTIFACT_TOOL = _registration_only(STATIC_CREATE_ARTIFACT_TOOL)
+
 
 RECALL_TOOL = ToolDef(
     name="recall",

@@ -6,8 +6,6 @@ neither has to re-derive it — only the task-specific instructions differ.
 
 from __future__ import annotations
 
-import os
-
 from anton.core.artifacts.geography_guidance import GEOGRAPHY_GUIDANCE
 from anton.core.llm.prompts import ANTON_NOTE
 
@@ -237,19 +235,9 @@ _WHEN_TO_ASK = (
     "One question with options beats several.\n"
 )
 
-_WHEN_TO_ASK_ACT_FIRST = (
-    "- When the request leaves something open, write your choice as ONE "
-    "line under `assumptions` and keep going. Ask the user only when the "
-    "artifact cannot be built without the answer and no reasonable "
-    "assumption exists — never for taste, style or scope you can pick "
-    "yourself. Leave `open_points` empty: nobody confirms the brief, so a "
-    "point left open is decided by its default anyway — record that "
-    "default as an assumption. One question with options beats several.\n"
-)
-
 
 def _gathering_instruction(act_first: bool, *, static_completion: bool = False) -> str:
-    if act_first and os.environ.get("ANTON_STATIC_FAST_PATH") == "direct":
+    if act_first:
         return (
             "Gather the evidence needed to build the ORIGINAL user request. Use the connected "
             "source's documented API and credentials from the catalog. Reuse an existing "
@@ -270,7 +258,7 @@ def _gathering_instruction(act_first: bool, *, static_completion: bool = False) 
             "must query data at runtime, verify its access with a real sample and finish."
         )
     return _GATHERING_TEMPLATE.format(
-        when_to_ask=_WHEN_TO_ASK_ACT_FIRST if act_first else _WHEN_TO_ASK,
+        when_to_ask=_WHEN_TO_ASK,
     )
 
 
