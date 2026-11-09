@@ -1612,18 +1612,6 @@ def _role_calls(tc: TurnCost, role: str) -> str:
     return str(slice_.calls if slice_ else 0)
 
 
-def _record_grace(turn_cost: TurnCost | None, tag: str) -> None:
-    """Add `tag` ("ceiling") to `turn_cost.grace_granted`,
-    comma-joined, deduplicated, and sorted — alphabetical rather than
-    firing order, so the two-grace value is one fixed string either way."""
-    if turn_cost is None:
-        return
-    tags = turn_cost.grace_granted.split(",") if turn_cost.grace_granted else []
-    if tag not in tags:
-        tags.append(tag)
-        turn_cost.grace_granted = ",".join(sorted(tags))
-
-
 @functools.cache
 def _jev_questions() -> dict:
     """The verifier's rubric as a Jev question, built from the same text."""
@@ -1961,6 +1949,10 @@ class ChatSession:
         # limit. Reset per turn in turn_stream.
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
+        # Tool rounds this turn has run. The step limit is per task, so the
+        # count spans verifier continuations and provider-error retries alike.
+        # Reset per turn in turn_stream.
+        self._turn_tool_rounds = 0
         # The tool calls this turn ran, for the report `_stream_handback_diagnosis`
         # writes when the content filter stops every hand-back. Reset per turn in
         # turn_stream.
@@ -4901,7 +4893,7 @@ class ChatSession:
         self._spend_ceiling_grace_used = True
         if self._turn_cost is not None:
             self._turn_cost.grace_tokens = self._spend_ceiling_grace_tokens
-        _record_grace(self._turn_cost, "ceiling")
+            self._turn_cost.grace_granted = "ceiling"
 
     def _limit_reached(self, limit: str) -> str:
         """Names the limit that stopped the turn.
@@ -5875,12 +5867,14 @@ class ChatSession:
         _screenshot_drop_unconfirmed = False
         _tool_images_dropped = False
         _tool_image_drop_unconfirmed = False
-        # One-time ceiling grace, reset once per turn_stream() call rather than in
-        # `_stream_and_handle_tools`, which retries re-enter and would re-arm.
+        # Per-turn limit state, reset once per turn_stream() call rather than
+        # in `_stream_and_handle_tools`, which retries re-enter: the grace
+        # would re-arm and the step count would restart.
         self._spend_ceiling_grace_used = False
         self._spend_ceiling_grace_tokens = 0
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
+        self._turn_tool_rounds = 0
         self._turn_steps = []
         self._finish_authorized = None
         self._limits_passed_by_message = set()
@@ -6799,10 +6793,6 @@ class ChatSession:
         # fallback the current reply is already in history, so it must not append
         # it a second time (ENG-1155 double-append).
         _reply_persisted = False
-        # Counted across the whole turn, continuations included: the step limit
-        # is per task, so a verifier-forced continuation does not start a fresh
-        # count against the cap.
-        tool_round = 0
 
         while True:  # Completion verification loop
             # Per-iteration, NOT per-turn: the flag means "the reply currently in
@@ -6819,13 +6809,13 @@ class ChatSession:
             resilience_nudged: set[str] = set()
 
             while llm_response.tool_calls:
-                tool_round += 1
+                self._turn_tool_rounds += 1
                 attempt_rounds += 1
                 # The configured cap plus whatever "Keep going" answers have
                 # added this turn. There is no silent extension: the user's
                 # step limit is the step limit.
                 effective_round_cap = self._max_tool_rounds + self._round_cap_continued_rounds
-                if tool_round > effective_round_cap and self._max_tool_rounds > 0:
+                if self._turn_tool_rounds > effective_round_cap and self._max_tool_rounds > 0:
                     agen = self._ask_to_continue_past_limit("round_cap", user_message)
                     try:
                         async for _kind, _payload in agen:
@@ -6838,10 +6828,10 @@ class ChatSession:
                     finally:
                         await agen.aclose()
                 # Counted before the cap check so a capped turn reports the
-                # cap, not cap+1 (#309 review).
-                if self._turn_cost is not None and tool_round <= effective_round_cap:
+                # cap, not cap+1.
+                if self._turn_cost is not None and self._turn_tool_rounds <= effective_round_cap:
                     self._turn_cost.rounds += 1
-                if tool_round > effective_round_cap:
+                if self._turn_tool_rounds > effective_round_cap:
                     _max_rounds_hit = True
                     if self._turn_cost is not None:
                         self._turn_cost.ended_by = "round_cap"
@@ -6849,7 +6839,7 @@ class ChatSession:
                         "cap_exhausted",
                         {"cap": effective_round_cap, "configured_cap": self._max_tool_rounds},
                         severity=9,
-                        round_idx=tool_round,
+                        round_idx=self._turn_tool_rounds,
                     )
                     self._append_history(
                         {"role": "assistant", "content": llm_response.content or ""}
@@ -6917,7 +6907,7 @@ class ChatSession:
                             "tool_round=%d continuation=%d — pausing to ask the user",
                             self._turn_cost.total_tokens if self._turn_cost else 0,
                             self._max_turn_tokens, self._spend_ceiling_gate(),
-                            tool_round, continuation,
+                            self._turn_tool_rounds, continuation,
                         )
                         self._append_history(
                             {"role": "assistant", "content": llm_response.content or ""}
@@ -6988,7 +6978,7 @@ class ChatSession:
                         "tool_call",
                         {"name": tc.name, "args_summary": str(tc.input)[:120]},
                         severity=1,
-                        round_idx=tool_round,
+                        round_idx=self._turn_tool_rounds,
                     )
                     if self._episodic is not None:
                         self._episodic.log_turn(
@@ -7467,7 +7457,7 @@ class ChatSession:
                             "tool_result",
                             {"name": tc.name, "success": tool_ok is not False, "error": ""},
                             severity=5 if tool_ok is False else 1,
-                            round_idx=tool_round,
+                            round_idx=self._turn_tool_rounds,
                         )
                         tool_results.append(
                             {
@@ -7513,7 +7503,7 @@ class ChatSession:
                             "error": result_text[:300] if _failed else "",
                         },
                         severity=5 if _failed else 1,
-                        round_idx=tool_round,
+                        round_idx=self._turn_tool_rounds,
                     )
                     tool_results.append(
                         {
@@ -7703,7 +7693,7 @@ class ChatSession:
                         "call(s) with no successful verdict since",
                         self._verifier_latch.skips,
                         reprobe_turns, continuation,
-                        self._max_continuations, tool_round,
+                        self._max_continuations, self._turn_tool_rounds,
                     )
                     # Stamp the books: this turn books ended_by="completed"
                     # but was NOT verified — without the flag it is
@@ -8009,7 +7999,7 @@ class ChatSession:
                 logger.warning(
                     "completion-verifier verdict=ERROR continuation=%d/%d tool_rounds=%d "
                     "model=%s — failing toward an honest diagnosis, not a silent COMPLETE",
-                    continuation, self._max_continuations, tool_round,
+                    continuation, self._max_continuations, self._turn_tool_rounds,
                     self._llm.coding_model,
                 )
                 self._append_history(
@@ -8051,7 +8041,7 @@ class ChatSession:
                 # from the user's conversation, and this is an ordinary app log.
                 # It stays in the Langfuse trace, where that content belongs.
                 "completion-verifier verdict=%s continuation=%d/%d tool_rounds=%d",
-                status, continuation, self._max_continuations, tool_round,
+                status, continuation, self._max_continuations, self._turn_tool_rounds,
             )
 
             if status in ("COMPLETE", "WAITING"):

@@ -11,7 +11,7 @@ plus an elicitor that answers from a script.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from collections.abc import Sequence
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -30,9 +30,9 @@ from tests.test_spend_ceiling import (
     PER_CALL,
     _history_text,
     _session,
+    _small,
     _text,
     _tool_call,
-    _usage,
     workspace,  # noqa: F401 — fixture
 )
 
@@ -143,16 +143,20 @@ async def test_stop_at_the_round_cap_hands_back(workspace):
     assert _HANDBACK_NOT_USER_CLAUSE in _history_text(session)
 
 
-def _structured_calls(session, *, authorized: bool) -> AsyncMock:
-    """Answer the finish-authorization check, and let any verifier verdict
-    through as COMPLETE."""
+def _structured_calls(
+    session, *, authorized: bool, verdicts: Sequence[str] = ()
+) -> AsyncMock:
+    """Answer the finish-authorization check, and answer each completion-verifier
+    call with the next of `verdicts`, then COMPLETE."""
+    pending = list(verdicts)
 
     async def _answer(schema, **_kwargs):
         if schema is _FinishAuthorization:
             return _FinishAuthorization(
                 quote="Keep going, don't stop" if authorized else "", authorized=authorized
             )
-        return _VerifierVerdict(status="COMPLETE", reason="done")
+        status = pending.pop(0) if pending else "COMPLETE"
+        return _VerifierVerdict(status=status, reason="done")
 
     calls = AsyncMock(side_effect=_answer)
     session._llm.generate_object_code = calls
@@ -343,25 +347,6 @@ async def test_typing_keep_going_in_the_cli_continues(workspace, monkeypatch):
     assert kwargs["limit_continues"] == "1"
 
 
-def _verdicts(session, *statuses: str) -> None:
-    """Answer each completion-verifier call with the next status."""
-    pending = list(statuses)
-
-    async def _answer(schema, **_kwargs):
-        if schema is _FinishAuthorization:
-            return _FinishAuthorization(quote="", authorized=False)
-        status = pending.pop(0) if pending else "COMPLETE"
-        return _VerifierVerdict(status=status, reason="scripted", close_to_done=False)
-
-    session._llm.generate_object_code = AsyncMock(side_effect=_answer)
-
-
-def _small(response):
-    """The response with a usage well under the output budget, so the
-    truncation retry stays out of the way."""
-    return replace(response, usage=_usage(1_000))
-
-
 async def test_the_step_limit_counts_the_whole_task_not_each_attempt(workspace):
     """TL-02: with "Max steps per task" at 5, a task that used 5 steps, was
     sent back by the verifier and used 5 more ran 10 steps with no limit
@@ -372,7 +357,7 @@ async def test_the_step_limit_counts_the_whole_task_not_each_attempt(workspace):
     session._max_tool_rounds = cap
     elicitor = _ScriptedElicitor(STOP_HERE)
     session.elicitor = elicitor
-    _verdicts(session, "INCOMPLETE", "COMPLETE")
+    _structured_calls(session, authorized=False, verdicts=("INCOMPLETE", "COMPLETE"))
     _, kwargs = await _run(session)
     assert len(elicitor.requests) == 1, "the limit must be reached on the continuation"
     assert f"reached its limit of {cap} steps per request" in elicitor.requests[0].prompt

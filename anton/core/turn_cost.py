@@ -132,9 +132,8 @@ class TurnCost:
     # A model call this turn ended with the provider's content filter. The
     # turn books ended_by="content_filter" unless it was cancelled or failed.
     content_filtered: bool = False
-    # One-time grace(s) granted this turn: "", "round", "ceiling", or
-    # "ceiling,round" — alphabetical, not firing order (see `_record_grace`).
-    # Without this a turn that used a grace and finished is
+    # The one-time spend-ceiling grace, if granted this turn: "" or "ceiling".
+    # Without this a turn that used the grace and finished is
     # byte-identical in `turn_completed` to one that never neared a limit —
     # `ended_by=round_cap`/`spend_ceiling` counts drop while actual spend
     # rises, unmeasurably.
