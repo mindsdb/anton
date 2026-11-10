@@ -792,9 +792,9 @@ def parse_reset_at(value: object) -> str | None:
 
 
 class MindsHubBillingStop(TokenLimitExceeded):
-    """The MindsHub authorization gate refused a request the org cannot pay for.
+    """The MindsHub authorization gate refused a request on billing grounds.
 
-    Base of the three denials the gate names; only the subclasses are raised,
+    Base of the four billing denials the gate names; only the subclasses are raised,
     by :func:`mindshub_billing_stop`. Subclassing ``TokenLimitExceeded`` keeps
     every existing catch working: the no-retry re-raise in
     ``ChatSession.turn_stream``, the verifier's ``_DENIED_VERDICT_ERRORS`` latch
