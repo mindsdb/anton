@@ -4,9 +4,11 @@ A cloud turn may build the template for an API connector the user has no
 connector for: its id, label, the credential fields the member will fill in,
 usage notes, and a check: one GET whose path and headers say how to test the
 credentials. Never a value, and never the API's address: the member types
-that when they connect, so a template cannot choose where a key is sent. The pod emits the drafts at end of turn, the
-host shows each as a card, and the member saves it explicitly. The member then
-enters credentials outside the conversation.
+that when they connect, so the check cannot send a key anywhere else. Usage
+notes are prose and may name any host; nothing fetches or follows them. The
+pod emits the drafts at end of turn, the host shows each as a card, and the
+member saves it explicitly. The member then enters credentials outside the
+conversation.
 
 `parse_connector_draft` is the allowlist for that shape. The host imports it to
 check a draft again before showing or storing it, so both sides agree on what
@@ -30,8 +32,8 @@ from anton.utils.datasources import scrub_output
 MAX_DRAFTS_PER_TURN = 3
 #: One below the store's limit, which also keeps the address the member types.
 MAX_FIELDS = 11
-#: Field names the host stores beside the member's values.
-RESERVED_FIELD_NAMES = frozenset({"base_url"})
+#: Field names the host stores beside the member's values or reads as display names.
+RESERVED_FIELD_NAMES = frozenset({"base_url", "label", "user_label"})
 MAX_CHECK_HEADERS = 5
 
 _CONNECTOR_ID = re.compile(r"[a-z][a-z0-9_]{1,40}")
@@ -39,6 +41,8 @@ _FIELD_NAME = re.compile(r"[a-z][a-z0-9_]{0,39}")
 #: An unbroken run this long of the characters keys are made of, holding both
 #: letters and digits, reads as a key or token. Words and digitless ids pass.
 _TOKEN_RUN = re.compile(r"[A-Za-z0-9_-]{20,}")
+#: The same rule for an id or field name, where ``_`` separates words.
+_ID_RUN = re.compile(r"[a-z0-9]{20,}")
 
 _HIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
@@ -123,11 +127,16 @@ class ConnectorDraft:
         return out
 
 
-def _looks_like_token(text: str) -> bool:
-    """Whether ``text`` holds a long letters-and-digits run with both kinds."""
-    for match in _TOKEN_RUN.finditer(text):
-        run = match.group()
-        if any(c.isdigit() for c in run) and any(c.isalpha() for c in run):
+def _looks_like_token(text: str, run: re.Pattern[str] = _TOKEN_RUN) -> bool:
+    """Whether ``text`` holds a long letters-and-digits run with both kinds.
+
+    Args:
+        text: The text to check.
+        run: What counts as one unbroken run.
+    """
+    for match in run.finditer(text):
+        found = match.group()
+        if any(c.isdigit() for c in found) and any(c.isalpha() for c in found):
             return True
     return False
 
@@ -152,13 +161,37 @@ def _check_text(value: Any, where: str, cap: int, *, long_text: bool) -> str | N
     if any(unicodedata.category(c) in _HIDDEN_CATEGORIES and c not in allowed for c in text):
         raise ConnectorDraftError(f"{where} must not contain control or invisible characters.")
     # The scrubber misses common key shapes in prose (GitHub, AWS), so the run
-    # rule applies to every text, the notes included.
-    if scrub_output(text) != text or _looks_like_token(text):
-        raise ConnectorDraftError(
-            f"{where} looks like it holds a credential value. Describe the "
-            "credential (its name, where to find it) without the value."
-        )
+    # rule applies to every text, the notes included. NFKC folds fullwidth
+    # forms, which would otherwise pass both.
+    folded = unicodedata.normalize("NFKC", text)
+    for form in (text,) if folded == text else (text, folded):
+        if scrub_output(form) != form:
+            raise ConnectorDraftError(
+                f"{where} looks like it holds a credential value: it matches a known "
+                "key shape. Describe the credential (its name, where to find it) without the value."
+            )
+        if _looks_like_token(form):
+            raise ConnectorDraftError(
+                f"{where} looks like it holds a credential value: it has a run of 20 or "
+                "more letters, digits, _ or - that mixes letters and digits. Describe the "
+                "credential without the value, or shorten or split that run."
+            )
     return text or None
+
+
+def _check_identifier(name: str, where: str) -> None:
+    """Refuse an id or field name that reads as a key, without quoting it.
+
+    Raises:
+        ConnectorDraftError: when ``name`` matches a key shape the scrubber
+            knows, or one of its ``_``-separated parts is a run of 20 or more
+            letters and digits with both kinds.
+    """
+    if scrub_output(name) != name or _looks_like_token(name, _ID_RUN):
+        raise ConnectorDraftError(
+            f"{where} looks like a credential value: it has a part of 20 or more letters "
+            "and digits, or a known key shape. Use short words joined by underscores."
+        )
 
 
 def check_draft_text(key: str, value: Any) -> str | None:
@@ -307,8 +340,9 @@ def _parse_field(data: Any, index: int) -> ConnectorDraftField:
             f"{where}.name must be lowercase letters, digits and underscores, "
             "starting with a letter, at most 40 characters."
         )
+    _check_identifier(name, f"{where}.name")
     if name in RESERVED_FIELD_NAMES:
-        raise ConnectorDraftError(f"{where}.name is reserved; the member types the API address when connecting.")
+        raise ConnectorDraftError(f"{where}.name is reserved; the host stores a value under that name.")
     texts = {
         key: _check_text(data.get(key), f"{where}.{key}", cap, long_text=key in _LONG_TEXTS)
         for key, cap in _FIELD_TEXT_CAPS.items()
@@ -347,6 +381,7 @@ def parse_connector_draft(data: Any) -> ConnectorDraft:
             "connector_id must be lowercase letters, digits and underscores, "
             "starting with a letter, 2 to 41 characters."
         )
+    _check_identifier(connector_id, "connector_id")
     texts = {key: check_draft_text(key, data.get(key)) for key in _TOP_TEXT_CAPS}
     if texts["label"] is None:
         raise ConnectorDraftError("label is required.")

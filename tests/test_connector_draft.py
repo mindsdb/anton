@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
+import sys
 
 import pytest
 
@@ -21,7 +24,11 @@ from anton.core.tools.connector_draft import (
     connector_draft_tool,
     parse_connector_draft,
 )
-from anton.utils.datasources import scrub_output
+from anton.utils.datasources import (
+    _reset_registered_ds_vars,
+    scrub_output,
+    set_ds_env_values,
+)
 
 #: Credential shapes assembled at runtime so no literal key sits in the source.
 _TOKEN_SHAPES = {
@@ -33,6 +40,21 @@ _TOKEN_SHAPES = {
 }
 _SHORT_TEXTS = ("label", "description", "category")
 _SHORT_FIELD_TEXTS = ("label", "placeholder")
+#: A lowercase key shape both identifier patterns accept.
+_ID_SHAPED_KEY = "ka3f9c8b" + "7e6d5f4a" + "3b2c1d0e" + "9f8a7b6c5"
+#: Letters only, so the run rule passes it and only the held-value scrub can refuse it.
+_HELD_VALUE = "heldvalue" + "qwertyzx"
+#: Parses a draft whose usage_notes is argv[1] and prints the refusal.
+_PARSE_NOTES = (
+    "import sys\n"
+    "from anton.core.tools.connector_draft import ConnectorDraftError, parse_connector_draft\n"
+    "draft = {'connector_id': 'acme', 'label': 'Acme', 'usage_notes': sys.argv[1],\n"
+    "         'fields': [{'name': 'api_key', 'label': 'Key'}]}\n"
+    "try:\n"
+    "    parse_connector_draft(draft)\n"
+    "except ConnectorDraftError as e:\n"
+    "    print(e)\n"
+)
 
 
 def _draft(**overrides):
@@ -235,6 +257,79 @@ def test_long_snake_case_and_plain_words_are_not_tokens():
     ))
 
 
+def _as_connector_id(value):
+    return _draft(connector_id=value)
+
+
+def _as_field_name(value):
+    return _draft(fields=[{"name": value, "label": "Key"}])
+
+
+@pytest.mark.parametrize("build,where", [
+    (_as_connector_id, r"^connector_id looks like"),
+    (_as_field_name, r"^fields\[0\]\.name looks like"),
+])
+def test_a_key_shaped_identifier_is_refused_without_the_value(build, where):
+    with pytest.raises(ConnectorDraftError, match=where) as exc:
+        parse_connector_draft(build(_ID_SHAPED_KEY))
+    assert _ID_SHAPED_KEY not in str(exc.value)
+
+
+@pytest.fixture
+def held_value():
+    set_ds_env_values({"DS_CUSTOM__TOKEN": _HELD_VALUE})
+    yield _HELD_VALUE
+    _reset_registered_ds_vars()
+
+
+@pytest.mark.parametrize("build,where", [
+    (_as_connector_id, r"^connector_id looks like"),
+    (_as_field_name, r"^fields\[0\]\.name looks like"),
+])
+def test_a_held_value_as_an_identifier_is_refused_without_the_value(held_value, build, where):
+    with pytest.raises(ConnectorDraftError, match=where) as exc:
+        parse_connector_draft(build(f"acme_{held_value}"))
+    assert held_value not in str(exc.value)
+
+
+def test_long_snake_case_field_names_are_not_tokens():
+    parse_connector_draft(_draft(fields=[
+        {"name": "salesforce_marketing_cloud_api_key_v2", "label": "Key"},
+    ]))
+
+
+@pytest.mark.parametrize("notes", [
+    "Use model gpt4turbopreview20240125 for it.",
+    "Fill in salesforce_marketing_cloud_api_key_v2 first.",
+    "Workspace ids look like 123e4567-e89b-12d3-a456-426614174000.",
+])
+def test_a_run_refusal_names_the_rule_so_the_model_can_reword(notes):
+    with pytest.raises(ConnectorDraftError, match="run of 20 or more letters, digits, _ or -"):
+        parse_connector_draft(_draft(usage_notes=notes))
+
+
+def test_a_mixed_refusal_is_the_same_in_every_process():
+    """The as-typed form fails the run rule, the folded form only the scrubber;
+    the as-typed form is checked first whatever the hash seed."""
+    fullwidth = "".join(chr(ord(c) + 0xFEE0) for c in "ya29." + "abcdefghijklmnopqrstuvwx")
+    notes = f"Use run abcdefghij1234567890xyz and {fullwidth}."
+    for seed in ("1", "2", "3", "4", "5", "6", "7"):
+        out = subprocess.run(
+            [sys.executable, "-c", _PARSE_NOTES, notes],
+            capture_output=True, text=True, env={**os.environ, "PYTHONHASHSEED": seed}, check=True,
+        )
+        assert "run of 20 or more" in out.stdout, seed
+
+
+def test_a_fullwidth_key_is_refused_without_the_value():
+    value = "".join(chr(ord(c) + 0xFEE0) if "!" <= c <= "~" else c for c in _TOKEN_SHAPES["github"])
+    assert scrub_output(value) == value
+    with pytest.raises(ConnectorDraftError, match="usage_notes looks like") as exc:
+        parse_connector_draft(_draft(usage_notes=f"Send {value} as the key."))
+    assert value not in str(exc.value)
+    assert _TOKEN_SHAPES["github"] not in str(exc.value)
+
+
 def test_a_token_run_is_caught_where_the_scrubber_is_not():
     """The bare hex shape passes `scrub_output`; only the run rule refuses it."""
     value = _TOKEN_SHAPES["bare"]
@@ -379,9 +474,10 @@ def test_a_token_shaped_header_name_is_refused_without_echoing_it():
     assert _TOKEN_SHAPES["bare"] not in str(exc.value)
 
 
-def test_base_url_is_reserved_for_the_address_the_member_types():
+@pytest.mark.parametrize("name", ["base_url", "label", "user_label"])
+def test_names_the_host_stores_or_shows_are_reserved(name):
     with pytest.raises(ConnectorDraftError, match="reserved"):
-        parse_connector_draft(_draft(fields=[{"name": "base_url", "label": "Base URL"}]))
+        parse_connector_draft(_draft(fields=[{"name": name, "label": "Taken"}]))
 
 
 def test_a_template_holds_at_most_eleven_fields():
