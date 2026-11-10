@@ -306,7 +306,7 @@ def test_a_draft_without_a_check_has_none():
     7,
 ])
 def test_a_check_path_that_could_name_a_host_or_carry_a_value_is_refused(path):
-    with pytest.raises(ConnectorDraftError, match=r"^check\b"):
+    with pytest.raises(ConnectorDraftError, match=r"^check\.path\b"):
         parse_connector_draft(_draft(check={**_CHECK, "path": path}))
 
 
@@ -331,7 +331,7 @@ def test_a_check_path_that_could_name_a_host_or_carry_a_value_is_refused(path):
     {"X-Region": "{region}"},
 ])
 def test_a_check_header_that_could_steer_or_inject_is_refused(headers):
-    with pytest.raises(ConnectorDraftError, match=r"^check\b"):
+    with pytest.raises(ConnectorDraftError, match=r"^check\.headers\b"):
         parse_connector_draft(_draft(check={**_CHECK, "headers": headers}))
 
 
@@ -344,11 +344,11 @@ def test_a_check_of_the_wrong_shape_is_refused(check):
 @pytest.mark.parametrize("name", _TOKEN_SHAPES)
 def test_a_value_in_a_check_is_refused_without_echoing_it(name):
     value = _TOKEN_SHAPES[name]
-    for check in (
-        {**_CHECK, "headers": {"Authorization": f"Bearer {value}"}},
-        {**_CHECK, "path": f"/v2/me?key={value}"},
+    for check, rule in (
+        ({**_CHECK, "headers": {"Authorization": f"Bearer {value}"}}, r"^check\.headers\b"),
+        ({**_CHECK, "path": f"/v2/me?key={value}"}, r"^check\.path\b"),
     ):
-        with pytest.raises(ConnectorDraftError, match=r"^check\b") as exc:
+        with pytest.raises(ConnectorDraftError, match=rule) as exc:
             parse_connector_draft(_draft(check=check))
         assert value not in str(exc.value)
 
@@ -356,7 +356,7 @@ def test_a_value_in_a_check_is_refused_without_echoing_it(name):
 def test_a_token_shaped_header_name_is_refused_without_echoing_it():
     name = "X-" + _TOKEN_SHAPES["bare"]
 
-    with pytest.raises(ConnectorDraftError, match=r"^check\b") as exc:
+    with pytest.raises(ConnectorDraftError, match=r"^check\.headers\b") as exc:
         parse_connector_draft(_draft(check={**_CHECK, "headers": {name: "Bearer {api_key}"}}))
 
     assert _TOKEN_SHAPES["bare"] not in str(exc.value)
