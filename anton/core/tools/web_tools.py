@@ -9,7 +9,8 @@ this module is dormant.
 For generic OpenAI-compatible third-party endpoints (Case 3 in the design):
 
 - ``web_search`` is dispatched to Exa.ai or Brave Search using a key the user
-  configured via ``anton setup search``. Without a configured key the handler
+  configured via ``anton setup search``, or to Keenable, which works without
+  a key (an optional key uses the keyed endpoint). Without a configured key the handler
   returns a clear error message pointing at that command.
 - ``web_fetch`` always works — it is a stdlib-style HTTP GET (via httpx, which
   Anton already depends on transitively through the LLM SDKs) plus a
@@ -55,6 +56,8 @@ logger = logging.getLogger(__name__)
 
 EXA_SEARCH_ENDPOINT = "https://api.exa.ai/search"
 BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
+KEENABLE_PUBLIC_SEARCH_ENDPOINT = "https://api.keenable.ai/v1/search/public"
+KEENABLE_SEARCH_ENDPOINT = "https://api.keenable.ai/v1/search"
 
 _HTTP_TIMEOUT = 30.0
 
@@ -255,6 +258,48 @@ async def _search_brave(query: str, api_key: str, max_results: int) -> _SearchRe
         url = r.get("url") or ""
         snippet = (r.get("description") or "").strip()
         lines.append(f"{i}. **{title}**\n   {url}")
+        if snippet:
+            lines.append(f"   {snippet}")
+    return _SearchResult("\n".join(lines), served=True)
+
+
+async def _search_keenable(
+    query: str, api_key: str | None, max_results: int
+) -> _SearchResult:
+    """Hit Keenable's search endpoint and format hits as markdown.
+
+    Without a key this uses the keyless public endpoint; with a key it uses
+    the keyed endpoint for higher rate limits.
+    """
+    headers = {"Content-Type": "application/json", "X-Keenable-Title": "Anton"}
+    if api_key:
+        headers["X-API-Key"] = api_key
+        endpoint = KEENABLE_SEARCH_ENDPOINT
+    else:
+        endpoint = KEENABLE_PUBLIC_SEARCH_ENDPOINT
+    payload = {"query": query, "max_results": max_results}
+    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+        resp = await client.post(endpoint, json=payload, headers=headers)
+        if resp.status_code != 200:
+            return _SearchResult(
+                f"Keenable search failed ({resp.status_code}): {resp.text[:500]}",
+                served=False,
+            )
+        data = resp.json()
+
+    results = [r for r in (data.get("results") or []) if r.get("url")]
+    if not results:
+        # Tier 3: the search ran and found nothing. Not a tool failure.
+        return _SearchResult(f"No results for query: {query!r}", served=False)
+    lines = [f"Web search results for: {query!r} (Keenable, {len(results)} hits)\n"]
+    for i, r in enumerate(results, 1):
+        title = r.get("title") or r["url"]
+        snippet = (r.get("description") or "").strip()
+        if not snippet:
+            snippet = (r.get("snippet") or "").strip()
+            if len(snippet) > 600:
+                snippet = snippet[:600] + "…"
+        lines.append(f"{i}. **{title}**\n   {r['url']}")
         if snippet:
             lines.append(f"   {snippet}")
     return _SearchResult("\n".join(lines), served=True)
@@ -492,6 +537,9 @@ def has_search_credential(settings: object) -> bool:
         return bool(getattr(settings, "exa_api_key", None))
     if provider == "brave":
         return bool(getattr(settings, "brave_api_key", None))
+    if provider == "keenable":
+        # Keenable's public endpoint is keyless; the key is optional.
+        return True
     return False
 
 
@@ -531,6 +579,10 @@ async def handle_web_search_fallback(
         found = await _search_exa(query, settings.exa_api_key, max_results)
     elif provider == "brave":
         found = await _search_brave(query, settings.brave_api_key, max_results)
+    elif provider == "keenable":
+        found = await _search_keenable(
+            query, getattr(settings, "keenable_api_key", None), max_results
+        )
     else:
         return _NO_PROVIDER_MSG
     return ToolOutcome(content=found.text, ok=True if found.served else None)
