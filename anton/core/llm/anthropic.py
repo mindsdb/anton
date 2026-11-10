@@ -85,8 +85,8 @@ def _raise_for_status_error(
 
     - 401 → ProviderAuthError (canonical provider-credential refusal).
     - 402/429 with an M3 gate billing code (``wallet_empty`` /
-      ``included_allowance_exhausted`` / ``free_air_daily_spend_fuse_exceeded``,
-      body or X-MindsHub-Reason header) → the matching TokenLimitExceeded
+      ``included_allowance_exhausted`` / ``free_air_daily_spend_fuse_exceeded`` /
+      ``budget_exceeded``, body or X-MindsHub-Reason header) → the matching TokenLimitExceeded
       subclass from ``mindshub_billing_stop`` (ENG-1169). Code-exact: BYOK
       402s stay generic.
     - 403 with the gateway's ``model_restricted`` deny detail
