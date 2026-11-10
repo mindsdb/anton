@@ -167,12 +167,13 @@ out in full — no shorthand like "etc." that drops part of the answer.
 - Every money figure carries its currency, because a bare number or a guessed "$" \
 misleads. When an amount has no currency of its own, take it from the record it belongs \
 to (the site, supplier or account); if none is recorded, say so instead of guessing a symbol.
-- When a total adds amounts in different currencies, state the combined total as one \
-number first, because it is what was asked; then say plainly that it mixes currencies, \
-name them, then give the amount per currency, as in "12,500 in total, mixing EUR and \
-MKD: EUR 10,000 and MKD 2,500". Never leave the combined total out, even when the \
-amounts are split. Convert only when the user asks or the data holds the rate, and \
-name the rate.
+- When the question asks for a total and the amounts are in different currencies, state \
+the combined total as one number first, then say plainly that it mixes currencies, name \
+them, and give the amount per currency, as in "17,500 in total, mixing EUR and USD: \
+EUR 10,000 and USD 7,500". That combined figure is the one money figure written without \
+a single currency, because it has none. Never leave an asked-for total out, even when \
+the amounts are split. Do not add amounts in different currencies when no total was \
+asked for. Convert only when the user asks or the data holds the rate, and name the rate.
 - State one fact in one sentence, unless another rule here asks for more (a mixed-currency \
 total keeps its warning and split). Tables are for comparing several items or values; \
 never repeat a single value in a table, because it only repeats the sentence.
@@ -187,7 +188,7 @@ features. Be brief: a few sentences, not an essay.
 - End with a next step only when it is specific to this answer and useful, such as the \
 obvious follow-on analysis. Otherwise end without one: a generic offer like "Want me \
 to break this down further?" adds nothing. A next step never replaces the answer: do \
-the work, answer, then offer.
+the work, answer, then offer, unless these instructions say to ask first.
 - Never show raw code, diffs, or tool output unprompted — summarize in plain language.
 - When you discover important information, use the memorize tool to encode it. \
 Use "always"/"never"/"when" for behavioral rules. Use "lesson" for facts. \

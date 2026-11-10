@@ -20,10 +20,12 @@ _RULES = (
     "Every money figure carries its currency",
     "take it from the record it belongs to",
     "say so instead of guessing",
-    "state the combined total as one number first",
-    "Never leave the combined total out, even when the amounts are split.",
-    "say plainly that it mixes currencies, name them, then give the amount per currency",
-    '"12,500 in total, mixing EUR and MKD: EUR 10,000 and MKD 2,500"',
+    "When the question asks for a total and the amounts are in different currencies, state the combined total",
+    "say plainly that it mixes currencies, name them, and give the amount per currency",
+    '"17,500 in total, mixing EUR and USD: EUR 10,000 and USD 7,500"',
+    "That combined figure is the one money figure written without a single currency",
+    "Never leave an asked-for total out, even when the amounts are split.",
+    "Do not add amounts in different currencies when no total was asked for.",
     "Convert only when the user asks or the data holds the rate, and name the rate.",
     "State one fact in one sentence, unless another rule here asks for more",
     "Tables are for comparing several items or values;",
@@ -34,13 +36,14 @@ _RULES = (
 )
 
 _BRANCHES = [
-    pytest.param(tools, internet, id=f"{name}-internet_{internet}")
+    pytest.param(tools, internet, act_first, id=f"{name}-internet_{internet}-act_first_{act_first}")
     for name, tools in _TOOL_SETS.items()
     for internet in (True, False)
+    for act_first in (True, False)
 ]
 
 
-def _shared_prompt(tools: list, internet: bool) -> str:
+def _shared_prompt(tools: list, internet: bool, act_first: bool = True) -> str:
     """The part of the built system prompt every session shares, before the session context."""
     prompt = ChatSystemPromptBuilder().build(
         conversation_started="2026-11-10",
@@ -50,14 +53,15 @@ def _shared_prompt(tools: list, internet: bool) -> str:
         tool_defs=tools,
         internet_research=internet,
         project_context="\n\nproject notes",
+        act_first=act_first,
     )
     assert SESSION_CONTEXT_MARKER in prompt
     return prompt.split(SESSION_CONTEXT_MARKER, 1)[0]
 
 
-@pytest.mark.parametrize(("tools", "internet"), _BRANCHES)
-def test_the_rule_is_in_the_shared_prompt_once(tools, internet):
-    shared = _shared_prompt(tools, internet)
+@pytest.mark.parametrize(("tools", "internet", "act_first"), _BRANCHES)
+def test_the_rule_is_in_the_shared_prompt_once(tools, internet, act_first):
+    shared = _shared_prompt(tools, internet, act_first)
     for rule in _RULES:
         assert shared.count(rule) == 1, rule
 
@@ -69,15 +73,18 @@ _GENERIC_CLOSERS = (
 )
 
 
-@pytest.mark.parametrize(("tools", "internet"), _BRANCHES)
-def test_closing_offers_are_asked_for_only_when_specific(tools, internet):
-    shared = _shared_prompt(tools, internet)
+@pytest.mark.parametrize(("tools", "internet", "act_first"), _BRANCHES)
+def test_closing_offers_are_asked_for_only_when_specific(tools, internet, act_first):
+    shared = _shared_prompt(tools, internet, act_first)
     for closer in _GENERIC_CLOSERS:
         assert closer not in shared, closer
     assert shared.count("End with a next step only when it is specific to this answer") == 1
     assert "Otherwise end without one: a generic offer" in shared
     assert "a check the result depends on" not in shared
-    assert shared.count("A next step never replaces the answer: do the work, answer, then offer.") == 1
+    assert shared.count(
+        "A next step never replaces the answer: do the work, answer, then offer, "
+        "unless these instructions say to ask first."
+    ) == 1
 
 
 @pytest.mark.parametrize("internet", (True, False))
