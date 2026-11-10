@@ -669,8 +669,8 @@ def _fetch_custom_connection(ref: CustomApiConnectionRefV1, turn_key: str, base_
         return None
     return {
         "fields": {**fields, "_user_label": _custom_label(ref.name, ref.connector_id)},
-        # Wider than auth's secure_keys, which follow the template's model-written flags.
-        "secure_keys": sorted(key for key in fields if key not in _CUSTOM_PUBLIC_FIELDS),
+        # Never narrower than auth's secure_keys, which follow the template's model-written flags.
+        "secure_keys": sorted(set(secure_keys) | {key for key in fields if key not in _CUSTOM_PUBLIC_FIELDS}),
     }
 
 

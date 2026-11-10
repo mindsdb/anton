@@ -83,6 +83,15 @@ def test_every_field_but_the_address_is_secure_whatever_the_template_said(auth):
     assert record["secure_keys"] == ["api_key", "api_secret", "email"]
 
 
+def test_the_address_stays_hidden_when_auth_marks_it_secure(auth):
+    answers, _ = auth
+    answers[7] = _answer(_ref(), fields={"api_key": SECRET, "base_url": BASE}, secure_keys=["api_key", "base_url"])
+
+    record = TurnKeyDataVault(None, _block(_ref())).read_record("c7", "acme_crm")
+
+    assert record["secure_keys"] == ["api_key", "base_url"]
+
+
 def test_the_label_is_the_members_name_on_one_line_without_control_characters(auth):
     answers, _ = auth
     name = "Prod\nline\u202etwo\x07"
