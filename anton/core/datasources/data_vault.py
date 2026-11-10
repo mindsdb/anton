@@ -679,8 +679,9 @@ def _fetch_custom_connections(custom_api: CustomApiBlockV1, base_url: str) -> di
 
     At most _CUSTOM_FETCH_WORKERS at a time, all within
     _CUSTOM_FETCH_DEADLINE_SECONDS. An answer that arrives after the deadline
-    is discarded and never kept. The fetch threads are daemons, so one still
-    waiting on auth never holds the pod's exit.
+    is discarded and never kept, and a fetch still queued for a slot at the
+    deadline never starts, so it spends none of the grant's fetches. The fetch
+    threads are daemons, so one still waiting on auth never holds the pod's exit.
     """
     refs = list(custom_api.connections)
     if not refs:
@@ -688,9 +689,12 @@ def _fetch_custom_connections(custom_api: CustomApiBlockV1, base_url: str) -> di
     answered: dict[int, dict[str, Any] | None] = {}
     lock = threading.Lock()
     slots = threading.BoundedSemaphore(_CUSTOM_FETCH_WORKERS)
+    closed = threading.Event()
 
     def fetch(ref: CustomApiConnectionRefV1) -> None:
         with slots:
+            if closed.is_set():
+                return
             record = _fetch_custom_connection(ref, custom_api.turn_key, base_url)
         with lock:
             answered[ref.connection_id] = record
@@ -701,6 +705,7 @@ def _fetch_custom_connections(custom_api: CustomApiBlockV1, base_url: str) -> di
     deadline = time.monotonic() + _CUSTOM_FETCH_DEADLINE_SECONDS
     for thread in threads:
         thread.join(max(0.0, deadline - time.monotonic()))
+    closed.set()
     with lock:
         in_time = dict(answered)
     fetched: dict[tuple[str, str], dict[str, Any]] = {}

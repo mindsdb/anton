@@ -163,6 +163,22 @@ def test_a_fetch_still_waiting_at_the_deadline_never_holds_the_pods_exit(auth, m
     assert waiting and all(thread.daemon for thread in waiting)
 
 
+def test_a_fetch_still_queued_at_the_deadline_never_starts(auth, monkeypatch):
+    """Each fetch spends one of the grant's fetches and writes an audit row; a queued one is not worth it."""
+    answers, calls = auth
+    refs = [_ref(i, f"api_{i}", f"n{i}") for i in range(1, 11)]
+    for ref in refs:
+        answers[ref.connection_id] = (lambda r: lambda: time.sleep(0.3) or json.dumps(_answer(r)).encode())(ref)
+    monkeypatch.setattr(dv, "_CUSTOM_FETCH_DEADLINE_SECONDS", 0.1)
+
+    TurnKeyDataVault(None, _block(*refs))
+    started_by_deadline = len(calls)
+    time.sleep(1.0)
+
+    assert started_by_deadline == 4
+    assert len(calls) == 4
+
+
 def test_at_most_four_fetches_run_at_once(auth):
     answers, _ = auth
     lock = threading.Lock()
