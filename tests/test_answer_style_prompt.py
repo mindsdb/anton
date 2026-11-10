@@ -22,10 +22,10 @@ _RULES = (
     "say so instead of guessing",
     "still give the total, but say plainly that it mixes currencies, name them, and give the amount per currency",
     "Convert only when the user asks or the data holds the rate, and name the rate.",
-    "State one fact in one sentence, unless a rule above asks for more",
+    "State one fact in one sentence, unless another rule here asks for more",
     "Tables are for comparing several items or values;",
     "never repeat a single value in a table",
-    "not table or field names from a query",
+    "Use plain words (the user's own where they gave them), not table or field names from a query",
     "Use schema names when the user asks about the schema or data model.",
     "Record ids and codes (order numbers, part and supplier codes) stay exactly as written.",
 )
@@ -83,16 +83,23 @@ def test_a_single_number_is_not_put_in_a_summary_table(name, internet):
     assert "A single number goes in the headline sentence, not a table." in shared
 
 
+_INLINE_ANALYSIS = (
+    "For inline analysis without an artifact, fetch current data and calculate metrics "
+    "with code. When the answer has several figures, present the main finding, exact "
+    "figures, comparisons, assumptions and useful implications, and keep units, time "
+    "scope and where the data came from clear, in plain words. A single fact is still "
+    "computed from the data, then given in one sentence with its unit or currency.\n"
+)
+
+
 @pytest.mark.parametrize("internet", (True, False))
 @pytest.mark.parametrize("name", ("server", "self_hosted_static"))
 def test_inline_analysis_sections_are_for_several_figures(name, internet):
+    """The server paragraph is pinned whole: no snapshot digest covers this branch."""
     shared = _shared_prompt(_TOOL_SETS[name], internet)
-    assert "When the answer has several figures, present the main finding" in shared
-    assert "fetch current data and calculate metrics with code." in shared
-    assert "keep units, time scope and where the data came from clear, in plain words." in shared
-    assert "A single fact is still computed from the data, then given in one sentence with its unit or currency." in shared
-    assert "Keep units, source and time scope clear." not in shared
-    assert "with code, then present the main finding" not in shared
+    start = shared.index("For inline analysis without an artifact")
+    assert shared[start:start + len(_INLINE_ANALYSIS)] == _INLINE_ANALYSIS
+    assert shared.count("For inline analysis without an artifact") == 1
 
 
 @pytest.mark.parametrize("internet", (True, False))
