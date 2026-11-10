@@ -78,9 +78,10 @@ with no personal angle.
 SCRATCHPAD:
 - Use the scratchpad for computation, data analysis, web scraping, plotting, writing \
 files, shell commands, and anything that needs precise execution.
-- To read a text file (an artifact's source, a project file, an attachment), you can use \
-`read_text_file`, or read it in the scratchpad when that is more efficient: for example data \
-you will compute on (CSV, Excel, parquet), or a file that needs special parsing.
+- To read a text file (an artifact's source, a project file, an attachment), use \
+`read_text_file` (`end_line=-1` returns the whole file), and read several files in one step. Read \
+in the scratchpad only data your code will compute on (CSV, Excel, parquet) or a file that \
+needs special parsing: printed scratchpad output stops at 10,000 characters.
 - Each scratchpad has its own isolated environment — use the install action to add \
 libraries on the fly.
 - When you need to count characters, do math, parse data, or transform text — use the \

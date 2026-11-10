@@ -220,3 +220,90 @@ def test_jev_decisions_stay_on_when_missing_or_true(value):
 def test_jev_decisions_turn_off_on_anything_else(value):
     """A malformed opt-out must not read as consent."""
     assert _jev_request(value).jev_decisions is False
+
+
+def _limits_request(value):
+    body = {"protocol_version": 1, "conversation_id": "conv-7", "input": "q"}
+    if value is not ...:
+        body["limits"] = value
+    return TurnRequestV1.from_json(json.dumps(body))
+
+
+def test_the_limits_block_is_read():
+    limits = {"max_tool_rounds": 250, "max_continuations": 10, "max_turn_tokens": 25_000_000}
+    assert _limits_request(limits).limits == limits
+
+
+@pytest.mark.parametrize("value", [..., None, "x", [250], 25_000_000])
+def test_a_missing_or_non_object_limits_block_reads_as_no_limits(value):
+    assert _limits_request(value).limits == {}
+
+
+def test_a_bad_limit_is_dropped_and_the_rest_are_kept():
+    request = _limits_request({
+        "max_tool_rounds": 250,
+        # 0 means no ceiling to anton; a producer bug must not turn it off.
+        "max_turn_tokens": 0,
+        "max_continuations": True,
+        "later_limit": 5,
+    })
+    assert request.limits == {"max_tool_rounds": 250}
+
+
+@pytest.mark.parametrize("value", ["250", 2.5, -1, None])
+def test_a_limit_that_is_not_a_usable_integer_is_dropped(value):
+    assert _limits_request({"max_tool_rounds": value}).limits == {}
+
+
+def test_zero_auto_continues_is_a_real_limit():
+    assert _limits_request({"max_continuations": 0}).limits == {"max_continuations": 0}
+
+
+def _pod_log_lines(caplog):
+    """Each captured record as the pod's formatter writes it, which is what
+    reaches the logs: caplog's own formatting keeps args the pod drops."""
+    from anton.diagnostics import make_formatter
+
+    formatter = make_formatter()
+    return [json.loads(formatter.format(r)) for r in caplog.records]
+
+
+def test_each_dropped_limit_is_logged_by_name_and_reason_never_its_value(caplog, monkeypatch):
+    """Dropping in silence would look exactly like a controller that sent no
+    block, and the only symptom would be a web turn stopping at the default."""
+    monkeypatch.setenv("LOG_FORMAT", "json")
+    with caplog.at_level("WARNING", logger="anton.cloud_turn.contract"):
+        request = _limits_request({
+            "max_tool_rounds": 250,
+            "max_turn_tokens": 0,
+            "max_continuations": "7777",
+            "later_limit": 31337,
+        })
+
+    assert request.limits == {"max_tool_rounds": 250}
+    lines = _pod_log_lines(caplog)
+    assert {line["reason"] for line in lines} == {
+        "max_turn_tokens_below_minimum",
+        "max_continuations_not_an_integer",
+        "unknown_limit",
+    }
+    assert all(line["event"] == "turn_limit_ignored" for line in lines)
+    assert all(line["conversation_id"] == "conv-7" for line in lines)
+    written = json.dumps(lines)
+    assert "7777" not in written and "31337" not in written and "later_limit" not in written
+
+
+def test_a_limits_block_that_is_not_an_object_is_logged(caplog, monkeypatch):
+    monkeypatch.setenv("LOG_FORMAT", "json")
+    with caplog.at_level("WARNING", logger="anton.cloud_turn.contract"):
+        assert _limits_request([250]).limits == {}
+    [line] = _pod_log_lines(caplog)
+    assert line["reason"] == "limits_block_not_an_object"
+    assert line["conversation_id"] == "conv-7"
+
+
+def test_no_limits_block_logs_nothing(caplog):
+    with caplog.at_level("WARNING", logger="anton.cloud_turn.contract"):
+        assert _limits_request(...).limits == {}
+        assert _limits_request(None).limits == {}
+    assert caplog.records == []

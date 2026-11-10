@@ -64,7 +64,14 @@ def build_pipeline_system_prompt(state: PrdState) -> str:
         "standing orders. The tool list stays the same for the whole "
         "pipeline; a tool being listed does NOT mean it is available on the "
         "current step. Calling one that is not available wastes a round and "
-        "is answered with a refusal naming the step."
+        "is answered with a refusal naming the step.\n\n"
+        # Generated pages cut day-dated rows at the last week's start and lost that week.
+        "DATE WINDOWS. For a period counted in weeks or months, set the window "
+        "end to the start of the period after the last one and filter with a "
+        "strict `<`. Example: weeks starting 2026-10-05 ... 2026-10-26 -> "
+        "end = 2026-11-02, filter `col < '2026-11-02'`. This works the same "
+        "for weekly, daily and timestamp columns. Never use the last period's "
+        "start as an inclusive end."
         + fullstack_choice
         + "\n\n" + GEOGRAPHY_GUIDANCE,
         state.project_rules,
