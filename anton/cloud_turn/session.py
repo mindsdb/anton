@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from anton.cloud_turn.contract import TurnRequestV1, TurnSkillEntry, parse_turn_skills
+from anton.core.datasources.data_vault import custom_connection_key
 from anton.core.llm.tracing import HARNESS_ANTON
 from anton.core.memory.always_on_skills import AlwaysOnSkill, render_always_on_skills
 from anton.core.tools.connector_draft import ConnectorDraftBox, connector_draft_tool
@@ -856,18 +857,24 @@ _POD_PROMPT_SUFFIX_WITH_TEMPLATES = "\n\n".join(
 )
 
 
-def _connector_usage_notes(connectors: dict | None) -> dict[str, str]:
+def _connector_usage_notes(connectors: dict | None, custom_api=None) -> dict[str, str]:
     """engine -> usage notes from the turn's `connectors` block.
 
     Always a dict, never None: None would make build_datasource_context fall
     back to anton's datasources.md registry, whose engine ids collide with
     cowork-server's connectors (see ChatSessionConfig.connector_usage_notes).
+    A custom API connection is listed in the vault as ``c<id>``
+    (custom_connection_key), so its connector's notes are keyed to that too.
     """
     notes: dict[str, str] = {}
     for engine, block in (connectors or {}).items():
         text = block.get("usage_notes") if isinstance(block, dict) else None
         if isinstance(engine, str) and isinstance(text, str) and text.strip():
             notes[engine] = text
+    for ref in (custom_api.connections if custom_api is not None else ()):
+        if ref.connector_id in notes:
+            engine, _ = custom_connection_key(ref.connection_id, ref.connector_id)
+            notes[engine] = notes[ref.connector_id]
     return notes
 
 
@@ -974,11 +981,11 @@ def build_cloud_chat_session(
     data_vault = None
     mcp_tool_defs: list = []
     mcp_sessions: list = []
-    if request.oauth:
+    if request.oauth or request.custom_api:
         from anton.core.datasources.data_vault import TurnKeyDataVault
         from anton.utils.datasources import restore_namespaced_env
 
-        data_vault = TurnKeyDataVault(request.oauth)
+        data_vault = TurnKeyDataVault(request.oauth, request.custom_api)
         restore_namespaced_env(data_vault)
 
         # ENG-1816: discover any MCP-method connections' tools now, before
@@ -1085,7 +1092,7 @@ def build_cloud_chat_session(
         episodic=None,
         self_awareness=None,
         data_vault=data_vault,              # connectors ON iff request.oauth is set
-        connector_usage_notes=_connector_usage_notes(request.connectors),
+        connector_usage_notes=_connector_usage_notes(request.connectors, request.custom_api),
         history_store=None,                 # disk history OFF (DB authoritative)
         tools=extra_tools,                   # this turn's MCP tools, and the connector draft tool
         # Static CLOUD_TOOL_ALLOWLIST plus this turn's own MCP and draft
