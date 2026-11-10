@@ -139,6 +139,9 @@ logger = logging.getLogger(__name__)
 TURN_PROTOCOL_VERSION = 1
 DATASOURCE_PROTOCOL_VERSION = 1
 MAX_DATASOURCE_CONNECTIONS = 100
+#: The most custom API connections one turn carries; cowork-server holds the
+#: same cap. The session fetches every one before the turn starts.
+MAX_CUSTOM_API_CONNECTIONS = 25
 
 # The `turn_completed` key that names the artifact folders the turn touched.
 # scratchpad-controller's `scratchpad_controller/anton_turn.py` relays it and
@@ -205,6 +208,68 @@ def _parse_datasource_block(value: object) -> DatasourceBlockV1 | None:
         seen.add(connection_id)
         refs.append(DatasourceConnectionRefV1(connection_id, credential_version))
     return DatasourceBlockV1(DATASOURCE_PROTOCOL_VERSION, tuple(refs))
+
+
+@dataclass(frozen=True)
+class CustomApiConnectionRefV1:
+    """One custom API connection the turn may fetch: auth's id and the member's own names, never a value."""
+
+    connection_id: int
+    connector_id: str
+    name: str
+    credential_version: int
+
+
+@dataclass(frozen=True, repr=False)
+class CustomApiBlockV1:
+    """The member's custom API connections and the turn key that fetches them.
+
+    ``repr=False`` keeps the key out of any traceback that prints the request.
+    """
+
+    turn_key: str
+    connections: tuple[CustomApiConnectionRefV1, ...]
+
+
+def _positive_int(value: object) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value >= 1
+
+
+def _parse_custom_api_block(value: object) -> CustomApiBlockV1 | None:
+    """Parse the optional ``custom_api`` block exactly, or refuse the request."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"turn_key", "connections"}:
+        raise ValueError("custom_api must carry exactly turn_key and connections")
+    turn_key = value["turn_key"]
+    if not isinstance(turn_key, str) or not turn_key:
+        raise ValueError("custom_api turn key is missing")
+    connections = value["connections"]
+    if not isinstance(connections, list) or not connections or len(connections) > MAX_CUSTOM_API_CONNECTIONS:
+        raise ValueError("custom_api connections are invalid")
+    refs: list[CustomApiConnectionRefV1] = []
+    seen: set[int] = set()
+    for connection in connections:
+        if not isinstance(connection, dict) or set(connection) != {
+            "connection_id", "connector_id", "name", "credential_version",
+        }:
+            raise ValueError("custom_api connection reference is invalid")
+        connection_id = connection["connection_id"]
+        if (
+            not _positive_int(connection_id)
+            or not _positive_int(connection["credential_version"])
+            or not isinstance(connection["connector_id"], str)
+            or not connection["connector_id"]
+            or not isinstance(connection["name"], str)
+            or not connection["name"]
+            or connection_id in seen
+        ):
+            raise ValueError("custom_api connection reference is invalid")
+        seen.add(connection_id)
+        refs.append(CustomApiConnectionRefV1(
+            connection_id, connection["connector_id"], connection["name"], connection["credential_version"],
+        ))
+    return CustomApiBlockV1(turn_key, tuple(refs))
 
 
 class TurnSkillEntry(BaseModel):
@@ -330,6 +395,9 @@ class TurnRequestV1:
     #: Optional verified datasource references: only IDs and immutable versions.
     #: No capability or password crosses; the gateway is on the `llm` base URL's host.
     datasource: DatasourceBlockV1 | None = None
+    #: Optional custom API connections of the member, by auth id, with the turn
+    #: key that fetches their fields (granted to this turn only). No value.
+    custom_api: CustomApiBlockV1 | None = None
     #: Optional ISO 8601 creation time of the conversation, as cowork-server
     #: resolved it. The pod is new every turn and cannot derive this: history
     #: rows carry no timestamps. Without it the session dates the conversation
@@ -390,6 +458,7 @@ class TurnRequestV1:
             # Same defensive isinstance check as trace, for the same reason.
             oauth=d.get("oauth") if isinstance(d.get("oauth"), dict) else None,
             datasource=_parse_datasource_block(d.get("datasource")),
+            custom_api=_parse_custom_api_block(d.get("custom_api")),
             # The controller always sends the key and sends None when
             # cowork-server could not resolve it, so the guard does real work.
             started_at=(
