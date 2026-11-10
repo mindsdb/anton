@@ -1,4 +1,7 @@
-from anton.core.llm.openai import _with_claude_cache_breakpoints
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from anton.core.llm.openai import OpenAIProvider, _with_claude_cache_breakpoints
 from anton.core.llm.prompt_builder import SESSION_CONTEXT_MARKER
 
 EPHEMERAL = {"type": "ephemeral"}
@@ -63,3 +66,41 @@ def test_empty_text_is_never_marked():
 
     assert [p["text"] for p in out[0]["content"]] == [SESSION_CONTEXT_MARKER + "tail"]
     assert "cache_control" not in out[1]["content"][0]
+
+
+HISTORY = [
+    {"role": "user", "content": "hi"},
+    {"role": "assistant", "content": "hello"},
+    {"role": "user", "content": "more"},
+]
+
+
+def _passthrough(mock_openai, result):
+    create = mock_openai.AsyncOpenAI.return_value.chat.completions.create = AsyncMock(return_value=result)
+    return OpenAIProvider(api_key="k", flavor=OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH), create
+
+
+async def test_complete_marks_only_the_system_prompt():
+    response = MagicMock()
+    response.choices = [MagicMock(message=MagicMock(content="ok", tool_calls=None), finish_reason="stop")]
+    with patch("anton.core.llm.openai.openai") as mock_openai:
+        provider, create = _passthrough(mock_openai, response)
+        await provider.complete(model="sonnet-5-5", system=SYSTEM, messages=HISTORY)
+
+    sent = create.call_args.kwargs["messages"]
+    assert all(p["cache_control"] == EPHEMERAL for p in sent[0]["content"])
+    assert [m["content"] for m in sent[1:]] == ["hi", "hello", "more"]
+
+
+async def test_stream_marks_the_messages():
+    async def chunks():
+        yield SimpleNamespace(usage=None, choices=[SimpleNamespace(
+            delta=SimpleNamespace(content="ok", tool_calls=None), finish_reason="stop")])
+
+    with patch("anton.core.llm.openai.openai") as mock_openai:
+        provider, create = _passthrough(mock_openai, chunks())
+        [e async for e in provider.stream(model="sonnet-5-5", system=SYSTEM, messages=HISTORY)]
+
+    sent = create.call_args.kwargs["messages"]
+    assert sent[1]["content"] == [{"type": "text", "text": "hi", "cache_control": EPHEMERAL}]
+    assert sent[-1]["content"] == [{"type": "text", "text": "more", "cache_control": EPHEMERAL}]

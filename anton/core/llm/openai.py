@@ -129,12 +129,13 @@ def _cache_marked(message: dict) -> dict | None:
     return None
 
 
-def _with_claude_cache_breakpoints(messages: list[dict], model: str) -> list[dict]:
+def _with_claude_cache_breakpoints(messages: list[dict], model: str, *, mark_messages: bool = True) -> list[dict]:
     """Chat messages for MindsHub with the Anthropic cache marks placed here.
 
     MindsHub marks the system prompt as one block whose tail differs per
     conversation, so every conversation re-wrote the shared rules. Any mark we
-    send turns MindsHub's own off, so the history marks come from here too.
+    send turns MindsHub's own off, so the history marks come from here too,
+    or not at all when ``mark_messages`` is False.
     """
     from .prompt_builder import SESSION_CONTEXT_MARKER
 
@@ -149,6 +150,8 @@ def _with_claude_cache_breakpoints(messages: list[dict], model: str) -> list[dic
             parts = [static, SESSION_CONTEXT_MARKER + session]
         out[0] = {**out[0], "content": [
             {"type": "text", "text": p, "cache_control": _EPHEMERAL} for p in parts if p]}
+    if not mark_messages:
+        return out
     # Where the previous request ended (just before the latest assistant turn),
     # so it is read back without relying on Anthropic's 20-block lookback; and
     # the newest message, for the next request.
@@ -1309,7 +1312,9 @@ class OpenAIProvider(LLMProvider):
 
         oai_messages = _translate_messages(system, messages, supports_vision=self._supports_vision, vision_format=self._vision_format)
         if self._flavor == self.FLAVOR_MINDS_PASSTHROUGH:
-            oai_messages = _with_claude_cache_breakpoints(oai_messages, model)
+            # No mark on the messages: one-off calls (structured output,
+            # compaction) never send the same history again.
+            oai_messages = _with_claude_cache_breakpoints(oai_messages, model, mark_messages=False)
 
         kwargs = build_chat_completion_kwargs(
             model=model,
