@@ -88,3 +88,12 @@ def test_inline_analysis_sections_are_for_several_figures(name, internet):
     assert "When the answer has several figures, present the main finding" in shared
     assert "A single fact is one sentence with its unit or currency." in shared
     assert "Keep units, source and time scope clear." not in shared
+
+
+@pytest.mark.parametrize("internet", (True, False))
+@pytest.mark.parametrize("name", ("no_direct_reports", "no_workspace"))
+def test_the_insights_order_is_for_several_figures(name, internet):
+    shared = _shared_prompt(_TOOL_SETS[name], internet)
+    assert "ALWAYS follow this order for analysis and reports" not in shared
+    assert "for analysis and reports with several figures, follow this order" in shared
+    assert "A single fact is still fetched and computed, then answered in one sentence" in shared

@@ -439,7 +439,8 @@ NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT = _without_direct_reports(STATIC_ARTIF
 BASE_VISUALIZATIONS_PROMPT = """\
 VISUALIZATIONS (charts, plots, maps, dashboards, reports):
 
-Insights-first workflow — ALWAYS follow this order for analysis and reports:
+Insights-first workflow — for analysis and reports with several figures, follow this order. \
+A single fact is still fetched and computed, then answered in one sentence without the insight sections.
 1. FETCH DATA FIRST: Use one scratchpad call to pull data and compute key metrics. Return \
 structured results (numbers, percentages, rankings).
 2. STREAM INSIGHTS IMMEDIATELY: Narrate your findings to the user in the chat. They should \
