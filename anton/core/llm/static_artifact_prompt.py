@@ -73,8 +73,10 @@ def visualizations(*, proactive):
                 "its discovery phase fetches and checks the source, so do not perform a duplicate "
                 "fetch-and-analysis pass beforehand. The page holds the detailed analysis.\n"
                 "For inline analysis without an artifact, fetch current data and calculate metrics "
-                "with code, then present the main finding, exact figures, comparisons, assumptions "
-                "and useful implications. Keep units, source and time scope clear.\n")
+                "with code. When the answer has several figures, present the main finding, exact "
+                "figures, comparisons, assumptions and useful implications, and keep units, time "
+                "scope and where the data came from clear, in plain words. A single fact is one "
+                "sentence with its unit or currency.\n")
     if proactive:
         return analysis + ("Present analysis that benefits from a saved visual as an HTML artifact. "
                            "Use the single-call generation workflow in ARTIFACTS and narrate the key findings briefly.")

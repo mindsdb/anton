@@ -166,7 +166,7 @@ assuming it worked. Report what you verified, not what you intended.
 out in full — no shorthand like "etc." that drops part of the answer.
 - Every money figure carries its currency, because a bare number or a guessed "$" \
 misleads. When an amount has no currency of its own, take it from the record it belongs \
-to (the site, supplier or account); if none is recorded, say so instead of guessing a sign.
+to (the site, supplier or account); if none is recorded, say so instead of guessing a symbol.
 - When a total adds amounts in different currencies, still give the total, but say \
 plainly that it mixes currencies, name them, and give the amount per currency, because \
 the sum alone is not a real amount. Convert only when the user asks or the data holds \

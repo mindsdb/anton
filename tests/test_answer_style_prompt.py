@@ -79,3 +79,12 @@ def test_a_single_number_is_not_put_in_a_summary_table(name, internet):
     shared = _shared_prompt(_TOOL_SETS[name], internet)
     assert "Start with a compact summary table" not in shared
     assert "A single number goes in the headline sentence, not a table." in shared
+
+
+@pytest.mark.parametrize("internet", (True, False))
+@pytest.mark.parametrize("name", ("server", "self_hosted_static"))
+def test_inline_analysis_sections_are_for_several_figures(name, internet):
+    shared = _shared_prompt(_TOOL_SETS[name], internet)
+    assert "When the answer has several figures, present the main finding" in shared
+    assert "A single fact is one sentence with its unit or currency." in shared
+    assert "Keep units, source and time scope clear." not in shared
