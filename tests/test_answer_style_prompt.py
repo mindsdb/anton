@@ -50,3 +50,26 @@ def test_the_rule_is_in_the_shared_prompt_once(tools, internet):
     shared = _shared_prompt(tools, internet)
     for rule in _RULES:
         assert shared.count(rule) == 1, rule
+
+
+_GENERIC_CLOSERS = (
+    "always end with what the user might want next",
+    "Always leave a door open",
+    "always let the user know the detail is available",
+)
+
+
+@pytest.mark.parametrize(("tools", "internet"), _BRANCHES)
+def test_closing_offers_are_asked_for_only_when_specific(tools, internet):
+    shared = _shared_prompt(tools, internet)
+    for closer in _GENERIC_CLOSERS:
+        assert closer not in shared, closer
+    assert shared.count("End with a next step only when it is specific to this answer") == 1
+
+
+@pytest.mark.parametrize("internet", (True, False))
+@pytest.mark.parametrize("name", ("no_direct_reports", "no_workspace"))
+def test_a_single_number_is_not_put_in_a_summary_table(name, internet):
+    shared = _shared_prompt(_TOOL_SETS[name], internet)
+    assert "Start with a compact summary table" not in shared
+    assert "A single number goes in the headline sentence, not a table." in shared
