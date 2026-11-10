@@ -18,9 +18,15 @@ _TOOL_SETS = {
 
 _RULES = (
     "Every money figure carries its currency",
-    "still give the total, but say plainly that it mixes currencies",
+    "take it from the record it belongs to",
+    "say so instead of guessing",
+    "still give the total, but say plainly that it mixes currencies, name them, and give the amount per currency",
+    "Convert only when the user asks or the data holds the rate, and name the rate.",
     "State one fact in one sentence.",
+    "never repeat a single value in a table",
     "not table or field names from a query",
+    "Use schema names when the user asks about the schema or data model.",
+    "Record ids and codes (order numbers, part and supplier codes) stay exactly as written.",
 )
 
 _BRANCHES = [
