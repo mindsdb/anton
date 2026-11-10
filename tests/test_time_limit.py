@@ -405,3 +405,17 @@ async def test_a_turn_that_finishes_after_keep_going_is_not_asked_again(workspac
     assert kwargs["ended_by"] == "completed"
     assert session._history[-1] == {"role": "assistant", "content": "all done"}
 
+
+async def test_only_the_time_question_is_marked_as_the_time_limit(workspace, clock):
+    """The web host extends the turn's model key on Keep going to the time
+    question only, so its id says so; the step limit's does not."""
+    session = _timed_session(workspace, [_tool_call(i) for i in range(1, 12)], clock)
+    session._max_tool_rounds = 1
+    session.elicitor = _ScriptedElicitor(KEEP_GOING, STOP_HERE)
+
+    events, _ = await _run(session)
+
+    ids = [ev.id for ev in events if isinstance(ev, StreamAskUser)]
+    assert len(ids) == 2
+    assert ids[0].startswith("limit:") and not ids[0].startswith("limit:time:")
+    assert ids[1].startswith("limit:time:")

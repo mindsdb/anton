@@ -5104,8 +5104,11 @@ class ChatSession:
         )
         # The time limit asks outside the model's question budget: a turn that
         # spent its questions would otherwise end at the limit without asking.
+        # Its id says which limit asked: the web host extends the turn's model
+        # key on Keep going to this question, and only this one.
+        prefix = "limit:time:" if limit == "time_limit" else "limit:"
         answer = await elicit(
-            self, f"limit:{uuid.uuid4().hex}", request, counted=limit != "time_limit",
+            self, f"{prefix}{uuid.uuid4().hex}", request, counted=limit != "time_limit",
         )
         return answer.status == "answered" and answer.values == ("continue",)
 
