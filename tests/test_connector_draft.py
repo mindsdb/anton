@@ -17,6 +17,7 @@ from anton.core.tools.connector_draft import (
     MAX_FIELDS,
     ConnectorDraftBox,
     ConnectorDraftError,
+    check_draft_text,
     connector_draft_tool,
     parse_connector_draft,
 )
@@ -192,6 +193,22 @@ def test_a_token_in_usage_notes_is_refused_without_the_value(shape):
     with pytest.raises(ConnectorDraftError, match="usage_notes looks like") as exc:
         parse_connector_draft(_draft(usage_notes=f"Call it with {value} in the header."))
     assert value not in str(exc.value)
+
+
+@pytest.mark.parametrize("key", _SHORT_TEXTS)
+def test_one_text_is_checked_with_the_rule_a_whole_draft_gets(key):
+    assert check_draft_text(key, "  Acme  ") == "Acme"
+    assert check_draft_text(key, "   ") is None
+    with pytest.raises(ConnectorDraftError) as caught:
+        check_draft_text(key, "Key " + _TOKEN_SHAPES["github"])
+    assert _TOKEN_SHAPES["github"] not in str(caught.value)
+    with pytest.raises(ConnectorDraftError):
+        check_draft_text(key, "x" * 301)
+
+
+def test_only_a_draft_text_can_be_checked_on_its_own():
+    with pytest.raises(ConnectorDraftError):
+        check_draft_text("help_url", "https://example.com")
 
 
 def test_a_shape_only_the_scrubber_knows_is_refused():

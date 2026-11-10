@@ -161,6 +161,29 @@ def _check_text(value: Any, where: str, cap: int, *, long_text: bool) -> str | N
     return text or None
 
 
+def check_draft_text(key: str, value: Any) -> str | None:
+    """Check one top-level text of a draft with the rule the parser applies to it.
+
+    Lets a host check an edit to a saved connector's label, description or
+    category without building a whole draft around it.
+
+    Args:
+        key: label, description, category or usage_notes.
+        value: The text as the client sent it.
+
+    Returns:
+        ``value`` stripped, or None when absent or empty.
+
+    Raises:
+        ConnectorDraftError: for any other key, or a value the parser would
+            refuse. The message names the key, never the value.
+    """
+    cap = _TOP_TEXT_CAPS.get(key)
+    if cap is None:
+        raise ConnectorDraftError(f"{key} is not a text of a connector draft.")
+    return _check_text(value, key, cap, long_text=key in _LONG_TEXTS)
+
+
 def _check_keys(data: dict, allowed: frozenset[str], where: str) -> None:
     """Refuse keys outside ``allowed`` without naming them; a key is model text too."""
     if not set(data) <= allowed:
@@ -324,10 +347,7 @@ def parse_connector_draft(data: Any) -> ConnectorDraft:
             "connector_id must be lowercase letters, digits and underscores, "
             "starting with a letter, 2 to 41 characters."
         )
-    texts = {
-        key: _check_text(data.get(key), key, cap, long_text=key in _LONG_TEXTS)
-        for key, cap in _TOP_TEXT_CAPS.items()
-    }
+    texts = {key: check_draft_text(key, data.get(key)) for key in _TOP_TEXT_CAPS}
     if texts["label"] is None:
         raise ConnectorDraftError("label is required.")
     raw_fields = data.get("fields")
