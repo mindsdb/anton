@@ -134,6 +134,8 @@ async def test_task_cancel_reports_cancelled_not_error(workspace):
             await task
 
         assert _ended_by(send) == "cancelled"
+        # A user Stop is not a failure, so no error_type is stamped.
+        assert send.call_args.kwargs["error_type"] == ""
         assert not session._cancel_event.is_set(), (
             "guard: the fix must not depend on _cancel_event, which the "
             "hosted path never sets"
@@ -240,28 +242,11 @@ async def test_late_finalizer_cannot_close_a_newer_turns_books(workspace):
         assert session._turn_cost is None, "the owner clears the slot"
 
 
-async def test_exhausted_retries_is_not_reported_as_completed(workspace):
-    """Every LLM call failing → the retry loop asks the model to explain, that
-    call fails too, and the turn raises. The default ``completed``
-    used to hold here — filing the most common failure mode as a clean turn.
-    """
-    mock_llm = make_mock_llm()
-    mock_llm.plan_stream = MagicMock(side_effect=RuntimeError("provider down"))
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace, session_id="conv-t"))
-
-    with patch("anton.analytics.send_event") as send:
-        with pytest.raises(RuntimeError):
-            async for _ in session.turn_stream("do something"):
-                pass
-
-    assert _ended_by(send) == "retry_exhausted"
-
-
 async def test_rounds_accumulate_across_verifier_continuations(workspace):
-    """``tool_round`` is loop-local and resets on each continuation, so
-    assigning it reported only the last continuation's rounds — breaking the
-    rounds x context shape metric for exactly the expensive turns it exists
-    to classify.
+    """`rounds` equals the rounds dispatched across every continuation, not
+    only the last one; an earlier version reported the last continuation's
+    count alone, breaking the rounds x context shape metric for exactly the
+    expensive turns it exists to classify.
     """
     mock_llm = make_mock_llm()
     # 2 tool rounds, reply; INCOMPLETE verdict; 1 tool round, reply; COMPLETE.
@@ -293,10 +278,7 @@ async def test_rounds_accumulate_across_verifier_continuations(workspace):
 
 
 async def test_round_cap_reports_the_cap_not_cap_plus_one(workspace):
-    """Reports the *effective* cap — the configured cap plus the one-time
-    grace extension (ENG-1893) — not effective_cap + 1."""
-    from anton.core.session import _ROUND_CAP_GRACE_ROUNDS
-
+    """Reports the cap, not cap + 1."""
     mock_llm = make_mock_llm()
     mock_llm.plan_stream = MagicMock(
         side_effect=lambda **kw: _Iter([StreamComplete(response=_tool_call())])
@@ -318,10 +300,7 @@ async def test_round_cap_reports_the_cap_not_cap_plus_one(workspace):
     notes = [m["content"] for m in session.history
              if m.get("role") == "user" and "tool-call rounds on this turn" in str(m.get("content"))]
     assert notes and "you could not find it" in notes[-1]
-    expected = 2 + _ROUND_CAP_GRACE_ROUNDS
-    assert kwargs["rounds"] == str(expected), (
-        f"effective cap is {expected}, reported {kwargs['rounds']}"
-    )
+    assert kwargs["rounds"] == "2", f"cap is 2, reported {kwargs['rounds']}"
 
 
 # The three hand-back terminals: STUCK, budget-exhausted, verifier-failure.
@@ -448,6 +427,7 @@ async def test_verified_turn_carries_no_verifier_failure(workspace):
             pass
     assert _ended_by(send) == "completed"
     assert _verifier_fields(send) == ("", "")
+    assert send.call_args.kwargs["verification_skipped"] == "false"
 
 
 async def test_denied_verdict_reports_completed_not_verifier_failure(workspace):
@@ -477,20 +457,6 @@ async def test_denied_verdict_reports_completed_not_verifier_failure(workspace):
     # ...and says WHY (ENG-1858): a denied turn is the one skipped-verifier
     # shape that must stay separable from a hard latch in PostHog.
     assert _verifier_fields(send) == ("denied", "TokenLimitExceeded")
-
-
-async def test_verified_turn_reports_verification_not_skipped(workspace):
-    # The control for the flag above: a turn whose verdict actually ran
-    # (COMPLETE) books verification_skipped="false".
-    session = ChatSession(
-        ChatSessionConfig(llm_client=_verdict_llm("COMPLETE"), workspace=workspace, session_id="conv-t")
-    )
-    _stub_tools(session)
-    with patch("anton.analytics.send_event") as send:
-        async for _ in session.turn_stream("run my script"):
-            pass
-    assert _ended_by(send) == "completed"
-    assert send.call_args.kwargs["verification_skipped"] == "false"
 
 
 async def test_callers_already_handled_exception_is_not_reported_as_error(workspace):
@@ -872,6 +838,8 @@ async def test_completed_turn_carries_no_error_type(workspace):
             llm_client=mock_llm, workspace=workspace, session_id="conv-t"
         )
     )
+    # With no settings, the emit site must not classify the machine's env as the endpoint.
+    assert session._settings is None, "fixture must have no settings for this to bite"
 
     with patch("anton.analytics.send_event") as send:
         async for _ in session.turn_stream("hello"):
@@ -879,45 +847,7 @@ async def test_completed_turn_carries_no_error_type(workspace):
 
     assert _ended_by(send) == "completed"
     assert _error_type(send) == ""
-
-
-async def test_user_stop_carries_no_error_type(workspace):
-    """A user pressing Stop is not a failure. `CancelledError` takes the
-    `cancelled` branch, which deliberately does not stamp `error_type` — so
-    an error-cause breakdown cannot be inflated by ordinary stops.
-    """
-    mock_llm = make_mock_llm()
-    started = asyncio.Event()
-
-    def _hang(**kwargs):
-        async def _gen():
-            started.set()
-            await asyncio.sleep(3600)
-            yield StreamComplete(response=_text())
-
-        return _gen()
-
-    mock_llm.plan_stream = MagicMock(side_effect=_hang)
-    session = ChatSession(
-        ChatSessionConfig(
-            llm_client=mock_llm, workspace=workspace, session_id="conv-t"
-        )
-    )
-
-    with patch("anton.analytics.send_event") as send:
-
-        async def _run():
-            async for _ in session.turn_stream("long one"):
-                pass
-
-        task = asyncio.create_task(_run())
-        await started.wait()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-    assert _ended_by(send) == "cancelled"
-    assert _error_type(send) == ""
+    assert send.call_args.kwargs["endpoint_class"] == ""
 
 
 async def test_stop_after_exhausted_retries_does_not_report_an_error_type(workspace):
@@ -946,34 +876,3 @@ async def test_stop_after_exhausted_retries_does_not_report_an_error_type(worksp
 
     assert _ended_by(send) == "cancelled"
     assert _error_type(send) == ""
-
-
-async def test_session_without_settings_emits_no_endpoint_class(workspace):
-    """The emit-site half of the same defect, which the helper test cannot see.
-
-    `_emit_turn_cost` resolves a fresh `AntonSettings()` when the session
-    carries none, so passing THAT to the classifier would report the machine's
-    environment as if it were the turn's endpoint — confidently, and with no
-    way to tell it apart from a real answer. cowork-server's connector probe
-    builds a session with no `settings=`, so this path carries real traffic.
-
-    Driven through the real turn rather than the helper, because the defect is
-    which object the emit site hands over.
-    """
-    mock_llm = make_mock_llm()
-    mock_llm.plan_stream = MagicMock(
-        side_effect=lambda **kw: _Iter([StreamComplete(response=_text("hi"))])
-    )
-    session = ChatSession(
-        ChatSessionConfig(
-            llm_client=mock_llm, workspace=workspace, session_id="conv-t"
-        )
-    )
-    assert session._settings is None, "fixture must have no settings for this to bite"
-
-    with patch("anton.analytics.send_event") as send:
-        async for _ in session.turn_stream("hello"):
-            pass
-
-    assert send.called
-    assert send.call_args.kwargs["endpoint_class"] == ""

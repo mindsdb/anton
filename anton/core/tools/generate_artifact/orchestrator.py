@@ -581,6 +581,9 @@ def _public_data_sources_skill(session) -> str:
     coroutine appears at all, because the mock is rejected by type before any
     call; here the call is unavoidable.)
     """
+    if getattr(session, "_internet_research_enabled", True) is False:
+        # A catalog of internet endpoints the session must not use.
+        return ""
     try:
         store = getattr(session, "_skill_store", None)
         skill = store.load_for_artifacts(_PUBLIC_SOURCES_SKILL) if store is not None else None
@@ -596,14 +599,15 @@ def _public_data_sources_skill(session) -> str:
 def _project_rules(session) -> str:
     """The workspace's anton.md as the `Project rules` section, or "".
 
-    Read with `read_anton_md`, not `build_anton_md_context`: that one frames
+    Read with `read_anton_md_user_text` (no template boilerplate), not
+    `build_anton_md_context`: that one frames
     the file for the main agent ("Project Context") and records the read for
     `anton_md_modified_since_last_read`. In tests the session is an
     `AsyncMock`, whose call returns a coroutine, closed here as in
     `_public_data_sources_skill`. A session without a workspace (the bench,
     some tests) has no project rules.
     """
-    read = getattr(getattr(session, "_workspace", None), "read_anton_md", None)
+    read = getattr(getattr(session, "_workspace", None), "read_anton_md_user_text", None)
     if read is None:
         return ""
     try:
@@ -1085,6 +1089,8 @@ async def _gen_verify_frontend(
         else:
             # In a thread: the static checks scan the whole page, which an
             # embedded asset can grow to tens of megabytes.
+            from anton.core.artifacts.geography_pages import generated_requirement
+
             verdict = await asyncio.to_thread(
                 verifiers.verify_frontend,
                 entry_file.read_text(encoding="utf-8"), is_fullstack=state.is_fullstack,
@@ -1092,6 +1098,7 @@ async def _gen_verify_frontend(
                     verifiers.contract_operations(state.api_spec)
                 ) if state.is_fullstack else None,
                 live_app=state.is_fullstack and _runs_live_apps(state),
+                geography=generated_requirement(state, entry_file),
             )
             if verdict.ok and not state.is_fullstack:
                 # Second gate, only once the text checks pass and only for the
@@ -1471,21 +1478,34 @@ async def _run_and_verify_app_in_slot(state: GenState) -> "str | object | None":
         if stop is not None:
             if launched:
                 await _stop_launched_app(state)
+                if stop is not OVER_BUDGET:
+                    state.error = stop = _with_stop_note(state, stop)
             return stop
 
     if launched:
         await _stop_launched_app(state)
-    state.error = f"Application failed to launch: {problem}" + _tail_section(
+    state.error = _with_stop_note(state, f"Application failed to launch: {problem}" + _tail_section(
         problem, tail, heading="--- backend.log tail ---",
-    )
+    ))
     return state.error
 
 
 async def _stop_launched_app(state: GenState) -> None:
     """Gave up on an app that may still run: free its slot, and send no
-    address for it."""
-    await live_app_slots.stop_live_app(state.session, folder=state.artifact_path)
+    address for it. When the stop fails, `state.live_app_stop_note` says
+    where the app may still run, for the run's final text."""
+    slot = await live_app_slots.stop_live_app(state.session, folder=state.artifact_path)
     state.app_url, state.live_app = None, None
+    if slot is not None:
+        state.live_app_stop_note = (
+            f"The app may still be running in slot {slot}: the run could not stop it. "
+            "It stops by itself after a while with no requests."
+        )
+
+
+def _with_stop_note(state: GenState, text: str) -> str:
+    """`text`, then where an app the run could not stop may still run."""
+    return f"{text}\n\n{state.live_app_stop_note}" if state.live_app_stop_note else text
 
 
 async def _after_earlier_launch(
@@ -1506,7 +1526,11 @@ async def _after_earlier_launch(
         )
     else:
         await _stop_launched_app(state)
-        earlier = f"The app this run launched earlier failed its check, so the run stopped it: {failed_check}"
+        earlier = (
+            f"The app this run launched earlier failed its check: {failed_check} {state.live_app_stop_note}"
+            if state.live_app_stop_note
+            else f"The app this run launched earlier failed its check, so the run stopped it: {failed_check}"
+        )
     return live_app_slots.LiveAppLaunchError(f"{failure} {earlier}", cause=failure.cause, log_tail=failure.log_tail)
 
 
@@ -1800,7 +1824,7 @@ def _stopped_over_budget(state: GenState, detail: str) -> dict:
     # this is the only way to show them one.
     return {
         "status": "stopped_over_budget",
-        "detail": detail,
+        "detail": _with_stop_note(state, detail),
         **({"brief_shown": True} if state.brief_shown else {"brief_summary": state.brief}),
         **_result_shell(state),
     }

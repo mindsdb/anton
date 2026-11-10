@@ -60,6 +60,79 @@ def _make_artifact(tmp_path: Path, type: str = "fullstack-stateless-app") -> str
     return store.create(name="Clock", description="d", type=type).slug
 
 
+async def test_new_page_single_call_registers_then_uses_the_same_generator(tmp_path, monkeypatch):
+    captured = []
+
+    async def generate(**kw):
+        captured.append(kw)
+        return {"status": "generated", "files_written": ["index.html"], "summary": "ok", "trace": []}
+
+    monkeypatch.setattr(gen_pkg, "generate", generate)
+    session = _session(tmp_path)
+    request = {"name": "Regional sales", "user_request": "Show regional sales", "agent_understanding": "A sales report"}
+    _, result = await _collect(session, request)
+    assert captured[0]["artifact_type"] == "html-app"
+    assert captured[0]["primary"] == "index.html"
+    store = ArtifactStore(tmp_path / "artifacts")
+    assert store.open(captured[0]["slug"]).name == "Regional sales"
+    assert '"status": "generated"' in result
+    # A follow-up with the existing slug edits the same resource, even if a
+    # caller also supplies a name. It must not create a duplicate artifact.
+    _, _ = await _collect(session, {**request, "slug": captured[0]["slug"]})
+    assert captured[1]["slug"] == captured[0]["slug"]
+    assert len(list((tmp_path / "artifacts").glob("*/metadata.json"))) == 1
+
+
+async def test_new_page_single_call_validates_before_creating_resource(tmp_path):
+    _, result = await _collect(_session(tmp_path), {"name": "Sales", "user_request": "Show sales"})
+    assert "agent_understanding" in result
+    assert not list((tmp_path / "artifacts").glob("*/metadata.json"))
+
+
+async def test_a_call_with_neither_slug_nor_name_creates_nothing(tmp_path):
+    _, result = await _collect(_session(tmp_path), {"user_request": "Show sales", "agent_understanding": "Sales"})
+    assert "`slug` (an existing artifact) or `name` (a new one) is required" in result
+    assert not list((tmp_path / "artifacts").glob("*/metadata.json"))
+
+
+async def test_new_page_failure_keeps_identity_and_authoritative_data_for_retry(tmp_path, monkeypatch):
+    import json
+    async def generate(**kw):
+        (kw["artifact_path"] / "observed-data.json").write_text('{"revenue":42}')
+        (kw["artifact_path"] / "presentation-program.js").write_text("await CoworkPage({title:'Revenue'});")
+        return "Frontend verification failed: repair the actual page"
+    monkeypatch.setattr(gen_pkg,"generate",generate)
+    session=_session(tmp_path)
+    _,outcome=await _collect_raw(session,{"name":"Revenue","user_request":"Show revenue","agent_understanding":"Revenue report"})
+    result=json.loads(outcome.content)
+    assert not outcome.ok and result["status"]=="failed"
+    store=ArtifactStore(tmp_path/"artifacts")
+    assert store.open(result["slug"]).name=="Revenue"
+    assert Path(result["observed_data_file"]).read_text()=='{"revenue":42}'
+    assert Path(result["last_saved_component_program"]).is_file()
+    assert len(list((tmp_path/"artifacts").glob("*/metadata.json")))==1
+    assert result["message"].count("Error: artifact generation failed") == 1
+    assert "slug" in result["if_the_user_asks_to_retry"]
+
+
+def test_single_call_schema_has_no_top_level_combinator_and_covers_both_deployments():
+    import anton.core.tools.tool_defs as tool_defs
+
+    for tool in (tool_defs.GENERATE_ARTIFACT_TOOL, tool_defs.STATIC_GENERATE_ARTIFACT_TOOL):
+        schema = tool.input_schema
+        assert not {"anyOf", "oneOf", "allOf"} & set(schema)
+        assert "name" in schema["properties"] and "slug" not in schema["required"]
+
+
+def test_with_direct_reports_off_the_page_tools_keep_register_first():
+    import anton.core.tools.tool_defs as tool_defs
+
+    for tool in (tool_defs.GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
+                 tool_defs.STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS):
+        assert "slug" in tool.input_schema["required"]
+        assert "name" not in tool.input_schema["properties"]
+
+
 async def test_fsm_failure_is_wrapped_with_report_instruction(tmp_path: Path, monkeypatch):
     slug = _make_artifact(tmp_path)
 
@@ -82,8 +155,9 @@ async def test_missing_data_tells_the_agent_what_to_ask_the_user_for(tmp_path: P
 
     monkeypatch.setattr(gen_pkg, "generate", fake_generate)
     _, out = await _collect(_session(tmp_path), {"slug": slug, "user_request": "build it", "agent_understanding": "an app"})
-    assert out.startswith("Error: the data this artifact needs is not available.")
-    assert "no connection holds the sites. Looked in: rest-gw." in out
+    payload = json.loads(out)
+    assert payload["message"].startswith("Error: the data this artifact needs is not available.")
+    assert "no connection holds the sites. Looked in: rest-gw." in payload["message"]
     assert "do NOT build the artifact yourself" in out
     assert "pass the data in `known_data`" in out
     assert "artifact generation failed" not in out
@@ -259,7 +333,7 @@ async def test_validation_errors_yield_no_progress(tmp_path: Path):
     the host's UI."""
     progress, out = await _collect(_session(tmp_path), {"user_request": "build it", "agent_understanding": "an app"})
     assert progress == []
-    assert out == "Error: `slug` is required."
+    assert out == "Error: `slug` (an existing artifact) or `name` (a new one) is required."
 
 
 async def test_success_tells_the_agent_not_to_reverify(tmp_path: Path, monkeypatch):
@@ -288,10 +362,10 @@ def test_the_tool_schema_has_no_context_parameter():
     props = GENERATE_ARTIFACT_TOOL.input_schema["properties"]
     assert "context" not in props
     assert set(GENERATE_ARTIFACT_TOOL.input_schema["required"]) == {
-        "slug", "user_request", "user_language", "agent_understanding",
+        "user_request", "user_language", "agent_understanding",
     }
     assert set(props) == {
-        "slug", "user_request", "user_language", "agent_understanding",
+        "slug", "name", "user_request", "user_language", "agent_understanding",
         "known_data", "user_preferences", "attachments",
     }
 
@@ -928,7 +1002,7 @@ async def test_generation_runs_every_model_call_at_the_configured_effort(tmp_pat
 
 
 async def test_act_first_relays_the_brief_between_the_steps_and_reports_it(
-    tmp_path, monkeypatch, make_llm_response,
+    tmp_path, monkeypatch, make_llm_response, decline_fast_path,
 ):
     """The whole chain: the session flag reaches `GenState` in
     `engine.generate`, the brief goes out as a message marker between the
@@ -1066,6 +1140,105 @@ async def test_a_page_that_failed_its_browser_check_comes_back_to_repair(tmp_pat
     assert "do NOT build or repair" not in text and "ask how they want to proceed" not in text
     for step in ("repair it yourself now", "`read_text_file`", "scratchpad cell", "`runView`",
                  "Do NOT call generate_artifact again", "needs no `recall_skill`"):
+        assert step in instruction, step
+    # The check's verdict is per page: a view of a page that still fails is not verified.
+    assert instruction.endswith(
+        "If the page still fails, tell the user it failed its browser check, and do not call it or any "
+        "view in it browser-verified, tested or working."
+    )
+
+
+@pytest.mark.parametrize("used,left", [(1, 1), (2, 0)])
+async def test_a_rebuild_that_failed_its_browser_check_reports_the_repair_cells_left(
+    tmp_path: Path, monkeypatch, used, left
+):
+    """A rebuild of a page that already spent repair cells this turn gets
+    only what is left. With none left the page is out of repair cells: no
+    repair, no screenshot, and never called verified."""
+    from anton.core.tools import tool_handlers
+
+    slug = _make_artifact(tmp_path, type="html-app")
+
+    async def fake_generate(**kw):
+        return _browser_check_failed()
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    key = tool_handlers.PageKey(slug, "dashboard.html")
+    session = _session(tmp_path)
+    session._render_screenshots_refused = False
+    session._repair_cells = {key: used}
+    session._out_of_repairs = set()
+    _, result = await _collect_raw(session, {"slug": slug, "user_request": "rebuild it", "agent_understanding": "a page"})
+
+    body = json.loads(result.content if isinstance(result.content, str) else result.content[0]["text"])
+    assert body["repair_cells"] == left
+    if left:
+        assert session._out_of_repairs == set()
+        assert body["instruction"].startswith(tool_handlers._STATUS_INSTRUCTIONS["browser_check_failed"])
+    else:
+        assert session._out_of_repairs == {key}
+        assert isinstance(result.content, str)
+        assert body["instruction"] == tool_handlers._BUILD_FAILED_NO_REPAIRS_LEFT
+        assert body["instruction"].endswith(
+            "do not call it or any view in it browser-verified, tested or working."
+        )
+
+
+async def test_an_artifact_with_a_page_out_of_repair_cells_is_not_rebuilt(tmp_path: Path, monkeypatch):
+    """A rebuild would write a page the turn must leave as its last check
+    left it: the call is refused before any run."""
+    from anton.core.tools import tool_handlers
+
+    slug = _make_artifact(tmp_path, type="html-app")
+    runs = []
+
+    async def fake_generate(**kw):
+        runs.append(kw)
+        return _browser_check_failed()
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    session = _session(tmp_path)
+    session._out_of_repairs = {tool_handlers.PageKey(slug, "dashboard.html")}
+    _, result = await _collect_raw(session, {"slug": slug, "user_request": "rebuild it", "agent_understanding": "a page"})
+
+    assert runs == []
+    assert result == tool_handlers._OUT_OF_REPAIRS_REFUSED.format(slug=slug, pages=f"`{slug}/dashboard.html`")
+
+
+async def test_a_view_whose_script_did_not_parse_comes_back_to_repair_in_its_own_script(tmp_path: Path, monkeypatch):
+    """One view's script holds a syntax error: the browser skips that script, so its `defineView`
+    never runs and the helper fails the view by name. The repair is told what that message means,
+    to fix that view's script, and to keep each view's code in a script of its own, since merging the
+    scripts would let the next syntax error blank every view again."""
+    from dataclasses import replace
+
+    findings = (
+        "Loaded in a headless browser, the page threw an uncaught exception: "
+        "SyntaxError: missing ) after argument list (index.html line 41) (desktop, phone)",
+        "Loaded in a headless browser, the page logged a console error: "
+        "console.error: Globe failed: no script defined this view (desktop, phone)",
+        "Loaded in a headless browser, a chart, map or canvas stayed blank: "
+        "Globe failed to draw: the page marked div#globe data-view-failed (desktop, phone)",
+    )
+    slug = _make_artifact(tmp_path, type="html-app")
+
+    async def fake_generate(**kw):
+        return replace(_browser_check_failed(), findings=findings)
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    session = _session(tmp_path)
+    session._render_screenshots_refused = True
+    _, result = await _collect_raw(session, {"slug": slug, "user_request": "build it", "agent_understanding": "a page"})
+
+    body = json.loads(result.content)
+    assert body["status"] == "browser_check_failed"
+    assert body["findings"] == list(findings)
+    instruction = " ".join(body["instruction"].split())
+    for step in ('When a view failed with "no script defined this view", its own script did not parse',
+                 "fix that view's script",
+                 'When views failed with "two scripts defined this view", two views share that title',
+                 "keep each view's code in a `<script>` of its own",
+                 "never merges views' scripts"):
         assert step in instruction, step
 
 

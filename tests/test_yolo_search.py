@@ -47,8 +47,8 @@ def test_search_finds_the_file_the_name_did_not_reveal(tmp_path: Path):
 
 
 def test_search_ignores_case(tmp_path: Path):
-    assert haystack(tmp_path).search("OLD TITLE").matches
-    assert haystack(tmp_path).search("old title").matches
+    for query in ("OLD TITLE", "old title"):
+        assert [m.path for m in haystack(tmp_path).search(query).matches] == ["c.js"]
 
 
 def test_search_skips_generated_data(tmp_path: Path):
@@ -167,10 +167,6 @@ def test_search_takes_a_regular_expression(tmp_path: Path):
     found = workspace.search(r"function\s+draw\w+")
     assert sorted(m.path for m in found.matches) == ["a.js", "b.js"]
     assert not found.note
-
-
-def test_a_plain_word_is_still_a_valid_pattern(tmp_path: Path):
-    assert haystack(tmp_path).search("Old Title").matches
 
 
 def test_an_invalid_pattern_comes_back_as_feedback_not_a_crash(tmp_path: Path):

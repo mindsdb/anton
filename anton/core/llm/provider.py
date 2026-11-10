@@ -359,6 +359,21 @@ class StreamReasoningDelta:
 
 
 @dataclass
+class StreamBrowserSession:
+    """The browser tool opened (or reopened) the user's browser session.
+
+    Hosts show the browser beside the chat so the user can watch and take
+    over: the Cowork desktop app shows its own browser, and the web app mints
+    a viewer link for the session with the person's own credential. The
+    event carries the session id only, never a link or a key. Emitted out of
+    band through ``session.emit``; ``tool_use_id`` is not known to the
+    handler, so hosts correlate by ``session_id``.
+    """
+
+    session_id: str
+
+
+@dataclass
 class StreamTurnEnded:
     """Last event of a turn that handed back before finishing.
 
@@ -381,6 +396,7 @@ StreamEvent = (
     | StreamAskUser
     | StreamAskUserAnswered
     | StreamReasoningDelta
+    | StreamBrowserSession
     | StreamTurnEnded
 )
 
@@ -2398,6 +2414,9 @@ class ProviderConnectionInfo:
     base_url: str | None = None
     ssl_verify: bool | None = None
     api_version: str | None = None  # Azure api-version query param
+    # The OpenAI transport the provider sends on (an OpenAIProvider.FLAVOR_*),
+    # so a pad's model calls use the same API as the agent's. None for others.
+    flavor: str | None = None
 
 
 def call_effort(passed: str | None, own: str | None) -> str | None:

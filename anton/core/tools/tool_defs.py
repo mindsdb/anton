@@ -16,6 +16,7 @@ from anton.core.tools.tool_handlers import (
 from anton.core.artifacts.listing import FIELDS as ARTIFACT_LIST_FIELDS
 from anton.core.llm.prompts import cut_spans
 from anton.core.utils.scratchpad import SCRATCHPAD_ACTIONS
+from anton.core.utils.write_hold import handle_approve_held_write
 from anton.core.tools.text_file import DEFAULT_LINE_COUNT, MAX_OUTPUT_CHARS
 
 from dataclasses import dataclass, replace
@@ -69,7 +70,9 @@ SCRATCHPAD_TOOL = ToolDef(
         "sizes the total budget (roughly 2x the estimate; without one the default "
         "budget is small). Call progress(message) to narrate long phases — it is "
         "user-visible status, not a survival requirement.\n\n"
-        "Use print() to produce output. Host Python packages are available by default. "
+        "Use print() to produce output; printed output stops at 10,000 characters, so read "
+        "text files with read_text_file rather than printing them. Host Python packages are "
+        "available by default. "
         "Include a 'packages' array on exec calls for any libraries your code needs — "
         "they'll be auto-installed before the cell runs (already-installed ones are skipped).\n"
         "get_llm() returns a pre-configured LLM client (sync) — call "
@@ -132,6 +135,14 @@ SCRATCHPAD_TOOL = ToolDef(
     },
     handler=handle_scratchpad,
 )
+
+# With internet research off the pad's web_search() only raises, so the
+# description doesn't offer it.
+NO_INTERNET_SCRATCHPAD_TOOL = replace(SCRATCHPAD_TOOL, description=cut_spans(
+    SCRATCHPAD_TOOL.description,
+    ("web_search(query) routes", "sample(var) inspects", ""),
+    ("get_llm, agentic_loop, web_search, sample, and progress", " are already", "get_llm, agentic_loop, sample, and progress"),
+))
 
 
 MEMORIZE_TOOL = ToolDef(
@@ -679,6 +690,81 @@ STATIC_UPDATE_ARTIFACT_METADATA_TOOL = replace(
 )
 
 
+def _without_direct_reports(tool: ToolDef) -> ToolDef:
+    """`tool` with the DIRECT REPORTS routing dropped from its texts."""
+    if tool.name == "create_artifact":
+        return replace(tool, description=cut_spans(
+            tool.description,
+            (
+                ": a report the user has fully specified you build yourself "
+                "(DIRECT REPORTS in the ARTIFACTS section); anything else goes to",
+                " `generate_artifact(",
+                ": it goes to",
+            ),
+        ))
+    return replace(
+        tool,
+        description=cut_spans(
+            tool.description,
+            (
+                " whose requirements still need agreeing (a report the user has fully "
+                "specified is built directly — see DIRECT REPORTS)",
+                ".",
+                "",
+            ),
+        ),
+        prompt=cut_spans(
+            tool.prompt,
+            ("; a report the user has fully specified is built directly (DIRECT REPORTS)", ".\n", ""),
+        ),
+    )
+
+
+CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(CREATE_ARTIFACT_TOOL)
+STATIC_CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(STATIC_CREATE_ARTIFACT_TOOL)
+GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(GENERATE_ARTIFACT_TOOL)
+STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(STATIC_GENERATE_ARTIFACT_TOOL)
+
+_single_call_instructions = (
+    "For a NEW web artifact, call generate_artifact directly with name, user_request, "
+    "user_language and agent_understanding; omit slug. It registers the artifact and "
+    "runs source discovery, generation and the normal verifiers in one operation. "
+    "Do not make a separate create_artifact call or pre-fetch data solely for this "
+    "handoff. Preserve the user's request verbatim. For an EDIT, pass the existing "
+    "slug instead of name so the existing artifact is updated."
+)
+
+
+# No top-level anyOf: providers reject it in tool schemas. The handler requires slug or name.
+def _single_call(tool: ToolDef) -> ToolDef:
+    return replace(
+        tool,
+        description=_single_call_instructions + "\n\n" + tool.description,
+        input_schema={
+            **tool.input_schema,
+            "properties": {**tool.input_schema["properties"],
+                           "name": {"type": "string", "description": "Name of a NEW artifact; omit for an existing-slug edit."}},
+            "required": [key for key in tool.input_schema["required"] if key != "slug"],
+        },
+        prompt="ARTIFACT GENERATION:\n" + _single_call_instructions +
+               "\n`user_language` is the language the user writes to you in; talk to the user in that "
+               "language while the artifact is built and when you report the result. "
+               "`needs_confirmation` means show `brief_summary` and, if the user agrees, call again "
+               "with the SAME `user_request` and `user_language`."
+               "\nFollow the returned instruction; the existing approval and verification rules still apply.",
+    )
+
+
+def _registration_only(tool: ToolDef) -> ToolDef:
+    return replace(tool, description="For end-to-end generation, prefer generate_artifact(name=...) directly. "
+                                     "Use this registration-only tool when writing the files manually.\n\n" + tool.description)
+
+
+GENERATE_ARTIFACT_TOOL = _single_call(GENERATE_ARTIFACT_TOOL)
+STATIC_GENERATE_ARTIFACT_TOOL = _single_call(STATIC_GENERATE_ARTIFACT_TOOL)
+CREATE_ARTIFACT_TOOL = _registration_only(CREATE_ARTIFACT_TOOL)
+STATIC_CREATE_ARTIFACT_TOOL = _registration_only(STATIC_CREATE_ARTIFACT_TOOL)
+
 
 RECALL_TOOL = ToolDef(
     name="recall",
@@ -748,7 +834,8 @@ READ_TEXT_FILE_TOOL = ToolDef(
         f"Returns the first {DEFAULT_LINE_COUNT} lines unless you pass a range; "
         f"`end_line=-1` reads to the end. One call returns at most {MAX_OUTPUT_CHARS:,} "
         "characters. The first line of the result is a header naming the lines "
-        "returned and where to continue; the file's text starts on the next line."
+        "returned and where to continue; the file's text starts on the next line. To read "
+        "several files, call it once per file in the same response."
     ),
     input_schema={
         "type": "object",
@@ -1016,4 +1103,37 @@ ASK_USER_TOOL = ToolDef(
         "required": ["question", "options"],
     },
     handler=handle_ask_user,
+)
+
+
+APPROVE_HELD_WRITE_TOOL = ToolDef(
+    name="approve_held_write",
+    description=(
+        "Ask the user to approve one HTTP request a host held for approval. Some hosts sit "
+        "behind a write relay: a GET or HEAD reaches them, but any other request is held, and "
+        "the host answers HTTP 428 with JSON such as "
+        '{"error": "held_for_approval", "pending_id": "<32 hex characters>", "sha256": "..."}. '
+        "The reply's Write-Relay-Pending-Id header and its status text carry the same pending_id, "
+        "so an error raised for the reply, such as raise_for_status()'s, names it too: read it "
+        "there rather than sending the request again. "
+        "A 428 held_for_approval reply means nothing was written. Call this tool with its "
+        "pending_id: the user sees the exact request and picks Approve or Cancel, and only "
+        "their Approve sends it, once. The result gives the host's answer, or says why nothing "
+        "was sent.\n\n"
+        "A person must approve: don't send the request again, change it to get past the hold, "
+        "or reach the host another way. Call it once per held request. When it isn't approved, "
+        "tell the user what the request would change and that it needs their approval."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "pending_id": {
+                "type": "string",
+                "description": "The pending_id from the host's 428 held_for_approval reply, in its "
+                "JSON, its Write-Relay-Pending-Id header or its status text: 32 lowercase hex characters.",
+            },
+        },
+        "required": ["pending_id"],
+    },
+    handler=handle_approve_held_write,
 )

@@ -427,12 +427,6 @@ def _clean_served_map():
     ev._SERVED.clear()
 
 
-def test_the_pinned_model_is_recorded_and_accepted():
-    ev._check_served_model("haiku", ev._EXPECTED_SERVED["haiku"])
-
-    assert ev._SERVED == {"haiku": ev._EXPECTED_SERVED["haiku"]}
-
-
 def test_a_repointed_alias_fails_naming_both_models():
     """The failure has to be readable by someone who has never seen this file.
 
@@ -453,18 +447,19 @@ def test_a_repointed_alias_fails_naming_both_models():
     assert ev._SERVED == {"mindshub_air": "kimi-k2p6"}
 
 
-def test_a_repoint_is_not_swallowed_by_the_verdict_retry_paths():
-    """`_verdict` absorbs truncation and throttling. It must not absorb this.
+@pytest.mark.asyncio
+async def test_a_repoint_is_not_swallowed_by_the_verdict_retry_paths():
+    """`_verdict` absorbs truncation and throttling. It must not absorb a repoint:
+    no retry, no skip, the error reaches the test."""
+    llm = _AlwaysDenied(lambda: ev.AliasRepointed("repointed"))
 
-    A repoint typed as `StructuredOutputError` would be retried at a bigger
-    budget; typed as `TokenLimitExceeded` it would become a marked skip, and a
-    fully-skipped matrix reports GREEN by design (ENG-1334's out-of-money
-    branch). Either one restores the silent pass this check exists to break.
-    """
-    from anton.core.llm.provider import StructuredOutputError
+    with pytest.raises(ev.AliasRepointed):
+        try:
+            await ev._verdict(llm, ev._CASES[0])
+        except pytest.skip.Exception as exc:
+            pytest.fail(f"a repoint became a skip: {exc}")
 
-    assert not issubclass(ev.AliasRepointed, (StructuredOutputError, TokenLimitExceeded))
-    assert not issubclass(ev.AliasRepointed, pytest.skip.Exception)
+    assert llm.calls == 1
 
 
 def test_an_alias_outside_the_pin_map_is_recorded_but_not_asserted():

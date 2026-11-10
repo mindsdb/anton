@@ -431,7 +431,7 @@ async def generate(
     ``abandoned`` are shared with the tool handler, which puts the page back
     for a run the turn gave up on (`GenState.page_lock`).
     """
-    from .attachments import resolve_attachments
+    from .attachments import KIND_DATA, resolve_attachments
     from .discovery import checkpoint as cp
     from .orchestrator import _artifact_skills, _datasource_catalog, _project_rules, run
     from .spend import SpendGuard
@@ -514,7 +514,17 @@ async def generate(
     # other; the channel is the only thing they share.
     session._artifact_progress = progress
     try:
-        result = await run(state, entry=entry)
+        from . import fast_static
+
+        if (state.act_first
+                and all(attachment.kind == KIND_DATA for attachment in state.attachments)
+                and fast_static.fits(state) and await fast_static.prepare(state)):
+            result = await fast_static.run(state)
+            if result is None:
+                fast_static.reset_discovery(state)
+                result = await run(state, entry=entry)
+        else:
+            result = await run(state, entry=entry)
     except BaseException as exc:
         # A crash is a run outcome too. Without this the trace file simply
         # stops mid-run with no terminal record, and nothing reading it can

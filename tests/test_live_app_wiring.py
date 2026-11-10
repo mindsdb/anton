@@ -4,17 +4,21 @@ relaunch after a cell. With live apps off, each answers as before."""
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import NamedTuple
 
 import pytest
 
 from anton.core.artifacts import backend_launcher
 from anton.core.artifacts import live_app_slots as las
 from anton.core.artifacts.live_app_slots import LiveAppLaunchError, LiveAppLaunchResult, MissingConnection, ProbeResult
+from anton.core.artifacts.page_copies import TurnPages
+from anton.core.artifacts.store import ArtifactStore
 from anton.core.backends.sandbox import BACKENDS_OFF_MESSAGE, CellSandbox
 from anton.core.tools import tool_handlers
 from anton.core.tools.generate_artifact import orchestrator, prompts, verifiers
@@ -273,7 +277,10 @@ async def test_with_live_apps_on_a_fullstack_run_gets_past_the_sandbox_refusal(t
     connections.write_text('{"version": 1, "connections": []}', encoding="utf-8")
     monkeypatch.setenv(las.CONNECTIONS_FILE_ENV_VAR, str(connections))
     state = _gen_state(tmp_path, policy)
-    state.session._live_app_host = SimpleNamespace(launcher=None, launch_token="t" * 64)
+    state.session._live_app_host = SimpleNamespace(
+        launcher=None, launch_token="t" * 64,
+        launch_lock=lambda: None, slots_full=lambda: None, slots_available=lambda: None,
+    )
     assert await orchestrator.run(state, entry=cp.ENTRY_SPEC) == "stopped for the test"
     assert reached == ["data"]
 
@@ -382,6 +389,7 @@ async def test_a_launch_a_new_backend_cant_fix_ends_the_run_as_not_launched(tmp_
 @pytest.mark.parametrize("cause, ok, reason", [
     ("launch_not_approved", True, "live_app_not_approved"),
     ("slots_full", False, "live_app_slots_full"),
+    ("slot_busy", False, "live_app_slots_busy"),
     ("no_slot", False, "live_app_unavailable"),
 ])
 def test_a_generation_that_didnt_launch_reads_as_launch_backend_does(cause, ok, reason):
@@ -389,7 +397,17 @@ def test_a_generation_that_didnt_launch_reads_as_launch_backend_does(cause, ok, 
     assert "launch_backend" in tool_handlers._STATUS_INSTRUCTIONS["not_launched"]
 
 
-async def test_a_run_that_gives_up_stops_the_app_it_launched(tmp_path, policy, live_apps_on, monkeypatch, gen_store):
+# What the run says when the stop of the app it gave up on didn't go
+# through: `stop_live_app` returned the slot, 2 here.
+_STILL_RUNS = (
+    "The app may still be running in slot 2: the run could not stop it. "
+    "It stops by itself after a while with no requests."
+)
+
+
+@pytest.mark.parametrize("left", [None, 2], ids=["stopped", "lock-timeout"])
+async def test_a_run_that_gives_up_stops_the_app_it_launched(tmp_path, policy, live_apps_on, monkeypatch, gen_store,
+                                                             left):
     stopped: list[Path] = []
 
     async def launch(session, **kwargs):
@@ -400,6 +418,7 @@ async def test_a_run_that_gives_up_stops_the_app_it_launched(tmp_path, policy, l
 
     async def stop(session, *, folder):
         stopped.append(folder)
+        return left
 
     monkeypatch.setattr(las, "launch_live_app", launch)
     monkeypatch.setattr(las, "stop_live_app", stop)
@@ -408,14 +427,17 @@ async def test_a_run_that_gives_up_stops_the_app_it_launched(tmp_path, policy, l
     error = await orchestrator._run_and_verify_app(state)
     assert error.startswith("Application failed to launch: health check GET /api/health returned 500")
     assert error.count("Traceback: boom") == 1
+    assert ("may still be running" in error) is (left is not None)
+    assert error.endswith(f"\n\n{_STILL_RUNS}") is (left is not None)
     assert stopped == [tmp_path]
     assert state.app_url is None and state.live_app is None
 
 
+@pytest.mark.parametrize("left", [None, 2], ids=["stopped", "lock-timeout"])
 @pytest.mark.parametrize("stop", ["Error: the backend could not be rebuilt.", orchestrator.OVER_BUDGET],
                          ids=["error", "over-budget"])
 async def test_a_regeneration_that_ends_the_run_stops_the_app_it_launched(tmp_path, policy, live_apps_on,
-                                                                          monkeypatch, gen_store, stop):
+                                                                          monkeypatch, gen_store, stop, left):
     stopped: list[Path] = []
 
     async def launch(session, **kwargs):
@@ -426,15 +448,22 @@ async def test_a_regeneration_that_ends_the_run_stops_the_app_it_launched(tmp_pa
 
     async def record_stop(session, *, folder):
         stopped.append(folder)
+        return left
 
     monkeypatch.setattr(las, "launch_live_app", launch)
     monkeypatch.setattr(las, "stop_live_app", record_stop)
     monkeypatch.setattr(orchestrator, "_gen_verify_backend", regenerate)
     state = _gen_state(tmp_path, policy)
-    assert await orchestrator._run_and_verify_app(state) == stop
+    returned = await orchestrator._run_and_verify_app(state)
     assert stopped == [tmp_path]
     result = orchestrator._stopped_over_budget(state, "the backend could not be rebuilt in time")
     assert "url" not in result and "live_app" not in result
+    note = f"\n\n{_STILL_RUNS}" if left is not None else ""
+    if stop is orchestrator.OVER_BUDGET:
+        assert returned is orchestrator.OVER_BUDGET
+        assert result["detail"] == "the backend could not be rebuilt in time" + note
+    else:
+        assert returned == state.error == stop + note
 
 
 _FAILED_CHECK = "health check GET /api/health returned 500 (expected 200)."
@@ -516,6 +545,29 @@ async def test_any_other_relaunch_failure_stops_the_earlier_app(tmp_path, policy
     assert result["detail"] == (
         f"Not launched: {cause}. The app this run launched earlier failed its check, so the run stopped it: "
         + _FAILED_CHECK
+    )
+
+
+async def test_a_relaunch_failure_whose_stop_failed_says_where_the_app_may_still_run(tmp_path, policy, live_apps_on,
+                                                                                    monkeypatch, gen_store):
+    """The stop timed out on the host's lock: the run never says it stopped
+    the app, and names the slot it may still run in."""
+    _launches(
+        monkeypatch,
+        _result(probe=(ProbeResult(path="/api/health", status=500),)),
+        LiveAppLaunchError("Not launched: slot_busy.", cause="slot_busy"),
+    )
+
+    async def lock_timed_out(session, *, folder):
+        return 2
+
+    monkeypatch.setattr(las, "stop_live_app", lock_timed_out)
+    state = _gen_state(tmp_path, policy)
+    assert await orchestrator._run_and_verify_app(state) is orchestrator.NOT_LAUNCHED
+    result = orchestrator._not_launched(state)
+    assert "url" not in result and "live_app" not in result
+    assert result["detail"] == (
+        f"Not launched: slot_busy. The app this run launched earlier failed its check: {_FAILED_CHECK} {_STILL_RUNS}"
     )
 
 
@@ -620,6 +672,7 @@ def test_with_live_apps_on_the_verifier_fails_a_script_from_another_host():
 @pytest.mark.parametrize("markup, blocked", [
     ('<script type="importmap">{"imports": {"a": "https://unpkg.com/a.js", "b": "./b.js"}}</script>',
      "https://unpkg.com/a.js"),
+    ('<script type="importmap">{"imports": {"a": "https://unpkg.com/a.js"}}</script foo>', "https://unpkg.com/a.js"),
     ('<script type="module">export { x } from "https://esm.sh/x";</script>', "https://esm.sh/x"),
     ("<script type=module>import(`https://esm.sh/y`)</script>", "https://esm.sh/y"),
     ('<script src="https://cdn.jsdelivr.net.evil.com/x.js"></script>', "cdn.jsdelivr.net.evil.com"),
@@ -684,7 +737,7 @@ async def _verify_frontend_live_app(tmp_path, policy, monkeypatch, seen: dict | 
         )
         return {"files_written": ["static/index.html"], "rounds_used": 1, "summary": "s"}
 
-    def fake_verify(html, *, is_fullstack, api_paths=None, live_app=False):
+    def fake_verify(html, *, is_fullstack, api_paths=None, live_app=False, geography=None):
         seen["live_app"] = live_app
         return VerifyResult(errors=[])
 
@@ -858,7 +911,9 @@ async def test_a_cell_that_edits_a_running_app_relaunches_it(tmp_path, policy, l
 
     monkeypatch.setattr(las, "relaunch_changed_apps", relaunch)
     session = SimpleNamespace(_scratchpads=SimpleNamespace(cell_sandbox=policy))
-    lines = await tool_handlers._relaunch_live_apps(session, store, before)
+    lines = await tool_handlers._relaunch_live_apps(
+        session, store, before, after=tool_handlers.snapshot_existing_artifacts(store)
+    )
     assert asked == [["app"]]
     text = tool_handlers.cell_content_with_lint("[output]\nok", tool_handlers.ArtifactLint(live_app_lines=lines),
                                                 cell_ok=True)
@@ -883,7 +938,8 @@ async def test_a_cell_that_edits_only_the_prd_relaunches_nothing(tmp_path, polic
 
     monkeypatch.setattr(las, "relaunch_changed_apps", relaunch)
     session = SimpleNamespace(_scratchpads=SimpleNamespace(cell_sandbox=policy))
-    assert await tool_handlers._relaunch_live_apps(session, store, before) == []
+    after = tool_handlers.snapshot_existing_artifacts(store)
+    assert await tool_handlers._relaunch_live_apps(session, store, before, after=after) == []
     assert asked == [[]]
 
 
@@ -896,7 +952,7 @@ async def test_with_live_apps_off_a_cell_relaunches_nothing(tmp_path, policy, li
 
     monkeypatch.setattr(las, "relaunch_changed_apps", relaunch)
     session = SimpleNamespace(_scratchpads=SimpleNamespace(cell_sandbox=policy))
-    assert await tool_handlers._relaunch_live_apps(session, SimpleNamespace(root=tmp_path), {}) == []
+    assert await tool_handlers._relaunch_live_apps(session, SimpleNamespace(root=tmp_path), {}, after={}) == []
     assert asked == []
     text = tool_handlers.cell_content_with_lint("[output]\nok", tool_handlers.ArtifactLint(), cell_ok=True)
     assert text == "[output]\nok"
@@ -912,6 +968,35 @@ def _running_app(root: Path) -> tuple[str, Path]:
     (folder / "static").mkdir(parents=True, exist_ok=True)
     (folder / "static" / "index.html").write_text("v1", encoding="utf-8")
     return artifact.slug, folder
+
+
+class _HeldPage(NamedTuple):
+    """A running app whose launch page is out of repair cells (`_held_launch_page`)."""
+
+    slug: str
+    store: ArtifactStore
+    page: Path
+    key: tool_handlers.PageKey
+    turn_pages: TurnPages
+    before: dict[str, tool_handlers.ArtifactFiles]
+
+
+def _held_launch_page(*, root: Path) -> _HeldPage:
+    """A running app under ROOT (`_running_app`) whose launch page is held
+    as its last check left it, then changed to text of another length, and
+    the snapshot of ROOT taken after that change, as a cell's `before`. An
+    app made under ROOT first is in that snapshot too."""
+    slug, folder = _running_app(root)
+    store = ArtifactStore(root)
+    page = folder / "static" / "index.html"
+    key = tool_handlers.PageKey(slug, "static/index.html")
+    turn_pages = TurnPages()
+    turn_pages.hold({key}, store)
+    page.write_text("changed before the cell", encoding="utf-8")
+    return _HeldPage(
+        slug=slug, store=store, page=page, key=key, turn_pages=turn_pages,
+        before=tool_handlers.snapshot_existing_artifacts(store),
+    )
 
 
 async def test_a_cells_relaunch_reaches_its_result_through_the_check(tmp_path, policy, live_apps_on, monkeypatch):
@@ -933,6 +1018,80 @@ async def test_a_cells_relaunch_reaches_its_result_through_the_check(tmp_path, p
     assert lint.live_app_lines == [f"Relaunched live app `{slug}`."]
 
 
+async def test_a_held_launch_page_a_cell_left_alone_goes_back_and_relaunches_the_app(
+    tmp_path, policy, live_apps_on, monkeypatch,
+):
+    """The app's launch page is out of repair cells and held as its last
+    check left it, then changes before a cell that leaves it alone. The
+    cell's own snapshot sees no change, but anton writes the held page back
+    through a rename, and the running app relaunches on the page as put back."""
+    held = _held_launch_page(root=tmp_path / "artifacts")
+    asked: list[list[str]] = []
+
+    async def relaunch(session, store_arg, slugs):
+        asked.append(list(slugs))
+        return [f"Relaunched live app `{s}`." for s in slugs]
+
+    monkeypatch.setattr(las, "relaunch_changed_apps", relaunch)
+    monkeypatch.delenv("ANTON_RENDER_CHECK_URL", raising=False)
+    session = SimpleNamespace(
+        _scratchpads=SimpleNamespace(cell_sandbox=policy), _artifacts_touched=set(),
+        _turn_pages=held.turn_pages, _out_of_repairs={held.key},
+    )
+    lint = await tool_handlers.check_cell_artifacts(session, store=held.store, before=held.before)
+
+    assert held.page.read_text(encoding="utf-8") == "v1"
+    assert asked == [[held.slug]]
+    assert lint.live_app_lines == [f"Relaunched live app `{held.slug}`."]
+
+
+async def test_a_put_back_whose_read_after_fails_still_relaunches_the_cells_own_edit(
+    tmp_path, policy, live_apps_on, monkeypatch, caplog,
+):
+    """One app's held launch page goes back while the cell edits another
+    app's launch page, and the read of the artifacts folder after the
+    put-back fails. A warning names the failed read, the held page is still
+    back, and the app the cell edited relaunches from the cell's own read."""
+    root = tmp_path / "artifacts"
+    edited_slug, edited_folder = _running_app(root)
+    held = _held_launch_page(root=root)
+    (edited_folder / "static" / "index.html").write_text("version two", encoding="utf-8")
+    asked: list[list[str]] = []
+
+    async def relaunch(session, store_arg, slugs):
+        asked.append(list(slugs))
+        return [f"Relaunched live app `{s}`." for s in slugs]
+
+    real_snapshot = tool_handlers.snapshot_existing_artifacts
+    reads: list[object] = []
+
+    def snapshot_failing_once(store_arg):
+        # Only the read after the put-back fails; the lint's read after it succeeds.
+        reads.append(store_arg)
+        if len(reads) == 1:
+            raise OSError("artifacts folder unreadable")
+        return real_snapshot(store_arg)
+
+    monkeypatch.setattr(las, "relaunch_changed_apps", relaunch)
+    monkeypatch.setattr(tool_handlers, "snapshot_existing_artifacts", snapshot_failing_once)
+    monkeypatch.delenv("ANTON_RENDER_CHECK_URL", raising=False)
+    session = SimpleNamespace(
+        _scratchpads=SimpleNamespace(cell_sandbox=policy), _artifacts_touched=set(),
+        _turn_pages=held.turn_pages, _out_of_repairs={held.key},
+    )
+    with caplog.at_level(logging.WARNING, logger=tool_handlers.__name__):
+        lint = await tool_handlers.check_cell_artifacts(session, store=held.store, before=held.before)
+
+    assert held.page.read_text(encoding="utf-8") == "v1"
+    assert asked == [[edited_slug]]
+    assert lint.live_app_lines == [f"Relaunched live app `{edited_slug}`."]
+    warnings = [
+        record.getMessage() for record in caplog.records
+        if record.name == tool_handlers.__name__ and record.levelno == logging.WARNING
+    ]
+    assert warnings == ["could not read the artifacts folder after putting pages back"]
+
+
 async def test_a_cell_inside_a_generation_leaves_its_app_alone(tmp_path, policy, live_apps_on, monkeypatch):
     root = tmp_path / "artifacts"
     slug, folder = _running_app(root)
@@ -947,7 +1106,7 @@ async def test_a_cell_inside_a_generation_leaves_its_app_alone(tmp_path, policy,
 
     monkeypatch.setattr(las, "relaunch_changed_apps", relaunch)
     session = SimpleNamespace(_scratchpads=SimpleNamespace(cell_sandbox=policy), _live_apps_building={slug})
-    await tool_handlers._relaunch_live_apps(session, store, before)
+    await tool_handlers._relaunch_live_apps(session, store, before, after=tool_handlers.snapshot_existing_artifacts(store))
     assert asked == [[]]
 
 

@@ -50,24 +50,12 @@ async def test_a_connected_engine_note_reaches_the_system_prompt():
             "turn_key": "tk",
             "connections": [{"engine": "google_drive", "name": "primary"}],
         },
-        connectors={"google_drive": {"usage_notes": DRIVE_MARKER}},
-    )
-
-    assert prompt.count(DRIVE_MARKER) == 1
-    assert prompt.index("### Slug: `google_drive-primary`") < prompt.index(DRIVE_MARKER)
-
-
-async def test_a_note_for_an_engine_the_turn_does_not_have_is_left_out():
-    prompt = await _system_prompt(
-        oauth={
-            "turn_key": "tk",
-            "connections": [{"engine": "google_drive", "name": "primary"}],
-        },
         connectors={
             "google_drive": {"usage_notes": DRIVE_MARKER},
             "gmail": {"usage_notes": GMAIL_MARKER},
         },
     )
 
-    assert DRIVE_MARKER in prompt
+    assert prompt.count(DRIVE_MARKER) == 1
+    assert prompt.index("### Slug: `google_drive-primary`") < prompt.index(DRIVE_MARKER)
     assert GMAIL_MARKER not in prompt

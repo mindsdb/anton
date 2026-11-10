@@ -43,6 +43,15 @@ class CoreSettings(BaseSettings):
     verifier_jev_timeout_s: float = 2.0
     # Minimum probability of Jev's COMPLETE/WAITING for it to decide without the LLM.
     verifier_jev_min_p: float = 0.8
+    # The `browser` tool. Where the browser is comes only from the host
+    # (ChatSessionConfig.browser), never from settings. These tune the tool:
+    # how much Jev steers it ("on" takes its confident steps, "shadow" only
+    # records its picks against the model's, "off" never asks), the bar a Jev
+    # step must clear, Jev's time limit, and the most steps one `run` takes.
+    browser_jev: Literal["on", "shadow", "off"] = "shadow"
+    browser_jev_min_p: float = 0.8
+    browser_jev_timeout_s: float = 4.0
+    browser_max_steps: int = 15
     # Hold a scratchpad cell that changes a database; deletes, renames, moves
     # or overwrites a file that existed when the turn began; or sends an HTTP
     # PUT, PATCH or DELETE, until the user picks Approve; anything else
@@ -60,6 +69,20 @@ class CoreSettings(BaseSettings):
     # URL the code picks when it runs matches whatever it could fill. A bad
     # entry is skipped with a WARNING.
     write_approval_http: str = ""
+    # The write relay's control address, where anton reads and cancels the
+    # requests it holds (ANTON_WRITE_RELAY_URL, as in
+    # "http://write-relay:8090"). When set, a session that can ask the user
+    # offers the `approve_held_write` tool. Unset by default: only a stack
+    # that runs the relay sets it.
+    write_relay_url: str | None = None
+    # The hosts the write relay holds writes for (ANTON_WRITE_RELAY_HOSTS):
+    # `host:port` entries separated by newlines or commas, an entry without
+    # a port meaning port 80. Under `write_approval`, with `write_relay_url`
+    # set, a request other than a GET or HEAD whose method and `http://` URL
+    # the code writes out to one of them raises no card from the cell's
+    # check: the relay holds it and `approve_held_write` asks
+    # (`write_hold.held_by_relay`). A bad entry is skipped with a WARNING.
+    write_relay_hosts: str = ""
     # Per-turn spend ceiling in RAW tokens — input + output + cache_read +
     # cache_creation, i.e. `TurnCost.total_tokens` (ENG-1286). 0 disables it.
     #

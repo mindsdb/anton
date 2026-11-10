@@ -334,6 +334,14 @@ def make_llm_response():
 
 
 @pytest.fixture(autouse=True)
+def _no_shared_memory_pins():
+    """Memory pins live in the process by conversation id, and tests reuse ids."""
+    from anton.core import session
+
+    session._MEMORY_PINS.clear()
+
+
+@pytest.fixture(autouse=True)
 def _no_browser_windows(monkeypatch):
     """No test may pop a real browser window.
 
@@ -509,6 +517,19 @@ def _no_user_registry(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture()
+def skills_tmp(tmp_path_factory, monkeypatch):
+    """Route a cloud turn's per-turn mkdtemp skills staging into pytest tmp.
+
+    Outside `tmp_path`, which the cloud session tests use as the workspace
+    mount, because the real staging lives outside the mount."""
+    import tempfile
+
+    root = tmp_path_factory.mktemp("skills-scratch")
+    monkeypatch.setattr(tempfile, "tempdir", str(root))
+    return root
+
+
+@pytest.fixture()
 def usage_lines(caplog) -> Callable[[], list[dict]]:
     """Read back the `llm_usage` lines logged so far, parsed; the test sets ANTON_USAGE_LOG."""
     caplog.set_level("INFO", logger="anton.usage")
@@ -552,3 +573,11 @@ def _no_shared_verifier_latches():
     _SHARED_VERIFIER_LATCHES.clear()
     yield
     _SHARED_VERIFIER_LATCHES.clear()
+
+
+@pytest.fixture
+def decline_fast_path(monkeypatch):
+    """For tests of the full page pipeline, which a page takes when the fast path declines."""
+    from anton.core.tools.generate_artifact import fast_static
+
+    monkeypatch.setattr(fast_static, "prepare", AsyncMock(return_value=False))

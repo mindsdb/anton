@@ -13,8 +13,11 @@ from anton.utils.datasources import _SCRUB_MARKER
 
 
 if TYPE_CHECKING:
+    from rich.console import Console
+
     from anton.core.datasources.datasource_registry import DatasourceEngine, DatasourceField
     from anton.core.session import ChatSession
+    from anton.publisher import ArtifactShareOrgRequiredError
 
 
 SECRET_NAME_TOKENS = (
@@ -517,6 +520,18 @@ def _previewable_html(path: "Path"):
     return htmls[0] if htmls else None
 
 
+def _share_org_refused(console: "Console", err: "ArtifactShareOrgRequiredError") -> str:
+    """Show the service's reason for refusing an org-wide share, and tell the
+    agent not to publish to a wider audience instead."""
+    from rich.markup import escape
+
+    from anton.publisher import SHARE_ORG_REQUIRED_INSTRUCTION
+
+    console.print(f"  [anton.error]Publish failed: {escape(err.reason)}[/]")
+    console.print()
+    return f"PUBLISH FAILED: {err.reason} {SHARE_ORG_REQUIRED_INSTRUCTION}"
+
+
 async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str:
     """Interactive preview/publish flow after dashboard creation.
 
@@ -603,7 +618,12 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     # Publish flow
     import urllib.error
 
-    from anton.publisher import ArtifactOwnedByOtherUserError, publish
+    from anton.minds_client import describe_minds_request_failure
+    from anton.publisher import (
+        ArtifactOwnedByOtherUserError,
+        ArtifactShareOrgRequiredError,
+        publish,
+    )
 
     if not settings.minds_api_key:
         console.print()
@@ -620,6 +640,7 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     import json as _json
 
     from rich.live import Live
+    from rich.markup import escape
     from rich.spinner import Spinner
 
     from anton.utils.prompt import prompt_or_cancel
@@ -704,11 +725,13 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
                 "that the existing link belongs to another account, and that they can "
                 "publish their own copy by running /publish and choosing 'new'."
             )
+        except ArtifactShareOrgRequiredError as e:
+            return _share_org_refused(console, e)
         except Exception as e:
-            # Only a 404 says the report is gone, so publishing it afresh
-            # without report_id is safe. After a timeout, a 5xx or a 409 the
-            # report may still exist, and a retry would publish a copy under
-            # a new URL.
+            # Only a 404 from the upload itself says the report is gone, so
+            # publishing it afresh without report_id is safe. After a timeout,
+            # a 5xx, a 409 or a failed or timed-out async job the report may
+            # still exist, and a retry would publish a copy under a new URL.
             gone = isinstance(e, urllib.error.HTTPError) and e.code == 404
             if report_id and gone:
                 try:
@@ -721,14 +744,18 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
                         pwd_version=pwd_version,
                         access_version=access_version,
                     )
+                except ArtifactShareOrgRequiredError as e2:
+                    return _share_org_refused(console, e2)
                 except Exception as e2:
-                    console.print(f"  [anton.error]Publish failed: {e2}[/]")
+                    failure = describe_minds_request_failure(e2) or str(e2)
+                    console.print(f"  [anton.error]Publish failed: {escape(failure)}[/]")
                     console.print()
-                    return f"PUBLISH FAILED: {e2}"
+                    return f"PUBLISH FAILED: {failure}"
             else:
-                console.print(f"  [anton.error]Publish failed: {e}[/]")
+                failure = describe_minds_request_failure(e) or str(e)
+                console.print(f"  [anton.error]Publish failed: {escape(failure)}[/]")
                 console.print()
-                return f"PUBLISH FAILED: {e}"
+                return f"PUBLISH FAILED: {failure}"
 
     view_url = result.get("view_url", "")
     returned_report_id = result.get("report_id", "")

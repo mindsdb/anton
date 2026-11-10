@@ -81,13 +81,27 @@ def test_label_recognises_gemini():
     assert openai_compatible_label(_cfg(base, "https://api.mindshub.ai")) == "Google Gemini"
 
 
-def test_setup_summary_uses_the_same_label():
+async def test_setup_summary_uses_the_same_label(tmp_path, monkeypatch):
     """/setup must not disagree with the startup summary about the endpoint."""
-    import inspect
+    from rich.console import Console
 
     from anton.commands import setup
 
-    src = inspect.getsource(setup.handle_setup_models)
-    assert "openai_compatible_label" in src
-    # The old substring check must not survive anywhere in this module.
-    assert "mindshub.ai\" in" not in inspect.getsource(setup)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    async def _back(*a, **kw):
+        return "q"
+
+    monkeypatch.setattr(setup, "prompt_or_cancel", _back)
+    settings = SimpleNamespace(
+        planning_provider="openai-compatible",
+        planning_model="gemini-2.5-pro",
+        coding_model="gemini-2.5-pro",
+        openai_base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        minds_url="https://api.mindshub.ai",
+    )
+    console = Console(record=True, width=200)
+    session = object()
+    result = await setup.handle_setup_models(console, settings, None, {}, None, None, session)
+    assert result is session
+    assert "Provider: Google Gemini" in console.export_text()

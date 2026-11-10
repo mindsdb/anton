@@ -8,7 +8,6 @@ from anton.core.tools.generate_artifact.state import (
     GEN_VERIFY_MAX_RETRIES,
     JOURNAL_DETAIL_MAX,
     RUNAPP_MAX_RETRIES,
-    FetchVerdict,
     GenState,
     RequiredData,
     StepResult,
@@ -23,35 +22,9 @@ def test_budgets_match_spec():
     assert RUNAPP_MAX_RETRIES == 1
 
 
-def test_verdict_models_validate():
-    rd = RequiredData(items=[{"name": "orders", "where": "postgres", "why": "chart"}], reasoning="r")
-    assert rd.items[0].name == "orders"
-    fv = FetchVerdict(possible=False, reasoning="no source")
-    assert fv.possible is False
-
-
 def test_verify_result_ok_is_derived():
     assert VerifyResult(errors=[], warnings=["w"]).ok is True
     assert VerifyResult(errors=["e"], warnings=[]).ok is False
-
-
-def test_genstate_defaults():
-    st = GenState(
-        session=object(),
-        artifact_type="html-app",
-        artifact_path=Path("/tmp/x"),
-        slug="x",
-        brief="b",
-        is_fullstack=False,
-    )
-    assert st.data_iterations == 0
-    assert st.data_notes == ""
-    assert st.api_spec is None
-    assert st.files_written == []
-    assert st.trace == []
-    assert st.error is None
-    st.trace.append(StepResult(node="is_data_enough", outcome="yes"))
-    assert st.trace[0].node == "is_data_enough"
 
 
 def test_genstate_journal_is_compact_and_capped():
@@ -104,6 +77,14 @@ def test_genstate_carries_the_discovery_fields():
     assert state.final_artifact_type == ""
     assert state.call_changed is False
     assert state.spend is None
+    assert state.data_iterations == 0
+    assert state.data_notes == ""
+    assert state.api_spec is None
+    assert state.files_written == []
+    assert state.trace == []
+    assert state.error is None
+    state.trace.append(StepResult(node="is_data_enough", outcome="yes"))
+    assert state.trace[0].node == "is_data_enough"
 
     state.record_qa("Which range?", "weekly")
     assert "weekly" in state.qa_log_markdown()

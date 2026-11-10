@@ -558,3 +558,171 @@ class TestAnthropicNativeWebTools:
             # No tools array at all — backward-compatible with the no-tools case
             assert "tools" not in kwargs
             assert "extra_headers" not in kwargs
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Prompt caching on a direct Anthropic key
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _count_marks(kwargs: dict) -> int:
+    """Number of cache_control marks anywhere in the request."""
+    def walk(node) -> int:
+        if isinstance(node, dict):
+            return ("cache_control" in node) + sum(walk(v) for v in node.values())
+        if isinstance(node, list):
+            return sum(walk(v) for v in node)
+        return 0
+    return walk(kwargs)
+
+
+async def _complete_kwargs(*, system: str, messages: list[dict], response=None) -> dict:
+    with patch("anton.core.llm.anthropic.anthropic") as mock_anthropic:
+        mock_client = AsyncMock()
+        mock_anthropic.AsyncAnthropic.return_value = mock_client
+        mock_client.messages.create = AsyncMock(return_value=response or _stub_text_response())
+        provider = AnthropicProvider(api_key="k")
+        await provider.complete(model="claude-sonnet-4-6", system=system, messages=messages)
+        return mock_client.messages.create.call_args[1]
+
+
+def _stream_events(cache_read_tokens: int = 0) -> list:
+    return [
+        SimpleNamespace(type="message_start", message=SimpleNamespace(
+            model="claude-sonnet-4-6",
+            usage=SimpleNamespace(
+                input_tokens=1_000, output_tokens=0,
+                cache_read_input_tokens=cache_read_tokens, cache_creation_input_tokens=0,
+            ),
+        )),
+        SimpleNamespace(type="content_block_start", index=0, content_block=SimpleNamespace(type="text")),
+        SimpleNamespace(type="content_block_delta", index=0, delta=SimpleNamespace(type="text_delta", text="ok")),
+        SimpleNamespace(type="content_block_stop", index=0),
+        SimpleNamespace(
+            type="message_delta",
+            delta=SimpleNamespace(stop_reason="end_turn"),
+            usage=SimpleNamespace(output_tokens=1),
+        ),
+    ]
+
+
+async def _stream_kwargs(*, system: str, messages: list[dict], events: list | None = None):
+    """Request kwargs of one stream() call, and its last event."""
+    with patch("anton.core.llm.anthropic.anthropic") as mock_anthropic:
+        mock_client = AsyncMock()
+        mock_client.messages.stream = MagicMock(return_value=_FakeAnthropicStream(events or _stream_events()))
+        mock_anthropic.AsyncAnthropic.return_value = mock_client
+        provider = AnthropicProvider(api_key="k")
+        final = None
+        async for event in provider.stream(model="claude-sonnet-4-6", system=system, messages=messages):
+            final = event
+        return mock_client.messages.stream.call_args[1], final
+
+
+class TestAnthropicPromptCaching:
+    async def test_system_is_split_at_the_session_marker_and_both_parts_marked(self):
+        from anton.core.llm.prompt_builder import SESSION_CONTEXT_MARKER
+
+        system = "shared rules" + SESSION_CONTEXT_MARKER + "memory and workspace"
+        kwargs = await _complete_kwargs(system=system, messages=[{"role": "user", "content": "hi"}])
+
+        blocks = kwargs["system"]
+        assert [b["text"] for b in blocks] == ["shared rules", SESSION_CONTEXT_MARKER + "memory and workspace"]
+        assert all(b["cache_control"] == {"type": "ephemeral"} for b in blocks)
+        assert "".join(b["text"] for b in blocks) == system
+
+    async def test_system_without_marker_is_one_marked_block(self):
+        kwargs = await _complete_kwargs(system="be helpful", messages=[{"role": "user", "content": "hi"}])
+
+        assert kwargs["system"] == [
+            {"type": "text", "text": "be helpful", "cache_control": {"type": "ephemeral"}}
+        ]
+
+    async def test_last_message_is_marked_and_history_is_not_modified(self):
+        history = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "scratchpad", "input": {}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "out"},
+                {"type": "text", "text": "note"},
+            ]},
+        ]
+        before = [dict(m) for m in history]
+
+        kwargs, _ = await _stream_kwargs(system="s", messages=history)
+
+        sent = kwargs["messages"]
+        assert sent[:2] == history[:2]
+        assert sent[-1]["content"][0] == {"type": "tool_result", "tool_use_id": "t1", "content": "out"}
+        assert sent[-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+        assert history == before
+        assert _count_marks({"messages": history}) == 0
+
+    async def test_string_last_message_becomes_a_marked_text_block(self):
+        kwargs, _ = await _stream_kwargs(system="s", messages=[{"role": "user", "content": "hi"}])
+
+        assert kwargs["messages"] == [{"role": "user", "content": [
+            {"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}
+        ]}]
+
+    async def test_thinking_block_is_never_marked(self):
+        messages = [{"role": "assistant", "content": [
+            {"type": "text", "text": "answer"},
+            {"type": "thinking", "thinking": "", "signature": "sig"},
+        ]}]
+
+        kwargs, _ = await _stream_kwargs(system="s", messages=messages)
+
+        content = kwargs["messages"][-1]["content"]
+        assert "cache_control" not in content[-1]
+        assert content[0]["cache_control"] == {"type": "ephemeral"}
+
+    async def test_marks_stay_within_the_limit_as_the_conversation_grows(self):
+        from anton.core.llm.prompt_builder import SESSION_CONTEXT_MARKER
+
+        system = "shared" + SESSION_CONTEXT_MARKER + "tail"
+        history = [{"role": "user", "content": "q"}]
+        for i in range(3):
+            kwargs, _ = await _stream_kwargs(system=system, messages=history)
+            assert _count_marks(kwargs) == 3
+            history += [
+                {"role": "assistant", "content": [{"type": "tool_use", "id": f"t{i}", "name": "x", "input": {}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{i}", "content": "r"}]},
+            ]
+
+    async def test_complete_leaves_messages_unmarked(self):
+        messages = [{"role": "user", "content": "hi"}]
+
+        kwargs = await _complete_kwargs(system="s", messages=messages)
+
+        assert kwargs["messages"] == messages
+        assert _count_marks(kwargs) == 1
+
+    async def test_context_pressure_counts_cached_tokens(self):
+        response = _stub_text_response()
+        response.usage.input_tokens = 1_000
+        response.usage.cache_read_input_tokens = 89_000
+        response.usage.cache_creation_input_tokens = 10_000
+
+        with patch("anton.core.llm.anthropic.anthropic") as mock_anthropic:
+            mock_client = AsyncMock()
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
+            mock_client.messages.create = AsyncMock(return_value=response)
+            provider = AnthropicProvider(api_key="k")
+            result = await provider.complete(
+                model="claude-sonnet-4-6", system="s", messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert result.usage.input_tokens == 1_000
+        assert result.usage.cache_read_tokens == 89_000
+        assert result.usage.context_pressure == compute_context_pressure("claude-sonnet-4-6", 100_000)
+
+    async def test_stream_sends_marks_and_counts_cached_tokens(self):
+        kwargs, final = await _stream_kwargs(
+            system="s", messages=[{"role": "user", "content": "hi"}],
+            events=_stream_events(cache_read_tokens=99_000),
+        )
+
+        assert kwargs["system"][0]["cache_control"] == {"type": "ephemeral"}
+        assert kwargs["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+        assert final.response.usage.context_pressure == compute_context_pressure("claude-sonnet-4-6", 100_000)

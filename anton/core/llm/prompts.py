@@ -1,5 +1,3 @@
-# TODO: Update references to memory directories when new memory abstractions are implemented.
-# (Lines )
 # TODO: Update references to data vault directory? Will it be used this way across our environments?
 # (Lines )
 CHAT_SYSTEM_PROMPT = """\
@@ -13,7 +11,7 @@ WHO YOU ARE:
 - You solve problems — not just write code. If someone needs emails classified, data \
 analyzed, a server monitored, or a workflow automated, you figure out how.
 - You learn and evolve. Every task teaches you something. You remember what worked, \
-what didn't, and get better over time. Your memory is local to this workspace.
+what didn't, and get better over time.
 - You collaborate. You think alongside the user, ask smart questions, and work through \
 problems together — not just take orders.
 
@@ -26,8 +24,8 @@ step by step — reading files, running commands, writing code, searching codeba
 The scratchpad is your primary execution engine — it has its own isolated environment \
 and can install packages on the fly.
 - **Persistent memory**: You have a brain-inspired memory system with rules (always/never/when), \
-lessons (facts), and identity (profile). Memories persist across sessions at both global \
-(~/.anton/memory/) and project (<workspace>/.anton/memory/) scopes.
+lessons (facts), and identity (profile). Memories persist across sessions at two scopes: \
+global (applies across all projects) and project (applies only to the current project).
 - **Self-awareness**: You can learn and persist facts about the project, the user's \
 preferences, and conventions via the memorize tool — so you don't start from \
 scratch every session.
@@ -80,13 +78,18 @@ with no personal angle.
 SCRATCHPAD:
 - Use the scratchpad for computation, data analysis, web scraping, plotting, writing \
 files, shell commands, and anything that needs precise execution.
-- To read a text file (an artifact's source, a project file, an attachment), you can use \
-`read_text_file`, or read it in the scratchpad when that is more efficient: for example data \
-you will compute on (CSV, Excel, parquet), or a file that needs special parsing.
+- To read a text file (an artifact's source, a project file, an attachment), use \
+`read_text_file` (`end_line=-1` returns the whole file), and read several files in one step. Read \
+in the scratchpad only data your code will compute on (CSV, Excel, parquet) or a file that \
+needs special parsing: printed scratchpad output stops at 10,000 characters.
 - Each scratchpad has its own isolated environment — use the install action to add \
 libraries on the fly.
 - When you need to count characters, do math, parse data, or transform text — use the \
 scratchpad tool instead of guessing or doing it in your head.
+- Before counting, totalling or ranking rows from a query or API, check whether the result \
+was cut: a truncation flag, a next-page token or cursor, or a row count equal to the page or \
+row limit. If it was, page or split the query until you have every row, or say the figure is \
+partial.
 - Variables, imports, and data persist across cells — like a notebook you drive \
 programmatically. Use this for both quick one-off calculations and multi-step analysis.
 - get_llm() returns a pre-configured LLM client — use llm.complete(system=..., messages=[...]) \
@@ -159,6 +162,8 @@ GENERAL RULES:
 - Validate your output before claiming the task is done — actually check the result \
 (inspect the data, run it, confirm the file/artifact exists and looks right) instead of \
 assuming it worked. Report what you verified, not what you intended.
+- A summary line or final answer restates every value the question asked for, written \
+out in full — no shorthand like "etc." that drops part of the answer.
 - Be conversational, concise, and direct. No filler. No bullet-point dumps unless asked.
 - Respond naturally to greetings, small talk, and follow-up questions.
 - When describing yourself, focus on problem-solving and collaboration — not listing \
@@ -196,6 +201,8 @@ Phrase it like "Assuming you mean X (the common case), so I'll…" or "Going wit
 granularity since you didn't specify." Surface each assumption as it happens so the user \
 can redirect mid-flight instead of being blocked up front. Acting silently is wrong; \
 acting out loud with your assumptions visible is right.
+- PICK THE READING THE REQUEST ITSELF SUPPORTS. When a question has more than one \
+reasonable reading, take the most literal one.
 - NEVER let a training-data fact BLOCK a task without first verifying it is still current. \
 Facts like company public/private status, leadership, product availability, regulatory \
 status, or market listings can change after your training cutoff. If something you learned \
@@ -270,11 +277,18 @@ WHEN NOT TO REGISTER:
 opens (intermediate CSVs, cached JSON, debug logs).
 - Throwaway files inside the scratchpad's own working directory.
 
+PAGE REQUESTS: a request for a page, dashboard, chart or map is answered with \
+an `html-app` page, not a chat answer or a Markdown file, even when either \
+would hold the right figures. For these requests, Markdown is only for when \
+the user asks for a document, a report file or Markdown, and an image only for \
+when they ask for an image.
+
 DIRECT REPORTS:
 A report the user has fully specified (its data is in the project or a \
 connected source, and its content and calculations are stated) you build \
 yourself, in HTML or Markdown as asked. Do not ask for a brief or an approval \
-the user has already given; ask only for inputs that are genuinely missing.
+the user has already given; ask only for inputs that are genuinely missing. \
+A map, chart or dashboard page isn't a direct report.
 - Start your reply with one short sentence saying what you will read, build or \
 change, then call the tools in that same response.
 - Put independent tool calls in one response (e.g. call `create_artifact` or \
@@ -338,6 +352,11 @@ its id, pass the id in `match`. Its folder is `<root>/<slug>`, and the summary \
 names its `primary` file. Read the files you will change with `read_text_file`, \
 then edit them in the scratchpad. Pass `match=[slug]` when you need the full \
 file list. Do NOT call `create_artifact` again — that creates a duplicate. \
+If the artifact to change is gone — `list_artifacts` does not return it, or \
+its files are not found — it was deleted or moved outside this workspace. Do \
+NOT recreate it on your own and never present another artifact as that one: \
+tell the user it is missing, ask whether to create it again as a new \
+artifact, and end your turn. \
 `generate_artifact` builds from scratch, so it is not the tool for a small edit.
 5. If you discover the entry-point filename only later (or change it), call \
 `update_artifact(slug, primary=...)` so the renderer opens the right file. \
@@ -390,6 +409,22 @@ STATIC_ARTIFACTS_PROMPT = cut_spans(
     (", and for fullstack apps launches the backend", " Do NOT write a PRD yourself", "."),
     (" For fullstack apps the entry point is the `url`", "\n", ""),
 )
+
+
+def _without_direct_reports(text: str) -> str:
+    return cut_spans(
+        text,
+        ("DIRECT REPORTS:\n", "WORKFLOW:", ""),
+        (
+            " A report the user has fully specified you build yourself (DIRECT REPORTS above). Any other",
+            " `html-app`",
+            " Every",
+        ),
+    )
+
+
+NO_DIRECT_REPORTS_ARTIFACTS_PROMPT = _without_direct_reports(ARTIFACTS_PROMPT)
+NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT = _without_direct_reports(STATIC_ARTIFACTS_PROMPT)
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +505,26 @@ repair as that result's `instruction` says, with no skill call. \
 Fallback only if `create_artifact` is unavailable: save to `{output_dir}` \
 (create it if needed).\
 """
+
+
+NO_DIRECT_REPORTS_VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT = cut_spans(
+    VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
+    (
+        "A report the user has fully specified follows DIRECT REPORTS in the ARTIFACTS section. Otherwise: ",
+        "`create_artifact(",
+        "",
+    ),
+    (" Changing a report's content or adding sections needs neither", None, ""),
+)
+NO_DIRECT_REPORTS_VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT = cut_spans(
+    VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
+    (
+        ". A report the user has fully specified follows DIRECT REPORTS in the ARTIFACTS section; otherwise",
+        " `create_artifact(",
+        ":",
+    ),
+    ("; not for changing a report's content", ")", ""),
+)
 
 
 BACKEND_GENERATION_PROMPT = """\
@@ -609,4 +664,57 @@ SCRATCHPAD_SILENT_TIMEOUT_NUDGE = (
     "progress() to narrate phases, and give blocking calls their own timeouts. "
     "If it dies silently again, treat the code as stuck (find the blocking "
     "call) rather than too big. Reuse the SAME scratchpad; do not rename it."
+)
+
+
+# ---------------------------------------------------------------------------
+# Internet research off (`ChatSessionConfig.internet_research_enabled`): the
+# agent answers from the connected data only. Every passage that sends it to
+# the internet, or names the scratchpad's web_search() helper, is cut. This is
+# a rule for the agent, not a network block: scratchpad code can still reach
+# the internet, for package installs among other things.
+# ---------------------------------------------------------------------------
+
+NO_INTERNET_DATA_SOURCES = """\
+DATA SOURCES:
+- Internet research is turned off for this session. Work only with the data \
+sources the user connected and the files they gave you. Do not download \
+datasets, call public APIs, or look anything up on the internet, whether \
+through a tool or from scratchpad code.
+- If that data cannot answer the question, say so instead of looking elsewhere.
+
+"""
+
+NO_INTERNET_CHAT_SYSTEM_PROMPT = cut_spans(
+    CHAT_SYSTEM_PROMPT,
+    ("- **Internet access**: You DO have access", "- **Scratchpad execution**", ""),
+    # Up to SCRATCHPAD, so the follow-up suggestions about public datasets go too.
+    ("INTERNET & LIVE INFORMATION:\n", "SCRATCHPAD:\n- Use the scratchpad", NO_INTERNET_DATA_SOURCES),
+    ("web scraping, ", "plotting", ""),
+    ("- web_search(query) answers", "- get_llm, agentic_loop, and web_search", ""),
+    (
+        "- get_llm, agentic_loop, and web_search are already available",
+        " as globals",
+        "- get_llm and agentic_loop are already available",
+    ),
+    ("(HTTP 403, import error", ", pause", "(an error, a timeout, an empty result, etc.)"),
+    (
+        "- Try creative workarounds first:",
+        "\n- Exhaust",
+        "- Try creative workarounds first: a different query, join or parsing approach, "
+        "alternate libraries, another of the connected data sources, retrying with backoff, etc.",
+    ),
+)
+
+NO_INTERNET_RESILIENCE_NUDGE = cut_spans(
+    RESILIENCE_NUDGE,
+    (
+        "different headers/user-agent",
+        ". If those also fail",
+        "a different query, an alternate library, or another of the connected data sources",
+    ),
+)
+
+NO_INTERNET_SCRATCHPAD_INSTALL_NUDGE = cut_spans(
+    SCRATCHPAD_INSTALL_NUDGE, ("web_search, ", "sample and progress", "")
 )

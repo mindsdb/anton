@@ -456,7 +456,7 @@ def test_agent_facing_texts_name_the_url_as_the_fullstack_entry_point():
 
 # ── Task 10: public generate() delegate ──────────────────────────────────────
 
-async def test_public_generate_delegates_to_run(tmp_path: Path, monkeypatch):
+async def test_public_generate_delegates_to_run(tmp_path: Path, monkeypatch, decline_fast_path):
     from anton.core.tools.generate_artifact import generate as public_generate
 
     session = AsyncMock()
@@ -1357,7 +1357,7 @@ async def test_gen_verify_frontend_hands_the_contract_paths_to_the_verifier(tmp_
         (tmp_path / "static" / "index.html").write_text(_VALID_PAGE)
         return {"files_written": ["static/index.html"], "rounds_used": 1, "summary": "s"}
 
-    def fake_verify(html, *, is_fullstack, api_paths=None, live_app=False):
+    def fake_verify(html, *, is_fullstack, api_paths=None, live_app=False, geography=None):
         seen["api_paths"] = api_paths
         seen["live_app"] = live_app
         return VerifyResult(errors=[])
@@ -1416,7 +1416,7 @@ async def test_warnings_of_the_accepted_frontend_attempt_reach_the_result(tmp_pa
         (tmp_path / "index.html").write_text(_VALID_HTML)
         return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
 
-    def fake_verify(html, *, is_fullstack, api_paths=None, live_app=False):
+    def fake_verify(html, *, is_fullstack, api_paths=None, live_app=False, geography=None):
         return VerifyResult(errors=[], warnings=["Significant blocks have no stable `id` attributes."])
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
@@ -2129,7 +2129,7 @@ def test_a_backend_heading_in_known_data_does_not_replace_the_specs(tmp_path: Pa
     assert ctx.rstrip().endswith(prompts.KNOWN_DATA_FOOTER) or prompts.KNOWN_DATA_FOOTER in ctx
 
 
-async def test_known_data_is_scrubbed_before_any_step_sees_it(tmp_path: Path, monkeypatch):
+async def test_known_data_is_scrubbed_before_any_step_sees_it(tmp_path: Path, monkeypatch, decline_fast_path):
     seen = {}
 
     async def fake_run(state, *, entry):

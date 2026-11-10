@@ -9,12 +9,16 @@ import dill
 
 from anton.core.backends.wire import (
     CELL_DELIM,
+    CELL_FILENAME,
     CELL_TRACE_MARKER,
+    EXPLAINABILITY_QUERIES_NAME,
+    INTERNET_RESEARCH_ENV,
     MISSING_MODULE_HINT,
     RESULT_START,
     RESULT_END,
     USAGE_MARKER,
     USAGE_MARKER_ENV,
+    cell_stopped_at,
     heal_surrogate_source,
 )
 
@@ -51,7 +55,7 @@ except ValueError:
     SESSION_MAX_BYTES = _SESSION_MAX_DEFAULT
 
 # Never snapshot these: rebuilt on every boot, and per-cell state.
-_SESSION_EXCLUDE_ALWAYS = frozenset({"__builtins__", "_anton_explainability_queries"})
+_SESSION_EXCLUDE_ALWAYS = frozenset({"__builtins__", EXPLAINABILITY_QUERIES_NAME})
 
 # Helpers this module injects. They are excluded because they are rebuilt fresh each
 # boot and some (`get_llm`, `web_search`, `query_minds_data`) close over live network
@@ -63,9 +67,6 @@ _SESSION_EXCLUDE_ALWAYS = frozenset({"__builtins__", "_anton_explainability_quer
 # value was dropped from the snapshot and then re-injected as the helper on the next
 # turn — so `print(sample)` returned `<function sample>` with no error. If the agent
 # rebinds one of these names, its value is data and gets persisted like any other.
-_INJECTED_HELPER_NAMES = frozenset(
-    {"get_llm", "agentic_loop", "web_search", "query_minds_data", "progress", "sample"}
-)
 
 # The helper objects this boot actually created, recorded by `_inject_helper` at the
 # point of definition. It must NOT be built from `namespace` after injection: on a
@@ -458,7 +459,7 @@ def _dump_namespace(ns: dict) -> str | None:
 namespace, _session_load_note = _load_namespace()
 if _session_load_note:
     _session_notes.append(_session_load_note)
-namespace["_anton_explainability_queries"] = []
+namespace[EXPLAINABILITY_QUERIES_NAME] = []
 
 # The running cell's trace context, read by every helper model call. The main
 # loop sets it from the cell's CELL_TRACE_MARKER line.
@@ -506,13 +507,23 @@ if _scratchpad_model:
             # vision_format="anthropic" for every mdb.ai/mindshub.ai host used
             # to assume every model behind it was Claude, which broke non-Claude
             # models sharing the same gateway (ENG-1992).
-            # Resolve the OpenAI "flavor" so the injected web_search() helper can
-            # route through whatever native web tooling the endpoint exposes.
-            # Detect Minds/mdb.ai by HOST, not provider name (always "openai" for
-            # an OpenAIProvider even on the minds gateway) — see resolve_web_flavor.
-            _llm_provider_kwargs["flavor"] = _ProviderClass.resolve_web_flavor(
-                _scratchpad_provider_name, _llm_base_url
-            )
+            # The OpenAI "flavor" sets the API the pad's model calls use and
+            # the native web tooling web_search() routes through. The host
+            # passes the agent's own in ANTON_SCRATCHPAD_FLAVOR, so a provider
+            # on chat completions never sends the pad to the Responses API.
+            # Without it, infer one: detect Minds/mdb.ai by HOST, not provider
+            # name (always "openai" for an OpenAIProvider even on the minds
+            # gateway) — see resolve_web_flavor.
+            _llm_flavor = os.environ.get("ANTON_SCRATCHPAD_FLAVOR", "")
+            if _llm_flavor not in (
+                _ProviderClass.FLAVOR_OPENAI,
+                _ProviderClass.FLAVOR_MINDS_PASSTHROUGH,
+                _ProviderClass.FLAVOR_OPENAI_COMPATIBLE_GENERIC,
+            ):
+                _llm_flavor = _ProviderClass.resolve_web_flavor(
+                    _scratchpad_provider_name, _llm_base_url
+                )
+            _llm_provider_kwargs["flavor"] = _llm_flavor
         else:
             _llm_provider_kwargs = {}  # Anthropic doesn't need ssl_verify
 
@@ -530,9 +541,29 @@ if _scratchpad_model:
                 _real_stdout.write(USAGE_MARKER + " " + json.dumps(record, default=str) + "\n")
                 _real_stdout.flush()
 
+        # The host rewrites this file whenever its credential is renewed (a
+        # desktop token refresh). Read on every call, not at boot, so a long
+        # batch keeps working past the boot-time token's expiry.
+        _llm_credential_file = os.environ.get("ANTON_SCRATCHPAD_CREDENTIAL_FILE", "")
+
+        def _current_llm_api_key():
+            """The host's current key, or None to keep the boot-time one."""
+            if not _llm_credential_file:
+                return None
+            try:
+                with open(_llm_credential_file, encoding="utf-8") as handle:
+                    return handle.read().strip() or None
+            except OSError:
+                return None
+
         def _new_llm_provider():
             """Build a provider from the pad's model settings. The only place one is built."""
-            provider = _ProviderClass(**_llm_provider_kwargs)
+            kwargs = _llm_provider_kwargs
+            if "api_key" in kwargs:
+                key = _current_llm_api_key()
+                if key:
+                    kwargs = {**kwargs, "api_key": key}
+            provider = _ProviderClass(**kwargs)
             if _send_usage:
                 provider.usage_sink = _send_usage_to_host
             return provider
@@ -872,9 +903,20 @@ if _scratchpad_model:
             )
             return response.content
 
+        def _web_search_off(query, *, max_tokens=4096):
+            """Raise: this session answers from the connected data only."""
+            raise RuntimeError(
+                "Internet research is turned off for this session, so web_search() is "
+                "unavailable. Answer from the connected data sources and the user's files."
+            )
+
         _inject_helper("get_llm", get_llm)
         _inject_helper("agentic_loop", agentic_loop)
-        _inject_helper("web_search", web_search)
+        # A stub rather than no name: a NameError would read as a missing package.
+        _inject_helper(
+            "web_search",
+            _web_search_off if os.environ.get(INTERNET_RESEARCH_ENV) == "off" else web_search,
+        )
     except Exception:
         pass  # LLM not available — not fatal (e.g. anthropic not installed)
 
@@ -920,7 +962,7 @@ if not _cloud_turn and _minds_datasource and _minds_api_key and _minds_url:
             try:
                 with _minds_urllib.urlopen(req, context=ctx, timeout=60) as resp:
                     parsed = json.loads(resp.read().decode())
-                    namespace.setdefault("_anton_explainability_queries", []).append({
+                    namespace.setdefault(EXPLAINABILITY_QUERIES_NAME, []).append({
                         "datasource": ds,
                         "sql": query,
                         "engine": _minds_engine or None,
@@ -934,7 +976,7 @@ if not _cloud_turn and _minds_datasource and _minds_api_key and _minds_url:
                     body = e.read().decode()
                 except Exception:
                     pass
-                namespace.setdefault("_anton_explainability_queries", []).append({
+                namespace.setdefault(EXPLAINABILITY_QUERIES_NAME, []).append({
                     "datasource": ds,
                     "sql": query,
                     "engine": _minds_engine or None,
@@ -948,7 +990,7 @@ if not _cloud_turn and _minds_datasource and _minds_api_key and _minds_url:
                     "error_message": f"HTTP {e.code}: {body or e.reason}",
                 }
             except Exception as e:
-                namespace.setdefault("_anton_explainability_queries", []).append({
+                namespace.setdefault(EXPLAINABILITY_QUERIES_NAME, []).append({
                     "datasource": ds,
                     "sql": query,
                     "engine": _minds_engine or None,
@@ -1147,6 +1189,7 @@ import threading
 from anton.core.backends.wire import (
     HEARTBEAT_MARKER,
     MAX_OUTPUT,
+    truncation_note,
     PROGRESS_MARKER,
     STDOUT_CHUNK_MARKER,
     STDOUT_SCRUB_MARGIN,
@@ -1436,6 +1479,42 @@ _cell_log_handler = _CellLogHandler()
 _logging.root.addHandler(_cell_log_handler)
 _logging.root.setLevel(_logging.INFO)
 
+# --- Cut results ---
+# A source that caps a result says so in the body, and the agent summed capped
+# rows as the whole even after printing the flag. httpx, requests (unless
+# simplejson is installed) and json.load decode through json.loads.
+_CUT_RESULT_KEYS = frozenset({
+    "truncated", "hasmore", "incompleteresults", "nextpagetoken", "nextcursor",
+    "nextlink", "odatanextlink", "nextrecordsurl", "nextpageurl",
+})
+_cut_result_keys = []
+_json_loads = json.loads
+
+
+def _cut_result_key(obj):
+    for key, value in obj.items():
+        if value and isinstance(key, str) and "".join(c for c in key.lower() if c.isalnum()) in _CUT_RESULT_KEYS:
+            return key
+    return None
+
+
+def _loads_noting_cut_results(*args, **kwargs):
+    obj = _json_loads(*args, **kwargs)
+    try:
+        if isinstance(obj, dict):
+            # One level down too: paging often sits under "meta" or "pagination".
+            for part in (obj, *(v for v in obj.values() if isinstance(v, dict))):
+                key = _cut_result_key(part)
+                if key:
+                    _cut_result_keys.append(key)
+                    break
+    except Exception:
+        pass
+    return obj
+
+
+json.loads = _loads_noting_cut_results
+
 
 while True:
     lines = []
@@ -1502,13 +1581,18 @@ while True:
         _cell_out["shipped"] = 0
         _cell_out["buf"] = out_buf
         error = None
-        namespace["_anton_explainability_queries"] = []
+        # The line of its own code the cell stopped at, read from the
+        # traceback rather than from the error's text, which the cell shapes.
+        stopped_at = None
+        compiled = None
+        namespace[EXPLAINABILITY_QUERIES_NAME] = []
+        _cut_result_keys.clear()
         _cell_log_handler.buf = log_buf
 
         sys.stdout = out_buf
         sys.stderr = err_buf
         try:
-            compiled = compile(code, "<scratchpad>", "exec")
+            compiled = compile(code, CELL_FILENAME, "exec")
             exec(compiled, namespace)
         except ModuleNotFoundError as _mnf:
             # Don't pip-install a name pulled from an exception — it may be a
@@ -1518,19 +1602,30 @@ while True:
             if _mnf.name:
                 hint = MISSING_MODULE_HINT.format(name=_mnf.name)
             error = hint + traceback.format_exc()
-        except Exception:
+            stopped_at = cell_stopped_at(_mnf.__traceback__, compiled)
+        except Exception as _exc:
             error = traceback.format_exc()
+            stopped_at = cell_stopped_at(_exc.__traceback__, compiled)
         finally:
             sys.stdout = _real_stdout
             sys.stderr = sys.__stderr__
             _cell_log_handler.buf = None
 
         stdout_full = out_buf.getvalue()
+        if _cut_result_keys:
+            # Ahead of the output, so clipping a long output cannot drop it.
+            stdout_full = (
+                f"Note: {len(_cut_result_keys)} JSON result(s) read in this cell said they "
+                f"hold only part of the data ({', '.join(sorted(set(_cut_result_keys)))}). "
+                "Rows from a cut result are not all the rows: page or split the query until "
+                "no result is cut, or say the figure is partial, before counting, totalling "
+                "or ranking them.\n" + stdout_full
+            )
         stdout_val = stdout_full
         if len(stdout_val) > MAX_OUTPUT:
             stdout_val = (
                 stdout_val[:MAX_OUTPUT]
-                + f"\n\n... (truncated, {len(stdout_val)} chars total)"
+                + truncation_note(len(stdout_val))
             )
 
         # Warn-only chdir visibility (ENG-578 fix #5): a cell's os.chdir
@@ -1579,7 +1674,8 @@ while True:
         "stderr": err_buf.getvalue(),
         "logs": logs_val,
         "error": error,
-        "explainability_queries": list(namespace.get("_anton_explainability_queries", [])),
+        "stopped_at": stopped_at,
+        "explainability_queries": list(namespace.get(EXPLAINABILITY_QUERIES_NAME, [])),
     }
     if len(stdout_full) > MAX_OUTPUT:
         # For LocalScratchpadRuntime, which scrubs before it cuts. Only for cut

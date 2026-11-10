@@ -27,6 +27,7 @@ import pytest
 import anton.core.llm.client as llm_client_mod
 import anton.core.session as session_mod
 from anton.cloud_turn.contract import TurnRequestV1
+from anton.config.settings import AntonSettings
 from anton.cloud_turn.session import (
     CLOUD_TOOL_ALLOWLIST,
     _ARTIFACTS_ROOT_ENV,
@@ -343,6 +344,14 @@ def test_model_override_applied(tmp_path, monkeypatch):
     assert cfg.settings.planning_model == "claude-opus-4-8"
 
 
+@pytest.mark.parametrize(("jev_decisions", "verifier_jev"), [(False, "off"), (True, "on")])
+def test_jev_decisions_set_the_completion_check(tmp_path, monkeypatch, jev_decisions, verifier_jev):
+    # The default under test, not a developer's shell.
+    monkeypatch.delenv("ANTON_VERIFIER_JEV", raising=False)
+    _, cfg = _build(tmp_path, monkeypatch, jev_decisions=jev_decisions)
+    assert cfg.settings.verifier_jev == verifier_jev
+
+
 def test_cloud_session_uses_turn_key_from_request(tmp_path, monkeypatch):
     # No minds env set; the credential must come from the request's llm block.
     monkeypatch.delenv("ANTON_MINDS_API_KEY", raising=False)
@@ -371,12 +380,17 @@ def test_llm_block_coding_model_applied(tmp_path, monkeypatch):
 
 
 def test_llm_block_without_coding_model_keeps_default(tmp_path, monkeypatch):
+    # Hermetic env, as below: a leaked ANTON_CODING_MODEL would mask the default.
+    for k in list(os.environ):
+        if k.startswith("ANTON_"):
+            monkeypatch.delenv(k, raising=False)
     _, cfg = _build(
         tmp_path, monkeypatch,
         llm={"provider": "minds-cloud", "api_key": "mdb_turnkey",
              "base_url": "https://api.mindshub.ai/v1"},
     )
-    assert cfg.settings.coding_model  # built-in default survives
+    default = AntonSettings.model_fields["coding_model"].default
+    assert cfg.settings.coding_model == default
 
 
 def test_cloud_session_without_llm_block_falls_back_to_env(tmp_path, monkeypatch):
@@ -580,6 +594,47 @@ def _real_cloud_session(tmp_path, monkeypatch, **req_overrides):
     return session
 
 
+def _hermetic_limits_env(monkeypatch):
+    for name in ("ANTON_MAX_TOOL_ROUNDS", "ANTON_MAX_CONTINUATIONS", "ANTON_MAX_TURN_TOKENS"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_the_tenants_limits_from_the_wire_bound_the_real_session(tmp_path, monkeypatch):
+    _hermetic_limits_env(monkeypatch)
+    line = json.dumps({
+        "protocol_version": 1, "conversation_id": "conv_1", "input": "hi",
+        # Unlike both anton's old (25/3/1.25M) and new (250/10/25M) defaults,
+        # so a session that ignored the limits could not pass by accident.
+        "limits": {"max_tool_rounds": 7, "max_continuations": 2, "max_turn_tokens": 4_000_000},
+    })
+    request = TurnRequestV1.from_json(line)
+    session = _real_cloud_session(tmp_path, monkeypatch, limits=request.limits)
+    assert session._max_tool_rounds == 7
+    assert session._max_continuations == 2
+    assert session._max_turn_tokens == 4_000_000
+
+
+def test_a_turn_without_limits_keeps_antons_defaults(tmp_path, monkeypatch):
+    from anton.core.settings import CoreSettings
+
+    _hermetic_limits_env(monkeypatch)
+    defaults = CoreSettings()
+    session = _real_cloud_session(tmp_path, monkeypatch)
+    assert session._max_tool_rounds == defaults.max_tool_rounds
+    assert session._max_continuations == defaults.max_continuations
+    assert session._max_turn_tokens == defaults.max_turn_tokens
+
+
+def test_one_limit_replaces_only_its_own_default(tmp_path, monkeypatch):
+    from anton.core.settings import CoreSettings
+
+    _hermetic_limits_env(monkeypatch)
+    defaults = CoreSettings()
+    session = _real_cloud_session(tmp_path, monkeypatch, limits={"max_turn_tokens": 3_000_000})
+    assert session._max_turn_tokens == 3_000_000
+    assert session._max_tool_rounds == defaults.max_tool_rounds
+
+
 def _pin_today(monkeypatch, moment):
     """Pin what the session sees as "now".
 
@@ -659,6 +714,98 @@ def test_final_tool_set_equals_allowlist_after_real_build(tmp_path, monkeypatch)
     assert names == set(CLOUD_TOOL_ALLOWLIST), (
         f"cloud tool set drifted from the allowlist: {sorted(names)}"
     )
+
+
+# ── the browser: only the router block a turn carries ───────────────────────
+
+_ROUTER = "https://app.example.test/browser"
+
+
+def _build_from_wire(tmp_path, monkeypatch, browser):
+    """`_build`, with the request read from its JSON line as the pod reads it."""
+    monkeypatch.setattr(session_mod, "ChatSession", lambda config: config)
+    monkeypatch.setattr(
+        llm_client_mod.LLMClient, "from_settings",
+        classmethod(lambda cls, settings: object()),
+    )
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+    line = json.dumps({"protocol_version": 1, "conversation_id": "conv_1", "input": "hello", "browser": browser})
+    return build_cloud_chat_session(TurnRequestV1.from_json(line))
+
+
+def test_a_router_block_gives_the_turn_a_browser(tmp_path, monkeypatch):
+    from anton.core.browser.config import BrowserConfig
+
+    cfg = _build_from_wire(tmp_path, monkeypatch, {"base_url": _ROUTER, "profile": "t-1"})
+    assert "browser" in cfg.tool_allowlist
+    assert cfg.browser == BrowserConfig(base_url=_ROUTER, profile="t-1")
+
+
+@pytest.mark.parametrize("block", [
+    {"base_url": _ROUTER, "profile": "t-1", "token": "t"},
+    {"base_url": "http://127.0.0.1:51234", "profile": "t-1", "token": "t"},
+    {"base_url": _ROUTER},
+    "junk",
+])
+def test_a_token_or_loopback_block_gives_no_browser(tmp_path, monkeypatch, block):
+    cfg = _build_from_wire(tmp_path, monkeypatch, block)
+    assert "browser" not in cfg.tool_allowlist
+    assert cfg.browser is None
+
+
+def test_a_cloud_session_with_a_router_block_registers_exactly_the_browser_too(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+
+    session = _real_cloud_session(
+        tmp_path, monkeypatch,
+        browser=TurnRequestV1.from_json(json.dumps({
+            "protocol_version": 1, "conversation_id": "c", "input": "hi",
+            "browser": {"base_url": _ROUTER, "profile": "t-1"},
+        })).browser,
+    )
+    session._scratchpads = MagicMock(available_packages=[])
+    session._build_tools()
+    names = {t.name for t in session.tool_registry.get_tool_defs()}
+    assert names == set(CLOUD_TOOL_ALLOWLIST) | {"browser"}
+
+
+def test_the_environment_never_gives_a_browser(tmp_path, monkeypatch):
+    """Settings are passed: ChatSessionConfig.settings defaults to None, so a
+    session without them would pass even with an environment fallback back."""
+    from anton.core.settings import CoreSettings
+
+    monkeypatch.setenv("ANTON_BROWSER_URL", "https://collector.example")
+    monkeypatch.setenv("ANTON_BROWSER_PROFILE", "t-1")
+    session = _real_session_with_workspace(tmp_path, settings=CoreSettings(), browser=None)
+    session._build_tools()
+    assert "browser" not in {t.name for t in session.tool_registry.get_tool_defs()}
+
+
+def test_a_host_config_registers_the_browser(tmp_path):
+    from anton.core.browser.config import BrowserConfig
+    from anton.core.settings import CoreSettings
+
+    for config in (
+        BrowserConfig(base_url=_ROUTER, profile="t-1"),
+        BrowserConfig(base_url="http://127.0.0.1:51234", profile="t-1", token="launch-key"),
+    ):
+        session = _real_session_with_workspace(tmp_path, settings=CoreSettings(), browser=config)
+        session._build_tools()
+        assert "browser" in {t.name for t in session.tool_registry.get_tool_defs()}
+
+
+async def test_closing_the_session_closes_the_browsers_clients(tmp_path):
+    """The browser state owns the browser's HTTP client and the Jev client its
+    steps share; the session's close is what releases both."""
+    from unittest.mock import AsyncMock
+
+    from anton.core.browser.config import BrowserConfig
+
+    session = _real_session_with_workspace(tmp_path, browser=BrowserConfig(base_url=_ROUTER, profile="t-1"))
+    session._scratchpads = AsyncMock()
+    session._browser_state = AsyncMock()
+    await session.close()
+    session._browser_state.aclose.assert_awaited_once()
 
 
 def test_tool_allowlist_none_preserves_desktop_tools(tmp_path):
@@ -771,21 +918,6 @@ def test_memory_scratch_is_outside_the_mount_by_default():
     )
 
 
-def _real_cloud_session(tmp_path, monkeypatch, **req_overrides):
-    from unittest.mock import MagicMock
-
-    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
-    monkeypatch.setattr(
-        llm_client_mod.LLMClient, "from_settings",
-        classmethod(lambda cls, settings: _mock_llm()),
-    )
-    body = dict(protocol_version=1, conversation_id="c", input="hi")
-    body.update(req_overrides)
-    session = build_cloud_chat_session(TurnRequestV1(**body))  # REAL ChatSession
-    session._scratchpads = MagicMock(available_packages=[])
-    return session
-
-
 def test_memorize_is_offered_with_or_without_existing_memory(tmp_path, monkeypatch, memory_dir):
     """The allowlist names `memorize` unconditionally, and an allowlist name that
     matches no built tool is a hard error — so a cortex must always exist. Both
@@ -808,8 +940,6 @@ def _engram(**kw):
 
 
 async def test_encode_captures_instead_of_writing(tmp_path, monkeypatch, memory_dir):
-    from anton.cloud_turn.session import drain_pending_memory
-
     session, cfg = _build(tmp_path, monkeypatch, memory=_MEMORY)
     before = (memory_dir / "global" / "rules.md").read_text()
 
@@ -920,19 +1050,6 @@ _SKILLS = {
         "references/recipe.md": "- prefer polars",
     }},
 }
-
-
-@pytest.fixture()
-def skills_tmp(tmp_path_factory, monkeypatch):
-    """Route the per-turn mkdtemp staging into pytest tmp.
-
-    Outside `tmp_path` for the same reason as memory_dir: tmp_path is the
-    workspace mount, and the real staging lives outside the mount."""
-    import tempfile
-
-    root = tmp_path_factory.mktemp("skills-scratch")
-    monkeypatch.setattr(tempfile, "tempdir", str(root))
-    return root
 
 
 def test_skills_reach_the_skill_store(tmp_path, monkeypatch, skills_tmp):
@@ -1050,16 +1167,16 @@ def test_skills_never_land_in_the_tenant_workspace(tmp_path, monkeypatch, skills
 
 def test_each_turn_gets_a_fresh_root(tmp_path, monkeypatch, skills_tmp):
     # A skill deleted/renamed/disabled server-side must not survive into the
-    # next turn on this pod — and a fresh mkdtemp per turn also means two
-    # overlapping turns can never wipe each other's tree.
+    # next turn on this pod. A process runs one turn at a time, so staging the
+    # next turn also deletes the earlier turn's tree. A turn running in another
+    # process keeps its own (tests/cloud_turn/test_staged_skills_cleanup.py).
     _, cfg1 = _build(tmp_path, monkeypatch, skills=_SKILLS)
     assert (cfg1.settings.skills_root / "csv-summary" / "SKILL.md").is_file()
 
     _, cfg2 = _build(tmp_path, monkeypatch, skills={})
     assert cfg2.settings.skills_root != cfg1.settings.skills_root
     assert not (cfg2.settings.skills_root / "csv-summary").exists()
-    # the first turn's tree is untouched — no cross-turn interference
-    assert (cfg1.settings.skills_root / "csv-summary" / "SKILL.md").is_file()
+    assert not cfg1.settings.skills_root.exists()
 
 
 def test_bad_slugs_and_escaping_paths_are_dropped(tmp_path, monkeypatch, skills_tmp):
