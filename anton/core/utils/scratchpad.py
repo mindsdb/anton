@@ -989,10 +989,11 @@ def format_cell_result(cell) -> str:
     parts: list[str] = []
     if cell.stdout:
         stdout = cell.stdout
-        from anton.core.backends.wire import MAX_OUTPUT, truncation_note
+        from anton.core.backends.wire import MAX_OUTPUT, TRUNCATION_PREFIX, truncation_note
 
-        # Output the scratchpad already cut carries its note; cutting again would misstate the total.
-        if len(stdout) > MAX_OUTPUT and "chars total)" not in stdout[MAX_OUTPUT:]:
+        # Output the scratchpad already cut carries its note, which scrubbing can move before
+        # MAX_OUTPUT; cutting again would split it and misstate the total.
+        if len(stdout) > MAX_OUTPUT and TRUNCATION_PREFIX not in stdout:
             stdout = stdout[:MAX_OUTPUT] + truncation_note(len(stdout))
         parts.append(f"[output]\n{stdout}")
     if cell.logs if hasattr(cell, "logs") else False:

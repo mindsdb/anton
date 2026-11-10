@@ -30,10 +30,14 @@ MAX_OUTPUT = 10_000
 STDOUT_SCRUB_MARGIN = 4_096
 
 
+# How every truncation note starts, so a cut is recognized wherever scrubbing left it.
+TRUNCATION_PREFIX = "\n\n... (truncated, "
+
+
 def truncation_note(total: int) -> str:
     """Appended where printed output is cut. The model tends to re-run code to
     print the rest in slices; this points it at the tool that returns files whole."""
-    return (f"\n\n... (truncated, {total} chars total) Printed output stops at {MAX_OUTPUT:,} characters: "
+    return (f"{TRUNCATION_PREFIX}{total} chars total) Printed output stops at {MAX_OUTPUT:,} characters: "
             "read text files with read_text_file (end_line=-1 returns a whole file), or print only the part you need.")
 
 
