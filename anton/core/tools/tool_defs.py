@@ -70,7 +70,9 @@ SCRATCHPAD_TOOL = ToolDef(
         "sizes the total budget (roughly 2x the estimate; without one the default "
         "budget is small). Call progress(message) to narrate long phases — it is "
         "user-visible status, not a survival requirement.\n\n"
-        "Use print() to produce output. Host Python packages are available by default. "
+        "Use print() to produce output; printed output stops at 10,000 characters, so read "
+        "text files with read_text_file rather than printing them. Host Python packages are "
+        "available by default. "
         "Include a 'packages' array on exec calls for any libraries your code needs — "
         "they'll be auto-installed before the cell runs (already-installed ones are skipped).\n"
         "get_llm() returns a pre-configured LLM client (sync) — call "
@@ -832,7 +834,8 @@ READ_TEXT_FILE_TOOL = ToolDef(
         f"Returns the first {DEFAULT_LINE_COUNT} lines unless you pass a range; "
         f"`end_line=-1` reads to the end. One call returns at most {MAX_OUTPUT_CHARS:,} "
         "characters. The first line of the result is a header naming the lines "
-        "returned and where to continue; the file's text starts on the next line."
+        "returned and where to continue; the file's text starts on the next line. To read "
+        "several files, call it once per file in the same response."
     ),
     input_schema={
         "type": "object",

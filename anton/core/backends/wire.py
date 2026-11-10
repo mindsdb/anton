@@ -28,6 +28,15 @@ INTERNET_RESEARCH_ENV = "ANTON_SCRATCHPAD_INTERNET_RESEARCH"
 # scrub before it cuts, so a secret across the limit can still match whole.
 MAX_OUTPUT = 10_000
 STDOUT_SCRUB_MARGIN = 4_096
+
+
+def truncation_note(total: int) -> str:
+    """Appended where printed output is cut. The model tends to re-run code to
+    print the rest in slices; this points it at the tool that returns files whole."""
+    return (f"\n\n... (truncated, {total} chars total) Printed output stops at {MAX_OUTPUT:,} characters: "
+            "read text files with read_text_file (end_line=-1 returns a whole file), or print only the part you need.")
+
+
 # Dead: the worker no longer auto-installs on a missing import, so nothing
 # emits these anymore. local.py still parses for them defensively.
 INSTALL_START_MARKER = "__ANTON_INSTALL_START__"
