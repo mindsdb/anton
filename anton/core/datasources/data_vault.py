@@ -413,10 +413,6 @@ _CUSTOM_LABEL_MAX = 120
 #: typed, which is not a credential. Every other field is hidden whatever the
 #: template said of it, since a model wrote that flag.
 _CUSTOM_PUBLIC_FIELDS = frozenset({"base_url"})
-#: A value this short that auth did not mark secure is config, not a
-#: credential (a region, a version); hiding it would rewrite every place the
-#: same short text appears in the turn's output.
-_CUSTOM_SHORT_VALUE_MAX = 8
 
 
 def custom_connection_key(connection_id: int, connector_id: str) -> tuple[str, str]:
@@ -674,10 +670,7 @@ def _fetch_custom_connection(ref: CustomApiConnectionRefV1, turn_key: str, base_
     return {
         "fields": {**fields, "_user_label": _custom_label(ref.name, ref.connector_id)},
         # Never narrower than auth's secure_keys, which follow the template's model-written flags.
-        "secure_keys": sorted(set(secure_keys) | {
-            key for key, value in fields.items()
-            if key not in _CUSTOM_PUBLIC_FIELDS and len(value) > _CUSTOM_SHORT_VALUE_MAX
-        }),
+        "secure_keys": sorted(set(secure_keys) | {key for key in fields if key not in _CUSTOM_PUBLIC_FIELDS}),
     }
 
 
