@@ -205,8 +205,8 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
         Cloudflare HTML 403s carry no such code and must fall through to
         the generic message, never the plan copy.
       - 402/429 with an M3 gate billing code (``wallet_empty`` /
-        ``included_allowance_exhausted`` / ``free_air_daily_spend_fuse_exceeded``,
-        body or X-MindsHub-Reason header) → the matching TokenLimitExceeded
+        ``included_allowance_exhausted`` / ``free_air_daily_spend_fuse_exceeded`` /
+        ``budget_exceeded``, body or X-MindsHub-Reason header) → the matching TokenLimitExceeded
         subclass from ``mindshub_billing_stop`` (ENG-1169). Code-exact: BYOK
         402s stay generic.
       - 403 with the gateway's ``model_restricted`` deny detail
@@ -269,7 +269,8 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # MindsHub billing taxonomy: the authorization gate denies
     # an empty wallet as 402 ``wallet_empty``, a spent free allowance as 429
     # ``included_allowance_exhausted`` and a tripped fleet-wide free-serving
-    # budget as 429 ``free_air_daily_spend_fuse_exceeded``. All three are
+    # budget as 429 ``free_air_daily_spend_fuse_exceeded``, and a spent org
+    # spending budget as 402 ``budget_exceeded``. All four are
     # permanent for the identical request: without this branch the
     # 402 fell to the generic "temporarily unavailable" ConnectionError, got
     # auto-retried, and was finally rendered as assistant prose. The typed

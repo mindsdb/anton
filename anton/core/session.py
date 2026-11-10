@@ -775,7 +775,8 @@ _TRANSIENT_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
 # the identical answer on every retry while the latch lives — a wallet that can't pay
 # for the verifier's model (TokenLimitExceeded, raised as one of its subclasses
 # for the gate's 402 ``wallet_empty`` / 429 ``included_allowance_exhausted`` /
-# 429 ``free_air_daily_spend_fuse_exceeded``, all matched on the exact code;
+# 429 ``free_air_daily_spend_fuse_exceeded`` / 402 ``budget_exceeded``, all
+# matched on the exact code;
 # velocity 429s map to TransientProviderError and never land here) or a model
 # id that doesn't resolve for this key (ModelUnavailableError: 404
 # model-not-found / 403 model-access-denied / 403 model-restricted, the last
