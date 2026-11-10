@@ -33,8 +33,8 @@ class CoreSettings(BaseSettings):
     # for a turn that never finishes, not budgets for normal work: 30 days of
     # production (2026-10-14) had no runaway turn, and the largest legitimate one
     # used 34.4M tokens, 171 tool rounds and 6 continuations. Hosts that want a
-    # tighter limit set their own. `max_tool_rounds` counts per attempt and
-    # restarts on each continuation.
+    # tighter limit set their own. `max_tool_rounds` counts across the whole
+    # turn, continuations included.
     max_tool_rounds: int = 250
     max_continuations: int = 10
     # Skip the completion verifier when a turn used fewer than this many tool
