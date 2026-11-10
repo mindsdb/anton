@@ -22,7 +22,8 @@ _RULES = (
     "say so instead of guessing",
     "still give the total, but say plainly that it mixes currencies, name them, and give the amount per currency",
     "Convert only when the user asks or the data holds the rate, and name the rate.",
-    "State one fact in one sentence.",
+    "State one fact in one sentence, unless a rule above asks for more",
+    "Tables are for comparing several items or values;",
     "never repeat a single value in a table",
     "not table or field names from a query",
     "Use schema names when the user asks about the schema or data model.",
@@ -71,6 +72,7 @@ def test_closing_offers_are_asked_for_only_when_specific(tools, internet):
     for closer in _GENERIC_CLOSERS:
         assert closer not in shared, closer
     assert shared.count("End with a next step only when it is specific to this answer") == 1
+    assert "Otherwise end without one: a generic offer" in shared
 
 
 @pytest.mark.parametrize("internet", (True, False))
@@ -86,8 +88,11 @@ def test_a_single_number_is_not_put_in_a_summary_table(name, internet):
 def test_inline_analysis_sections_are_for_several_figures(name, internet):
     shared = _shared_prompt(_TOOL_SETS[name], internet)
     assert "When the answer has several figures, present the main finding" in shared
-    assert "A single fact is one sentence with its unit or currency." in shared
+    assert "fetch current data and calculate metrics with code." in shared
+    assert "keep units, time scope and where the data came from clear, in plain words." in shared
+    assert "A single fact is still computed from the data, then given in one sentence with its unit or currency." in shared
     assert "Keep units, source and time scope clear." not in shared
+    assert "with code, then present the main finding" not in shared
 
 
 @pytest.mark.parametrize("internet", (True, False))

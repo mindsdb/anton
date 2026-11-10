@@ -75,8 +75,8 @@ def visualizations(*, proactive):
                 "For inline analysis without an artifact, fetch current data and calculate metrics "
                 "with code. When the answer has several figures, present the main finding, exact "
                 "figures, comparisons, assumptions and useful implications, and keep units, time "
-                "scope and where the data came from clear, in plain words. A single fact is one "
-                "sentence with its unit or currency.\n")
+                "scope and where the data came from clear, in plain words. A single fact is still "
+                "computed from the data, then given in one sentence with its unit or currency.\n")
     if proactive:
         return analysis + ("Present analysis that benefits from a saved visual as an HTML artifact. "
                            "Use the single-call generation workflow in ARTIFACTS and narrate the key findings briefly.")
