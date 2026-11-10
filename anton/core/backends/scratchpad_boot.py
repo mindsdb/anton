@@ -1189,6 +1189,7 @@ import threading
 from anton.core.backends.wire import (
     HEARTBEAT_MARKER,
     MAX_OUTPUT,
+    truncation_note,
     PROGRESS_MARKER,
     STDOUT_CHUNK_MARKER,
     STDOUT_SCRUB_MARGIN,
@@ -1624,7 +1625,7 @@ while True:
         if len(stdout_val) > MAX_OUTPUT:
             stdout_val = (
                 stdout_val[:MAX_OUTPUT]
-                + f"\n\n... (truncated, {len(stdout_val)} chars total)"
+                + truncation_note(len(stdout_val))
             )
 
         # Warn-only chdir visibility (ENG-578 fix #5): a cell's os.chdir
