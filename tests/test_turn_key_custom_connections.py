@@ -75,12 +75,24 @@ def test_a_custom_connection_is_listed_by_auth_id_and_named_without_typed_text(a
 def test_every_field_but_the_address_is_secure_whatever_the_template_said(auth):
     """auth's secure_keys follow the template's model-written `secret` flags, so the pod widens them."""
     answers, _ = auth
-    fields = {"api_key": SECRET, "api_secret": "s2", "email": "tok_9f8e", "base_url": BASE}
+    fields = {"api_key": SECRET, "api_secret": "hunter2-prod-api-secret", "email": "tok_9f8e7d6c5b4a", "base_url": BASE}
     answers[7] = _answer(_ref(), fields=fields, secure_keys=["api_key"])
 
     record = TurnKeyDataVault(None, _block(_ref())).read_record("c7", "acme_crm")
 
     assert record["secure_keys"] == ["api_key", "api_secret", "email"]
+
+
+def test_a_short_value_auth_left_unmarked_is_config_and_stays_readable(auth):
+    """A region "us" hidden everywhere would rewrite "let us know"; a flagged short key stays hidden."""
+    answers, _ = auth
+    fields = {"api_key": "k1", "region": "us", "api_version": "2", "token": "x" * 9, "base_url": BASE}
+    answers[7] = _answer(_ref(), fields=fields, secure_keys=["api_key"])
+    vault = TurnKeyDataVault(None, _block(_ref()))
+
+    assert vault.read_record("c7", "acme_crm")["secure_keys"] == ["api_key", "token"]
+    ds.restore_namespaced_env(vault)
+    assert ds.scrub_credentials("let us know: 2 rows") == "let us know: 2 rows"
 
 
 def test_the_address_stays_hidden_when_auth_marks_it_secure(auth):
