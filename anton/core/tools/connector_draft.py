@@ -69,6 +69,10 @@ class ConnectorDraftError(ValueError):
     never quotes its value, since the value may be a credential."""
 
 
+class ConnectorCheckError(ConnectorDraftError):
+    """The draft's check was refused."""
+
+
 @dataclass(frozen=True)
 class ConnectorDraftField:
     """One credential field the member fills in; it describes, never holds, a value."""
@@ -269,7 +273,10 @@ def _parse_check(data: Any, fields: tuple[ConnectorDraftField, ...]) -> Connecto
     if not isinstance(data, dict):
         raise ConnectorDraftError("check must be an object.")
     _check_keys(data, _CHECK_KEYS, "check")
-    return ConnectorDraftCheck(path=_check_path(data.get("path")), headers=_check_headers(data.get("headers"), fields))
+    try:
+        return ConnectorDraftCheck(path=_check_path(data.get("path")), headers=_check_headers(data.get("headers"), fields))
+    except ConnectorDraftError as e:
+        raise ConnectorCheckError(str(e)) from e
 
 
 def _parse_field(data: Any, index: int) -> ConnectorDraftField:
@@ -372,6 +379,13 @@ class ConnectorDraftBox:
         return drained
 
 
+_NO_CONNECTOR_CASES = (
+    "If an API takes no key or token, do not build a connector: call it directly "
+    "from code. If it takes its key in the URL or query string, or has no GET that "
+    "answers only with valid credentials, it cannot be a custom connector yet: "
+    "tell the user so."
+)
+
 _DESCRIPTION = (
     "Build the template for a connector to an API the user needs and has no "
     "connector for. Pass the connector's id, a label, the credential fields "
@@ -386,7 +400,7 @@ _DESCRIPTION = (
     "staged, not saved: the user sees it as a card in the chat and saves it, "
     "then enters their credentials in Connect Apps and Data. Only API "
     "connectors that take keys or tokens are supported; not database drivers "
-    "and not sign-in flows that redirect to the provider."
+    "and not sign-in flows that redirect to the provider. " + _NO_CONNECTOR_CASES
 )
 
 _TEXT = {"type": "string"}
@@ -446,10 +460,7 @@ _INPUT_SCHEMA["properties"]["check"] = {
 
 _CHECK_REQUIRED = (
     "A connector needs a check: one GET that answers only with valid credentials, "
-    "with a header that places the key. If this API takes no key or token, do not "
-    "build a connector: call it directly from code. If it takes its key in the URL "
-    "or query string, or has no GET that answers only with valid credentials, it "
-    "cannot be a custom connector yet: tell the user so."
+    "with a header that places the key. " + _NO_CONNECTOR_CASES
 )
 
 
@@ -460,6 +471,9 @@ def connector_draft_tool(box: ConnectorDraftBox) -> ToolDef:
         """Parse one draft and keep it in ``box``; refusals name the field only."""
         try:
             draft = parse_connector_draft(tc_input)
+        except ConnectorCheckError as e:
+            # An API with no key, or one in the URL, fails here first: say what to do instead.
+            return ToolOutcome(content=json.dumps({"error": f"{e} {_NO_CONNECTOR_CASES}"}), ok=False, reason="invalid_draft")
         except ConnectorDraftError as e:
             return ToolOutcome(content=json.dumps({"error": str(e)}), ok=False, reason="invalid_draft")
         # The parser keeps the check optional for templates stored before it

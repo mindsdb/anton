@@ -277,6 +277,29 @@ def test_the_tool_refuses_a_template_without_a_check_and_says_what_to_do(check):
     assert box.drain() == []
 
 
+@pytest.mark.parametrize("check", [
+    {"path": "/api/3/action/status_show", "headers": {"Accept": "application/json"}},
+    {"path": "/v1/me?api_key=x", "headers": {}},
+], ids=["places-no-key", "key-in-query"])
+def test_the_tool_says_what_to_do_when_a_check_cannot_place_the_key(check):
+    """An API that takes no key, or takes it in the URL, is told to skip the connector."""
+    box = ConnectorDraftBox()
+
+    outcome = asyncio.run(connector_draft_tool(box).handler(None, _tool_draft(check=check)))
+
+    assert outcome.ok is False and outcome.reason == "invalid_draft"
+    error = json.loads(outcome.content)["error"]
+    assert "call it directly from code" in error and "cannot be a custom connector yet" in error
+    assert box.drain() == []
+
+
+def test_the_tool_refuses_a_draft_outside_the_check_without_the_check_guidance():
+    outcome = asyncio.run(connector_draft_tool(ConnectorDraftBox()).handler(None, _tool_draft(label="")))
+
+    assert outcome.ok is False
+    assert "call it directly from code" not in json.loads(outcome.content)["error"]
+
+
 def test_the_tool_schema_requires_the_check():
     assert "check" in connector_draft_tool(ConnectorDraftBox()).input_schema["required"]
 
@@ -404,4 +427,5 @@ def test_the_tool_describes_the_check():
     assert check["required"] == ["path", "headers"]
     assert check["additionalProperties"] is False
     assert "check" in tool.description
+    assert "call it directly from code" in tool.description
     assert "base URL" not in tool.input_schema["properties"]["usage_notes"]["description"]
