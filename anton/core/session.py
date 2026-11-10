@@ -6893,6 +6893,8 @@ class ChatSession:
         # Set when the turn's time limit stopped it. Suppresses verification for
         # the same reason as the two above.
         _time_limit_hit = False
+        # Set when a tool call was not run because the time limit had passed.
+        _time_limit_refused_calls = False
         # Set per verification-loop iteration (see below): tells the post-loop
         # fallback the current reply is already in history, so it must not append
         # it a second time (ENG-1155 double-append).
@@ -7111,6 +7113,7 @@ class ChatSession:
                     # one after another: without this, every cell in the round
                     # would overrun it, past what the turn's key was sized for.
                     if self._time_limit_reached():
+                        _time_limit_refused_calls = True
                         tool_results.append(_not_run_past_time_limit(tc))
                         for event in _discarded_tool_call_events(
                             tc, _NOT_RUN_PAST_TIME_LIMIT
@@ -7751,6 +7754,69 @@ class ChatSession:
                         )
                     else:
                         self._compaction_failed_this_turn = True
+
+            # A cell that crosses the limit mid-round leaves the round's other
+            # calls not run, and the model may answer that in text, which ends
+            # the tool loop before its per-round check comes round again. The
+            # limit cut that answer short, so it is asked about here too.
+            if _time_limit_refused_calls and not _time_limit_hit and self._time_limit_reached():
+                _time_limit_refused_calls = False
+                agen = self._ask_to_continue_past_limit("time_limit", user_message)
+                try:
+                    async for _kind, _payload in agen:
+                        if _kind == "event":
+                            yield _payload
+                finally:
+                    await agen.aclose()
+                reply = llm_response.content or ""
+                self._append_history({"role": "assistant", "content": reply})
+                _reply_persisted = True
+                if self._time_limit_reached():
+                    _time_limit_hit = True
+                    if self._turn_cost is not None:
+                        self._turn_cost.ended_by = "time_limit"
+                    self._append_history(
+                        {"role": "user", "content": self._time_limit_notice()}
+                    )
+                    yield StreamTaskProgress(
+                        phase="analyzing",
+                        message="Reached this task's time limit — checking in with you...",
+                    )
+                    async for event in self._stream_handback_diagnosis(
+                        system=system, label="time-limit", answered=bool(reply.strip()),
+                        cancels_continuation=self._turn_continuations > 0, limit="time_limit",
+                    ):
+                        yield event
+                    break
+                # Keep going: the answer above stopped at the limit, so the
+                # work resumes, the steps that were not run included.
+                self._append_history(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"{_CHECK_NOTE} The user chose to keep going past this task's "
+                            "time limit. Continue the user's original request where you "
+                            "left off, including the steps that were not run; do not redo "
+                            "tool work already done. Your next reply replaces the previous "
+                            "one in what the user sees, so it must stand on its own."
+                        ),
+                    }
+                )
+                yield StreamTaskProgress(
+                    phase="continuation",
+                    message="Continuing past the time limit...",
+                )
+                response = None
+                async for event in self.plan_stream_with_recovery(
+                    system=system, tools=tools
+                ):
+                    yield event
+                    if isinstance(event, StreamComplete):
+                        response = event
+                if response is None:
+                    return
+                llm_response = response.response
+                continue
 
             # --- Completion verification ---
             # Skip when too few tool rounds were used (pure Q&A and, at the

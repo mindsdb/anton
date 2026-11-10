@@ -26,6 +26,7 @@ from tests.test_limit_continue import KEEP_GOING, STOP_HERE, _run, _ScriptedElic
 from tests.test_spend_ceiling import (
     _history_text,
     _session,
+    _small,
     _text,
     _tool_call,
     workspace,  # noqa: F401 — fixture
@@ -284,3 +285,67 @@ async def test_no_tool_call_starts_after_the_limit_has_passed(workspace, clock):
     for skipped in ("cell_1", "cell_2"):
         assert results[skipped]["is_error"] is True
         assert "time limit" in results[skipped]["content"]
+
+
+def _cells_then(clock, cell_s, after):
+    """A round of three cells, each moving the clock `cell_s`, then `after`."""
+    from anton.core.llm.provider import LLMResponse, ToolCall
+    from anton.core.tools.registry import ToolOutcome
+
+    from tests.test_spend_ceiling import _usage
+
+    def _cell(*_args, **_kwargs):
+        clock[0] += cell_s
+        return ToolOutcome(content="cell output", ok=True)
+
+    three_cells = LLMResponse(
+        content="working",
+        tool_calls=[
+            ToolCall(id=f"cell_{i}", name="scratchpad", input={"action": "view", "name": "main"})
+            for i in range(3)
+        ],
+        usage=_usage(),
+        stop_reason="tool_use",
+    )
+    return [three_cells, *after], AsyncMock(side_effect=_cell)
+
+
+async def test_a_text_answer_after_cells_were_not_run_still_asks_at_the_time_limit(workspace, clock):
+    """A cell crosses the limit mid-round, the round's other cells are not
+    run, and the model answers that in text. The tool loop ends before its
+    per-round check, so without a check after it the turn ended `completed`,
+    never asking and never saying the limit cut it short."""
+    responses, dispatch = _cells_then(clock, 900, [_small(_text("Here are the results."))])
+    session = _timed_session(workspace, responses, clock)
+    session.tool_registry.dispatch_tool = dispatch
+    elicitor = _ScriptedElicitor(STOP_HERE)
+    session.elicitor = elicitor
+
+    events, kwargs = await _run(session)
+
+    assert dispatch.await_count == 1
+    assert len(elicitor.requests) == 1
+    assert kwargs["ended_by"] == "time_limit"
+    assert events[-1] == StreamTurnEnded(ended_by="time_limit")
+    assert "This task reached its time limit of 3 minutes per request." in _history_text(session)
+
+
+async def test_keep_going_after_cells_were_not_run_resumes_the_work(workspace, clock):
+    """Keep going there resumes the task rather than ending on the answer the
+    limit cut short."""
+    responses, dispatch = _cells_then(
+        clock, 150, [_small(_text("Here are the results.")), _small(_text("all done"))],
+    )
+    session = _timed_session(workspace, responses, clock)
+    session.tool_registry.dispatch_tool = dispatch
+    elicitor = _ScriptedElicitor(KEEP_GOING)
+    session.elicitor = elicitor
+
+    _, kwargs = await _run(session)
+
+    assert len(elicitor.requests) == 1
+    assert kwargs["ended_by"] == "completed"
+    assert kwargs["limit_continues"] == "1"
+    history = _history_text(session)
+    assert "The user chose to keep going past this task's time limit." in history
+    assert session._history[-1] == {"role": "assistant", "content": "all done"}
