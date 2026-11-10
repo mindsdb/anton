@@ -573,3 +573,11 @@ def _no_shared_verifier_latches():
     _SHARED_VERIFIER_LATCHES.clear()
     yield
     _SHARED_VERIFIER_LATCHES.clear()
+
+
+@pytest.fixture
+def decline_fast_path(monkeypatch):
+    """For tests of the full page pipeline, which a page takes when the fast path declines."""
+    from anton.core.tools.generate_artifact import fast_static
+
+    monkeypatch.setattr(fast_static, "prepare", AsyncMock(return_value=False))
