@@ -279,7 +279,7 @@ def test_the_tool_refuses_a_template_without_a_check_and_says_what_to_do(check):
 
 @pytest.mark.parametrize("check", [
     {"path": "/api/3/action/status_show", "headers": {"Accept": "application/json"}},
-    {"path": "/v1/me?api_key=x", "headers": {}},
+    {"path": "/v1/me?key={api_key}", "headers": {"Accept": "application/json"}},
 ], ids=["places-no-key", "key-in-query"])
 def test_the_tool_says_what_to_do_when_a_check_cannot_place_the_key(check):
     """An API that takes no key, or takes it in the URL, is told to skip the connector."""
