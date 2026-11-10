@@ -112,6 +112,8 @@ rendered as an agent message; the pod sends it only when the request set
 `tool_messages`.
 A request with `jev_decisions` set to false never asks Jev, MindsHub's
 decision model, whether the agent finished: the organization opted out.
+A request with `ui_locale` ("en", "es" or "pt-BR") tells the agent which
+language the user's app is set to (ENG-4149); absent or unsupported adds nothing.
 
 Answer lines on stdin (interactive turns only), one JSON object per line,
 at most 64 KB:
@@ -395,6 +397,11 @@ class TurnRequestV1:
     #: controller that does not forward the field changes nothing; anything
     #: else turns it off, since a malformed opt-out must not read as consent.
     jev_decisions: bool = True
+    #: The language the user's app is set to ("en", "es", "pt-BR"), which
+    #: cowork-server read from the request's Accept-Language (ENG-4149). The
+    #: session validates it (`anton.core.llm.ui_locale`); absent, or a
+    #: controller that does not forward it, leaves the prompt unchanged.
+    ui_locale: str | None = None
     #: Per-engine connector data cowork-server resolved for this turn:
     #: {engine: {"usage_notes": str}}. Rendered only for engines the turn's
     #: vault connects. Absent when no connected engine has notes.
@@ -442,6 +449,7 @@ class TurnRequestV1:
             interactive=d.get("interactive") is True,
             tool_messages=d.get("tool_messages") is True,
             jev_decisions=d.get("jev_decisions", True) is True,
+            ui_locale=d.get("ui_locale") if isinstance(d.get("ui_locale"), str) else None,
             # Same defensive isinstance check as oauth/trace.
             connectors=(
                 d.get("connectors") if isinstance(d.get("connectors"), dict) else None
