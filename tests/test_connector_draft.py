@@ -226,21 +226,29 @@ def test_a_token_run_is_caught_where_the_scrubber_is_not():
         parse_connector_draft(_draft(label=value))
 
 
+_TOOL_CHECK = {"path": "/v1/me", "headers": {"Authorization": "Bearer {api_key}"}}
+
+
+def _tool_draft(**overrides):
+    """A draft as the tool takes it, which requires a check."""
+    return _draft(**{"check": _TOOL_CHECK, **overrides})
+
+
 def test_the_tool_keeps_drafts_and_the_box_drains_once():
     box = ConnectorDraftBox()
     tool = connector_draft_tool(box)
-    outcome = asyncio.run(tool.handler(None, _draft()))
+    outcome = asyncio.run(tool.handler(None, _tool_draft()))
     assert outcome.ok is True
     assert json.loads(outcome.content)["status"] == "staged"
-    assert box.drain() == [parse_connector_draft(_draft()).to_dict()]
+    assert box.drain() == [parse_connector_draft(_tool_draft()).to_dict()]
     assert box.drain() == []
 
 
-def test_the_same_id_replaces_the_earlier_draft():
+def test_the_same_id_replaces_the_earlier_tool_draft():
     box = ConnectorDraftBox()
     tool = connector_draft_tool(box)
-    asyncio.run(tool.handler(None, _draft(label="First")))
-    asyncio.run(tool.handler(None, _draft(label="Second")))
+    asyncio.run(tool.handler(None, _tool_draft(label="First")))
+    asyncio.run(tool.handler(None, _tool_draft(label="Second")))
     assert [d["label"] for d in box.drain()] == ["Second"]
 
 
@@ -248,12 +256,29 @@ def test_a_turn_holds_at_most_three_drafts():
     box = ConnectorDraftBox()
     tool = connector_draft_tool(box)
     for i in range(MAX_DRAFTS_PER_TURN):
-        assert asyncio.run(tool.handler(None, _draft(connector_id=f"acme_{i}"))).ok
-    refused = asyncio.run(tool.handler(None, _draft(connector_id="acme_extra")))
+        assert asyncio.run(tool.handler(None, _tool_draft(connector_id=f"acme_{i}"))).ok
+    refused = asyncio.run(tool.handler(None, _tool_draft(connector_id="acme_extra")))
     assert refused.ok is False and refused.reason == "draft_limit"
     # Replacing one already held still works at the cap.
-    assert asyncio.run(tool.handler(None, _draft(connector_id="acme_0", label="New"))).ok
+    assert asyncio.run(tool.handler(None, _tool_draft(connector_id="acme_0", label="New"))).ok
     assert [d["connector_id"] for d in box.drain()] == ["acme_0", "acme_1", "acme_2"]
+
+
+@pytest.mark.parametrize("check", ["missing", None], ids=["missing", "null"])
+def test_the_tool_refuses_a_template_without_a_check_and_says_what_to_do(check):
+    box = ConnectorDraftBox()
+    draft = _draft() if check == "missing" else _draft(check=None)
+
+    outcome = asyncio.run(connector_draft_tool(box).handler(None, draft))
+
+    assert outcome.ok is False and outcome.reason == "invalid_draft"
+    error = json.loads(outcome.content)["error"]
+    assert "call it directly from code" in error and "cannot be a custom connector yet" in error
+    assert box.drain() == []
+
+
+def test_the_tool_schema_requires_the_check():
+    assert "check" in connector_draft_tool(ConnectorDraftBox()).input_schema["required"]
 
 
 def test_the_tool_refuses_a_bad_draft_without_the_value():

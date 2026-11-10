@@ -424,7 +424,7 @@ _INPUT_SCHEMA = {
             },
         },
     },
-    "required": ["connector_id", "label", "fields"],
+    "required": ["connector_id", "label", "fields", "check"],
     "additionalProperties": False,
 }
 _INPUT_SCHEMA["properties"]["check"] = {
@@ -444,6 +444,15 @@ _INPUT_SCHEMA["properties"]["check"] = {
 }
 
 
+_CHECK_REQUIRED = (
+    "A connector needs a check: one GET that answers only with valid credentials, "
+    "with a header that places the key. If this API takes no key or token, do not "
+    "build a connector: call it directly from code. If it takes its key in the URL "
+    "or query string, or has no GET that answers only with valid credentials, it "
+    "cannot be a custom connector yet: tell the user so."
+)
+
+
 def connector_draft_tool(box: ConnectorDraftBox) -> ToolDef:
     """The `create_connector_draft` tool, keeping its drafts in ``box``."""
 
@@ -453,6 +462,10 @@ def connector_draft_tool(box: ConnectorDraftBox) -> ToolDef:
             draft = parse_connector_draft(tc_input)
         except ConnectorDraftError as e:
             return ToolOutcome(content=json.dumps({"error": str(e)}), ok=False, reason="invalid_draft")
+        # The parser keeps the check optional for templates stored before it
+        # existed; a new one without it could never be connected.
+        if draft.check is None:
+            return ToolOutcome(content=json.dumps({"error": _CHECK_REQUIRED}), ok=False, reason="invalid_draft")
         if not box.put(draft):
             return ToolOutcome(
                 content=json.dumps({

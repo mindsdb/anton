@@ -695,7 +695,8 @@ def test_a_real_turn_with_connector_drafts_registers_and_drains_the_tool(tmp_pat
     names = {t.name for t in session.tool_registry.get_tool_defs()}
     assert names == set(CLOUD_TOOL_ALLOWLIST) | {"create_connector_draft"}
 
-    draft = {"connector_id": "acme", "label": "Acme", "fields": [{"name": "api_key", "label": "Key"}]}
+    draft = {"connector_id": "acme", "label": "Acme", "fields": [{"name": "api_key", "label": "Key"}],
+             "check": {"path": "/v1/me", "headers": {"Authorization": "Bearer {api_key}"}}}
     tool = next(t for t in session._extra_tools if t.name == "create_connector_draft")
     assert asyncio.run(tool.handler(session, draft)).ok is True
     assert [d["connector_id"] for d in drain_pending_connectors(session)] == ["acme"]
