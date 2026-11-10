@@ -4,11 +4,13 @@ import json
 import logging
 import os
 import re
+import threading
+import time
+import unicodedata
 import urllib.error
-from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +22,9 @@ logger = logging.getLogger(__name__)
 # alone" — distinct from an empty string, which means "explicitly
 # clear this field". Importers should reference the constant rather
 # than re-typing the literal so the two ends stay in sync.
+if TYPE_CHECKING:
+    from anton.cloud_turn.contract import CustomApiBlockV1, CustomApiConnectionRefV1
+
 ANTON_VAULT_KEEP = "__anton_vault_keep__"
 
 
@@ -404,6 +409,10 @@ _CUSTOM_FETCH_WORKERS = 4
 _CUSTOM_FETCH_DEADLINE_SECONDS = 20.0
 _CUSTOM_FIELD_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _CUSTOM_LABEL_MAX = 120
+#: The one custom field a turn may read in the clear: the address the member
+#: typed, which is not a credential. Every other field is hidden whatever the
+#: template said of it, since a model wrote that flag.
+_CUSTOM_PUBLIC_FIELDS = frozenset({"base_url"})
 
 
 def custom_connection_key(connection_id: int, connector_id: str) -> tuple[str, str]:
@@ -428,7 +437,7 @@ class TurnKeyDataVault:
     matching the fact that a cloud turn never edits connections mid-turn.
     """
 
-    def __init__(self, oauth: dict[str, Any] | None, custom_api: Any = None) -> None:
+    def __init__(self, oauth: dict[str, Any] | None, custom_api: CustomApiBlockV1 | None = None) -> None:
         """Hold this turn's OAuth connections, and fetch its custom API connections now.
 
         Args:
@@ -619,12 +628,13 @@ class TurnKeyDataVault:
 
 
 def _custom_label(name: str, connector_id: str) -> str:
-    """The member's name for the connection, on one line, with its connector id."""
-    one_line = " ".join(name.split())[:_CUSTOM_LABEL_MAX]
+    """The member's name for the connection, on one line without control or format characters, with its id."""
+    spaced = " ".join(name.split())
+    one_line = "".join(c for c in spaced if unicodedata.category(c) not in ("Cc", "Cf"))[:_CUSTOM_LABEL_MAX]
     return f"{one_line} ({connector_id})"
 
 
-def _fetch_custom_connection(ref: Any, turn_key: str, base_url: str) -> dict[str, Any] | None:
+def _fetch_custom_connection(ref: CustomApiConnectionRefV1, turn_key: str, base_url: str) -> dict[str, Any] | None:
     """Fetch one custom API connection's fields with the turn key, or None.
 
     The answer must name the connection the turn listed and carry lowercase
@@ -659,31 +669,47 @@ def _fetch_custom_connection(ref: Any, turn_key: str, base_url: str) -> dict[str
         return None
     return {
         "fields": {**fields, "_user_label": _custom_label(ref.name, ref.connector_id)},
-        "secure_keys": list(secure_keys),
+        # Wider than auth's secure_keys, which follow the template's model-written flags.
+        "secure_keys": sorted(key for key in fields if key not in _CUSTOM_PUBLIC_FIELDS),
     }
 
 
-def _fetch_custom_connections(custom_api: Any, base_url: str) -> dict[tuple[str, str], dict[str, Any]]:
+def _fetch_custom_connections(custom_api: CustomApiBlockV1, base_url: str) -> dict[tuple[str, str], dict[str, Any]]:
     """Fetch every custom API connection of the turn at once, keeping those that answer in time.
 
     At most _CUSTOM_FETCH_WORKERS at a time, all within
     _CUSTOM_FETCH_DEADLINE_SECONDS. An answer that arrives after the deadline
-    is discarded and never kept.
+    is discarded and never kept. The fetch threads are daemons, so one still
+    waiting on auth never holds the pod's exit.
     """
     refs = list(custom_api.connections)
     if not refs:
         return {}
-    pool = ThreadPoolExecutor(max_workers=_CUSTOM_FETCH_WORKERS, thread_name_prefix="custom-fetch")
-    pending = [(ref, pool.submit(_fetch_custom_connection, ref, custom_api.turn_key, base_url)) for ref in refs]
-    _, late = wait([future for _, future in pending], timeout=_CUSTOM_FETCH_DEADLINE_SECONDS)
-    pool.shutdown(wait=False, cancel_futures=True)
+    answered: dict[int, dict[str, Any] | None] = {}
+    lock = threading.Lock()
+    slots = threading.BoundedSemaphore(_CUSTOM_FETCH_WORKERS)
+
+    def fetch(ref: CustomApiConnectionRefV1) -> None:
+        with slots:
+            record = _fetch_custom_connection(ref, custom_api.turn_key, base_url)
+        with lock:
+            answered[ref.connection_id] = record
+
+    threads = [threading.Thread(target=fetch, args=(ref,), daemon=True, name="custom-fetch") for ref in refs]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + _CUSTOM_FETCH_DEADLINE_SECONDS
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+    with lock:
+        in_time = dict(answered)
     fetched: dict[tuple[str, str], dict[str, Any]] = {}
-    for ref, future in pending:
-        if future in late:
+    for ref in refs:
+        if ref.connection_id not in in_time:
             logger.warning("custom connection %s left out: no answer within %ss",
                            ref.connection_id, _CUSTOM_FETCH_DEADLINE_SECONDS)
             continue
-        record = future.result()
+        record = in_time[ref.connection_id]
         if record is not None:
             fetched[custom_connection_key(ref.connection_id, ref.connector_id)] = record
     return fetched

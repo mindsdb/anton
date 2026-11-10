@@ -125,3 +125,24 @@ def test_every_variable_the_pad_gets_is_registered_for_scrubbing(monkeypatch):
     assert len(env) == 2
     for value in env.values():
         assert value not in ds.scrub_credentials(f"printed {value} here")
+
+
+def test_fields_the_template_left_unflagged_are_hidden_and_kept_out_of_the_prompt(monkeypatch):
+    """A template can mark a credential field `secret: false`; the turn hides it anyway."""
+    from anton import minds_client
+
+    ref = _ref()
+    api_secret, account = "hunter2-prod-api-secret-77aa", "tok_9f8e7d6c5b4a39281706"
+    body = {"connector_id": ref.connector_id, "name": ref.name, "secure_keys": ["api_key"],
+            "fields": {"api_key": SECRET, "api_secret": api_secret, "email": account,
+                       "base_url": "https://api.acme.example"}}
+    monkeypatch.setattr(minds_client, "minds_request", lambda url, key, **kw: json.dumps(body).encode())
+    vault = TurnKeyDataVault(None, CustomApiBlockV1(TURN_KEY, (ref,)))
+
+    ds.restore_namespaced_env(vault)
+    prompt = ds.build_datasource_context(vault, usage_notes={})
+    printed = ds.scrub_output(f"secret={api_secret} email={account} key={SECRET}")
+
+    for planted in (SECRET, api_secret, account):
+        assert planted not in printed
+        assert planted not in prompt

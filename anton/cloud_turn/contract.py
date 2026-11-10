@@ -127,6 +127,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ConfigDict
@@ -142,6 +143,10 @@ MAX_DATASOURCE_CONNECTIONS = 100
 #: The most custom API connections one turn carries; cowork-server holds the
 #: same cap. The session fetches every one before the turn starts.
 MAX_CUSTOM_API_CONNECTIONS = 25
+#: The connector id rule anton's draft parser applies, and auth's longest
+#: connection name: a block outside them did not come from those writers.
+_CUSTOM_CONNECTOR_ID = re.compile(r"[a-z][a-z0-9_]{1,40}")
+_CUSTOM_NAME_MAX = 128
 
 # The `turn_completed` key that names the artifact folders the turn touched.
 # scratchpad-controller's `scratchpad_controller/anton_turn.py` relays it and
@@ -259,9 +264,10 @@ def _parse_custom_api_block(value: object) -> CustomApiBlockV1 | None:
             not _positive_int(connection_id)
             or not _positive_int(connection["credential_version"])
             or not isinstance(connection["connector_id"], str)
-            or not connection["connector_id"]
+            or not _CUSTOM_CONNECTOR_ID.fullmatch(connection["connector_id"])
             or not isinstance(connection["name"], str)
             or not connection["name"]
+            or len(connection["name"]) > _CUSTOM_NAME_MAX
             or connection_id in seen
         ):
             raise ValueError("custom_api connection reference is invalid")

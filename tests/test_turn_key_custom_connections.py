@@ -72,14 +72,25 @@ def test_a_custom_connection_is_listed_by_auth_id_and_named_without_typed_text(a
     assert key == "mdb_turnkey.secret"
 
 
-def test_the_record_carries_auths_secure_keys_and_the_members_label(auth):
+def test_every_field_but_the_address_is_secure_whatever_the_template_said(auth):
+    """auth's secure_keys follow the template's model-written `secret` flags, so the pod widens them."""
     answers, _ = auth
-    answers[7] = _answer(_ref(name="Prod\nline two"))
+    fields = {"api_key": SECRET, "api_secret": "s2", "email": "tok_9f8e", "base_url": BASE}
+    answers[7] = _answer(_ref(), fields=fields, secure_keys=["api_key"])
 
-    record = TurnKeyDataVault(None, _block(_ref(name="Prod\nline two"))).read_record("c7", "acme_crm")
+    record = TurnKeyDataVault(None, _block(_ref())).read_record("c7", "acme_crm")
 
-    assert record["secure_keys"] == ["api_key"]
-    assert record["fields"]["_user_label"] == "Prod line two (acme_crm)"
+    assert record["secure_keys"] == ["api_key", "api_secret", "email"]
+
+
+def test_the_label_is_the_members_name_on_one_line_without_control_characters(auth):
+    answers, _ = auth
+    name = "Prod\nline\u202etwo\x07"
+    answers[7] = _answer(_ref(name=name))
+
+    record = TurnKeyDataVault(None, _block(_ref(name=name))).read_record("c7", "acme_crm")
+
+    assert record["fields"]["_user_label"] == "Prod linetwo (acme_crm)"
 
 
 @pytest.mark.parametrize("answer", [
@@ -128,6 +139,19 @@ def test_an_answer_after_the_deadline_is_discarded_and_never_kept(auth, monkeypa
     assert vault.list_connections() == []
     assert vault.env_for("c7", "acme_crm") is None
     assert len(calls) == 1
+
+
+def test_a_fetch_still_waiting_at_the_deadline_never_holds_the_pods_exit(auth, monkeypatch):
+    answers, _ = auth
+    released = threading.Event()
+    answers[7] = lambda: released.wait(5) and json.dumps(_answer(_ref())).encode()
+    monkeypatch.setattr(dv, "_CUSTOM_FETCH_DEADLINE_SECONDS", 0.1)
+
+    TurnKeyDataVault(None, _block(_ref()))
+    waiting = [thread for thread in threading.enumerate() if thread.name == "custom-fetch"]
+    released.set()
+
+    assert waiting and all(thread.daemon for thread in waiting)
 
 
 def test_at_most_four_fetches_run_at_once(auth):

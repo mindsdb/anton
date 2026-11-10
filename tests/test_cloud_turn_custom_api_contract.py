@@ -60,8 +60,12 @@ def test_the_cap_matches_cowork_servers():
     {"turn_key": "k", "connections": [{**_REF, "connector_id": 5}]},
     {"turn_key": "k", "connections": [{**_REF, "api_key": "planted-secret"}]},
     {"turn_key": "k", "connections": [_REF, _REF]},
+    {"turn_key": "k", "connections": [{**_REF, "connector_id": "Acme-CRM"}]},
+    {"turn_key": "k", "connections": [{**_REF, "connector_id": "a"}]},
+    {"turn_key": "k", "connections": [{**_REF, "name": "n" * 129}]},
 ], ids=["not_an_object", "no_turn_key", "empty_turn_key", "extra_field", "empty", "over_the_cap", "bool_id",
-        "zero_version", "empty_name", "non_text_connector", "secret_bearing_reference", "duplicate_id"])
+        "zero_version", "empty_name", "non_text_connector", "secret_bearing_reference", "duplicate_id",
+        "connector_id_shape", "connector_id_too_short", "name_too_long"])
 def test_a_malformed_block_refuses_the_request_without_quoting_it(custom_api):
     with pytest.raises(ValueError) as refused:
         TurnRequestV1.from_json(_request(custom_api))
