@@ -349,3 +349,59 @@ async def test_keep_going_after_cells_were_not_run_resumes_the_work(workspace, c
     history = _history_text(session)
     assert "The user chose to keep going past this task's time limit." in history
     assert session._history[-1] == {"role": "assistant", "content": "all done"}
+
+
+async def test_a_step_limit_stop_after_cells_were_not_run_asks_once(workspace, clock):
+    """Cells were not run at the time limit, then the step limit stopped the
+    turn on the next round. That stop asked and handed back; the time limit
+    must not ask again, relabel the turn, or append the reply a second time."""
+    responses, dispatch = _cells_then(clock, 900, [_tool_call(i) for i in range(9, 20)])
+    session = _timed_session(workspace, responses, clock)
+    session._max_tool_rounds = 1
+    session.tool_registry.dispatch_tool = dispatch
+    elicitor = _ScriptedElicitor(STOP_HERE, STOP_HERE)
+    session.elicitor = elicitor
+
+    _, kwargs = await _run(session)
+
+    assert len(elicitor.requests) == 1
+    assert kwargs["ended_by"] == "round_cap"
+    assert "time limit" not in _history_text(session)
+
+
+async def test_keep_going_on_a_later_question_never_overrides_stop_here(workspace, clock):
+    """The user said Stop here to the step limit. A time-limit question after
+    it, answered Keep going, resumed the turn the user had just stopped."""
+    responses, dispatch = _cells_then(
+        clock, 250, [_tool_call(9), _small(_text("diag")), _small(_text("resumed answer"))],
+    )
+    session = _timed_session(workspace, responses, clock)
+    session._max_turn_seconds = 300
+    session._max_tool_rounds = 1
+    session.tool_registry.dispatch_tool = dispatch
+    elicitor = _ScriptedElicitor(STOP_HERE, KEEP_GOING)
+    session.elicitor = elicitor
+
+    _, kwargs = await _run(session)
+
+    assert len(elicitor.requests) == 1
+    assert kwargs["ended_by"] == "round_cap"
+    assert "resumed answer" not in _history_text(session)
+
+
+async def test_a_turn_that_finishes_after_keep_going_is_not_asked_again(workspace, clock):
+    """Calls were not run at the first limit and the per-round check asked;
+    after Keep going the work finished in text with nothing refused. It must
+    end completed, not be asked about the earlier refusal."""
+    responses, dispatch = _cells_then(clock, 150, [_tool_call(9), _small(_text("all done"))])
+    session = _timed_session(workspace, responses, clock)
+    session.tool_registry.dispatch_tool = dispatch
+    elicitor = _ScriptedElicitor(KEEP_GOING, STOP_HERE)
+    session.elicitor = elicitor
+
+    _, kwargs = await _run(session)
+
+    assert len(elicitor.requests) == 1
+    assert kwargs["ended_by"] == "completed"
+    assert session._history[-1] == {"role": "assistant", "content": "all done"}
+

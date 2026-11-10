@@ -6915,6 +6915,9 @@ class ChatSession:
             resilience_nudged: set[str] = set()
 
             while llm_response.tool_calls:
+                # Only the last round's refusals count: an earlier one was asked
+                # about by the per-round check, or the turn ran on past it.
+                _time_limit_refused_calls = False
                 self._turn_tool_rounds += 1
                 attempt_rounds += 1
                 # The configured cap plus whatever "Keep going" answers have
