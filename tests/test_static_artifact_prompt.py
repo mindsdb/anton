@@ -23,6 +23,7 @@ def test_delegated_artifacts_have_no_competing_registration_or_data_fetch_instru
     assert "For inline analysis without an artifact" in prompt
     assert "dataset for CSV/JSON/parquet" in prompt
     assert "Never create a duplicate artifact" in prompt
+    assert "tell the user it is missing" in " ".join(prompt.split())
 
 
 def test_a_generate_tool_without_name_keeps_the_register_first_workflow():
