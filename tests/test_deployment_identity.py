@@ -83,10 +83,10 @@ def test_default_product_lines_are_byte_identical(surface, line):
 
 
 @pytest.mark.parametrize(("surface", "digest"), [
-    (None, "eb21d29823e7662fa3cdcbafbc108d7735b092323a3c6f59a8c6e74543fcc468"),
-    ("desktop", "63e2a3853bc23a1403284af9d3536eb0d140b2121478466d8801ab51b9ed2a54"),
-    ("web", "58ce57fa749ed5e61a19c4aecb2db9c07bb2a227660927649c862c57d5143b7f"),
-    ("cli", "b1a0983b173f73bff063205ee7f63f6b1aa15a7abbbafae450bbc8e9a356ccb6"),
+    (None, "aedd2be638a6bfa3fab140844955a77575e610800bd5beb8b6db0abff40dd2a1"),
+    ("desktop", "a55b9a0342e75ec7f3c0b8f25466d0d71ca7c6b4a6f93ad231d18a079d6b2cf6"),
+    ("web", "f49546ee8a60d04d9967e3e11680ec1c5fd936752fee7c8561e23bf81bdf6dbd"),
+    ("cli", "a3fcc3fc3c68b40971ce27926530ce42a79d64a1c732748203ec2141db171703"),
 ])
 def test_complete_default_builder_output_is_byte_identical(surface, digest):
     # Snapshot the current complete default prompt for each surface, including

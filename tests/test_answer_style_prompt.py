@@ -20,7 +20,10 @@ _RULES = (
     "Every money figure carries its currency",
     "take it from the record it belongs to",
     "say so instead of guessing",
-    "still give the total, but say plainly that it mixes currencies, name them, and give the amount per currency",
+    "state the combined total as one number first",
+    "Never leave the combined total out, even when the amounts are split.",
+    "say plainly that it mixes currencies, name them, then give the amount per currency",
+    '"12,500 in total, mixing EUR and MKD: EUR 10,000 and MKD 2,500"',
     "Convert only when the user asks or the data holds the rate, and name the rate.",
     "State one fact in one sentence, unless another rule here asks for more",
     "Tables are for comparing several items or values;",
@@ -73,6 +76,8 @@ def test_closing_offers_are_asked_for_only_when_specific(tools, internet):
         assert closer not in shared, closer
     assert shared.count("End with a next step only when it is specific to this answer") == 1
     assert "Otherwise end without one: a generic offer" in shared
+    assert "a check the result depends on" not in shared
+    assert shared.count("A next step never replaces the answer: do the work, answer, then offer.") == 1
 
 
 @pytest.mark.parametrize("internet", (True, False))
