@@ -21,7 +21,7 @@ _RULES = (
     "take it from the record it belongs to",
     "say so instead of guessing",
     "When the question asks for a total and the amounts are in different currencies, state the combined total",
-    "say plainly that it mixes currencies, name them, and give the amount per currency",
+    "the combined total as one number first, then say plainly that it mixes currencies, name them, and give the amount per currency",
     '"17,500 in total, mixing EUR and USD: EUR 10,000 and USD 7,500"',
     "That combined figure is the one money figure written without a single currency",
     "Never leave an asked-for total out, even when the amounts are split.",
