@@ -93,6 +93,7 @@ from anton.core.llm.provider import (
     usage_log_enabled,
 )
 from anton.core.llm.structured import looks_truncated, truncation_verdict, usable_tool_call
+from anton.core.llm.ui_locale import ui_locale_line, validated_ui_locale
 from anton.core.llm.tracing import (
     JEV_CALL_ROLE,
     VALID_SURFACES,
@@ -1816,6 +1817,14 @@ class ChatSessionConfig:
     # in every surface breakdown, and a wrong surface is worse than an absent
     # one.
     surface: str | None = None
+    # The language the user's app is set to, as a tag from
+    # `anton.core.llm.ui_locale.UI_LOCALE_NAMES` (en, es, pt-BR, de, fr, it, ja,
+    # ko, zh-CN), or None
+    # when the host did not say (ENG-4149). Adds one line to the system prompt:
+    # reply in the language the user writes in, and in this one when that is
+    # unclear. Untrusted like `surface`: an unsupported value is dropped with a
+    # warning, and None leaves the prompt exactly as it was.
+    ui_locale: str | None = None
     # Trusted deployment facts supplied by the host. Omitted by desktop, hosted
     # web and CLI callers, whose identity and memory prompts stay unchanged.
     deployment_identity: DeploymentIdentity | None = None
@@ -2111,6 +2120,7 @@ class ChatSession:
         self._session_id = config.session_id
         self._harness = config.harness
         self._surface = _validated_surface(config.surface)
+        self._ui_locale = validated_ui_locale(config.ui_locale)
         self._deployment_identity = (
             DeploymentIdentity.model_validate(config.deployment_identity)
             if config.deployment_identity is not None else None
@@ -3188,6 +3198,8 @@ class ChatSession:
             datasource_context=ds_ctx,
             skill_store=self._skill_store,
             workspace_context=workspace_ctx,
+            # ENG-4149. Fixed for the session, so it sits with the stable lines.
+            ui_locale_context=ui_locale_line(getattr(self, "_ui_locale", None)),
         )
 
         return prompt
