@@ -77,7 +77,25 @@ Events written back on stdout (JSONL):
   {"kind": "ask_user_answer_rejected", "id", "answer_id", "reason"}  - a stdin
       answer that did not close its question; reason is invalid_option |
       not_found | already_answered. The question stays open on invalid_option.
-  {"kind": "turn_completed"}          - terminal success (no payload)
+  {"kind": "browser", "session_id": "..."}  - the browser tool opened (or
+      reopened) the person's browser session. cowork shows the browser beside
+      the chat, with a viewer link it mints with the person's own credential.
+      The line carries no link and no key.
+  {"kind": "turn_completed", "artifacts_touched": [slug, ...]}  - terminal
+      success. `artifacts_touched` (ARTIFACTS_TOUCHED_KEY) is the sorted
+      folder names of the artifacts this turn created or updated through its
+      artifact tools, or edited by a scratchpad cell (the session's
+      `artifacts_touched`); `[]` means the turn touched none. The list is what
+      the tools and cells reported, not every write: a process a cell started
+      that writes into an artifact after the cell returns goes unlisted.
+      cowork-server reads it in `tracked_artifacts_from_reply` and then opens
+      only the listed folders at turn end, plus the folders it queued a repair
+      in and its `.locks` folder. The key is left out, and the host then
+      diffs the whole artifacts folder, when the session keeps no such
+      record, when a snapshot around a cell could not read the artifacts
+      folder or an entry in it (`ChatSession.artifacts_touched_complete`),
+      and when the list would name more than MAX_ARTIFACTS_TOUCHED (1,000)
+      folders.
   {"kind": "turn_failed", "error": "..."}  - terminal failure (scrubbed string)
       `error` is "TypeName: message", so a consumer reads the failure's kind
       off the class name. A MindsHub billing stop that knows when its limit
@@ -92,6 +110,8 @@ controller's stall timer.
 A `tool_result` with `action: "message"` is a tool's message to the user,
 rendered as an agent message; the pod sends it only when the request set
 `tool_messages`.
+A request with `jev_decisions` set to false never asks Jev, MindsHub's
+decision model, whether the agent finished: the organization opted out.
 
 Answer lines on stdin (interactive turns only), one JSON object per line,
 at most 64 KB:
@@ -107,6 +127,7 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ConfigDict
 
+from anton.core.browser.config import BrowserConfig
 from anton.core.tools.skill_format import validate_name
 
 logger = logging.getLogger(__name__)
@@ -114,6 +135,16 @@ logger = logging.getLogger(__name__)
 TURN_PROTOCOL_VERSION = 1
 DATASOURCE_PROTOCOL_VERSION = 1
 MAX_DATASOURCE_CONNECTIONS = 100
+
+# The `turn_completed` key that names the artifact folders the turn touched.
+# scratchpad-controller's `scratchpad_controller/anton_turn.py` relays it and
+# cowork-server's `cowork/services/task_objects.py` reads it, under the same name.
+ARTIFACTS_TOUCHED_KEY = "artifacts_touched"
+# The most folder names that list carries. The entrypoint leaves out a longer
+# list; scratchpad-controller's `anton_turn.py` relays none and cowork-server's
+# `tracked_artifacts_from_reply` (`cowork/services/task_objects.py`) reads one
+# as absent, both against the same cap.
+MAX_ARTIFACTS_TOUCHED = 1000
 
 
 def _is_version(value: object, expected: int) -> bool:
@@ -238,6 +269,53 @@ def _is_skill_name(slug: object) -> bool:
     return True
 
 
+#: The per-task limits a request may set, with the lowest value each accepts.
+#: A turn-token limit of 0 means no limit to anton, so it is refused here: a
+#: producer bug must not turn the ceiling off.
+TURN_LIMIT_MINIMUMS = {"max_tool_rounds": 1, "max_continuations": 0, "max_turn_tokens": 1}
+
+
+def _parse_limits(value: object, conversation_id: str) -> dict[str, int]:
+    """The usable limits in a request's ``limits`` block.
+
+    Keeps known names with integer values at or above their minimum and drops
+    the rest, so one bad value leaves that limit at the pod's default instead of
+    failing the turn. Each drop is logged by name and reason, never by value:
+    dropping in silence would look exactly like a controller that sent nothing.
+    The name and reason go in log fields, not %-args, because the pod's
+    formatter keeps only the static template of a call with args.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        logger.warning(
+            "cloud turn ignoring a limits block that is not an object",
+            extra={
+                "event": "turn_limits_ignored",
+                "reason": "limits_block_not_an_object",
+                "conversation_id": conversation_id,
+            },
+        )
+        return {}
+    limits: dict[str, int] = {}
+    for name, limit in value.items():
+        if name not in TURN_LIMIT_MINIMUMS:
+            # An unknown name is not echoed: it comes off the wire.
+            reason = "unknown_limit"
+        elif not isinstance(limit, int) or isinstance(limit, bool):
+            reason = f"{name}_not_an_integer"
+        elif limit < TURN_LIMIT_MINIMUMS[name]:
+            reason = f"{name}_below_minimum"
+        else:
+            limits[name] = limit
+            continue
+        logger.warning(
+            "cloud turn ignoring a limit",
+            extra={"event": "turn_limit_ignored", "reason": reason, "conversation_id": conversation_id},
+        )
+    return limits
+
+
 @dataclass
 class TurnRequestV1:
     """One turn to run in the pod. Sent as a single JSON line on stdin."""
@@ -312,10 +390,30 @@ class TurnRequestV1:
     #: messages and the tool hands the content to the agent instead. Anything
     #: but a JSON `true` reads as False.
     tool_messages: bool = False
+    #: Whether the turn may ask Jev, MindsHub's decision model, whether the
+    #: agent finished. A missing field or a JSON `true` keeps it on, so a
+    #: controller that does not forward the field changes nothing; anything
+    #: else turns it off, since a malformed opt-out must not read as consent.
+    jev_decisions: bool = True
     #: Per-engine connector data cowork-server resolved for this turn:
     #: {engine: {"usage_notes": str}}. Rendered only for engines the turn's
     #: vault connects. Absent when no connected engine has notes.
     connectors: dict | None = None
+    #: Optional reasoning effort the user picked for this turn. Applied to the
+    #: planning model only; the name is passed to the provider uninterpreted.
+    #: Absent, null, blank, or non-string keeps the configured default.
+    reasoning_effort: str | None = None
+    #: The MindsHub browser router, when cowork-server turned the browser on for
+    #: this turn: {"base_url", "profile", "project"?}, read by
+    #: BrowserConfig.from_dict. The pod reaches the router with this turn's
+    #: `llm` key. A block with a `token`, or with any address but the https
+    #: router, is refused. Absent or malformed means no browser tool this turn.
+    browser: BrowserConfig | None = None
+    #: The tenant's per-task limits cowork-server resolved: any of
+    #: ``max_tool_rounds``, ``max_continuations``, ``max_turn_tokens``. Each one
+    #: present replaces the pod's own default for this turn; an absent one (or
+    #: an older controller that sends no block) leaves the default.
+    limits: dict[str, int] = field(default_factory=dict)
 
     @staticmethod
     def from_json(raw: str) -> "TurnRequestV1":
@@ -323,6 +421,9 @@ class TurnRequestV1:
         protocol_version = d["protocol_version"]
         if not _is_version(protocol_version, TURN_PROTOCOL_VERSION):
             raise ValueError("unsupported cloud turn protocol version")
+        reasoning_effort = d.get("reasoning_effort")
+        if not isinstance(reasoning_effort, str):
+            reasoning_effort = ""
         return TurnRequestV1(
             protocol_version=protocol_version,
             conversation_id=str(d["conversation_id"]),
@@ -347,8 +448,12 @@ class TurnRequestV1:
             ),
             interactive=d.get("interactive") is True,
             tool_messages=d.get("tool_messages") is True,
+            jev_decisions=d.get("jev_decisions", True) is True,
             # Same defensive isinstance check as oauth/trace.
             connectors=(
                 d.get("connectors") if isinstance(d.get("connectors"), dict) else None
             ),
+            reasoning_effort=reasoning_effort.strip() or None,
+            browser=BrowserConfig.from_dict(d.get("browser")),
+            limits=_parse_limits(d.get("limits"), str(d["conversation_id"])),
         )

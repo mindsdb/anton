@@ -20,11 +20,14 @@ from pathlib import Path
 # `_pin_today` later replaces on the module.
 from datetime import datetime as _stdlib_datetime
 
+import httpx2 as httpx
+import openai
 import pytest
 
 import anton.core.llm.client as llm_client_mod
 import anton.core.session as session_mod
 from anton.cloud_turn.contract import TurnRequestV1
+from anton.config.settings import AntonSettings
 from anton.cloud_turn.session import (
     CLOUD_TOOL_ALLOWLIST,
     _ARTIFACTS_ROOT_ENV,
@@ -341,6 +344,14 @@ def test_model_override_applied(tmp_path, monkeypatch):
     assert cfg.settings.planning_model == "claude-opus-4-8"
 
 
+@pytest.mark.parametrize(("jev_decisions", "verifier_jev"), [(False, "off"), (True, "on")])
+def test_jev_decisions_set_the_completion_check(tmp_path, monkeypatch, jev_decisions, verifier_jev):
+    # The default under test, not a developer's shell.
+    monkeypatch.delenv("ANTON_VERIFIER_JEV", raising=False)
+    _, cfg = _build(tmp_path, monkeypatch, jev_decisions=jev_decisions)
+    assert cfg.settings.verifier_jev == verifier_jev
+
+
 def test_cloud_session_uses_turn_key_from_request(tmp_path, monkeypatch):
     # No minds env set; the credential must come from the request's llm block.
     monkeypatch.delenv("ANTON_MINDS_API_KEY", raising=False)
@@ -369,12 +380,17 @@ def test_llm_block_coding_model_applied(tmp_path, monkeypatch):
 
 
 def test_llm_block_without_coding_model_keeps_default(tmp_path, monkeypatch):
+    # Hermetic env, as below: a leaked ANTON_CODING_MODEL would mask the default.
+    for k in list(os.environ):
+        if k.startswith("ANTON_"):
+            monkeypatch.delenv(k, raising=False)
     _, cfg = _build(
         tmp_path, monkeypatch,
         llm={"provider": "minds-cloud", "api_key": "mdb_turnkey",
              "base_url": "https://api.mindshub.ai/v1"},
     )
-    assert cfg.settings.coding_model  # built-in default survives
+    default = AntonSettings.model_fields["coding_model"].default
+    assert cfg.settings.coding_model == default
 
 
 def test_cloud_session_without_llm_block_falls_back_to_env(tmp_path, monkeypatch):
@@ -578,6 +594,47 @@ def _real_cloud_session(tmp_path, monkeypatch, **req_overrides):
     return session
 
 
+def _hermetic_limits_env(monkeypatch):
+    for name in ("ANTON_MAX_TOOL_ROUNDS", "ANTON_MAX_CONTINUATIONS", "ANTON_MAX_TURN_TOKENS"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_the_tenants_limits_from_the_wire_bound_the_real_session(tmp_path, monkeypatch):
+    _hermetic_limits_env(monkeypatch)
+    line = json.dumps({
+        "protocol_version": 1, "conversation_id": "conv_1", "input": "hi",
+        # Unlike both anton's old (25/3/1.25M) and new (250/10/25M) defaults,
+        # so a session that ignored the limits could not pass by accident.
+        "limits": {"max_tool_rounds": 7, "max_continuations": 2, "max_turn_tokens": 4_000_000},
+    })
+    request = TurnRequestV1.from_json(line)
+    session = _real_cloud_session(tmp_path, monkeypatch, limits=request.limits)
+    assert session._max_tool_rounds == 7
+    assert session._max_continuations == 2
+    assert session._max_turn_tokens == 4_000_000
+
+
+def test_a_turn_without_limits_keeps_antons_defaults(tmp_path, monkeypatch):
+    from anton.core.settings import CoreSettings
+
+    _hermetic_limits_env(monkeypatch)
+    defaults = CoreSettings()
+    session = _real_cloud_session(tmp_path, monkeypatch)
+    assert session._max_tool_rounds == defaults.max_tool_rounds
+    assert session._max_continuations == defaults.max_continuations
+    assert session._max_turn_tokens == defaults.max_turn_tokens
+
+
+def test_one_limit_replaces_only_its_own_default(tmp_path, monkeypatch):
+    from anton.core.settings import CoreSettings
+
+    _hermetic_limits_env(monkeypatch)
+    defaults = CoreSettings()
+    session = _real_cloud_session(tmp_path, monkeypatch, limits={"max_turn_tokens": 3_000_000})
+    assert session._max_turn_tokens == 3_000_000
+    assert session._max_tool_rounds == defaults.max_tool_rounds
+
+
 def _pin_today(monkeypatch, moment):
     """Pin what the session sees as "now".
 
@@ -657,6 +714,98 @@ def test_final_tool_set_equals_allowlist_after_real_build(tmp_path, monkeypatch)
     assert names == set(CLOUD_TOOL_ALLOWLIST), (
         f"cloud tool set drifted from the allowlist: {sorted(names)}"
     )
+
+
+# ── the browser: only the router block a turn carries ───────────────────────
+
+_ROUTER = "https://app.example.test/browser"
+
+
+def _build_from_wire(tmp_path, monkeypatch, browser):
+    """`_build`, with the request read from its JSON line as the pod reads it."""
+    monkeypatch.setattr(session_mod, "ChatSession", lambda config: config)
+    monkeypatch.setattr(
+        llm_client_mod.LLMClient, "from_settings",
+        classmethod(lambda cls, settings: object()),
+    )
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+    line = json.dumps({"protocol_version": 1, "conversation_id": "conv_1", "input": "hello", "browser": browser})
+    return build_cloud_chat_session(TurnRequestV1.from_json(line))
+
+
+def test_a_router_block_gives_the_turn_a_browser(tmp_path, monkeypatch):
+    from anton.core.browser.config import BrowserConfig
+
+    cfg = _build_from_wire(tmp_path, monkeypatch, {"base_url": _ROUTER, "profile": "t-1"})
+    assert "browser" in cfg.tool_allowlist
+    assert cfg.browser == BrowserConfig(base_url=_ROUTER, profile="t-1")
+
+
+@pytest.mark.parametrize("block", [
+    {"base_url": _ROUTER, "profile": "t-1", "token": "t"},
+    {"base_url": "http://127.0.0.1:51234", "profile": "t-1", "token": "t"},
+    {"base_url": _ROUTER},
+    "junk",
+])
+def test_a_token_or_loopback_block_gives_no_browser(tmp_path, monkeypatch, block):
+    cfg = _build_from_wire(tmp_path, monkeypatch, block)
+    assert "browser" not in cfg.tool_allowlist
+    assert cfg.browser is None
+
+
+def test_a_cloud_session_with_a_router_block_registers_exactly_the_browser_too(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+
+    session = _real_cloud_session(
+        tmp_path, monkeypatch,
+        browser=TurnRequestV1.from_json(json.dumps({
+            "protocol_version": 1, "conversation_id": "c", "input": "hi",
+            "browser": {"base_url": _ROUTER, "profile": "t-1"},
+        })).browser,
+    )
+    session._scratchpads = MagicMock(available_packages=[])
+    session._build_tools()
+    names = {t.name for t in session.tool_registry.get_tool_defs()}
+    assert names == set(CLOUD_TOOL_ALLOWLIST) | {"browser"}
+
+
+def test_the_environment_never_gives_a_browser(tmp_path, monkeypatch):
+    """Settings are passed: ChatSessionConfig.settings defaults to None, so a
+    session without them would pass even with an environment fallback back."""
+    from anton.core.settings import CoreSettings
+
+    monkeypatch.setenv("ANTON_BROWSER_URL", "https://collector.example")
+    monkeypatch.setenv("ANTON_BROWSER_PROFILE", "t-1")
+    session = _real_session_with_workspace(tmp_path, settings=CoreSettings(), browser=None)
+    session._build_tools()
+    assert "browser" not in {t.name for t in session.tool_registry.get_tool_defs()}
+
+
+def test_a_host_config_registers_the_browser(tmp_path):
+    from anton.core.browser.config import BrowserConfig
+    from anton.core.settings import CoreSettings
+
+    for config in (
+        BrowserConfig(base_url=_ROUTER, profile="t-1"),
+        BrowserConfig(base_url="http://127.0.0.1:51234", profile="t-1", token="launch-key"),
+    ):
+        session = _real_session_with_workspace(tmp_path, settings=CoreSettings(), browser=config)
+        session._build_tools()
+        assert "browser" in {t.name for t in session.tool_registry.get_tool_defs()}
+
+
+async def test_closing_the_session_closes_the_browsers_clients(tmp_path):
+    """The browser state owns the browser's HTTP client and the Jev client its
+    steps share; the session's close is what releases both."""
+    from unittest.mock import AsyncMock
+
+    from anton.core.browser.config import BrowserConfig
+
+    session = _real_session_with_workspace(tmp_path, browser=BrowserConfig(base_url=_ROUTER, profile="t-1"))
+    session._scratchpads = AsyncMock()
+    session._browser_state = AsyncMock()
+    await session.close()
+    session._browser_state.aclose.assert_awaited_once()
 
 
 def test_tool_allowlist_none_preserves_desktop_tools(tmp_path):
@@ -1248,6 +1397,124 @@ def test_needs_reconnect_yields_no_env_not_a_crash(tmp_path, monkeypatch):
 
     assert cfg.data_vault.load("gmail", "primary") is None
     assert "DS_GMAIL_PRIMARY__ACCESS_TOKEN" not in os.environ
+
+
+_MINDS_LLM = {"provider": "minds-cloud", "api_key": "mdb_k", "base_url": "https://api.mindshub.ai"}
+
+
+def _build_real_client(tmp_path, monkeypatch, **req_overrides):
+    """The real LLMClient a cloud turn builds for this request, with ChatSession faked."""
+    captured: dict = {}
+    real_from_settings = llm_client_mod.LLMClient.from_settings.__func__
+
+    def capture(cls, settings):
+        captured["client"] = real_from_settings(cls, settings)
+        return captured["client"]
+
+    monkeypatch.setattr(session_mod, "ChatSession", lambda config: _FakeSession())
+    monkeypatch.setattr(llm_client_mod.LLMClient, "from_settings", classmethod(capture))
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+    body = dict(protocol_version=1, conversation_id="conv_1", input="hello", llm=_MINDS_LLM)
+    body.update(req_overrides)
+    build_cloud_chat_session(TurnRequestV1(**body))
+    return captured["client"]
+
+
+def _chat_stream(text: str) -> bytes:
+    """``text`` as a streamed chat.completions answer, the format the minds passthrough reads."""
+    chunk = {"id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 0, "model": "m"}
+    chunks = [
+        {**chunk, "choices": [{"index": 0, "delta": {"role": "assistant", "content": text},
+                               "finish_reason": None}]},
+        {**chunk, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+    ]
+    return ("".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n").encode()
+
+
+def _record_requests(monkeypatch) -> list[tuple[str, dict]]:
+    """Point every OpenAI SDK client built from now on at a transport that
+    records each request as (path, body) and answers it with a short completion."""
+    requests: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent = json.loads(request.content)
+        requests.append((request.url.path, sent))
+        if sent.get("stream"):
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"},
+                content=_chat_stream("answered"),
+            )
+        return httpx.Response(200, json={
+            "id": "chatcmpl-1", "object": "chat.completion", "created": 0, "model": "m",
+            "choices": [{"index": 0, "finish_reason": "stop",
+                         "message": {"role": "assistant", "content": "answered"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        })
+
+    real_async_openai = openai.AsyncOpenAI
+
+    def mock_async_openai(**kwargs):
+        kwargs["http_client"] = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        return real_async_openai(**{**kwargs, "max_retries": 0})
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", mock_async_openai)
+    return requests
+
+
+async def _efforts_on_the_wire(client, requests) -> dict[str, str | None]:
+    """One call per role; the ``reasoning_effort`` each chat.completions request carried."""
+    messages = [{"role": "user", "content": "hi"}]
+    async for _ in client.plan_stream(system="s", messages=messages):
+        pass
+    async for _ in client.code_stream(system="s", messages=messages):
+        pass
+    await client.summarize(system="s", messages=messages)
+    assert [path for path, _ in requests] == ["/v1/chat/completions"] * 3
+    efforts = (sent.get("reasoning_effort") for _, sent in requests)
+    return dict(zip(("planning", "coding", "router"), efforts))
+
+
+@pytest.mark.parametrize("coding_model", [None, "claude-opus-4-6"])
+@pytest.mark.parametrize("router", [False, True])
+async def test_selected_effort_reaches_only_the_planning_request(tmp_path, monkeypatch, coding_model, router):
+    """The router shares the coding provider unless one is configured, so
+    coding effort must stay put or history summarization would change too."""
+    if router:
+        monkeypatch.setenv("ANTON_ROUTER_PROVIDER", "openai-compatible")
+    monkeypatch.setenv("ANTON_CODING_REASONING_EFFORT", "medium")
+    requests = _record_requests(monkeypatch)
+    llm = dict(_MINDS_LLM, coding_model=coding_model) if coding_model else _MINDS_LLM
+    client = _build_real_client(
+        tmp_path, monkeypatch, model="claude-opus-4-6", llm=llm, reasoning_effort="low",
+    )
+    try:
+        sent = await _efforts_on_the_wire(client, requests)
+    finally:
+        await client.aclose()
+    assert sent == {"planning": "low", "coding": "medium", "router": None if router else "medium"}
+
+
+async def test_no_selected_effort_keeps_the_configured_planning_effort(tmp_path, monkeypatch):
+    """With nothing selected, planning carries the configured effort and the other roles none."""
+    monkeypatch.setenv("ANTON_PLANNING_REASONING_EFFORT", "high")
+    requests = _record_requests(monkeypatch)
+    client = _build_real_client(tmp_path, monkeypatch, reasoning_effort=None)
+    try:
+        sent = await _efforts_on_the_wire(client, requests)
+    finally:
+        await client.aclose()
+    assert sent == {"planning": "high", "coding": None, "router": None}
+
+
+async def test_no_selected_or_configured_effort_sends_none(tmp_path, monkeypatch):
+    """With nothing selected or configured, no request carries an effort."""
+    requests = _record_requests(monkeypatch)
+    client = _build_real_client(tmp_path, monkeypatch)
+    try:
+        sent = await _efforts_on_the_wire(client, requests)
+    finally:
+        await client.aclose()
+    assert sent == {"planning": None, "coding": None, "router": None}
 
 
 # ── ENG-1638: the pod injects a configured-LLM block ─────────────────────────

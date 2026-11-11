@@ -160,7 +160,7 @@ async def test_publish_says_why_the_upload_service_refused(tmp_path, status, rea
         return {"mode": "restricted", "emails": [], "org_allowed": True}
 
     console = Console(record=True, width=200)
-    with mock.patch("anton.publisher.minds_request", side_effect=refusal), \
+    with mock.patch("anton.publisher.minds_request_with_status", side_effect=refusal), \
          mock.patch("anton.publish_access.prompt_access", side_effect=fake_prompt_access), \
          mock.patch("webbrowser.open"):
         await chat._handle_publish(console, _settings(root, tmp_path), file_arg="sales/report.html")
@@ -193,7 +193,7 @@ async def test_publish_says_once_why_the_account_may_not_share_with_the_organiza
 
     console = Console(record=True, width=200)
     settings = _settings(root, tmp_path)
-    with mock.patch("anton.publisher.minds_request", side_effect=refusal), \
+    with mock.patch("anton.publisher.minds_request_with_status", side_effect=refusal), \
          mock.patch("anton.publish_access.prompt_access", side_effect=fake_prompt_access), \
          mock.patch("webbrowser.open"):
         await chat._handle_publish(console, settings, file_arg="sales/report.html")

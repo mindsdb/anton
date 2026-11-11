@@ -34,6 +34,7 @@ from anton.core.backends.wire import (
     INSTALL_START_MARKER,
     INTERNET_RESEARCH_ENV,
     MAX_OUTPUT,
+    truncation_note,
     NOTHING_KEPT,
     PROGRESS_MARKER,
     RESULT_END,
@@ -247,7 +248,7 @@ def _clip_stdout(raw: str, total: int, cwd_note: str) -> str:
             unsafe_tail = max(STDOUT_SCRUB_MARGIN, longest_exact_secret())
             keep = min(keep, max(len(text) - unsafe_tail, 0))
         if keep:
-            text = text[:keep] + f"\n\n... (truncated, {total} chars total)"
+            text = text[:keep] + truncation_note(total)
         else:
             text = f"... (output withheld: it could not be scrubbed safely, {total} chars total)"
     if cwd_note:
@@ -1706,6 +1707,17 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         )
         self._running_code = None
         cell = self._record_cell(cell)
+        if cell.ended_process and self._proc is not None and self._proc.returncode is None:
+            # The exit can be reaped after the result arrives; until then the
+            # next cell sees a live process and writes to its closed pipe.
+            try:
+                await asyncio.wait_for(self._proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                logger.debug(
+                    "scratchpad %s: cell reported its process ended, but pid %s had not exited after 5s",
+                    self.name, self._proc.pid,
+                )
+                await self._stop_process()
         # The process proved itself alive by completing this round trip —
         # whatever earlier death streak led here (if any) is over. This is
         # in addition to (not instead of) the reset inside _auto_resume()

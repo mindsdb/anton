@@ -1,13 +1,11 @@
 """Optional static-data collection with an explicit, checked completion condition."""
 import copy
-import os
 
 from .observed_data import credential_bearing, read_handoff
 
 
 def enabled(state):
-    return (state.act_first and state.artifact_type == "html-app"
-            and os.environ.get("ANTON_STATIC_FAST_PATH") == "direct")
+    return state.act_first and state.artifact_type == "html-app"
 
 
 def tools(schemas):

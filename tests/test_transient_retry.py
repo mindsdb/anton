@@ -127,6 +127,9 @@ def test_velocity_429_without_a_hint_still_backs_off():
         # or when the org adds credit, and no retry budget waits out either.
         (429, {"error": {"code": "free_air_daily_spend_fuse_exceeded"}}),
         (429, {"code": "free_air_daily_spend_fuse_exceeded"}),
+        # A spent organization budget, which lifts only when it resets or an admin raises it.
+        (402, {"error": {"code": "budget_exceeded"}}),
+        (402, {"code": "budget_exceeded"}),
         # OpenAI's own quota dialect.
         (429, {"error": {"code": "insufficient_quota"}}),
         (429, {"code": "insufficient_quota"}),
@@ -465,6 +468,7 @@ def _mapped_gate_denial(status, code):
     (402, "wallet_empty"),
     (429, "included_allowance_exhausted"),
     (429, "free_air_daily_spend_fuse_exceeded"),
+    (402, "budget_exceeded"),
 ])
 async def test_a_gate_billing_stop_fails_the_turn_on_the_first_attempt(status, code):
     """End to end from the mapper's output to the session's retry loop. The fuse
