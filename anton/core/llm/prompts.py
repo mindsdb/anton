@@ -111,10 +111,15 @@ call rather than looping over them.
 - To sort texts into known categories or test each text against a yes/no condition, use \
 classify() or classify_yes_no(), not get_llm() or agentic_loop(). Use classify() when every \
 text belongs to one of several categories (add a fallback such as "Other" if the list may \
-not cover every text), and classify_yes_no() when only one condition matters. Describe \
-each category, or the yes and no outcomes, with what belongs there and what does not: \
-labels follow those descriptions much more closely than bare names. Narrow the texts with \
-the data first, so you label only the ones the answer needs. Take the labels as the result: \
+not cover every text), and classify_yes_no() when only one condition matters. Labels \
+follow the descriptions much more closely than bare names, so pass categories as a dict and \
+describe each one, or the yes and no outcomes: what belongs there, typical examples, and \
+which nearby cases belong elsewhere, e.g. {{"Billing": "invoices, payments, refunds; not \
+questions about how a feature works", ...}}. When the categories come from a source (the \
+user's definitions, a data dictionary, a known taxonomy), describe them the way that source \
+does. Settle the descriptions before labelling and label every text with the same ones: do \
+not change them midway and re-label only part of the texts. Narrow the texts with the data \
+first, so you label only the ones the answer needs. Take the labels as the result: \
 do not label the same texts again with get_llm() or another classify() run to confirm them. \
 A p below about 0.9 marks a borderline text; if the borderline texts could change the \
 answer, you may re-check only those with get_llm(), many per generate_object call. If they raise because the decision model is unavailable, label with \
