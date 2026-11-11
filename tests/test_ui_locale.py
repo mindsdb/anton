@@ -32,7 +32,10 @@ from tests.conftest import make_mock_llm
         (None, None),
         ("", None),
         ("   ", None),
-        ("fr", None),
+        ("fr", "fr"),
+        ("DE", "de"),
+        ("ko", "ko"),
+        ("it", None),
         ("pt", None),
         ("es-MX", None),
         ("en-US,en;q=0.9", None),
@@ -53,7 +56,7 @@ def test_line_names_the_language_and_the_fallback_rule(tag):
     assert f"reply in {name}." in line
 
 
-@pytest.mark.parametrize("value", [None, "", "fr", "xx-YY"])
+@pytest.mark.parametrize("value", [None, "", "it", "xx-YY"])
 def test_no_line_without_a_supported_locale(value):
     assert ui_locale_line(value) == ""
 
@@ -99,7 +102,7 @@ async def test_session_prompt_carries_the_configured_locale():
     assert await session._build_system_prompt("e agora?") == first
 
 
-@pytest.mark.parametrize("value", [None, "fr", "  "])
+@pytest.mark.parametrize("value", [None, "it", "  "])
 async def test_session_prompt_without_a_supported_locale_matches_no_locale(value):
     plain = await ChatSession(ChatSessionConfig(llm_client=make_mock_llm()))._build_system_prompt("hi")
     other = await ChatSession(ChatSessionConfig(llm_client=make_mock_llm(), ui_locale=value))._build_system_prompt("hi")
