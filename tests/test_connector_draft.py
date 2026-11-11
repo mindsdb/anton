@@ -572,9 +572,15 @@ def test_a_held_value_as_a_header_name_is_refused_without_the_value(held_value):
     assert held_value not in str(exc.value)
 
 
-@pytest.mark.parametrize("value", ["Basic {email}:{api_token}", "basic {api_token}", "BASIC X"])
-def test_a_hand_built_basic_header_is_refused_in_favour_of_type_basic(value):
-    auth = {"type": "header", "headers": {"Authorization": value}}
+@pytest.mark.parametrize("name,value", [
+    ("Authorization", "Basic {email}:{api_token}"),
+    ("authorization", "Basic {email}:{api_token}"),
+    ("Authorization", "basic {api_token}"),
+    ("Authorization", "BASIC X"),
+    ("X-Authorization", "Basic {email}:{api_token}"),
+])
+def test_a_hand_built_basic_header_is_refused_in_favour_of_type_basic(name, value):
+    auth = {"type": "header", "headers": {name: value}}
 
     with pytest.raises(ConnectorDraftError, match=r"use auth type 'basic'"):
         parse_connector_draft(_draft(fields=_BASIC_FIELDS, auth=auth))

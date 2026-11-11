@@ -397,8 +397,8 @@ def _parse_auth_headers(value: Any, declared: frozenset[str]) -> tuple[tuple[tup
         seen.add(name.lower())
         text, names = _check_template(template, f"auth.headers.{name}", declared)
         # Basic needs base64 of user:password, which a header template cannot build.
-        if name.lower() == "authorization" and text.lower().startswith("basic"):
-            raise ConnectorDraftError("auth.headers.Authorization must not be Basic; use auth type 'basic'.")
+        if text.lower().startswith("basic"):
+            raise ConnectorDraftError("auth.headers must not hold a Basic value; use auth type 'basic'.")
         headers.append((name, text))
         placed |= names
     return tuple(headers), placed
