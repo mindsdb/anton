@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -200,10 +199,9 @@ class ChatSystemPromptBuilder:
         (`ChatSessionConfig.internet_research_enabled`) swaps the internet
         guidance for "use the connected data only" and leaves out the
         public-data-sources skill's line."""
-        direct_generation = (os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on"
-                             and any(getattr(tool, "name", "") == "generate_artifact"
-                                     and "name" in tool.input_schema.get("properties", {})
-                                     for tool in tool_defs or []))
+        direct_generation = any(getattr(tool, "name", "") == "generate_artifact"
+                                and "name" in tool.input_schema.get("properties", {})
+                                for tool in tool_defs or [])
         visualizations_section = self._build_visualizations_section(
             proactive_dashboards=proactive_dashboards,
             output_dir=output_dir,
@@ -217,9 +215,9 @@ class ChatSystemPromptBuilder:
                                  else NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT)
         # The single-call path has its own artifact instructions, which have no direct report path
         if direct_generation:
-            from .static_artifact_prompt import ARTIFACTS
+            from .static_artifact_prompt import ARTIFACTS, STATIC_ARTIFACTS
 
-            artifacts_section = ARTIFACTS
+            artifacts_section = ARTIFACTS if fullstack_offered else STATIC_ARTIFACTS
 
         prompt = ""
 

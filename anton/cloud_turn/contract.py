@@ -269,6 +269,53 @@ def _is_skill_name(slug: object) -> bool:
     return True
 
 
+#: The per-task limits a request may set, with the lowest value each accepts.
+#: A turn-token limit of 0 means no limit to anton, so it is refused here: a
+#: producer bug must not turn the ceiling off.
+TURN_LIMIT_MINIMUMS = {"max_tool_rounds": 1, "max_continuations": 0, "max_turn_tokens": 1}
+
+
+def _parse_limits(value: object, conversation_id: str) -> dict[str, int]:
+    """The usable limits in a request's ``limits`` block.
+
+    Keeps known names with integer values at or above their minimum and drops
+    the rest, so one bad value leaves that limit at the pod's default instead of
+    failing the turn. Each drop is logged by name and reason, never by value:
+    dropping in silence would look exactly like a controller that sent nothing.
+    The name and reason go in log fields, not %-args, because the pod's
+    formatter keeps only the static template of a call with args.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        logger.warning(
+            "cloud turn ignoring a limits block that is not an object",
+            extra={
+                "event": "turn_limits_ignored",
+                "reason": "limits_block_not_an_object",
+                "conversation_id": conversation_id,
+            },
+        )
+        return {}
+    limits: dict[str, int] = {}
+    for name, limit in value.items():
+        if name not in TURN_LIMIT_MINIMUMS:
+            # An unknown name is not echoed: it comes off the wire.
+            reason = "unknown_limit"
+        elif not isinstance(limit, int) or isinstance(limit, bool):
+            reason = f"{name}_not_an_integer"
+        elif limit < TURN_LIMIT_MINIMUMS[name]:
+            reason = f"{name}_below_minimum"
+        else:
+            limits[name] = limit
+            continue
+        logger.warning(
+            "cloud turn ignoring a limit",
+            extra={"event": "turn_limit_ignored", "reason": reason, "conversation_id": conversation_id},
+        )
+    return limits
+
+
 @dataclass
 class TurnRequestV1:
     """One turn to run in the pod. Sent as a single JSON line on stdin."""
@@ -352,12 +399,21 @@ class TurnRequestV1:
     #: {engine: {"usage_notes": str}}. Rendered only for engines the turn's
     #: vault connects. Absent when no connected engine has notes.
     connectors: dict | None = None
+    #: Optional reasoning effort the user picked for this turn. Applied to the
+    #: planning model only; the name is passed to the provider uninterpreted.
+    #: Absent, null, blank, or non-string keeps the configured default.
+    reasoning_effort: str | None = None
     #: The MindsHub browser router, when cowork-server turned the browser on for
     #: this turn: {"base_url", "profile", "project"?}, read by
     #: BrowserConfig.from_dict. The pod reaches the router with this turn's
     #: `llm` key. A block with a `token`, or with any address but the https
     #: router, is refused. Absent or malformed means no browser tool this turn.
     browser: BrowserConfig | None = None
+    #: The tenant's per-task limits cowork-server resolved: any of
+    #: ``max_tool_rounds``, ``max_continuations``, ``max_turn_tokens``. Each one
+    #: present replaces the pod's own default for this turn; an absent one (or
+    #: an older controller that sends no block) leaves the default.
+    limits: dict[str, int] = field(default_factory=dict)
 
     @staticmethod
     def from_json(raw: str) -> "TurnRequestV1":
@@ -365,6 +421,9 @@ class TurnRequestV1:
         protocol_version = d["protocol_version"]
         if not _is_version(protocol_version, TURN_PROTOCOL_VERSION):
             raise ValueError("unsupported cloud turn protocol version")
+        reasoning_effort = d.get("reasoning_effort")
+        if not isinstance(reasoning_effort, str):
+            reasoning_effort = ""
         return TurnRequestV1(
             protocol_version=protocol_version,
             conversation_id=str(d["conversation_id"]),
@@ -394,5 +453,7 @@ class TurnRequestV1:
             connectors=(
                 d.get("connectors") if isinstance(d.get("connectors"), dict) else None
             ),
+            reasoning_effort=reasoning_effort.strip() or None,
             browser=BrowserConfig.from_dict(d.get("browser")),
+            limits=_parse_limits(d.get("limits"), str(d["conversation_id"])),
         )

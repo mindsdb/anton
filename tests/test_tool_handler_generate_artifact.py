@@ -61,7 +61,6 @@ def _make_artifact(tmp_path: Path, type: str = "fullstack-stateless-app") -> str
 
 
 async def test_new_page_single_call_registers_then_uses_the_same_generator(tmp_path, monkeypatch):
-    monkeypatch.setenv("ANTON_STATIC_SINGLE_CALL", "on")
     captured = []
 
     async def generate(**kw):
@@ -84,23 +83,20 @@ async def test_new_page_single_call_registers_then_uses_the_same_generator(tmp_p
     assert len(list((tmp_path / "artifacts").glob("*/metadata.json"))) == 1
 
 
-async def test_new_page_single_call_validates_before_creating_resource(tmp_path, monkeypatch):
-    monkeypatch.setenv("ANTON_STATIC_SINGLE_CALL", "on")
+async def test_new_page_single_call_validates_before_creating_resource(tmp_path):
     _, result = await _collect(_session(tmp_path), {"name": "Sales", "user_request": "Show sales"})
     assert "agent_understanding" in result
     assert not list((tmp_path / "artifacts").glob("*/metadata.json"))
 
 
-async def test_new_page_single_call_is_disabled_by_default(tmp_path, monkeypatch):
-    monkeypatch.delenv("ANTON_STATIC_SINGLE_CALL", raising=False)
-    _, result = await _collect(_session(tmp_path), {"name": "Sales", "user_request": "Show sales", "agent_understanding": "Sales"})
-    assert "`slug` is required" in result
+async def test_a_call_with_neither_slug_nor_name_creates_nothing(tmp_path):
+    _, result = await _collect(_session(tmp_path), {"user_request": "Show sales", "agent_understanding": "Sales"})
+    assert "`slug` (an existing artifact) or `name` (a new one) is required" in result
     assert not list((tmp_path / "artifacts").glob("*/metadata.json"))
 
 
 async def test_new_page_failure_keeps_identity_and_authoritative_data_for_retry(tmp_path, monkeypatch):
     import json
-    monkeypatch.setenv("ANTON_STATIC_SINGLE_CALL", "on")
     async def generate(**kw):
         (kw["artifact_path"] / "observed-data.json").write_text('{"revenue":42}')
         (kw["artifact_path"] / "presentation-program.js").write_text("await CoworkPage({title:'Revenue'});")
@@ -119,20 +115,22 @@ async def test_new_page_failure_keeps_identity_and_authoritative_data_for_retry(
     assert "slug" in result["if_the_user_asks_to_retry"]
 
 
-def test_single_call_schema_has_no_top_level_combinator_and_covers_both_deployments(monkeypatch):
-    import importlib
+def test_single_call_schema_has_no_top_level_combinator_and_covers_both_deployments():
     import anton.core.tools.tool_defs as tool_defs
 
-    monkeypatch.setenv("ANTON_STATIC_SINGLE_CALL", "on")
-    try:
-        importlib.reload(tool_defs)
-        for tool in (tool_defs.GENERATE_ARTIFACT_TOOL, tool_defs.STATIC_GENERATE_ARTIFACT_TOOL):
-            schema = tool.input_schema
-            assert not {"anyOf", "oneOf", "allOf"} & set(schema)
-            assert "name" in schema["properties"] and "slug" not in schema["required"]
-    finally:
-        monkeypatch.delenv("ANTON_STATIC_SINGLE_CALL")
-        importlib.reload(tool_defs)
+    for tool in (tool_defs.GENERATE_ARTIFACT_TOOL, tool_defs.STATIC_GENERATE_ARTIFACT_TOOL):
+        schema = tool.input_schema
+        assert not {"anyOf", "oneOf", "allOf"} & set(schema)
+        assert "name" in schema["properties"] and "slug" not in schema["required"]
+
+
+def test_with_direct_reports_off_the_page_tools_keep_register_first():
+    import anton.core.tools.tool_defs as tool_defs
+
+    for tool in (tool_defs.GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
+                 tool_defs.STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS):
+        assert "slug" in tool.input_schema["required"]
+        assert "name" not in tool.input_schema["properties"]
 
 
 async def test_fsm_failure_is_wrapped_with_report_instruction(tmp_path: Path, monkeypatch):
@@ -157,8 +155,9 @@ async def test_missing_data_tells_the_agent_what_to_ask_the_user_for(tmp_path: P
 
     monkeypatch.setattr(gen_pkg, "generate", fake_generate)
     _, out = await _collect(_session(tmp_path), {"slug": slug, "user_request": "build it", "agent_understanding": "an app"})
-    assert out.startswith("Error: the data this artifact needs is not available.")
-    assert "no connection holds the sites. Looked in: rest-gw." in out
+    payload = json.loads(out)
+    assert payload["message"].startswith("Error: the data this artifact needs is not available.")
+    assert "no connection holds the sites. Looked in: rest-gw." in payload["message"]
     assert "do NOT build the artifact yourself" in out
     assert "pass the data in `known_data`" in out
     assert "artifact generation failed" not in out
@@ -334,7 +333,7 @@ async def test_validation_errors_yield_no_progress(tmp_path: Path):
     the host's UI."""
     progress, out = await _collect(_session(tmp_path), {"user_request": "build it", "agent_understanding": "an app"})
     assert progress == []
-    assert out == "Error: `slug` is required."
+    assert out == "Error: `slug` (an existing artifact) or `name` (a new one) is required."
 
 
 async def test_success_tells_the_agent_not_to_reverify(tmp_path: Path, monkeypatch):
@@ -363,10 +362,10 @@ def test_the_tool_schema_has_no_context_parameter():
     props = GENERATE_ARTIFACT_TOOL.input_schema["properties"]
     assert "context" not in props
     assert set(GENERATE_ARTIFACT_TOOL.input_schema["required"]) == {
-        "slug", "user_request", "user_language", "agent_understanding",
+        "user_request", "user_language", "agent_understanding",
     }
     assert set(props) == {
-        "slug", "user_request", "user_language", "agent_understanding",
+        "slug", "name", "user_request", "user_language", "agent_understanding",
         "known_data", "user_preferences", "attachments",
     }
 
@@ -1003,7 +1002,7 @@ async def test_generation_runs_every_model_call_at_the_configured_effort(tmp_pat
 
 
 async def test_act_first_relays_the_brief_between_the_steps_and_reports_it(
-    tmp_path, monkeypatch, make_llm_response,
+    tmp_path, monkeypatch, make_llm_response, decline_fast_path,
 ):
     """The whole chain: the session flag reaches `GenState` in
     `engine.generate`, the brief goes out as a message marker between the
