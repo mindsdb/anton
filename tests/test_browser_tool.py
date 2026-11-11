@@ -348,6 +348,13 @@ def test_format_page_is_one_line_per_element_under_an_untrusted_heading():
     assert '[6] textbox "Password" (password)' in checkout and '[8] textbox "Card number" (secret field)' in checkout
 
 
+def test_the_prompt_makes_the_browser_the_last_resort_after_connectors():
+    prompt = browser_tool.BROWSER_TOOL_PROMPT
+    assert "The browser is the last resort." in prompt
+    assert "offer to connect it instead of browsing" in prompt
+    assert "booking tickets" in prompt
+
+
 def test_the_prompt_and_the_skill_say_page_content_is_untrusted():
     from pathlib import Path
 
