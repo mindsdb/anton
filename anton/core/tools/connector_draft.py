@@ -60,12 +60,19 @@ _CHECK_PATH_MAX = 300
 _CHECK_HEADER_VALUE_MAX = 200
 _HEADER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,40}")
 _PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]{0,39})\}")
-#: Headers the request itself owns, or that would change what it does or where it goes.
+#: Headers a template may not set, compared in lowercase: ones the request or
+#: its transport owns, ones a proxy reads as the client, host, path or method,
+#: and the four the call helper passes itself. A name not listed is allowed.
 _REFUSED_HEADERS = frozenset({
-    "host", "cookie", "content-length", "transfer-encoding", "connection", "keep-alive", "te",
-    "trailer", "upgrade", "expect", "accept-encoding",
+    "host", "cookie", "via", "max-forwards", "range", "expect", "accept-encoding",
+    "connection", "keep-alive", "te", "trailer", "transfer-encoding", "upgrade",
+    "forwarded", "x-real-ip", "x-client-ip", "x-cluster-client-ip", "true-client-ip",
+    "cf-connecting-ip", "fastly-client-ip",
+    "x-original-url", "x-rewrite-url", "x-original-host", "x-host", "x-http-host-override",
     "x-http-method-override", "x-http-method", "x-method-override",
+    "accept", "accept-language", "if-none-match", "if-modified-since",
 })
+_REFUSED_HEADER_PREFIXES = ("proxy-", "x-forwarded-", "x-envoy-", "content-")
 
 
 class ConnectorDraftError(ValueError):
@@ -217,6 +224,29 @@ def check_draft_text(key: str, value: Any) -> str | None:
     return _check_text(value, key, cap, long_text=key in _LONG_TEXTS)
 
 
+def check_header_name(name: Any, where: str = "The template") -> None:
+    """Refuse a header name a connector template may not set.
+
+    A grammar plus a list of refused names, not an allowlist: a name outside
+    the list passes. The other services that apply a template's headers keep
+    a copy of this rule and run ``tests/fixtures/header_name_cases.json``.
+
+    Args:
+        name: The header name as the template gives it.
+        where: Where the name sits, for the message.
+
+    Raises:
+        ConnectorDraftError: when ``name`` breaks the grammar, reads as a
+            token, or is refused. The message never quotes the name, which
+            is model text.
+    """
+    if not isinstance(name, str) or not _HEADER_NAME.fullmatch(name) or _looks_like_token(name):
+        raise ConnectorDraftError(f"{where} has a header name that is not allowed.")
+    lowered = name.lower()
+    if lowered in _REFUSED_HEADERS or lowered.startswith(_REFUSED_HEADER_PREFIXES):
+        raise ConnectorDraftError(f"{where} has a header name that is not allowed.")
+
+
 def _check_keys(data: dict, allowed: frozenset[str], where: str) -> None:
     """Refuse keys outside ``allowed`` without naming them; a key is model text too."""
     if not set(data) <= allowed:
@@ -296,10 +326,9 @@ def _check_headers(value: Any, fields: tuple[ConnectorDraftField, ...]) -> tuple
     places_secret = False
     for name, header_value in value.items():
         # A header name is model text: one that reads as a token is refused before any message names it.
-        if not isinstance(name, str) or not _HEADER_NAME.fullmatch(name) or _looks_like_token(name):
-            raise ConnectorDraftError("check.headers has a header name that is not allowed.")
+        check_header_name(name, "check.headers")
         lowered = name.lower()
-        if lowered in _REFUSED_HEADERS or lowered.startswith("proxy-") or lowered in seen:
+        if lowered in seen:
             raise ConnectorDraftError("check.headers has a header name that is not allowed.")
         seen.add(lowered)
         where = f"check.headers.{name}"

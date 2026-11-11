@@ -8,10 +8,12 @@ the value it refused.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -21,6 +23,7 @@ from anton.core.tools.connector_draft import (
     ConnectorDraftBox,
     ConnectorDraftError,
     check_draft_text,
+    check_header_name,
     connector_draft_tool,
     parse_connector_draft,
 )
@@ -377,14 +380,14 @@ def test_the_tool_refuses_a_bad_draft_without_the_value():
     assert box.drain() == []
 
 
-_CHECK = {"path": "/v2/me", "headers": {"Authorization": "Bearer {api_key}", "Accept": "application/json"}}
+_CHECK = {"path": "/v2/me", "headers": {"Authorization": "Bearer {api_key}", "X-Api-Version": "2"}}
 
 
 def test_a_check_parses_and_round_trips():
     draft = parse_connector_draft(_draft(check=_CHECK))
 
     assert draft.check.path == "/v2/me"
-    assert draft.check.headers == (("Authorization", "Bearer {api_key}"), ("Accept", "application/json"))
+    assert draft.check.headers == (("Authorization", "Bearer {api_key}"), ("X-Api-Version", "2"))
     assert draft.to_dict()["check"] == _CHECK
     assert parse_connector_draft(draft.to_dict()) == draft
 
@@ -429,6 +432,8 @@ def test_a_check_path_that_could_name_a_host_or_carry_a_value_is_refused(path):
     {"Proxy-Authorization": "Bearer {api_key}"},
     {"X-HTTP-Method-Override": "DELETE", "Authorization": "Bearer {api_key}"},
     {"Accept-Encoding": "gzip", "Authorization": "Bearer {api_key}"},
+    {"X-Forwarded-Host": "evil.example", "Authorization": "Bearer {api_key}"},
+    {"Accept": "application/json", "Authorization": "Bearer {api_key}"},
     {"Authorization": "Bearer {api_key}", "authorization": "Bearer {api_key}"},
     {"X Bad": "{api_key}"},
     {f"X-{i}": "{api_key}" for i in range(6)},
@@ -472,6 +477,35 @@ def test_a_token_shaped_header_name_is_refused_without_echoing_it():
         parse_connector_draft(_draft(check={**_CHECK, "headers": {name: "Bearer {api_key}"}}))
 
     assert _TOKEN_SHAPES["bare"] not in str(exc.value)
+
+
+_HEADER_CASES = Path(__file__).parent / "fixtures" / "header_name_cases.json"
+#: Other services carry this file byte for byte; a change here must reach their copies.
+_HEADER_CASES_SHA256 = "dcf66003063f842abc2eee9e413110d7cb9e1dba62f88a8d1b0af855df6bfa4d"
+
+
+def test_the_shared_header_name_cases_are_pinned_and_canonical():
+    raw = _HEADER_CASES.read_bytes()
+    cases = json.loads(raw)
+
+    assert hashlib.sha256(raw).hexdigest() == _HEADER_CASES_SHA256
+    assert raw.decode("ascii") == json.dumps(cases, sort_keys=True, indent=2, ensure_ascii=True) + "\n"
+
+
+@pytest.mark.parametrize("case", json.loads(_HEADER_CASES.read_text(encoding="ascii")), ids=repr)
+def test_the_header_name_rule_matches_the_shared_cases(case):
+    if case["allowed"]:
+        check_header_name(case["name"])
+    else:
+        with pytest.raises(ConnectorDraftError, match="header name that is not allowed") as exc:
+            check_header_name(case["name"])
+        assert not case["name"] or case["name"] not in str(exc.value)
+
+
+@pytest.mark.parametrize("name", [None, 7, b"Authorization"])
+def test_a_header_name_that_is_not_text_is_refused(name):
+    with pytest.raises(ConnectorDraftError, match=r"^auth\.headers has a header name"):
+        check_header_name(name, "auth.headers")
 
 
 @pytest.mark.parametrize("name", ["base_url", "label", "user_label"])
