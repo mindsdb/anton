@@ -1818,7 +1818,8 @@ class ChatSessionConfig:
     # one.
     surface: str | None = None
     # The language the user's app is set to, as a tag from
-    # `anton.core.llm.ui_locale.UI_LOCALE_NAMES` ("en", "es", "pt-BR"), or None
+    # `anton.core.llm.ui_locale.UI_LOCALE_NAMES` (en, es, pt-BR, de, fr, it, ja,
+    # ko, zh-CN), or None
     # when the host did not say (ENG-4149). Adds one line to the system prompt:
     # reply in the language the user writes in, and in this one when that is
     # unclear. Untrusted like `surface`: an unsupported value is dropped with a

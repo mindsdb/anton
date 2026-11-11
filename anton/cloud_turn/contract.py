@@ -112,7 +112,8 @@ rendered as an agent message; the pod sends it only when the request set
 `tool_messages`.
 A request with `jev_decisions` set to false never asks Jev, MindsHub's
 decision model, whether the agent finished: the organization opted out.
-A request with `ui_locale` ("en", "es" or "pt-BR") tells the agent which
+A request with `ui_locale` (a tag in `anton.core.llm.ui_locale.UI_LOCALE_NAMES`:
+en, es, pt-BR, de, fr, it, ja, ko, zh-CN) tells the agent which
 language the user's app is set to (ENG-4149); absent or unsupported adds nothing.
 
 Answer lines on stdin (interactive turns only), one JSON object per line,
@@ -397,8 +398,10 @@ class TurnRequestV1:
     #: controller that does not forward the field changes nothing; anything
     #: else turns it off, since a malformed opt-out must not read as consent.
     jev_decisions: bool = True
-    #: The language the user's app is set to ("en", "es", "pt-BR"), which
-    #: cowork-server read from the request's Accept-Language (ENG-4149). The
+    #: The language the user's app is set to, a tag in
+    #: `anton.core.llm.ui_locale.UI_LOCALE_NAMES` (en, es, pt-BR, de, fr, it,
+    #: ja, ko, zh-CN), which cowork-server read from the app's
+    #: X-Cowork-UI-Locale header (ENG-4149). The
     #: session validates it (`anton.core.llm.ui_locale`); absent, or a
     #: controller that does not forward it, leaves the prompt unchanged.
     ui_locale: str | None = None
