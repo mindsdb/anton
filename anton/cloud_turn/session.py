@@ -35,8 +35,10 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from anton.cloud_turn.contract import TurnRequestV1, TurnSkillEntry, parse_turn_skills
+from anton.core.datasources.data_vault import custom_connection_key
 from anton.core.llm.tracing import HARNESS_ANTON
 from anton.core.memory.always_on_skills import AlwaysOnSkill, render_always_on_skills
+from anton.core.tools.connector_draft import ConnectorDraftBox, connector_draft_tool
 from anton.core.tools.skill_format import SKILL_FILE
 
 if TYPE_CHECKING:
@@ -91,8 +93,9 @@ CLOUD_TOOL_ALLOWLIST = frozenset(
 #: prompt still invites asking for them and is left alone to keep this fix
 #: web-only, so this text has to claim precedence instead of winning it by
 #: position, and it names no connector because the pod cannot see which ones
-#: auth offers.
-_CREDENTIAL_CONTEXT = (
+#: auth offers. The middle sentence is the one that changes when the turn can
+#: build a connector template.
+_CREDENTIAL_HEAD = (
     "CREDENTIALS ON THIS SURFACE: no tool here can capture a credential, and "
     "none will appear mid-turn. Never ask the user to type a password, API "
     "key, token, connection string, or private key into this conversation. "
@@ -104,11 +107,28 @@ _CREDENTIAL_CONTEXT = (
     "Apps and Data, which reads Connected Apps and Data once something is "
     "connected. You cannot see which connectors it offers, so never state "
     "that a particular one is or is not available there. When a task needs a "
-    "connection that does not exist yet, name that entry. If the user reports "
+    "connection that does not exist yet, name that entry. "
+)
+_DESKTOP_REFERRAL = (
+    "If the user reports "
     "that the connector they need is not offered, say that it is not on Cloud "
     "yet and that it can be used in the Cowork Desktop App instead, and be "
     "exact about what that means: the work itself would move to that app, "
     "because a credential added there is not readable from this conversation. "
+)
+_TEMPLATE_REFERRAL = (
+    "If the user reports that the connector they need is not offered and it "
+    "is an API that takes keys or tokens, build its template with "
+    "create_connector_draft, and still never ask for a value: the user saves "
+    "the template from its card in this chat, then enters their credentials "
+    "for it in Connect Apps and Data. Anything else that is not offered, such "
+    "as a database that needs a driver or a sign-in that redirects to the "
+    "provider, is not on Cloud yet and can be used in the Cowork Desktop App "
+    "instead; be exact about what that means: the work itself would move to "
+    "that app, because a credential added there is not readable from this "
+    "conversation. "
+)
+_CREDENTIAL_TAIL = (
     "Never offer another location inside this app: saving a credential "
     "somewhere else does not make it usable in this conversation. If a "
     "credential arrives here anyway, say plainly that it is now in the "
@@ -116,6 +136,8 @@ _CREDENTIAL_CONTEXT = (
     "it into no tool call, no file and no store: nothing here can vault it, "
     "so having it rotated is the whole of the correct response."
 )
+_CREDENTIAL_CONTEXT = _CREDENTIAL_HEAD + _DESKTOP_REFERRAL + _CREDENTIAL_TAIL
+_CREDENTIAL_CONTEXT_WITH_TEMPLATES = _CREDENTIAL_HEAD + _TEMPLATE_REFERRAL + _CREDENTIAL_TAIL
 
 #: Per-turn staging: Hippocampus reads slots from disk, so the payload has to land
 #: as files. Used only as a fallback when no shared mount is configured (desktop,
@@ -643,6 +665,16 @@ def drain_pending_skills(session) -> list[dict]:
     return entries
 
 
+def drain_pending_connectors(session) -> list[dict]:
+    """Connector templates this turn built, as ``ConnectorDraft.to_dict()``.
+
+    Empty when the turn had no `create_connector_draft` tool. Clears as it
+    reads, so a second call cannot repeat them.
+    """
+    box = getattr(session, "_connector_drafts", None)
+    return box.drain() if box is not None else []
+
+
 def resolve_trusted_workspace_path() -> Path:
     """Resolve the trusted workspace mount path (never from the wire request).
 
@@ -819,20 +851,30 @@ CLOUD_ARTIFACT_DELIVERY_GUIDANCE = (
 _POD_PROMPT_SUFFIX = "\n\n".join(
     (CLOUD_ARTIFACT_DELIVERY_GUIDANCE, _CREDENTIAL_CONTEXT)
 )
+#: The same, for a turn that has `create_connector_draft`.
+_POD_PROMPT_SUFFIX_WITH_TEMPLATES = "\n\n".join(
+    (CLOUD_ARTIFACT_DELIVERY_GUIDANCE, _CREDENTIAL_CONTEXT_WITH_TEMPLATES)
+)
 
 
-def _connector_usage_notes(connectors: dict | None) -> dict[str, str]:
+def _connector_usage_notes(connectors: dict | None, custom_api=None) -> dict[str, str]:
     """engine -> usage notes from the turn's `connectors` block.
 
     Always a dict, never None: None would make build_datasource_context fall
     back to anton's datasources.md registry, whose engine ids collide with
     cowork-server's connectors (see ChatSessionConfig.connector_usage_notes).
+    A custom API connection is listed in the vault as ``c<id>``
+    (custom_connection_key), so its connector's notes are keyed to that too.
     """
     notes: dict[str, str] = {}
     for engine, block in (connectors or {}).items():
         text = block.get("usage_notes") if isinstance(block, dict) else None
         if isinstance(engine, str) and isinstance(text, str) and text.strip():
             notes[engine] = text
+    for ref in (custom_api.connections if custom_api is not None else ()):
+        if ref.connector_id in notes:
+            engine, _ = custom_connection_key(ref.connection_id, ref.connector_id)
+            notes[engine] = notes[ref.connector_id]
     return notes
 
 
@@ -948,11 +990,11 @@ def build_cloud_chat_session(
     data_vault = None
     mcp_tool_defs: list = []
     mcp_sessions: list = []
-    if request.oauth:
+    if request.oauth or request.custom_api:
         from anton.core.datasources.data_vault import TurnKeyDataVault
         from anton.utils.datasources import restore_namespaced_env
 
-        data_vault = TurnKeyDataVault(request.oauth)
+        data_vault = TurnKeyDataVault(request.oauth, request.custom_api)
         restore_namespaced_env(data_vault)
 
         # ENG-1816: discover any MCP-method connections' tools now, before
@@ -998,6 +1040,14 @@ def build_cloud_chat_session(
         | ({"ask_user"} if elicitor is not None else set())
         | ({"browser"} if request.browser is not None else set())
     )
+    # Only when cowork-server asked for it: the template a member saves can be
+    # connected only where the host offers that, so the tool is off by default.
+    connector_drafts = ConnectorDraftBox() if request.connector_drafts else None
+    extra_tools = list(mcp_tool_defs)
+    if connector_drafts is not None:
+        draft_tool = connector_draft_tool(connector_drafts)
+        extra_tools.append(draft_tool)
+        tool_allowlist |= {draft_tool.name}
 
     config = ChatSessionConfig(
         llm_client=llm_client,
@@ -1024,7 +1074,10 @@ def build_cloud_chat_session(
             # the desktop harness injects its own via `_turn_style_context`.
             # Org and team skills cowork marks always-on follow, so they hold
             # on every turn rather than only when recalled.
-            suffix=_POD_PROMPT_SUFFIX + render_always_on_skills(_always_on_skills(turn_skills)),
+            suffix=(
+                (_POD_PROMPT_SUFFIX_WITH_TEMPLATES if connector_drafts is not None else _POD_PROMPT_SUFFIX)
+                + render_always_on_skills(_always_on_skills(turn_skills))
+            ),
         ),
         # WHERE the user was, which this pod cannot know on its own — only the
         # deployment does, so cowork sends it (ENG-1459). Absent when the pod is
@@ -1048,12 +1101,12 @@ def build_cloud_chat_session(
         episodic=None,
         self_awareness=None,
         data_vault=data_vault,              # connectors ON iff request.oauth is set
-        connector_usage_notes=_connector_usage_notes(request.connectors),
+        connector_usage_notes=_connector_usage_notes(request.connectors, request.custom_api),
         history_store=None,                 # disk history OFF (DB authoritative)
-        tools=mcp_tool_defs,                 # ENG-1816: this turn's MCP connections, if any
-        # Static CLOUD_TOOL_ALLOWLIST plus this turn's own discovered MCP
+        tools=extra_tools,                   # this turn's MCP tools, and the connector draft tool
+        # Static CLOUD_TOOL_ALLOWLIST plus this turn's own MCP and draft
         # tool names — _build_tools() re-enforces the allowlist on every
-        # call (not just the first), so an MCP tool left out of it would
+        # call (not just the first), so an extra tool left out of it would
         # survive exactly one round then vanish on the turn's next rebuild.
         tool_allowlist=tool_allowlist,
         mcp_sessions=mcp_sessions,           # closed in ChatSession.close()
@@ -1086,6 +1139,7 @@ def build_cloud_chat_session(
     # from earlier turns are already on the workspace, so without this every
     # turn would re-report all of them.
     session._skill_drafts_before = _snapshot_skill_drafts(settings.skill_drafts_root)
+    session._connector_drafts = connector_drafts
     logger.info(
         "cloud session built conversation=%s workspace=%s tools=%s",
         request.conversation_id, base, sorted(tool_allowlist),

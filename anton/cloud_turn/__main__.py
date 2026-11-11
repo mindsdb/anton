@@ -41,6 +41,7 @@ from anton.cloud_turn.history_rows import split_turn_into_rows
 from anton.cloud_turn.session import (
     build_cloud_chat_session,
     build_turn_content,
+    drain_pending_connectors,
     drain_pending_memory,
     resolve_trusted_workspace_path,
     drain_pending_skills,
@@ -432,6 +433,13 @@ async def _stream_turn(
             logger.info("emitting %d skill draft(s): %s",
                         len(drafts), ", ".join(d["slug"] for d in drafts))
             wire({"kind": "skill", "entries": drafts})
+        connectors = drain_pending_connectors(session)
+        if connectors:
+            # Pre-terminal like skills, and staged the same way: cowork shows a
+            # card the member saves. Ids only in the log; the rest is model text.
+            logger.info("emitting %d connector draft(s): %s",
+                        len(connectors), ", ".join(c["connector_id"] for c in connectors))
+            wire({"kind": "connector", "entries": connectors})
         # Pre-terminal like memory and skills. Without this the pod compacts
         # every turn and throws the result away: the host owns history, so it
         # must be told which seeded messages the summary now covers.

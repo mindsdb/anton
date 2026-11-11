@@ -4,10 +4,13 @@ import json
 import logging
 import os
 import re
+import threading
+import time
+import unicodedata
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +22,9 @@ logger = logging.getLogger(__name__)
 # alone" — distinct from an empty string, which means "explicitly
 # clear this field". Importers should reference the constant rather
 # than re-typing the literal so the two ends stay in sync.
+if TYPE_CHECKING:
+    from anton.cloud_turn.contract import CustomApiBlockV1, CustomApiConnectionRefV1
+
 ANTON_VAULT_KEEP = "__anton_vault_keep__"
 
 
@@ -396,6 +402,30 @@ _TURNKEY_EXTRA_FIELDS = ("developer_token", "login_customer_id")
 _TURNKEY_BOOKKEEPING_FIELDS = ("_method", "_access_mode")
 _TURNKEY_SECURE_KEYS = ("access_token", "developer_token")
 
+#: A custom API connection's fields are fetched once, while the vault is built:
+#: this many at a time, all within one deadline, so a slow auth cannot hold the
+#: turn's start past its key.
+_CUSTOM_FETCH_WORKERS = 4
+_CUSTOM_FETCH_DEADLINE_SECONDS = 20.0
+_CUSTOM_FIELD_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_CUSTOM_LABEL_MAX = 120
+#: The one custom field a turn may read in the clear: the address the member
+#: typed, which is not a credential. Every other field is hidden whatever the
+#: template said of it, since a model wrote that flag.
+_CUSTOM_PUBLIC_FIELDS = frozenset({"base_url"})
+
+
+def custom_connection_key(connection_id: int, connector_id: str) -> tuple[str, str]:
+    """The vault's (engine, name) for a custom API connection.
+
+    ``c<id>`` as the engine makes ``_slug_env_prefix`` give
+    ``DS_C<id>_<CONNECTOR_ID>``: the id's digits are always followed by ``_``,
+    and no built-in engine id starts with ``c`` and a digit, so no two
+    connections share a variable, in a turn or across turns. ``c<id>`` is never
+    a registry engine, so secrets are classified by auth's ``secure_keys``.
+    """
+    return f"c{connection_id}", connector_id
+
 
 class TurnKeyDataVault:
     """Read-only DataVault backed by a live call to auth's turn-key token
@@ -407,7 +437,17 @@ class TurnKeyDataVault:
     matching the fact that a cloud turn never edits connections mid-turn.
     """
 
-    def __init__(self, oauth: dict[str, Any]) -> None:
+    def __init__(self, oauth: dict[str, Any] | None, custom_api: CustomApiBlockV1 | None = None) -> None:
+        """Hold this turn's OAuth connections, and fetch its custom API connections now.
+
+        Args:
+            oauth: The turn's ``oauth`` block, or None.
+            custom_api: The turn's parsed ``custom_api`` block
+                (``CustomApiBlockV1``), or None. Each connection is fetched
+                here, and only the ones that answered in time and in shape
+                are known to the vault afterwards.
+        """
+        oauth = oauth or {}
         self._turn_key = str(oauth.get("turn_key") or "")
         self._connections: list[dict[str, str]] = [
             {"engine": str(c["engine"]), "name": str(c["name"])}
@@ -434,16 +474,30 @@ class TurnKeyDataVault:
         # (e.g. system-prompt building) — one token fetch per connection,
         # not one per call.
         self._cache: dict[tuple[str, str], dict[str, str] | None] = {}
+        # Kept apart from `_cache`, which clear_ds_env empties: a custom
+        # connection is fetched once, and one that did not answer stays out.
+        self._custom: dict[tuple[str, str], dict[str, Any]] = (
+            _fetch_custom_connections(custom_api, self._base_url) if custom_api is not None else {}
+        )
 
     def list_connections(self) -> list[dict[str, str]]:
         """Return [{engine, name, created_at}] — created_at is unknown here,
-        so it's always empty; nothing reads it for OAuth connections today."""
-        return [{**c, "created_at": ""} for c in self._connections]
+        so it's always empty; nothing reads it for OAuth connections today.
+        Custom API connections follow, under custom_connection_key."""
+        listed = [{**c, "created_at": ""} for c in self._connections]
+        listed += [{"engine": engine, "name": name, "created_at": ""} for engine, name in self._custom]
+        return listed
 
     def load(self, engine: str, name: str) -> dict[str, str] | None:
         return self._fetch(engine, name)
 
     def read_record(self, engine: str, name: str) -> dict[str, Any] | None:
+        custom = self._custom.get((engine, name))
+        if custom is not None:
+            return {
+                "engine": engine, "name": name, "created_at": "", "updated_at": "",
+                "fields": dict(custom["fields"]), "secure_keys": list(custom["secure_keys"]),
+            }
         fields = self._fetch(engine, name)
         if fields is None:
             return None
@@ -503,6 +557,9 @@ class TurnKeyDataVault:
         self._cache.clear()
 
     def _fetch(self, engine: str, name: str) -> dict[str, str] | None:
+        custom = self._custom.get((engine, name))
+        if custom is not None:
+            return dict(custom["fields"])
         cache_key = (engine, name)
         if cache_key in self._cache:
             return self._cache[cache_key]
@@ -568,3 +625,96 @@ class TurnKeyDataVault:
             # (anton/utils/datasources.py) reads from LocalDataVault.
             fields["_picked_files"] = picked_files if isinstance(picked_files, str) else json.dumps(picked_files)
         return fields
+
+
+def _custom_label(name: str, connector_id: str) -> str:
+    """The member's name for the connection, on one line without control or format characters, with its id."""
+    spaced = " ".join(name.split())
+    one_line = "".join(c for c in spaced if unicodedata.category(c) not in ("Cc", "Cf"))[:_CUSTOM_LABEL_MAX]
+    return f"{one_line} ({connector_id})"
+
+
+def _fetch_custom_connection(ref: CustomApiConnectionRefV1, turn_key: str, base_url: str) -> dict[str, Any] | None:
+    """Fetch one custom API connection's fields with the turn key, or None.
+
+    The answer must name the connection the turn listed and carry lowercase
+    field names and ``secure_keys`` naming only those fields. Failures are
+    logged by type, status and connection id, never a value.
+    """
+    from anton.minds_client import minds_request  # local: avoid a module-load-time dep from core.datasources
+
+    url = f"{base_url}/v1/custom-connections/{ref.connection_id}/fields"
+    try:
+        raw = minds_request(url, turn_key, method="POST", payload=b"{}", timeout=15)
+        data = json.loads(raw.decode())
+    except urllib.error.HTTPError as e:
+        logger.warning("custom connection %s left out: auth answered HTTP %s", ref.connection_id, e.code)
+        return None
+    except Exception as e:
+        logger.warning("custom connection %s left out: %s", ref.connection_id, type(e).__name__)
+        return None
+    fields = data.get("fields") if isinstance(data, dict) else None
+    secure_keys = data.get("secure_keys") if isinstance(data, dict) else None
+    if (
+        not isinstance(fields, dict)
+        or not isinstance(secure_keys, list)
+        or data.get("connector_id") != ref.connector_id
+        or data.get("name") != ref.name
+        or not all(isinstance(k, str) and _CUSTOM_FIELD_NAME.fullmatch(k) and isinstance(v, str)
+                   for k, v in fields.items())
+        or not all(isinstance(k, str) and k in fields for k in secure_keys)
+    ):
+        logger.warning("custom connection %s left out: auth's answer is not the listed connection's fields",
+                       ref.connection_id)
+        return None
+    return {
+        "fields": {**fields, "_user_label": _custom_label(ref.name, ref.connector_id)},
+        # Never narrower than auth's secure_keys, which follow the template's model-written flags.
+        "secure_keys": sorted(set(secure_keys) | {key for key in fields if key not in _CUSTOM_PUBLIC_FIELDS}),
+    }
+
+
+def _fetch_custom_connections(custom_api: CustomApiBlockV1, base_url: str) -> dict[tuple[str, str], dict[str, Any]]:
+    """Fetch every custom API connection of the turn at once, keeping those that answer in time.
+
+    At most _CUSTOM_FETCH_WORKERS at a time, all within
+    _CUSTOM_FETCH_DEADLINE_SECONDS. An answer that arrives after the deadline
+    is discarded and never kept, and a fetch still queued for a slot at the
+    deadline never starts, so it spends none of the grant's fetches. The fetch
+    threads are daemons, so one still waiting on auth never holds the pod's exit.
+    """
+    refs = list(custom_api.connections)
+    if not refs:
+        return {}
+    answered: dict[int, dict[str, Any] | None] = {}
+    lock = threading.Lock()
+    slots = threading.BoundedSemaphore(_CUSTOM_FETCH_WORKERS)
+    closed = threading.Event()
+
+    def fetch(ref: CustomApiConnectionRefV1) -> None:
+        with slots:
+            if closed.is_set():
+                return
+            record = _fetch_custom_connection(ref, custom_api.turn_key, base_url)
+        with lock:
+            answered[ref.connection_id] = record
+
+    threads = [threading.Thread(target=fetch, args=(ref,), daemon=True, name="custom-fetch") for ref in refs]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + _CUSTOM_FETCH_DEADLINE_SECONDS
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+    closed.set()
+    with lock:
+        in_time = dict(answered)
+    fetched: dict[tuple[str, str], dict[str, Any]] = {}
+    for ref in refs:
+        if ref.connection_id not in in_time:
+            logger.warning("custom connection %s left out: no answer within %ss",
+                           ref.connection_id, _CUSTOM_FETCH_DEADLINE_SECONDS)
+            continue
+        record = in_time[ref.connection_id]
+        if record is not None:
+            fetched[custom_connection_key(ref.connection_id, ref.connector_id)] = record
+    return fetched
