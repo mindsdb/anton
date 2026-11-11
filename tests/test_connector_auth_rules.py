@@ -17,10 +17,10 @@ from pathlib import Path
 
 import pytest
 
-from anton.core.tools.connector_auth_rules import AuthRuleError, parse_auth, query_collides, render
+from anton.core.tools.connector_auth_rules import AuthRuleError, parse_auth, query_collides, query_names, render
 
 _MODULE = Path(__file__).resolve().parents[1] / "anton" / "core" / "tools" / "connector_auth_rules.py"
-_MODULE_SHA256 = "6d990ad784d591db7c9b66b66f35f6b560c0715cbbb7f861fbe1fd97655a9b41"
+_MODULE_SHA256 = "b37142d9c2b17961980b803796cc4fab197d122e3fdd57bb867367d5170f052f"
 #: Copies to update, and the hash their tests pin, whenever the module changes.
 _COPIES = (
     "auth: auth/datavault/connector_auth_rules.py",
@@ -169,10 +169,23 @@ def test_render_refuses_a_missing_value_without_naming_it():
 
 @pytest.mark.parametrize("names,collides", [
     (["access_key"], True), (["ACCESS_KEY"], True), (["access_key[]"], True),
-    (["symbols"], False), ([], False), (["access_key_x"], False),
+    (["access_key[0]"], True), (["access.key"], True), (["ACCESS.KEY"], True), (["access key"], True),
+    (["symbols;access_key"], True),
+    (["symbols"], False), ([], False), (["access_key_x"], False), (["accesskey"], False),
 ])
-def test_query_collides_ignores_case_and_brackets(names, collides):
+def test_query_collides_reads_names_as_servers_do(names, collides):
     assert query_collides({"type": "query", "params": {"access_key": "{api_key}"}}, names) is collides
+
+
+@pytest.mark.parametrize("query,names", [
+    ("a=1&access_key=2", ["a", "access_key"]),
+    ("a=1;access_key=2", ["a", "access_key"]),
+    ("access%5Fkey=2&b", ["access_key", "b"]),
+    ("access+key=2", ["access key"]),
+    ("", []),
+])
+def test_query_names_split_on_both_separators_and_decode(query, names):
+    assert query_names(query) == names
 
 
 def test_query_collides_is_false_for_other_types():

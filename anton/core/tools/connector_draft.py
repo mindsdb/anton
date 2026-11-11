@@ -22,7 +22,7 @@ import re
 import unicodedata
 from dataclasses import asdict, dataclass
 from typing import Any
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import urlsplit
 
 from anton.core.tools import connector_auth_rules as rules
 from anton.core.tools.connector_auth_rules import (
@@ -335,8 +335,7 @@ def _parse_check(data: Any, auth: ConnectorDraftAuth) -> ConnectorDraftCheck | N
         raise ConnectorDraftError("check must be an object.")
     _check_keys(data, _CHECK_KEYS, "check")
     path = _check_path(data.get("path"))
-    names = [name for name, _ in parse_qsl(urlsplit(path).query, keep_blank_values=True)]
-    if rules.query_collides(auth.to_dict(), names):
+    if rules.query_collides(auth.to_dict(), rules.query_names(urlsplit(path).query)):
         raise ConnectorDraftError("check.path must not carry a parameter that auth places.")
     return ConnectorDraftCheck(path=path)
 

@@ -13,6 +13,7 @@ import base64
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
+from urllib.parse import unquote_plus
 
 MAX_AUTH_HEADERS = 5
 MAX_AUTH_PARAMS = 5
@@ -295,15 +296,27 @@ def render(auth: Mapping[str, Any], values: Mapping[str, str]) -> tuple[dict[str
     return {name: _fill(template, values) for name, template in auth["headers"].items()}, []
 
 
-def query_collides(auth: Mapping[str, Any], names: Iterable[str]) -> bool:
-    """Whether any of ``names`` is a query parameter the auth section places.
+def _param_key(name: str) -> str:
+    """A parameter name as common servers read it: lowercase, cut at ``[``, ``.`` and space as ``_``."""
+    return name.lower().split("[", 1)[0].replace(".", "_").replace(" ", "_")
 
-    Compares ignoring case and a trailing ``[]``, as many servers read them.
+
+def query_names(query: str) -> list[str]:
+    """The parameter names in a raw query string, split on ``&`` and ``;`` as servers do, decoded."""
+    return [unquote_plus(part.split("=", 1)[0]) for part in re.split(r"[&;]", query) if part]
+
+
+def query_collides(auth: Mapping[str, Any], names: Iterable[str]) -> bool:
+    """Whether any of ``names`` would reach a server as a query parameter the auth section places.
+
+    Each name is also split on ``;`` and compared as servers read it, so
+    ``ACCESS.KEY``, ``access key``, ``access_key[0]`` and ``a;access_key``
+    all collide with ``access_key``.
     """
     if auth["type"] != "query":
         return False
-    placed = {name.lower() for name in auth["params"]}
-    return any(name.lower().removesuffix("[]") in placed for name in names)
+    placed = {_param_key(name) for name in auth["params"]}
+    return any(_param_key(part) in placed for name in names for part in name.split(";"))
 
 
 def parse_auth(

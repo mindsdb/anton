@@ -640,6 +640,7 @@ def test_a_token_shaped_or_held_parameter_name_is_refused_without_echoing_it(hel
 
 @pytest.mark.parametrize("path", [
     "/v1/eod?access_key=demo", "/v1/eod?ACCESS_KEY=demo", "/v1/eod?access_key[]=demo", "/v1/eod?symbols=A&access_key",
+    "/v1/eod?access.key=demo", "/v1/eod?access_key[0]=demo", "/v1/eod?symbols=A;access_key=demo",
 ])
 def test_a_check_path_carrying_the_placed_parameter_is_refused(path):
     with pytest.raises(ConnectorDraftError, match=r"^check\.path must not carry a parameter that auth places"):
