@@ -126,11 +126,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ConfigDict
 
 from anton.core.browser.config import BrowserConfig
+from anton.core.llm.identity import sanitize_connection_label
 from anton.core.tools.skill_format import validate_name
 
 logger = logging.getLogger(__name__)
@@ -138,6 +140,10 @@ logger = logging.getLogger(__name__)
 TURN_PROTOCOL_VERSION = 1
 DATASOURCE_PROTOCOL_VERSION = 1
 MAX_DATASOURCE_CONNECTIONS = 100
+_REQUIRED_REF_KEYS = frozenset({"connection_id", "credential_version"})
+# Names only, for the prompt. cowork-server's queue check allows the same two.
+_OPTIONAL_REF_KEYS = frozenset({"label", "engine"})
+_ENGINE_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,31}")
 
 # The `turn_completed` key that names the artifact folders the turn touched.
 # scratchpad-controller's `scratchpad_controller/anton_turn.py` relays it and
@@ -164,6 +170,10 @@ def _is_version(value: object, expected: int) -> bool:
 class DatasourceConnectionRefV1:
     connection_id: int
     credential_version: int
+    #: The name the user gave the connection, already safe for one prompt line.
+    label: str | None = None
+    #: Auth's connector id for the connection, such as ``postgres``.
+    engine: str | None = None
 
 
 @dataclass(frozen=True)
@@ -187,7 +197,10 @@ def _parse_datasource_block(value: object) -> DatasourceBlockV1 | None:
     refs: list[DatasourceConnectionRefV1] = []
     seen: set[int] = set()
     for connection in connections:
-        if not isinstance(connection, dict) or set(connection) != {"connection_id", "credential_version"}:
+        if (
+            not isinstance(connection, dict)
+            or not _REQUIRED_REF_KEYS <= set(connection) <= _REQUIRED_REF_KEYS | _OPTIONAL_REF_KEYS
+        ):
             raise ValueError("datasource connection reference is invalid")
         connection_id = connection.get("connection_id")
         credential_version = connection.get("credential_version")
@@ -202,8 +215,26 @@ def _parse_datasource_block(value: object) -> DatasourceBlockV1 | None:
         ):
             raise ValueError("datasource connection reference is invalid")
         seen.add(connection_id)
-        refs.append(DatasourceConnectionRefV1(connection_id, credential_version))
+        refs.append(
+            DatasourceConnectionRefV1(
+                connection_id,
+                credential_version,
+                label=sanitize_connection_label(connection.get("label")),
+                engine=_usable_engine(connection.get("engine")),
+            )
+        )
     return DatasourceBlockV1(DATASOURCE_PROTOCOL_VERSION, tuple(refs))
+
+
+def _usable_engine(value: object) -> str | None:
+    """Auth's connector id if it has the shape of one, else ``None``.
+
+    A name is only a hint for the model, so an odd value is dropped rather
+    than failing the turn. ``fullmatch``, so a trailing newline does not pass.
+    """
+    if isinstance(value, str) and _ENGINE_PATTERN.fullmatch(value):
+        return value
+    return None
 
 
 class TurnSkillEntry(BaseModel):

@@ -96,6 +96,25 @@ def sanitize_model_name(value: object) -> str | None:
     return cleaned[:_MAX_MODEL_NAME_LEN]
 
 
+#: Auth caps a connection's name at this many characters; the prompt keeps the same bound.
+MAX_CONNECTION_LABEL_LEN = 128
+
+
+def sanitize_connection_label(value: object) -> str | None:
+    """A connection name safe to place on one prompt line, or ``None``.
+
+    Input: the name the user gave a database connection, as the turn carried it.
+    Output: the name with every non-printable character removed (line and
+    paragraph separators included), cut to the cap and trimmed; ``None`` for a
+    non-string or a name that is empty afterwards. No side effects.
+    """
+    if not isinstance(value, str):
+        return None
+    cleaned = "".join(ch for ch in value if ch.isprintable()).strip()
+    cleaned = cleaned[:MAX_CONNECTION_LABEL_LEN].strip()
+    return cleaned or None
+
+
 def serving_model_lines(
     *, requested: object, served: object
 ) -> list[str]:
