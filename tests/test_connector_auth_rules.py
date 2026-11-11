@@ -20,7 +20,7 @@ import pytest
 from anton.core.tools.connector_auth_rules import AuthRuleError, parse_auth, query_collides, query_names, render
 
 _MODULE = Path(__file__).resolve().parents[1] / "anton" / "core" / "tools" / "connector_auth_rules.py"
-_MODULE_SHA256 = "b37142d9c2b17961980b803796cc4fab197d122e3fdd57bb867367d5170f052f"
+_MODULE_SHA256 = "811c1fbbaababfd8f60891a3c608ad2afe1662713003d1895cb35aebbd83c7f2"
 #: Copies to update, and the hash their tests pin, whenever the module changes.
 _COPIES = (
     "auth: auth/datavault/connector_auth_rules.py",
@@ -170,7 +170,8 @@ def test_render_refuses_a_missing_value_without_naming_it():
 @pytest.mark.parametrize("names,collides", [
     (["access_key"], True), (["ACCESS_KEY"], True), (["access_key[]"], True),
     (["access_key[0]"], True), (["access.key"], True), (["ACCESS.KEY"], True), (["access key"], True),
-    (["symbols;access_key"], True),
+    (["symbols;access_key"], True), (["access[key"], True), ([" access_key"], True), (["access+key"], True),
+    (["access_key "], True),
     (["symbols"], False), ([], False), (["access_key_x"], False), (["accesskey"], False),
 ])
 def test_query_collides_reads_names_as_servers_do(names, collides):

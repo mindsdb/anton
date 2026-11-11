@@ -296,9 +296,15 @@ def render(auth: Mapping[str, Any], values: Mapping[str, str]) -> tuple[dict[str
     return {name: _fill(template, values) for name, template in auth["headers"].items()}, []
 
 
-def _param_key(name: str) -> str:
-    """A parameter name as common servers read it: lowercase, cut at ``[``, ``.`` and space as ``_``."""
-    return name.lower().split("[", 1)[0].replace(".", "_").replace(" ", "_")
+def _param_keys(name: str) -> set[str]:
+    """The ways common servers may read a parameter name, lowercase and trimmed.
+
+    One reading cuts at ``[`` (an array index), the other reads an unmatched
+    ``[`` as ``_``; both read ``.``, space and ``+`` as ``_``.
+    """
+    text = name.strip().lower()
+    cut = text.split("[", 1)[0]
+    return {re.sub(r"[.\s+\[]", "_", form) for form in (cut, text)}
 
 
 def query_names(query: str) -> list[str]:
@@ -309,14 +315,14 @@ def query_names(query: str) -> list[str]:
 def query_collides(auth: Mapping[str, Any], names: Iterable[str]) -> bool:
     """Whether any of ``names`` would reach a server as a query parameter the auth section places.
 
-    Each name is also split on ``;`` and compared as servers read it, so
-    ``ACCESS.KEY``, ``access key``, ``access_key[0]`` and ``a;access_key``
-    all collide with ``access_key``.
+    Each name is also split on ``;`` and compared in every way servers read
+    it, so ``ACCESS.KEY``, ``access key``, `` access_key``, ``access_key[0]``,
+    ``access[key`` and ``a;access_key`` all collide with ``access_key``.
     """
     if auth["type"] != "query":
         return False
-    placed = {_param_key(name) for name in auth["params"]}
-    return any(_param_key(part) in placed for name in names for part in name.split(";"))
+    placed = {key for name in auth["params"] for key in _param_keys(name)}
+    return any(_param_keys(part) & placed for name in names for part in name.split(";"))
 
 
 def parse_auth(
