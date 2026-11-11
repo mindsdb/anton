@@ -5,11 +5,10 @@ connector for: its id, label, the credential fields the member will fill in,
 an auth section saying how those fields go on every request, usage notes,
 and a check: the path of one GET that tests the credentials. Never a value,
 and never the API's address: the member types that when they connect, so
-nothing can send a key anywhere else. Usage
-notes are prose and may name any host; nothing fetches or follows them. The
-pod emits the drafts at end of turn, the host shows each as a card, and the
-member saves it explicitly. The member then enters credentials outside the
-conversation.
+nothing can send a key anywhere else. Usage notes are prose and may name any
+host; nothing fetches or follows them. The pod emits the drafts at end of
+turn, the host shows each as a card, and the member saves it explicitly. The
+member then enters credentials outside the conversation.
 
 `parse_connector_draft` is the allowlist for that shape. The host imports it to
 check a draft again before showing or storing it, so both sides agree on what
@@ -66,9 +65,8 @@ _CHECK_PATH_MAX = 300
 _AUTH_TEMPLATE_MAX = 200
 _HEADER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,40}")
 _PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]{0,39})\}")
-#: Headers a template may not set, compared in lowercase: ones the request or
-#: its transport owns, ones a proxy reads as the client, host, path or method,
-#: and the four the call helper passes itself. A name not listed is allowed.
+#: Lowercase names a template may not set: transport-owned, read by proxies as
+#: client, host, path or method, or passed by the call helper. Others pass.
 _REFUSED_HEADERS = frozenset({
     "host", "cookie", "via", "max-forwards", "range", "expect", "accept-encoding",
     "connection", "keep-alive", "te", "trailer", "transfer-encoding", "upgrade",
@@ -265,7 +263,12 @@ def check_header_name(name: Any, where: str = "The template") -> None:
             token, or is refused. The message never quotes the name, which
             is model text.
     """
-    if not isinstance(name, str) or not _HEADER_NAME.fullmatch(name) or _looks_like_token(name):
+    if (
+        not isinstance(name, str)
+        or not _HEADER_NAME.fullmatch(name)
+        or _looks_like_token(name)
+        or scrub_output(name) != name
+    ):
         raise ConnectorDraftError(f"{where} has a header name that is not allowed.")
     lowered = name.lower()
     if lowered in _REFUSED_HEADERS or lowered.startswith(_REFUSED_HEADER_PREFIXES):
@@ -337,7 +340,9 @@ def _check_path(value: Any) -> str:
     return text
 
 
-def _check_template(value: Any, where: str, declared: frozenset[str], *, may_be_empty: bool = False) -> tuple[str, set[str]]:
+def _check_template(
+    value: Any, where: str, declared: frozenset[str], *, may_be_empty: bool = False
+) -> tuple[str, set[str]]:
     """Return an auth template and the field names its ``{field}`` slots place.
 
     The token and scrub rules read the template with its slots removed, so a
@@ -391,6 +396,9 @@ def _parse_auth_headers(value: Any, declared: frozenset[str]) -> tuple[tuple[tup
             raise ConnectorDraftError("auth.headers has a header name that is not allowed.")
         seen.add(name.lower())
         text, names = _check_template(template, f"auth.headers.{name}", declared)
+        # Basic needs base64 of user:password, which a header template cannot build.
+        if name.lower() == "authorization" and text.lower().startswith("basic"):
+            raise ConnectorDraftError("auth.headers.Authorization must not be Basic; use auth type 'basic'.")
         headers.append((name, text))
         placed |= names
     return tuple(headers), placed

@@ -302,5 +302,13 @@
   {
     "allowed": false,
     "name": "Authorization:"
+  },
+  {
+    "allowed": false,
+    "name": "Authorization\n"
+  },
+  {
+    "allowed": false,
+    "name": "X-abc123def456ghi789jkl0"
   }
 ]

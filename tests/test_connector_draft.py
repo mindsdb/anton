@@ -81,6 +81,7 @@ def _draft(**overrides):
 
 
 def _one_field_auth(name="api_key"):
+    """A header auth section that places only the field ``name`` as a Bearer token."""
     return {"type": "header", "headers": {"Authorization": f"Bearer {{{name}}}"}}
 
 
@@ -562,6 +563,23 @@ def test_a_held_value_written_into_auth_is_refused_without_the_value(held_value)
     assert held_value not in str(exc.value)
 
 
+def test_a_held_value_as_a_header_name_is_refused_without_the_value(held_value):
+    auth = {"type": "header", "headers": {f"X-{held_value}": "", "Authorization": "Bearer {api_key}"}}
+
+    with pytest.raises(ConnectorDraftError, match=r"^auth\.headers has a header name") as exc:
+        parse_connector_draft(_draft(auth=auth))
+
+    assert held_value not in str(exc.value)
+
+
+@pytest.mark.parametrize("value", ["Basic {email}:{api_token}", "basic {api_token}", "BASIC X"])
+def test_a_hand_built_basic_header_is_refused_in_favour_of_type_basic(value):
+    auth = {"type": "header", "headers": {"Authorization": value}}
+
+    with pytest.raises(ConnectorDraftError, match=r"use auth type 'basic'"):
+        parse_connector_draft(_draft(fields=_BASIC_FIELDS, auth=auth))
+
+
 def test_a_token_shaped_header_name_is_refused_without_echoing_it():
     name = "X-" + _TOKEN_SHAPES["bare"]
 
@@ -573,7 +591,7 @@ def test_a_token_shaped_header_name_is_refused_without_echoing_it():
 
 _HEADER_CASES = Path(__file__).parent / "fixtures" / "header_name_cases.json"
 #: Other services carry this file byte for byte; a change here must reach their copies.
-_HEADER_CASES_SHA256 = "dcf66003063f842abc2eee9e413110d7cb9e1dba62f88a8d1b0af855df6bfa4d"
+_HEADER_CASES_SHA256 = "787974a77b274c7cbb08caca5c76c7d1881a15b824ca1eb2e8b458a5e84e057e"
 
 
 def test_the_shared_header_name_cases_are_pinned_and_canonical():
