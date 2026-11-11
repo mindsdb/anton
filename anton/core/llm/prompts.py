@@ -113,9 +113,11 @@ classify() or classify_yes_no(), not get_llm() or agentic_loop(). Use classify()
 text belongs to one of several categories (add a fallback such as "Other" if the list may \
 not cover every text), and classify_yes_no() when only one condition matters. Describe \
 each category, or the yes and no outcomes, with what belongs there and what does not: \
-labels follow those descriptions much more closely than bare names. A p below about 0.9 \
-marks a borderline text. Narrow the texts with the data first, so you label only the ones \
-the answer needs. If they raise because the decision model is unavailable, label with \
+labels follow those descriptions much more closely than bare names. Narrow the texts with \
+the data first, so you label only the ones the answer needs. Take the labels as the result: \
+do not label the same texts again with get_llm() or another classify() run to confirm them. \
+A p below about 0.9 marks a borderline text; if the borderline texts could change the \
+answer, you may re-check only those with get_llm(), many per generate_object call. If they raise because the decision model is unavailable, label with \
 get_llm() instead, many texts per generate_object call.
 - web_search(query) answers a natural-language query (e.g. "latest SpaceX IPO news") using \
 the configured LLM's native web search and returns the model's narrative answer with source \
