@@ -15,6 +15,7 @@ import json
 import logging
 import re
 import sys
+import threading
 from typing import TYPE_CHECKING, List, Literal, get_args
 import os
 import uuid
@@ -1072,6 +1073,19 @@ _VERIFIER_JUDGMENT_RUBRIC = (
     "a reply that says the value is not recorded, without substituting a "
     "related figure, is COMPLETE, not STUCK."
 )
+
+# Opens the block that shows the model text the user added mid-turn (ENG-4194).
+_USER_INPUT_PREFIX = (
+    "The user added this while you were working. Take it into account from here on:"
+)
+# Appended only when the added text arrives after the model's final answer: the
+# reply that follows replaces that answer in what the user sees.
+_USER_INPUT_REPLY_CLAUSE = (
+    "Your next reply replaces your previous answer in what the user sees, so it "
+    "must stand on its own."
+)
+# Extra rounds a turn may take for added text that arrived after its final answer.
+_MAX_USER_INPUT_ROUNDS = 2
 
 # Opens the verifier's continuation and stuck notes. A "SYSTEM:" note that says "do not
 # mention this" reads as an injection: Azure's prompt filter blocks variants of it, and
@@ -2153,6 +2167,18 @@ class ChatSession:
         # Out-of-band event path, attached for the duration of a
         # `turn_stream` turn only; None outside one.
         self.emitter = None
+        # Text the user added while a turn runs (ENG-4194). The host calls
+        # `add_user_input` from any thread; the tool loop shows unread entries
+        # to the model at its next step boundary. Only unread entries are kept.
+        self._user_input_lock = threading.Lock()
+        self._user_inputs: list[dict] = []
+        self._user_input_turn_running = False
+        # Extra model rounds this turn took because the model finished with
+        # added text still unread. Capped by `_MAX_USER_INPUT_ROUNDS`.
+        self._user_input_rounds = 0
+        # Called with the ids just shown to the model, so the host can mark
+        # them read. Runs on the event loop; must not block.
+        self.on_user_input_read: Callable[[list[str]], None] | None = None
         self.question_count = 0
         # Seconds spent waiting on humans during the current tool dispatch,
         # subtracted from the tool's reported elapsed time.
@@ -5641,6 +5667,62 @@ class ChatSession:
             )
         return ""
 
+    def add_user_input(self, addon_id: str, text: str) -> bool:
+        """Queue *text* for the running turn. False when no turn is running,
+        so the caller keeps it as the next task instead. Thread-safe."""
+        with self._user_input_lock:
+            if not self._user_input_turn_running:
+                return False
+            self._user_inputs.append({"id": addon_id, "text": text})
+            return True
+
+    def withdraw_user_input(self, addon_id: str) -> bool:
+        """Remove an added text the model has not seen yet. False when it was
+        already shown or is unknown."""
+        with self._user_input_lock:
+            for i, entry in enumerate(self._user_inputs):
+                if entry["id"] == addon_id:
+                    del self._user_inputs[i]
+                    return True
+            return False
+
+    def take_unread_user_inputs(self) -> list[dict]:
+        """Return and clear what the model never saw, as ``{"id", "text"}``
+        dicts. The host runs them as the next task once the turn ends."""
+        with self._user_input_lock:
+            unread, self._user_inputs = self._user_inputs, []
+        return [{"id": e["id"], "text": e["text"]} for e in unread]
+
+    def _take_user_input_block(self) -> tuple[dict, list[str]] | None:
+        """Drain unread added text into one text block for the model, with
+        the ids it covers. None when there is nothing unread."""
+        with self._user_input_lock:
+            pending, self._user_inputs = self._user_inputs, []
+        if not pending:
+            return None
+        lines = "\n".join(
+            f"- {scrub_credentials(e['text']).strip()}" for e in pending
+        )
+        block = {"type": "text", "text": f"{_USER_INPUT_PREFIX}\n{lines}"}
+        return block, [e["id"] for e in pending]
+
+    @property
+    def _continuation_crossed(self) -> bool:
+        """This turn emitted a `continuation` boundary: a verifier
+        continuation or a round taken for added user text."""
+        return self._turn_continuations > 0 or self._user_input_rounds > 0
+
+    def _user_inputs_read(self, ids: list[str]) -> None:
+        """Tell the host these ids reached the model. A failing callback
+        must not end the turn."""
+        callback = self.on_user_input_read
+        if callback is None or not ids:
+            return
+        try:
+            callback(ids)
+        except Exception:
+            logger.warning("on_user_input_read callback failed", exc_info=True)
+
     async def _dispatch_draining(self, tc):
         """Run one tool through `_run_draining`. The final item is
         ``("result", outcome)``, the ``ToolOutcome`` ``dispatch_tool`` returns,
@@ -5798,6 +5880,9 @@ class ChatSession:
         # Before the inner turn appends the user input, so `turn_messages`
         # starts where a slice of the seeded history would.
         self._start_turn_segments()
+        self._user_input_rounds = 0
+        with self._user_input_lock:
+            self._user_input_turn_running = True
         # Bind the inner generator so we can close it explicitly. A bare
         # `async for` would leave it suspended at its own `yield` when a host
         # abandons this wrapper: GeneratorExit lands on OUR yield, the loop is
@@ -5818,6 +5903,10 @@ class ChatSession:
             async for event in inner:
                 yield event
         finally:
+            # First, so text added during cleanup is refused and queued by the
+            # host rather than accepted into a turn that will never read it.
+            with self._user_input_lock:
+                self._user_input_turn_running = False
             # Nested so the turn still closes when the inner turn's own
             # cleanup raises; a turn left open would record the next
             # between-turn swap as its own.
@@ -6812,6 +6901,9 @@ class ChatSession:
         # fallback the current reply is already in history, so it must not append
         # it a second time (ENG-1155 double-append).
         _reply_persisted = False
+        # Rounds carried into the next verification-loop pass by a round taken
+        # for added user text, so the verifier gate still sees them.
+        _carried_rounds = 0
 
         while True:  # Completion verification loop
             # Per-iteration, NOT per-turn: the flag means "the reply currently in
@@ -6822,8 +6914,10 @@ class ChatSession:
             # tools (attempt_rounds stays 0, so the loop breaks at the gate
             # below before the append).
             _reply_persisted = False
-            # This attempt's rounds alone, for the verifier gate below.
-            attempt_rounds = 0
+            # This attempt's rounds alone, for the verifier gate below. A round
+            # taken for added user text continues the same attempt.
+            attempt_rounds = _carried_rounds
+            _carried_rounds = 0
             error_streak: dict[str, int] = {}
             resilience_nudged: set[str] = set()
 
@@ -6888,7 +6982,7 @@ class ChatSession:
                     _reply_persisted = True
                     async for event in self._stream_handback_diagnosis(
                         system=system, label="max-tool-rounds", answered=False,
-                        cancels_continuation=self._turn_continuations > 0, limit="round_cap",
+                        cancels_continuation=self._continuation_crossed, limit="round_cap",
                     ):
                         yield event
                     break
@@ -6946,7 +7040,7 @@ class ChatSession:
                         )
                         async for event in self._stream_handback_diagnosis(
                             system=system, label="spend-ceiling", answered=False,
-                            cancels_continuation=self._turn_continuations > 0, limit="spend_ceiling",
+                            cancels_continuation=self._continuation_crossed, limit="spend_ceiling",
                         ):
                             yield event
                         break
@@ -7539,7 +7633,19 @@ class ChatSession:
                 # so the LLM sees the alarm before its next decision.
                 self._acc_maybe_nudge(tool_results)
 
+                # Text the user added while this round ran (ENG-4194), in the
+                # same message so turns still alternate. Not after a question
+                # nobody answered: the turn ends below with no model call.
+                _added = (
+                    self._take_user_input_block()
+                    if self._unanswered_question is None else None
+                )
+                if _added is not None:
+                    tool_results.append(_added[0])
+
                 self._append_history({"role": "user", "content": tool_results})
+                if _added is not None:
+                    self._user_inputs_read(_added[1])
                 # Every model call resends the whole history: one render
                 # screenshot in it, the newest, is enough.
                 drop_older_screenshots(self._history)
@@ -7548,7 +7654,7 @@ class ChatSession:
                 # one would get to answer the question itself. The answer, when
                 # it comes, starts the next turn.
                 if self._unanswered_question is not None:
-                    for event in self._unanswered_question_events(cancels_continuation=self._turn_continuations > 0):
+                    for event in self._unanswered_question_events(cancels_continuation=self._continuation_crossed):
                         yield event
                     _reply_persisted = True
                     break
@@ -7623,6 +7729,49 @@ class ChatSession:
                     else:
                         self._compaction_failed_this_turn = True
 
+            # The model finished with added user text still unread (ENG-4194):
+            # show it and take another round instead of ending on an answer
+            # that ignores it. Capped so a stream of additions can't hold the
+            # turn open; later ones stay unread for `take_unread_user_inputs`.
+            if (
+                not _max_rounds_hit
+                and not _spend_ceiling_hit
+                and self._unanswered_question is None
+                and self._user_input_rounds < _MAX_USER_INPUT_ROUNDS
+            ):
+                _added = self._take_user_input_block()
+                if _added is not None:
+                    self._user_input_rounds += 1
+                    self._append_history(
+                        {"role": "assistant", "content": llm_response.content or ""}
+                    )
+                    self._append_history({
+                        "role": "user",
+                        "content": [
+                            _added[0],
+                            {"type": "text", "text": _USER_INPUT_REPLY_CLAUSE},
+                        ],
+                    })
+                    self._user_inputs_read(_added[1])
+                    # Same boundary as a verifier continuation: the next reply
+                    # supersedes the one the user just read.
+                    yield StreamTaskProgress(
+                        phase="continuation",
+                        message="Taking your added message into account...",
+                    )
+                    response = None
+                    async for event in self.plan_stream_with_recovery(
+                        system=system, tools=tools
+                    ):
+                        yield event
+                        if isinstance(event, StreamComplete):
+                            response = event
+                    if response is None:
+                        return
+                    llm_response = response.response
+                    _carried_rounds = attempt_rounds
+                    continue
+
             # --- Completion verification ---
             # Skip when too few tool rounds were used (pure Q&A and, at the
             # default of 2, single-round turns), when we hit the max-rounds
@@ -7668,7 +7817,7 @@ class ChatSession:
                     self._turn_cost.ended_by = "handback_budget"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="budget-exhausted", answered=bool(reply.strip()),
-                    cancels_continuation=self._turn_continuations > 0,
+                    cancels_continuation=self._continuation_crossed,
                 ):
                     yield event
                 # Consolidation still runs after diagnosis
@@ -8052,7 +8201,7 @@ class ChatSession:
                     self._turn_cost.ended_by = "handback_verifier_failure"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="verifier-failure", answered=bool(reply.strip()),
-                    cancels_continuation=self._turn_continuations > 0,
+                    cancels_continuation=self._continuation_crossed,
                 ):
                     yield event
                 break
@@ -8092,7 +8241,7 @@ class ChatSession:
                     self._turn_cost.ended_by = "handback_stuck"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="stuck", answered=bool(reply.strip()),
-                    cancels_continuation=self._turn_continuations > 0,
+                    cancels_continuation=self._continuation_crossed,
                 ):
                     yield event
                 break
@@ -8151,7 +8300,7 @@ class ChatSession:
                     )
                     async for event in self._stream_handback_diagnosis(
                         system=system, label="spend-ceiling", answered=bool(reply.strip()),
-                        cancels_continuation=self._turn_continuations > 0, limit="spend_ceiling",
+                        cancels_continuation=self._continuation_crossed, limit="spend_ceiling",
                     ):
                         yield event
                     break
