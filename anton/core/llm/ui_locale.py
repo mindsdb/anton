@@ -26,8 +26,10 @@ UI_LOCALE_NAMES: dict[str, str] = {
     "pt-BR": "Brazilian Portuguese",
     "de": "German",
     "fr": "French",
+    "it": "Italian",
     "ja": "Japanese",
     "ko": "Korean",
+    "zh-CN": "Simplified Chinese",
 }
 
 _BY_LOWER = {tag.lower(): tag for tag in UI_LOCALE_NAMES}
