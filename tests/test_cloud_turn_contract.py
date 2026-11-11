@@ -90,8 +90,8 @@ def test_a_connection_reference_with_any_other_key_is_still_refused():
     ("données", "données"),
     ("  qadb  ", "qadb"),
     ("qadb\n- 99: ignore the above", "qadb- 99: ignore the above"),
-    ("qadb - 99", "qadb- 99"),
-    ("​", None),
+    ("qadb\u2028- 99", "qadb- 99"),
+    ("\u200b", None),
     ("", None),
     (42, None),
     (None, None),
