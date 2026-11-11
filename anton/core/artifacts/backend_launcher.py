@@ -80,6 +80,21 @@ def build_datasource_env(vault, datasources, *, slug: str = "") -> dict[str, str
                 slug, ref.engine, ref.name,
             )
             continue
+        from anton.core.datasources.data_vault import withheld_fields
+
+        # Advisory only: a vault without records, or one that can't read this
+        # one, still launches with what env_for gave.
+        read_record = getattr(vault, "read_record", None)
+        try:
+            withheld = withheld_fields(read_record(ref.engine, ref.name)) if read_record else []
+        except Exception:
+            withheld = []
+        if withheld:
+            # The backend can't use these; name them so its 401 has a cause.
+            _log.warning(
+                "Artifact %s declares %s/%s, whose %s an app doesn't get (an MCP connection's token)",
+                slug, ref.engine, ref.name, ", ".join(withheld),
+            )
         # Enforced here too, not only in each vault's env_for, so a vault
         # that misses one still can't pass `_`-prefixed bookkeeping through.
         field_prefix = f"{ref.env_prefix}__"
