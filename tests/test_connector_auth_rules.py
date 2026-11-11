@@ -20,7 +20,7 @@ import pytest
 from anton.core.tools.connector_auth_rules import AuthRuleError, parse_auth, query_collides, query_names, render
 
 _MODULE = Path(__file__).resolve().parents[1] / "anton" / "core" / "tools" / "connector_auth_rules.py"
-_MODULE_SHA256 = "ec4ba9e75d5b06e608dc91085fa9617ef267ebe7d2ee65f4f932b045f89d4e32"
+_MODULE_SHA256 = "a74acd12e07e275effa6e9dbf0aac6c5b0eeba69aeaf05fbf0372978dcc22873"
 #: Copies to update, and the hash their tests pin, whenever the module changes.
 _COPIES = (
     "auth: auth/datavault/connector_auth_rules.py",
@@ -48,7 +48,7 @@ def test_the_module_hash_is_pinned_so_its_copies_are_resynced():
 
 
 _CASES = Path(__file__).parent / "fixtures" / "auth_section_cases.json"
-_CASES_SHA256 = "a8c1f41e7342d004836999b2b80fcaa048bf187d5cd400838ab03b72caf5d4e5"
+_CASES_SHA256 = "a5ad27ce4ef1239d5f2f2110b8cfabcd34aa2cde5cc2535b2ce7b3a920e1e9a0"
 #: Rewrites the case list after a rule change; copy the result to every service that carries the module.
 _REGENERATE = (
     "uv run python -c \"from tests.test_connector_auth_rules import _CASES, _cases_text; "
@@ -125,16 +125,22 @@ _RENDER_INPUTS = [
     ({"type": "header", "headers": {"X-Api-Key": "{api_key}"}}, {}),
     ({"type": "header", "headers": {"X-Api-Key": "{api_key}"}}, {"api_key": "k0\r\nX-Injected: 1"}),
     ({"type": "query", "params": {"access_key": "{api_key}"}}, {"api_key": "k0\x7f"}),
+    ({"type": "query", "params": {"access_key": "{api_key}"}}, {"api_key": "k0\x85"}),
+    ({"type": "header", "headers": {"X-Api-Key": "{api_key}"}}, {"api_key": "k0 "}),
     ({"type": "oauth"}, {}),
 ]
 #: Raw query strings for query_names.
 _QUERY_NAME_INPUTS = ["a=1&access_key=2", "a=1;access_key=2", "access%5Fkey=2&b", "access+key=2", ""]
-#: Request query names checked against _QUERY for query_collides.
+_MIXED_CASE_QUERY = {"type": "query", "params": {"Access-Key": "{api_key}"}}
+#: (auth, request query names) pairs for query_collides.
 _COLLIDE_INPUTS = [
-    ["symbols"], [], ["symbols", "date_from"], ["access_key_x"], ["accesskey"],
-    ["access_key"], ["ACCESS_KEY"], ["access_key[]"], ["access_key[0]"], ["[access_key]"], ["]access_key"],
-    ["[access_key][x]"], ["access.key"], ["access key"], [" access_key"], ["access+key"], ["access[key"],
-    ["symbols;access_key"], ["filter[status]"], [_NAME_41], [_NAME_41 + "a"],
+    *((_QUERY, names) for names in [
+        ["symbols"], [], ["symbols", "date_from"], ["access_key_x"], ["accesskey"],
+        ["access_key"], ["ACCESS_KEY"], ["access_key[]"], ["access_key[0]"], ["[access_key]"], ["]access_key"],
+        ["[access_key][x]"], ["access.key"], ["access key"], [" access_key"], ["access+key"], ["access[key"],
+        ["symbols;access_key"], ["filter[status]"], [_NAME_41], [_NAME_41 + "a"],
+    ]),
+    (_MIXED_CASE_QUERY, ["access-key"]), (_MIXED_CASE_QUERY, ["ACCESS-KEY"]), (_MIXED_CASE_QUERY, ["access_key"]),
 ]
 
 
@@ -159,7 +165,7 @@ def _build_cases() -> dict[str, list[dict]]:
         ],
         "query_names": [{"query": q, "names": query_names(q)} for q in _QUERY_NAME_INPUTS],
         "query_collides": [
-            {"auth": _QUERY, "names": names, "collides": query_collides(_QUERY, names)} for names in _COLLIDE_INPUTS
+            {"auth": auth, "names": names, "collides": query_collides(auth, names)} for auth, names in _COLLIDE_INPUTS
         ],
     }
 
@@ -216,7 +222,7 @@ def test_render_refuses_a_missing_value_without_naming_it():
     assert "secret_field_name" not in str(exc.value)
 
 
-@pytest.mark.parametrize("value", ["k0\r\nX-Injected: 1", "k0\n", "k0\x00", "k0\x7f"])
+@pytest.mark.parametrize("value", ["k0\r\nX-Injected: 1", "k0\n", "k0\x00", "k0\x7f", "k0\x85", "k0\x9b", "k0 "])
 def test_render_refuses_a_value_with_a_control_character_without_quoting_it(value):
     with pytest.raises(AuthRuleError, match="control character") as exc:
         render({"type": "header", "headers": {"X-Api-Key": "{api_key}"}}, {"api_key": value})
@@ -254,7 +260,6 @@ def test_query_names_split_on_both_separators_and_decode(query, names):
 
 def test_query_collides_is_false_for_other_types():
     assert query_collides({"type": "header", "headers": {"access_key": "{api_key}"}}, ["[odd]", "access_key"]) is False
-
 
 
 def test_the_module_loads_with_the_standard_library_alone():

@@ -1145,6 +1145,42 @@
       "names": [
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       ]
+    },
+    {
+      "auth": {
+        "params": {
+          "Access-Key": "{api_key}"
+        },
+        "type": "query"
+      },
+      "collides": true,
+      "names": [
+        "access-key"
+      ]
+    },
+    {
+      "auth": {
+        "params": {
+          "Access-Key": "{api_key}"
+        },
+        "type": "query"
+      },
+      "collides": true,
+      "names": [
+        "ACCESS-KEY"
+      ]
+    },
+    {
+      "auth": {
+        "params": {
+          "Access-Key": "{api_key}"
+        },
+        "type": "query"
+      },
+      "collides": false,
+      "names": [
+        "access_key"
+      ]
     }
   ],
   "query_names": [
@@ -1298,6 +1334,32 @@
       "error": "A value the auth section places holds a control character.",
       "values": {
         "api_key": "k0\u007f"
+      }
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "params": {
+          "access_key": "{api_key}"
+        },
+        "type": "query"
+      },
+      "error": "A value the auth section places holds a control character.",
+      "values": {
+        "api_key": "k0\u0085"
+      }
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "headers": {
+          "X-Api-Key": "{api_key}"
+        },
+        "type": "header"
+      },
+      "error": "A value the auth section places holds a control character.",
+      "values": {
+        "api_key": "k0\u2028"
       }
     },
     {

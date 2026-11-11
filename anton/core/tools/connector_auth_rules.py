@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import re
+import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 from urllib.parse import unquote_plus
@@ -267,8 +268,8 @@ def _fill(template: str, values: Mapping[str, str]) -> str:
         if name not in values:
             raise AuthRuleError("A field the auth section places has no value.")
         value = values[name]
-        # A control character would split a header or a URL.
-        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in value):
+        # A control or line-separator character would split a header or a URL.
+        if any(unicodedata.category(c) in ("Cc", "Zl", "Zp") for c in value):
             raise AuthRuleError("A value the auth section places holds a control character.")
         return value
 
@@ -315,6 +316,7 @@ def query_collides(auth: Mapping[str, Any], names: Iterable[str]) -> bool:
     none may equal a placed name ignoring case. Anything else is refused
     rather than interpreted: servers rewrite brackets, dots, spaces and
     separators in ways no check can follow. Other types accept any name.
+    ``auth`` is a section ``parse_auth`` returned; ``names`` are strings.
     """
     if auth["type"] != "query":
         return False
