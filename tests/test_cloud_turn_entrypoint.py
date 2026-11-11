@@ -430,6 +430,7 @@ def _mapped_gate_denial(status, code):
     (402, "wallet_empty", "WalletEmptyError"),
     (429, "included_allowance_exhausted", "AllowanceExhaustedError"),
     (429, "free_air_daily_spend_fuse_exceeded", "FreeServingPausedError"),
+    (402, "budget_exceeded", "BudgetExceededError"),
 ])
 def test_a_billing_stop_names_its_limit_on_the_wire(status, code, type_name):
     """A hosted turn's host reads the failure's kind from the `TypeName:`
@@ -443,7 +444,9 @@ def test_a_billing_stop_names_its_limit_on_the_wire(status, code, type_name):
     # The whole curated message fits under the wire cap, billing link included.
     assert not error.endswith("…")
     assert error.endswith(
-        "Add credits at https://console.mindshub.ai/settings/organization/billing to continue."
+        "https://console.mindshub.ai/settings/organization/billing?tab=budgets."
+        if code == "budget_exceeded"
+        else "Add credits at https://console.mindshub.ai/settings/organization/billing to continue."
     )
 
 

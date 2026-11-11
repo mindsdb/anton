@@ -896,6 +896,10 @@ def build_cloud_chat_session(
     settings.resolve_workspace(str(base))
     if request.model:
         settings.planning_model = request.model
+    # Planning only: the router shares the coding provider, so changing coding
+    # effort would also change history summarization.
+    if request.reasoning_effort:
+        settings.planning_reasoning_effort = request.reasoning_effort
     if not request.jev_decisions:
         # The organization opted out of Jev: the completion check uses the
         # LLM verifier alone.

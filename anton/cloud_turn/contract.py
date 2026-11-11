@@ -406,6 +406,10 @@ class TurnRequestV1:
     #: {engine: {"usage_notes": str}}. Rendered only for engines the turn's
     #: vault connects. Absent when no connected engine has notes.
     connectors: dict | None = None
+    #: Optional reasoning effort the user picked for this turn. Applied to the
+    #: planning model only; the name is passed to the provider uninterpreted.
+    #: Absent, null, blank, or non-string keeps the configured default.
+    reasoning_effort: str | None = None
     #: The MindsHub browser router, when cowork-server turned the browser on for
     #: this turn: {"base_url", "profile", "project"?}, read by
     #: BrowserConfig.from_dict. The pod reaches the router with this turn's
@@ -424,6 +428,9 @@ class TurnRequestV1:
         protocol_version = d["protocol_version"]
         if not _is_version(protocol_version, TURN_PROTOCOL_VERSION):
             raise ValueError("unsupported cloud turn protocol version")
+        reasoning_effort = d.get("reasoning_effort")
+        if not isinstance(reasoning_effort, str):
+            reasoning_effort = ""
         return TurnRequestV1(
             protocol_version=protocol_version,
             conversation_id=str(d["conversation_id"]),
@@ -454,6 +461,7 @@ class TurnRequestV1:
             connectors=(
                 d.get("connectors") if isinstance(d.get("connectors"), dict) else None
             ),
+            reasoning_effort=reasoning_effort.strip() or None,
             browser=BrowserConfig.from_dict(d.get("browser")),
             limits=_parse_limits(d.get("limits"), str(d["conversation_id"])),
         )

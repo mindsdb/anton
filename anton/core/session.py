@@ -773,10 +773,11 @@ _TRANSIENT_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
 )
 
 # Verdict-call failures that are DETERMINISTIC DENIALS: the provider will give
-# the identical answer on every retry while the latch lives — a wallet that can't pay
-# for the verifier's model (TokenLimitExceeded, raised as one of its subclasses
+# the identical answer on every retry while the latch lives — a billing stop on the
+# verifier's model, from an empty wallet, allowance or spent budget (TokenLimitExceeded, raised as one of its subclasses
 # for the gate's 402 ``wallet_empty`` / 429 ``included_allowance_exhausted`` /
-# 429 ``free_air_daily_spend_fuse_exceeded``, all matched on the exact code;
+# 429 ``free_air_daily_spend_fuse_exceeded`` / 402 ``budget_exceeded``, all
+# matched on the exact code;
 # velocity 429s map to TransientProviderError and never land here) or a model
 # id that doesn't resolve for this key (ModelUnavailableError: 404
 # model-not-found / 403 model-access-denied / 403 model-restricted, the last
@@ -7934,14 +7935,15 @@ class ChatSession:
                     # than auto-upgrading to the planning model: a missing
                     # check beats a surprise bill. The periodic re-probe still
                     # runs; a re-probe denied again lands back here and stays
-                    # latched, so adding credits self-heals within
+                    # latched, so lifting the stop (adding credits, or raising
+                    # a spent budget) self-heals within
                     # _VERIFIER_LATCH_REPROBE_TURNS turns.
                     #
                     # Scope note: the latch lives as long as its owner. A
                     # session-owned latch in a host that rebuilds the session
-                    # per message spans one message, so a top-up recovers on
-                    # the next one. A latch the host shares spans messages, so
-                    # a top-up recovers at the re-probe. Either way this branch
+                    # per message spans one message, so lifting the stop recovers
+                    # on the next one. A latch the host shares spans messages, so
+                    # it recovers at the re-probe. Either way this branch
                     # is the guarantee the user is never told the turn failed.
                     self._verifier_latch.latched = True
                     # Through the same accumulator as every other class, but
