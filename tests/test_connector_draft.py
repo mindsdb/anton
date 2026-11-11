@@ -618,6 +618,13 @@ def test_the_header_name_rule_matches_the_shared_cases(case):
         assert not case["name"] or case["name"] not in str(exc.value)
 
 
+def test_the_header_name_rule_refuses_a_held_value_on_its_own(held_value):
+    with pytest.raises(ConnectorDraftError, match="header name that is not allowed") as exc:
+        check_header_name(f"X-{held_value}")
+
+    assert held_value not in str(exc.value)
+
+
 @pytest.mark.parametrize("name", [None, 7, b"Authorization"])
 def test_a_header_name_that_is_not_text_is_refused(name):
     with pytest.raises(ConnectorDraftError, match=r"^auth\.headers has a header name"):

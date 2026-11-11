@@ -24,6 +24,8 @@ from dataclasses import asdict, dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
+from anton.core.tools import connector_auth_rules as rules
+from anton.core.tools.connector_auth_rules import AUTH_KEYS, MAX_AUTH_HEADERS, is_printable_ascii, looks_like_token
 from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.tool_defs import ToolDef
 from anton.utils.datasources import scrub_output
@@ -37,10 +39,7 @@ RESERVED_FIELD_NAMES = frozenset({"base_url", "label", "user_label"})
 
 _CONNECTOR_ID = re.compile(r"[a-z][a-z0-9_]{1,40}")
 _FIELD_NAME = re.compile(r"[a-z][a-z0-9_]{0,39}")
-#: An unbroken run this long of the characters keys are made of, holding both
-#: letters and digits, reads as a key or token. Words and digitless ids pass.
-_TOKEN_RUN = re.compile(r"[A-Za-z0-9_-]{20,}")
-#: The same rule for an id or field name, where ``_`` separates words.
+#: The token-run rule for an id or field name, where ``_`` separates words.
 _ID_RUN = re.compile(r"[a-z0-9]{20,}")
 
 _HIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
@@ -54,29 +53,8 @@ _LONG_TEXTS = frozenset({"usage_notes", "help"})
 _TOP_KEYS = frozenset({"connector_id", "help_url", "fields", "check", "auth", *_TOP_TEXT_CAPS})
 _FIELD_KEYS = frozenset({"name", "secret", "required", *_FIELD_TEXT_CAPS})
 _CHECK_KEYS = frozenset({"path"})
-#: How the member's values go on a request; later types join this list.
-_AUTH_KEYS = {
-    "header": frozenset({"type", "headers"}),
-    "basic": frozenset({"type", "username", "password"}),
-}
-MAX_AUTH_HEADERS = 5
 
 _CHECK_PATH_MAX = 300
-_AUTH_TEMPLATE_MAX = 200
-_HEADER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,40}")
-_PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]{0,39})\}")
-#: Lowercase names a template may not set: transport-owned, read by proxies as
-#: client, host, path or method, or passed by the call helper. Others pass.
-_REFUSED_HEADERS = frozenset({
-    "host", "cookie", "via", "max-forwards", "range", "expect", "accept-encoding",
-    "connection", "keep-alive", "te", "trailer", "transfer-encoding", "upgrade",
-    "forwarded", "x-real-ip", "x-client-ip", "x-cluster-client-ip", "true-client-ip",
-    "cf-connecting-ip", "fastly-client-ip",
-    "x-original-url", "x-rewrite-url", "x-original-host", "x-host", "x-http-host-override",
-    "x-http-method-override", "x-http-method", "x-method-override",
-    "accept", "accept-language", "if-none-match", "if-modified-since",
-})
-_REFUSED_HEADER_PREFIXES = ("proxy-", "x-forwarded-", "x-envoy-", "content-")
 
 
 class ConnectorDraftError(ValueError):
@@ -157,18 +135,9 @@ class ConnectorDraft:
         return out
 
 
-def _looks_like_token(text: str, run: re.Pattern[str] = _TOKEN_RUN) -> bool:
-    """Whether ``text`` holds a long letters-and-digits run with both kinds.
-
-    Args:
-        text: The text to check.
-        run: What counts as one unbroken run.
-    """
-    for match in run.finditer(text):
-        found = match.group()
-        if any(c.isdigit() for c in found) and any(c.isalpha() for c in found):
-            return True
-    return False
+def _scrubbed(text: str) -> bool:
+    """Whether the scrubber reads ``text`` as a known key shape or a value the turn holds."""
+    return scrub_output(text) != text
 
 
 def _check_text(value: Any, where: str, cap: int, *, long_text: bool) -> str | None:
@@ -200,7 +169,7 @@ def _check_text(value: Any, where: str, cap: int, *, long_text: bool) -> str | N
                 f"{where} looks like it holds a credential value: it matches a known "
                 "key shape. Describe the credential (its name, where to find it) without the value."
             )
-        if _looks_like_token(form):
+        if looks_like_token(form):
             raise ConnectorDraftError(
                 f"{where} looks like it holds a credential value: it has a run of 20 or "
                 "more letters, digits, _ or - that mixes letters and digits. Describe the "
@@ -217,7 +186,7 @@ def _check_identifier(name: str, where: str) -> None:
             knows, or one of its ``_``-separated parts is a run of 20 or more
             letters and digits with both kinds.
     """
-    if scrub_output(name) != name or _looks_like_token(name, _ID_RUN):
+    if scrub_output(name) != name or looks_like_token(name, _ID_RUN):
         raise ConnectorDraftError(
             f"{where} looks like a credential value: it has a part of 20 or more letters "
             "and digits, or a known key shape. Use short words joined by underscores."
@@ -248,31 +217,21 @@ def check_draft_text(key: str, value: Any) -> str | None:
 
 
 def check_header_name(name: Any, where: str = "The template") -> None:
-    """Refuse a header name a connector template may not set.
-
-    A grammar plus a list of refused names, not an allowlist: a name outside
-    the list passes. The other services that apply a template's headers keep
-    a copy of this rule and run ``tests/fixtures/header_name_cases.json``.
+    """Refuse a header name a connector template may not set, by the shared rule.
 
     Args:
         name: The header name as the template gives it.
         where: Where the name sits, for the message.
 
     Raises:
-        ConnectorDraftError: when ``name`` breaks the grammar, reads as a
-            token, or is refused. The message never quotes the name, which
-            is model text.
+        ConnectorDraftError: when ``connector_auth_rules.check_header_name``
+            refuses it, with the scrubber as its secret detector. The message
+            never quotes the name, which is model text.
     """
-    if (
-        not isinstance(name, str)
-        or not _HEADER_NAME.fullmatch(name)
-        or _looks_like_token(name)
-        or scrub_output(name) != name
-    ):
-        raise ConnectorDraftError(f"{where} has a header name that is not allowed.")
-    lowered = name.lower()
-    if lowered in _REFUSED_HEADERS or lowered.startswith(_REFUSED_HEADER_PREFIXES):
-        raise ConnectorDraftError(f"{where} has a header name that is not allowed.")
+    try:
+        rules.check_header_name(name, where, _scrubbed)
+    except rules.AuthRuleError as e:
+        raise ConnectorDraftError(str(e)) from e
 
 
 def _check_keys(data: dict, allowed: frozenset[str], where: str) -> None:
@@ -310,12 +269,6 @@ def _check_help_url(value: Any) -> str | None:
     return text
 
 
-def _is_printable_ascii(text: str, *, space: bool) -> bool:
-    """Whether every character of ``text`` is printable ASCII, the space only when allowed."""
-    low = 0x20 if space else 0x21
-    return all(low <= ord(c) <= 0x7E for c in text)
-
-
 def _check_path(value: Any) -> str:
     """Return the check's path: an absolute path with an optional query, never a host.
 
@@ -330,7 +283,7 @@ def _check_path(value: Any) -> str:
     if (
         not text.startswith("/")
         or "//" in text
-        or not _is_printable_ascii(text, space=False)
+        or not is_printable_ascii(text, space=False)
         or any(c in text for c in "\\#{}%")
     ):
         raise ConnectorDraftError("check.path must be a path such as /v1/me, with no host.")
@@ -340,104 +293,24 @@ def _check_path(value: Any) -> str:
     return text
 
 
-def _check_template(
-    value: Any, where: str, declared: frozenset[str], *, may_be_empty: bool = False
-) -> tuple[str, set[str]]:
-    """Return an auth template and the field names its ``{field}`` slots place.
-
-    The token and scrub rules read the template with its slots removed, so a
-    long field name in a slot is not taken for a key.
-
-    Args:
-        value: The template as the draft gives it.
-        where: Its place in the draft, for messages.
-        declared: The draft's field names.
-        may_be_empty: Whether an empty template is allowed.
+def _parse_auth(data: Any, fields: tuple[ConnectorDraftField, ...]) -> ConnectorDraftAuth:
+    """Parse the required ``auth`` section against the draft's fields by the shared rules.
 
     Raises:
-        ConnectorDraftError: when it is not printable ASCII on one line, too
-            long, empty when it may not be, has a brace outside a slot, names
-            an undeclared field, or holds what reads as a credential value.
+        ConnectorDraftError: when ``connector_auth_rules.parse_auth`` refuses
+            it, with the scrubber as its secret detector.
     """
-    if not isinstance(value, str):
-        raise ConnectorDraftError(f"{where} must be text.")
-    text = value.strip()
-    if not text and not may_be_empty:
-        raise ConnectorDraftError(f"{where} is required.")
-    if len(text) > _AUTH_TEMPLATE_MAX:
-        raise ConnectorDraftError(f"{where} must be at most {_AUTH_TEMPLATE_MAX} characters.")
-    if not _is_printable_ascii(text, space=True):
-        raise ConnectorDraftError(f"{where} must be printable text on one line.")
-    literal = _PLACEHOLDER.sub("", text)
-    if "{" in literal or "}" in literal:
-        raise ConnectorDraftError(f"{where} may use braces only as {{field_name}}.")
-    placed = set(_PLACEHOLDER.findall(text))
-    if not placed <= declared:
-        raise ConnectorDraftError(f"{where} names a field the draft does not declare.")
-    if scrub_output(literal) != literal or _looks_like_token(literal):
-        raise ConnectorDraftError(
-            f"{where} looks like it holds a credential value. Place the field as "
-            "{field_name} instead of writing its value."
-        )
-    return text, placed
+    try:
+        canonical = rules.parse_auth(data, [(f.name, f.secret) for f in fields], _scrubbed)
+    except rules.AuthRuleError as e:
+        raise ConnectorDraftError(str(e)) from e
+    return ConnectorDraftAuth(
+        type=canonical["type"],
+        headers=tuple(canonical.get("headers", {}).items()),
+        username=canonical.get("username"),
+        password=canonical.get("password"),
+    )
 
-
-def _parse_auth_headers(value: Any, declared: frozenset[str]) -> tuple[tuple[tuple[str, str], ...], set[str]]:
-    """Return the ``header`` type's headers and the fields they place."""
-    if not isinstance(value, dict) or not 1 <= len(value) <= MAX_AUTH_HEADERS:
-        raise ConnectorDraftError(f"auth.headers must be an object of 1 to {MAX_AUTH_HEADERS} headers.")
-    seen: set[str] = set()
-    headers: list[tuple[str, str]] = []
-    placed: set[str] = set()
-    for name, template in value.items():
-        # A header name is model text: one that reads as a token is refused before any message names it.
-        check_header_name(name, "auth.headers")
-        if name.lower() in seen:
-            raise ConnectorDraftError("auth.headers has a header name that is not allowed.")
-        seen.add(name.lower())
-        text, names = _check_template(template, f"auth.headers.{name}", declared)
-        # Basic needs base64 of user:password, which a header template cannot build.
-        if text.lower().startswith("basic"):
-            raise ConnectorDraftError("auth.headers must not hold a Basic value; use auth type 'basic'.")
-        headers.append((name, text))
-        placed |= names
-    return tuple(headers), placed
-
-
-def _parse_auth(data: Any, fields: tuple[ConnectorDraftField, ...]) -> ConnectorDraftAuth:
-    """Parse the required ``auth`` section against the draft's fields.
-
-    It must place at least one secret field and every declared field: a
-    field it never uses would ask the member for a value that goes nowhere.
-    """
-    if data is None:
-        raise ConnectorDraftError("auth is required: say how the fields go on a request.")
-    if not isinstance(data, dict):
-        raise ConnectorDraftError("auth must be an object.")
-    kind = data.get("type")
-    if not isinstance(kind, str) or kind not in _AUTH_KEYS:
-        raise ConnectorDraftError(f"auth.type must be one of: {', '.join(sorted(_AUTH_KEYS))}.")
-    _check_keys(data, _AUTH_KEYS[kind], "auth")
-    declared = frozenset(f.name for f in fields)
-    if kind == "header":
-        headers, placed = _parse_auth_headers(data.get("headers"), declared)
-        auth = ConnectorDraftAuth(type=kind, headers=headers)
-    else:
-        username, placed = _check_template(data.get("username"), "auth.username", declared)
-        if not placed or ":" in _PLACEHOLDER.sub("", username):
-            raise ConnectorDraftError("auth.username must place a field and hold no ':' outside it.")
-        if "password" not in data:
-            raise ConnectorDraftError("auth.password is required; use an empty text when the API takes none.")
-        password, in_password = _check_template(data["password"], "auth.password", declared, may_be_empty=True)
-        placed |= in_password
-        auth = ConnectorDraftAuth(type=kind, username=username, password=password)
-    secrets = {f.name for f in fields if f.secret}
-    if not placed & secrets:
-        raise ConnectorDraftError("auth must place a secret field, such as {api_key}.")
-    unused = [i for i, f in enumerate(fields) if f.name not in placed]
-    if unused:
-        raise ConnectorDraftError(f"auth must place every field; fields[{unused[0]}] is never used.")
-    return auth
 
 
 def _parse_check(data: Any) -> ConnectorDraftCheck | None:
@@ -622,7 +495,7 @@ _INPUT_SCHEMA["properties"]["auth"] = {
         "{field_name} places a field's value; place every field and at least one secret."
     ),
     "properties": {
-        "type": {"type": "string", "enum": sorted(_AUTH_KEYS)},
+        "type": {"type": "string", "enum": sorted(AUTH_KEYS)},
         "headers": {
             "type": "object",
             "description": "For type 'header': header name to template.",
