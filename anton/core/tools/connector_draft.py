@@ -336,7 +336,7 @@ def _parse_check(data: Any, auth: ConnectorDraftAuth) -> ConnectorDraftCheck | N
     _check_keys(data, _CHECK_KEYS, "check")
     path = _check_path(data.get("path"))
     if rules.query_collides(auth.to_dict(), rules.query_names(urlsplit(path).query)):
-        raise ConnectorDraftError("check.path must not carry a parameter that auth places.")
+        raise ConnectorDraftError("check.path may carry only plain parameter names, none of them one auth places.")
     return ConnectorDraftCheck(path=path)
 
 
@@ -497,6 +497,7 @@ _INPUT_SCHEMA = {
                     "secret": {"type": "boolean", "description": "Mask the input. Defaults to true."},
                     "required": {
                         "type": "boolean",
+                        "enum": [True],
                         "description": "Must be true or left out: auth sends every field on a request.",
                     },
                     "placeholder": _TEXT,

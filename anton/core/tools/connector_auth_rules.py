@@ -1,10 +1,9 @@
 """Rules for a connector template's auth section: how a member's values go on a request.
 
-Standard library only. auth and the call gateway carry this file byte for
-byte, and their tests pin its SHA-256, so every service that stores or
-applies a template's auth checks it with the same code. anton's
-``connector_draft`` calls it with its scrubber as ``looks_secret``; each
-host passes its own detector for values it holds.
+Standard library only. Every service that builds, stores or applies a
+template's auth carries this file byte for byte, and pins its SHA-256, so
+they all check it with the same code. Each service passes its own
+``looks_secret`` detector for values it holds or key shapes it knows.
 """
 
 from __future__ import annotations
@@ -113,7 +112,7 @@ def check_header_name(name: Any, where: str = "The template", looks_secret: Look
     """Refuse a header name a connector template may not set.
 
     A grammar plus a list of refused names, not an allowlist: a name outside
-    the list passes. ``tests/fixtures/header_name_cases.json`` pins it.
+    the list passes. The shared ``header_name_cases.json`` pins it.
 
     Args:
         name: The header name as the template gives it.
@@ -221,13 +220,13 @@ def _parse_headers(
     seen: set[str] = set()
     headers: dict[str, str] = {}
     placed: set[str] = set()
-    for name, template in value.items():
-        # A header name is model text: one that reads as a token is refused before any message names it.
+    for index, (name, template) in enumerate(value.items()):
+        # Messages name the position, never the header: a name is model text.
         check_header_name(name, "auth.headers", looks_secret)
         if name.lower() in seen:
             raise AuthRuleError("auth.headers has a header name that is not allowed.")
         seen.add(name.lower())
-        text, names = check_template(template, f"auth.headers.{name}", declared, looks_secret=looks_secret)
+        text, names = check_template(template, f"auth.headers[{index}]", declared, looks_secret=looks_secret)
         # Basic needs base64 of user:password, which a header template cannot build.
         if text.lower().startswith("basic"):
             raise AuthRuleError("auth.headers must not hold a Basic value; use auth type 'basic'.")
@@ -245,12 +244,12 @@ def _parse_params(
     seen: set[str] = set()
     params: dict[str, str] = {}
     placed: set[str] = set()
-    for name, template in value.items():
+    for index, (name, template) in enumerate(value.items()):
         check_param_name(name, "auth.params", looks_secret)
         if name.lower() in seen:
             raise AuthRuleError("auth.params has a parameter name that is not allowed.")
         seen.add(name.lower())
-        where = f"auth.params.{name}"
+        where = f"auth.params[{index}]"
         text, names = check_template(template, where, declared, looks_secret=looks_secret)
         if QUERY_LITERAL_REFUSED & set(PLACEHOLDER.sub("", text)):
             raise AuthRuleError(f"{where} may not hold &, #, +, = or a space outside {{field_name}}.")
@@ -260,13 +259,18 @@ def _parse_params(
 
 
 def _fill(template: str, values: Mapping[str, str]) -> str:
-    """Put each slot's value into ``template``; a missing value is refused without naming it."""
+    """Put each slot's value into ``template``; a missing or unsafe value is refused without naming it."""
 
     def value_of(match: re.Match[str]) -> str:
+        """The value for one slot, refused when absent or holding a control character."""
         name = match.group(1)
         if name not in values:
             raise AuthRuleError("A field the auth section places has no value.")
-        return values[name]
+        value = values[name]
+        # A control character would split a header or a URL.
+        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in value):
+            raise AuthRuleError("A value the auth section places holds a control character.")
+        return value
 
     return PLACEHOLDER.sub(value_of, template)
 
@@ -286,25 +290,17 @@ def render(auth: Mapping[str, Any], values: Mapping[str, str]) -> tuple[dict[str
         The headers to set and the query parameters to append.
 
     Raises:
-        AuthRuleError: when a placed field has no value.
+        AuthRuleError: when the type is not one this file knows, or a placed
+            field has no value or holds a control character.
     """
     if auth["type"] == "basic":
         pair = f"{_fill(auth['username'], values)}:{_fill(auth['password'], values)}"
         return {"Authorization": "Basic " + base64.b64encode(pair.encode()).decode("ascii")}, []
     if auth["type"] == "query":
         return {}, [(name, _fill(template, values)) for name, template in auth["params"].items()]
-    return {name: _fill(template, values) for name, template in auth["headers"].items()}, []
-
-
-def _param_keys(name: str) -> set[str]:
-    """The ways common servers may read a parameter name, lowercase and trimmed.
-
-    One reading cuts at ``[`` (an array index), the other reads an unmatched
-    ``[`` as ``_``; both read ``.``, space and ``+`` as ``_``.
-    """
-    text = name.strip().lower()
-    cut = text.split("[", 1)[0]
-    return {re.sub(r"[.\s+\[]", "_", form) for form in (cut, text)}
+    if auth["type"] == "header":
+        return {name: _fill(template, values) for name, template in auth["headers"].items()}, []
+    raise AuthRuleError("auth.type is not one these rules can apply.")
 
 
 def query_names(query: str) -> list[str]:
@@ -313,16 +309,17 @@ def query_names(query: str) -> list[str]:
 
 
 def query_collides(auth: Mapping[str, Any], names: Iterable[str]) -> bool:
-    """Whether any of ``names`` would reach a server as a query parameter the auth section places.
+    """Whether a request's own query parameter names may not go out beside the auth section's.
 
-    Each name is also split on ``;`` and compared in every way servers read
-    it, so ``ACCESS.KEY``, ``access key``, `` access_key``, ``access_key[0]``,
-    ``access[key`` and ``a;access_key`` all collide with ``access_key``.
+    For a ``query`` section every name must be a plain ``PARAM_NAME``, and
+    none may equal a placed name ignoring case. Anything else is refused
+    rather than interpreted: servers rewrite brackets, dots, spaces and
+    separators in ways no check can follow. Other types accept any name.
     """
     if auth["type"] != "query":
         return False
-    placed = {key for name in auth["params"] for key in _param_keys(name)}
-    return any(_param_keys(part) & placed for name in names for part in name.split(";"))
+    placed = {name.lower() for name in auth["params"]}
+    return any(not PARAM_NAME.fullmatch(name) or name.lower() in placed for name in names)
 
 
 def parse_auth(

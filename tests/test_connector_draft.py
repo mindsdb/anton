@@ -544,7 +544,7 @@ def test_an_auth_header_that_could_steer_or_inject_is_refused(headers):
 def test_an_over_long_auth_template_is_refused():
     auth = {"type": "header", "headers": {"Authorization": "Bearer {api_key} " + "x " * 100, "X-Region": "{region}"}}
 
-    with pytest.raises(ConnectorDraftError, match=r"^auth\.headers\.Authorization must be at most 200"):
+    with pytest.raises(ConnectorDraftError, match=r"^auth\.headers\[0\] must be at most 200"):
         parse_connector_draft(_draft(auth=auth))
 
 
@@ -553,7 +553,7 @@ def test_a_value_in_auth_or_the_check_is_refused_without_echoing_it(name):
     value = _TOKEN_SHAPES[name]
     for overrides, rule in (
         ({"auth": {"type": "header", "headers": {"Authorization": f"Bearer {value}", "X-Region": "{region}"}}},
-         r"^auth\.headers\.Authorization looks like"),
+         r"^auth\.headers\[0\] looks like"),
         ({"fields": [{"name": "api_key", "label": "Key"}],
           "auth": {"type": "basic", "username": "{api_key}", "password": value}}, r"^auth\.password looks like"),
         ({"check": {"path": f"/v2/me?key={value}"}}, r"^check\.path\b"),
@@ -566,7 +566,7 @@ def test_a_value_in_auth_or_the_check_is_refused_without_echoing_it(name):
 def test_a_held_value_written_into_auth_is_refused_without_the_value(held_value):
     auth = {"type": "header", "headers": {"Authorization": f"Bearer {held_value}", "X-Region": "{region}"}}
 
-    with pytest.raises(ConnectorDraftError, match=r"^auth\.headers\.Authorization looks like") as exc:
+    with pytest.raises(ConnectorDraftError, match=r"^auth\.headers\[0\] looks like") as exc:
         parse_connector_draft(_draft(auth=auth))
 
     assert held_value not in str(exc.value)
@@ -617,12 +617,12 @@ def test_query_auth_parses_and_round_trips():
     ({"X-HTTP-Method-Override": "{api_key}"}, r"^auth\.params has a parameter name"),
     ({"x-method-override": "{api_key}"}, r"^auth\.params has a parameter name"),
     ({"access_key": "{api_key}", "ACCESS_KEY": "{api_key}"}, r"^auth\.params has a parameter name"),
-    ({"access_key": "{api_key}&admin=1"}, r"^auth\.params\.access_key may not hold &"),
-    ({"access_key": "{api_key}#frag"}, r"^auth\.params\.access_key may not hold &"),
-    ({"access_key": "a+{api_key}"}, r"^auth\.params\.access_key may not hold &"),
-    ({"access_key": "x={api_key}"}, r"^auth\.params\.access_key may not hold &"),
-    ({"access_key": "a {api_key}"}, r"^auth\.params\.access_key may not hold &"),
-    ({"access_key": "{token}"}, r"^auth\.params\.access_key names a field"),
+    ({"access_key": "{api_key}&admin=1"}, r"^auth\.params\[0\] may not hold &"),
+    ({"access_key": "{api_key}#frag"}, r"^auth\.params\[0\] may not hold &"),
+    ({"access_key": "a+{api_key}"}, r"^auth\.params\[0\] may not hold &"),
+    ({"access_key": "x={api_key}"}, r"^auth\.params\[0\] may not hold &"),
+    ({"access_key": "a {api_key}"}, r"^auth\.params\[0\] may not hold &"),
+    ({"access_key": "{token}"}, r"^auth\.params\[0\] names a field"),
     ("access_key={api_key}", r"^auth\.params must be an object"),
 ])
 def test_a_query_auth_section_of_the_wrong_shape_is_refused(params, rule):
@@ -641,9 +641,11 @@ def test_a_token_shaped_or_held_parameter_name_is_refused_without_echoing_it(hel
 @pytest.mark.parametrize("path", [
     "/v1/eod?access_key=demo", "/v1/eod?ACCESS_KEY=demo", "/v1/eod?access_key[]=demo", "/v1/eod?symbols=A&access_key",
     "/v1/eod?access.key=demo", "/v1/eod?access_key[0]=demo", "/v1/eod?symbols=A;access_key=demo",
+    "/v1/eod?[access_key]=demo", "/v1/eod?]access_key=demo", "/v1/eod?[access_key][x]=demo",
+    "/v1/eod?filter[status]=open",
 ])
 def test_a_check_path_carrying_the_placed_parameter_is_refused(path):
-    with pytest.raises(ConnectorDraftError, match=r"^check\.path must not carry a parameter that auth places"):
+    with pytest.raises(ConnectorDraftError, match=r"^check\.path may carry only plain parameter names"):
         parse_connector_draft(_draft(fields=_QUERY_FIELDS, auth=_QUERY_AUTH, check={"path": path}))
 
 
@@ -743,6 +745,9 @@ def test_the_tool_describes_auth_as_one_flat_object():
     assert auth["properties"]["type"]["enum"] == ["basic", "header", "query"]
     assert set(auth["properties"]) == {"type", "headers", "username", "password", "params"}
     assert "type 'query'" in tool.description
+    assert auth["properties"]["params"]["maxProperties"] == 5
+    field = schema["properties"]["fields"]["items"]["properties"]["required"]
+    assert field["enum"] == [True]
     assert auth["additionalProperties"] is False
     assert _union_keywords(schema) == set()
     assert "call_minds_api" in schema["properties"]["usage_notes"]["description"]
