@@ -12,11 +12,6 @@ from anton.core.tools.generate_artifact.state import GenState
 from anton.core.tools.registry import ToolOutcome
 
 
-@pytest.fixture
-def atomic(monkeypatch):
-    monkeypatch.setenv("ANTON_STATIC_FAST_PATH", "direct")
-
-
 def test_identical_fresh_source_data_is_allowed_but_a_stale_file_is_not(tmp_path):
     path = tmp_path / "observed-data.json"
     path.write_text('{"revenue":42}')
@@ -45,7 +40,7 @@ def test_handoff_cannot_follow_a_symlink_outside_the_artifact(tmp_path):
 
 
 @pytest.mark.parametrize("failure", [None, "failed-exec", "stale", "invalid", "refused"])
-async def test_collection_completes_in_one_call_only_after_successful_fresh_data(tmp_path, monkeypatch, atomic, failure):
+async def test_collection_completes_in_one_call_only_after_successful_fresh_data(tmp_path, monkeypatch, failure):
     import anton.core.tools.tool_handlers as handlers
 
     if failure == "stale":
@@ -82,7 +77,7 @@ async def test_collection_completes_in_one_call_only_after_successful_fresh_data
             assert not state.scratchpad_execs
 
 
-def test_ask_first_and_live_apps_never_offer_automatic_static_completion(atomic, tmp_path):
+def test_ask_first_and_live_apps_never_offer_automatic_static_completion(tmp_path):
     for artifact_type, act_first in [("html-app", False), ("fullstack-stateful-app", True)]:
         state = GenState(session=SimpleNamespace(), artifact_type=artifact_type, artifact_path=tmp_path,
                          slug="page", act_first=act_first)

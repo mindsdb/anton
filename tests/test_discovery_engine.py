@@ -78,7 +78,6 @@ async def test_batch_finish_uses_completed_source_work_without_an_extra_model_ca
     from anton.core.tools.registry import ToolOutcome
     import anton.core.tools.tool_handlers as handlers
 
-    monkeypatch.setenv("ANTON_STATIC_FAST_PATH", "direct")
     monkeypatch.setattr(handlers, "handle_scratchpad", AsyncMock(return_value=ToolOutcome("validated rows", ok=True)))
     session = _session_with_plan_sequence(_batch())
     state = _state(session)
@@ -94,7 +93,6 @@ async def test_batch_finish_cannot_vouch_for_a_failed_source_execution(monkeypat
     from anton.core.tools.registry import ToolOutcome
     import anton.core.tools.tool_handlers as handlers
 
-    monkeypatch.setenv("ANTON_STATIC_FAST_PATH", "direct")
     scratchpad = AsyncMock(side_effect=[ToolOutcome("bad query", ok=False), ToolOutcome("validated rows", ok=True)])
     monkeypatch.setattr(handlers, "handle_scratchpad", scratchpad)
     session = _session_with_plan_sequence(_batch("premature"), _batch("after correction"))
@@ -111,7 +109,6 @@ async def test_batch_finish_must_follow_the_work_it_vouches_for(monkeypatch):
     from anton.core.tools.registry import ToolOutcome
     import anton.core.tools.tool_handlers as handlers
 
-    monkeypatch.setenv("ANTON_STATIC_FAST_PATH", "direct")
     monkeypatch.setattr(handlers, "handle_scratchpad", AsyncMock(return_value=ToolOutcome("validated rows", ok=True)))
     reversed_batch = _batch()
     reversed_batch.tool_calls.reverse()

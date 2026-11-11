@@ -2075,7 +2075,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         return
 
     slug = (tc_input.get("slug") or "").strip()
-    if not slug and os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on":
+    if not slug:
         # A new page can enter the same generator without a separate model
         # round trip solely to register its folder. Existing-slug edits keep
         # their normal path. Validate before creating any persistent resource.
@@ -2097,8 +2097,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
             slug = artifact.slug
             _track_artifact(session, store, slug, summary=f"Created artifact: {name}")
     if not slug:
-        yield ("Error: `slug` (an existing artifact) or `name` (a new one) is required."
-               if os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on" else "Error: `slug` is required.")
+        yield "Error: `slug` (an existing artifact) or `name` (a new one) is required."
         return
     artifact = store.open(slug)
     if artifact is None:
@@ -2232,8 +2231,6 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
 
     def failure_context(detail):
         message = detail if detail.startswith("Error:") else _generation_failed(detail)
-        if os.environ.get("ANTON_STATIC_SINGLE_CALL") != "on":
-            return message
         # Creation may have happened inside this call. Losing its identity on
         # failure makes a caller recreate the artifact or discard collected data.
         recovery = {"status": "failed", "slug": slug, "path": str(folder),

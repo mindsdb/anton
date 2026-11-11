@@ -15,7 +15,8 @@ import pytest
 
 from anton.core.artifacts import live_app_slots as las
 from anton.core.backends.sandbox import CellSandbox
-from anton.core.llm.prompts import ARTIFACTS_PROMPT, BACKEND_GENERATION_PROMPT, STATIC_ARTIFACTS_PROMPT
+from anton.core.llm.prompts import BACKEND_GENERATION_PROMPT
+from anton.core.llm.static_artifact_prompt import ARTIFACTS, STATIC_ARTIFACTS
 from anton.core.memory import skills as skills_mod
 from anton.core.session import ChatSession, ChatSessionConfig
 from anton.core.tools.generate_artifact.state import GenState
@@ -88,7 +89,7 @@ async def test_a_sandboxed_turn_without_live_apps_offers_no_fullstack_app(
     assert not any(t in every_tool for t in _FULLSTACK_TYPES)
     assert "launch_backend" not in every_tool
     assert BACKEND_GENERATION_PROMPT not in system
-    assert STATIC_ARTIFACTS_PROMPT in system
+    assert STATIC_ARTIFACTS in system
     assert "the entry point is the `url`" not in system
     assert "launch_backend" not in system
     assert "build-fullstack-backend" not in system
@@ -108,7 +109,7 @@ async def test_without_a_policy_or_with_live_apps_the_offer_is_unchanged(
     assert "launch_backend" in tools
     assert set(_FULLSTACK_TYPES) <= set(tools["create_artifact"]["input_schema"]["properties"]["type"]["enum"])
     assert "port" in tools["update_artifact"]["input_schema"]["properties"]
-    assert ARTIFACTS_PROMPT in system
+    assert ARTIFACTS in system
     assert BACKEND_GENERATION_PROMPT in system
     assert "- `build-fullstack-backend` — " in system
 
