@@ -77,6 +77,24 @@ Events written back on stdout (JSONL):
   {"kind": "ask_user_answer_rejected", "id", "answer_id", "reason"}  - a stdin
       answer that did not close its question; reason is invalid_option |
       not_found | already_answered. The question stays open on invalid_option.
+  {"kind": "addon", "type": "response.addon", "addon_id", "state", ...}  - what
+      happened to a message the user added mid-task (stdin `addon` lines
+      below); any turn, never rate limited. `addon_id` is the stdin line's.
+      The controller relays it as a `turn_step` (step "addon"), the way it
+      relays the ask_user kinds; an older controller drops it.
+      state "added" | "refused" (+ "text", "decided_by"): the verdict on an
+      `addon` line. Refused when no turn is running yet or any more (a line
+      that lands before the session is built is refused too, not buffered),
+      and cowork-server then keeps the message as the next task.
+      state "read" (+ "text", "decided_by"): the model has now seen it.
+      state "returned" (+ "text", "decided_by"): the turn ended before the
+      model saw it; sent before the terminal event on every path (completed,
+      failed, interrupted, ended on an unanswered question), so the host can
+      run it as the next task.
+      state "withdrawn" | "already_read" (+ "request_id"): the verdict on an
+      `addon_withdraw` line. "already_read" also covers an unknown id.
+      An `addon` line repeating a known `addon_id` re-reports that message's
+      current state rather than adding it twice.
   {"kind": "browser", "session_id": "..."}  - the browser tool opened (or
       reopened) the person's browser session. cowork shows the browser beside
       the chat, with a viewer link it mints with the person's own credential.
@@ -117,6 +135,15 @@ Answer lines on stdin (interactive turns only), one JSON object per line,
 at most 64 KB:
   {"kind": "answer", "question_id", "answer_id", "values": [...], "text": "...",
    "skipped": false}
+
+Addon lines on stdin (any turn, same 64 KB bound), ENG-4194:
+  {"kind": "addon", "addon_id", "text", "decided_by"}  - hand the running turn
+      a message (ChatSession.add_user_input); answered by an `addon` event
+      with state "added" or "refused".
+  {"kind": "addon_withdraw", "addon_id", "request_id"}  - take back one the
+      model has not seen (ChatSession.withdraw_user_input); answered by an
+      `addon` event with state "withdrawn" or "already_read".
+A stdin line of any other kind, or a malformed one, is logged and skipped.
 """
 
 from __future__ import annotations
