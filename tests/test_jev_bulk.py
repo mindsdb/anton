@@ -19,16 +19,16 @@ class _Clock:
 
 
 def _answer(label: str) -> dict:
-    probabilities = {name: (1.0 if name == label else 0.0) for name in ("Sports", "World")}
+    probabilities = {name: (1.0 if name == label else 0.0) for name in ("Billing", "Support")}
     return {"type": "choice", "choice": label, "confidence": 1.0, "probabilities": probabilities}
 
 
 def _label_all(request, seen=None) -> httpx.Response:
-    """Answer every question of a batch: Sports when its text mentions a goal."""
+    """Answer every question of a batch: Billing when its text mentions an invoice."""
     body = json.loads(request.content)
     if seen is not None:
         seen.append(body)
-    answers = {name: _answer("Sports" if "goal" in q["instructions"] else "World")
+    answers = {name: _answer("Billing" if "invoice" in q["instructions"] else "Support")
                for name, q in body["questions"].items()}
     return httpx.Response(200, json={"model": "jev-1.13.0", "answers": answers,
                                      "usage": {"input_tokens": 10, "output_tokens": 2}})
@@ -42,7 +42,7 @@ async def _run(handler, items, *, pacer=None, sleeps=None, **kwargs):
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         return await jev.decide_many(
             items,
-            jev.choice_question(["Sports", "World"], "Which?"),
+            jev.choice_question(["Billing", "Support"], "Which?"),
             base_url="https://api.mindshub.ai/v1",
             api_key="key",
             pacer=pacer or jev.Pacer(6000),
@@ -70,14 +70,14 @@ async def test_each_text_rides_in_its_own_question_and_the_state_holds_only_the_
         assert request.headers["x-extra"] == "1"
         return _label_all(request, seen)
 
-    results = await _run(handler, ["a goal", "an election", {"title": "late goal"}], headers=headers)
+    results = await _run(handler, ["an invoice", "a login error", {"title": "late invoice"}], headers=headers)
 
-    assert [jev.choice_result(d)["label"] for d in results] == ["Sports", "World", "Sports"]
+    assert [jev.choice_result(d)["label"] for d in results] == ["Billing", "Support", "Billing"]
     (body,) = seen
     assert body["model"] == jev.CLASSIFY_MODEL
     assert body["state"] == jev.BATCH_STATE
     assert [q["instructions"] for q in body["questions"].values()] == [
-        "Which?\n\nText:\na goal", "Which?\n\nText:\nan election", 'Which?\n\nText:\n{"title": "late goal"}',
+        "Which?\n\nText:\nan invoice", "Which?\n\nText:\na login error", 'Which?\n\nText:\n{"title": "late invoice"}',
     ]
 
 
@@ -91,13 +91,13 @@ def test_batches_keep_order_and_respect_both_limits():
 
 async def test_many_batches_come_back_in_input_order():
     seen = []
-    texts = [f"text {i} {'goal' if i % 3 == 0 else 'vote'}" for i in range(450)]
+    texts = [f"text {i} {'invoice' if i % 3 == 0 else 'login'}" for i in range(450)]
 
     results = await _run(lambda r: _label_all(r, seen), texts)
 
     assert len(seen) == 3  # 450 texts, at most 200 a request
     assert [jev.choice_result(d)["label"] for d in results] == [
-        "Sports" if i % 3 == 0 else "World" for i in range(450)
+        "Billing" if i % 3 == 0 else "Support" for i in range(450)
     ]
 
 
@@ -111,9 +111,9 @@ async def test_a_batch_over_the_context_limit_is_split_until_it_fits():
             return httpx.Response(400, json={"detail": {"error_type": "max_tokens_exceeded"}})
         return _label_all(request)
 
-    results = await _run(handler, ["goal 1", "vote", "goal 2", "huge", "goal 3"], concurrency=1)
+    results = await _run(handler, ["invoice 1", "login", "invoice 2", "huge", "invoice 3"], concurrency=1)
 
-    assert [jev.choice_result(d).get("label") for d in results] == ["Sports", "World", "Sports", None, "Sports"]
+    assert [jev.choice_result(d).get("label") for d in results] == ["Billing", "Support", "Billing", None, "Billing"]
     assert jev.choice_result(results[3])["error"] == jev.TEXT_TOO_LONG
     assert sizes[0] == 5
 
@@ -133,7 +133,7 @@ async def test_transient_failures_are_retried_and_a_429_pauses_every_start():
     sleeps = []
     results = await _run(handler, ["x"], pacer=pacer, sleeps=sleeps)
 
-    assert jev.choice_result(results[0])["label"] == "World"
+    assert jev.choice_result(results[0])["label"] == "Support"
     assert calls["n"] == 3
     # 503: a backoff sleep. 429: the next start waits out the edge's minute.
     assert 1 in sleeps
@@ -197,8 +197,8 @@ def test_choice_question_takes_a_list_or_described_categories():
 
 
 def test_yes_no_question_and_its_result():
-    assert jev.yes_no_question("Sports?") == {"type": "noul", "instructions": "Sports?"}
-    assert jev.yes_no_question("Sports?", yes="about sport")["criteria"] == {"true": "about sport", "false": None}
+    assert jev.yes_no_question("Billing?") == {"type": "noul", "instructions": "Billing?"}
+    assert jev.yes_no_question("Billing?", yes="about payments")["criteria"] == {"true": "about payments", "false": None}
     with pytest.raises(ValueError):
         jev.yes_no_question(" ")
 
