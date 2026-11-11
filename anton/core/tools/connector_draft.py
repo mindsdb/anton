@@ -362,11 +362,14 @@ def _parse_field(data: Any, index: int) -> ConnectorDraftField:
     }
     if texts["label"] is None:
         raise ConnectorDraftError(f"{where}.label is required.")
+    # auth places every field on every request, so a field left blank would send an empty value.
+    if not _check_bool(data.get("required"), f"{where}.required", True):
+        raise ConnectorDraftError(f"{where}.required must be true: every field goes on a request.")
     return ConnectorDraftField(
         name=name,
         label=texts["label"],
         secret=_check_bool(data.get("secret"), f"{where}.secret", True),
-        required=_check_bool(data.get("required"), f"{where}.required", True),
+        required=True,
         placeholder=texts["placeholder"],
         help=texts["help"],
     )
@@ -493,7 +496,10 @@ _INPUT_SCHEMA = {
                     "name": {"type": "string", "description": "Lowercase field name, e.g. 'api_key'."},
                     "label": _TEXT,
                     "secret": {"type": "boolean", "description": "Mask the input. Defaults to true."},
-                    "required": {"type": "boolean", "description": "Defaults to true."},
+                    "required": {
+                        "type": "boolean",
+                        "description": "Must be true or left out: auth sends every field on a request.",
+                    },
                     "placeholder": _TEXT,
                     "help": {"type": "string", "description": "Where the user finds this value."},
                 },

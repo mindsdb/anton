@@ -72,7 +72,7 @@ def _draft(**overrides):
         "usage_notes": "Base URL https://api.acme.example/v2. Send the key as Authorization: Bearer <api_key>.",
         "fields": [
             {"name": "api_key", "label": "API key", "help": "Settings, then API."},
-            {"name": "region", "label": "Region", "secret": False, "required": False, "placeholder": "eu"},
+            {"name": "region", "label": "Region", "secret": False, "placeholder": "eu"},
         ],
         "auth": _AUTH,
     }
@@ -90,7 +90,7 @@ def test_a_full_draft_parses_and_round_trips():
     assert draft.connector_id == "acme_crm"
     assert [f.name for f in draft.fields] == ["api_key", "region"]
     assert draft.fields[0].secret is True and draft.fields[0].required is True
-    assert draft.fields[1].secret is False and draft.fields[1].required is False
+    assert draft.fields[1].secret is False and draft.fields[1].required is True
     assert parse_connector_draft(draft.to_dict()) == draft
 
 
@@ -171,6 +171,15 @@ def test_help_url_must_be_a_plain_https_url(url):
 def test_a_boolean_must_be_a_boolean():
     with pytest.raises(ConnectorDraftError, match=r"fields\[0\]\.secret"):
         parse_connector_draft(_draft(fields=[{"name": "k", "label": "K", "secret": "false"}]))
+    with pytest.raises(ConnectorDraftError, match=r"fields\[0\]\.required must be true or false"):
+        parse_connector_draft(_draft(fields=[{"name": "k", "label": "K", "required": "false"}]))
+
+
+def test_an_optional_field_is_refused_since_auth_sends_every_field():
+    fields = [{"name": "api_key", "label": "Key"}, {"name": "region", "label": "Region", "secret": False, "required": False}]
+
+    with pytest.raises(ConnectorDraftError, match=r"^fields\[1\]\.required must be true"):
+        parse_connector_draft(_draft(fields=fields))
 
 
 @pytest.mark.parametrize("hidden", ["\u200b", "\u2060", "\ufeff", "\u2028", "\u2029", "\U000e0041"])
