@@ -99,13 +99,30 @@ Pydantic models. Define a class with BaseModel, and the LLM fills it. Supports l
 - agentic_loop(system=..., user_message=..., tools=[...], handle_tool=fn) runs an LLM \
 tool-call loop inside scratchpad code. The LLM reasons and calls your tools iteratively. \
 handle_tool(name, inputs) is a plain sync function returning a string result. Use this for \
-multi-step AI workflows like classification, extraction, or analysis with structured outputs.
+multi-step AI workflows like extraction or analysis with structured outputs.
+- classify(texts, categories) labels each text with exactly one category (a list of names, \
+or a dict of name -> description) and returns one dict per text, in order, with keys \
+label, p and probabilities. classify_yes_no(texts, question) answers one yes/no question \
+about each text and returns one dict per text with keys yes and p_yes. A failed item has \
+label or yes set to None and an error key. Both run on a dedicated decision model, judge \
+each text on its own, are synchronous, and label thousands of texts a minute: set \
+estimated_execution_time_seconds to about 30 + texts / 50, and pass all the texts in one \
+call rather than looping over them.
+- To sort texts into known categories or test each text against a yes/no condition, use \
+classify() or classify_yes_no(), not get_llm() or agentic_loop(). Use classify() when every \
+text belongs to one of several categories (add a fallback such as "Other" if the list may \
+not cover every text), and classify_yes_no() when only one condition matters. Describe \
+each category, or the yes and no outcomes, with what belongs there and what does not: \
+labels follow those descriptions much more closely than bare names. A p below about 0.9 \
+marks a borderline text. Narrow the texts with the data first, so you label only the ones \
+the answer needs. If they raise because the decision model is unavailable, label with \
+get_llm() instead, many texts per generate_object call.
 - web_search(query) answers a natural-language query (e.g. "latest SpaceX IPO news") using \
 the configured LLM's native web search and returns the model's narrative answer with source \
 links as a string. Use it for current/real-time information from within scratchpad code. The \
 call is synchronous.
-- get_llm, agentic_loop, and web_search are already available as globals inside \
-scratchpad code — do not import them.
+- get_llm, agentic_loop, classify, classify_yes_no, and web_search are already available \
+as globals inside scratchpad code — do not import them.
 - All .anton/.env variables are available as environment variables (os.environ).
 - Connected data source credentials are injected as namespaced environment \
 variables in the form DS_<ENGINE>_<NAME>__<FIELD> \
@@ -647,7 +664,7 @@ SCRATCHPAD_INSTALL_NUDGE = (
     f"\n\n{ANTON_NOTE} This scratchpad cell keeps failing on a missing module, not "
     "on its logic — imports never install anything. Do not shrink or split "
     "the cell. Question the import itself first: get_llm, agentic_loop, "
-    "web_search, sample and progress are already globals (no import), and a "
+    "classify, classify_yes_no, web_search, sample and progress are already globals (no import), and a "
     "name recovered from a failing import may not be a real package at all. "
     "Install a package only when you can name the real PyPI distribution "
     "this task needs; if an install fails or times out, tell the user "
@@ -691,11 +708,11 @@ NO_INTERNET_CHAT_SYSTEM_PROMPT = cut_spans(
     # Up to SCRATCHPAD, so the follow-up suggestions about public datasets go too.
     ("INTERNET & LIVE INFORMATION:\n", "SCRATCHPAD:\n- Use the scratchpad", NO_INTERNET_DATA_SOURCES),
     ("web scraping, ", "plotting", ""),
-    ("- web_search(query) answers", "- get_llm, agentic_loop, and web_search", ""),
+    ("- web_search(query) answers", "- get_llm, agentic_loop, classify, classify_yes_no, and web_search", ""),
     (
-        "- get_llm, agentic_loop, and web_search are already available",
+        "- get_llm, agentic_loop, classify, classify_yes_no, and web_search are already available",
         " as globals",
-        "- get_llm and agentic_loop are already available",
+        "- get_llm, agentic_loop, classify, and classify_yes_no are already available",
     ),
     ("(HTTP 403, import error", ", pause", "(an error, a timeout, an empty result, etc.)"),
     (

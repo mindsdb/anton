@@ -82,13 +82,19 @@ SCRATCHPAD_TOOL = ToolDef(
         "agentic_loop(system=..., user_message=..., tools=[...], handle_tool=fn) "
         "runs a tool-call loop where the LLM reasons and calls your tools iteratively. "
         "handle_tool(name, inputs) -> str is a plain sync function.\n"
+        "classify(texts, categories) labels each text with one of the categories and "
+        "returns [{'label', 'p', 'probabilities'}, ...]; classify_yes_no(texts, question) "
+        "returns [{'yes', 'p_yes'}, ...]. Use them, not get_llm(), to classify texts. "
+        "They run on a dedicated decision model, thousands of texts a minute; describe each "
+        "category rather than passing bare names.\n"
         "web_search(query) routes a natural-language query (e.g. 'latest SpaceX IPO "
         "news') through the configured LLM's native web search and returns the "
         "model's narrative answer with source links, as a string.\n"
         "sample(var) inspects any variable with type-aware formatting — DataFrames get "
         "shape/dtypes/head, dicts get keys/values, lists get length/items. "
         "Defaults to 'preview' mode (compact); use sample(var, mode='full') for complete dump.\n"
-        "get_llm, agentic_loop, web_search, sample, and progress are already available "
+        "get_llm, agentic_loop, classify, classify_yes_no, web_search, sample, and progress "
+        "are already available "
         "as globals in the scratchpad — do not import them.\n"
         "All .anton/.env secrets are available as environment variables (os.environ).\n"
         "Never print a credential or a token endpoint's response: keep the token in a "
@@ -141,7 +147,11 @@ SCRATCHPAD_TOOL = ToolDef(
 NO_INTERNET_SCRATCHPAD_TOOL = replace(SCRATCHPAD_TOOL, description=cut_spans(
     SCRATCHPAD_TOOL.description,
     ("web_search(query) routes", "sample(var) inspects", ""),
-    ("get_llm, agentic_loop, web_search, sample, and progress", " are already", "get_llm, agentic_loop, sample, and progress"),
+    (
+        "get_llm, agentic_loop, classify, classify_yes_no, web_search, sample, and progress",
+        " are already",
+        "get_llm, agentic_loop, classify, classify_yes_no, sample, and progress",
+    ),
 ))
 
 

@@ -5099,15 +5099,9 @@ class ChatSession:
         # own role: it runs on Jev, not on any of the session's model slots.
         with call_role(JEV_CALL_ROLE):
             headers = provider.trace_headers()
-        # Kept out of the conversation's session: the console marks a conversation
-        # failed when any call in it fails, and a refused check is one the turn
-        # recovers from. The conversation rides in the metadata instead, so the
-        # check can still be joined to it.
-        conversation_id = headers.pop("Langfuse-Session-Id", None)
-        if conversation_id and "Langfuse-Metadata" in headers:
-            metadata = json.loads(headers["Langfuse-Metadata"])
-            metadata["conversation_id"] = conversation_id
-            headers["Langfuse-Metadata"] = json.dumps(metadata)
+        # Kept out of the conversation's session, so a refused check does not
+        # mark the conversation failed.
+        headers = _jev.detach_conversation(headers)
         if self._jev_http is None:
             # Same TLS setting as the provider, e.g. behind an intercepting proxy.
             self._jev_http = httpx.AsyncClient(timeout=self._jev_timeout_s, verify=info.ssl_verify is not False)

@@ -63,7 +63,10 @@ MISSING_MODULE_HINT = (
 # cell runs, by name. The host's write check reads a call to one as a call
 # to a name the pad binds.
 INJECTED_HELPER_NAMES = frozenset(
-    {"get_llm", "agentic_loop", "web_search", "query_minds_data", "progress", "sample"}
+    {
+        "get_llm", "agentic_loop", "classify", "classify_yes_no", "web_search",
+        "query_minds_data", "progress", "sample",
+    }
 )
 # The list the boot binds in the cell namespace for the data helpers to
 # record their queries in.

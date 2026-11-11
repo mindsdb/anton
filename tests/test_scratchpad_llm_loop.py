@@ -775,6 +775,21 @@ def test_web_search_raises_without_a_model_call_when_internet_research_is_off(tm
     assert len(server.seen) == 1
 
 
+
+# Jev lives on the MindsHub gateway only. Elsewhere classify() raises with the
+# fallback in its message, and sends nothing.
+@pytest.mark.parametrize("cell", [
+    'classify(["a"], ["X", "Y"])',
+    'classify_yes_no(["a"], "Is it X?")',
+])
+def test_classify_raises_without_a_request_off_the_mindshub_gateway(tmp_path, cell):
+    with _serving() as server:
+        (result,) = _run_cells([cell], tmp_path, base_url=f"http://127.0.0.1:{server.server_port}/v1")
+
+    assert result.error is not None and "need the MindsHub gateway" in result.error
+    assert "get_llm()" in result.error
+    assert server.seen == []
+
 @pytest.mark.slow
 @pytest.mark.parametrize("enabled", [False, True], ids=["off", "on"])
 async def test_the_session_flag_decides_web_search_whatever_the_pad_inherits(tmp_path, monkeypatch, enabled):
