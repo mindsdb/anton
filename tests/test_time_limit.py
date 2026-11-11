@@ -419,3 +419,71 @@ async def test_only_the_time_question_is_marked_as_the_time_limit(workspace, clo
     assert len(ids) == 2
     assert ids[0].startswith("limit:") and not ids[0].startswith("limit:time:")
     assert ids[1].startswith("limit:time:")
+
+
+class _SlowElicitor(_ScriptedElicitor):
+    """Moves the clock while the question waits, as a user who answers late does."""
+
+    def __init__(self, clock, wait_s, *answers):
+        super().__init__(*answers)
+        self.clock, self.wait_s = clock, wait_s
+
+    async def ask(self, question_id, request):
+        self.clock[0] += self.wait_s
+        return await super().ask(question_id, request)
+
+
+async def test_keep_going_after_a_late_answer_still_gets_a_full_window(workspace, clock):
+    """Asked at 200 s, answered at 400 s. The window counts from the answer, so
+    the work goes on to 580 s; counted from the old limit it ended at 360 s, and
+    the check right after the answer turned the user's Keep going into a stop."""
+    session = _timed_session(workspace, [_tool_call(1), _tool_call(2), _text("all done")], clock)
+    elicitor = _SlowElicitor(clock, 200, KEEP_GOING)
+    session.elicitor = elicitor
+    _, kwargs = await _run(session)
+    assert len(elicitor.requests) == 1
+    assert kwargs["ended_by"] == "completed"
+
+
+async def test_late_answers_never_stretch_the_turn_past_four_windows(workspace, clock):
+    """However late each answer, the turn's allowance stops at the limit plus
+    three windows, which the host's backstop and the turn key are sized for."""
+    session = _timed_session(workspace, [_tool_call(i) for i in range(1, 40)], clock)
+    elicitor = _SlowElicitor(clock, 150, KEEP_GOING, KEEP_GOING, KEEP_GOING, KEEP_GOING)
+    session.elicitor = elicitor
+    _, kwargs = await _run(session)
+    assert kwargs["ended_by"] == "time_limit"
+    assert session._time_limit_continued_s == 3 * LIMIT_S
+    assert clock[0] < 4 * LIMIT_S + 2 * STEP_S + 150
+
+
+async def test_a_hand_back_after_a_time_limit_resume_restores_the_answer(workspace, clock):
+    """Keep going after the answer the limit cut short resumes the work; when a
+    later limit stops it, the hand-back must say so, or the host never puts back
+    the answer it set aside at the resume and the user loses text they read."""
+    from anton.core.llm.provider import StreamTaskProgress
+
+    responses, dispatch = _cells_then(
+        clock, 150, [_small(_text("Here are the results.")), *[_tool_call(i) for i in range(9, 30)]],
+    )
+    session = _timed_session(workspace, responses, clock)
+    session.tool_registry.dispatch_tool = dispatch
+    elicitor = _ScriptedElicitor(KEEP_GOING, STOP_HERE)
+    session.elicitor = elicitor
+
+    events, kwargs = await _run(session)
+
+    assert kwargs["ended_by"] == "time_limit"
+    phases = [ev.phase for ev in events if isinstance(ev, StreamTaskProgress) and ev.phase in ("continuation", "handback")]
+    assert phases == ["continuation", "handback"]
+
+
+@pytest.mark.parametrize(
+    ("seconds", "more", "text"),
+    [(45, False, "45 seconds"), (1, False, "1 second"), (60, False, "1 minute"), (119, False, "1 minute"),
+     (3600, False, "60 minutes"), (60, True, "1 more minute"), (180, True, "3 more minutes")],
+)
+def test_a_limit_reads_in_the_unit_it_is_set_in(seconds, more, text):
+    from anton.core.session import _duration_text
+
+    assert _duration_text(seconds, more=more) == text

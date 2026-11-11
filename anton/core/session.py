@@ -1005,6 +1005,13 @@ _TIME_LIMIT_CONTINUE_MULTIPLIER = 1
 # rather than being cut off.
 _TIME_LIMIT_MAX_CONTINUES = 3
 
+def _duration_text(seconds: int, *, more: bool = False) -> str:
+    """A time limit as the user reads it: whole minutes, or seconds under one.
+    With `more`, "3 more minutes"."""
+    count, unit = (seconds, "second") if seconds < 60 else (seconds // 60, "minute")
+    return f"{count} {'more ' if more else ''}{unit}{'' if count == 1 else 's'}"
+
+
 # Closes every hand-back notice. The notices reach the model as user-role
 # messages, so without this it reads the pause as the user's request and tells
 # them it "stopped, as requested" right after they asked it to keep going.
@@ -2009,6 +2016,11 @@ class ChatSession:
         self._max_turn_seconds = getattr(s, "max_turn_seconds", 0) or 0
         self._time_limit_continued_s = 0
         self._turn_started_monotonic: float | None = None
+        # Set when a "Keep going" past the time limit resumed work after the
+        # answer the user read. Like a verifier continuation, a later hand-back
+        # must then announce itself so the host restores that answer. Reset per
+        # turn in turn_stream.
+        self._time_limit_resumed = False
         # The tool calls this turn ran, for the report `_stream_handback_diagnosis`
         # writes when the content filter stops every hand-back. Reset per turn in
         # turn_stream.
@@ -4970,8 +4982,8 @@ class ChatSession:
             ceiling = self._max_turn_tokens + self._spend_ceiling_continued_tokens
             return f"This task reached its limit of {ceiling:,} tokens per request"
         if limit == "time_limit":
-            minutes = (self._max_turn_seconds + self._time_limit_continued_s) // 60
-            return f"This task reached its time limit of {minutes} minutes per request"
+            allowed = _duration_text(self._max_turn_seconds + self._time_limit_continued_s)
+            return f"This task reached its time limit of {allowed} per request"
         cap = self._max_tool_rounds + self._round_cap_continued_rounds
         return f"This task reached its limit of {cap} steps per request"
 
@@ -4980,8 +4992,18 @@ class ChatSession:
         times its configured size, or by `_TIME_LIMIT_CONTINUE_MULTIPLIER` for
         the time limit."""
         if limit == "time_limit":
-            self._time_limit_continued_s += (
-                _TIME_LIMIT_CONTINUE_MULTIPLIER * self._max_turn_seconds
+            # One window from the answer, not from the old limit, so a long last
+            # cell and the wait for the answer don't eat it; never past
+            # `_TIME_LIMIT_MAX_CONTINUES` windows in all, which the host's
+            # backstop and the turn key's lifetime are sized for.
+            window = _TIME_LIMIT_CONTINUE_MULTIPLIER * self._max_turn_seconds
+            elapsed = (
+                int(time.monotonic() - self._turn_started_monotonic)
+                if self._turn_started_monotonic is not None else 0
+            )
+            self._time_limit_continued_s = min(
+                max(self._time_limit_continued_s + window, elapsed - self._max_turn_seconds + window),
+                _TIME_LIMIT_MAX_CONTINUES * window,
             )
         elif limit == "spend_ceiling":
             self._spend_ceiling_continued_tokens += (
@@ -5084,8 +5106,7 @@ class ChatSession:
             more = f"Allow up to {_LIMIT_CONTINUE_MULTIPLIER * self._max_turn_tokens:,} more tokens"
             cost = " Continuing uses more tokens."
         elif limit == "time_limit":
-            minutes = _TIME_LIMIT_CONTINUE_MULTIPLIER * self._max_turn_seconds // 60
-            more = f"Allow up to {minutes} more minutes"
+            more = f"Allow up to {_duration_text(_TIME_LIMIT_CONTINUE_MULTIPLIER * self._max_turn_seconds, more=True)}"
             cost = ""
         else:
             more = f"Allow up to {_LIMIT_CONTINUE_MULTIPLIER * self._max_tool_rounds} more steps"
@@ -5111,6 +5132,13 @@ class ChatSession:
             self, f"{prefix}{uuid.uuid4().hex}", request, counted=limit != "time_limit",
         )
         return answer.status == "answered" and answer.values == ("continue",)
+
+    @property
+    def _continuation_pending(self) -> bool:
+        """Whether this turn has resumed past an answer the user already read:
+        a verifier continuation, or a "Keep going" past the time limit. A
+        hand-back after either must announce itself (`cancels_continuation`)."""
+        return self._turn_continuations > 0 or self._time_limit_resumed
 
     def _time_limit_reached(self) -> bool:
         """Whether this turn has run past its time limit. Never on a host that
@@ -5979,6 +6007,7 @@ class ChatSession:
         self._turn_tool_rounds = 0
         self._turn_continuations = 0
         self._time_limit_continued_s = 0
+        self._time_limit_resumed = False
         self._turn_started_monotonic = time.monotonic()
         self._turn_steps = []
         self._finish_authorized = None
@@ -6981,7 +7010,7 @@ class ChatSession:
                     _reply_persisted = True
                     async for event in self._stream_handback_diagnosis(
                         system=system, label="max-tool-rounds", answered=False,
-                        cancels_continuation=self._turn_continuations > 0, limit="round_cap",
+                        cancels_continuation=self._continuation_pending, limit="round_cap",
                     ):
                         yield event
                     break
@@ -7039,7 +7068,7 @@ class ChatSession:
                         )
                         async for event in self._stream_handback_diagnosis(
                             system=system, label="spend-ceiling", answered=False,
-                            cancels_continuation=self._turn_continuations > 0, limit="spend_ceiling",
+                            cancels_continuation=self._continuation_pending, limit="spend_ceiling",
                         ):
                             yield event
                         break
@@ -7073,7 +7102,7 @@ class ChatSession:
                         )
                         async for event in self._stream_handback_diagnosis(
                             system=system, label="time-limit", answered=False,
-                            cancels_continuation=self._turn_continuations > 0, limit="time_limit",
+                            cancels_continuation=self._continuation_pending, limit="time_limit",
                         ):
                             yield event
                         break
@@ -7686,7 +7715,7 @@ class ChatSession:
                 # one would get to answer the question itself. The answer, when
                 # it comes, starts the next turn.
                 if self._unanswered_question is not None:
-                    for event in self._unanswered_question_events(cancels_continuation=self._turn_continuations > 0):
+                    for event in self._unanswered_question_events(cancels_continuation=self._continuation_pending):
                         yield event
                     _reply_persisted = True
                     break
@@ -7790,7 +7819,7 @@ class ChatSession:
                     )
                     async for event in self._stream_handback_diagnosis(
                         system=system, label="time-limit", answered=bool(reply.strip()),
-                        cancels_continuation=self._turn_continuations > 0, limit="time_limit",
+                        cancels_continuation=self._continuation_pending, limit="time_limit",
                     ):
                         yield event
                     break
@@ -7808,6 +7837,7 @@ class ChatSession:
                         ),
                     }
                 )
+                self._time_limit_resumed = True
                 yield StreamTaskProgress(
                     phase="continuation",
                     message="Continuing past the time limit...",
@@ -7870,7 +7900,7 @@ class ChatSession:
                     self._turn_cost.ended_by = "handback_budget"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="budget-exhausted", answered=bool(reply.strip()),
-                    cancels_continuation=self._turn_continuations > 0,
+                    cancels_continuation=self._continuation_pending,
                 ):
                     yield event
                 # Consolidation still runs after diagnosis
@@ -8253,7 +8283,7 @@ class ChatSession:
                     self._turn_cost.ended_by = "handback_verifier_failure"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="verifier-failure", answered=bool(reply.strip()),
-                    cancels_continuation=self._turn_continuations > 0,
+                    cancels_continuation=self._continuation_pending,
                 ):
                     yield event
                 break
@@ -8293,7 +8323,7 @@ class ChatSession:
                     self._turn_cost.ended_by = "handback_stuck"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="stuck", answered=bool(reply.strip()),
-                    cancels_continuation=self._turn_continuations > 0,
+                    cancels_continuation=self._continuation_pending,
                 ):
                     yield event
                 break
@@ -8352,7 +8382,7 @@ class ChatSession:
                     )
                     async for event in self._stream_handback_diagnosis(
                         system=system, label="spend-ceiling", answered=bool(reply.strip()),
-                        cancels_continuation=self._turn_continuations > 0, limit="spend_ceiling",
+                        cancels_continuation=self._continuation_pending, limit="spend_ceiling",
                     ):
                         yield event
                     break
@@ -8380,7 +8410,7 @@ class ChatSession:
                     )
                     async for event in self._stream_handback_diagnosis(
                         system=system, label="time-limit", answered=bool(reply.strip()),
-                        cancels_continuation=self._turn_continuations > 0, limit="time_limit",
+                        cancels_continuation=self._continuation_pending, limit="time_limit",
                     ):
                         yield event
                     break
