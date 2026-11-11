@@ -294,3 +294,59 @@ def test_add_from_another_thread(workspace):
     assert sorted(e["id"] for e in session.take_unread_user_inputs()) == sorted(
         f"a{i}" for i in range(20)
     )
+
+
+async def test_a_mid_turn_read_streams_like_any_other_step_boundary(workspace):
+    """ENG-4194. A host files the text a tool call follows as narration and
+    keeps the last round's text as the answer, and a `continuation` tells it
+    the next text replaces the answer. A message read at a step boundary is
+    not an answer being replaced: no `continuation`, each round's text before
+    its own tool call, and the read reported after the tool ran and before
+    the next round's text."""
+    from anton.core.llm.provider import (
+        StreamTextDelta, StreamToolUseEnd, StreamToolUseStart,
+    )
+
+    def _round(text, call_id=None):
+        resp = _tool_call(int(call_id[-1])) if call_id else _text(text)
+        resp.content = text
+        events = [StreamTextDelta(text=text)]
+        if call_id:
+            resp.tool_calls[0].id = call_id
+            events += [StreamToolUseStart(id=call_id, name="scratchpad"), StreamToolUseEnd(id=call_id)]
+        return events + [StreamComplete(response=resp)]
+
+    rounds = [_round("I'll pull the prices.", "tc_1"),
+              _round("Got it, six months instead.", "tc_2"),
+              _round("Here is the six-month dashboard.")]
+    session, _ = _session(workspace, [])
+
+    def _plan_stream(**kwargs):
+        async def _gen():
+            for n, event in enumerate(rounds.pop(0)):
+                if n == 1 and len(rounds) == 2:
+                    session.add_user_input("a1", "actually past 6 months")
+                yield event
+        return _gen()
+
+    session._llm.plan_stream = _plan_stream
+    marks: list = []
+    session.on_user_input_read = lambda ids: marks.append(("read", ids))
+
+    with patch("anton.analytics.send_event"):
+        async for event in session.turn_stream("NVIDIA past week dashboard"):
+            if isinstance(event, StreamTextDelta):
+                marks.append(("text", event.text))
+            elif isinstance(event, StreamToolUseStart):
+                marks.append(("tool", event.id))
+            elif isinstance(event, StreamTaskProgress) and event.phase == "continuation":
+                marks.append(("continuation", event.message))
+
+    assert not any(kind == "continuation" for kind, _ in marks)
+    order = [m for m in marks if m[0] in ("text", "tool", "read")]
+    assert order == [
+        ("text", "I'll pull the prices."), ("tool", "tc_1"),
+        ("read", ["a1"]),
+        ("text", "Got it, six months instead."), ("tool", "tc_2"),
+        ("text", "Here is the six-month dashboard."),
+    ]
