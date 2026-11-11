@@ -217,9 +217,9 @@ class ChatSystemPromptBuilder:
                                  else NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT)
         # The single-call path has its own artifact instructions, which have no direct report path
         if direct_generation:
-            from .static_artifact_prompt import ARTIFACTS
+            from .static_artifact_prompt import ARTIFACTS, STATIC_ARTIFACTS
 
-            artifacts_section = ARTIFACTS
+            artifacts_section = ARTIFACTS if fullstack_offered else STATIC_ARTIFACTS
 
         prompt = ""
 

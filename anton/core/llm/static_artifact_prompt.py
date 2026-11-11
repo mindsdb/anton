@@ -1,4 +1,6 @@
-"""Opt-in workflow for the single-call static artifact generator."""
+"""Workflow for the single-call static artifact generator."""
+
+from .prompts import cut_spans
 
 ARTIFACTS = """ARTIFACTS (all files the user is meant to open, view, download or run):
 Every deliverable belongs to a registered artifact folder. Keep its files in
@@ -51,6 +53,18 @@ path. For a fullstack app, use the running backend URL, never the standalone
 static HTML path, which cannot reach the app's API.
 Pure inline chat answers and throwaway computation files need no artifact.
 """
+
+# Where nothing starts an app backend (`live_app_slots.fullstack_offered` is
+# False): no fullstack type to register, no launch, and no backend URL.
+STATIC_ARTIFACTS = cut_spans(
+    ARTIFACTS,
+    (", mixed artifact, or an app\nthat explicitly requires ongoing service access",
+     "\nfirst call create_artifact", " or mixed artifact,"),
+    (" Use fullstack-stateless-app for ongoing external", "\nThen generate_artifact", ""),
+    ("Then generate_artifact(slug, ...) builds a web app; write non-web artifacts",
+     "\n\nACCURACY AND COMPLETION:", "Write non-web artifacts directly in the registered folder."),
+    (" For a fullstack app, use the running backend URL", "\nPure inline", ""),
+)
 
 
 def visualizations(*, proactive):
