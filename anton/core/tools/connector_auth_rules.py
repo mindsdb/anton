@@ -9,19 +9,28 @@ host passes its own detector for values it holds.
 
 from __future__ import annotations
 
+import base64
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 MAX_AUTH_HEADERS = 5
+MAX_AUTH_PARAMS = 5
 AUTH_TEMPLATE_MAX = 200
 #: The keys each auth type may hold; later types join this list.
 AUTH_KEYS = {
     "header": frozenset({"type", "headers"}),
     "basic": frozenset({"type", "username", "password"}),
+    "query": frozenset({"type", "params"}),
 }
 
 HEADER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,40}")
+#: No ``.``: it would split the token-run rule, and some frameworks read it as ``_``.
+PARAM_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,40}")
+#: Lowercase query parameter names a template may not place: method overrides.
+REFUSED_PARAMS = frozenset({"x-http-method-override", "x-http-method", "x-method-override"})
+#: Characters a query value's literal part may not hold: they would split or end the value.
+QUERY_LITERAL_REFUSED = frozenset("&#+= ")
 PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]{0,39})\}")
 #: An unbroken run this long of the characters keys are made of, holding both
 #: letters and digits, reads as a key or token. Words and digitless ids pass.
@@ -126,6 +135,28 @@ def check_header_name(name: Any, where: str = "The template", looks_secret: Look
         raise AuthRuleError(f"{where} has a header name that is not allowed.")
 
 
+def check_param_name(name: Any, where: str = "The template", looks_secret: LooksSecret | None = None) -> None:
+    """Refuse a query parameter name a connector template may not place.
+
+    Args:
+        name: The parameter name as the template gives it.
+        where: Where the name sits, for the message.
+        looks_secret: The host's detector for a value it holds or a known key shape.
+
+    Raises:
+        AuthRuleError: when ``name`` breaks the grammar, reads as a token or
+            a secret, or is a method override.
+    """
+    if (
+        not isinstance(name, str)
+        or not PARAM_NAME.fullmatch(name)
+        or looks_like_token(name)
+        or _secret(name, looks_secret)
+        or name.lower() in REFUSED_PARAMS
+    ):
+        raise AuthRuleError(f"{where} has a parameter name that is not allowed.")
+
+
 def check_template(
     value: Any,
     where: str,
@@ -204,6 +235,77 @@ def _parse_headers(
     return headers, placed
 
 
+def _parse_params(
+    value: Any, declared: frozenset[str], looks_secret: LooksSecret | None
+) -> tuple[dict[str, str], set[str]]:
+    """Return the ``query`` type's parameters and the fields they place."""
+    if not isinstance(value, dict) or not 1 <= len(value) <= MAX_AUTH_PARAMS:
+        raise AuthRuleError(f"auth.params must be an object of 1 to {MAX_AUTH_PARAMS} parameters.")
+    seen: set[str] = set()
+    params: dict[str, str] = {}
+    placed: set[str] = set()
+    for name, template in value.items():
+        check_param_name(name, "auth.params", looks_secret)
+        if name.lower() in seen:
+            raise AuthRuleError("auth.params has a parameter name that is not allowed.")
+        seen.add(name.lower())
+        where = f"auth.params.{name}"
+        text, names = check_template(template, where, declared, looks_secret=looks_secret)
+        if QUERY_LITERAL_REFUSED & set(PLACEHOLDER.sub("", text)):
+            raise AuthRuleError(f"{where} may not hold &, #, +, = or a space outside {{field_name}}.")
+        params[name] = text
+        placed |= names
+    return params, placed
+
+
+def _fill(template: str, values: Mapping[str, str]) -> str:
+    """Put each slot's value into ``template``; a missing value is refused without naming it."""
+
+    def value_of(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name not in values:
+            raise AuthRuleError("A field the auth section places has no value.")
+        return values[name]
+
+    return PLACEHOLDER.sub(value_of, template)
+
+
+def render(auth: Mapping[str, Any], values: Mapping[str, str]) -> tuple[dict[str, str], list[tuple[str, str]]]:
+    """Fill a checked auth section with the member's values, as headers and query parameters.
+
+    The one place slots become values, so the connection check and the
+    gateway build the same request. URL encoding is left to the caller's
+    HTTP client.
+
+    Args:
+        auth: An auth section as ``parse_auth`` returned it.
+        values: Each placed field's value.
+
+    Returns:
+        The headers to set and the query parameters to append.
+
+    Raises:
+        AuthRuleError: when a placed field has no value.
+    """
+    if auth["type"] == "basic":
+        pair = f"{_fill(auth['username'], values)}:{_fill(auth['password'], values)}"
+        return {"Authorization": "Basic " + base64.b64encode(pair.encode()).decode("ascii")}, []
+    if auth["type"] == "query":
+        return {}, [(name, _fill(template, values)) for name, template in auth["params"].items()]
+    return {name: _fill(template, values) for name, template in auth["headers"].items()}, []
+
+
+def query_collides(auth: Mapping[str, Any], names: Iterable[str]) -> bool:
+    """Whether any of ``names`` is a query parameter the auth section places.
+
+    Compares ignoring case and a trailing ``[]``, as many servers read them.
+    """
+    if auth["type"] != "query":
+        return False
+    placed = {name.lower() for name in auth["params"]}
+    return any(name.lower().removesuffix("[]") in placed for name in names)
+
+
 def parse_auth(
     data: Any, fields: Sequence[tuple[str, bool]], looks_secret: LooksSecret | None = None
 ) -> dict[str, Any]:
@@ -235,6 +337,9 @@ def parse_auth(
     if kind == "header":
         headers, placed = _parse_headers(data.get("headers"), declared, looks_secret)
         canonical: dict[str, Any] = {"type": kind, "headers": headers}
+    elif kind == "query":
+        params, placed = _parse_params(data.get("params"), declared, looks_secret)
+        canonical = {"type": kind, "params": params}
     else:
         username, placed = check_template(data.get("username"), "auth.username", declared, looks_secret=looks_secret)
         if not placed or ":" in PLACEHOLDER.sub("", username):

@@ -22,10 +22,16 @@ import re
 import unicodedata
 from dataclasses import asdict, dataclass
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from anton.core.tools import connector_auth_rules as rules
-from anton.core.tools.connector_auth_rules import AUTH_KEYS, MAX_AUTH_HEADERS, is_printable_ascii, looks_like_token
+from anton.core.tools.connector_auth_rules import (
+    AUTH_KEYS,
+    MAX_AUTH_HEADERS,
+    MAX_AUTH_PARAMS,
+    is_printable_ascii,
+    looks_like_token,
+)
 from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.tool_defs import ToolDef
 from anton.utils.datasources import scrub_output
@@ -92,18 +98,22 @@ class ConnectorDraftAuth:
     ``{field}`` stands for that field's value.
 
     ``header`` sets each of ``headers``. ``basic`` sends
-    ``Authorization: Basic`` of ``username:password``.
+    ``Authorization: Basic`` of ``username:password``. ``query`` appends each
+    of ``params``; only the gateway adds them, so the model never writes them.
     """
 
     type: str
     headers: tuple[tuple[str, str], ...] = ()
     username: str | None = None
     password: str | None = None
+    params: tuple[tuple[str, str], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """The auth section as JSON-ready data, holding only its type's keys."""
         if self.type == "basic":
             return {"type": "basic", "username": self.username, "password": self.password}
+        if self.type == "query":
+            return {"type": "query", "params": dict(self.params)}
         return {"type": self.type, "headers": dict(self.headers)}
 
 
@@ -309,18 +319,26 @@ def _parse_auth(data: Any, fields: tuple[ConnectorDraftField, ...]) -> Connector
         headers=tuple(canonical.get("headers", {}).items()),
         username=canonical.get("username"),
         password=canonical.get("password"),
+        params=tuple(canonical.get("params", {}).items()),
     )
 
 
+def _parse_check(data: Any, auth: ConnectorDraftAuth) -> ConnectorDraftCheck | None:
+    """Parse the optional ``check``, or return None when absent.
 
-def _parse_check(data: Any) -> ConnectorDraftCheck | None:
-    """Parse the optional ``check``, or return None when absent."""
+    For a ``query`` template the path may not carry a parameter the template
+    places, or the check would send the key under two values.
+    """
     if data is None:
         return None
     if not isinstance(data, dict):
         raise ConnectorDraftError("check must be an object.")
     _check_keys(data, _CHECK_KEYS, "check")
-    return ConnectorDraftCheck(path=_check_path(data.get("path")))
+    path = _check_path(data.get("path"))
+    names = [name for name, _ in parse_qsl(urlsplit(path).query, keep_blank_values=True)]
+    if rules.query_collides(auth.to_dict(), names):
+        raise ConnectorDraftError("check.path must not carry a parameter that auth places.")
+    return ConnectorDraftCheck(path=path)
 
 
 def _parse_field(data: Any, index: int) -> ConnectorDraftField:
@@ -386,16 +404,17 @@ def parse_connector_draft(data: Any) -> ConnectorDraft:
     fields = tuple(_parse_field(f, i) for i, f in enumerate(raw_fields))
     if len({f.name for f in fields}) != len(fields):
         raise ConnectorDraftError("Each field name must be unique.")
+    auth = _parse_auth(data.get("auth"), fields)
     return ConnectorDraft(
         connector_id=connector_id,
         label=texts["label"],
         fields=fields,
-        auth=_parse_auth(data.get("auth"), fields),
+        auth=auth,
         description=texts["description"],
         category=texts["category"],
         help_url=_check_help_url(data.get("help_url")),
         usage_notes=texts["usage_notes"],
-        check=_parse_check(data.get("check")),
+        check=_parse_check(data.get("check"), auth),
     )
 
 
@@ -430,16 +449,17 @@ _DESCRIPTION = (
     "auth: how those fields go on every request, usage notes, and a check: "
     "the path of one GET that answers only with valid credentials (for "
     "example /v1/me). auth is type 'header' with headers such as "
-    "Authorization: Bearer {api_key}, or type 'basic' with a username and "
-    "password such as {email}/token and {api_token}; {field_name} places a "
-    "field's value and every field must be placed. The user types the API's "
-    "address when connecting, so leave it out. Never pass a credential "
-    "value: no key, token, password or secret goes into any field of this "
-    "tool, and never ask the user for one. The template is staged, not "
-    "saved: the user sees it as a card in the chat and saves it, then enters "
-    "their credentials in Connect Apps and Data. Only API connectors that "
-    "take keys or tokens in headers are supported; not database drivers, "
-    "not keys in the URL, and not sign-in flows that redirect to the provider."
+    "Authorization: Bearer {api_key}, type 'basic' with a username and "
+    "password such as {email}/token and {api_token}, or type 'query' with "
+    "the URL parameters that carry the key, such as access_key: {api_key}; "
+    "{field_name} places a field's value and every field must be placed. "
+    "The user types the API's address when connecting, so leave it out. "
+    "Never pass a credential value: no key, token, password or secret goes "
+    "into any field of this tool, and never ask the user for one. The "
+    "template is staged, not saved: the user sees it as a card in the chat "
+    "and saves it, then enters their credentials in Connect Apps and Data. "
+    "Only API connectors that take keys or tokens are supported; not "
+    "database drivers and not sign-in flows that redirect to the provider."
 )
 
 _TEXT = {"type": "string"}
@@ -459,7 +479,8 @@ _INPUT_SCHEMA = {
             "description": (
                 "How to use the API once connected: which paths and query parameters answer what. "
                 "Calls go through call_minds_api(connection_id, path, query, headers), which adds "
-                "the credentials, so leave out auth headers, keys and the API's address. No values."
+                "the credentials, including any key parameter auth places in the URL, so leave out "
+                "auth headers, key parameters, keys and the API's address. No values."
             ),
         },
         "fields": {
@@ -492,6 +513,8 @@ _INPUT_SCHEMA["properties"]["auth"] = {
         "template, e.g. {'Authorization': 'Bearer {api_key}'}, or a literal such as "
         "{'Notion-Version': '2022-06-28'}. type 'basic': username and password templates, e.g. "
         "'{email}/token' and '{api_token}'; the password may be a literal such as 'X' or empty. "
+        "type 'query': params maps a URL parameter name to a template, e.g. "
+        "{'access_key': '{api_key}'}; only the gateway adds it to a call. "
         "{field_name} places a field's value; place every field and at least one secret."
     ),
     "properties": {
@@ -504,6 +527,12 @@ _INPUT_SCHEMA["properties"]["auth"] = {
         },
         "username": {"type": "string", "description": "For type 'basic'."},
         "password": {"type": "string", "description": "For type 'basic'."},
+        "params": {
+            "type": "object",
+            "description": "For type 'query': URL parameter name to template.",
+            "additionalProperties": {"type": "string"},
+            "maxProperties": MAX_AUTH_PARAMS,
+        },
     },
     "required": ["type"],
     "additionalProperties": False,

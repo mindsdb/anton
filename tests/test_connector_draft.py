@@ -586,6 +586,62 @@ def test_a_hand_built_basic_header_is_refused_in_favour_of_type_basic(name, valu
         parse_connector_draft(_draft(fields=_BASIC_FIELDS, auth=auth))
 
 
+_QUERY_FIELDS = [{"name": "api_key", "label": "Access key"}]
+_QUERY_AUTH = {"type": "query", "params": {"access_key": "{api_key}"}}
+
+
+def test_query_auth_parses_and_round_trips():
+    draft = parse_connector_draft(_draft(fields=_QUERY_FIELDS, auth=_QUERY_AUTH, check={"path": "/v1/eod?symbols=AAPL"}))
+
+    assert draft.auth.type == "query"
+    assert draft.auth.params == (("access_key", "{api_key}"),)
+    assert draft.to_dict()["auth"] == _QUERY_AUTH
+    assert parse_connector_draft(draft.to_dict()) == draft
+
+
+@pytest.mark.parametrize("params,rule", [
+    ({}, r"^auth\.params must be an object of 1 to 5"),
+    ({f"k{i}": "{api_key}" for i in range(6)}, r"^auth\.params must be an object of 1 to 5"),
+    ({"access.key": "{api_key}"}, r"^auth\.params has a parameter name"),
+    ({"1key": "{api_key}"}, r"^auth\.params has a parameter name"),
+    ({"access key": "{api_key}"}, r"^auth\.params has a parameter name"),
+    ({"X-HTTP-Method-Override": "{api_key}"}, r"^auth\.params has a parameter name"),
+    ({"x-method-override": "{api_key}"}, r"^auth\.params has a parameter name"),
+    ({"access_key": "{api_key}", "ACCESS_KEY": "{api_key}"}, r"^auth\.params has a parameter name"),
+    ({"access_key": "{api_key}&admin=1"}, r"^auth\.params\.access_key may not hold &"),
+    ({"access_key": "{api_key}#frag"}, r"^auth\.params\.access_key may not hold &"),
+    ({"access_key": "a+{api_key}"}, r"^auth\.params\.access_key may not hold &"),
+    ({"access_key": "x={api_key}"}, r"^auth\.params\.access_key may not hold &"),
+    ({"access_key": "a {api_key}"}, r"^auth\.params\.access_key may not hold &"),
+    ({"access_key": "{token}"}, r"^auth\.params\.access_key names a field"),
+    ("access_key={api_key}", r"^auth\.params must be an object"),
+])
+def test_a_query_auth_section_of_the_wrong_shape_is_refused(params, rule):
+    with pytest.raises(ConnectorDraftError, match=rule):
+        parse_connector_draft(_draft(fields=_QUERY_FIELDS, auth={"type": "query", "params": params}))
+
+
+def test_a_token_shaped_or_held_parameter_name_is_refused_without_echoing_it(held_value):
+    for name in ("x" + _TOKEN_SHAPES["bare"], held_value):
+        auth = {"type": "query", "params": {name: "{api_key}"}}
+        with pytest.raises(ConnectorDraftError, match=r"^auth\.params has a parameter name") as exc:
+            parse_connector_draft(_draft(fields=_QUERY_FIELDS, auth=auth))
+        assert name not in str(exc.value)
+
+
+@pytest.mark.parametrize("path", [
+    "/v1/eod?access_key=demo", "/v1/eod?ACCESS_KEY=demo", "/v1/eod?access_key[]=demo", "/v1/eod?symbols=A&access_key",
+])
+def test_a_check_path_carrying_the_placed_parameter_is_refused(path):
+    with pytest.raises(ConnectorDraftError, match=r"^check\.path must not carry a parameter that auth places"):
+        parse_connector_draft(_draft(fields=_QUERY_FIELDS, auth=_QUERY_AUTH, check={"path": path}))
+
+
+def test_a_header_template_may_carry_a_check_path_with_any_query():
+    draft = parse_connector_draft(_draft(check={"path": "/v1/me?access_key=demo"}))
+    assert draft.check.path == "/v1/me?access_key=demo"
+
+
 def test_a_token_shaped_header_name_is_refused_without_echoing_it():
     name = "X-" + _TOKEN_SHAPES["bare"]
 
@@ -674,8 +730,9 @@ def test_the_tool_describes_auth_as_one_flat_object():
 
     auth = schema["properties"]["auth"]
     assert "auth" in schema["required"]
-    assert auth["properties"]["type"]["enum"] == ["basic", "header"]
-    assert set(auth["properties"]) == {"type", "headers", "username", "password"}
+    assert auth["properties"]["type"]["enum"] == ["basic", "header", "query"]
+    assert set(auth["properties"]) == {"type", "headers", "username", "password", "params"}
+    assert "type 'query'" in tool.description
     assert auth["additionalProperties"] is False
     assert _union_keywords(schema) == set()
     assert "call_minds_api" in schema["properties"]["usage_notes"]["description"]
