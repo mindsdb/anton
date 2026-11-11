@@ -619,7 +619,44 @@ def test_the_tool_describes_the_check():
     tool = connector_draft_tool(ConnectorDraftBox())
 
     check = tool.input_schema["properties"]["check"]
-    assert check["required"] == ["path", "headers"]
+    assert check["required"] == ["path"]
+    assert set(check["properties"]) == {"path"}
     assert check["additionalProperties"] is False
     assert "check" in tool.description
     assert "base URL" not in tool.input_schema["properties"]["usage_notes"]["description"]
+
+
+def _union_keywords(schema):
+    """Every oneOf/anyOf/allOf key anywhere in ``schema``."""
+    if isinstance(schema, dict):
+        return {k for k in schema if k in ("oneOf", "anyOf", "allOf")} | {
+            found for v in schema.values() for found in _union_keywords(v)
+        }
+    if isinstance(schema, list):
+        return {found for v in schema for found in _union_keywords(v)}
+    return set()
+
+
+def test_the_tool_describes_auth_as_one_flat_object():
+    tool = connector_draft_tool(ConnectorDraftBox())
+    schema = tool.input_schema
+
+    auth = schema["properties"]["auth"]
+    assert "auth" in schema["required"]
+    assert auth["properties"]["type"]["enum"] == ["basic", "header"]
+    assert set(auth["properties"]) == {"type", "headers", "username", "password"}
+    assert auth["additionalProperties"] is False
+    assert _union_keywords(schema) == set()
+    assert "call_minds_api" in schema["properties"]["usage_notes"]["description"]
+    assert "type 'header'" in tool.description and "type 'basic'" in tool.description
+
+
+def test_the_examples_the_tool_gives_parse():
+    header = _draft(fields=[{"name": "api_key", "label": "Key"}], auth=_one_field_auth())
+    basic = _draft(fields=_BASIC_FIELDS, auth={"type": "basic", "username": "{email}/token", "password": "{api_token}"})
+    notion = _draft(
+        fields=[{"name": "api_key", "label": "Key"}],
+        auth={"type": "header", "headers": {"Authorization": "Bearer {api_key}", "Notion-Version": "2022-06-28"}},
+    )
+    for data in (header, basic, notion):
+        parse_connector_draft(data)

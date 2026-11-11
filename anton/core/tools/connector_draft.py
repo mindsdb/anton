@@ -35,7 +35,6 @@ MAX_DRAFTS_PER_TURN = 3
 MAX_FIELDS = 11
 #: Field names the host stores beside the member's values or reads as display names.
 RESERVED_FIELD_NAMES = frozenset({"base_url", "label", "user_label"})
-MAX_CHECK_HEADERS = 5
 
 _CONNECTOR_ID = re.compile(r"[a-z][a-z0-9_]{1,40}")
 _FIELD_NAME = re.compile(r"[a-z][a-z0-9_]{0,39}")
@@ -546,18 +545,20 @@ class ConnectorDraftBox:
 _DESCRIPTION = (
     "Build the template for a connector to an API the user needs and has no "
     "connector for. Pass the connector's id, a label, the credential fields "
-    "the user will fill in (for example api_key, or client_id and "
-    "client_secret), usage notes on how to call the API with them, and a "
-    "check: the path of one GET that answers only with valid credentials (for "
-    "example /v1/me) and the header that carries them (for example "
-    "Authorization: Bearer {api_key}). The user types the API's address "
-    "when connecting, so leave it out of the check. Never "
-    "pass a credential value: no key, token, password or secret goes into any "
-    "field of this tool, and never ask the user for one. The template is "
-    "staged, not saved: the user sees it as a card in the chat and saves it, "
-    "then enters their credentials in Connect Apps and Data. Only API "
-    "connectors that take keys or tokens are supported; not database drivers "
-    "and not sign-in flows that redirect to the provider."
+    "the user will fill in (for example api_key, or email and api_token), "
+    "auth: how those fields go on every request, usage notes, and a check: "
+    "the path of one GET that answers only with valid credentials (for "
+    "example /v1/me). auth is type 'header' with headers such as "
+    "Authorization: Bearer {api_key}, or type 'basic' with a username and "
+    "password such as {email}/token and {api_token}; {field_name} places a "
+    "field's value and every field must be placed. The user types the API's "
+    "address when connecting, so leave it out. Never pass a credential "
+    "value: no key, token, password or secret goes into any field of this "
+    "tool, and never ask the user for one. The template is staged, not "
+    "saved: the user sees it as a card in the chat and saves it, then enters "
+    "their credentials in Connect Apps and Data. Only API connectors that "
+    "take keys or tokens in headers are supported; not database drivers, "
+    "not keys in the URL, and not sign-in flows that redirect to the provider."
 )
 
 _TEXT = {"type": "string"}
@@ -574,7 +575,11 @@ _INPUT_SCHEMA = {
         "help_url": {"type": "string", "description": "https link to the provider's API key docs."},
         "usage_notes": {
             "type": "string",
-            "description": "How to call the API: auth header and scheme, key endpoints. No values.",
+            "description": (
+                "How to use the API once connected: which paths and query parameters answer what. "
+                "Calls go through call_minds_api(connection_id, path, query, headers), which adds "
+                "the credentials, so leave out auth headers, keys and the API's address. No values."
+            ),
         },
         "fields": {
             "type": "array",
@@ -595,22 +600,40 @@ _INPUT_SCHEMA = {
             },
         },
     },
-    "required": ["connector_id", "label", "fields"],
+    "required": ["connector_id", "label", "fields", "auth"],
+    "additionalProperties": False,
+}
+# One flat object with a type, not a oneOf: providers refuse union schemas in tool inputs.
+_INPUT_SCHEMA["properties"]["auth"] = {
+    "type": "object",
+    "description": (
+        "How the fields go on every request. type 'header': headers maps a header name to a "
+        "template, e.g. {'Authorization': 'Bearer {api_key}'}, or a literal such as "
+        "{'Notion-Version': '2022-06-28'}. type 'basic': username and password templates, e.g. "
+        "'{email}/token' and '{api_token}'; the password may be a literal such as 'X' or empty. "
+        "{field_name} places a field's value; place every field and at least one secret."
+    ),
+    "properties": {
+        "type": {"type": "string", "enum": sorted(_AUTH_KEYS)},
+        "headers": {
+            "type": "object",
+            "description": "For type 'header': header name to template.",
+            "additionalProperties": {"type": "string"},
+            "maxProperties": MAX_AUTH_HEADERS,
+        },
+        "username": {"type": "string", "description": "For type 'basic'."},
+        "password": {"type": "string", "description": "For type 'basic'."},
+    },
+    "required": ["type"],
     "additionalProperties": False,
 }
 _INPUT_SCHEMA["properties"]["check"] = {
     "type": "object",
-    "description": "How to test the credentials: one GET, on the address the user types.",
+    "description": "How to test the credentials: one GET of this path, on the address the user types, sent with auth.",
     "properties": {
         "path": {"type": "string", "description": "The request path, e.g. '/v1/me'. No host."},
-        "headers": {
-            "type": "object",
-            "description": "Header name to value; {field_name} places a field's value, e.g. 'Bearer {api_key}'.",
-            "additionalProperties": {"type": "string"},
-            "maxProperties": MAX_CHECK_HEADERS,
-        },
     },
-    "required": ["path", "headers"],
+    "required": ["path"],
     "additionalProperties": False,
 }
 
