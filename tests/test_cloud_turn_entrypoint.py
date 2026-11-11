@@ -698,7 +698,10 @@ class _ConnectorSession(_FakeSession):
             yield event
 
 
-_CONNECTOR_DRAFT = {"connector_id": "acme", "label": "Acme", "fields": [{"name": "api_key", "label": "Key"}]}
+_CONNECTOR_DRAFT = {
+    "connector_id": "acme", "label": "Acme", "fields": [{"name": "api_key", "label": "Key"}],
+    "auth": {"type": "header", "headers": {"Authorization": "Bearer {api_key}"}},
+}
 
 
 def test_connector_draft_emitted_before_the_terminal_event():

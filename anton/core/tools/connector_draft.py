@@ -2,9 +2,10 @@
 
 A cloud turn may build the template for an API connector the user has no
 connector for: its id, label, the credential fields the member will fill in,
-usage notes, and a check: one GET whose path and headers say how to test the
-credentials. Never a value, and never the API's address: the member types
-that when they connect, so the check cannot send a key anywhere else. Usage
+an auth section saying how those fields go on every request, usage notes,
+and a check: the path of one GET that tests the credentials. Never a value,
+and never the API's address: the member types that when they connect, so
+nothing can send a key anywhere else. Usage
 notes are prose and may name any host; nothing fetches or follows them. The
 pod emits the drafts at end of turn, the host shows each as a card, and the
 member saves it explicitly. The member then enters credentials outside the
@@ -52,12 +53,18 @@ _HELP_URL_MAX = 500
 #: Prose texts, the only ones that may span lines.
 _LONG_TEXTS = frozenset({"usage_notes", "help"})
 
-_TOP_KEYS = frozenset({"connector_id", "help_url", "fields", "check", *_TOP_TEXT_CAPS})
+_TOP_KEYS = frozenset({"connector_id", "help_url", "fields", "check", "auth", *_TOP_TEXT_CAPS})
 _FIELD_KEYS = frozenset({"name", "secret", "required", *_FIELD_TEXT_CAPS})
-_CHECK_KEYS = frozenset({"path", "headers"})
+_CHECK_KEYS = frozenset({"path"})
+#: How the member's values go on a request; later types join this list.
+_AUTH_KEYS = {
+    "header": frozenset({"type", "headers"}),
+    "basic": frozenset({"type", "username", "password"}),
+}
+MAX_AUTH_HEADERS = 5
 
 _CHECK_PATH_MAX = 300
-_CHECK_HEADER_VALUE_MAX = 200
+_AUTH_TEMPLATE_MAX = 200
 _HEADER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,40}")
 _PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]{0,39})\}")
 #: Headers a template may not set, compared in lowercase: ones the request or
@@ -94,18 +101,35 @@ class ConnectorDraftField:
 
 @dataclass(frozen=True)
 class ConnectorDraftCheck:
-    """How to test the credentials: one GET of ``path`` on the address the member types.
-
-    ``headers`` pairs each header name with its value, where ``{field}`` stands
-    for that field's value.
-    """
+    """How to test the credentials: one GET of ``path`` on the address the
+    member types, carrying the template's ``auth``."""
 
     path: str
-    headers: tuple[tuple[str, str], ...]
 
     def to_dict(self) -> dict[str, Any]:
-        """The check as JSON-ready data, its headers as a name-to-value object."""
-        return {"path": self.path, "headers": dict(self.headers)}
+        """The check as JSON-ready data."""
+        return {"path": self.path}
+
+
+@dataclass(frozen=True)
+class ConnectorDraftAuth:
+    """How the member's values go on every request, as templates where
+    ``{field}`` stands for that field's value.
+
+    ``header`` sets each of ``headers``. ``basic`` sends
+    ``Authorization: Basic`` of ``username:password``.
+    """
+
+    type: str
+    headers: tuple[tuple[str, str], ...] = ()
+    username: str | None = None
+    password: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """The auth section as JSON-ready data, holding only its type's keys."""
+        if self.type == "basic":
+            return {"type": "basic", "username": self.username, "password": self.password}
+        return {"type": self.type, "headers": dict(self.headers)}
 
 
 @dataclass(frozen=True)
@@ -115,6 +139,7 @@ class ConnectorDraft:
     connector_id: str
     label: str
     fields: tuple[ConnectorDraftField, ...]
+    auth: ConnectorDraftAuth
     description: str | None = None
     category: str | None = None
     help_url: str | None = None
@@ -124,11 +149,12 @@ class ConnectorDraft:
     def to_dict(self) -> dict[str, Any]:
         """The draft as JSON-ready data, with unset optional keys left out."""
         out = {
-            k: v for k, v in asdict(self).items() if k not in ("fields", "check") and v is not None
+            k: v for k, v in asdict(self).items() if k not in ("fields", "check", "auth") and v is not None
         }
         out["fields"] = [
             {k: v for k, v in asdict(f).items() if v is not None} for f in self.fields
         ]
+        out["auth"] = self.auth.to_dict()
         if self.check is not None:
             out["check"] = self.check.to_dict()
         return out
@@ -312,49 +338,109 @@ def _check_path(value: Any) -> str:
     return text
 
 
-def _check_headers(value: Any, fields: tuple[ConnectorDraftField, ...]) -> tuple[tuple[str, str], ...]:
-    """Return the check's headers; a value may place a declared field as ``{name}``.
+def _check_template(value: Any, where: str, declared: frozenset[str], *, may_be_empty: bool = False) -> tuple[str, set[str]]:
+    """Return an auth template and the field names its ``{field}`` slots place.
 
-    At least one header places a secret field, or the check cannot tell a
-    working key from a wrong one.
+    The token and scrub rules read the template with its slots removed, so a
+    long field name in a slot is not taken for a key.
+
+    Args:
+        value: The template as the draft gives it.
+        where: Its place in the draft, for messages.
+        declared: The draft's field names.
+        may_be_empty: Whether an empty template is allowed.
+
+    Raises:
+        ConnectorDraftError: when it is not printable ASCII on one line, too
+            long, empty when it may not be, has a brace outside a slot, names
+            an undeclared field, or holds what reads as a credential value.
     """
-    if not isinstance(value, dict) or not 1 <= len(value) <= MAX_CHECK_HEADERS:
-        raise ConnectorDraftError(f"check.headers must be an object of 1 to {MAX_CHECK_HEADERS} headers.")
-    by_name = {f.name: f for f in fields}
+    if not isinstance(value, str):
+        raise ConnectorDraftError(f"{where} must be text.")
+    text = value.strip()
+    if not text and not may_be_empty:
+        raise ConnectorDraftError(f"{where} is required.")
+    if len(text) > _AUTH_TEMPLATE_MAX:
+        raise ConnectorDraftError(f"{where} must be at most {_AUTH_TEMPLATE_MAX} characters.")
+    if not _is_printable_ascii(text, space=True):
+        raise ConnectorDraftError(f"{where} must be printable text on one line.")
+    literal = _PLACEHOLDER.sub("", text)
+    if "{" in literal or "}" in literal:
+        raise ConnectorDraftError(f"{where} may use braces only as {{field_name}}.")
+    placed = set(_PLACEHOLDER.findall(text))
+    if not placed <= declared:
+        raise ConnectorDraftError(f"{where} names a field the draft does not declare.")
+    if scrub_output(literal) != literal or _looks_like_token(literal):
+        raise ConnectorDraftError(
+            f"{where} looks like it holds a credential value. Place the field as "
+            "{field_name} instead of writing its value."
+        )
+    return text, placed
+
+
+def _parse_auth_headers(value: Any, declared: frozenset[str]) -> tuple[tuple[tuple[str, str], ...], set[str]]:
+    """Return the ``header`` type's headers and the fields they place."""
+    if not isinstance(value, dict) or not 1 <= len(value) <= MAX_AUTH_HEADERS:
+        raise ConnectorDraftError(f"auth.headers must be an object of 1 to {MAX_AUTH_HEADERS} headers.")
     seen: set[str] = set()
     headers: list[tuple[str, str]] = []
-    places_secret = False
-    for name, header_value in value.items():
+    placed: set[str] = set()
+    for name, template in value.items():
         # A header name is model text: one that reads as a token is refused before any message names it.
-        check_header_name(name, "check.headers")
-        lowered = name.lower()
-        if lowered in seen:
-            raise ConnectorDraftError("check.headers has a header name that is not allowed.")
-        seen.add(lowered)
-        where = f"check.headers.{name}"
-        text = _check_text(header_value, where, _CHECK_HEADER_VALUE_MAX, long_text=False)
-        if text is None or not _is_printable_ascii(text, space=True):
-            raise ConnectorDraftError(f"{where} must be printable text.")
-        placed = _PLACEHOLDER.findall(text)
-        if "{" in _PLACEHOLDER.sub("", text) or "}" in _PLACEHOLDER.sub("", text):
-            raise ConnectorDraftError(f"{where} may use braces only as {{field_name}}.")
-        if any(name_ not in by_name for name_ in placed):
-            raise ConnectorDraftError(f"{where} names a field the draft does not declare.")
-        places_secret = places_secret or any(by_name[name_].secret for name_ in placed)
+        check_header_name(name, "auth.headers")
+        if name.lower() in seen:
+            raise ConnectorDraftError("auth.headers has a header name that is not allowed.")
+        seen.add(name.lower())
+        text, names = _check_template(template, f"auth.headers.{name}", declared)
         headers.append((name, text))
-    if not places_secret:
-        raise ConnectorDraftError("check.headers must place a secret field, such as {api_key}.")
-    return tuple(headers)
+        placed |= names
+    return tuple(headers), placed
 
 
-def _parse_check(data: Any, fields: tuple[ConnectorDraftField, ...]) -> ConnectorDraftCheck | None:
+def _parse_auth(data: Any, fields: tuple[ConnectorDraftField, ...]) -> ConnectorDraftAuth:
+    """Parse the required ``auth`` section against the draft's fields.
+
+    It must place at least one secret field and every declared field: a
+    field it never uses would ask the member for a value that goes nowhere.
+    """
+    if data is None:
+        raise ConnectorDraftError("auth is required: say how the fields go on a request.")
+    if not isinstance(data, dict):
+        raise ConnectorDraftError("auth must be an object.")
+    kind = data.get("type")
+    if not isinstance(kind, str) or kind not in _AUTH_KEYS:
+        raise ConnectorDraftError(f"auth.type must be one of: {', '.join(sorted(_AUTH_KEYS))}.")
+    _check_keys(data, _AUTH_KEYS[kind], "auth")
+    declared = frozenset(f.name for f in fields)
+    if kind == "header":
+        headers, placed = _parse_auth_headers(data.get("headers"), declared)
+        auth = ConnectorDraftAuth(type=kind, headers=headers)
+    else:
+        username, placed = _check_template(data.get("username"), "auth.username", declared)
+        if not placed or ":" in _PLACEHOLDER.sub("", username):
+            raise ConnectorDraftError("auth.username must place a field and hold no ':' outside it.")
+        if "password" not in data:
+            raise ConnectorDraftError("auth.password is required; use an empty text when the API takes none.")
+        password, in_password = _check_template(data["password"], "auth.password", declared, may_be_empty=True)
+        placed |= in_password
+        auth = ConnectorDraftAuth(type=kind, username=username, password=password)
+    secrets = {f.name for f in fields if f.secret}
+    if not placed & secrets:
+        raise ConnectorDraftError("auth must place a secret field, such as {api_key}.")
+    unused = [i for i, f in enumerate(fields) if f.name not in placed]
+    if unused:
+        raise ConnectorDraftError(f"auth must place every field; fields[{unused[0]}] is never used.")
+    return auth
+
+
+def _parse_check(data: Any) -> ConnectorDraftCheck | None:
     """Parse the optional ``check``, or return None when absent."""
     if data is None:
         return None
     if not isinstance(data, dict):
         raise ConnectorDraftError("check must be an object.")
     _check_keys(data, _CHECK_KEYS, "check")
-    return ConnectorDraftCheck(path=_check_path(data.get("path")), headers=_check_headers(data.get("headers"), fields))
+    return ConnectorDraftCheck(path=_check_path(data.get("path")))
 
 
 def _parse_field(data: Any, index: int) -> ConnectorDraftField:
@@ -424,11 +510,12 @@ def parse_connector_draft(data: Any) -> ConnectorDraft:
         connector_id=connector_id,
         label=texts["label"],
         fields=fields,
+        auth=_parse_auth(data.get("auth"), fields),
         description=texts["description"],
         category=texts["category"],
         help_url=_check_help_url(data.get("help_url")),
         usage_notes=texts["usage_notes"],
-        check=_parse_check(data.get("check"), fields),
+        check=_parse_check(data.get("check")),
     )
 
 

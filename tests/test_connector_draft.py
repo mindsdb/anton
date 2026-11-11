@@ -47,12 +47,14 @@ _SHORT_FIELD_TEXTS = ("label", "placeholder")
 _ID_SHAPED_KEY = "ka3f9c8b" + "7e6d5f4a" + "3b2c1d0e" + "9f8a7b6c5"
 #: Letters only, so the run rule passes it and only the held-value scrub can refuse it.
 _HELD_VALUE = "heldvalue" + "qwertyzx"
+_AUTH = {"type": "header", "headers": {"Authorization": "Bearer {api_key}", "X-Region": "{region}"}}
 #: Parses a draft whose usage_notes is argv[1] and prints the refusal.
 _PARSE_NOTES = (
     "import sys\n"
     "from anton.core.tools.connector_draft import ConnectorDraftError, parse_connector_draft\n"
     "draft = {'connector_id': 'acme', 'label': 'Acme', 'usage_notes': sys.argv[1],\n"
-    "         'fields': [{'name': 'api_key', 'label': 'Key'}]}\n"
+    "         'fields': [{'name': 'api_key', 'label': 'Key'}],\n"
+    "         'auth': {'type': 'header', 'headers': {'Authorization': 'Bearer {api_key}'}}}\n"
     "try:\n"
     "    parse_connector_draft(draft)\n"
     "except ConnectorDraftError as e:\n"
@@ -72,9 +74,14 @@ def _draft(**overrides):
             {"name": "api_key", "label": "API key", "help": "Settings, then API."},
             {"name": "region", "label": "Region", "secret": False, "required": False, "placeholder": "eu"},
         ],
+        "auth": _AUTH,
     }
     draft.update(overrides)
     return draft
+
+
+def _one_field_auth(name="api_key"):
+    return {"type": "header", "headers": {"Authorization": f"Bearer {{{name}}}"}}
 
 
 def test_a_full_draft_parses_and_round_trips():
@@ -87,10 +94,14 @@ def test_a_full_draft_parses_and_round_trips():
 
 
 def test_optional_texts_may_be_left_out():
-    data = {"connector_id": "acme", "label": "Acme", "fields": [{"name": "token", "label": "Token"}]}
+    data = {
+        "connector_id": "acme", "label": "Acme", "fields": [{"name": "token", "label": "Token"}],
+        "auth": _one_field_auth("token"),
+    }
     assert parse_connector_draft(data).to_dict() == {
         "connector_id": "acme", "label": "Acme",
         "fields": [{"name": "token", "label": "Token", "secret": True, "required": True}],
+        "auth": {"type": "header", "headers": {"Authorization": "Bearer {token}"}},
     }
 
 
@@ -257,6 +268,7 @@ def test_long_snake_case_and_plain_words_are_not_tokens():
         label="Salesforce Marketing Cloud v2",
         category="customer_relationship",
         fields=[{"name": "client_secret", "label": "Client secret", "placeholder": "From the app's settings page"}],
+        auth=_one_field_auth("client_secret"),
     ))
 
 
@@ -296,9 +308,11 @@ def test_a_held_value_as_an_identifier_is_refused_without_the_value(held_value, 
 
 
 def test_long_snake_case_field_names_are_not_tokens():
-    parse_connector_draft(_draft(fields=[
-        {"name": "salesforce_marketing_cloud_api_key_v2", "label": "Key"},
-    ]))
+    # Placed in a slot too: the token rule reads auth templates with slots removed.
+    parse_connector_draft(_draft(
+        fields=[{"name": "salesforce_marketing_cloud_api_key_v2", "label": "Key"}],
+        auth=_one_field_auth("salesforce_marketing_cloud_api_key_v2"),
+    ))
 
 
 @pytest.mark.parametrize("notes", [
@@ -380,20 +394,19 @@ def test_the_tool_refuses_a_bad_draft_without_the_value():
     assert box.drain() == []
 
 
-_CHECK = {"path": "/v2/me", "headers": {"Authorization": "Bearer {api_key}", "X-Api-Version": "2"}}
+_CHECK = {"path": "/v2/me"}
 
 
 def test_a_check_parses_and_round_trips():
     draft = parse_connector_draft(_draft(check=_CHECK))
 
     assert draft.check.path == "/v2/me"
-    assert draft.check.headers == (("Authorization", "Bearer {api_key}"), ("X-Api-Version", "2"))
     assert draft.to_dict()["check"] == _CHECK
     assert parse_connector_draft(draft.to_dict()) == draft
 
 
 def test_a_check_may_carry_a_query():
-    assert parse_connector_draft(_draft(check={**_CHECK, "path": "/v2/me?fields=id"})).check.path == "/v2/me?fields=id"
+    assert parse_connector_draft(_draft(check={"path": "/v2/me?fields=id"})).check.path == "/v2/me?fields=id"
 
 
 def test_a_draft_without_a_check_has_none():
@@ -415,14 +428,80 @@ def test_a_draft_without_a_check_has_none():
     "/v2/me?key=sk%5Flive%5F4eC39HqLyjWDarjtT1zdp7dc",
     "/v2/%2e%2e/me",
     "/v2/m e",
-    "/v2/\u00e9",
+    "/v2/é",
     "",
     None,
     7,
 ])
 def test_a_check_path_that_could_name_a_host_or_carry_a_value_is_refused(path):
     with pytest.raises(ConnectorDraftError, match=r"^check\.path\b"):
-        parse_connector_draft(_draft(check={**_CHECK, "path": path}))
+        parse_connector_draft(_draft(check={"path": path}))
+
+
+@pytest.mark.parametrize("check", [
+    {"path": "/v2/me", "headers": {"Authorization": "Bearer {api_key}"}},
+    {"path": "/v2/me", "method": "POST"},
+    {"path": "/v2/me", "host": "x"},
+    "/v2/me",
+])
+def test_a_check_of_the_wrong_shape_is_refused(check):
+    with pytest.raises(ConnectorDraftError, match=r"^check\b"):
+        parse_connector_draft(_draft(check=check))
+
+
+def test_header_auth_parses_and_round_trips_with_a_literal_header():
+    auth = {"type": "header", "headers": {
+        "Authorization": "Bearer {api_key}", "Notion-Version": "2022-06-28", "X-Region": "{region}",
+    }}
+    draft = parse_connector_draft(_draft(auth=auth))
+
+    assert draft.auth.type == "header"
+    assert draft.auth.headers == tuple(auth["headers"].items())
+    assert draft.to_dict()["auth"] == auth
+    assert parse_connector_draft(draft.to_dict()) == draft
+
+
+_BASIC_FIELDS = [
+    {"name": "email", "label": "Email", "secret": False},
+    {"name": "api_token", "label": "API token"},
+]
+
+
+@pytest.mark.parametrize("fields,auth", [
+    (_BASIC_FIELDS, {"type": "basic", "username": "{email}/token", "password": "{api_token}"}),
+    ([{"name": "api_key", "label": "Key"}], {"type": "basic", "username": "{api_key}", "password": "X"}),
+    ([{"name": "api_key", "label": "Key"}], {"type": "basic", "username": "{api_key}", "password": ""}),
+])
+def test_basic_auth_parses_and_round_trips(fields, auth):
+    draft = parse_connector_draft(_draft(fields=fields, auth=auth))
+
+    assert (draft.auth.type, draft.auth.username, draft.auth.password) == ("basic", auth["username"], auth["password"])
+    assert draft.to_dict()["auth"] == auth
+    assert parse_connector_draft(draft.to_dict()) == draft
+
+
+@pytest.mark.parametrize("auth,rule", [
+    (None, r"^auth is required"),
+    ("Bearer {api_key}", r"^auth must be an object"),
+    ({"headers": {"Authorization": "Bearer {api_key}"}}, r"^auth\.type must be one of"),
+    ({"type": "oauth"}, r"^auth\.type must be one of"),
+    ({**_AUTH, "username": "{api_key}"}, r"^auth has a key that is not allowed"),
+    ({"type": "basic", "username": "{api_key}", "password": "X", "headers": {}}, r"^auth has a key that is not allowed"),
+    ({"type": "header", "headers": {"X-Region": "{region}"}}, r"^auth must place a secret field"),
+    ({"type": "header", "headers": {"Authorization": "Bearer {api_key}"}}, r"^auth must place every field; fields\[1\]"),
+    ({"type": "basic", "username": "{region}", "password": "{api_key}"}, None),
+    ({"type": "basic", "username": "admin", "password": "{api_key}"}, r"^auth\.username must place a field"),
+    ({"type": "basic", "username": "{region}:x", "password": "{api_key}"}, r"^auth\.username must place a field"),
+    ({"type": "basic", "username": "{region}"}, r"^auth\.password is required"),
+    ({"type": "basic", "username": "", "password": "{api_key}"}, r"^auth\.username is required"),
+    ({"type": "basic", "username": "{region}", "password": 7}, r"^auth\.password must be text"),
+])
+def test_an_auth_section_of_the_wrong_shape_is_refused(auth, rule):
+    if rule is None:
+        parse_connector_draft(_draft(auth=auth))
+        return
+    with pytest.raises(ConnectorDraftError, match=rule):
+        parse_connector_draft(_draft(auth=auth))
 
 
 @pytest.mark.parametrize("headers", [
@@ -443,38 +522,51 @@ def test_a_check_path_that_could_name_a_host_or_carry_a_value_is_refused(path):
     {"Authorization": "{api_key.__class__}"},
     {"Authorization": "Bearer {api_key}}"},
     {"Authorization": "Bearer {api_key}\r\nX-Injected: 1"},
-    {"Authorization": "Bearer {api_key}\u00e9"},
+    {"Authorization": "Bearer {api_key}é"},
+    {"Authorization": ""},
     {"Authorization": 7},
-    {"X-Region": "{region}"},
 ])
-def test_a_check_header_that_could_steer_or_inject_is_refused(headers):
-    with pytest.raises(ConnectorDraftError, match=r"^check\.headers\b"):
-        parse_connector_draft(_draft(check={**_CHECK, "headers": headers}))
+def test_an_auth_header_that_could_steer_or_inject_is_refused(headers):
+    with pytest.raises(ConnectorDraftError, match=r"^auth\.headers\b"):
+        parse_connector_draft(_draft(auth={"type": "header", "headers": headers}))
 
 
-@pytest.mark.parametrize("check", [{"path": "/v2/me"}, {**_CHECK, "method": "POST"}, {**_CHECK, "host": "x"}, "/v2/me"])
-def test_a_check_of_the_wrong_shape_is_refused(check):
-    with pytest.raises(ConnectorDraftError, match=r"^check\b"):
-        parse_connector_draft(_draft(check=check))
+def test_an_over_long_auth_template_is_refused():
+    auth = {"type": "header", "headers": {"Authorization": "Bearer {api_key} " + "x " * 100, "X-Region": "{region}"}}
+
+    with pytest.raises(ConnectorDraftError, match=r"^auth\.headers\.Authorization must be at most 200"):
+        parse_connector_draft(_draft(auth=auth))
 
 
 @pytest.mark.parametrize("name", _TOKEN_SHAPES)
-def test_a_value_in_a_check_is_refused_without_echoing_it(name):
+def test_a_value_in_auth_or_the_check_is_refused_without_echoing_it(name):
     value = _TOKEN_SHAPES[name]
-    for check, rule in (
-        ({**_CHECK, "headers": {"Authorization": f"Bearer {value}"}}, r"^check\.headers\b"),
-        ({**_CHECK, "path": f"/v2/me?key={value}"}, r"^check\.path\b"),
+    for overrides, rule in (
+        ({"auth": {"type": "header", "headers": {"Authorization": f"Bearer {value}", "X-Region": "{region}"}}},
+         r"^auth\.headers\.Authorization looks like"),
+        ({"fields": [{"name": "api_key", "label": "Key"}],
+          "auth": {"type": "basic", "username": "{api_key}", "password": value}}, r"^auth\.password looks like"),
+        ({"check": {"path": f"/v2/me?key={value}"}}, r"^check\.path\b"),
     ):
         with pytest.raises(ConnectorDraftError, match=rule) as exc:
-            parse_connector_draft(_draft(check=check))
+            parse_connector_draft(_draft(**overrides))
         assert value not in str(exc.value)
+
+
+def test_a_held_value_written_into_auth_is_refused_without_the_value(held_value):
+    auth = {"type": "header", "headers": {"Authorization": f"Bearer {held_value}", "X-Region": "{region}"}}
+
+    with pytest.raises(ConnectorDraftError, match=r"^auth\.headers\.Authorization looks like") as exc:
+        parse_connector_draft(_draft(auth=auth))
+
+    assert held_value not in str(exc.value)
 
 
 def test_a_token_shaped_header_name_is_refused_without_echoing_it():
     name = "X-" + _TOKEN_SHAPES["bare"]
 
-    with pytest.raises(ConnectorDraftError, match=r"^check\.headers\b") as exc:
-        parse_connector_draft(_draft(check={**_CHECK, "headers": {name: "Bearer {api_key}"}}))
+    with pytest.raises(ConnectorDraftError, match=r"^auth\.headers\b") as exc:
+        parse_connector_draft(_draft(auth={"type": "header", "headers": {name: "Bearer {api_key}"}}))
 
     assert _TOKEN_SHAPES["bare"] not in str(exc.value)
 
@@ -516,7 +608,11 @@ def test_names_the_host_stores_or_shows_are_reserved(name):
 
 def test_a_template_holds_at_most_eleven_fields():
     assert MAX_FIELDS == 11
-    parse_connector_draft(_draft(fields=[{"name": f"f{i}", "label": "L"} for i in range(11)]))
+    auth = {"type": "header", "headers": {
+        "X-Keys": ".".join(f"{{f{i}}}" for i in range(6)),
+        "X-More-Keys": ".".join(f"{{f{i}}}" for i in range(6, 11)),
+    }}
+    parse_connector_draft(_draft(fields=[{"name": f"f{i}", "label": "L"} for i in range(11)], auth=auth))
 
 
 def test_the_tool_describes_the_check():
