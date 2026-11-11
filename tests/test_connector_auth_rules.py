@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from anton.core.tools.connector_auth_rules import AuthRuleError, query_collides, render
+from anton.core.tools.connector_auth_rules import AuthRuleError, parse_auth, query_collides, render
 
 _MODULE = Path(__file__).resolve().parents[1] / "anton" / "core" / "tools" / "connector_auth_rules.py"
 _MODULE_SHA256 = "6d990ad784d591db7c9b66b66f35f6b560c0715cbbb7f861fbe1fd97655a9b41"
@@ -45,6 +45,97 @@ def test_the_module_hash_is_pinned_so_its_copies_are_resynced():
         + "; ".join(_COPIES)
         + f". Then set the pinned SHA-256 here and in each copy's test to {digest}."
     )
+
+
+_CASES = Path(__file__).parent / "fixtures" / "auth_section_cases.json"
+_CASES_SHA256 = "8db88436c1936b053529697ac81d5e2a301bbc8bd59dbfb7bb794c8689ec7b7d"
+_KEY = [["api_key", True]]
+_HARVEST = [["token", True], ["account_id", False]]
+_BASIC = [["email", False], ["api_token", True]]
+_LONG = "{api_key} " + "a " * 95
+#: (fields as [name, secret], auth) pairs. Literals are never key-shaped, so the
+#: file is safe to copy; key shapes stay in Python tests that build them at runtime.
+_CASE_INPUTS = [
+    (_KEY, {"type": "header", "headers": {"Authorization": "Bearer {api_key}"}}),
+    (_HARVEST, {"type": "header", "headers": {
+        "Authorization": "Bearer {token}", "Harvest-Account-Id": "{account_id}", "Notion-Version": "2022-06-28",
+    }}),
+    (_KEY, {"type": "header", "headers": {"X-Api-Key": "  {api_key}  "}}),
+    (_KEY, {"type": "header", "headers": {f"X-H{i}": "{api_key}" for i in range(5)}}),
+    (_KEY, {"type": "header", "headers": {f"X-H{i}": "{api_key}" for i in range(6)}}),
+    (_KEY, {"type": "header", "headers": {}}),
+    (_KEY, {"type": "header", "headers": {"X-Api-Key": _LONG.strip()}}),
+    (_KEY, {"type": "header", "headers": {"X-Api-Key": _LONG.strip() + "ab"}}),
+    (_KEY, {"type": "header", "headers": {"Host": "{api_key}"}}),
+    (_KEY, {"type": "header", "headers": {"X-Forwarded-For": "{api_key}"}}),
+    (_KEY, {"type": "header", "headers": {"Accept": "{api_key}"}}),
+    (_KEY, {"type": "header", "headers": {"X-Api-Key": "{api_key}", "x-api-key": "{api_key}"}}),
+    (_KEY, {"type": "header", "headers": {"Authorization": "Basic {api_key}"}}),
+    (_KEY, {"type": "header", "headers": {"X-Api-Key": "{api_key}}"}}),
+    (_KEY, {"type": "header", "headers": {"X-Api-Key": "{token}"}}),
+    (_KEY, {"type": "header", "headers": {"X-Api-Key": "{api_key}\r\nX-Injected: 1"}}),
+    (_KEY, {"type": "header", "headers": {"X-Api-Key": "{api_key}é"}}),
+    (_KEY, {"type": "header", "headers": {"X-Api-Key": ""}}),
+    (_KEY, {"type": "header", "headers": {"X-Api-Key": 7}}),
+    (_KEY, {"type": "header", "headers": {"X-Api-Key": "{api_key} abc123def456ghi789jkl0"}}),
+    (_KEY, {"type": "header", "headers": {"X-Api-Key": "{api_key}"}, "note": "x"}),
+    (_BASIC, {"type": "basic", "username": "{email}/token", "password": "{api_token}"}),
+    ([["api_key", True]], {"type": "basic", "username": "{api_key}", "password": "X"}),
+    ([["api_key", True]], {"type": "basic", "username": "{api_key}", "password": ""}),
+    (_BASIC, {"type": "basic", "username": "admin", "password": "{api_token}"}),
+    (_BASIC, {"type": "basic", "username": "{email}:x", "password": "{api_token}"}),
+    (_BASIC, {"type": "basic", "username": "{email}"}),
+    (_BASIC, {"type": "basic", "username": "{email}", "password": 7}),
+    (_BASIC, {"type": "basic", "username": "{email}", "password": "{api_token}", "headers": {}}),
+    (_KEY, {"type": "query", "params": {"access_key": "{api_key}"}}),
+    ([["api_key", True], ["client_id", False]], {"type": "query", "params": {"access_key": "{api_key}", "client": "{client_id}"}}),
+    (_KEY, {"type": "query", "params": {}}),
+    (_KEY, {"type": "query", "params": {f"k{i}": "{api_key}" for i in range(6)}}),
+    (_KEY, {"type": "query", "params": {"access.key": "{api_key}"}}),
+    (_KEY, {"type": "query", "params": {"X-HTTP-Method-Override": "{api_key}"}}),
+    (_KEY, {"type": "query", "params": {"access_key": "{api_key}", "ACCESS_KEY": "{api_key}"}}),
+    (_KEY, {"type": "query", "params": {"access_key": "{api_key}&admin=1"}}),
+    (_KEY, {"type": "query", "params": {"access_key": "a {api_key}"}}),
+    (_HARVEST, {"type": "header", "headers": {"X-Account": "{account_id}"}}),
+    (_HARVEST, {"type": "header", "headers": {"Authorization": "Bearer {token}"}}),
+    (_KEY, None),
+    (_KEY, "Bearer {api_key}"),
+    (_KEY, {"headers": {"X-Api-Key": "{api_key}"}}),
+    (_KEY, {"type": "oauth"}),
+]
+
+
+def _build_cases() -> list[dict]:
+    """Run every input through the module with no secret detector, as each copy will."""
+    cases = []
+    for fields, auth in _CASE_INPUTS:
+        case = {"fields": fields, "auth": auth}
+        try:
+            case |= {"accepted": True, "canonical": parse_auth(auth, [tuple(f) for f in fields])}
+        except AuthRuleError as e:
+            case |= {"accepted": False, "error": str(e)}
+        cases.append(case)
+    return cases
+
+
+def _cases_text() -> str:
+    """The case list in its canonical form: sorted keys, 2-space indent, ASCII, final newline."""
+    return json.dumps(_build_cases(), sort_keys=True, indent=2, ensure_ascii=True) + "\n"
+
+
+def test_the_auth_section_cases_are_what_the_module_gives():
+    assert _CASES.read_text(encoding="ascii") == _cases_text(), (
+        "Regenerate tests/fixtures/auth_section_cases.json from _cases_text() and copy it to the services "
+        "that carry the module."
+    )
+    assert hashlib.sha256(_CASES.read_bytes()).hexdigest() == _CASES_SHA256
+
+
+def test_the_auth_section_cases_cover_both_outcomes_for_each_type():
+    cases = _build_cases()
+    for kind in ("header", "basic", "query"):
+        outcomes = {c["accepted"] for c in cases if isinstance(c["auth"], dict) and c["auth"].get("type") == kind}
+        assert outcomes == {True, False}
 
 
 def test_render_fills_header_slots_and_keeps_literals():
