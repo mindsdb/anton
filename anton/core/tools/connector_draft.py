@@ -463,12 +463,15 @@ _DESCRIPTION = (
     "the user will fill in (for example api_key, or email and api_token), "
     "auth: how those fields go on every request, usage notes, and a check: "
     "the path of one GET that answers only with valid credentials (for "
-    "example /v1/me). auth is type 'header' with headers such as "
+    "example /v2/me). auth is type 'header' with headers such as "
     "Authorization: Bearer {api_key}, type 'basic' with a username and "
     "password such as {email}/token and {api_token}, or type 'query' with "
     "the URL parameters that carry the key, such as access_key: {api_key}; "
     "{field_name} places a field's value and every field must be placed. "
-    "The user types the API's address when connecting, so leave it out. "
+    "The user types only the API's host when connecting (such as "
+    "api.example.com), so leave it out, and start every path at the host: "
+    "include any version the provider's docs put after the host "
+    "(/v2/exchanges, not /exchanges). "
     "Never pass a credential value: no key, token, password or secret goes "
     "into any field of this tool, and never ask the user for one. The "
     "template is staged, not saved: the user sees it as a card in the chat "
@@ -495,7 +498,9 @@ _INPUT_SCHEMA = {
                 "How to use the API once connected: which paths and query parameters answer what. "
                 "Calls go through call_minds_api(connection_id, path, query, headers), which adds "
                 "the credentials, including any key parameter auth places in the URL, so leave out "
-                "auth headers, key parameters, keys and the API's address. No values."
+                "auth headers, key parameters, keys and the API's address. No values. The user types "
+                "only the host, so every path starts at the host and includes any version, "
+                "e.g. /v2/eod?symbols=AAPL."
             ),
         },
         "fields": {
@@ -560,7 +565,13 @@ _INPUT_SCHEMA["properties"]["check"] = {
     "type": "object",
     "description": "How to test the credentials: one GET of this path, on the address the user types, sent with auth.",
     "properties": {
-        "path": {"type": "string", "description": "The request path, e.g. '/v1/me'. No host."},
+        "path": {
+            "type": "string",
+            "description": (
+                "The request path from the host, including any version, e.g. '/v2/me'. "
+                "No host: the user types only the host, such as api.example.com."
+            ),
+        },
     },
     "required": ["path"],
     "additionalProperties": False,

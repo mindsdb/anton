@@ -774,6 +774,20 @@ def test_the_tool_describes_the_check():
     assert "base URL" not in tool.input_schema["properties"]["usage_notes"]["description"]
 
 
+def test_the_tool_says_every_path_starts_at_the_host_with_its_version():
+    tool = connector_draft_tool(ConnectorDraftBox())
+    texts = {
+        "description": tool.description,
+        "check.path": tool.input_schema["properties"]["check"]["properties"]["path"]["description"],
+        "usage_notes": tool.input_schema["properties"]["usage_notes"]["description"],
+    }
+
+    for where, text in texts.items():
+        assert "only" in text and "host" in text, where
+        assert "/v2/" in text, where
+        assert "includ" in text and "version" in text, where
+
+
 def _union_keywords(schema):
     """Every oneOf/anyOf/allOf key anywhere in ``schema``."""
     if isinstance(schema, dict):
