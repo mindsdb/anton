@@ -125,6 +125,8 @@ class FakeHost:
             if self.done_after_hand_over:
                 self.set_control("agent", "", "person")
             return answer
+        if path == f"/sessions/{SID}" and request.method == "DELETE":
+            return httpx.Response(200, json={"ok": True})
         if path == f"/sessions/{SID}" and request.method == "GET":
             return httpx.Response(200, json={
                 "session_id": SID, "url": self.shown["url"], "control": self.control, **self.session_extra,
@@ -1817,3 +1819,86 @@ async def test_the_hand_over_card_names_the_page_the_browser_shows_and_keeps_the
     prompt = elicit_answers.requests[0].prompt
     assert prompt.startswith("Your turn on claude.ai: Continue. ## Your turn on mybank.com")
     assert "\n## " not in prompt and "x" * 300 not in prompt
+
+
+# ── after the turn ─────────────────────────────────────────────────────────
+
+
+def tidy_answers(browser, browser_p=0.9, other_tabs=None, other_p=0.9):
+    answers = {"browser": {"choice": browser, "probabilities": {browser: browser_p}}}
+    if other_tabs:
+        answers["other_tabs"] = {"choice": other_tabs, "probabilities": {other_tabs: other_p}}
+    return jev.JevDecision(answers=answers, ms=9)
+
+
+def turn_session(host, **kwargs):
+    session = make_session(host, **kwargs)
+    session._history = [
+        {"role": "user", "content": "Find the cheapest flight to Lisbon on Saturday"},
+        {"role": "assistant", "content": "The cheapest is TAP at $212, leaving 9:40."},
+    ]
+    session._browser_state.opened = True
+    return session
+
+
+async def test_after_a_turn_jev_closes_a_browser_the_task_is_done_with(fake_jev):
+    host = FakeHost()
+    session = turn_session(host)
+    fake_jev.queue.append(tidy_answers("close"))
+    await browser_tool.tidy_after_turn(session)
+    state = fake_jev.calls[0]["state"]
+    assert state["task_request"].startswith("Find the cheapest flight") and "TAP at $212" in state["final_answer"]
+    assert set(fake_jev.calls[0]["questions"]) == {"browser"}
+    assert any(c[0] == "DELETE" and c[1] == f"/sessions/{SID}" for c in host.calls)
+
+
+async def test_after_a_turn_nothing_closes_while_the_user_watches_or_holds_it(fake_jev):
+    host = FakeHost()
+    host.session_extra = {"viewers": 1}
+    session = turn_session(host)
+    fake_jev.queue.append(tidy_answers("close"))
+    await browser_tool.tidy_after_turn(session)
+    assert fake_jev.calls[0]["state"]["user_is_watching_the_browser"] is True
+    assert not any(c[0] == "DELETE" for c in host.calls)
+
+    held = FakeHost()
+    held.set_control("human", "sign in", "agent")
+    session = turn_session(held)
+    await browser_tool.tidy_after_turn(session)
+    assert len(fake_jev.calls) == 1, "no decision while the person holds the browser"
+
+
+async def test_after_a_turn_jev_may_keep_the_browser_and_close_its_side_tabs(fake_jev):
+    host = FakeHost()
+    host.tabs.append({"id": "t2", "url": "https://docs.example/", "title": "Docs", "active": False})
+    urls: list[str] = []
+    handle = host.handler
+
+    def recording(request):
+        urls.append(f"{request.method} {request.url.path}?{request.url.query.decode() if isinstance(request.url.query, bytes) else request.url.query}")
+        return handle(request)
+
+    host.handler = recording
+    session = turn_session(host)
+    fake_jev.queue.append(tidy_answers("keep", other_tabs="close"))
+    await browser_tool.tidy_after_turn(session)
+    assert [u for u in urls if u.startswith("DELETE")] == [f"DELETE /browser/sessions/{SID}/tabs/t2?park=true"]
+
+
+async def test_after_a_turn_an_unsure_or_failed_decision_closes_nothing(fake_jev):
+    host = FakeHost()
+    session = turn_session(host)
+    fake_jev.queue.append(tidy_answers("close", browser_p=0.55))
+    await browser_tool.tidy_after_turn(session)
+    await browser_tool.tidy_after_turn(session)  # exhausted: an error
+    assert not any(c[0] == "DELETE" for c in host.calls)
+
+
+async def test_no_tidy_up_for_a_turn_that_never_opened_the_browser_or_on_the_desktop(fake_jev):
+    session = make_session(FakeHost())
+    session._history = []
+    await browser_tool.tidy_after_turn(session)
+    desktop = make_session(FakeHost(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+    desktop._browser_state.opened = True
+    await browser_tool.tidy_after_turn(desktop)
+    assert fake_jev.calls == []

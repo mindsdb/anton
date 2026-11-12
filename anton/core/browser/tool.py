@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -55,6 +56,9 @@ from anton.core.browser.policy import (
 )
 from anton.core.tools.registry import ToolOutcome
 from anton.core.utils.scratchpad import _fence, ask_approval_card, ask_approval_choice, refusal_why
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from anton.core.session import ChatSession
@@ -1821,6 +1825,109 @@ async def handle_browser(session: "ChatSession", tc_input: dict):
     if isinstance(result, ToolOutcome):
         return result
     return ToolOutcome(content=result, ok=True)
+
+
+# ── after the turn ─────────────────────────────────────────────────────────
+
+#: The most the tidy-up after a turn may take; the answer has already gone out.
+TIDY_TIMEOUT_S = 6.0
+#: How sure Jev must be before a browser or tab is closed.
+TIDY_MIN_P = 0.7
+
+TIDY_QUESTIONS = {
+    "browser": {
+        "type": "choice",
+        "instructions": (
+            "A task's turn just ended. Its browser can close now: its tabs are saved and reopen when the task "
+            "needs them again, and the user stays signed in. Decide whether to keep it open or close it."
+        ),
+        "criteria": {
+            "keep": (
+                "The user is likely to look at or continue in the browser soon: the answer points them to the page "
+                "or asks them to do something there, or the work is mid-flow (a half-filled form, a checkout, a "
+                "booking, waiting for their reply about what is on the page)."
+            ),
+            "close": "The browser work is done or paused: the answer stands on its own without the page.",
+        },
+    },
+    "other_tabs": {
+        "type": "choice",
+        "instructions": "If the browser stays open: are the tabs other than the active one still needed for this task?",
+        "criteria": {
+            "keep": "A tab holds something the task will come back to soon, such as a form in progress.",
+            "close": "They were lookups or side pages that the task is done with.",
+        },
+    },
+}
+
+
+def _text_of(message: dict) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
+def _last_exchange(session: "ChatSession") -> tuple[str, str]:
+    """This turn's request and final answer, as text."""
+    request = answer = ""
+    for message in reversed(getattr(session, "_history", None) or []):
+        if not isinstance(message, dict):
+            continue
+        if not answer and message.get("role") == "assistant":
+            answer = _text_of(message).strip()
+        elif message.get("role") == "user" and _text_of(message).strip():
+            request = _text_of(message).strip()
+            break
+    return request, answer
+
+
+async def tidy_after_turn(session: "ChatSession") -> None:
+    """After a turn that used the browser, ask Jev whether the task is done
+    with it: close the whole browser (its tabs are noted and reopen on
+    request), or keep it and close the side tabs. Nothing closes while the
+    person holds the browser or watches it. Best-effort and bounded: the
+    answer has already gone out."""
+    state: _BrowserState | None = getattr(session, "_browser_state", None)
+    if state is None or not state.opened or session._browser_config.in_app:
+        return
+    try:
+        async with asyncio.timeout(TIDY_TIMEOUT_S):
+            await _tidy(session, state)
+    except Exception as exc:  # never raise out of the turn's cleanup
+        logger.info("browser tidy-up skipped: %s", type(exc).__name__)
+
+
+async def _tidy(session: "ChatSession", state: _BrowserState) -> None:
+    info = await state.client.session_info(session_id=state.session_id)
+    if info.control.holder == "human":
+        return
+    tabs = await state.client.tabs(session_id=state.session_id)
+    request, answer = _last_exchange(session)
+    questions = dict(TIDY_QUESTIONS) if len(tabs) > 1 else {"browser": TIDY_QUESTIONS["browser"]}
+    decision = await _jev(session, jev_state={
+        "task_request": request[:1500],
+        "final_answer": answer[:2000],
+        "user_is_watching_the_browser": info.viewers > 0,
+        "tabs": [{"url": t.url, "title": t.title[:200], "active": t.active} for t in tabs],
+    }, questions=questions)
+    if decision is None or decision.error:
+        return
+    choice, p = decision.choice("browser")
+    if choice == "close" and p >= TIDY_MIN_P and info.viewers == 0:
+        await state.client.close_session(session_id=state.session_id)
+        logger.info("browser closed after the turn", extra={"event": "browser_tidy", "closed": "session", "p": p})
+        return
+    if len(tabs) < 2:
+        return
+    choice, p = decision.choice("other_tabs")
+    if choice == "close" and p >= TIDY_MIN_P:
+        for tab in tabs:
+            if not tab.active:
+                await state.client.close_tab(session_id=state.session_id, tab_id=tab.id, park=True)
+        logger.info("side tabs closed after the turn", extra={"event": "browser_tidy", "closed": "tabs", "p": p})
 
 
 BROWSER_TOOL_PROMPT = """\

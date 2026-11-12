@@ -3501,6 +3501,10 @@ class ChatSession:
                 # steps above raise, or the pool outlives the process.
                 try:
                     if self._browser_state is not None:
+                        # Jev may close a browser the task is done with; its tabs are noted.
+                        from anton.core.browser.tool import tidy_after_turn
+
+                        await tidy_after_turn(self)
                         await self._browser_state.aclose()
                     if self._jev_http is not None:
                         await self._jev_http.aclose()

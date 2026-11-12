@@ -116,6 +116,8 @@ class SessionInfo(_Answer):
     control: Control
     #: The active tab's address; null before a page loads.
     url: str | None = None
+    #: People watching it now: the router's viewers; 0 from a host that doesn't say.
+    viewers: int = 0
     #: The most tabs the agent may open for this task; None from a host that has no limit.
     max_tabs: int | None = None
     #: Tabs a recycled session noted, which reopen only when asked for.

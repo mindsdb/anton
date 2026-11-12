@@ -219,9 +219,13 @@ class BrowserClient:
         path = f"/sessions/{quote(session_id)}/tabs/{quote(tab_id, safe='')}/activate"
         return (await self._read(TabAnswer, "POST", path)).tab
 
-    async def close_tab(self, *, session_id: str, tab_id: str) -> None:
-        """Closing the last tab leaves a blank one."""
-        await self._request("DELETE", f"/sessions/{quote(session_id)}/tabs/{quote(tab_id, safe='')}")
+    async def close_tab(self, *, session_id: str, tab_id: str, park: bool = False) -> None:
+        """Closing the last tab leaves a blank one. ``park`` notes the tab
+        (address and title) among the session's parked tabs, to reopen later."""
+        await self._request(
+            "DELETE", f"/sessions/{quote(session_id)}/tabs/{quote(tab_id, safe='')}",
+            params={"park": "true"} if park else None,
+        )
 
     async def saved_tabs(self, *, project: str) -> list[SavedTab]:
         """The project's saved tabs, newest first."""
