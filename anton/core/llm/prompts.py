@@ -100,6 +100,10 @@ Pydantic models. Define a class with BaseModel, and the LLM fills it. Supports l
 tool-call loop inside scratchpad code. The LLM reasons and calls your tools iteratively. \
 handle_tool(name, inputs) is a plain sync function returning a string result. Use this for \
 multi-step AI workflows like extraction or analysis with structured outputs.
+- web_search(query) answers a natural-language query (e.g. "latest SpaceX IPO news") using \
+the configured LLM's native web search and returns the model's narrative answer with source \
+links as a string. Use it for current/real-time information from within scratchpad code. The \
+call is synchronous.
 - classify(texts, categories) labels each text with exactly one category (a list of names, \
 or a dict of name -> description) and returns one dict per text, in order, with keys \
 label, p and probabilities. classify_yes_no(texts, question) answers one yes/no question \
@@ -124,10 +128,6 @@ do not label the same texts again with get_llm() or another classify() run to co
 A p below about 0.9 marks a borderline text; if the borderline texts could change the \
 answer, you may re-check only those with get_llm(), many per generate_object call. If they raise because the decision model is unavailable, label with \
 get_llm() instead, many texts per generate_object call.
-- web_search(query) answers a natural-language query (e.g. "latest SpaceX IPO news") using \
-the configured LLM's native web search and returns the model's narrative answer with source \
-links as a string. Use it for current/real-time information from within scratchpad code. The \
-call is synchronous.
 - get_llm, agentic_loop, classify, classify_yes_no, and web_search are already available \
 as globals inside scratchpad code — do not import them.
 - All .anton/.env variables are available as environment variables (os.environ).
@@ -715,7 +715,7 @@ NO_INTERNET_CHAT_SYSTEM_PROMPT = cut_spans(
     # Up to SCRATCHPAD, so the follow-up suggestions about public datasets go too.
     ("INTERNET & LIVE INFORMATION:\n", "SCRATCHPAD:\n- Use the scratchpad", NO_INTERNET_DATA_SOURCES),
     ("web scraping, ", "plotting", ""),
-    ("- web_search(query) answers", "- get_llm, agentic_loop, classify, classify_yes_no, and web_search", ""),
+    ("- web_search(query) answers", "- classify(texts, categories) labels", ""),
     (
         "- get_llm, agentic_loop, classify, classify_yes_no, and web_search are already available",
         " as globals",
@@ -729,6 +729,26 @@ NO_INTERNET_CHAT_SYSTEM_PROMPT = cut_spans(
         "alternate libraries, another of the connected data sources, retrying with backoff, etc.",
     ),
 )
+
+def without_classify(prompt: str) -> str:
+    """``prompt`` without the scratchpad's classify() and classify_yes_no().
+
+    For a session where they are off, or whose coding model is not on MindsHub.
+    Works on the full and the no-internet chat prompt alike.
+    """
+    prompt = cut_spans(prompt, ("- classify(texts, categories) labels", "- get_llm, agentic_loop", ""))
+    for named, without in (
+        ("- get_llm, agentic_loop, classify, classify_yes_no, and web_search are",
+         "- get_llm, agentic_loop, and web_search are"),
+        ("- get_llm, agentic_loop, classify, and classify_yes_no are", "- get_llm and agentic_loop are"),
+    ):
+        if prompt.count(named) == 1:
+            return prompt.replace(named, without)
+    raise ValueError("the scratchpad globals line no longer names classify()")
+
+
+NO_CLASSIFY_CHAT_SYSTEM_PROMPT = without_classify(CHAT_SYSTEM_PROMPT)
+NO_INTERNET_NO_CLASSIFY_CHAT_SYSTEM_PROMPT = without_classify(NO_INTERNET_CHAT_SYSTEM_PROMPT)
 
 NO_INTERNET_RESILIENCE_NUDGE = cut_spans(
     RESILIENCE_NUDGE,

@@ -84,6 +84,7 @@ class ScratchpadManager:
         coding_api_key_supplier: ApiKeySupplier | None = None,
         coding_flavor: str | None = None,
         internet_research_enabled: bool = True,
+        classify_enabled: bool = True,
     ) -> None:
         self._pads: dict[str, ScratchpadRuntime] = {}
         self._runtime_factory = runtime_factory
@@ -132,6 +133,8 @@ class ScratchpadManager:
                 "this scratchpad runtime factory takes no internet_research_enabled, so "
                 "its pads keep web_search() although internet research is off"
             )
+        self._classify_enabled = classify_enabled
+        self._factory_takes_classify = self._probe_factory_kwarg(runtime_factory, "classify_enabled")
         # Unlike the kwargs above, a policy is never dropped: a factory that
         # cannot take it would run agent code unlocked. It must name the
         # parameter, since a bare **kwargs can swallow it, and get_or_create
@@ -378,6 +381,11 @@ class ScratchpadManager:
                 **(
                     {"internet_research_enabled": False}
                     if not self._internet_research_enabled and self._factory_takes_internet_research
+                    else {}
+                ),
+                **(
+                    {"classify_enabled": False}
+                    if not self._classify_enabled and self._factory_takes_classify
                     else {}
                 ),
             )

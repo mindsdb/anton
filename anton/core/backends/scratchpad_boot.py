@@ -11,6 +11,7 @@ from anton.core.backends.wire import (
     CELL_DELIM,
     CELL_FILENAME,
     CELL_TRACE_MARKER,
+    CLASSIFY_ENV,
     EXPLAINABILITY_QUERIES_NAME,
     INTERNET_RESEARCH_ENV,
     MISSING_MODULE_HINT,
@@ -1005,6 +1006,19 @@ if _scratchpad_model:
         def _classify_off(*args, **kwargs):
             raise RuntimeError(_JEV_OFF)
 
+        def _classify_turned_off(*args, **kwargs):
+            raise RuntimeError(
+                "classify() and classify_yes_no() are turned off for this session. Label the "
+                "texts with get_llm() instead, many texts per generate_object call."
+            )
+
+        if os.environ.get(CLASSIFY_ENV) == "off":
+            _classify_helper = _classify_yes_no_helper = _classify_turned_off
+        elif _jev_ready:
+            _classify_helper, _classify_yes_no_helper = classify, classify_yes_no
+        else:
+            _classify_helper = _classify_yes_no_helper = _classify_off
+
         import logging
 
         _jev_url_prefix = f"{(_llm_base_url or '').rstrip('/')}/decisions"
@@ -1024,11 +1038,11 @@ if _scratchpad_model:
                     and str(args[1]).startswith(_jev_url_prefix)
                 )
 
-        if _jev_ready:
+        if _classify_helper is classify:
             logging.getLogger("httpx2").addFilter(_DropDecisionRequestLogs())
 
-        _inject_helper("classify", classify if _jev_ready else _classify_off)
-        _inject_helper("classify_yes_no", classify_yes_no if _jev_ready else _classify_off)
+        _inject_helper("classify", _classify_helper)
+        _inject_helper("classify_yes_no", _classify_yes_no_helper)
     except Exception:
         pass  # LLM not available — not fatal (e.g. anthropic not installed)
 

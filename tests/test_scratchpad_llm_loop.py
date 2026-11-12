@@ -34,7 +34,7 @@ from pydantic import BaseModel, TypeAdapter
 
 from anton.core.backends.local import LocalScratchpadRuntime, local_scratchpad_runtime_factory
 from anton.core.backends.manager import ScratchpadManager
-from anton.core.backends.wire import CELL_DELIM, INTERNET_RESEARCH_ENV, RESULT_START
+from anton.core.backends.wire import CELL_DELIM, CLASSIFY_ENV, INTERNET_RESEARCH_ENV, RESULT_START
 from anton.core.llm.openai import OpenAIProvider
 from anton.core.llm.tracing import TraceContext, reset_trace_context, set_trace_context
 
@@ -788,6 +788,16 @@ def test_classify_raises_without_a_request_off_the_mindshub_gateway(tmp_path, ce
 
     assert result.error is not None and "need the MindsHub gateway" in result.error
     assert "get_llm()" in result.error
+    assert server.seen == []
+
+
+def test_classify_raises_without_a_request_when_turned_off(tmp_path):
+    with _serving() as server:
+        (result,) = _run_cells(['classify(["a"], ["X", "Y"])'], tmp_path,
+                               base_url=f"http://127.0.0.1:{server.server_port}/v1",
+                               extra_env={CLASSIFY_ENV: "off"})
+
+    assert result.error is not None and "turned off for this session" in result.error
     assert server.seen == []
 
 @pytest.mark.slow

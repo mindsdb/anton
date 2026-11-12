@@ -112,6 +112,8 @@ rendered as an agent message; the pod sends it only when the request set
 `tool_messages`.
 A request with `jev_decisions` set to false never asks Jev, MindsHub's
 decision model, whether the agent finished: the organization opted out.
+A request with `jev_classify` set to false gives the agent no scratchpad
+classify() or classify_yes_no(), which label texts with Jev.
 
 Answer lines on stdin (interactive turns only), one JSON object per line,
 at most 64 KB:
@@ -395,6 +397,9 @@ class TurnRequestV1:
     #: controller that does not forward the field changes nothing; anything
     #: else turns it off, since a malformed opt-out must not read as consent.
     jev_decisions: bool = True
+    #: Whether the agent's scratchpad may label texts with Jev through
+    #: classify() and classify_yes_no(). Read like `jev_decisions`.
+    jev_classify: bool = True
     #: Per-engine connector data cowork-server resolved for this turn:
     #: {engine: {"usage_notes": str}}. Rendered only for engines the turn's
     #: vault connects. Absent when no connected engine has notes.
@@ -449,6 +454,7 @@ class TurnRequestV1:
             interactive=d.get("interactive") is True,
             tool_messages=d.get("tool_messages") is True,
             jev_decisions=d.get("jev_decisions", True) is True,
+            jev_classify=d.get("jev_classify", True) is True,
             # Same defensive isinstance check as oauth/trace.
             connectors=(
                 d.get("connectors") if isinstance(d.get("connectors"), dict) else None

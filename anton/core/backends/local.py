@@ -32,6 +32,7 @@ from anton.core.backends.wire import (
     HEARTBEAT_MARKER,
     INSTALL_END_MARKER,
     INSTALL_START_MARKER,
+    CLASSIFY_ENV,
     INTERNET_RESEARCH_ENV,
     MAX_OUTPUT,
     truncation_note,
@@ -387,6 +388,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         coding_api_key_supplier: ApiKeySupplier | None = None,
         coding_flavor: str | None = None,
         internet_research_enabled: bool = True,
+        classify_enabled: bool = True,
         _venvs_base: Path | None = None,
     ) -> None:
         # The name becomes a folder the host deletes and recreates, so one that
@@ -427,6 +429,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._coding_flavor: str | None = coding_flavor
         # False: the boot script injects a web_search() that only raises.
         self._internet_research_enabled = internet_research_enabled
+        # False: the boot script injects a classify() that only raises.
+        self._classify_enabled = classify_enabled
         self._credential_path: Path | None = None
         self._credential_written: str | None = None
         # The Landlock policy every spawn of agent code runs under; None runs
@@ -1115,6 +1119,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             env.pop(INTERNET_RESEARCH_ENV, None)
         else:
             env[INTERNET_RESEARCH_ENV] = "off"
+        if self._classify_enabled:
+            env.pop(CLASSIFY_ENV, None)
+        else:
+            env[CLASSIFY_ENV] = "off"
         # Propagate provider credentials from the ANTON_* names into the SDK
         # names the scratchpad's nested get_llm() expects.
         if "ANTHROPIC_API_KEY" not in env and "ANTON_ANTHROPIC_API_KEY" in env:
@@ -2124,6 +2132,7 @@ def local_scratchpad_runtime_factory(
     coding_api_key_supplier: ApiKeySupplier | None = None,
     coding_flavor: str | None = None,
     internet_research_enabled: bool = True,
+    classify_enabled: bool = True,
 ) -> ScratchpadRuntime:
     return LocalScratchpadRuntime(
         name=name,
@@ -2141,4 +2150,5 @@ def local_scratchpad_runtime_factory(
         coding_api_key_supplier=coding_api_key_supplier,
         coding_flavor=coding_flavor,
         internet_research_enabled=internet_research_enabled,
+        classify_enabled=classify_enabled,
     )

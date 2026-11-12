@@ -156,6 +156,28 @@ NO_INTERNET_SCRATCHPAD_TOOL = replace(SCRATCHPAD_TOOL, description=cut_spans(
 ))
 
 
+
+def _without_classify(tool: ToolDef) -> ToolDef:
+    """``tool`` with classify() and classify_yes_no() left out of its description."""
+    text = tool.description
+    start = text.index("classify(texts, categories) labels each text")
+    end = text.index("\n", text.index("not the whole set.", start)) + 1
+    text = text[:start] + text[end:]
+    if text.count("classify, classify_yes_no, ") != 1:
+        raise ValueError("the scratchpad globals list no longer names classify()")
+    return replace(tool, description=text.replace("classify, classify_yes_no, ", ""))
+
+
+NO_CLASSIFY_SCRATCHPAD_TOOL = _without_classify(SCRATCHPAD_TOOL)
+NO_INTERNET_NO_CLASSIFY_SCRATCHPAD_TOOL = _without_classify(NO_INTERNET_SCRATCHPAD_TOOL)
+
+
+def scratchpad_tool(*, internet_research: bool = True, classify: bool = True) -> ToolDef:
+    """The scratchpad tool for a session with or without internet research and classify()."""
+    if internet_research:
+        return SCRATCHPAD_TOOL if classify else NO_CLASSIFY_SCRATCHPAD_TOOL
+    return NO_INTERNET_SCRATCHPAD_TOOL if classify else NO_INTERNET_NO_CLASSIFY_SCRATCHPAD_TOOL
+
 MEMORIZE_TOOL = ToolDef(
     name="memorize",
     description=(
