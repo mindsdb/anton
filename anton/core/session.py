@@ -14,7 +14,9 @@ from datetime import datetime, timezone
 import json
 import logging
 import re
+import secrets
 import sys
+import threading
 import time
 from typing import TYPE_CHECKING, List, Literal, get_args
 import os
@@ -1112,6 +1114,32 @@ _VERIFIER_JUDGMENT_RUBRIC = (
     "related figure, is COMPLETE, not STUCK."
 )
 
+# Opens the block that shows the model text the user added mid-turn (ENG-4194).
+_USER_INPUT_PREFIX = (
+    "The user added this while you were working. Take it into account from here on:"
+)
+# Each added message is wrapped in this tag with a marker drawn per turn, so a
+# tool result that imitates an addition can't reproduce it (ENG-4194).
+_USER_INPUT_TAG = "user_addition"
+# Any user_addition tag inside the user's own text is stripped before wrapping.
+_USER_INPUT_TAG_RE = re.compile(r"<\s*/?\s*user_addition\b[^>]*>", re.IGNORECASE)
+# Appended only when the added text arrives after the model's final answer: the
+# reply that follows replaces that answer in what the user sees. An anton note,
+# so the completion check's transcript leaves it out.
+_USER_INPUT_REPLY_CLAUSE = (
+    f"{ANTON_NOTE} Your next reply replaces your previous answer in what the user "
+    "sees, so it must stand on its own."
+)
+# Extra rounds a turn may take for added text that arrived after its final answer.
+_MAX_USER_INPUT_ROUNDS = 2
+# Limits on what one turn takes; past them `add_user_input` refuses and the
+# host keeps the message as the next task.
+_MAX_USER_INPUTS_PER_TURN = 20
+_MAX_USER_INPUT_CHARS = 4000
+_MAX_USER_INPUT_TURN_BYTES = 64 * 1024
+# Most added text one injected block carries; the rest waits for the next step.
+_MAX_USER_INPUT_BLOCK_CHARS = 16000
+
 # Opens the verifier's continuation and stuck notes. A "SYSTEM:" note that says "do not
 # mention this" reads as an injection: Azure's prompt filter blocks variants of it, and
 # models answered it with "I cannot assist" or by inventing the figure just reported missing.
@@ -1596,7 +1624,7 @@ def _render_verify_transcript(
                 btype = block.get("type")
                 if btype == "text":
                     text = (block.get("text") or "").strip()
-                    if not text:
+                    if not text or (role == "user" and text.startswith(_NOTE_PREFIXES)):
                         continue
                     if preamble:
                         # A tool_use rides with this text, so it is never the
@@ -2213,6 +2241,32 @@ class ChatSession:
         # Out-of-band event path, attached for the duration of a
         # `turn_stream` turn only; None outside one.
         self.emitter = None
+        # Text the user added while a turn runs (ENG-4194). The host calls
+        # `add_user_input` from any thread; the tool loop shows unread entries
+        # to the model at its next step boundary. Only unread entries are kept.
+        self._user_input_lock = threading.Lock()
+        self._user_inputs: list[dict] = []
+        self._user_input_turn_running = False
+        # Shown to the model by a call that has not completed yet. They count
+        # as unread until it does: a failed or cancelled call returns them.
+        # Each entry also holds the history block that carried it.
+        self._user_inputs_in_flight: list[dict] = []
+        # What this turn has taken so far, against the per-turn limits.
+        self._user_input_count = 0
+        self._user_input_bytes = 0
+        # Texts the model has read this turn, for the completion check.
+        self._user_inputs_seen: list[str] = []
+        # Per-turn marker on the user_addition tags.
+        self._user_input_marker = secrets.token_hex(8)
+        # Extra model rounds this turn took because the model finished with
+        # added text still unread. Capped by `_MAX_USER_INPUT_ROUNDS`.
+        self._user_input_rounds = 0
+        # Called with the ids just shown to the model, so the host can mark
+        # them read. Runs on the event loop; must not block.
+        self.on_user_input_read: Callable[[list[str]], None] | None = None
+        # Called once at turn start, before any model call, when the turn
+        # starts taking added text. Runs on the event loop; must not block.
+        self.on_user_input_ready: Callable[[], None] | None = None
         self.question_count = 0
         # Seconds spent waiting on humans during the current tool dispatch,
         # subtracted from the tool's reported elapsed time.
@@ -5149,9 +5203,14 @@ class ChatSession:
     @property
     def _continuation_pending(self) -> bool:
         """Whether this turn has resumed past an answer the user already read:
-        a verifier continuation, or a "Keep going" past the time limit. A
-        hand-back after either must announce itself (`cancels_continuation`)."""
-        return self._turn_continuations > 0 or self._time_limit_resumed
+        a verifier continuation, a "Keep going" past the time limit, or a
+        round taken for added user text (ENG-4194). A hand-back after any of
+        them must announce itself (`cancels_continuation`)."""
+        return (
+            self._turn_continuations > 0
+            or self._time_limit_resumed
+            or self._user_input_rounds > 0
+        )
 
     def _time_limit_reached(self) -> bool:
         """Whether this turn has run past its time limit. Never on a host that
@@ -5471,6 +5530,7 @@ class ChatSession:
         try:
             async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
                 self._book_content_filter(event)
+                self._confirm_user_inputs_read(event)
                 yield event
             return
         except ContextOverflowError:
@@ -5486,6 +5546,7 @@ class ChatSession:
         try:
             async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
                 self._book_content_filter(event)
+                self._confirm_user_inputs_read(event)
                 yield event
             return
         except ContextOverflowError:
@@ -5497,6 +5558,7 @@ class ChatSession:
         )
         async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
             self._book_content_filter(event)
+            self._confirm_user_inputs_read(event)
             yield event
 
     def _book_content_filter(self, event: StreamEvent) -> None:
@@ -5765,6 +5827,142 @@ class ChatSession:
             )
         return ""
 
+    def add_user_input(self, addon_id: str, text: str) -> bool:
+        """Queue *text* for the running turn. False when no turn is running or
+        the text is past this turn's limits (`_MAX_USER_INPUTS_PER_TURN`,
+        `_MAX_USER_INPUT_CHARS`, `_MAX_USER_INPUT_TURN_BYTES`), so the caller
+        keeps it as the next task instead. Thread-safe."""
+        size = len(text.encode("utf-8", "replace"))
+        with self._user_input_lock:
+            if not self._user_input_turn_running:
+                return False
+            if (
+                len(text) > _MAX_USER_INPUT_CHARS
+                or self._user_input_count >= _MAX_USER_INPUTS_PER_TURN
+                or self._user_input_bytes + size > _MAX_USER_INPUT_TURN_BYTES
+            ):
+                logger.info("added user input refused: past this turn's limits")
+                return False
+            self._user_input_count += 1
+            self._user_input_bytes += size
+            self._user_inputs.append({"id": addon_id, "text": text})
+            return True
+
+    def withdraw_user_input(self, addon_id: str) -> bool:
+        """Remove an added text the model has not been shown. False when it
+        was already shown (even by a call still running) or is unknown."""
+        with self._user_input_lock:
+            for i, entry in enumerate(self._user_inputs):
+                if entry["id"] == addon_id:
+                    del self._user_inputs[i]
+                    return True
+            return False
+
+    def take_unread_user_inputs(self) -> list[dict]:
+        """Return and clear what the model never read, as ``{"id", "text"}``
+        dicts. The host runs them as the next task once the turn ends.
+
+        Includes text shown to a model call that never completed (it failed,
+        or the turn was cancelled first); its block is taken back out of the
+        history so the next task does not carry it twice."""
+        with self._user_input_lock:
+            in_flight, self._user_inputs_in_flight = self._user_inputs_in_flight, []
+            unread, self._user_inputs = self._user_inputs, []
+        self._drop_user_input_blocks([e["block"] for e in in_flight])
+        return [{"id": e["id"], "text": e["text"]} for e in in_flight + unread]
+
+    def _reset_user_inputs(self) -> None:
+        """A new turn: nothing left over from the last one, fresh limits and marker."""
+        with self._user_input_lock:
+            self._user_inputs = []
+            self._user_inputs_in_flight = []
+            self._user_input_count = 0
+            self._user_input_bytes = 0
+            self._user_inputs_seen = []
+            self._user_input_marker = secrets.token_hex(8)
+
+    def _take_user_input_block(self) -> dict | None:
+        """Move unread added text into one text block for the model, at most
+        `_MAX_USER_INPUT_BLOCK_CHARS` of it (the rest waits for the next step).
+        Each message is wrapped in a ``user_addition`` tag carrying this
+        turn's marker; tags inside the text are stripped. The entries stay
+        in flight until a model call that saw the block completes
+        (`_confirm_user_inputs_read`). None when nothing is unread."""
+        marker = self._user_input_marker
+        taken: list[dict] = []
+        parts: list[str] = []
+        used = 0
+        with self._user_input_lock:
+            while self._user_inputs:
+                entry = self._user_inputs[0]
+                text = _USER_INPUT_TAG_RE.sub("", scrub_credentials(entry["text"])).strip()
+                part = f'<{_USER_INPUT_TAG} id="{marker}">\n{text}\n</{_USER_INPUT_TAG}>'
+                if taken and used + len(part) > _MAX_USER_INPUT_BLOCK_CHARS:
+                    break
+                self._user_inputs.pop(0)
+                taken.append(entry)
+                parts.append(part)
+                used += len(part)
+            if not taken:
+                return None
+            block = {"type": "text", "text": f"{_USER_INPUT_PREFIX}\n" + "\n".join(parts)}
+            self._user_inputs_in_flight.extend(
+                {"id": e["id"], "text": e["text"], "block": block} for e in taken
+            )
+        return block
+
+    def _confirm_user_inputs_read(self, event: StreamEvent) -> None:
+        """On a completed model call, the in-flight added text has been read:
+        tell the host (`on_user_input_read`). A failing callback must not end
+        the turn."""
+        if not isinstance(event, StreamComplete):
+            return
+        with self._user_input_lock:
+            read, self._user_inputs_in_flight = self._user_inputs_in_flight, []
+            self._user_inputs_seen.extend(e["text"] for e in read)
+        callback = self.on_user_input_read
+        if callback is None or not read:
+            return
+        try:
+            callback([e["id"] for e in read])
+        except Exception:
+            logger.warning("on_user_input_read callback failed", exc_info=True)
+
+    def _drop_user_input_blocks(self, blocks: list[dict]) -> None:
+        """Take unread added-text blocks back out of the history. A message
+        left holding only anton's note goes too; it was the last one, so the
+        history still alternates."""
+        if not blocks:
+            return
+        for msg in reversed(self._history[-6:]):
+            content = msg.get("content")
+            if msg.get("role") != "user" or not isinstance(content, list):
+                continue
+            kept = [b for b in content if not any(b is blk for blk in blocks)]
+            if len(kept) == len(content):
+                continue
+            msg["content"] = kept
+            leftover = [b for b in kept if not (
+                b.get("type") == "text" and (b.get("text") or "").startswith(_NOTE_PREFIXES)
+            )]
+            if not leftover and msg is self._history[-1]:
+                self._history.pop()
+
+    def _verify_request_text(self, user_message: str | None) -> str | None:
+        """The request the completion check judges: the turn's message plus
+        whatever the user added that the model read, so a later "stop, don't
+        send it" counts."""
+        if not self._user_inputs_seen:
+            return user_message
+        added = "\n".join(
+            f"- {_USER_INPUT_TAG_RE.sub('', scrub_credentials(t)).strip()}"
+            for t in self._user_inputs_seen
+        )
+        return (
+            f"{(user_message or '').strip()}\n\nThe user then added, while the work "
+            f"ran (where these conflict with the request, the later message wins):\n{added}"
+        )
+
     async def _dispatch_draining(self, tc):
         """Run one tool through `_run_draining`. The final item is
         ``("result", outcome)``, the ``ToolOutcome`` ``dispatch_tool`` returns,
@@ -5922,6 +6120,15 @@ class ChatSession:
         # Before the inner turn appends the user input, so `turn_messages`
         # starts where a slice of the seeded history would.
         self._start_turn_segments()
+        self._user_input_rounds = 0
+        self._reset_user_inputs()
+        with self._user_input_lock:
+            self._user_input_turn_running = True
+        if self.on_user_input_ready is not None:
+            try:
+                self.on_user_input_ready()
+            except Exception:
+                logger.warning("on_user_input_ready callback failed", exc_info=True)
         # Bind the inner generator so we can close it explicitly. A bare
         # `async for` would leave it suspended at its own `yield` when a host
         # abandons this wrapper: GeneratorExit lands on OUR yield, the loop is
@@ -5942,6 +6149,10 @@ class ChatSession:
             async for event in inner:
                 yield event
         finally:
+            # First, so text added during cleanup is refused and queued by the
+            # host rather than accepted into a turn that will never read it.
+            with self._user_input_lock:
+                self._user_input_turn_running = False
             # Nested so the turn still closes when the inner turn's own
             # cleanup raises; a turn left open would record the next
             # between-turn swap as its own.
@@ -6944,6 +7155,9 @@ class ChatSession:
         # fallback the current reply is already in history, so it must not append
         # it a second time (ENG-1155 double-append).
         _reply_persisted = False
+        # Rounds carried into the next verification-loop pass by a round taken
+        # for added user text, so the verifier gate still sees them.
+        _carried_rounds = 0
 
         while True:  # Completion verification loop
             # Per-iteration, NOT per-turn: the flag means "the reply currently in
@@ -6954,8 +7168,10 @@ class ChatSession:
             # tools (attempt_rounds stays 0, so the loop breaks at the gate
             # below before the append).
             _reply_persisted = False
-            # This attempt's rounds alone, for the verifier gate below.
-            attempt_rounds = 0
+            # This attempt's rounds alone, for the verifier gate below. A round
+            # taken for added user text continues the same attempt.
+            attempt_rounds = _carried_rounds
+            _carried_rounds = 0
             error_streak: dict[str, int] = {}
             resilience_nudged: set[str] = set()
 
@@ -7719,6 +7935,19 @@ class ChatSession:
                 # so the LLM sees the alarm before its next decision.
                 self._acc_maybe_nudge(tool_results)
 
+                # Text the user added while this round ran (ENG-4194), in the
+                # same message so turns still alternate. Not after a question
+                # nobody answered: the turn ends below with no model call.
+                # A separate text block, never inside a tool_result: only this
+                # form is the user's (see the system prompt). Read once the
+                # next model call completes (`_confirm_user_inputs_read`).
+                _added = (
+                    self._take_user_input_block()
+                    if self._unanswered_question is None else None
+                )
+                if _added is not None:
+                    tool_results.append(_added)
+
                 self._append_history({"role": "user", "content": tool_results})
                 # Every model call resends the whole history: one render
                 # screenshot in it, the newest, is enough.
@@ -7867,6 +8096,58 @@ class ChatSession:
                 llm_response = response.response
                 continue
 
+            # The model finished with added user text still unread (ENG-4194):
+            # show it and take another round instead of ending on an answer
+            # that ignores it. Capped so a stream of additions can't hold the
+            # turn open; later ones stay unread for `take_unread_user_inputs`.
+            if (
+                not _max_rounds_hit
+                and not _spend_ceiling_hit
+                and not _time_limit_hit
+                and not self._spend_ceiling_stops_the_tool_loop()
+                and not self._time_limit_reached()
+                and self._unanswered_question is None
+                and self._user_input_rounds < _MAX_USER_INPUT_ROUNDS
+            ):
+                _added = self._take_user_input_block()
+                if _added is not None:
+                    self._user_input_rounds += 1
+                    _extra = [_added, {"type": "text", "text": _USER_INPUT_REPLY_CLAUSE}]
+                    _last = self._history[-1] if self._history else None
+                    if (llm_response.content or "").strip():
+                        self._append_history(
+                            {"role": "assistant", "content": llm_response.content}
+                        )
+                        self._append_history({"role": "user", "content": _extra})
+                    elif _last is not None and _last.get("role") == "user":
+                        # A blank answer is not kept: an empty assistant message
+                        # is no answer to replace, and some providers reject it.
+                        # The added text joins the user message it follows, so
+                        # the history still alternates.
+                        if isinstance(_last.get("content"), str):
+                            _last["content"] = [{"type": "text", "text": _last["content"]}]
+                        _last["content"] = list(_last["content"]) + _extra
+                    else:
+                        self._append_history({"role": "user", "content": _extra})
+                    # Same boundary as a verifier continuation: the next reply
+                    # supersedes the one the user just read.
+                    yield StreamTaskProgress(
+                        phase="continuation",
+                        message="Taking your added message into account...",
+                    )
+                    response = None
+                    async for event in self.plan_stream_with_recovery(
+                        system=system, tools=tools
+                    ):
+                        yield event
+                        if isinstance(event, StreamComplete):
+                            response = event
+                    if response is None:
+                        return
+                    llm_response = response.response
+                    _carried_rounds = attempt_rounds
+                    continue
+
             # --- Completion verification ---
             # Skip when too few tool rounds were used (pure Q&A and, at the
             # default of 2, single-round turns), when we hit the max-rounds
@@ -8000,11 +8281,13 @@ class ChatSession:
             # Ask the cheap coding model to self-assess completion over a compact,
             # text-rendered view of the recent conversation (ENG-716). The
             # assistant's latest reply is already in history (appended above).
+            # With what the user added mid-turn, so a retraction counts (ENG-4194).
+            _verify_request = self._verify_request_text(user_message)
             verifier_system, verify_messages = _build_verify_request(
-                self._history, user_message
+                self._history, _verify_request
             )
             # Still latched here means this is the LLM re-probe: only an LLM verdict can clear it.
-            jev_result = None if self._verifier_latch.latched else await self._jev_verdict(user_message)
+            jev_result = None if self._verifier_latch.latched else await self._jev_verdict(_verify_request)
             jev_decided = self._jev_decides(jev_result)
             verdict = (
                 _VerifierVerdict(status=jev_result.status, reason=f"Decided by Jev (p={jev_result.p_status:.2f}).")
