@@ -84,7 +84,10 @@ class Page(_Answer):
     text: str = ""
     truncated: bool = False
     scroll: Scroll | None = None
-    challenges: list[Challenge] = []
+    #: Check frames the person can see; the router's pod always sends it (empty
+    #: when there are none) and leaves out invisible checks. None from a host
+    #: that doesn't say.
+    challenges: list[Challenge] | None = None
 
 
 class ActionResult(_Answer):

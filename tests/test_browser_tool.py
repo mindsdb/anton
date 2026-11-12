@@ -424,11 +424,13 @@ def test_an_invisible_recaptcha_frame_is_no_human_check():
     assert human_check(shown) == "reCAPTCHA"
 
 
-def test_an_on_screen_captcha_frame_the_host_missed_is_a_human_check():
-    page = model({**PAGE, "elements": [*PAGE["elements"], {"id": 9, "role": "frame", "name": "reCAPTCHA"}]})
-    assert human_check(page) == "reCAPTCHA"
-    page = model({**PAGE, "elements": [*PAGE["elements"], {"id": 9, "role": "Iframe", "name": "Widget containing checkbox for hCaptcha security challenge"}]})
-    assert human_check(page) == "hCaptcha"
+def test_an_on_screen_captcha_frame_is_a_check_only_from_a_host_that_sends_no_challenges():
+    framed = {**PAGE, "elements": [*PAGE["elements"], {"id": 9, "role": "frame", "name": "reCAPTCHA"}]}
+    # The router's pod sends challenges and leaves out invisible ones, such as the v3 badge.
+    assert human_check(model({**framed, "challenges": []})) == ""
+    assert human_check(model(framed)) == "reCAPTCHA"
+    hcaptcha = {**PAGE, "elements": [{"id": 9, "role": "Iframe", "name": "Widget containing checkbox for hCaptcha security challenge"}]}
+    assert human_check(model(hcaptcha)) == "hCaptcha"
 
 
 def test_signature_changes_with_values():

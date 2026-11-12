@@ -31,14 +31,13 @@ _CHECK_TEXT = (
     ("hcaptcha", ("i am human",)),
 )
 # A full-page check names itself in the element list. A reCAPTCHA or hCaptcha
-# frame counts only on screen (CAPTCHA_NAME); the host also reports the ones
-# the person can see as `challenges`.
+# frame is matched by name only from a host that sends no `challenges`: one
+# that does already reports the visible ones and leaves out invisible checks,
+# such as reCAPTCHA v3's on-screen badge.
 _CHECK_ELEMENTS = (
     ("cloudflare", "cloudflare security challenge"),
 )
-#: A reCAPTCHA or hCaptcha widget's name. On an on-screen frame it is a check
-#: the person can see even when the host doesn't report it; off-screen, it is
-#: a site's invisible background check.
+#: A reCAPTCHA or hCaptcha widget's name.
 CAPTCHA_NAME = re.compile(r"\b(re)?captcha\b|\bhcaptcha\b", re.I)
 _FRAME_ROLES = ("frame", "iframe")
 _CHECK_NAMES = {"cloudflare": "Cloudflare", "recaptcha": "reCAPTCHA", "hcaptcha": "hCaptcha"}
@@ -52,7 +51,8 @@ def human_check(page: Page) -> str:
     The host's ``challenges`` come first: they name check frames the person
     can see, such as a Turnstile widget embedded in an ordinary page, which
     the element list shows only as a frame. Then the URL, element names and
-    text of a full-page check, and an on-screen reCAPTCHA or hCaptcha frame.
+    text of a full-page check, and, from a host that sends no ``challenges``,
+    an on-screen reCAPTCHA or hCaptcha frame.
     """
     if page.challenges:
         return _CHECK_NAMES.get(page.challenges[0].kind, _ANY_CHECK)
@@ -65,7 +65,7 @@ def human_check(page: Page) -> str:
     for kind, needle in _CHECK_ELEMENTS:
         if needle in names:
             return _CHECK_NAMES[kind]
-    for el in page.elements:
+    for el in page.elements if page.challenges is None else ():
         if el.role.lower() in _FRAME_ROLES and not el.offscreen and CAPTCHA_NAME.search(el.name):
             return _CHECK_NAMES["hcaptcha" if "hcaptcha" in el.name.lower() else "recaptcha"]
     for kind, phrases in _CHECK_TEXT:
