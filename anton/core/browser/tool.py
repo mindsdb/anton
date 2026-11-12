@@ -679,6 +679,27 @@ def _has_position(step: dict) -> bool:
     return any("x" in end or "y" in end for end in _ends(step))
 
 
+def _in_frame(body: dict, page: Page) -> bool:
+    """Whether a step by position may land inside one of the page's frames:
+    a point inside a frame's box, or a point the boxes can't rule out (a
+    frame the host couldn't place, a point not in screenshot pixels, which
+    the boxes are in, or a point that isn't two numbers)."""
+    if not page.frames:
+        return False
+    if body.get("coords") != "screenshot" or any(frame.box is None for frame in page.frames):
+        return True
+    boxes = [frame.box for frame in page.frames if frame.box is not None]
+    for end in _ends(body):
+        if "x" not in end and "y" not in end:
+            continue
+        x, y = end.get("x"), end.get("y")
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (x, y)):
+            return True
+        if any(box.x <= x < box.x + box.width and box.y <= y < box.y + box.height for box in boxes):
+            return True
+    return False
+
+
 def _step_body(tc_input: dict) -> dict:
     step = tc_input.get("step")
     if not isinstance(step, dict) or step.get("action") not in STEP_ACTIONS:
@@ -1077,7 +1098,11 @@ async def _gate(session: "ChatSession", *, state: _BrowserState, body: dict, pag
     every step by position, whoever sends it, so those go straight to it and
     the card comes when it answers ``approval_required`` (``_send_step``).
     Only a step Jev alone flags gets the card first there. The desktop app's
-    browser holds nothing, so this card is the only one it gets."""
+    browser holds nothing, so this card is the only one it gets. There a step
+    by position that may land inside a frame (``_in_frame``) gets the
+    one-step card every time, even after clicks by position were approved on
+    the page: the tool can't tell which of a frame's controls a point lands
+    on, so it can't check that one against the commit list."""
     key = _step_key(body)
     refused = state.refused.get((page.url, key))
     if refused is not None:
@@ -1090,6 +1115,8 @@ async def _gate(session: "ChatSession", *, state: _BrowserState, body: dict, pag
     if state.position_url is not None and state.position_url != page.url:
         state.position_url = None
     listed = _hold_of(state, body, page)
+    if listed == "position" and not host_holds and _in_frame(body, page):
+        listed = "commit"
     if listed == "position":
         if host_holds or state.position_url == page.url:
             return None
@@ -2018,7 +2045,7 @@ BROWSER: you and the user share a real browser. The user sees it beside this cha
 - When a site takes its search in the address (most travel, shopping and search sites, e.g. kayak.com/flights/SFO-WAS/2026-11-27/2026-11-29), open the results address directly instead of filling the form. Building that address from the site's known pattern is allowed.
 - Otherwise start with action=run, a goal, and every value it will need in `inputs` (dates as YYYY-MM-DD). run takes the steps it is sure of quickly, keeps what pages on its way show that the goal needs, and hands back with them and the page when it isn't sure; then continue with action=act.
 - To act yourself, use action=act with a step: {"action":"click","element":17}, {"action":"type","element":4,"text":"…","submit":true}, {"action":"select","element":9,"value":"Blue"}, {"action":"scroll","direction":"down"}, {"action":"press","element":4,"key":"Enter"}, {"action":"back"}, {"action":"navigate","url":"…"}. Element numbers come from the latest page.
-- Where the page list has nothing to point at (a canvas, a drawing, a map), use pixels from your latest screenshot: {"action":"click","x":412,"y":230}. Clicks also take "button":"right" and "clicks":2. Drag with {"action":"drag","from":{"element":5} or {"x":…,"y":…},"to":{…}}; that's how shapes get drawn, sliders moved and items reordered.
+- Where the page list has nothing to point at (a canvas, a drawing, a map), use pixels from your latest screenshot: {"action":"click","x":412,"y":230}. Clicks also take "button":"right" and "clicks":2. Drag with {"action":"drag","from":{"element":5} or {"x":…,"y":…},"to":{…}}; that's how shapes get drawn, sliders moved and items reordered. Controls inside a frame have no number: click them by pixel from your latest screenshot; each such step waits for the user's Approve. A field inside a frame is for the user: hand the browser over rather than typing into it key by key.
 - Never ask for, read out, or type a password, one-time code, or card number; the tool refuses to type into a secret field. For sign-ins, CAPTCHAs, two-factor codes and payments, call action=hand_to_user with a short reason and let the user do it in the browser.
 - hand_to_user is only for those. Never use it to hand over work you found hard; if you can't do something with these actions, stop and say so in the chat, with what you tried and another way to get it done.
 - Only the user hands the browser back, with Done in the browser. Until then you can't act in it or read the page: say what you need in chat and end your turn.

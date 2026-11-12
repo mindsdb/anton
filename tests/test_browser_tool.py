@@ -900,6 +900,49 @@ async def test_on_the_desktop_position_steps_ask_once_per_page(elicit_answers):
     assert len(host.posted("/action")) == 3
 
 
+#: A page with one read frame, boxed in screenshot pixels.
+FRAMED = {
+    **PAGE,
+    "frames": [{
+        "url": "https://forms.example.test/newsletter", "read": True,
+        "box": {"x": 112, "y": 300, "width": 560, "height": 180},
+        "elements": [{"role": "button", "name": "Subscribe"}], "text": "Get the weekly digest.",
+    }],
+}
+
+
+async def test_on_the_desktop_a_click_by_position_inside_a_frame_gets_the_commit_card_after_a_position_approval(elicit_answers):
+    """The desktop's browser holds nothing and can't name what a frame's
+    controls do, so a click into a frame gets the one-step card every time,
+    even after clicks by position were approved on the page."""
+    host = FakeHost(pages=[FRAMED])
+    session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+    elicit_answers.answers += ["approve"] * 3
+    outside = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "x": 10, "y": 10}})
+    assert outside.content.startswith("Done: click at (10, 10).")
+    for _ in range(2):
+        inside = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "x": 200, "y": 350}})
+        assert inside.content.startswith("Done: click at (200, 350).")
+    prompts = elicit_answers.prompts()
+    assert len(prompts) == 3 and "Approve clicks by position on this page?" in prompts[0]
+    assert all(p.startswith("**Approve this browser step?**") for p in prompts[1:])
+    assert [o.detail for o in elicit_answers.requests[1].options][0] == "Take this step once"
+
+    # A frame the host couldn't place may be under any point.
+    host.pages = [{**FRAMED, "frames": [{"url": "about:srcdoc", "read": False, "box": None}]}]
+    unplaced = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "x": 10, "y": 10}})
+    assert unplaced.reason == "browser_step_not_approved"
+    assert elicit_answers.prompts()[3].startswith("**Approve this browser step?**")
+    # Nor can a point in page pixels be held against boxes in screenshot pixels.
+    host.pages = [FRAMED]
+    in_page_px = await browser_tool.handle_browser(
+        session, {"action": "act", "step": {"action": "click", "x": 20, "y": 20, "coords": "page"}},
+    )
+    assert in_page_px.reason == "browser_step_not_approved"
+    assert elicit_answers.prompts()[4].startswith("**Approve this browser step?**")
+    assert len(host.posted("/action")) == 3
+
+
 async def test_on_the_desktop_a_point_on_a_step_that_names_an_element_is_a_position_step(elicit_answers):
     host = FakeHost(pages=[PAGE])
     session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
