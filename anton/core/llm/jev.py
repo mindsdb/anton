@@ -269,34 +269,43 @@ def _host(url: str | None) -> str:
         return ""
 
 
-def _mindshub_host(host: str) -> bool:
-    # A real suffix match: "mindshub.ai.attacker.example" is not MindsHub.
-    return host == "mindshub.ai" or host.endswith(".mindshub.ai")
+MINDSHUB_API_HOST = "api.mindshub.ai"
 
 
-def _mindshub_base(settings) -> str | None:
-    """The MindsHub API base (``https://host/v1``) this configuration talks to, or None.
+def _provider(settings) -> str:
+    return str(getattr(settings, "planning_provider", "") or "").strip().lower().replace("_", "-")
 
-    MindsHub means the LLM provider is MindsHub (``minds-cloud``, which
-    AntonSettings reads as ``openai-compatible`` on the MindsHub base URL),
-    or a base URL on api.mindshub.ai. The legacy mdb.ai host does not serve
-    decisions.
+
+def _v1(url: str) -> str:
+    base = str(url).strip().rstrip("/")
+    return base if base.endswith("/v1") else base + "/v1"
+
+
+def _active_mindshub(settings) -> tuple[str, str] | None:
+    """``(base_url ending in /v1, api_key)`` when the configured LLM provider itself is MindsHub, else None.
+
+    Only the active (planning) provider's own config counts: ``minds-cloud``
+    (its ``minds_url`` / ``minds_api_key``), or ``openai-compatible`` whose
+    base URL host is exactly api.mindshub.ai (its ``openai_base_url`` /
+    ``openai_api_key``; AntonSettings reads ``minds-cloud`` this way). A
+    MindsHub key or URL left over beside an Anthropic or OpenAI provider is
+    never used.
     """
-    providers = {str(getattr(settings, f, "") or "").strip().lower().replace("_", "-")
-                 for f in ("planning_provider", "coding_provider")}
-    candidates = [getattr(settings, "openai_base_url", None)]
-    if providers & {"minds-cloud", "openai-compatible"}:
-        candidates.append(getattr(settings, "minds_url", None))
-    for url in candidates:
-        if url and _mindshub_host(_host(url)):
-            base = str(url).strip().rstrip("/")
-            return base if base.endswith("/v1") else base + "/v1"
-    return None
+    provider = _provider(settings)
+    if provider == "minds-cloud":
+        url, key = getattr(settings, "minds_url", None), getattr(settings, "minds_api_key", None)
+    elif provider == "openai-compatible":
+        url, key = getattr(settings, "openai_base_url", None), getattr(settings, "openai_api_key", None)
+    else:
+        return None
+    if not url or not key or _host(url) != MINDSHUB_API_HOST:
+        return None
+    return _v1(url), str(key)
 
 
 def default_decisions_model(settings) -> str | None:
-    """The decisions model when none is configured: Jev on MindsHub, otherwise none."""
-    return DEFAULT_DECISIONS_MODEL if _mindshub_base(settings) else None
+    """The decisions model when none is configured: Jev when the LLM provider is MindsHub, otherwise none."""
+    return DEFAULT_DECISIONS_MODEL if _active_mindshub(settings) else None
 
 
 def decisions_model(settings) -> str | None:
@@ -314,26 +323,15 @@ def decisions_model(settings) -> str | None:
 def decisions_config(settings) -> tuple[str, str, str] | None:
     """``(base_url, api_key, model)`` for MindsHub's ``/v1/decisions``, or None when there is no decisions model.
 
-    None when the model is off or unset off MindsHub, or when no MindsHub
-    base URL and key can be found (an explicit model needs them too).
+    Available only when the configured LLM provider itself is MindsHub (see
+    :func:`_active_mindshub`); an explicit ``ANTON_DECISIONS_MODEL`` picks the
+    model but never borrows a URL or key from anywhere else.
     """
+    connection = _active_mindshub(settings)
     model = decisions_model(settings)
-    if not model:
+    if connection is None or not model:
         return None
-    base = _mindshub_base(settings)
-    if base is None:
-        minds_url = getattr(settings, "minds_url", None)
-        if not minds_url or not _mindshub_host(_host(minds_url)):
-            return None
-        base = str(minds_url).strip().rstrip("/")
-        base = base if base.endswith("/v1") else base + "/v1"
-    key = getattr(settings, "minds_api_key", None)
-    openai_base = getattr(settings, "openai_base_url", None)
-    if not key and openai_base and _mindshub_host(_host(openai_base)):
-        key = getattr(settings, "openai_api_key", None)
-    if not key:
-        return None
-    return base, str(key), model
+    return connection[0], connection[1], model
 
 
 def decisions_available(settings) -> bool:

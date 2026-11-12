@@ -115,5 +115,6 @@ The 32 agent-labelled messages were sent straight to `run_quick_edit` (1 run eac
   messages once the bar ships.
 * Router latency was measured one call at a time from a laptop. In the end-to-end runs, with
   4 jobs at once, the router's median was 0.92 s.
-* Without a decisions model (`ANTON_DECISIONS_MODEL`; Jev by default only on MindsHub) the bar
+* Without a decisions model (`ANTON_DECISIONS_MODEL`; Jev by default, and only when the LLM provider itself
+  is MindsHub) the bar
   never edits directly and every message goes to the agent. Those setups get #790 B's timing.
