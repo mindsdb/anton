@@ -1051,6 +1051,21 @@ async def test_on_the_desktop_a_step_says_into_frame_only_after_the_one_step_fra
     assert len(web.posted("/action")) == 2 and all("into_frame" not in body for body in web.posted("/action"))
 
 
+async def test_on_the_desktop_the_navigate_that_opens_an_address_in_an_open_session_says_into_frame_false():
+    """Every step body anton sends the desktop says into_frame, the navigate
+    that open or run sends for an address in a session already open too, so
+    no body leaves the field to the desktop's default. The web's browser
+    gets none."""
+    for config, field in ((BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"), {"into_frame": False}), (None, {})):
+        host = FakeHost()
+        session = make_session(host, config=config)
+        await browser_tool.handle_browser(session, {"action": "open"})
+        await browser_tool.handle_browser(session, {"action": "open", "url": "https://shop.example/other"})
+        assert host.posted("/action") == [
+            {"action": "navigate", "url": "https://shop.example/other", "include_page": False, **field},
+        ]
+
+
 async def test_on_the_desktop_a_step_held_for_another_reason_says_into_frame_after_its_one_step_card(elicit_answers):
     """A step by position that holds for another reason (any click on a
     consent page, a drag from a commit control) gets the same one-step card

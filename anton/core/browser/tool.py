@@ -604,7 +604,12 @@ async def _ensure_open(session: "ChatSession", url: str | None = None) -> None:
         # The host relaunches the browser on the same profile by itself if it
         # was reaped for idleness, so only a new URL needs a call here.
         if url:
-            await state.client.act(session_id=state.session_id, step={"action": "navigate", "url": url, "include_page": False})
+            step = {"action": "navigate", "url": url, "include_page": False}
+            # A navigate has no point, so it never goes into a frame; the
+            # desktop gets the field on every body all the same (_gate).
+            if session._browser_config.in_app:
+                step["into_frame"] = False
+            await state.client.act(session_id=state.session_id, step=step)
         return
     await state.client.open_session(session_id=state.session_id, url=url)
     state.opened = True
