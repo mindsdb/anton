@@ -1547,6 +1547,8 @@ async def _do_run(session: "ChatSession", tc_input: dict) -> str:
 
     taken: list[str] = []
     stalls = 0
+    # The last step the run sent, as _step_key compares two steps.
+    last_step: str | None = None
     # Pages kept this run, by signature: kept once each.
     kept_here: set[str] = set()
     state.kept = []
@@ -1631,13 +1633,17 @@ async def _do_run(session: "ChatSession", tc_input: dict) -> str:
             taken.append(_describe(body))
             state.steps.append(_describe(body, typed=False))
             page = result.page or await state.client.page(session_id=state.session_id)
-            # Text that arrives late is progress. The host's true never resets the
-            # count by itself, since a clock or a carousel changes something during
-            # most steps. Their text still resets it when it changes during the
-            # step: that reads the same as late text, so such a page runs on to
-            # max_steps.
-            unchanged = signature(page) == before and page.text == before_text
-            stalls = stalls + 1 if result.changed is False or unchanged else 0
+            # A stall: the host says nothing changed; or neither the elements nor
+            # the text did; or the elements didn't and the step repeats the one
+            # before. Text that arrives late after a new step is progress, while
+            # a dead button clicked again on a page whose clock or carousel ticks
+            # during every step still hands back. The host's true never resets
+            # the count by itself.
+            step_key = _step_key(body)
+            same = signature(page) == before
+            stalled = result.changed is False or (same and (page.text == before_text or step_key == last_step))
+            last_step = step_key
+            stalls = stalls + 1 if stalled else 0
             if stalls >= MAX_STALLS:
                 return _handback(state, "The last steps changed nothing on the page; take over with action=act.", taken, page)
 

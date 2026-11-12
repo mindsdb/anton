@@ -1413,12 +1413,14 @@ async def test_run_stops_when_steps_change_nothing(fake_jev):
 
 async def test_run_does_not_stall_on_text_that_arrives_late(fake_jev):
     """Results that fill in after a click change the text and not the
-    elements; the run goes on."""
+    elements; the run goes on while each step is a new one."""
     pages = [{**PAGE, "text": f"Searching… {i} results so far"} for i in range(5)]
     host = FakeHost(pages=pages)
     host.changed = True
     session = make_session(host)
-    fake_jev.queue += [jev_answers("click", target="e2")] * 3 + [jev_answers("done")]
+    fake_jev.queue += [
+        jev_answers("click", target="e2"), jev_answers("scroll_down"), jev_answers("click", target="e3"), jev_answers("done"),
+    ]
     result = await browser_tool.handle_browser(session, {"action": "run", "goal": "search for laptops"})
     assert "changed nothing" not in result.content
     assert "Jev reports the goal is done" in result.content and len(host.posted("/action")) == 3
@@ -1443,18 +1445,19 @@ async def test_run_hands_back_when_the_host_says_changed_but_nothing_did(fake_je
     assert "changed nothing" in result.content and len(moved_between_steps.posted("/action")) == browser_tool.MAX_STALLS
 
 
-async def test_run_reads_a_clock_that_ticks_during_each_step_as_late_text_and_runs_to_max_steps(fake_jev):
-    """A clock or a carousel in the page's text that changes during the step
-    answers true with new text and the same elements, which is what late
-    text looks like too. The run can't tell them apart, so it counts no
-    stall there and stops at max_steps instead of after MAX_STALLS."""
+async def test_run_hands_back_from_a_dead_button_on_a_page_whose_clock_ticks_during_each_step(fake_jev):
+    """A clock or a carousel in the page's text changes during every step,
+    so the host answers true with new text and the same elements, as it does
+    for late text. A step that repeats the one before it on the same
+    elements still counts as a stall, so clicking a dead button hands back
+    after MAX_STALLS repeats rather than running to max_steps."""
     host = FakeHost(pages=[{**PAGE, "text": f"Now 12:00:0{i}"} for i in range(9)])
     host.changed = True
     session = make_session(host)
-    fake_jev.queue += [jev_answers("scroll_down")] * 4
-    result = await browser_tool.handle_browser(session, {"action": "run", "goal": "find the footer", "max_steps": 4})
-    assert "changed nothing" not in result.content
-    assert "Stopped after 4 steps without finishing." in result.content and len(host.posted("/action")) == 4
+    fake_jev.queue += [jev_answers("click", target="e2")] * 6
+    result = await browser_tool.handle_browser(session, {"action": "run", "goal": "search", "max_steps": 6})
+    assert "changed nothing" in result.content
+    assert len(host.posted("/action")) == browser_tool.MAX_STALLS + 1
 
 
 async def test_run_clamps_max_steps(fake_jev):
