@@ -793,7 +793,16 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
         webbrowser.open(view_url)
 
     status = "Updated" if report_id else "Published"
-    return f"{status} successfully!\nView URL: {view_url}"
+    message = f"{status} successfully!\nView URL: {view_url}"
+    withheld = result.get("withheld_secrets") or []
+    if withheld:
+        # An MCP connection's token is never given to an app, so code that
+        # reads it gets nothing; say so rather than leave a bare 401.
+        message += (
+            "\nNot available to the app: " + ", ".join(withheld)
+            + " (an MCP connection's token is kept out of apps; use another connection type for the app's backend)."
+        )
+    return message
 
 
 PUBLISH_TOOL = ToolDef(

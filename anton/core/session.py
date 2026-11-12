@@ -29,6 +29,12 @@ from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
 from anton.core.datasources.data_vault import DataVault
+from anton.core.idle_scratchpad import (
+    IDLE_ROUNDS_BEFORE_WITHHOLD,
+    IDLE_SCRATCHPAD_NOTICE,
+    round_is_idle,
+    without_scratchpad,
+)
 from anton.core.llm import jev as _jev
 from anton.core.llm.effort import (
     TRUNCATION_RETRY_NOTE,
@@ -7190,6 +7196,7 @@ class ChatSession:
             _carried_rounds = 0
             error_streak: dict[str, int] = {}
             resilience_nudged: set[str] = set()
+            idle_scratchpad_rounds = 0
 
             while llm_response.tool_calls:
                 # Only the last round's refusals count: an earlier one was asked
@@ -7951,6 +7958,21 @@ class ChatSession:
                 # so the LLM sees the alarm before its next decision.
                 self._acc_maybe_nudge(tool_results)
 
+                # Only on turns with MCP tools: without them the scratchpad is
+                # the only way to the data, and the notice points at tools the
+                # turn does not have.
+                idle_scratchpad_rounds = (
+                    idle_scratchpad_rounds + 1
+                    if self._mcp_sessions and round_is_idle(llm_response.tool_calls)
+                    else 0
+                )
+                withhold_scratchpad = idle_scratchpad_rounds >= IDLE_ROUNDS_BEFORE_WITHHOLD
+                if withhold_scratchpad:
+                    logger.info(
+                        "idle scratchpad loop: %d rounds — withholding scratchpad for the next round",
+                        idle_scratchpad_rounds,
+                    )
+                    tool_results.append({"type": "text", "text": IDLE_SCRATCHPAD_NOTICE})
                 # Text the user added while this round ran (ENG-4194), in the
                 # same message so turns still alternate. Not after a question
                 # nobody answered: the turn ends below with no model call.
@@ -7981,6 +8003,8 @@ class ChatSession:
                 # Rebuild: a tool this round (e.g. recall_skill) may have
                 # registered new tools the follow-up must see.
                 tools = self._build_tools()
+                if withhold_scratchpad:
+                    tools = without_scratchpad(tools)
 
                 # Signal that tools are done and LLM is now reasoning
                 _reasoning_t0 = _time.monotonic()
@@ -8756,7 +8780,9 @@ class ChatSession:
                 message=f"Task incomplete — continuing ({self._turn_continuations}/{self._max_continuations})...",
             )
 
-            # Re-enter tool loop: get next LLM response with tools available
+            # Re-enter tool loop: get next LLM response with tools available.
+            # Rebuilt so a scratchpad withheld for the last round is back.
+            tools = self._build_tools()
             response = None
             async for event in self.plan_stream_with_recovery(
                 system=system, tools=tools
