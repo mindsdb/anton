@@ -11,7 +11,8 @@ confirmations. Only their Done in the browser hands it back.
 Some steps never run on the model's word alone, whoever proposed them:
 typing into a secret field is refused, a step that commits something (a
 submit, a purchase, a message, a deletion) waits for the user's Approve on
-the write gate's card, and clicks by position ask once per page.
+the write gate's card, and clicks by position ask once per page, except
+that on the desktop one that may land in a frame asks each time.
 
 ``browser_jev`` (settings) decides how much Jev does:
 
@@ -1080,6 +1081,7 @@ def _card_prompt(*, hold: Hold, url: str, step: str, may_commit: bool = False) -
             "This step clicks or drags at a point the page's element list doesn't name, so it can't be "
             f"checked first:\n\n{shown}\n\n{commits}"
             "Approve covers clicks and drags by position on this page until it goes to another address. "
+            "A click or drag into an embedded frame still asks each time. "
             "Cancel, Skip or no answer stops it."
         )
     return (

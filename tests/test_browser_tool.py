@@ -919,6 +919,21 @@ async def test_on_the_desktop_position_steps_ask_once_per_page(elicit_answers):
     assert len(host.posted("/action")) == 3
 
 
+def test_every_line_on_approving_clicks_by_position_says_a_click_into_a_frame_asks_each_time():
+    """The position card, the module's account of what waits for the user,
+    the prompt and the skill all say that approving clicks by position for a
+    page leaves a click into a frame asking each time."""
+    from pathlib import Path
+
+    card = browser_tool._card_prompt(hold="position", url=PAGE["url"], step="click at (10, 20)")
+    assert "A click or drag into an embedded frame still asks each time." in card
+    assert "on the desktop one that may land in a frame asks each time" in " ".join(browser_tool.__doc__.split())
+    assert "Controls inside a frame have no number" in browser_tool.BROWSER_TOOL_PROMPT
+    assert "each such step waits for the user's Approve" in browser_tool.BROWSER_TOOL_PROMPT
+    skill = (Path(browser_tool.__file__).parents[1] / "memory" / "builtin_skills" / "browser" / "SKILL.md").read_text()
+    assert "each such click waits for the user's Approve" in skill
+
+
 #: A page with one read frame, boxed in screenshot pixels.
 FRAMED = {
     **PAGE,
