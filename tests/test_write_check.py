@@ -3768,6 +3768,33 @@ def test_a_py_file_the_cell_may_change_first_is_not_kept(helpers):
     assert writes.unchecked and writes.code_files == {}
 
 
+def test_the_pad_runs_the_text_the_check_read_in_place_of_the_read(helpers):
+    """What runs is what was checked: a change to the file after the check,
+    by anything, doesn't reach the cell."""
+    code = "x = 0\nexec(open(\n    'helpers.py'\n).read())\ny = load()"
+    writes = find_cell_writes(code=code, earlier=(), snapshots=(helpers,), code_root=helpers.root)
+    assert not writes.needs_approval() and writes.run_code is not None
+    assert writes.run_code.count("\n") == code.count("\n"), "a traceback's lines still match the cell's"
+    (helpers.root / "helpers.py").write_text("def load():\n    return 'changed'\n")
+    namespace: dict = {}
+    exec(writes.run_code, namespace)
+    assert namespace["y"] == 1
+
+
+def test_the_pad_runs_the_script_the_check_built_from_pieces(helpers):
+    earlier = ["P = []", "P.append('z = 41\\n')", "P.append('z += 1\\n')"]
+    writes = find_cell_writes(code="exec(''.join(P))", earlier=_earlier(earlier), snapshots=(helpers,),
+                              code_root=helpers.root)
+    assert writes.run_code == "exec(('z = 41\\nz += 1\\n'))"
+    assert list(writes.code_files) == ["@1:5"]
+
+
+def test_a_cell_the_check_cant_read_runs_as_written(helpers):
+    code = "import runpy\nrunpy.run_path('other.py')\nexec(open('helpers.py').read())"
+    writes = find_cell_writes(code=code, earlier=(), snapshots=(helpers,), code_root=helpers.root)
+    assert writes.unchecked and writes.run_code is None
+
+
 def test_a_cell_that_runs_code_the_check_cant_read_keeps_no_hash(helpers):
     """Unread code may change the file after the read, so a later cell
     mustn't trust what this one read."""

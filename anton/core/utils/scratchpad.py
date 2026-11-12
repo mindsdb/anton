@@ -542,7 +542,7 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
         writes = CellWrites(unchecked=True)
     # The cell keeps what this check read, so a later check reads the same text.
     if callable(expect):
-        expect(code, dict(writes.code_files))
+        expect(code, dict(writes.code_files), writes.run_code)
     if gate.relayed_hosts and writes.http:
         # The write relay holds a request to a host it relays and raises its
         # own card through approve_held_write, so a second card here would

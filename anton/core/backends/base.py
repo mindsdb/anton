@@ -214,10 +214,19 @@ class ScratchpadRuntime(ABC):
         self.cells.append(scrubbed)
         return scrubbed
 
-    def expect_code_files(self, code: str, files: dict[str, str]) -> None:
+    def expect_code_files(self, code: str, files: dict[str, str], run_code: str | None = None) -> None:
         """What the write check read for the cell about to run `code`
-        (`Cell.code_files`), kept on that cell when it is recorded."""
-        self._pending_code_files = (code, files)
+        (`Cell.code_files`), kept on that cell when it is recorded, and the
+        code to run in its place with those texts swapped in, if any."""
+        self._pending_code_files = (code, files, run_code)
+
+    def _code_to_run(self, code: str) -> str:
+        """`code` as the pad runs it: with the texts its write check read in
+        place of the reads, when the check gave them for this code."""
+        pending = getattr(self, "_pending_code_files", None)
+        if pending is not None and pending[0] == code and pending[2] is not None:
+            return pending[2]
+        return code
 
     def set_scratchpad_ds_env(self, ds_env: dict[str, str] | None) -> None:
         """Override this pad's DS_* env for its next start()/reset(); no-op unless a backend supports it."""

@@ -95,10 +95,12 @@ class _Pad:
         self.cells: list[Cell] = []
         # The folder a local pad runs cells in, where the check reads exec'd files.
         self._explicit_workspace_path = workspace
-        self._expected: tuple[str, dict[str, str]] | None = None
+        self._expected: tuple[str, dict[str, str], str | None] | None = None
+        # The code each cell ran, with the texts its check read swapped in.
+        self.ran_as: list[str] = []
 
-    def expect_code_files(self, code: str, files: dict[str, str]) -> None:
-        self._expected = (code, files)
+    def expect_code_files(self, code: str, files: dict[str, str], run_code: str | None = None) -> None:
+        self._expected = (code, files, run_code)
 
     async def install_packages(self, packages: list[str]) -> str:
         self.installed.append(list(packages))
@@ -106,7 +108,9 @@ class _Pad:
 
     async def execute_streaming(self, code: str, **kwargs: object):
         self.ran.append(code)
-        files = self._expected[1] if self._expected and self._expected[0] == code else {}
+        matched = self._expected if self._expected and self._expected[0] == code else None
+        files = matched[1] if matched else {}
+        self.ran_as.append(matched[2] if matched and matched[2] is not None else code)
         cell = Cell(code=code, stdout="done", stderr="", error=None, code_files=dict(files))
         self.cells.append(cell)
         yield cell
@@ -717,6 +721,14 @@ async def test_reads_of_what_a_helpers_file_made_raise_no_card(project):
     seen = await _run(harness=harness, answers=[])
     assert seen.cards == []
     assert harness.pad.ran == list(cells)
+
+
+async def test_the_pad_runs_the_helpers_text_the_check_read(project):
+    (project / "helpers.py").write_text(HELPERS)
+    harness = _session(project, EXEC_HELPERS, http=PLANNER_RULE)
+    assert (await _run(harness=harness, answers=[])).cards == []
+    assert harness.pad.ran == [EXEC_HELPERS], "the cell keeps the code the agent wrote"
+    assert "open('helpers.py')" not in harness.pad.ran_as[0] and "def load_orders" in harness.pad.ran_as[0]
 
 
 async def test_a_write_a_helpers_file_defines_is_named_where_it_is_defined_and_where_it_runs(project):
