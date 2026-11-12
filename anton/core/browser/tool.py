@@ -20,6 +20,11 @@ the write gate's card, and clicks by position ask once per page.
   on. Also when the session's ``verifier_jev`` is off (the organization
   opted out of Jev) and after Jev refused this session once. ``shadow``, a
   retired mode that only measured Jev's picks, reads as off.
+
+Jev here is whatever decision model the host gave the browser: the
+organization's own (``BrowserConfig.decisions``, or ``decisions_proxy``
+through the host for a cloud turn), else Jev on the session's MindsHub
+connection, for the router and the desktop app's browser alike (``_jev``).
 """
 
 from __future__ import annotations
@@ -429,25 +434,32 @@ def _jev_mode(session: "ChatSession") -> str:
 async def _jev(session: "ChatSession", *, jev_state: dict, questions: dict):
     """One decision, or None when there is no decision model to ask.
 
-    The host's own decision model when the config carries one
-    (``BrowserConfig.decisions``), for either browser: the host chose where
-    its pages go. Otherwise Jev on the session's MindsHub connection, unless
-    Jev is turned off; never for the desktop app's own browser, whose pages
-    go to no MindsDB service, so the model picks every step there. None too
-    once the endpoint refused (403)."""
+    The host's own decision model when the config carries one: directly
+    (``BrowserConfig.decisions``, for either browser) or through the host
+    with the session's MindsHub credential (``decisions_proxy``, for a cloud
+    turn, whose pod never holds the model's key). Otherwise Jev on the
+    session's MindsHub connection, for either browser, unless Jev is turned
+    off. None too once the endpoint refused (403)."""
     if _jev_mode(session) == "off":
         return None
     config = session._browser_config
-    own = config.decisions
-    if own is None and (config.in_app or _setting(session, "verifier_jev", "on") == "off"):
+    own, proxy = config.decisions, config.decisions_proxy
+    if own is None and proxy is None and _setting(session, "verifier_jev", "on") == "off":
         return None
     browser = _state(session)
     if browser.jev_refused:
         return None
+    connection = _mindshub_connection(session)
     if own is not None:
         base_url, url, api_key, model, verify = "", own.url, own.api_key.get_secret_value(), own.model, True
+    elif proxy is not None:
+        # The turn key, which the host checks and maps to the organization.
+        api_key = await _credential(session)
+        if not api_key:
+            return None
+        base_url, url, model = "", proxy.url, proxy.model
+        verify = connection is None or connection.ssl_verify is not False
     else:
-        connection = _mindshub_connection(session)
         if connection is None:
             return None
         try:
@@ -476,8 +488,9 @@ async def _jev(session: "ChatSession", *, jev_state: dict, questions: dict):
         client=browser.jev_http,
     )
     if decision.error == "http_403":
-        # The endpoint refuses this organization (MindsHub's Jev, or the
-        # host's own) and will refuse every later call too.
+        # The endpoint refuses this organization (MindsHub's Jev, the
+        # host's own, or the host's proxy to it) and will refuse every later
+        # call too.
         browser.jev_refused = True
     return decision
 
