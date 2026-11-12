@@ -168,15 +168,20 @@ class JevDecision:
 
 async def decide(
     *,
-    base_url: str,
+    base_url: str = "",
     api_key: str,
     model: str,
     state: dict,
     questions: dict,
     timeout_s: float,
     client=None,
+    url: str = "",
 ) -> JevDecision:
-    """POST one decision request with any questions. Never raises."""
+    """POST one decision request with any questions. Never raises.
+
+    The request goes to ``{base_url}/decisions`` (a MindsHub inference base
+    URL, incl. /v1), or to ``url`` as given when there is one: a decision
+    endpoint's full URL, which hosts serve at paths of their own."""
     import httpx2 as httpx
 
     started = time.monotonic()
@@ -189,7 +194,7 @@ async def decide(
     try:
         async with asyncio.timeout(timeout_s):
             response = await client.post(
-                f"{base_url.rstrip('/')}/decisions",
+                url or f"{base_url.rstrip('/')}/decisions",
                 headers={"Authorization": f"Bearer {api_key}"},
                 json={"model": model, "state": state, "questions": questions},
             )

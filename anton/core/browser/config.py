@@ -16,6 +16,48 @@ LOOPBACK_HOST = "127.0.0.1"
 _TOKEN = re.compile(r"[\x21-\x7e]+")
 
 
+class DecisionsTarget(BaseModel):
+    """A decision model of the host's own that picks the browser's steps,
+    instead of Jev on the session's MindsHub connection.
+
+    ``url`` is the endpoint's full URL, which takes the decision body
+    ``anton.core.llm.jev.decide`` sends (model, state, questions): hosts serve
+    it at different paths (TypeSafe's ``/v1/systemone``, a gateway's
+    ``/v1/decisions``), so nothing is appended to it. ``model`` is the name
+    that endpoint expects. Only a host builds one, in its own process, as it
+    does the in-app browser's launch key: ``from_dict`` never reads one and
+    ``to_dict`` refuses one. ``repr`` and validation errors leave the key out.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+
+    url: str
+    api_key: SecretStr
+    model: str = "jev"
+
+    @field_validator("url")
+    @classmethod
+    def _url_is_http(cls, value: str) -> str:
+        url = urlsplit(value)
+        if url.scheme not in ("http", "https") or not url.hostname or "@" in url.netloc:
+            raise ValueError("the decision endpoint must be an http(s) URL with a host and no user")
+        return value
+
+    @field_validator("api_key")
+    @classmethod
+    def _key_is_set(cls, value: SecretStr) -> SecretStr:
+        if not value.get_secret_value().strip():
+            raise ValueError("the decision endpoint needs its API key")
+        return value
+
+    @field_validator("model")
+    @classmethod
+    def _model_is_set(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("the decision endpoint needs a model name")
+        return value.strip()
+
+
 class BrowserConfig(BaseModel):
     """Where the browser the tool drives is, and which session to drive.
 
@@ -36,6 +78,10 @@ class BrowserConfig(BaseModel):
     keys the tabs saved for the conversation's project; empty when there is
     none, and saved tabs are then unavailable.
 
+    ``decisions`` is the host's own decision model for the browser's steps
+    (``DecisionsTarget``), for either form. None picks them with Jev on the
+    session's MindsHub connection, where there is one.
+
     Validation errors never echo the input, so a refused config can be
     logged without its key. ``repr`` masks the key too.
     """
@@ -46,6 +92,7 @@ class BrowserConfig(BaseModel):
     profile: str
     project: str = ""
     token: SecretStr | None = None
+    decisions: DecisionsTarget | None = None
 
     @field_validator("base_url", mode="before")
     @classmethod
@@ -122,10 +169,13 @@ class BrowserConfig(BaseModel):
         key, so ``from_dict`` reads it back as this same config.
 
         The in-app browser's config has no dict form: its launch key stays in
-        the host's process. Raises ValueError for it.
+        the host's process. Nor has one with a decision model of the host's
+        own, for its key. Raises ValueError for either.
         """
         if self.in_app:
             raise ValueError("the in-app browser's config stays in the host's process")
+        if self.decisions is not None:
+            raise ValueError("a config with the host's own decision model stays in the host's process")
         block = {"base_url": self.base_url, "profile": self.profile}
         if self.project:
             block["project"] = self.project

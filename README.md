@@ -252,6 +252,8 @@ A host gives a session the `browser` tool by passing `ChatSessionConfig.browser`
 
 The tool reads pages as numbered elements and acts on them by number. The person shares the browser: only they hand it back after a hand-over, with Done in the browser. A step that commits something (submit, buy, send, delete, grant access) waits for the person's Approve on a card; a click by position runs at once. On the router, the browser itself holds those steps and anton shows the card when it answers `approval_required`; on the desktop, anton shows the card before it sends the step. The desktop app's browser sends no page content to MindsHub's decision service.
 
+A decision model picks the browser's steps: Jev on the session's MindsHub connection, or a decision model of the host's own, `BrowserConfig.decisions` (a `DecisionsTarget`: the endpoint's full URL, its key and its model name), which wins for either form. Like the launch key, it stays in the host's process and never travels in a turn request. Without either, the model picks every step.
+
 `tests/fixtures/browser_contract/` pins the HTTP contract both hosts serve, including the commit list both read; each host's tests keep a copy. Its README explains the format.
 
 ## Shared live-app slots

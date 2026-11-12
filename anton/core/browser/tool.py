@@ -427,44 +427,57 @@ def _jev_mode(session: "ChatSession") -> str:
 
 
 async def _jev(session: "ChatSession", *, jev_state: dict, questions: dict):
-    """One Jev decision, or None when Jev is off, refused, or the session isn't on MindsHub.
+    """One decision, or None when there is no decision model to ask.
 
-    Never for the desktop app's own browser: its pages go to no MindsDB
-    service, so the model picks every step there."""
-    if session._browser_config.in_app:
+    The host's own decision model when the config carries one
+    (``BrowserConfig.decisions``), for either browser: the host chose where
+    its pages go. Otherwise Jev on the session's MindsHub connection, unless
+    Jev is turned off; never for the desktop app's own browser, whose pages
+    go to no MindsDB service, so the model picks every step there. None too
+    once the endpoint refused (403)."""
+    if _jev_mode(session) == "off":
         return None
-    if _jev_mode(session) == "off" or _setting(session, "verifier_jev", "on") == "off":
+    config = session._browser_config
+    own = config.decisions
+    if own is None and (config.in_app or _setting(session, "verifier_jev", "on") == "off"):
         return None
     browser = _state(session)
     if browser.jev_refused:
         return None
-    connection = _mindshub_connection(session)
-    if connection is None:
-        return None
-    try:
-        api_key = await connection.provider.current_api_key()
-    except Exception:
-        return None
-    if not api_key:
-        return None
+    if own is not None:
+        base_url, url, api_key, model, verify = "", own.url, own.api_key.get_secret_value(), own.model, True
+    else:
+        connection = _mindshub_connection(session)
+        if connection is None:
+            return None
+        try:
+            api_key = await connection.provider.current_api_key()
+        except Exception:
+            return None
+        if not api_key:
+            return None
+        base_url, url = connection.base_url, ""
+        model = _setting(session, "verifier_jev_model", "jev-1.13.0")
+        # Same TLS setting as the provider, e.g. behind an intercepting proxy.
+        verify = connection.ssl_verify is not False
     from anton.core.llm import jev
 
     timeout_s = float(_setting(session, "browser_jev_timeout_s", 4.0))
     if browser.jev_http is None:
-        # Same TLS setting as the provider, e.g. behind an intercepting proxy.
-        browser.jev_http = httpx.AsyncClient(timeout=timeout_s, verify=connection.ssl_verify is not False)
+        browser.jev_http = httpx.AsyncClient(timeout=timeout_s, verify=verify)
     decision = await jev.decide(
-        base_url=connection.base_url,
+        base_url=base_url,
+        url=url,
         api_key=api_key,
-        model=_setting(session, "verifier_jev_model", "jev-1.13.0"),
+        model=model,
         state=jev_state,
         questions=questions,
         timeout_s=timeout_s,
         client=browser.jev_http,
     )
     if decision.error == "http_403":
-        # MindsHub refuses Jev to this organization and will refuse every
-        # later call too.
+        # The endpoint refuses this organization (MindsHub's Jev, or the
+        # host's own) and will refuse every later call too.
         browser.jev_refused = True
     return decision
 
