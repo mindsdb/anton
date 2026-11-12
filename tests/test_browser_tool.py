@@ -2068,10 +2068,16 @@ async def test_hand_to_user_without_an_elicitor_tells_the_model_to_wait():
 def test_human_check_spots_verification_pages_only():
     assert human_check(model(CHALLENGE)) == "Cloudflare"
     assert human_check(model({"url": "https://x.com/cdn-cgi/challenge-platform/h/b", "title": "", "elements": []})) == "Cloudflare"
-    # An embedded widget: the host lists its visible frame, and the element
-    # list shows only a clickable frame named by its title.
-    embedded = {**PAGE, "challenges": [{"host": "challenges.cloudflare.com", "kind": "cloudflare"}]}
+    # An embedded widget: the host lists its visible check frame in
+    # challenges, and in frames unread; the element list never lists a frame.
+    embedded = {
+        **PAGE, "challenges": [{"host": "challenges.cloudflare.com", "kind": "cloudflare"}],
+        "frames": [{"url": "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile", "read": False}],
+    }
     assert human_check(model(embedded)) == "Cloudflare"
+    doc = " ".join(human_check.__doc__.split())
+    assert "the element list shows only as a frame" not in doc
+    assert "which hosts list in challenges and, unread, in frames, never as an element" in doc
     assert human_check(model({**PAGE, "challenges": [{"host": "captcha.example", "kind": "other"}]})) == "a security check"
     framed = {**PAGE, "elements": [{"id": 9, "role": "clickable", "name": "Widget containing a Cloudflare security challenge"}]}
     assert human_check(model(framed)) == "Cloudflare"

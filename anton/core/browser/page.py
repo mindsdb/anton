@@ -60,9 +60,10 @@ def human_check(page: Page) -> str:
 
     The host's ``challenges`` come first: they name check frames the person
     can see, such as a Turnstile widget embedded in an ordinary page, which
-    the element list shows only as a frame. Then the URL, element names and
-    text of a full-page check, and, from a host that sends no ``challenges``,
-    an on-screen reCAPTCHA or hCaptcha frame.
+    hosts list in challenges and, unread, in frames, never as an element.
+    Then the URL, element names and text of a full-page check, and, from a
+    host that sends no ``challenges``, an on-screen reCAPTCHA or hCaptcha
+    frame an older host lists as an element.
     """
     if page.challenges:
         return _CHECK_NAMES.get(page.challenges[0].kind, _ANY_CHECK)
