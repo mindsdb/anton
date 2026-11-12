@@ -1,0 +1,314 @@
+[
+  {
+    "allowed": true,
+    "name": "Authorization"
+  },
+  {
+    "allowed": true,
+    "name": "authorization"
+  },
+  {
+    "allowed": true,
+    "name": "AUTHORIZATION"
+  },
+  {
+    "allowed": true,
+    "name": "X-Api-Key"
+  },
+  {
+    "allowed": true,
+    "name": "x-api-key"
+  },
+  {
+    "allowed": true,
+    "name": "X-Finnhub-Token"
+  },
+  {
+    "allowed": true,
+    "name": "Harvest-Account-Id"
+  },
+  {
+    "allowed": true,
+    "name": "Notion-Version"
+  },
+  {
+    "allowed": true,
+    "name": "X-Client-Id"
+  },
+  {
+    "allowed": true,
+    "name": "Proxy"
+  },
+  {
+    "allowed": true,
+    "name": "Proxyauth"
+  },
+  {
+    "allowed": true,
+    "name": "X-Forwarded"
+  },
+  {
+    "allowed": true,
+    "name": "X-Envoy"
+  },
+  {
+    "allowed": true,
+    "name": "Content"
+  },
+  {
+    "allowed": true,
+    "name": "Contents"
+  },
+  {
+    "allowed": true,
+    "name": "X-Hosted-By"
+  },
+  {
+    "allowed": true,
+    "name": "Hostname"
+  },
+  {
+    "allowed": true,
+    "name": "Accepts"
+  },
+  {
+    "allowed": true,
+    "name": "X-Accept"
+  },
+  {
+    "allowed": true,
+    "name": "Xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "allowed": false,
+    "name": "Host"
+  },
+  {
+    "allowed": false,
+    "name": "HOST"
+  },
+  {
+    "allowed": false,
+    "name": "host"
+  },
+  {
+    "allowed": false,
+    "name": "Cookie"
+  },
+  {
+    "allowed": false,
+    "name": "Via"
+  },
+  {
+    "allowed": false,
+    "name": "Max-Forwards"
+  },
+  {
+    "allowed": false,
+    "name": "Range"
+  },
+  {
+    "allowed": false,
+    "name": "Expect"
+  },
+  {
+    "allowed": false,
+    "name": "Accept-Encoding"
+  },
+  {
+    "allowed": false,
+    "name": "Content-Type"
+  },
+  {
+    "allowed": false,
+    "name": "Content-Length"
+  },
+  {
+    "allowed": false,
+    "name": "content-md5"
+  },
+  {
+    "allowed": false,
+    "name": "Connection"
+  },
+  {
+    "allowed": false,
+    "name": "Keep-Alive"
+  },
+  {
+    "allowed": false,
+    "name": "TE"
+  },
+  {
+    "allowed": false,
+    "name": "Trailer"
+  },
+  {
+    "allowed": false,
+    "name": "Transfer-Encoding"
+  },
+  {
+    "allowed": false,
+    "name": "Upgrade"
+  },
+  {
+    "allowed": false,
+    "name": "Proxy-Authorization"
+  },
+  {
+    "allowed": false,
+    "name": "proxy-connection"
+  },
+  {
+    "allowed": false,
+    "name": "Forwarded"
+  },
+  {
+    "allowed": false,
+    "name": "X-Forwarded-For"
+  },
+  {
+    "allowed": false,
+    "name": "X-Forwarded-Host"
+  },
+  {
+    "allowed": false,
+    "name": "x-forwarded-proto"
+  },
+  {
+    "allowed": false,
+    "name": "X-Real-IP"
+  },
+  {
+    "allowed": false,
+    "name": "X-Client-IP"
+  },
+  {
+    "allowed": false,
+    "name": "X-Cluster-Client-IP"
+  },
+  {
+    "allowed": false,
+    "name": "True-Client-IP"
+  },
+  {
+    "allowed": false,
+    "name": "CF-Connecting-IP"
+  },
+  {
+    "allowed": false,
+    "name": "Fastly-Client-IP"
+  },
+  {
+    "allowed": false,
+    "name": "X-Original-URL"
+  },
+  {
+    "allowed": false,
+    "name": "X-Rewrite-URL"
+  },
+  {
+    "allowed": false,
+    "name": "X-Original-Host"
+  },
+  {
+    "allowed": false,
+    "name": "X-Host"
+  },
+  {
+    "allowed": false,
+    "name": "X-HTTP-Host-Override"
+  },
+  {
+    "allowed": false,
+    "name": "X-Envoy-Original-Path"
+  },
+  {
+    "allowed": false,
+    "name": "x-envoy-upstream-rq-timeout-ms"
+  },
+  {
+    "allowed": false,
+    "name": "X-HTTP-Method-Override"
+  },
+  {
+    "allowed": false,
+    "name": "X-HTTP-Method"
+  },
+  {
+    "allowed": false,
+    "name": "X-Method-Override"
+  },
+  {
+    "allowed": false,
+    "name": "Accept"
+  },
+  {
+    "allowed": false,
+    "name": "accept"
+  },
+  {
+    "allowed": false,
+    "name": "Accept-Language"
+  },
+  {
+    "allowed": false,
+    "name": "If-None-Match"
+  },
+  {
+    "allowed": false,
+    "name": "If-Modified-Since"
+  },
+  {
+    "allowed": false,
+    "name": "Xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "allowed": false,
+    "name": ""
+  },
+  {
+    "allowed": false,
+    "name": "1X-Api-Key"
+  },
+  {
+    "allowed": false,
+    "name": "-X-Api-Key"
+  },
+  {
+    "allowed": false,
+    "name": "X_Api_Key"
+  },
+  {
+    "allowed": false,
+    "name": "X Api Key"
+  },
+  {
+    "allowed": false,
+    "name": "Authorization "
+  },
+  {
+    "allowed": false,
+    "name": " Authorization"
+  },
+  {
+    "allowed": false,
+    "name": "Authoriz\u0430tion"
+  },
+  {
+    "allowed": false,
+    "name": "\u0425-Api-Key"
+  },
+  {
+    "allowed": false,
+    "name": "Authorization:"
+  },
+  {
+    "allowed": false,
+    "name": "Authorization\n"
+  },
+  {
+    "allowed": false,
+    "name": "X-abc123def456ghi789jkl0"
+  }
+]
