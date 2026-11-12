@@ -53,7 +53,7 @@ from anton.core.browser.client import (
     BrowserError,
     cut_reason,
 )
-from anton.core.browser.models import ActionResult, Element, HeldStep, Page, SavedTab, Site, StepKey, Tab
+from anton.core.browser.models import ActionResult, Element, FrameBox, HeldStep, Page, SavedTab, Site, StepKey, Tab
 from anton.core.browser.page import CAPTCHA_NAME, format_page, human_check, signature
 from anton.core.browser.policy import (
     StepDecision,
@@ -689,28 +689,43 @@ def _has_position(step: dict) -> bool:
     return any("x" in end or "y" in end for end in _ends(step))
 
 
-def _in_frame(body: dict, page: Page) -> bool:
-    """Whether a step by position may land inside one of the page's frames:
-    a point inside a frame's box, or a point the boxes can't rule out (a
-    host that sends no ``frames``, a frame the host couldn't place, a point
-    not in screenshot pixels, which the boxes are in, or a point that isn't
-    two numbers)."""
+class _FrameAt(NamedTuple):
+    """A frame a step's point may land in, as the person saw it on a card:
+    its address and its box."""
+
+    url: str
+    box: FrameBox | None
+
+
+def _frames_under(body: dict, page: Page) -> frozenset[_FrameAt] | None:
+    """The frames a step by position may land in on ``page``: each frame
+    whose box holds one of its points, or every frame when the boxes can't
+    rule a point out (a frame the host couldn't place, a point not in
+    screenshot pixels, which the boxes are in, or a point that isn't two
+    numbers). None from a host that sends no ``frames``, which hasn't said
+    where its frames are."""
     if page.frames is None:
-        return True
-    if not page.frames:
-        return False
-    if body.get("coords") != "screenshot" or any(frame.box is None for frame in page.frames):
-        return True
-    boxes = [frame.box for frame in page.frames if frame.box is not None]
+        return None
+    every = frozenset(_FrameAt(frame.url, frame.box) for frame in page.frames)
+    placed = [(_FrameAt(frame.url, frame.box), frame.box) for frame in page.frames if frame.box is not None]
+    if body.get("coords") != "screenshot" or len(placed) < len(page.frames):
+        return every
+    under: set[_FrameAt] = set()
     for end in _ends(body):
         if "x" not in end and "y" not in end:
             continue
         x, y = end.get("x"), end.get("y")
         if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (x, y)):
-            return True
-        if any(box.x <= x < box.x + box.width and box.y <= y < box.y + box.height for box in boxes):
-            return True
-    return False
+            return every
+        under |= {at for at, box in placed if box.x <= x < box.x + box.width and box.y <= y < box.y + box.height}
+    return frozenset(under)
+
+
+def _in_frame(body: dict, page: Page) -> bool:
+    """Whether a step by position may land inside one of the page's frames
+    (``_frames_under``); any point may on a host that sends no ``frames``."""
+    under = _frames_under(body, page)
+    return under is None or bool(under)
 
 
 def _step_body(tc_input: dict) -> dict:
@@ -1078,7 +1093,7 @@ def _not_approved(body: dict, why: str) -> ToolOutcome:
     )
 
 
-def _card_prompt(*, hold: Hold, url: str, step: str, may_commit: bool = False) -> str:
+def _card_prompt(*, hold: Hold, url: str, step: str, may_commit: bool = False, frame_changed: bool = False) -> str:
     shown = _fence(f"{url}\n{step}")
     if hold == "position":
         commits = (
@@ -1093,15 +1108,18 @@ def _card_prompt(*, hold: Hold, url: str, step: str, may_commit: bool = False) -
             "A click or drag into an embedded frame still asks each time. "
             "Cancel, Skip or no answer stops it."
         )
+    again = "The frame under this point changed after your Approve, so this asks again. " if frame_changed else ""
     return (
         "**Approve this browser step?**\n\n"
-        "This step may commit something for you, such as a purchase, a payment, a message, a deletion "
+        f"{again}This step may commit something for you, such as a purchase, a payment, a message, a deletion "
         f"or a form:\n\n{shown}\n\n"
         "It runs only if you approve. Cancel, Skip or no answer stops it."
     )
 
 
-async def _gate(session: "ChatSession", *, state: _BrowserState, body: dict, page: Page, risky: bool) -> dict | ToolOutcome:
+async def _gate(
+    session: "ChatSession", *, state: _BrowserState, body: dict, page: Page, risky: bool, frame_changed: bool = False,
+) -> dict | ToolOutcome:
     """The body to send when the step may be sent on ``page``; otherwise what
     to answer in its place, before anything is sent. ``act`` and ``run`` both
     ask it, in every ``browser_jev`` mode, so a step a page talked the model
@@ -1127,8 +1145,13 @@ async def _gate(session: "ChatSession", *, state: _BrowserState, body: dict, pag
     point. The desktop refuses a press, or a drag's release, that lands in a
     frame when it is false, so a frame that slides under the point after
     this read gets no press under a position approval, or after a card for a
-    point outside every frame. The web's browser holds its own steps and
-    gets none."""
+    point outside every frame. With it true, the desktop presses only into
+    the frame under the point when the step starts, so after that card the
+    tool reads the page again and, when the frame under the point has
+    another address or box than on the read the card was raised on, asks
+    again on the new read (``frame_changed``), once; a frame that changes
+    again refuses the step. The web's browser holds its own steps and gets
+    none."""
     key = _step_key(body)
     refused = state.refused.get((page.url, key))
     if refused is not None:
@@ -1161,15 +1184,28 @@ async def _gate(session: "ChatSession", *, state: _BrowserState, body: dict, pag
     else:
         return send
     cause = await ask_approval_card(
-        session, _card_prompt(hold=hold, url=page.url, step=_step_words(body, element)),
+        session, _card_prompt(hold=hold, url=page.url, step=_step_words(body, element), frame_changed=frame_changed),
         approve_detail=approve, cancel_detail="Leave the page as it is", log_label="browser step",
     )
-    if cause is None:
-        if hold == "position":
-            state.position_url = page.url
-        return {**send, "into_frame": True} if into_frame else send
-    state.refused[(page.url, key)] = refusal_why(cause)
-    return _not_approved(body, refusal_why(cause))
+    if cause is not None:
+        state.refused[(page.url, key)] = refusal_why(cause)
+        return _not_approved(body, refusal_why(cause))
+    if hold == "position":
+        state.position_url = page.url
+    if not into_frame:
+        return send
+    now = await state.client.page(session_id=state.session_id)
+    if _frames_under(body, now) == _frames_under(body, page):
+        return {**send, "into_frame": True}
+    if frame_changed:
+        return ToolOutcome(
+            content=(
+                f"The frame under the point changed again after the user approved {_describe(body)} a second "
+                f"time. Nothing was done. The page now:\n\n{_show(state, now)}"
+            ),
+            ok=False, reason="browser_stale_element",
+        )
+    return await _gate(session, state=state, body=body, page=now, risky=risky, frame_changed=True)
 
 
 #: What a step can answer that doesn't say whether the browser ran it: no

@@ -286,10 +286,12 @@ def test_the_commit_list_covers_every_word_and_both_holds():
 
 class _Recorder:
     """A host that records each request and answers with any fixture answer
-    the client can read, so every client call completes."""
+    the client can read, so every client call completes. ``page`` names the
+    page example it reads back."""
 
-    def __init__(self):
+    def __init__(self, page: str = "a page with no check"):
         self.sent: list[tuple[str, str, dict | None]] = []
+        self.page = page
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content) if request.content else None
@@ -305,7 +307,7 @@ class _Recorder:
             ("GET", f"/sessions/{PROFILE}/sites"): _load("sites").examples["the sites on record"].body,
             ("POST", "/saved-tabs"): _load("saved_tabs").examples["the saved tab"].body,
             ("GET", "/saved-tabs"): _load("saved_tabs").examples["the project's saved tabs"].body,
-            ("GET", f"/sessions/{PROFILE}/page"): _load("page").examples["a page with no check"].body,
+            ("GET", f"/sessions/{PROFILE}/page"): _load("page").examples[self.page].body,
             ("POST", f"/sessions/{PROFILE}/action"): _load("action").examples["the answer with the page after"].body,
         }
         answer = answers.get((request.method, path), {"ok": True})
@@ -371,13 +373,14 @@ APPROVED_IN_APP_STEPS = {
 
 async def _approved_in_app(step: dict, monkeypatch: pytest.MonkeyPatch) -> dict:
     """The body the gate sends to the desktop app's browser when the person
-    approves the step's card."""
+    approves the step's card, on a page that holds still while the card
+    waits: the gate reads it again after a card for a point in a frame."""
     async def approve(*args, **kwargs):
         return None
 
     monkeypatch.setattr(browser_tool, "ask_approval_card", approve)
     session = SimpleNamespace(_browser_config=BrowserConfig(base_url="http://127.0.0.1:51234", profile=PROFILE, token="k"))
-    state = browser_tool._BrowserState(client=_client(_Recorder()), session_id=PROFILE)
+    state = browser_tool._BrowserState(client=_client(_Recorder(page="a page with a frame")), session_id=PROFILE)
     page = Page.model_validate(_load("page").examples["a page with a frame"].body)
     return await browser_tool._gate(session, state=state, body=browser_tool._step_body({"step": step}), page=page, risky=False)
 

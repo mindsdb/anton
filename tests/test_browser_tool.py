@@ -1051,6 +1051,50 @@ async def test_on_the_desktop_a_step_says_into_frame_only_after_the_one_step_fra
     assert len(web.posted("/action")) == 2 and all("into_frame" not in body for body in web.posted("/action"))
 
 
+async def test_on_the_desktop_a_frame_that_changes_under_the_point_while_the_card_waits_is_asked_about_again(elicit_answers):
+    """The one-step card for a point that may land in a frame approves the
+    frame the person saw there, and the desktop binds the step to the frame
+    under the point only when the step starts. So after the Approve the tool
+    reads the page again, and asks again on that read when the frame under
+    the point has another address or another box, as it refuses an element
+    number that names another element now. A frame that changes again after
+    the second card refuses the step. Text that changes inside the same
+    frame (a clock) is no other frame."""
+    desktop = BrowserConfig(base_url=LOOPBACK, profile=SID, token="k")
+    frame = FRAMED["frames"][0]
+    swapped = {**FRAMED, "frames": [{**frame, "url": "https://ads.example.test/slot"}]}
+    moved = {**FRAMED, "frames": [{**frame, "box": {**frame["box"], "y": 320}}]}
+    ticking = {**FRAMED, "frames": [{**frame, "text": "Get the weekly digest. 12:01"}]}
+    click = {"action": "act", "step": {"action": "click", "x": 200, "y": 350}}
+    sent = {"action": "click", "x": 200, "y": 350, "include_page": True, "coords": "screenshot", "into_frame": True}
+
+    host = FakeHost(pages=[FRAMED, swapped, swapped])
+    session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+    elicit_answers.answers += ["approve", "approve"]
+    result = await browser_tool.handle_browser(session, click)
+    assert result.content.startswith("Done: click at (200, 350).")
+    prompts = elicit_answers.prompts()
+    assert len(prompts) == 2 and all(p.startswith("**Approve this browser step?**") for p in prompts)
+    assert "The frame under this point changed after your Approve" not in prompts[0]
+    assert "The frame under this point changed after your Approve, so this asks again." in prompts[1]
+    assert host.posted("/action") == [sent]
+
+    host = FakeHost(pages=[FRAMED, moved, FRAMED])
+    session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+    elicit_answers.answers += ["approve", "approve"]
+    result = await browser_tool.handle_browser(session, click)
+    assert result.ok is False and result.reason == "browser_stale_element"
+    assert "changed again" in result.content and "Nothing was done." in result.content
+    assert len(elicit_answers.prompts()) == 4 and host.posted("/action") == []
+
+    host = FakeHost(pages=[FRAMED, ticking])
+    session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+    elicit_answers.answers.append("approve")
+    result = await browser_tool.handle_browser(session, click)
+    assert result.content.startswith("Done: click at (200, 350).")
+    assert len(elicit_answers.prompts()) == 5 and host.posted("/action") == [sent]
+
+
 async def test_on_the_desktop_the_navigate_that_opens_an_address_in_an_open_session_says_into_frame_false():
     """Every step body anton sends the desktop says into_frame, the navigate
     that open or run sends for an address in a session already open too, so
