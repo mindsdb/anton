@@ -151,12 +151,16 @@ def format_page(page: Page, *, max_text: int = 3000) -> str:
 
 
 def signature(page: Page) -> str:
-    """Changes when the page does: URL plus every element's id, name and value."""
+    """Changes when the page does: URL plus every element's id, name and value.
+
+    Not their order: one host lists the elements in view first and the other
+    keeps page order, so a scroll that only reorders the list is no change.
+    """
     parts = [page.url]
-    parts += [
+    parts += sorted(
         f"{el.id}:{el.name}:{el.value or ''}:{'' if el.checked is None else el.checked}"
         for el in page.elements
-    ]
+    )
     return "|".join(parts)
 
 

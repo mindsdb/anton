@@ -455,6 +455,15 @@ def test_an_on_screen_captcha_frame_is_a_check_only_from_a_host_that_sends_no_ch
     assert human_check(model(hcaptcha)) == "hCaptcha"
 
 
+def test_signature_ignores_the_order_a_host_lists_elements_in():
+    """One host lists the elements in view first and the other keeps page
+    order, so the order of the list alone never reads as a change."""
+    reordered = {**PAGE, "elements": list(reversed(PAGE["elements"]))}
+    assert signature(model(PAGE)) == signature(model(reordered))
+    renamed = {**PAGE, "elements": [{**PAGE["elements"][0], "name": "Find"}, *PAGE["elements"][1:]]}
+    assert signature(model(PAGE)) != signature(model(renamed))
+
+
 def test_signature_changes_with_values():
     changed = {**PAGE, "elements": [{**PAGE["elements"][0], "value": "mac"}, *PAGE["elements"][1:]]}
     assert signature(model(PAGE)) != signature(model(changed))
@@ -1613,6 +1622,19 @@ async def test_run_stops_when_steps_change_nothing(fake_jev):
     fake_jev.queue += [jev_answers("scroll_down")] * 3
     result = await browser_tool.handle_browser(session, {"action": "run", "goal": "find the footer"})
     assert "changed nothing" in result.content
+
+
+async def test_run_counts_a_scroll_that_only_reorders_the_element_list_as_a_stall(fake_jev):
+    """A host that lists the elements in view first reorders its list when a
+    scroll moves what is in view, with the same elements and text. Whether
+    the step was progress doesn't depend on a host's list order, so the run
+    hands back after MAX_STALLS such scrolls on either host."""
+    flipped = {**PAGE, "elements": list(reversed(PAGE["elements"]))}
+    host = FakeHost(pages=[PAGE, flipped, PAGE, flipped, PAGE, flipped])
+    session = make_session(host)
+    fake_jev.queue += [jev_answers("scroll_down")] * 5
+    result = await browser_tool.handle_browser(session, {"action": "run", "goal": "find the footer"})
+    assert "changed nothing" in result.content and len(host.posted("/action")) == browser_tool.MAX_STALLS
 
 
 async def test_run_does_not_stall_on_text_that_arrives_late(fake_jev):
