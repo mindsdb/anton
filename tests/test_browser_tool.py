@@ -952,17 +952,24 @@ def test_every_line_on_approving_clicks_by_position_says_a_click_into_a_frame_as
 
 def test_the_prompt_and_the_skill_say_how_to_fill_an_ordinary_field_inside_a_frame():
     """Both hosts let keys into an ordinary field of an embedded form and
-    refuse a secret one, so the model fills it by a click by pixel and press
-    steps, each key waiting for the user's Approve, and hands over only what
-    hand_to_user is for."""
+    refuse a secret one. type needs an element number on both, and a frame's
+    fields have none, so the model fills one by a click by pixel and press
+    steps (one key each, with no element, a shape both hosts take), each
+    waiting for the user's Approve, and hands over only what hand_to_user is
+    for: a sign-in, a two-factor code or a payment."""
     from pathlib import Path
 
     prompt = " ".join(browser_tool.BROWSER_TOOL_PROMPT.split())
     skill = " ".join((Path(browser_tool.__file__).parents[1] / "memory" / "builtin_skills" / "browser" / "SKILL.md").read_text().split())
     for text in (prompt, skill):
         assert "hand the browser over rather than typing" not in text
-        assert "To fill an ordinary field inside a frame, click it by pixel, then type into it with" in text
-        assert "each key waits for the user's Approve too. A secret, card or sign-in field there is the user's, as anywhere" in text
+        assert "A secret, card or sign-in field there is the user's" not in text
+        assert "needs an element number, so to fill an ordinary field inside a frame, click it by pixel, then type into it with" in text
+        assert "each key waits for the user's Approve too." in text
+        assert (
+            "The browser refuses keys into a secret field there, as anywhere, and a sign-in, two-factor code or "
+            "payment in a frame is the user's to do"
+        ) in text
     assert 'press steps, one key each ({"action":"press","key":"a"})' in prompt
     assert "hand_to_user is only for those." in prompt
 
