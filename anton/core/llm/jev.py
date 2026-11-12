@@ -166,6 +166,34 @@ class JevDecision:
             return 0.0
 
 
+# MindsHub's answer when Jev's routing policy is briefly not loaded: a 503
+# with exactly this message. Nothing was decided, so the same request may be
+# sent once more within the same deadline (yolocoder's edit router does).
+POLICY_UNAVAILABLE = "The model policy is temporarily unavailable. Please retry shortly."
+
+
+def policy_unavailable(response) -> bool:
+    """Whether RESPONSE is MindsHub's 503 "policy temporarily unavailable" refusal."""
+    if response.status_code != 503:
+        return False
+    try:
+        text = response.text
+    except Exception:
+        return False
+    if len(text) >= 8 << 10:
+        return False
+    if text.strip() == POLICY_UNAVAILABLE:
+        return True
+    try:
+        import json
+
+        body = json.loads(text)
+    except ValueError:
+        return False
+    error = body.get("error") if isinstance(body, dict) else None
+    return isinstance(error, dict) and error.get("message") == POLICY_UNAVAILABLE
+
+
 async def decide(
     *,
     base_url: str,
@@ -175,8 +203,15 @@ async def decide(
     questions: dict,
     timeout_s: float,
     client=None,
+    headers: dict[str, str] | None = None,
+    retry_policy_unavailable: bool = False,
 ) -> JevDecision:
-    """POST one decision request with any questions. Never raises."""
+    """POST one decision request with any questions. Never raises.
+
+    ``retry_policy_unavailable``: send the request once more after MindsHub's
+    503 "policy temporarily unavailable", inside the same ``timeout_s``.
+    ``headers`` are sent alongside the key, which they cannot override.
+    """
     import httpx2 as httpx
 
     started = time.monotonic()
@@ -188,11 +223,14 @@ async def decide(
     client = client or httpx.AsyncClient(timeout=timeout_s)
     try:
         async with asyncio.timeout(timeout_s):
-            response = await client.post(
-                f"{base_url.rstrip('/')}/decisions",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json={"model": model, "state": state, "questions": questions},
-            )
+            for attempt in range(2):
+                response = await client.post(
+                    f"{base_url.rstrip('/')}/decisions",
+                    headers={**(headers or {}), "Authorization": f"Bearer {api_key}"},
+                    json={"model": model, "state": state, "questions": questions},
+                )
+                if not (retry_policy_unavailable and attempt == 0 and policy_unavailable(response)):
+                    break
     except TimeoutError:
         return JevDecision(answers={}, ms=elapsed(), error="timeout")
     except httpx.HTTPError:

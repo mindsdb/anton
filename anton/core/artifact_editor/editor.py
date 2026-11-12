@@ -27,6 +27,10 @@ One tool-using conversation per edit:
    the model itself decided the task cannot be done.
 7. Giving up (a second failed check, a crash, a cancellation) restores every
    file the edit touched to what it was before the edit.
+8. With ``escalation=True`` (the quick-edit bar, ENG-4227) the model also has
+   ``hand_to_agent``: a request that needs data or analysis these files do not
+   have is handed back (status ``escalated``) and every file is restored.
+   ``max_fix_rounds`` then bounds how many failed checks go back for repair.
 
 Every rejected patch is written to the editor's JSONL record (``records``).
 """
@@ -76,10 +80,13 @@ MAX_ASIDE_CHARS = 800
 # The cut-off ladder: one step down per cut-off reply.
 _EFFORT_LADDER = ("max", "xhigh", "high", "medium", "low")
 
-Status = Literal["applied", "answered", "restored"]
+Status = Literal["applied", "answered", "restored", "escalated"]
 
 
 class Progress(Protocol):
+    """How the editor reports. A Progress may also have ``stage(name, **info)``:
+    "reading", "writing", "checking" or "fixing", called when the edit enters it."""
+
     def status(self, text: str) -> None: ...  # a transient activity line
     def log(self, text: str) -> None: ...  # a permanent line of the trail
 
@@ -120,7 +127,10 @@ class Outcome:
     * ``answered`` — the model changed nothing and replied (a question, or
       "this cannot be done by editing these files");
     * ``restored`` — the edit gave up and every file it touched is back as it
-      was; ``error`` says why.
+      was; ``error`` says why;
+    * ``escalated`` — (only with ``escalation=True``) the model said the request
+      needs more than these files; every file is back as it was and ``reply``
+      is its reason.
     """
 
     status: Status
@@ -132,10 +142,12 @@ class Outcome:
     usage: EditUsage = field(default_factory=EditUsage)
     error: str = ""
     seconds: float = 0.0
+    # Failed checks that went back to the model for repair.
+    fix_rounds: int = 0
 
     @property
     def ok(self) -> bool:
-        return self.status != "restored"
+        return self.status not in ("restored", "escalated")
 
     @property
     def model_calls(self) -> int:
@@ -152,6 +164,10 @@ class _GiveUp(Exception):
 
 class _OutOfRounds(Exception):
     pass
+
+
+class _Escalate(Exception):
+    """The model handed the request to the agent; restore and report `str(self)`."""
 
 
 @dataclass
@@ -257,6 +273,8 @@ class ArtifactEditor:
         images: bool = True,
         record: EditRecord | None = None,
         conversation_id: str = "",
+        escalation: bool = False,
+        max_fix_rounds: int | None = None,
     ) -> None:
         self.ws = workspace
         self.llm = llm
@@ -268,6 +286,13 @@ class ArtifactEditor:
         self.images = images
         self.record = record
         self.conversation_id = conversation_id
+        self.escalation = escalation
+        # None: the default bounds (static failures by the edit budget, browser
+        # failures by MAX_CHECK_FAILURES). A number: at most that many failed
+        # checks of any channel go back for repair; the next one gives up.
+        self.max_fix_rounds = max_fix_rounds
+        self.system = prompts.INSTRUCTIONS + (prompts.QUICK_EDIT_INSTRUCTIONS if escalation else "")
+        self.tools = [*prompts.TOOLS, prompts.HAND_TO_AGENT_TOOL] if escalation else prompts.TOOLS
         self._reset()
 
     def _reset(self) -> None:
@@ -284,6 +309,8 @@ class ArtifactEditor:
         self.cut_offs = 0
         self.empties = 0
         self.check_failures = 0
+        self.fix_rounds = 0
+        self._stage_now = ""
         self.last_check: CheckResult | None = None
         self.usage = EditUsage()
         self.effort: str | None = None
@@ -308,6 +335,9 @@ class ArtifactEditor:
             self._restore()
             self._record_run("cancelled", rewrote=False, error="cancelled", started=started)
             raise
+        except _Escalate as exc:
+            self._restore()
+            outcome = Outcome("escalated", reply=str(exc), check=self.last_check)
         except _GiveUp as exc:
             self._restore()
             outcome = Outcome("restored", reply="", check=exc.check or self.last_check, error=str(exc))
@@ -318,7 +348,8 @@ class ArtifactEditor:
         outcome.attempts = self.used.get(prompts.APPLY_DIFF, 0)
         outcome.usage = self.usage
         outcome.seconds = time.monotonic() - started
-        if outcome.status == "restored":
+        outcome.fix_rounds = self.fix_rounds
+        if outcome.status in ("restored", "escalated"):
             outcome.files = []
         self._record_run(outcome.status, rewrote=outcome.rewrote, error=outcome.error, started=started,
                          outcome=outcome)
@@ -339,7 +370,20 @@ class ArtifactEditor:
                    "cache_read": self.usage.cache_read_tokens, "cache_creation": self.usage.cache_creation_tokens},
         )
 
+    def _stage(self, name: str, **info: Any) -> None:
+        """Tell a Progress that has ``stage`` which part of the edit this is (once per change)."""
+        if name == self._stage_now and not info:
+            return
+        self._stage_now = name
+        stage = getattr(self.progress, "stage", None)
+        if callable(stage):
+            try:
+                stage(name, **info)
+            except Exception:  # noqa: BLE001 — a reporting failure never fails the edit
+                _log.debug("a progress stage callback failed", exc_info=True)
+
     async def _run(self, task: str) -> Outcome:
+        self._stage("reading")
         self.progress.status("Looking over the artifact...")
         entries = self.ws.map()
         file_list = "\n".join(f"{e.path} ({e.bytes} bytes)" for e in entries) or "(no files)"
@@ -372,6 +416,7 @@ class ArtifactEditor:
                 self._preload([primary])
             self._say(prompts.request(task, preloaded=False))
 
+        self._stage("writing")
         self.progress.status("Working out the change...")
         try:
             outcome = await self._work()
@@ -433,7 +478,7 @@ class ArtifactEditor:
 
         for _round in range(MAX_ROUNDS):
             started = time.monotonic()
-            response, budget = await self._create(system=prompts.INSTRUCTIONS, tools=prompts.TOOLS)
+            response, budget = await self._create(system=self.system, tools=self.tools)
             self.progress.log(f"thought · {_seconds(started)}")
             calls = [ensure_replayable_tool_call(tc) for tc in (response.tool_calls or [])]
             cut = self._cut_off(response, budget)
@@ -611,6 +656,11 @@ class ArtifactEditor:
         # A later read, rejected edit or refused call cannot inherit an earlier edit's "done".
         self.complete, self.closing = False, ""
         name = tc.name or ""
+        if self.escalation and name == prompts.HAND_TO_AGENT:
+            args = tc.input if isinstance(tc.input, dict) else {}
+            reason = " ".join(str(args.get("reason") or "").split())[:400]
+            self.progress.log("handed to the agent: " + (reason or "no reason given"))
+            raise _Escalate(reason or "This needs more than editing the artifact's files.")
         quota = QUOTA.get(name)
         if quota is None:
             return _ToolResult(f"ERROR: unknown tool {name}", ok=False)
@@ -893,6 +943,7 @@ class ArtifactEditor:
     # ── the check ────────────────────────────────────────────────────
 
     async def _check(self) -> CheckResult:
+        self._stage("checking")
         self.progress.status("Checking the page...")
         started = time.monotonic()
         try:
@@ -924,8 +975,14 @@ class ArtifactEditor:
             self.check_failures += 1
         elif self.used.get(prompts.APPLY_DIFF, 0) >= QUOTA[prompts.APPLY_DIFF]:
             raise _GiveUp("the edits still do not pass the static check, and the edit budget is spent", result)
-        if self.check_failures >= MAX_CHECK_FAILURES:
+        if self.max_fix_rounds is not None:
+            if self.fix_rounds >= self.max_fix_rounds:
+                raise _GiveUp(f"the check still failed after {self.fix_rounds} fix "
+                              f"round{'s' if self.fix_rounds != 1 else ''}", result)
+        elif self.check_failures >= MAX_CHECK_FAILURES:
             raise _GiveUp(f"the check failed {self.check_failures} times", result)
+        self.fix_rounds += 1
+        self._stage("fixing", round=self.fix_rounds, findings=len(result.findings))
         image = (result.screenshot_b64, result.screenshot_media_type) if result.screenshot_b64 else None
         self._say(prompts.CHECK_FAILED + result.describe(), image=image)
 
@@ -944,6 +1001,7 @@ class ArtifactEditor:
         if not targets:
             raise _GiveUp("no edit would apply and there was no file to rewrite")
         evidence = self.last_failure or "Your edits could not be placed."
+        self._stage("writing")
         self.progress.status("Rewriting the file instead...")
         summary = ""
         budget = client_stream_budget(self.llm, self.role, by_effort=WRITE_BUDGET_BY_EFFORT)

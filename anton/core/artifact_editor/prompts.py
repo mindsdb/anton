@@ -16,6 +16,7 @@ MAX_READ_PATHS = 12
 READ_FILES = "read_files"
 SEARCH = "search"
 APPLY_DIFF = "apply_diff"
+HAND_TO_AGENT = "hand_to_agent"
 
 TOOLS: list[dict] = [
     {
@@ -169,6 +170,38 @@ with only the required edit made. Never abbreviate, summarize, or elide any part
 "unchanged" or "...": what you return replaces the file exactly, so anything you leave out is deleted. Keep \
 every <!-- anton:keep ... --> line exactly as it is. Put a short, factual note of what changed in summary.
 Respond with only the JSON object {"summary": "...", "content": "..."}, no other text before or after it."""
+
+# Quick edit (the artifact viewer's chat bar, ENG-4227): the editor runs with no
+# agent around it, so a request that needs more than these files has to be
+# handed back rather than answered or faked. Offered only with `escalation=True`.
+HAND_TO_AGENT_TOOL: dict = {
+    "name": HAND_TO_AGENT,
+    "description": (
+        "Hand this request to the analyst agent instead of editing, because it needs something these files "
+        "do not have: data the artifact does not contain, a query, analysis, or an answer rather than a change. "
+        "Every edit made so far is undone. Give the reason in one short sentence the user will read."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"reason": {"type": "string"}},
+        "required": ["reason"],
+        "additionalProperties": False,
+    },
+}
+
+QUICK_EDIT_INSTRUCTIONS = """
+
+QUICK EDIT
+
+This request was typed in the artifact's quick-edit bar, so there is no analyst agent in this conversation: \
+nobody can query a datasource, fetch new data or run an analysis for you. Data the artifact already contains \
+(its embedded data, the values in its files) is yours to use freely: sorting, filtering, grouping, totals, \
+percentages, new tables, charts or controls over that data are edits. When the request needs anything beyond \
+these files (rows, periods, columns or metrics the data does not have, refreshed or re-queried data, another \
+source, an analysis, forecast or explanation of the data, or an answer to a question rather than a change), \
+call hand_to_agent with the reason instead of editing or replying, and never invent, estimate or hard-code \
+data to make it fit. A short follow-up ("bigger", "undo that", "the other one") refers to the earlier \
+messages shown with the request."""
 
 CHECK_FAILED = "The edits applied, but the check failed. Fix it.\n"
 
