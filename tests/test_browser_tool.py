@@ -1094,8 +1094,31 @@ async def test_on_the_desktop_a_step_held_for_another_reason_says_into_frame_aft
         result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
         assert result.content.startswith("Done:"), step
     assert [body["into_frame"] for body in host.posted("/action")] == [True, False]
+
+    # A drag from a point in a frame onto a commit control.
+    host = FakeHost(pages=[order])
+    session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+    elicit_answers.answers.append("approve")
+    result = await browser_tool.handle_browser(
+        session, {"action": "act", "step": {"action": "drag", "from": {"x": 200, "y": 350}, "to": {"element": 7}}},
+    )
+    assert result.content.startswith("Done:")
+    assert [body["into_frame"] for body in host.posted("/action")] == [True]
+
+    # A page that a redirect from an authorization request landed on holds
+    # as a consent page whatever its own address.
+    landed = {**FRAMED, "url": "https://accounts.example.test/signin"}
+    host = FakeHost(pages=[landed])
+    session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+    await browser_tool.handle_browser(
+        session, {"action": "open", "url": "https://accounts.example.test/o/oauth2/auth?client_id=x&response_type=code"},
+    )
+    elicit_answers.answers.append("approve")
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "x": 200, "y": 350}})
+    assert result.content.startswith("Done:")
+    assert [body["into_frame"] for body in host.posted("/action")] == [True]
     prompts = elicit_answers.prompts()
-    assert len(prompts) == 5 and all(p.startswith("**Approve this browser step?**") for p in prompts)
+    assert len(prompts) == 7 and all(p.startswith("**Approve this browser step?**") for p in prompts)
     assert {[o.detail for o in r.options][0] for r in elicit_answers.requests} == {"Take this step once"}
 
 
@@ -1113,7 +1136,7 @@ async def test_on_a_desktop_that_sends_no_frames_every_click_by_position_gets_th
     prompts = elicit_answers.prompts()
     assert len(prompts) == 2 and all(p.startswith("**Approve this browser step?**") for p in prompts)
     assert [o.detail for o in elicit_answers.requests[0].options][0] == "Take this step once"
-    assert len(host.posted("/action")) == 2
+    assert [body["into_frame"] for body in host.posted("/action")] == [True, True]
 
 
 async def test_on_the_desktop_a_point_on_a_step_that_names_an_element_is_a_position_step(elicit_answers):
