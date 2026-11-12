@@ -11839,6 +11839,8 @@ class _CodeFiles:
     may_read: bool | None = None
     # Whether a cell may swap what a plain read runs (`_reads_swapped`), once asked.
     swapped: bool | None = None
+    # Whether a cell may reach code or state the check can't follow (`_opaque_code`), by how many cells it read.
+    opaque: tuple[int, bool] | None = None
 
     def hashes(self) -> dict[str, str]:
         """The SHA-256 of each file the checked cell read, by path (`CellWrites.code_files`)."""
@@ -11928,7 +11930,8 @@ def _code_file_path(source: ast.AST, reader: _Reader) -> str | None:
     else:
         return None
     path = opened.args[0].value
-    if not path.endswith(".py"):
+    # `..` after a link climbs from where the link points, not where its name sits.
+    if not path.endswith(".py") or ".." in path.replace("\\", "/").split("/"):
         return None
     files = reader.code_files
     if files.swapped is None:
@@ -11973,19 +11976,107 @@ _BACKGROUND_SHELL = re.compile(r"(?<!&)&(?!&)\s*(?:$|[;\n)])|\b(?:nohup|setsid|d
 
 def _may_read_now(reader: _Reader) -> bool:
     """Whether the checked cell may read a `.py` file from disk now: no cell
-    changes the working folder (`chdir`, `fchdir`), starts work that may run
-    on beside the pad (`_BACKGROUND_CALLS`, `_BACKGROUND_SHELL`), or ran
-    code the check can't read before it (`_runs_code`), any of which may
-    change the file, or which file a relative path names, unseen."""
-    for cell in _all_cells(reader):
-        if cell.index == cell.host and cell.host < reader.current.index and _runs_code(cell, reader):
-            return False
+    reaches code or state the check can't follow (`_opaque_code`), and no
+    earlier cell ran code the check can't read (`_ran_unread_code`), any of
+    which may change the file, or which file a relative path names, unseen."""
+    if _opaque_code(reader):
+        return False
+    return not any(cell.index == cell.host and cell.host < reader.current.index and _ran_unread_code(cell, reader)
+                   for cell in reader.cells)
+
+
+# Names that reach code or state the check can't follow: the working folder,
+# a frame or namespace, the garbage collector, raw memory, the loaded modules.
+_OPAQUE_NAMES = frozenset({
+    "chdir", "fchdir", "gc", "ctypes", "get_objects", "get_referrers", "get_referents", "_getframe",
+    "currentframe", "__dict__", "__globals__", "f_globals", "f_locals", "f_back", "modules", "setattr",
+    "delattr",
+})
+# Calls that load code by a name or a path, which a cell's own code doesn't show.
+_LOADING_CALLS = frozenset({
+    "import_module", "__import__", "run_path", "run_module", "reload", "spec_from_file_location",
+    "exec_module", "load_module", "SourceFileLoader",
+})
+
+
+def _opaque_code(reader: _Reader) -> bool:
+    """Whether a cell, or literal code it runs, may reach code or state the
+    check can't follow, so it can't rule out an unseen change to a file or a
+    name: an import of a module that isn't the standard library's or
+    installed (`_local_module`), a call that loads code by name or path
+    (`_LOADING_CALLS`), a lookup by a computed name (`getattr`), a name in
+    `_OPAQUE_NAMES`, or work that runs on beside the pad
+    (`_BACKGROUND_CALLS`, `_BACKGROUND_SHELL`). Read once per check."""
+    files = reader.code_files
+    cells = _all_cells(reader)
+    if files.opaque is not None and files.opaque[0] == len(cells):
+        return files.opaque[1]
+    files.opaque = (len(cells), _reaches_opaque(cells, files.root))
+    return files.opaque[1]
+
+
+def _reaches_opaque(cells: Sequence[_Cell], root: Path | None) -> bool:
+    """`_opaque_code` for `cells`, with `root` the pad's folder."""
+    for cell in cells:
         for node in cell.walked:
-            if isinstance(node, ast.Call) and _last_name(node.func) in {"chdir", "fchdir", *_BACKGROUND_CALLS}:
-                return False
-            if isinstance(node, ast.Constant) and isinstance(node.value, str) and _BACKGROUND_SHELL.search(node.value):
-                return False
-    return True
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
+                if isinstance(node, ast.ImportFrom) and node.level or any(_local_module(n, root) for n in names):
+                    return True
+            elif isinstance(node, ast.Call):
+                last = _last_name(node.func)
+                computed = last == "getattr" and not (len(node.args) > 1 and isinstance(node.args[1], ast.Constant))
+                if last in _LOADING_CALLS or last in _BACKGROUND_CALLS or computed:
+                    return True
+            elif isinstance(node, ast.Name) and node in cell.looked_up and _local_module(node.id, root):
+                # A literal `importlib.import_module("w")` or `__import__("w")`, read as the module.
+                return True
+            elif isinstance(node, ast.Name) and (node.id in _OPAQUE_NAMES or node.id in _BACKGROUND_CALLS) or (
+                isinstance(node, ast.Attribute) and (node.attr in _OPAQUE_NAMES or node.attr in _BACKGROUND_CALLS)
+            ):
+                return True
+            if (isinstance(node, ast.Attribute) and node.attr in ("path", "meta_path", "path_hooks")
+                    and isinstance(node.value, ast.Name) and node.value.id == "sys"):
+                return True
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str) and _BACKGROUND_SHELL.search(node.value):
+                return True
+    return False
+
+
+def _local_module(name: str, root: Path | None) -> bool:
+    """Whether an import of `name` may load a module the check can't read:
+    one in the pad's folder `root` (any other folder reaches the import path
+    only through `sys.path`, `_OPAQUE_NAMES`), or, with no root, any that is
+    neither the standard library's nor installed beside the check."""
+    top = name.split(".")[0]
+    if not top:
+        return False
+    if root is not None:
+        # The pad has packages of its own, so only its folder tells.
+        return (root / f"{top}.py").exists() or (root / top).is_dir()
+    if top in sys.stdlib_module_names:
+        return False
+    try:
+        return importlib.util.find_spec(top) is None
+    except (ImportError, ValueError):
+        return True
+
+
+def _ran_unread_code(cell: _Cell, reader: _Reader) -> bool:
+    """Whether `cell` may run code the check can't read (`_runs_code`), past
+    an exec(), eval() or compile() whose source the check reads
+    (`_source_text`)."""
+    if not _runs_code(cell, reader):
+        return False
+    for node in cell.signs.hints:
+        if not _names_a_runner(node, reader):
+            continue
+        call = cell.parents.get(node)
+        builtin = reader.exec_builtin(node) if isinstance(call, ast.Call) and call.func is node else None
+        source = _exec_source(call, builtin) if builtin else None
+        if source is None or _source_text(source, reader) is None:
+            return True
+    return False
 
 
 def _all_cells(reader: _Reader) -> list[_Cell]:
@@ -12063,7 +12154,7 @@ def _stitched_text(source: ast.AST, reader: _Reader) -> str | None:
     cache[key] = None
     cell = reader.cell_of(source)
     stmt = _top_statement(source, cell)
-    if cell.index != cell.host or stmt is None:
+    if cell.index != cell.host or stmt is None or _opaque_code(reader):
         return None
     replay = _stitch_before(reader, cell, errored)
     replay.run(cell, cell.tree.body[: cell.tree.body.index(stmt)], errored=False)
@@ -17097,7 +17188,8 @@ def find_cell_writes(
         # A depth limit that may have stopped a read short of a write
         # (`_Reader.stopped`) leaves the cell unchecked too.
         unchecked=bool(unread) or reader.stopped or stale_files,
-        code_files={} if stale_files else code_files.hashes(),
+        # A cell that runs code the check can't read may change a file after its read.
+        code_files={} if stale_files or unread or reader.stopped else code_files.hashes(),
         causes=tuple(dict.fromkeys(c for c in causes if c.code or c.name))[:_CAUSES_SHOWN],
     )
 

@@ -42,6 +42,10 @@ class Cell:
     """
 
     code: str
+    # The SHA-256 of each `.py` file its write check read for exec(), by
+    # path, so a later check (another turn's too) reads only that same text.
+    # Right after `code`, so a host that cuts a long saved result keeps it.
+    code_files: dict[str, str] = field(default_factory=dict, kw_only=True)
     stdout: str
     stderr: str
     error: str | None
@@ -49,9 +53,6 @@ class Cell:
     # most often, so a result cut there keeps them.
     stopped_at: int | None = None
     ended_process: bool = False
-    # The SHA-256 of each `.py` file its write check read for exec(), by
-    # path, so a later check (another turn's too) reads only that same text.
-    code_files: dict[str, str] = field(default_factory=dict)
     description: str = ""
     estimated_time: str = ""
     logs: str = ""

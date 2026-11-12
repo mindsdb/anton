@@ -501,6 +501,10 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
     Only sessions with a `WriteGate` (the `write_approval` setting) check
     anything. A check that fails asks too, since it can't clear the cell.
     """
+    # Drop what an earlier check left for a cell that never ran.
+    expect = getattr(pad, "expect_code_files", None)
+    if callable(expect):
+        expect(code, {})
     gate = getattr(session, "_write_gate", None)
     if not isinstance(gate, WriteGate):
         return None
@@ -537,7 +541,6 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
         logger.warning("write approval: the check failed (%s)", type(exc).__name__)
         writes = CellWrites(unchecked=True)
     # The cell keeps what this check read, so a later check reads the same text.
-    expect = getattr(pad, "expect_code_files", None)
     if callable(expect):
         expect(code, dict(writes.code_files))
     if gate.relayed_hosts and writes.http:

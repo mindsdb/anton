@@ -617,6 +617,109 @@ cases:
       exec("".join(PARTS))
     card: unchecked
 
+  - name: exec of a py file after an earlier import of an installed package runs with no card
+    files:
+      h.py: x = 1
+    earlier:
+      - import pandas as pd
+    code: |-
+      exec(open('h.py').read())
+    card: none
+
+  - name: exec of a py file after an earlier literal exec runs with no card
+    files:
+      h.py: x = 1
+    earlier:
+      - exec('z = 3')
+    code: |-
+      exec(open('h.py').read())
+    card: none
+
+  - name: exec of a py file after a literal import of a module in the pad's folder is unchecked
+    files:
+      h.py: x = 1
+      w.py: x = 2
+    code: |-
+      import importlib
+      importlib.import_module('w')
+      exec(open('h.py').read())
+    card: unchecked
+
+  - name: exec of a py file after a call into a module in the pad's folder is unchecked
+    files:
+      h.py: x = 1
+      w.py: "def g():\n    pass\n"
+    earlier:
+      - import w
+    code: |-
+      w.g()
+      exec(open('h.py').read())
+    card: unchecked
+
+  - name: exec of a py file after a folder change through an alias is unchecked
+    files:
+      h.py: x = 1
+    earlier:
+      - |-
+        import os
+        f = os.chdir
+        f('/tmp')
+    code: |-
+      exec(open('h.py').read())
+    card: unchecked
+
+  - name: exec of a py file after a lookup by a computed name is unchecked
+    files:
+      h.py: x = 1
+    earlier:
+      - |-
+        import os
+        getattr(os, 'ch' + 'dir')('/tmp')
+    code: |-
+      exec(open('h.py').read())
+    card: unchecked
+
+  - name: exec of a py file by a path that climbs out of a folder is unchecked
+    files:
+      h.py: x = 1
+      sub/k.py: x = 2
+    code: |-
+      exec(open('sub/../h.py').read())
+    card: unchecked
+
+  - name: exec of a py file after a thread started through an alias is unchecked
+    files:
+      h.py: x = 1
+    earlier:
+      - |-
+        import threading
+        T = threading.Thread
+        T(target=print).start()
+    code: |-
+      exec(open('h.py').read())
+    card: unchecked
+
+  - name: pieces the garbage collector reaches are unchecked
+    earlier:
+      - "PARTS = ['x = 1\\n']"
+      - |-
+        import gc
+        [o for o in gc.get_objects() if o == ['x = 1\n']][0].append('import requests\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\n')
+    code: |-
+      exec("".join(PARTS))
+    card: unchecked
+
+  - name: pieces after a call into a module in the pad's folder are unchecked
+    files:
+      w.py: "def g():\n    pass\n"
+    earlier:
+      - "PARTS = ['x = 1\\n']"
+      - import w
+    code: |-
+      w.g()
+      exec("".join(PARTS))
+    card: unchecked
+
   - name: a script of harmless pieces joined over cells runs with no card
     earlier:
       - PARTS = {}

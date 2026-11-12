@@ -3768,6 +3768,14 @@ def test_a_py_file_the_cell_may_change_first_is_not_kept(helpers):
     assert writes.unchecked and writes.code_files == {}
 
 
+def test_a_cell_that_runs_code_the_check_cant_read_keeps_no_hash(helpers):
+    """Unread code may change the file after the read, so a later cell
+    mustn't trust what this one read."""
+    code = "import runpy\nrunpy.run_path('other.py')\nexec(open('helpers.py').read())"
+    writes = find_cell_writes(code=code, earlier=(), snapshots=(helpers,), code_root=helpers.root)
+    assert writes.unchecked and writes.code_files == {}
+
+
 def test_a_py_file_past_the_cap_is_unchecked(helpers):
     writes = find_cell_writes(code="exec(open('big.py').read())", earlier=(), snapshots=(helpers,),
                               code_root=helpers.root)
