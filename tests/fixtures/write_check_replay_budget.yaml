@@ -1,0 +1,47 @@
+# The write check's card budget on tests/fixtures/write_check_replay_corpus.yaml,
+# read by tests/test_write_check_replay.py::test_the_write_check_stays_within_its_card_budget.
+#
+#   no_write_cards_max   cards allowed on cells that write nothing and run no
+#                        unread code. Lower it when a change frees cells; never
+#                        raise it without saying in the PR which cells gained a
+#                        card and why each one must ask.
+#   real_writes_carded   real writes that must keep their card. Add a cell when
+#                        a change starts catching it; never remove one.
+
+no_write_cards_max: 119
+real_writes_carded:
+  - "C01 exec_module dbx helpers #10"
+  - "C01 exec_module dbx helpers #11"
+  - "C05 exec open gateway skill #6"
+  - "C05 exec open gateway skill #7"
+  - "C07 exec_module restart reload #7"
+  - "D03 config-driven page path #7"
+  - "F01 dbx create safety stock table #4"
+  - "F01 dbx create safety stock table #6"
+  - "F01 dbx create safety stock table #9"
+  - "F02 pg update statuses #4"
+  - "F02 pg update statuses #6"
+  - "F03 overwrite project files #2"
+  - "F03 overwrite project files #5"
+  - "F04 gateway sandbox edits #4"
+  - "F04 gateway sandbox edits #6"
+  - "F04 gateway sandbox edits #9"
+  - "F05 sqlite project db #3"
+  - "F06 cleanup old exports #2"
+  - "F06 cleanup old exports #3"
+  - "F06 cleanup old exports #5"
+  - "F07 to_sql append #3"
+  - "F07 to_sql append #6"
+  - "F08 crm patch #3"
+  - "G03 path loop overwrite #3"
+  - "G04 statement shown then run #2"
+  - "H05 planning client object over three turns #10"
+  - "S03 monthly kpi pack #4"
+  - "W01 snowflake through sqlalchemy #7"
+  - "W01 snowflake through sqlalchemy #9"
+  - "K02 duckdb project database #3"
+  - "P01 helper module: push through it #1"
+  - "P04 exec of a script that writes, then call it #1"
+  - "P06 DDL run on a project database #1"
+  - "P08 startup hook written through a path, then a restart #1"
+  - "P12 page builder data step that posts #0"

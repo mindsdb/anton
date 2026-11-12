@@ -299,6 +299,22 @@ Each turn writes its skills into a fresh folder in the system temp dir, outside 
 
 A request with no `skills` block at all stages no skills, with one rollout fallback. On a pod whose controller mounts the organization's whole skills tree and names it in `ANTON_CLOUD_SKILLS_ROOT`, such a request reads that mount instead, and the pod logs a warning. The mount holds every member's skills, so a request that carries a block never reads it.
 
+## Write-check card budget
+
+The write check asks the person to approve a cell before it changes a database, a listed endpoint or an existing file. A card on a cell that writes nothing costs a click, or an unattended answer the whole card timeout, so the check is measured both ways: what it catches and what it asks about for no reason.
+
+`scripts/write_check_replay.py` replays `tests/fixtures/write_check_replay_corpus.yaml` through one anton tree's write check, cell by cell with each chat's earlier cells. The corpus holds about 80 synthetic analysis chats. They mix pandas, SQL reads, helper modules, restarts between turns, page builds and real writes, and each cell is labeled by hand. Each must-hold cell is paired with must-stay-free cells that share its `pair` id. The replay prints cards per 100 cells and per 100 questions by kind, real writes carded, cards on cells that write nothing, each pair's result, and the causes the cards name. It takes a few seconds:
+
+```bash
+uv run python -I scripts/write_check_replay.py                         # this tree
+uv run python -I scripts/write_check_replay.py --tree /path/to/other/anton --commit <sha> --out other.json
+uv run python -I scripts/write_check_replay.py --tree . --compare other.json   # exit 1 on a lost hold or more noise
+```
+
+It runs any anton commit's write check, the older `earlier_code=` form included. It exits 2 when Python imported the check from anywhere but `--tree`. A check that raises counts as a card, as it does in a session. `--code-root` passes the project folder as a local pad's `code_root` on a tree that takes it.
+
+`tests/test_write_check_replay.py` holds this tree to `tests/fixtures/write_check_replay_budget.yaml`. Every real write listed there keeps its card, and cards on cells that write nothing stay at or under `no_write_cards_max`. A change that frees cells lowers the ceiling and lists any real write it starts catching. A change that adds cards says in its PR which cells gained one and why each must ask.
+
 ---
 
 ## Dev guidelines
