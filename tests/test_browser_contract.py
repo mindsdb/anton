@@ -190,6 +190,17 @@ def test_the_page_fixture_names_every_frame_limit_the_hosts_hold():
     assert "frames_phase_ms" in _load("page").description
 
 
+def test_the_page_fixture_gives_the_element_order_both_hosts_use():
+    """Past the cap both hosts list what the person sees first. One lists an
+    open dialog's elements ahead of everything, even when all fit, and the
+    other keeps page order when all fit, so the fixture allows both."""
+    description = _load("page").description
+    assert "It keeps page order when every shown element fits" not in description
+    assert "Past the cap it lists the on-screen elements ahead of the off-screen ones, each group in page order" in description
+    assert "when every shown element fits, a host may keep page order or use the same order" in description
+    assert "A host may list an open dialog's elements (in_dialog) ahead of both groups." in description
+
+
 def test_a_page_from_a_host_that_predates_frames_says_nothing_about_frames():
     """A host that sends no ``frames`` hasn't said the page has none."""
     body = {key: value for key, value in _load("page").examples["a page with no check"].body.items() if key != "frames"}
