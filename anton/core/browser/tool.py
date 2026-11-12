@@ -1577,9 +1577,14 @@ async def _do_tabs(session: "ChatSession", tc_input: dict) -> str:
     state = _state(session)
     await _ensure_open(session)
     tabs = await state.client.tabs(session_id=state.session_id)
-    if not tabs:
-        return "No tabs are open."
-    return "Open tabs (actions and page reads use the active one):\n" + "\n".join(_tab_line(t) for t in tabs)
+    info = await state.client.session_info(session_id=state.session_id)
+    limit = f" (at most {info.max_tabs} for this task)" if info.max_tabs else ""
+    lines = [f"Open tabs{limit}; actions and page reads use the active one:"] if tabs else ["No tabs are open."]
+    lines += [_tab_line(t) for t in tabs]
+    if info.parked_tabs:
+        lines.append("Closed earlier (reopen one with action=new_tab and its url):")
+        lines += [f"- {json.dumps(t.title, ensure_ascii=False)} {t.url}" for t in info.parked_tabs]
+    return "\n".join(lines)
 
 
 async def _do_new_tab(session: "ChatSession", tc_input: dict) -> str:
@@ -1832,7 +1837,7 @@ BROWSER: you and the user share a real browser. The user sees it beside this cha
 - Only the user hands the browser back, with Done in the browser. Until then you can't act in it or read the page: say what you need in chat and end your turn.
 - Never click or try to solve a "verify you are human" check (Cloudflare, reCAPTCHA, hCaptcha). The tool hands those to the user by itself; wait for them.
 - After the user signs in to a site, call action=note_login with the site (and an account hint they'd recognize, never a secret). The browser keeps that record, and action=open lists it in later conversations.
-- Use tabs (action=new_tab, switch_tab, close_tab, tabs) to keep a reference page open while you work in another. When the user will want a page again in this project, save it with action=save_tab (action=saved_tabs lists them).
+- Work in one tab: go back to a page by its address when you need it again. Before filling a form, list what it needs, gather it first and keep it in your notes, then fill it in one pass. A task keeps at most a few tabs (action=tabs says how many): open a second (action=new_tab) only to check something while a half-done form can't be left, and close it (action=close_tab) when done. action=tabs also lists tabs from before that were closed; reopen one with new_tab and its url. When the user will want a page again in this project, save it with action=save_tab (action=saved_tabs lists them).
 - A step that commits something on the user's behalf (submitting, buying, paying, sending, posting, deleting) waits for the user's Approve on a card the tool shows them, and so do clicks by position, once per page. If they decline, don't take the step another way: tell them what it would do.
 - Only report what the page actually shows. If a step fails or the page didn't change, say so.
 - Use action=screenshot when the page list can't show what you need (canvas, maps, charts, text in images), or when you seem stuck: a step failed or timed out, the page didn't change, or you're about to try the same thing again. Usually something is in the way (a modal, cookie banner or overlay); close it, then go on. Don't take one after every step.

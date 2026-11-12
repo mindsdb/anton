@@ -73,6 +73,8 @@ class FakeHost:
 
     def __init__(self, pages=None):
         self.calls: list[tuple[str, str, dict | None, str]] = []
+        # More of GET /sessions/{id}: max_tabs, parked_tabs.
+        self.session_extra: dict = {}
         self.timeouts: list[float] = []
         self.pages = list(pages or [PAGE])
         self.sites: list[dict] = []
@@ -124,7 +126,9 @@ class FakeHost:
                 self.set_control("agent", "", "person")
             return answer
         if path == f"/sessions/{SID}" and request.method == "GET":
-            return httpx.Response(200, json={"session_id": SID, "url": self.shown["url"], "control": self.control})
+            return httpx.Response(200, json={
+                "session_id": SID, "url": self.shown["url"], "control": self.control, **self.session_extra,
+            })
         if path.endswith("/page"):
             return httpx.Response(200, json=self.page())
         if path.endswith("/action"):
@@ -1474,6 +1478,21 @@ async def test_tabs_lists_the_open_tabs():
     assert result.ok is True
     assert '- t1 (active) "Shop" https://shop.example/' in result.content
     assert '- t2 "Docs" https://docs.example/' in result.content
+
+
+async def test_tabs_says_the_tasks_limit_and_lists_the_tabs_closed_earlier():
+    host = FakeHost()
+    host.session_extra = {"max_tabs": 2, "parked_tabs": [{"url": "https://docs.example/faq", "title": "FAQ"}]}
+    session = make_session(host)
+    result = await browser_tool.handle_browser(session, {"action": "tabs"})
+    assert "Open tabs (at most 2 for this task)" in result.content
+    assert 'Closed earlier (reopen one with action=new_tab and its url):\n- "FAQ" https://docs.example/faq' in result.content
+
+
+def test_the_prompt_says_to_work_in_one_tab_and_gather_before_filling_a_form():
+    prompt = browser_tool.BROWSER_TOOL_PROMPT
+    assert "Work in one tab" in prompt
+    assert "gather it first" in prompt and "fill it in one pass" in prompt
 
 
 async def test_new_tab_opens_and_returns_the_page_like_act():

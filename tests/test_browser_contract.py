@@ -325,6 +325,7 @@ ERROR_REASONS = {
     "password_field": "browser_secret_field",
     "bad_request": "browser_bad_input",
     "tab_not_found": "browser_error",
+    "tab_limit": "browser_error",
     "human_in_control": "browser_human_in_control",
     "stale_element": "browser_stale_element",
     "page_blocked": "browser_page_blocked",

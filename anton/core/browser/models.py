@@ -116,6 +116,15 @@ class SessionInfo(_Answer):
     control: Control
     #: The active tab's address; null before a page loads.
     url: str | None = None
+    #: The most tabs the agent may open for this task; None from a host that has no limit.
+    max_tabs: int | None = None
+    #: Tabs a recycled session noted, which reopen only when asked for.
+    parked_tabs: list["ParkedTab"] = []
+
+
+class ParkedTab(_Answer):
+    url: str
+    title: str = ""
 
 
 class Tab(_Answer):

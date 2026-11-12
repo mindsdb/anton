@@ -1,5 +1,5 @@
 {
-  "description": "Who holds the browser. seq rises by one with every change, and by says who made it. The agent hands the browser to the person with POST /sessions/{id}/control holder \"human\". Only the person hands it back, with Done in the browser, which records holder \"agent\" by \"person\". The API refuses holder \"agent\" with 403 person_only. GET /sessions/{id} answers even while the person holds control. since is epoch milliseconds. The session record also carries the active tab's title and url; url is null before a page loads.",
+  "description": "Who holds the browser. seq rises by one with every change, and by says who made it. The agent hands the browser to the person with POST /sessions/{id}/control holder \"human\". Only the person hands it back, with Done in the browser, which records holder \"agent\" by \"person\". The API refuses holder \"agent\" with 403 person_only. GET /sessions/{id} answers even while the person holds control. since is epoch milliseconds. The session record also carries the active tab's title and url; url is null before a page loads. GET /sessions/{id} also says the most tabs the agent may open for the task (max_tabs) and the tabs a recycled session noted (parked_tabs: url and title), which reopen only when asked for.",
   "examples": {
     "a session the agent holds": {
       "where": "GET /sessions/{id}",
@@ -19,7 +19,14 @@
           "by": "agent"
         },
         "created_at": "2026-11-05T18:00:00.000Z",
-        "last_active_at": "2026-11-05T18:00:00.000Z"
+        "last_active_at": "2026-11-05T18:00:00.000Z",
+        "max_tabs": 2,
+        "parked_tabs": [
+          {
+            "url": "https://shop.example.test/help",
+            "title": "Help - Example Shop"
+          }
+        ]
       }
     },
     "a session before a page loads": {
@@ -40,7 +47,9 @@
           "by": "agent"
         },
         "created_at": "2026-11-05T18:00:00.000Z",
-        "last_active_at": "2026-11-05T18:00:00.000Z"
+        "last_active_at": "2026-11-05T18:00:00.000Z",
+        "max_tabs": 2,
+        "parked_tabs": []
       }
     },
     "hand to the person": {
@@ -81,7 +90,9 @@
           "by": "person"
         },
         "created_at": "2026-11-05T18:00:00.000Z",
-        "last_active_at": "2026-11-05T18:02:00.000Z"
+        "last_active_at": "2026-11-05T18:02:00.000Z",
+        "max_tabs": 2,
+        "parked_tabs": []
       }
     },
     "the agent asks for the browser back": {
