@@ -127,12 +127,12 @@ from __future__ import annotations
 import json
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ConfigDict
 
 from anton.core.browser.config import BrowserConfig
-from anton.core.llm.identity import sanitize_connection_label
 from anton.core.tools.skill_format import validate_name
 
 logger = logging.getLogger(__name__)
@@ -144,6 +144,8 @@ _REQUIRED_REF_KEYS = frozenset({"connection_id", "credential_version"})
 # Names only, for the prompt. cowork-server's queue check allows the same two.
 _OPTIONAL_REF_KEYS = frozenset({"label", "engine"})
 _ENGINE_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,31}")
+#: Auth caps a connection's name at this many characters; the prompt keeps the same bound.
+MAX_CONNECTION_LABEL_LEN = 128
 
 # The `turn_completed` key that names the artifact folders the turn touched.
 # scratchpad-controller's `scratchpad_controller/anton_turn.py` relays it and
@@ -219,11 +221,25 @@ def _parse_datasource_block(value: object) -> DatasourceBlockV1 | None:
             DatasourceConnectionRefV1(
                 connection_id,
                 credential_version,
-                label=sanitize_connection_label(connection.get("label")),
+                label=_usable_label(connection.get("label")),
                 engine=_usable_engine(connection.get("engine")),
             )
         )
     return DatasourceBlockV1(DATASOURCE_PROTOCOL_VERSION, tuple(refs))
+
+
+def _usable_label(value: object) -> str | None:
+    """The connection's name as one clean prompt line, or ``None`` when nothing usable is left.
+
+    Spaces of any kind become a plain space and other non-printable characters go, so a
+    name cannot start a new prompt line; cowork-server's producer applies the same rule.
+    """
+    if not isinstance(value, str):
+        return None
+    spaced = "".join(" " if unicodedata.category(ch) == "Zs" else ch for ch in value)
+    cleaned = "".join(ch for ch in spaced if ch.isprintable()).strip()
+    cleaned = cleaned[:MAX_CONNECTION_LABEL_LEN].strip()
+    return cleaned or None
 
 
 def _usable_engine(value: object) -> str | None:
@@ -404,8 +420,10 @@ class TurnRequestV1:
     #: empty means no connectors for this turn — see cloud_turn/session.py's
     #: build_cloud_chat_session, which is the only place this is read.
     oauth: dict | None = None
-    #: Optional verified datasource references: only IDs and immutable versions.
-    #: No capability or password crosses; the gateway is on the `llm` base URL's host.
+    #: Optional verified datasource references: IDs and immutable versions, each with
+    #: an optional ``label`` (the user's name for it) and ``engine`` (auth's connector
+    #: id), which only the prompt reads. No capability or password crosses; the
+    #: gateway is on the `llm` base URL's host.
     datasource: DatasourceBlockV1 | None = None
     #: Optional ISO 8601 creation time of the conversation, as cowork-server
     #: resolved it. The pod is new every turn and cannot derive this: history
