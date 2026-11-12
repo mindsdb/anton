@@ -281,18 +281,19 @@ def test_developer_token_is_marked_secret_and_login_customer_id_is_not(monkeypat
     assert record["secure_keys"] == ["access_token", "developer_token"]
 
 
-def test_method_passes_through_so_mcp_wiring_sees_the_connection(monkeypatch):
-    """auth marks a HubSpot connection `_method: "mcp"`; without it anton
-    registers no HubSpot tools on a cloud turn."""
+@pytest.mark.parametrize("engine", ["hubspot", "notion"])
+def test_method_passes_through_so_mcp_wiring_sees_the_connection(monkeypatch, engine):
+    """auth marks a HubSpot or Notion connection `_method: "mcp"`; without it
+    anton registers none of its tools on a cloud turn."""
     from anton.core.mcp.wiring import _method_of
 
     monkeypatch.setattr(
         "anton.minds_client.minds_request",
         lambda *a, **kw: b'{"access_token": "tok", "_method": "mcp"}',
     )
-    vault = _vault(connections=[{"engine": "hubspot", "name": "acme"}])
-    assert _method_of(vault, "hubspot", "acme") == "mcp"
-    assert vault.load("hubspot", "acme")["access_token"] == "tok"
+    vault = _vault(connections=[{"engine": engine, "name": "acme"}])
+    assert _method_of(vault, engine, "acme") == "mcp"
+    assert vault.load(engine, "acme")["access_token"] == "tok"
 
 
 def test_response_without_method_is_not_treated_as_mcp(monkeypatch):
