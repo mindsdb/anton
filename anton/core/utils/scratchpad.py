@@ -6,8 +6,7 @@ import os
 import re
 import time
 import uuid
-from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
@@ -114,10 +113,6 @@ class WriteGate:
     unanswered: bool = False
     http_rules: tuple[HttpWriteRule, ...] = ()
     relayed_hosts: frozenset[str] = frozenset()
-    # What each cell's check read of the `.py` files it hands exec(), by pad
-    # name, then by the cell's code and how many cells with that code came
-    # before it, which compaction keeps (`EarlierCell.code_files`).
-    code_files: dict[str, dict[tuple[str, int], dict[str, str]]] = field(default_factory=dict)
 
     async def begin_turn(self, *, manager: ScratchpadManager) -> None:
         self.unanswered = False
@@ -509,14 +504,6 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
     gate = getattr(session, "_write_gate", None)
     if not isinstance(gate, WriteGate):
         return None
-    records = gate.code_files.setdefault(str(getattr(pad, "name", "")), {})
-    seen: Counter[str] = Counter()
-
-    def read_files(cell_code: str) -> dict[str, str]:
-        # What this cell's own check read, by its code and place among same-code cells.
-        seen[cell_code] += 1
-        return records.get((cell_code, seen[cell_code] - 1), {})
-
     try:
         # The cells compaction folded away come first: the pad's process still
         # holds what they imported and bound. Their outcomes still decide
@@ -528,12 +515,12 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
         # gets the card too.
         earlier = (
             *(EarlierCell(code=cell.code, errored=cell.errored, stopped_at=cell.stopped_at,
-                          ended_process=cell.ended_process, code_files=read_files(cell.code))
+                          ended_process=cell.ended_process, code_files=_code_files_of(cell))
               for cell in getattr(pad, "compacted_cells", ())),
             *(EarlierCell(code=cell.code, errored=bool(getattr(cell, "error", None)),
                           stopped_at=getattr(cell, "stopped_at", None),
                           ended_process=getattr(cell, "ended_process", False) is True,
-                          code_files=read_files(cell.code))
+                          code_files=_code_files_of(cell))
               for cell in getattr(pad, "cells", ()) or ()),
         )
         if earlier and getattr(pad, "process_running", True) is False:
@@ -543,19 +530,16 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
             earlier = (*earlier[:-1], earlier[-1].model_copy(update={"ended_process": True}))
         writes = await asyncio.to_thread(
             find_cell_writes, code=code, earlier=earlier, snapshots=gate.snapshots, http_rules=gate.http_rules,
+            code_root=_code_root(pad),
         )
     except Exception as exc:
         # The type only, as for a failed question.
         logger.warning("write approval: the check failed (%s)", type(exc).__name__)
         writes = CellWrites(unchecked=True)
-        # The count may have stopped short: drop every record of this code.
-        for key in [k for k in records if k[0] == code]:
-            del records[key]
-    # Replaces what an earlier check of this code at this place read, which didn't run or ran before a reset.
-    if writes.code_files:
-        records[(code, seen[code])] = writes.code_files
-    else:
-        records.pop((code, seen[code]), None)
+    # The cell keeps what this check read, so a later check reads the same text.
+    expect = getattr(pad, "expect_code_files", None)
+    if callable(expect):
+        expect(code, dict(writes.code_files))
     if gate.relayed_hosts and writes.http:
         # The write relay holds a request to a host it relays and raises its
         # own card through approve_held_write, so a second card here would
@@ -580,6 +564,25 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
     if cause is None:
         return None
     return _refusal(writes, cause)
+
+
+def _code_files_of(cell: object) -> dict[str, str]:
+    """A recorded cell's `code_files`, or none from a runtime or a replay that has none."""
+    files = getattr(cell, "code_files", None)
+    return dict(files) if isinstance(files, dict) else {}
+
+
+def _code_root(pad: object) -> Path | None:
+    """The folder a local pad runs its cells in, where the write check reads
+    a `.py` file a cell hands exec(); None for any other pad, whose files
+    the host can't see."""
+    root = getattr(pad, "_explicit_workspace_path", None)
+    if root is None:
+        return None
+    try:
+        return Path(root).resolve()
+    except (OSError, RuntimeError, TypeError):
+        return None
 
 
 def _acc_observe(session, kind: str, detail: dict, *, severity: int = 1) -> None:

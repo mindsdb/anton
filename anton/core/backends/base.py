@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -49,6 +49,9 @@ class Cell:
     # most often, so a result cut there keeps them.
     stopped_at: int | None = None
     ended_process: bool = False
+    # The SHA-256 of each `.py` file its write check read for exec(), by
+    # path, so a later check (another turn's too) reads only that same text.
+    code_files: dict[str, str] = field(default_factory=dict)
     description: str = ""
     estimated_time: str = ""
     logs: str = ""
@@ -62,6 +65,7 @@ class CompactedCell:
     errored: bool
     stopped_at: int | None = None
     ended_process: bool = False
+    code_files: dict[str, str] = field(default_factory=dict, hash=False, compare=False)
 
 
 def stopped_line(value: object) -> int | None:
@@ -203,8 +207,16 @@ class ScratchpadRuntime(ABC):
         output.
         """
         scrubbed = scrub_cell(cell)
+        pending, self._pending_code_files = getattr(self, "_pending_code_files", None), None
+        if pending is not None and pending[0] == scrubbed.code:
+            scrubbed.code_files = dict(pending[1])
         self.cells.append(scrubbed)
         return scrubbed
+
+    def expect_code_files(self, code: str, files: dict[str, str]) -> None:
+        """What the write check read for the cell about to run `code`
+        (`Cell.code_files`), kept on that cell when it is recorded."""
+        self._pending_code_files = (code, files)
 
     def set_scratchpad_ds_env(self, ds_env: dict[str, str] | None) -> None:
         """Override this pad's DS_* env for its next start()/reset(); no-op unless a backend supports it."""
@@ -347,7 +359,7 @@ class ScratchpadRuntime(ABC):
         self.compacted_cells = (
             *self.compacted_cells,
             *(CompactedCell(code=cell.code, errored=bool(cell.error), stopped_at=cell.stopped_at,
-                            ended_process=cell.ended_process)
+                            ended_process=cell.ended_process, code_files=cell.code_files)
               for cell in to_compact if cell.code != _COMPACTED_CELL_CODE),
         )
         summary_cell = Cell(

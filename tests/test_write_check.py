@@ -50,6 +50,12 @@ PG = (
 UPD = "f\"UPDATE suppliers SET lead_time_days = {d} WHERE supplier_id = '{s}'\""
 
 
+def _sha256(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 @pytest.fixture
 def snap(tmp_path: Path, monkeypatch):
     for rel in ("report.pdf", "stock.csv", "summary.md", "output/old.png",
@@ -497,8 +503,11 @@ class _UnreadCase(BaseModel):
     not_kinds: list[str] = []
 
     def earlier_cells(self) -> list[EarlierCell]:
-        """The row's earlier cells, oldest first."""
-        return [EarlierCell(code=cell) if isinstance(cell, str) else cell for cell in self.earlier]
+        """The row's earlier cells, oldest first, each `code_files` text as
+        the SHA-256 a cell records of it."""
+        return [EarlierCell(code=cell) if isinstance(cell, str) else cell.model_copy(update={
+            "code_files": {path: _sha256(text) for path, text in cell.code_files.items()}})
+            for cell in self.earlier]
 
 
 _UNREAD_CODE = yaml.safe_load(
@@ -521,7 +530,7 @@ def test_cells_that_run_code_the_check_cant_read(case: "_UnreadCase", tmp_path, 
     snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
     writes = find_cell_writes(
         code=case.code, earlier=case.earlier_cells(), snapshots=(snap,),
-        http_rules=parse_http_write_rules(_UNREAD_CODE_RULE))
+        http_rules=parse_http_write_rules(_UNREAD_CODE_RULE), code_root=tmp_path.resolve())
     if case.card == "none":
         assert not writes.needs_approval()
     elif case.card == "unchecked":
@@ -3737,25 +3746,31 @@ def helpers(tmp_path: Path, monkeypatch):
     (tmp_path / "helpers.py").write_text("def load():\n    return 1\n")
     (tmp_path / "big.py").write_text("x = 1\n" * 20_000)
     monkeypatch.chdir(tmp_path)
-    return snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    return snapshot_project_files(root=tmp_path.resolve(), label="project", taken_at=time.time() + 60)
 
 
-def test_an_exec_of_a_py_file_returns_the_text_it_read(helpers):
+def test_an_exec_of_a_py_file_returns_the_hash_of_what_it_read(helpers):
     absolute = (helpers.root / "helpers.py").as_posix()
     for code in ("exec(open('helpers.py').read())", f"exec(open({absolute!r}).read())"):
-        writes = find_cell_writes(code=code, earlier=(), snapshots=(helpers,))
+        writes = find_cell_writes(code=code, earlier=(), snapshots=(helpers,), code_root=helpers.root)
         assert not writes.needs_approval()
-        assert writes.code_files == {"helpers.py": "def load():\n    return 1\n"}
+        assert writes.code_files == {"helpers.py": _sha256("def load():\n    return 1\n")}
+
+
+def test_a_py_file_is_read_only_from_the_folder_the_pad_runs_in(helpers):
+    writes = find_cell_writes(code="exec(open('helpers.py').read())", earlier=(), snapshots=(helpers,))
+    assert writes.unchecked and writes.code_files == {}
 
 
 def test_a_py_file_the_cell_may_change_first_is_not_kept(helpers):
     code = "open('helpers.py', 'w').write('x = 1')\nexec(open('helpers.py').read())"
-    writes = find_cell_writes(code=code, earlier=(), snapshots=(helpers,))
+    writes = find_cell_writes(code=code, earlier=(), snapshots=(helpers,), code_root=helpers.root)
     assert writes.unchecked and writes.code_files == {}
 
 
 def test_a_py_file_past_the_cap_is_unchecked(helpers):
-    writes = find_cell_writes(code="exec(open('big.py').read())", earlier=(), snapshots=(helpers,))
+    writes = find_cell_writes(code="exec(open('big.py').read())", earlier=(), snapshots=(helpers,),
+                              code_root=helpers.root)
     assert writes.unchecked and writes.code_files == {}
 
 

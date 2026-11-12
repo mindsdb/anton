@@ -89,10 +89,16 @@ class _Pad:
     """A scratchpad runtime with no subprocess. Records each cell it runs and
     each package install it is asked for."""
 
-    def __init__(self) -> None:
+    def __init__(self, workspace: Path | None = None) -> None:
         self.ran: list[str] = []
         self.installed: list[list[str]] = []
         self.cells: list[Cell] = []
+        # The folder a local pad runs cells in, where the check reads exec'd files.
+        self._explicit_workspace_path = workspace
+        self._expected: tuple[str, dict[str, str]] | None = None
+
+    def expect_code_files(self, code: str, files: dict[str, str]) -> None:
+        self._expected = (code, files)
 
     async def install_packages(self, packages: list[str]) -> str:
         self.installed.append(list(packages))
@@ -100,7 +106,8 @@ class _Pad:
 
     async def execute_streaming(self, code: str, **kwargs: object):
         self.ran.append(code)
-        cell = Cell(code=code, stdout="done", stderr="", error=None)
+        files = self._expected[1] if self._expected and self._expected[0] == code else {}
+        cell = Cell(code=code, stdout="done", stderr="", error=None, code_files=dict(files))
         self.cells.append(cell)
         yield cell
 
@@ -243,7 +250,7 @@ def _session(
             write_relay_url="http://write-relay:8090" if relay_hosts else None,
         ),
     ))
-    pad = _Pad()
+    pad = _Pad(project)
     session._scratchpads.get_or_create = AsyncMock(return_value=pad)
     elicitor = _GatedElicitor()
     session.elicitor = elicitor
@@ -724,19 +731,22 @@ async def test_a_write_a_helpers_file_defines_is_named_where_it_is_defined_and_w
         assert "planner.example.com" in card.request.prompt
 
 
-async def test_a_later_check_reads_a_helpers_file_as_the_exec_ran_it(project):
-    """What a cell's check read of a file is what later checks read for that
-    cell, so an edit to the file afterwards changes nothing they see."""
-    (project / "helpers.py").write_text(PUSH_HELPERS)
-    elicitor = _AnswersAtOnce(answer=APPROVE)
-    session = await _gated_session(project, elicitor=elicitor)
-    session._write_gate.http_rules = parse_http_write_rules(PLANNER_RULE)
-    pad = _runtime(project)
-    assert await _hold()(session, pad=pad, code=EXEC_HELPERS) is None
-    pad.cells.append(Cell(code=EXEC_HELPERS, stdout="", stderr="", error=None))
-    (project / "helpers.py").write_text("def push():\n    pass\n")
-    assert await _hold()(session, pad=pad, code="push()") is None
-    assert elicitor.asked == 2, "the call still waits: the push that ran posts"
+async def test_a_later_turn_reads_a_helpers_file_only_while_it_holds_what_the_exec_ran(project):
+    """Each turn builds a new session, so what the exec's check read rides on
+    its cell: a later turn reads the file while it still holds that text,
+    and holds a use of what it made once the file changed."""
+    (project / "helpers.py").write_text(HELPERS)
+    first = _session(project, EXEC_HELPERS, "orders = load_orders()\n", http=PLANNER_RULE)
+    assert (await _run(harness=first, answers=[])).cards == []
+    assert first.pad.cells[0].code_files, "the exec's cell keeps what its check read"
+    for helpers, held in ((HELPERS, False), (HELPERS + "x = 2\n", True)):
+        (project / "helpers.py").write_text(helpers)
+        later = _session(project, "print(orders.mean())\n", http=PLANNER_RULE)
+        later.pad.cells = list(first.pad.cells)
+        seen = await _run(harness=later, answers=[CANCEL])
+        assert bool(seen.cards) is held
+        if held:
+            assert "It uses `orders`, which comes from code an earlier step ran" in seen.cards[0].request.prompt
 
 
 async def test_compaction_keeps_what_a_cells_check_read_of_a_helpers_file(project):
@@ -746,14 +756,17 @@ async def test_compaction_keeps_what_a_cells_check_read_of_a_helpers_file(projec
     session._write_gate.http_rules = parse_http_write_rules(PLANNER_RULE)
     pad = _runtime(project)
     assert await _hold()(session, pad=pad, code=EXEC_HELPERS) is None
-    pad.cells = _runtime(project, EXEC_HELPERS, "orders = load_orders()", *_FILLERS).cells
+    pad._record_cell(Cell(code=EXEC_HELPERS, stdout="", stderr="", error=None))
+    pad_record = dict(pad.cells[0].code_files)
+    assert pad_record, "the recorded cell keeps what its check read"
+    pad.cells += _runtime(project, "orders = load_orders()", *_FILLERS).cells
     assert pad._compact_cells()
-    assert all(cell.code != EXEC_HELPERS for cell in pad.cells)
+    assert pad.compacted_cells[0].code_files == pad_record
     assert await _hold()(session, pad=pad, code="print(orders.mean())") is None
-    # A session whose checks read nothing of the file can't read what it made.
-    fresh = await _gated_session(project, elicitor=elicitor)
-    fresh._write_gate.http_rules = parse_http_write_rules(PLANNER_RULE)
-    assert await _hold()(fresh, pad=pad, code="print(orders.mean())") is not None
+    # A cell whose check read nothing of the file leaves what it made unread.
+    bare = _runtime(project, EXEC_HELPERS, "orders = load_orders()", *_FILLERS)
+    assert bare._compact_cells()
+    assert await _hold()(session, pad=bare, code="print(orders.mean())") is not None
     assert elicitor.asked == 1
 
 

@@ -16,6 +16,9 @@
 #                          true for a cell whose process died, was killed
 #                          or never ran it, so the pad starts a new one
 #                          before the next cell.
+#              code_files  what its own check read of each .py file it
+#                          exec'd, {path: text}; the test records each
+#                          text's SHA-256, as a cell does.
 #   code     the cell the check runs before it runs for real.
 #   files    project files that exist when the turn begins, {path: text}
 #            (optional). The snapshot holds stock.csv besides these.
@@ -365,7 +368,7 @@ cases:
     card: read
     kinds: [http]
 
-  - name: an earlier exec of a py file reads as its own check read it, not as the file is now
+  - name: an earlier exec of a py file whose file changed since leaves what it made unread
     files:
       push.py: |
         def push():
@@ -379,8 +382,7 @@ cases:
                 requests.post("https://erp.example.test/api/orders", json={"qty": 1})
     code: |-
       push()
-    card: read
-    kinds: [http]
+    card: unchecked
 
   - name: an earlier exec of a py file its own check didn't read leaves what it made unread
     files:
@@ -482,6 +484,138 @@ cases:
       setup()
     card: unchecked
 
+
+  - name: exec of a py file opened with another encoding is unchecked
+    files:
+      h.py: x = 1
+    code: |-
+      exec(open('h.py', encoding='utf-7').read())
+    card: unchecked
+
+  - name: exec of a py file opened in binary is unchecked
+    files:
+      h.py: x = 1
+    code: |-
+      exec(open('h.py', 'rb').read())
+    card: unchecked
+
+  - name: exec of a py file opened through an opener is unchecked
+    files:
+      h.py: x = 1
+    code: |-
+      import os
+      exec(open('h.py', opener=lambda p, f: os.open('other.py', f)).read())
+    card: unchecked
+
+  - name: exec of a py file after an earlier cell rebound open is unchecked
+    files:
+      h.py: x = 1
+    earlier:
+      - |-
+        import io
+        open = lambda *a, **k: io.StringIO("")
+    code: |-
+      exec(open('h.py').read())
+    card: unchecked
+
+  - name: exec of a py file after literal code rebound open is unchecked
+    files:
+      h.py: x = 1
+    code: |-
+      exec("open = lambda *a: None")
+      exec(open('h.py').read())
+    card: unchecked
+
+  - name: exec of a py file read through a rebound Path is unchecked
+    files:
+      h.py: x = 1
+    earlier:
+      - |-
+        from pathlib import Path
+        Path.read_text = lambda self: ""
+    code: |-
+      exec(Path('h.py').read_text())
+    card: unchecked
+
+  - name: exec of a py file after an import of a module in the pad's folder is unchecked
+    files:
+      h.py: x = 1
+      w.py: x = 2
+    code: |-
+      import w
+      exec(open('h.py').read())
+    card: unchecked
+
+  - name: exec of a py file after a cell changed folder by descriptor is unchecked
+    files:
+      h.py: x = 1
+    earlier:
+      - |-
+        import os
+        os.fchdir(os.open('/tmp', os.O_RDONLY))
+    code: |-
+      exec(open('h.py').read())
+    card: unchecked
+
+  - name: exec of a py file after a cell started a background process is unchecked
+    files:
+      h.py: x = 1
+    earlier:
+      - |-
+        import subprocess
+        subprocess.Popen('sleep 5; cp other.py h.py', shell=True)
+    code: |-
+      exec(open('h.py').read())
+    card: unchecked
+
+  - name: pieces a function defined before the list adds are unchecked
+    earlier:
+      - "def more():\n    PARTS.append('import requests\\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\\n')"
+      - "PARTS = ['x = 1\\n']"
+      - more()
+    code: |-
+      exec("".join(PARTS))
+    card: unchecked
+
+  - name: pieces added through a frame's globals are unchecked
+    earlier:
+      - "PARTS = ['x = 1\\n']"
+    code: |-
+      import sys
+      sys._getframe().f_globals['PARTS'].append('import requests\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\n')
+      exec("".join(PARTS))
+    card: unchecked
+
+  - name: a script read through a rebound builtin is unchecked
+    earlier:
+      - "str = lambda x: 'import requests\\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\\n'"
+    code: |-
+      exec(str('x = 1'))
+    card: unchecked
+
+  - name: a script decoded through a patched module is unchecked
+    earlier:
+      - import base64
+      - "base64.b64decode = lambda s: b'import requests\\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\\n'"
+    code: |-
+      exec(base64.b64decode('eCA9IDE='))
+    card: unchecked
+
+  - name: a script after a star import is unchecked
+    earlier:
+      - "PARTS = ['x = 1\\n']"
+      - from string import *
+    code: |-
+      exec("".join(PARTS))
+    card: unchecked
+
+  - name: a script after literal code run through an alias of exec is unchecked
+    earlier:
+      - "PARTS = ['x = 1\\n']"
+      - e = exec
+    code: |-
+      exec("".join(PARTS))
+    card: unchecked
 
   - name: a script of harmless pieces joined over cells runs with no card
     earlier:
@@ -693,8 +827,7 @@ cases:
       - 'run = exec'
     code: |-
       run(SCRIPT)
-    card: read
-    kinds: [http]
+    card: unchecked
 
   - name: exec held in a dict in an earlier cell then called
     earlier:
@@ -702,8 +835,7 @@ cases:
       - 'RUNNERS = {"py": exec}'
     code: |-
       RUNNERS["py"](SCRIPT)
-    card: read
-    kinds: [http]
+    card: unchecked
 
   - name: an earlier function that returns exec
     earlier:
