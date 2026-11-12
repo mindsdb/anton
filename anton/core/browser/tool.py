@@ -1694,6 +1694,18 @@ async def _do_run(session: "ChatSession", tc_input: dict) -> str:
                 return _handback(state, f"The next step is {step.action}{hint}, but it needs {what} from you; use action=act.", taken, page)
             if body.get("element") is not None and step.target_p < min_p:
                 return _handback(state, f"Not sure which element to {step.action}; take it with action=act.", taken, page)
+            if session._browser_config.in_app:
+                # The desktop's browser holds nothing and keeps an element's
+                # number while the element lives, so a button a wizard
+                # relabels in place ("Continue" to "Place order") during
+                # Jev's calls keeps the number Jev picked. The gate holds on
+                # the page as it is now, as act's does; the web's browser
+                # holds by its own read.
+                now = await state.client.page(session_id=state.session_id)
+                moved = _moved_element(seen=page, current=now, body=body)
+                page = now
+                if moved is not None:
+                    return _handback(state, f"Paused before {_describe(body)}. {moved} Nothing was done.", taken, page)
             if body.get("element") is not None and _is_captcha(page, body["element"]):
                 return _handback(
                     state, "The next step acts on a human check, which only the user completes. "

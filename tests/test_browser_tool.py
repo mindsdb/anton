@@ -1819,6 +1819,43 @@ async def test_on_the_desktop_every_step_run_sends_goes_through_the_gate_and_say
     assert len(fake_jev.calls) == 4
 
 
+async def test_on_the_desktop_run_reads_the_page_before_each_step_and_hands_back_from_a_button_relabeled_in_place(
+    fake_jev, elicit_answers,
+):
+    """The desktop's browser holds nothing and keeps an element's number while
+    the element lives, so a wizard that relabels its button in place from
+    "Continue" to "Place order" keeps the number Jev picked. run asks Jev on
+    one read and sends after Jev's calls, so on the desktop it reads the page
+    again right before the gate and hands back, sending nothing, when the
+    element Jev picked has another role or name there, as act refuses one;
+    the gate holds on that read. The web's browser holds by its own read of
+    the page and gets no extra one."""
+    cont = {**PAGE, "elements": [*PAGE["elements"], {"id": 7, "role": "button", "name": "Continue"}]}
+    working = {**cont, "text": "Working..."}
+    relabeled = {**PAGE, "elements": [*PAGE["elements"], {"id": 7, "role": "button", "name": "Place order"}]}
+    jev_picks = [jev_answers("click", target="e7"), jev_answers("click", target="e7"), jev_answers("done")]
+
+    host = FakeHost(pages=[cont, cont, working, relabeled])
+    host.changed = True
+    session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+    fake_jev.queue[:] = jev_picks
+    result = await browser_tool.handle_browser(session, {"action": "run", "goal": "continue"})
+    assert 'Element [7] is now button "Place order", not the button "Continue" you read' in result.content
+    assert "Nothing was done." in result.content
+    assert host.posted("/action") == [{"action": "click", "element": 7, "into_frame": False, "include_page": True}]
+    assert elicit_answers.prompts() == []
+    made = [f"{m} {p.rsplit('/', 1)[1]}" for m, p, _, _ in host.calls if p.endswith(("/page", "/action"))]
+    assert made == ["GET page", "GET page", "POST action", "GET page"]
+
+    web = FakeHost(pages=[cont, cont, working, relabeled])
+    web.changed = True
+    session = make_session(web, elicitor=FakeElicitor())
+    fake_jev.queue[:] = jev_picks
+    await browser_tool.handle_browser(session, {"action": "run", "goal": "continue"})
+    made = [f"{m} {p.rsplit('/', 1)[1]}" for m, p, _, _ in web.calls if p.endswith(("/page", "/action"))]
+    assert made[:3] == ["GET page", "POST action", "POST action"]
+
+
 async def test_run_clamps_max_steps(fake_jev):
     pages = [{**PAGE, "url": f"https://shop.example/{i}"} for i in range(40)]
     host = FakeHost(pages=pages)
