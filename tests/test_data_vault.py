@@ -265,3 +265,35 @@ class TestEnvForFiltersBookkeepingFields:
         assert "DS_POSTGRES_A1B2C3__HOST" in env
         assert not any(k.endswith("__USER_LABEL") for k in env)
         assert not any(k.endswith("__CONNECTOR_ID") for k in env)
+
+
+# ─── MCP connections keep their secrets out of the env ───────────────────────
+
+
+def test_an_mcp_connections_secrets_never_reach_the_env(vault: LocalDataVault) -> None:
+    """Its access mode only limits the MCP tools; a token in the Scratchpad
+    env would let code call the provider's API directly and get past it."""
+    vault.save(
+        "notion", "acme",
+        {"access_token": "tok", "account_email": "a@b.com", "_method": "mcp", "_access_mode": "read"},
+        secure_keys=["access_token"],
+    )
+    assert vault.env_for("notion", "acme") == {"DS_NOTION_ACME__ACCOUNT_EMAIL": "a@b.com"}
+    assert vault.env_for("notion", "acme", flat=True) == {"DS_ACCOUNT_EMAIL": "a@b.com"}
+
+
+def test_a_legacy_mcp_record_without_secure_keys_still_keeps_its_secrets_out(vault: LocalDataVault) -> None:
+    vault.save(
+        "hubspot", "acme",
+        {"access_token": "tok", "refresh_token": "ref", "hub_id": "42", "_method": "mcp"},
+    )
+    assert vault.env_for("hubspot", "acme") == {"DS_HUBSPOT_ACME__HUB_ID": "42"}
+
+
+def test_a_non_mcp_connection_keeps_its_token_in_the_env(vault: LocalDataVault) -> None:
+    vault.save(
+        "hubspot", "acme",
+        {"access_token": "pat-na1-x", "_method": "private-app"},
+        secure_keys=["access_token"],
+    )
+    assert vault.env_for("hubspot", "acme") == {"DS_HUBSPOT_ACME__ACCESS_TOKEN": "pat-na1-x"}
