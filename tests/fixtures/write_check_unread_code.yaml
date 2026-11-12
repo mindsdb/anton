@@ -74,20 +74,23 @@ cases:
       - 'SCRIPT = ''import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})'''
     code: |-
       exec(compile(SCRIPT, "job", "exec"))
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: exec of a script joined from two literals in the same cell
     code: |-
       SCRIPT = 'import requests\n' + 'requests.post("https://erp.example.test/api/orders", json={"qty": 1})'
       exec(SCRIPT)
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: eval compile of a script
     earlier:
       - 'SCRIPT = ''import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})'''
     code: |-
       eval(compile(SCRIPT, "job", "exec"))
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: writes job.py then runs it with runpy
     code: |-
@@ -118,7 +121,8 @@ cases:
     code: |-
       SCRIPT = "".join(PARTS[i] for i in sorted(PARTS))
       exec(compile(SCRIPT, "job", "exec"), {"__name__": "__main__"})
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: base64 pieces appended to a list then decoded and exec compiled
     earlier:
@@ -129,7 +133,8 @@ cases:
       import base64
       SCRIPT = base64.b64decode("".join(CHUNKS)).decode()
       exec(compile(SCRIPT, "job", "exec"))
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: a cursor delete inside exec of a script
     earlier:
@@ -139,7 +144,8 @@ cases:
       conn = psycopg2.connect(host=os.environ['DS_POSTGRES_QA__HOST'])
       cur = conn.cursor()
       exec(SCRIPT)
-    card: unchecked
+    card: read
+    kinds: [sql]
 
   - name: a ninth literal exec holding the request after eight harmless ones
     code: |-
@@ -236,18 +242,20 @@ cases:
       formula = "a * 2"
       a = 3
       print(eval(formula))
-    card: unchecked
+    card: none
 
   - name: exec of a joined string
     code: |-
       PARTS = ['import requests\n', 'requests.post("https://erp.example.test/api/orders", json={"qty": 1})']
       exec("".join(PARTS))
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: exec of two concatenated literals
     code: |-
       exec('import requests\n' + 'requests.post("https://erp.example.test/api/orders", json={"qty": 1})')
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: exec of an f-string with a filled hole
     code: |-
@@ -474,6 +482,115 @@ cases:
       setup()
     card: unchecked
 
+
+  - name: a script of harmless pieces joined over cells runs with no card
+    earlier:
+      - PARTS = {}
+      - "PARTS[0] = 'import pandas as pd\\n'"
+      - "PARTS[1] = 'def load_orders():\\n    return pd.DataFrame({\"qty\": [1, 2]})\\n'"
+      - SCRIPT = "".join(PARTS[i] for i in range(len(PARTS)))
+    code: |-
+      exec(compile(SCRIPT, "job", "exec"))
+    card: none
+
+  - name: a read of what a script of harmless pieces made runs with no card
+    earlier:
+      - P = []
+      - "P.append('import pandas as pd\\n')"
+      - "P.append('def load_orders():\\n    return pd.DataFrame({\"qty\": [1, 2]})\\n')"
+      - exec("".join(P))
+      - orders = load_orders()
+    code: |-
+      print(orders.mean())
+    card: none
+
+  - name: a script built up with += over cells is read whole
+    earlier:
+      - "S = 'x = 1\\n'"
+      - "S += 'import requests\\n'"
+      - "S += 'requests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\\n'"
+    code: |-
+      exec(S)
+    card: read
+    kinds: [http]
+
+  - name: a script added to under an if is unchecked
+    earlier:
+      - "S = 'x = 1\\n'"
+      - "if x_ready:\n    S += 'import requests\\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\\n'"
+    code: |-
+      exec(S)
+    card: unchecked
+
+  - name: a script built in a loop is unchecked
+    code: |-
+      S = ''
+      for piece in PIECES:
+          S += piece
+      exec(S)
+    card: unchecked
+
+  - name: pieces added through another name for the list are unchecked
+    earlier:
+      - P = []
+      - "P.append('x = 1\\n')"
+      - Q = P
+      - "Q.append('import requests\\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\\n')"
+    code: |-
+      exec("".join(P))
+    card: unchecked
+
+  - name: pieces a function adds to the list are unchecked
+    earlier:
+      - P = []
+      - "def more():\n    P.append('import requests\\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\\n')"
+      - more()
+    code: |-
+      exec("".join(P))
+    card: unchecked
+
+  - name: a script a function rebinds through global is unchecked
+    earlier:
+      - "S = 'x = 1\\n'"
+      - "def swap():\n    global S\n    S = 'import requests\\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\\n'"
+      - swap()
+    code: |-
+      exec(S)
+    card: unchecked
+
+  - name: a script the cell namespace rebinds is unchecked
+    earlier:
+      - "S = 'x = 1\\n'"
+      - "globals()['S'] = 'import requests\\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\\n'"
+    code: |-
+      exec(S)
+    card: unchecked
+
+  - name: a script after code the check can't read ran is unchecked
+    earlier:
+      - "S = 'x = 1\\n'"
+      - exec(open('job.txt').read())
+    code: |-
+      exec(S)
+    card: unchecked
+
+  - name: a script an errored cell may have rebound is unchecked
+    earlier:
+      - "S = 'x = 1\\n'"
+      - code: "S = 'import requests\\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\\n'\nraise ValueError('stopped')"
+        errored: true
+        stopped_at: 2
+    code: |-
+      exec(S)
+    card: unchecked
+
+  - name: a script handed to exec inside an if is unchecked
+    earlier:
+      - "S = 'x = 1\\n'"
+    code: |-
+      if S:
+          exec(S)
+    card: unchecked
   - name: exec of a code object bound in an earlier cell
     earlier:
       - 'code = compile(''import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})'', "job", "exec")'
@@ -486,7 +603,8 @@ cases:
       - 'E = ''__import__("requests").post("https://erp.example.test/api/orders", json={"qty": 1})'''
     code: |-
       eval(E)
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: exec of a function parameter in this cell
     code: |-
@@ -508,7 +626,8 @@ cases:
     code: |-
       import base64
       exec(base64.b64decode("aW1wb3J0IHJlcXVlc3RzCnJlcXVlc3RzLnBvc3QoImh0dHBzOi8vZXJwLmV4YW1wbGUudGVzdC9hcGkvb3JkZXJzIiwganNvbj17InF0eSI6IDF9KQ=="))
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: exec held in a dict then called
     earlier:
@@ -574,7 +693,8 @@ cases:
       - 'run = exec'
     code: |-
       run(SCRIPT)
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: exec held in a dict in an earlier cell then called
     earlier:
@@ -582,7 +702,8 @@ cases:
       - 'RUNNERS = {"py": exec}'
     code: |-
       RUNNERS["py"](SCRIPT)
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: an earlier function that returns exec
     earlier:
@@ -628,7 +749,8 @@ cases:
           def eval(self):
               return self
       eval(E)
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: a sort keyed by eval
     code: |-
@@ -6760,7 +6882,7 @@ cases:
 
   - name: call to a name a non-literal exec defined
     earlier:
-      - 'SCRIPT = ''import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'''
+      - "SCRIPT = open('job.txt').read()"
       - 'exec(SCRIPT)'
     code: |-
       push()
@@ -6775,11 +6897,12 @@ cases:
         exec(compile(SCRIPT, "job", "exec"))
     code: |-
       push()
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: call through a namespace a non-literal exec filled
     earlier:
-      - 'SCRIPT = ''import requests\ndef f():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'''
+      - "SCRIPT = open('job.txt').read()"
       - |-
         ns = {}
         exec(SCRIPT, ns)
@@ -6832,7 +6955,7 @@ cases:
 
   - name: call after setattr from an unread namespace
     earlier:
-      - 'SCRIPT = ''import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'''
+      - "SCRIPT = open('job.txt').read()"
       - |-
         import sys
         ns = {}
@@ -6844,7 +6967,7 @@ cases:
 
   - name: call through the globals dict after an unread exec
     earlier:
-      - 'SCRIPT = ''import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'''
+      - "SCRIPT = open('job.txt').read()"
       - 'exec(SCRIPT)'
     code: |-
       globals()["push"]()
@@ -6852,7 +6975,7 @@ cases:
 
   - name: instantiate a class a non-literal exec defined
     earlier:
-      - 'SCRIPT = ''import requests\nclass Pusher:\n    def __init__(self):\n        requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'''
+      - "SCRIPT = open('job.txt').read()"
       - 'exec(SCRIPT)'
     code: |-
       Pusher()
@@ -6860,7 +6983,7 @@ cases:
 
   - name: method call on an instance of an unread class
     earlier:
-      - 'SCRIPT = ''import requests\nclass Pusher:\n    def go(self):\n        requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'''
+      - "SCRIPT = open('job.txt').read()"
       - |-
         exec(SCRIPT)
         p = Pusher()
@@ -6870,7 +6993,7 @@ cases:
 
   - name: alias then call of an unread function
     earlier:
-      - 'SCRIPT = ''import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'''
+      - "SCRIPT = open('job.txt').read()"
       - 'exec(SCRIPT)'
     code: |-
       f = push
@@ -6879,7 +7002,7 @@ cases:
 
   - name: an unread function passed as a callback
     earlier:
-      - 'SCRIPT = ''import requests\ndef push(r):\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'''
+      - "SCRIPT = open('job.txt').read()"
       - |-
         exec(SCRIPT)
         import pandas as pd
@@ -6890,7 +7013,7 @@ cases:
 
   - name: an unread name called inside a lambda
     earlier:
-      - 'SCRIPT = ''import requests\ndef push(r):\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'''
+      - "SCRIPT = open('job.txt').read()"
       - |-
         exec(SCRIPT)
         import pandas as pd
@@ -6904,7 +7027,7 @@ cases:
       - |-
         def main():
             push()
-      - 'SCRIPT = ''import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'''
+      - "SCRIPT = open('job.txt').read()"
       - 'exec(SCRIPT)'
     code: |-
       main()
@@ -6912,7 +7035,7 @@ cases:
 
   - name: an attribute call on an unread root object
     earlier:
-      - 'SCRIPT = ''import requests\nclient = requests.Session()\n'''
+      - "SCRIPT = open('job.txt').read()"
       - 'exec(SCRIPT)'
     code: |-
       client.post("https://erp.example.test/api/orders", json={"qty": 1})
@@ -6920,7 +7043,7 @@ cases:
 
   - name: a function decorated by an unread decorator
     earlier:
-      - 'SCRIPT = ''import requests\ndef track(f):\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n    return f\n'''
+      - "SCRIPT = open('job.txt').read()"
       - 'exec(SCRIPT)'
     code: |-
       @track
@@ -7024,8 +7147,7 @@ cases:
 
   - name: call to a name an eval of unread code bound earlier
     earlier:
-      - |-
-        SRC = 'lambda: __import__("requests").post("https://erp.example.test/api/orders")'
+      - "SRC = open('job.txt').read()"
       - |-
         push = eval(SRC)
     code: |-
@@ -7907,8 +8029,7 @@ cases:
 
   - name: a call in a function run before a later star import
     earlier:
-      - |-
-        SCRIPT = 'import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'
+      - "SCRIPT = open('job.txt').read()"
       - |-
         exec(SCRIPT)
     code: |-
@@ -7920,8 +8041,7 @@ cases:
 
   - name: a call in a lambda run before a later star import
     earlier:
-      - |-
-        SCRIPT = 'import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'
+      - "SCRIPT = open('job.txt').read()"
       - |-
         exec(SCRIPT)
     code: |-
@@ -7932,8 +8052,7 @@ cases:
 
   - name: a call in a comprehension before a later star import
     earlier:
-      - |-
-        SCRIPT = 'import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'
+      - "SCRIPT = open('job.txt').read()"
       - |-
         exec(SCRIPT)
     code: |-
@@ -7943,8 +8062,7 @@ cases:
 
   - name: a call in a class body before a later star import
     earlier:
-      - |-
-        SCRIPT = 'import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'
+      - "SCRIPT = open('job.txt').read()"
       - |-
         exec(SCRIPT)
     code: |-
@@ -7955,8 +8073,7 @@ cases:
 
   - name: a call in a function before a star import that never runs
     earlier:
-      - |-
-        SCRIPT = 'import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'
+      - "SCRIPT = open('job.txt').read()"
       - |-
         exec(SCRIPT)
     code: |-
@@ -12355,7 +12472,7 @@ cases:
 
   - name: an overwrite after a non-literal exec in an earlier cell is read
     earlier:
-      - 'SCRIPT = "open(''stock.csv'', ''w'').write(''y'')"'
+      - "SCRIPT = open('job.txt').read()"
       - 'exec(SCRIPT)'
     code: |-
       open("stock.csv", "w").write("z")

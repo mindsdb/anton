@@ -82,9 +82,12 @@ What it finds:
   ``python -c``, and a ``.py`` file that ``exec``, ``eval`` or ``compile`` at
   a cell's top level gets as ``open('x.py').read()`` or
   ``Path('x.py').read_text()``, as that cell's own check read it, unless code
-  may change it before the read; each read like one more cell, placed where
-  the call that runs it runs, with its own imports; and in a function a literal exec in
-  an earlier cell defined, where this cell calls it. A program's or
+  may change it before the read, and a script built only from literal
+  pieces over the cells (assigned, ``+=``, appended, stored by key, joined
+  or base64-decoded) that no other code may change; each read like one more
+  cell, placed where the call that runs it runs, with its own imports; and
+  in a function a literal exec in an earlier cell defined, where this cell
+  calls it. A program's or
   module's name, or a package pip installs, held in a name bound only to
   literal text, or in a list built from such text or grown in place with
   it, reads as that text.
@@ -92,9 +95,10 @@ What it finds:
   ends "This step can't be checked before it runs." That is ``exec``,
   ``eval`` or ``compile`` reached through the builtins however the code
   names them (a builtin function's ``__self__`` and a frame's
-  ``f_builtins`` among them) and handed anything but a literal or a ``.py``
-  file read as above (a name, another file read, a decode, a join) or a
-  literal too long to read, or passed or stored as a value; code the pad's own process runs through ``runpy``, ``importlib``
+  ``f_builtins`` among them) and handed anything but a literal, a ``.py``
+  file read or a script of literal pieces as above (another name, file
+  read, decode or join) or a literal too long to read, or passed or stored
+  as a value; code the pad's own process runs through ``runpy``, ``importlib``
   (``reload``, a spec or a loader from a file, an import by a name the code
   picks when it runs), ``zipimport``, ``site`` (the ``.pth`` files it reads),
   a code object, or one a function is given as its ``__code__``, an
@@ -3432,12 +3436,13 @@ class _Cell:
     def hands_literal_code(self) -> bool:
         """Whether the cell may hand literal code to something that runs it:
         a call spelled as exec(), eval(), compile() or a runner of text
-        (`_spelled_exec`, `_STRING_RUNNER_NAMES`) given a literal or a call,
+        (`_spelled_exec`, `_STRING_RUNNER_NAMES`) given a literal, a call, a
+        name, an index or a `+`,
         or a string with `-c` in it, as `python -c` takes code. A cell with
         none gives `_exec_cells` nothing to read at its own top level."""
         return self.signs.names_dash_c or any(
             (_spelled_exec(c.func) or _last_name(c.func) in _STRING_RUNNER_NAMES) and any(
-                _literal_source(a) is not None or isinstance(a, ast.Call)
+                _literal_source(a) is not None or isinstance(a, (ast.Call, ast.Name, ast.BinOp, ast.Subscript))
                 for a in (*c.args, *(k.value for k in c.keywords))
             )
             for c in self.calls
@@ -11804,6 +11809,8 @@ class _CodeFiles:
     read: dict[str, str] = dataclasses.field(default_factory=dict)
     reads: list[tuple[ast.Call, ast.AST, str]] = dataclasses.field(default_factory=list)
     by_source: dict[int, str] = dataclasses.field(default_factory=dict)
+    # What `_stitched_text` read of each source, by its id and the cells counted as stopped early.
+    stitched: dict[tuple[int, frozenset[int]], str | None] = dataclasses.field(default_factory=dict)
 
     def text(self, source: ast.AST, reader: _Reader) -> str | None:
         """The text the read `source` hands exec(); None when it isn't one
@@ -11874,10 +11881,399 @@ def _read_code_file(path: str, reader: _Reader) -> str | None:
 
 def _source_text(source: ast.AST, reader: _Reader) -> str | None:
     """The code a source handed to exec() runs, read now: a literal
-    (`_literal_source`), or a `.py` file read by a literal path
-    (`_CodeFiles`); None for any other."""
+    (`_literal_source`), a `.py` file read by a literal path
+    (`_CodeFiles`), or a script built from literal pieces
+    (`_stitched_text`); None for any other."""
     text = _literal_source(source)
-    return text if text is not None else reader.code_files.text(source, reader)
+    if text is None:
+        text = reader.code_files.text(source, reader)
+    return text if text is not None else _stitched_text(source, reader)
+
+
+# Builtins that read a list or dict they're handed and leave it as it is.
+_STITCH_READERS = frozenset({
+    "len", "sorted", "list", "tuple", "print", "repr", "str", "enumerate", "reversed", "range", "min", "max",
+    "sum", "isinstance", "type", "iter",
+})
+# A list's or a dict's methods that read it.
+_STITCH_READ_METHODS = frozenset({"keys", "values", "items", "get", "copy", "count", "index"})
+_STITCH_DECODERS = {
+    "base64.b64decode": "b64decode", "base64.standard_b64decode": "standard_b64decode",
+    "base64.urlsafe_b64decode": "urlsafe_b64decode", "base64.b32decode": "b32decode",
+    "base64.b16decode": "b16decode",
+}
+# Names through which code reaches the cell namespace itself.
+_NAMESPACE_NAMES = frozenset({"globals", "vars", "locals", "__builtins__", "builtins", "__main__"})
+_STITCH_RANGE_LIMIT = 10_000
+
+_Stitched = str | bytes | int | list | dict
+
+
+def _stitched_text(source: ast.AST, reader: _Reader) -> str | None:
+    """The script a source handed to exec() holds when it's built only from
+    literal pieces, as `SCRIPT = "".join(PARTS)` after `PARTS[2] = r"..."`
+    over several cells, or a base64 decode of joined pieces. Read by
+    replaying the conversation's top-level statements in order
+    (`_Stitch`); None when the source sits anywhere but a cell's own top
+    level, or anything it reads may hold more than the replay follows."""
+    # Each reader of a check may count other cells as stopped early.
+    errored = reader.stopped_early | reader.errored
+    cache = reader.code_files.stitched
+    key = (id(source), errored)
+    if key in cache:
+        return cache[key]
+    cache[key] = None
+    cell = reader.cell_of(source)
+    stmt = _top_statement(source, cell)
+    if cell.index != cell.host or stmt is None:
+        return None
+    replay = _Stitch(reader)
+    for earlier in sorted((c for c in reader.cells if c.index == c.host and c.index < cell.index),
+                          key=lambda c: c.index):
+        replay.run(earlier, earlier.tree.body, errored=earlier.index in errored)
+    replay.run(cell, cell.tree.body[: cell.tree.body.index(stmt)], errored=False)
+    if replay.dead or replay.unsafe_in(cell, stmt, source):
+        return None
+    value = replay.value(source)
+    text = value if isinstance(value, str) else _decoded_source(value) if isinstance(value, bytes) else None
+    if text is not None and len(text) > _LITERAL_CODE_LIMIT:
+        text = None
+    cache[key] = text
+    return text
+
+
+def _top_statement(node: ast.AST, cell: _Cell) -> ast.stmt | None:
+    """The top-level statement of `cell` that holds `node`, when no
+    statement between them holds it; None otherwise."""
+    child, parent = node, cell.parents.get(node)
+    while parent is not None and not isinstance(parent, ast.Module):
+        if isinstance(child, ast.stmt):
+            return None
+        child, parent = parent, cell.parents.get(parent)
+    return child if isinstance(child, ast.stmt) and parent is not None else None
+
+
+class _Stitch:
+    """A replay of top-level statements for `_stitched_text`: each name's
+    value where it is a literal text, bytes, number, or a list or dict of
+    them (`env`). A name a statement may change in a way the replay doesn't
+    follow is `poisoned` for good; once code runs that may set any name
+    (exec, a runner, the cell namespace), the replay is `dead`."""
+
+    def __init__(self, reader: _Reader) -> None:
+        self.reader = reader
+        self.env: dict[str, _Stitched] = {}
+        self.poisoned: set[str] = set()
+        self.dead = False
+
+    def run(self, cell: _Cell, stmts: Sequence[ast.stmt], *, errored: bool) -> None:
+        for stmt in stmts:
+            if self.dead:
+                return
+            if self._runs_code(stmt):
+                self.dead = True
+                return
+            consumed: set[int] = set()
+            if errored or not self._apply(stmt, consumed):
+                self._poison_stores(stmt)
+            elif any(isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store) and id(n) not in consumed
+                     for n in ast.walk(stmt)):
+                self._poison_stores(stmt, skip=consumed)
+            self._poison_unsafe_uses(cell, stmt, consumed)
+
+    def unsafe_in(self, cell: _Cell, stmt: ast.stmt, source: ast.AST) -> bool:
+        """Whether the statement that runs `source` may run other code, or
+        set a name `source` reads."""
+        # The source itself, and the exec() or compile() calls that hand it on.
+        skip = {id(n) for n in ast.walk(source)}
+        parent = cell.parents.get(source)
+        while parent is not None and parent is not stmt:
+            skip.add(id(parent))
+            parent = cell.parents.get(parent)
+        if self._runs_code(stmt, skip=skip):
+            return True
+        names = {n.id for n in ast.walk(source) if isinstance(n, ast.Name)}
+        stored = {n.id for n in ast.walk(stmt) if isinstance(n, ast.Name) and not isinstance(n.ctx, ast.Load)}
+        return bool(names & stored)
+
+    def _runs_code(self, stmt: ast.AST, *, skip: AbstractSet[int] = frozenset()) -> bool:
+        """Whether `stmt` may run code that sets names the replay can't see."""
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Call) and id(node) not in skip:
+                if _spelled_exec(node.func) or _last_name(node.func) in _STRING_RUNNER_NAMES:
+                    return True
+                if self.reader.dotted(node.func) in _CODE_RUNNERS:
+                    return True
+            if isinstance(node, ast.Name) and node.id in _NAMESPACE_NAMES:
+                return True
+            if isinstance(node, ast.Attribute) and node.attr in ("__dict__", "__globals__"):
+                return True
+            if isinstance(node, (ast.Import, ast.ImportFrom)) and any(
+                a.name.split(".")[0] in _NAMESPACE_NAMES for a in node.names
+            ) or isinstance(node, ast.ImportFrom) and (node.module or "") in _NAMESPACE_NAMES:
+                return True
+        return False
+
+    def _apply(self, stmt: ast.stmt, consumed: set[int]) -> bool:
+        """Applies a statement the replay follows, noting each name it
+        stores through in `consumed`; False for any other."""
+        env = self.env
+        if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and stmt.value is not None:
+            targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+            if len(targets) != 1:
+                return False
+            target = targets[0]
+            if isinstance(target, ast.Name):
+                consumed.add(id(target))
+                self._set(target.id, self.value(stmt.value, fresh=True))
+                return True
+            if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+                held = env.get(target.value.id) if target.value.id not in self.poisoned else None
+                key = self.value(target.slice)
+                item = self.value(stmt.value)
+                consumed.add(id(target.value))
+                if isinstance(held, dict) and isinstance(key, (str, int)) and isinstance(item, (str, bytes)):
+                    held[key] = item
+                    return True
+                if (isinstance(held, list) and isinstance(key, int) and -len(held) <= key < len(held)
+                        and isinstance(item, (str, bytes))):
+                    held[key] = item
+                    return True
+                self._poison(target.value.id)
+                return True
+            return False
+        if isinstance(stmt, ast.AugAssign) and isinstance(stmt.target, ast.Name) and isinstance(stmt.op, ast.Add):
+            consumed.add(id(stmt.target))
+            name = stmt.target.id
+            held = env.get(name) if name not in self.poisoned else None
+            more = self.value(stmt.value, fresh=True)
+            if isinstance(held, str) and isinstance(more, str) or isinstance(held, bytes) and isinstance(more, bytes):
+                env[name] = held + more
+            elif isinstance(held, list) and isinstance(more, list):
+                held.extend(more)
+            else:
+                self._poison(name)
+            return True
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+            call = stmt.value
+            func = call.func
+            if (isinstance(func, ast.Attribute) and func.attr in ("append", "extend")
+                    and isinstance(func.value, ast.Name) and len(call.args) == 1 and not call.keywords):
+                name = func.value.id
+                held = env.get(name) if name not in self.poisoned else None
+                consumed.add(id(func.value))
+                more = self.value(call.args[0], fresh=True)
+                if isinstance(held, list) and func.attr == "append" and isinstance(more, (str, bytes)):
+                    held.append(more)
+                elif isinstance(held, list) and func.attr == "extend" and isinstance(more, list):
+                    held.extend(more)
+                elif name in env:
+                    self._poison(name)
+                return True
+            return True
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            for alias in stmt.names:
+                self.env.pop((alias.asname or alias.name).split(".")[0], None)
+            return True
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            self.env.pop(stmt.name, None)
+            # Its body's own names are its locals, unless declared global.
+            for node in ast.walk(stmt):
+                if isinstance(node, (ast.Global, ast.Nonlocal)):
+                    for name in node.names:
+                        self._poison(name)
+            consumed.update(id(n) for n in ast.walk(stmt) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store))
+            return True
+        return isinstance(stmt, ast.Pass)
+
+    def _set(self, name: str, value: _Stitched | None) -> None:
+        if value is None or name in self.poisoned:
+            self.env.pop(name, None)
+        else:
+            self.env[name] = value
+
+    def _poison(self, name: str) -> None:
+        self.poisoned.add(name)
+        self.env.pop(name, None)
+
+    def _poison_stores(self, stmt: ast.AST, *, skip: AbstractSet[int] = frozenset()) -> None:
+        """Poisons each name `stmt` may set or change in place."""
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load) and id(node) not in skip:
+                self._poison(node.id)
+            elif isinstance(node, (ast.Global, ast.Nonlocal)):
+                for name in node.names:
+                    self._poison(name)
+            elif isinstance(node, (ast.Subscript, ast.Attribute)) and not isinstance(node.ctx, ast.Load):
+                root = _root_of(node)
+                if isinstance(root, ast.Name) and id(root) not in skip:
+                    self._poison(root.id)
+
+    def _poison_unsafe_uses(self, cell: _Cell, stmt: ast.AST, consumed: set[int]) -> None:
+        """Poisons each list or dict `stmt` reads anywhere but where reading
+        leaves it as it is, since it may be changed in place or aliased."""
+        for node in ast.walk(stmt):
+            if (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and id(node) not in consumed
+                    and isinstance(self.env.get(node.id), (list, dict)) and not _reads_only(node, cell)):
+                self._poison(node.id)
+
+    def value(self, node: ast.AST, *, fresh: bool = False, local: Mapping[str, _Stitched] | None = None,
+              whole: bool = False) -> _Stitched | None:
+        """What `node` evaluates to in the replay; None when it can't tell. A
+        list or dict a name holds comes back only with `whole`, read in
+        place; with `fresh`, a new one the statement builds may."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes, int)) and not isinstance(
+            node.value, bool
+        ):
+            return node.value
+        if isinstance(node, ast.JoinedStr) and all(isinstance(v, ast.Constant) for v in node.values):
+            return "".join(str(v.value) for v in node.values)
+        if isinstance(node, ast.Name):
+            if local is not None and node.id in local:
+                return local[node.id]
+            held = self.env.get(node.id) if node.id not in self.poisoned else None
+            return held if whole or not isinstance(held, (list, dict)) else None
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = self.value(node.left, local=local)
+            right = self.value(node.right, local=local)
+            if isinstance(left, str) and isinstance(right, str) or isinstance(left, bytes) and isinstance(right, bytes):
+                return left + right
+            return None
+        if isinstance(node, (ast.List, ast.Tuple)) and fresh:
+            items = [self.value(e, local=local) for e in node.elts]
+            return items if all(isinstance(i, (str, bytes)) for i in items) else None
+        if isinstance(node, ast.Dict) and fresh:
+            if None in node.keys:
+                return None
+            keys = [self.value(k, local=local) for k in node.keys if k is not None]
+            values = [self.value(v, local=local) for v in node.values]
+            if all(isinstance(k, (str, int)) for k in keys) and all(isinstance(v, (str, bytes)) for v in values):
+                return dict(zip(keys, values, strict=True))
+            return None
+        if isinstance(node, ast.Subscript):
+            held = self.value(node.value, local=local, whole=True)
+            key = self.value(node.slice, local=local)
+            if isinstance(held, dict) and isinstance(key, (str, int)) and key in held:
+                return held[key]
+            if isinstance(held, list) and isinstance(key, int) and -len(held) <= key < len(held):
+                return held[key]
+            return None
+        if isinstance(node, ast.Call):
+            return self._call_value(node, local=local)
+        return None
+
+    def _call_value(self, node: ast.Call, *, local: Mapping[str, _Stitched] | None) -> _Stitched | None:
+        func = node.func
+        if node.keywords:
+            return None
+        if isinstance(func, ast.Attribute) and func.attr == "join" and len(node.args) == 1:
+            sep = self.value(func.value, local=local)
+            items = self._items(node.args[0], local=local)
+            if items is None or not isinstance(sep, (str, bytes)):
+                return None
+            if not all(type(i) is type(sep) for i in items) or sum(map(len, items)) > _LITERAL_CODE_LIMIT:
+                return None
+            return sep.join(items)  # type: ignore[arg-type]
+        if isinstance(func, ast.Attribute) and func.attr in ("decode", "encode") and len(node.args) <= 1:
+            held = self.value(func.value, local=local)
+            codec = self.value(node.args[0], local=local) if node.args else "utf-8"
+            if not isinstance(codec, str) or codec.lower().replace("-", "") != "utf8":
+                return None
+            try:
+                if func.attr == "decode" and isinstance(held, bytes):
+                    return held.decode("utf-8")
+                if func.attr == "encode" and isinstance(held, str):
+                    return held.encode("utf-8")
+            except UnicodeError:
+                return None
+            return None
+        name = self.reader.dotted(func)
+        if name in _STITCH_DECODERS and len(node.args) == 1:
+            import base64
+
+            held = self.value(node.args[0], local=local)
+            if not isinstance(held, (str, bytes)):
+                return None
+            try:
+                return getattr(base64, _STITCH_DECODERS[name])(held)
+            except (ValueError, TypeError):
+                return None
+        if name == "str" and len(node.args) == 1:
+            held = self.value(node.args[0], local=local)
+            return held if isinstance(held, str) else None
+        if name == "len" and len(node.args) == 1:
+            held = self.value(node.args[0], local=local, whole=True)
+            return len(held) if isinstance(held, (str, bytes, list, dict)) else None
+        return None
+
+    def _items(self, node: ast.AST, *, local: Mapping[str, _Stitched] | None) -> list[_Stitched] | None:
+        """The items a join walks: a list or dict as it is, a range, `sorted`,
+        `.keys()` or `.values()` of one, or a comprehension over those."""
+        if isinstance(node, (ast.GeneratorExp, ast.ListComp)):
+            if len(node.generators) != 1:
+                return None
+            gen = node.generators[0]
+            if gen.ifs or gen.is_async or not isinstance(gen.target, ast.Name):
+                return None
+            walked = self._items(gen.iter, local=local)
+            if walked is None:
+                return None
+            out: list[_Stitched] = []
+            for item in walked:
+                got = self.value(node.elt, local={**(local or {}), gen.target.id: item})
+                if got is None:
+                    return None
+                out.append(got)
+            return out
+        if isinstance(node, ast.Call) and not node.keywords:
+            name = self.reader.dotted(node.func)
+            if name == "range" and 1 <= len(node.args) <= 2:
+                bounds = [self.value(a, local=local) for a in node.args]
+                if not all(isinstance(b, int) for b in bounds):
+                    return None
+                start, stop = (0, bounds[0]) if len(bounds) == 1 else bounds
+                if stop - start > _STITCH_RANGE_LIMIT:  # type: ignore[operator]
+                    return None
+                return list(range(start, stop))  # type: ignore[arg-type]
+            if name in ("sorted", "list") and len(node.args) == 1:
+                walked = self._items(node.args[0], local=local)
+                if walked is None or name == "list":
+                    return walked
+                try:
+                    return sorted(walked)  # type: ignore[type-var]
+                except TypeError:
+                    return None
+            func = node.func
+            if isinstance(func, ast.Attribute) and func.attr in ("keys", "values") and not node.args:
+                held = self.value(func.value, local=local, whole=True)
+                if isinstance(held, dict):
+                    return list(held.keys() if func.attr == "keys" else held.values())
+                return None
+        held = self.value(node, local=local, whole=True)
+        if isinstance(held, dict):
+            return list(held)
+        return list(held) if isinstance(held, list) else None
+
+
+def _reads_only(node: ast.Name, cell: _Cell) -> bool:
+    """Whether the name `node` loads is only read where it sits: indexed,
+    walked by a loop or comprehension, joined, handed to a builtin that
+    reads it (`_STITCH_READERS`), or a method that does
+    (`_STITCH_READ_METHODS`) called on it."""
+    parent = cell.parents.get(node)
+    if isinstance(parent, ast.Subscript) and parent.value is node:
+        return isinstance(parent.ctx, ast.Load)
+    if isinstance(parent, (ast.comprehension, ast.For, ast.AsyncFor)) and parent.iter is node:
+        return True
+    if isinstance(parent, ast.Attribute) and parent.value is node:
+        call = cell.parents.get(parent)
+        return parent.attr in _STITCH_READ_METHODS and isinstance(call, ast.Call) and call.func is parent
+    if isinstance(parent, ast.Call) and node in parent.args:
+        func = parent.func
+        if isinstance(func, ast.Name) and func.id in _STITCH_READERS:
+            return True
+        return isinstance(func, ast.Attribute) and func.attr == "join"
+    return False
 
 
 @dataclass(frozen=True, eq=False)
@@ -12018,11 +12414,14 @@ class _ExecReading:
                     given = () if runner is None else runner.sources
                     launch = None if runner is not None else _python_launch(node, reader)
                 texts = [t for t in map(_literal_source, given) if t is not None]
-                if builtin and not texts and given:
+                if builtin and not texts and given and reader.exec_builtin(node.func):
                     # A `.py` file read by a literal path, as `open('helpers.py').read()`.
                     text = reader.code_files.text(given[0], reader)
                     if text is None and host == reader.current.index:
                         text = reader.code_files.read_now(node, given[0], reader)
+                    if text is None:
+                        # A script built from literal pieces, as `exec("".join(PARTS))`.
+                        text = _stitched_text(given[0], reader)
                     texts = [] if text is None else [text]
                 if launch is not None:
                     texts = list(launch.sources)
@@ -15857,9 +16256,10 @@ def _namespace_at(namespaces: Sequence[_Cell], name: str, *, at: tuple[int, ...]
 
 
 def _is_literal_eval(value: ast.AST, reader: _Reader) -> bool:
-    """Whether `value` is a call to the builtin eval on a literal source."""
+    """Whether `value` is a call to the builtin eval on a source the check
+    reads (`_source_text`)."""
     return (isinstance(value, ast.Call) and reader.exec_builtin(value.func) == "eval"
-            and (source := _exec_source(value, "eval")) is not None and _literal_source(source) is not None)
+            and (source := _exec_source(value, "eval")) is not None and _source_text(source, reader) is not None)
 
 
 def _global_fills(cell: _Cell) -> list[_NameValue]:
