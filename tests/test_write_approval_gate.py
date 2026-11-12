@@ -681,6 +681,7 @@ async def test_a_cell_that_runs_code_the_check_cant_read_waits_and_says_so(proje
     seen = await _run(harness=harness, answers=[answer])
     assert len(seen.cards) == 1 and seen.ran_before == [1]
     assert "This step can't be checked before it runs." in seen.cards[0].request.prompt
+    assert f"```\n{EXEC_SCRIPT_CELL}\n```" in seen.cards[0].request.prompt, "the card shows the step's code"
     assert harness.pad.ran == ([SCRIPT_CELL, EXEC_SCRIPT_CELL] if answer == APPROVE else [SCRIPT_CELL])
     if answer != APPROVE:
         assert "Not run: this step would run code the check couldn't read." in _history_text(harness.session)
@@ -710,7 +711,8 @@ async def test_a_cell_the_check_cant_read_that_posts_to_a_relayed_host_raises_on
     assert len(seen.cards) == 1 and seen.ran_before == [1]
     prompt = seen.cards[0].request.prompt
     assert "This step can't be checked before it runs." in prompt
-    assert RELAYED not in prompt, "the relay holds the request, so the card leaves it out"
+    assert "would send" not in prompt, "the relay holds the request, so the card lists no request"
+    assert f"```\n{exec_cell}\n```" in prompt, "the card shows the step's code"
     assert harness.pad.ran == ([SCRIPT_CELL, exec_cell] if answer == APPROVE else [SCRIPT_CELL])
 
 
@@ -897,6 +899,7 @@ async def test_a_check_that_fails_asks_instead_of_clearing_the_cell(project, mon
     with caplog.at_level(logging.WARNING, logger=GATE_LOG):
         outcome = await _hold()(session, pad=_Pad(), code="print('hello')")
     assert elicitor.asked == 1
+    assert "The check failed on this step." in elicitor.prompts[0]
     assert outcome is not None and "the check couldn't read" in outcome.content
     failed = [r for r in caplog.records if r.name == GATE_LOG and "the check failed" in r.getMessage()]
     assert [r.getMessage() for r in failed] == ["write approval: the check failed (RecursionError)"]
