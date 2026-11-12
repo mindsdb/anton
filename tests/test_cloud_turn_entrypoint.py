@@ -715,6 +715,26 @@ def test_entrypoint_wires_attachment_augmentation(tmp_path, monkeypatch):
     assert any(b.get("type") == "text" and "notes.txt" in b.get("text", "") for b in captured["input"])
 
 
+def test_turn_content_is_built_off_the_event_loop(tmp_path, monkeypatch):
+    """The scan reads a network mount; on the loop it would stall the
+    heartbeat, and the controller would see the turn go silent."""
+    import threading
+
+    import anton.cloud_turn.__main__ as entry
+
+    monkeypatch.setenv("ANTON_CLOUD_WORKSPACE_PATH", str(tmp_path))
+    seen = {}
+    real = entry.build_turn_content
+
+    def recording(base, user_text):
+        seen["thread"] = threading.current_thread()
+        return real(base, user_text)
+
+    monkeypatch.setattr(entry, "build_turn_content", recording)
+    _drive(_FakeSession(deltas=["ok"]))
+    assert seen["thread"] is not threading.main_thread()
+
+
 # ── turn-history rows ────────────────────────────────────────────────────────
 
 _HISTORY_TURN = [

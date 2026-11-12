@@ -321,12 +321,16 @@ async def _stream_turn(
         # `ready` goes out at turn start, before any model call, and only when
         # the stdin reader above is there to take the lines it invites.
         addons.attach(session, announce=stdin is not None)
-        # Fold in any attachments cowork-server staged into the workspace (read
-        # off the mount, so image bytes never crossed the stdin wire). Plain
-        # string when there are none. Never fail the turn over this — degrade to
-        # the plain input if the workspace can't be resolved or a file is bad.
+        # Fold in any attachments and project files cowork-server staged into
+        # the workspace (read off the mount, so image bytes never crossed the
+        # stdin wire). Plain string when there are none. The scan reads a
+        # network mount, so it runs off the event loop like the build above.
+        # Never fail the turn over this: degrade to the plain input if the
+        # workspace can't be resolved or a file is bad.
         try:
-            turn_content = build_turn_content(resolve_trusted_workspace_path(), req.input)
+            turn_content = await asyncio.to_thread(
+                build_turn_content, resolve_trusted_workspace_path(), req.input
+            )
         except Exception:
             logger.warning("cloud turn: attachment augmentation failed; using plain input", exc_info=True)
             turn_content = req.input

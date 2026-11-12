@@ -279,6 +279,8 @@ While a model call is silent, hosts can show that the turn is still working. `Ch
 
 The cloud turn entrypoint sends the list as `artifacts_touched` on `turn_completed`. It leaves the key out when the record is incomplete or would name more than 1,000 folders, and the host then reads the whole artifacts folder. `anton/cloud_turn/contract.py` holds the key and the cap.
 
+Each cloud turn's message lists, by absolute path, the conversation's attachments and the project's shared files, which cowork-server copies read-only into the workspace's `project-files/` folder before every turn, and names the project files it left out.
+
 ## Cloud turn skills
 
 A cloud turn's request (`TurnRequestV1` in `anton/cloud_turn/contract.py`) can carry a `skills` block: the skills cowork-server resolved for that turn's person and project. Each key is a skill's slug. Each entry holds the skill's files, by their path inside the skill's folder, and `always_on`, which cowork-server leaves out or sets to false for a skill the agent recalls on demand:
