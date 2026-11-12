@@ -272,7 +272,8 @@ def _usable_label(value: object) -> str | None:
     """The connection's name as one clean prompt line, or ``None`` when nothing usable is left.
 
     Spaces of any kind become a plain space and other non-printable characters go, so a
-    name cannot start a new prompt line; cowork-server's producer applies the same rule.
+    name cannot start a new prompt line. cowork-server sends the name as the user typed it,
+    so this is the only place it is cleaned.
     """
     if not isinstance(value, str):
         return None
