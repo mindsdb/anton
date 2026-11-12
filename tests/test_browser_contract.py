@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
@@ -86,6 +87,26 @@ def test_the_contract_is_exactly_these_files():
     ])
     for name in names:
         assert _load(name).examples, name
+
+
+#: The dotted names the descriptions use. Any other word, a period and a
+#: word with no space between them is two sentences run together.
+_DOTTED_NAMES = {"params.browser", "BrowserConfig.to_dict", "BrowserConfig.from_dict", "limits.saved_tabs_per_project"}
+
+
+def test_no_description_runs_two_sentences_together():
+    for path in sorted(FIXTURES.glob("*.json")):
+        joined = set(re.findall(r"[A-Za-z_]+\.[A-Za-z_]+", _load(path.stem).description)) - _DOTTED_NAMES
+        assert not joined, path.name
+
+
+def test_every_host_keeps_this_folder_byte_for_byte_readme_included():
+    """The README is one of the files all three copies share byte for byte,
+    so it says so, and a host keeps its own notes outside its copy."""
+    readme = " ".join((FIXTURES / "README.md").read_text().split())
+    assert "Each host's tests keep a copy of these files" not in readme
+    assert "Each host's tests keep a byte-for-byte copy of this folder, this README included" in readme
+    assert "a host keeps its own notes outside its copy" in readme
 
 
 # ── answers ────────────────────────────────────────────────────────────────
@@ -218,20 +239,38 @@ def test_the_action_fixture_says_whether_the_step_changed_anything():
 
 
 def test_the_action_fixture_says_a_step_that_changed_the_page_in_place_settles_too():
-    """Both hosts wait for quiet after a step that changed the page in place,
-    whether or not it started a request, and a host may wait out a page
-    marked aria-busy. A step that changed nothing and started nothing waits
-    for no quiet, though one host first gives it settle_quiet_ms to start a
-    request (a debounced search), and that host lets a navigation's cap run
-    past settle_max_ms while the new page loads."""
+    """The settle both hosts run: no settle ends for quiet, or for a step
+    that started nothing, inside the first settle_quiet_ms (the request
+    window, for a debounced search); a step that started nothing answers at
+    its end; one that started a request or a navigation, or finds the page
+    aria-busy, waits for quiet up to settle_max_ms; one that only changed the
+    page in place waits for quiet a moment at most. A navigation's cap is
+    each host's own: the router's browser lets it run past settle_max_ms
+    while the new page loads, and the desktop app's waits for a navigate
+    step's load before the settle and caps every settle at settle_max_ms."""
     description = _load("action").description
     assert "answers at once" not in description
-    assert "or changed the page in place, the host waits" in description
-    assert (
-        "A step that changed nothing and started neither answers without waiting for quiet, though a host may "
-        "first wait up to settle_quiet_ms for a request the step starts, or wait out a page marked aria-busy."
-    ) in description
-    assert "A navigation also waits for its new page's network, and a host may hold its cap past settle_max_ms" in description
+    assert "a host may first wait up to settle_quiet_ms" not in description
+    for sentence in (
+        "Neither host ends a settle for quiet, or for a step that started nothing, before settle_quiet_ms from its "
+        "start, so a request the step starts by then (a search box's debounced suggestions) is waited for.",
+        "A step that by then has changed nothing, started no main-frame request or navigation and left nothing "
+        "shown marked aria-busy answers there.",
+        "One that started a main-frame request or a navigation, or finds the page aria-busy, waits until those "
+        "requests are done, nothing shown is marked aria-busy and the page has shown no change for "
+        "settle_quiet_ms, at most settle_max_ms from the settle's start.",
+        "One that only changed the page in place waits for that quiet at most settle_quiet_ms past the host's "
+        "first look at the page after the step, so a page that changes on its own (a ticker) doesn't hold every "
+        "step to the cap.",
+        "A navigation's cap is each host's own.",
+        "The router's browser waits up to 5 s each for a navigation to commit and for its new page's "
+        "DOMContentLoaded (a navigate step's own load has waited up to 30 s for it), then for the new page's "
+        "network to go idle too, and stops at the later of settle_max_ms from the settle's start and 1.5 s after "
+        "that DOMContentLoaded wait, never past 31.5 s from the step's start.",
+        "The desktop app's browser waits for a navigate, back, forward or reload step's page to finish loading, "
+        "up to 30 s, before the settle, and stops every settle, a navigation's too, at settle_max_ms from its start.",
+    ):
+        assert sentence in description, sentence
 
 
 def test_the_control_fixture_tells_done_by_the_person_from_any_other_agent_record():

@@ -2,7 +2,7 @@
 
 These files pin the HTTP contract between Anton's `browser` tool and the two hosts that serve it: the MindsHub browser router (with the browser it starts for each person) and the Cowork desktop app's own browser. They also pin the turn request's browser block, `BrowserConfig`, and the session event the cloud turn writes.
 
-Anton owns them. `tests/test_browser_contract.py` reads every file through typed models, parses each answer into the model in `anton/core/browser/models.py` that the client reads it with, and checks each request against what the client sends. Each host's tests keep a copy of these files and check their own routes against them, so a change here is a contract change for both hosts.
+Anton owns them. `tests/test_browser_contract.py` reads every file through typed models, parses each answer into the model in `anton/core/browser/models.py` that the client reads it with, and checks each request against what the client sends. Each host's tests keep a byte-for-byte copy of this folder, this README included, and check their own routes against it, so a change here is a contract change for both hosts, and a host keeps its own notes outside its copy.
 
 ## Format
 
