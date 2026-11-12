@@ -71,6 +71,7 @@ def fill_in_scratchpad_action(tc_input: dict) -> None:
         tc_input["action"] = "exec"
 
 
+UncheckedMode = Literal["all", "own", "off"]
 RefusalCause = Literal["cancelled", "timeout", "unavailable", "error", "unanswered_earlier"]
 # What a logged decision says came of a held cell: "stopped" when the turn
 # ended while its card waited, so no refusal went back to the model.
@@ -115,6 +116,8 @@ class WriteGate:
     unanswered: bool = False
     http_rules: tuple[HttpWriteRule, ...] = ()
     relayed_hosts: frozenset[str] = frozenset()
+    # Which cells that run code the check can't read wait (`write_approval_unchecked`).
+    unchecked: UncheckedMode = "all"
 
     async def begin_turn(self, *, manager: ScratchpadManager) -> None:
         self.unanswered = False
@@ -550,7 +553,10 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
             earlier = (*earlier[:-1], earlier[-1].model_copy(update={"ended_process": True}))
         writes = await asyncio.to_thread(
             find_cell_writes, code=code, earlier=earlier, snapshots=gate.snapshots, http_rules=gate.http_rules,
+            carry_unread=gate.unchecked == "all",
         )
+        if gate.unchecked == "off" and writes.unchecked:
+            writes = writes.model_copy(update={"unchecked": False, "causes": ()})
     except Exception as exc:
         # The type only, as for a failed question.
         logger.warning("write approval: the check failed (%s)", type(exc).__name__)

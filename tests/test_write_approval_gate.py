@@ -230,7 +230,7 @@ class _TurnSeen:
 
 def _session(
     project: Path, *cells: str, write_approval: bool = True, packages: tuple[str, ...] = (), http: str = "",
-    relay_hosts: str = "",
+    relay_hosts: str = "", unchecked: str = "all",
 ) -> _Harness:
     workspace = MagicMock(base=project)
     workspace.artifacts_dir = project / "artifacts"
@@ -240,6 +240,7 @@ def _session(
         settings=CoreSettings(
             write_approval=write_approval, write_approval_http=http, write_relay_hosts=relay_hosts,
             write_relay_url="http://write-relay:8090" if relay_hosts else None,
+            write_approval_unchecked=unchecked,
         ),
     ))
     pad = _Pad()
@@ -716,6 +717,41 @@ async def test_a_cell_the_check_cant_read_that_posts_to_a_relayed_host_raises_on
     assert harness.pad.ran == ([SCRIPT_CELL, exec_cell] if answer == APPROVE else [SCRIPT_CELL])
 
 
+CALL_SCRIPT_CELL = "job_main()\n"
+
+
+@pytest.mark.parametrize(("unchecked", "held"), [
+    ("all", [EXEC_SCRIPT_CELL, CALL_SCRIPT_CELL, UPDATE_CELL]),
+    ("own", [EXEC_SCRIPT_CELL, UPDATE_CELL]),
+    ("off", [UPDATE_CELL]),
+])
+async def test_the_unchecked_setting_picks_which_unread_cells_wait(project, unchecked, held):
+    """`all` holds the cell that runs code the check can't read and a later
+    call into what it defined; `own` only the first; `off` neither. A real
+    write waits whatever the setting."""
+    harness = _session(project, SCRIPT_CELL, EXEC_SCRIPT_CELL, CALL_SCRIPT_CELL, UPDATE_CELL, unchecked=unchecked)
+    seen = await _run(harness=harness, answers=[APPROVE] * len(held))
+    cells = [SCRIPT_CELL, EXEC_SCRIPT_CELL, CALL_SCRIPT_CELL, UPDATE_CELL]
+    assert seen.ran_before == [cells.index(cell) for cell in held]
+    assert harness.pad.ran == cells
+    assert "UPDATE suppliers" in seen.cards[-1].request.prompt
+    if unchecked == "off":
+        assert "can't be checked" not in seen.cards[-1].request.prompt
+
+
+async def test_the_unchecked_setting_reads_its_environment_variable(project, monkeypatch):
+    monkeypatch.setenv("ANTON_WRITE_APPROVAL_UNCHECKED", "own")
+    workspace = MagicMock(base=project)
+    workspace.artifacts_dir = project / "artifacts"
+    session = ChatSession(ChatSessionConfig(
+        llm_client=_llm(), workspace=workspace, settings=CoreSettings(write_approval=True),
+    ))
+    try:
+        assert session._write_gate.unchecked == "own"
+    finally:
+        await session.close()
+
+
 # ── One unanswered card ───────────────────────────────────────────────────
 
 async def test_after_a_timeout_later_cells_in_the_turn_are_refused_without_a_card(project):
@@ -904,6 +940,21 @@ async def test_a_check_that_fails_asks_instead_of_clearing_the_cell(project, mon
     failed = [r for r in caplog.records if r.name == GATE_LOG and "the check failed" in r.getMessage()]
     assert [r.getMessage() for r in failed] == ["write approval: the check failed (RecursionError)"]
     assert failed[0].exc_info is None, "a traceback's frames would print the cell's code"
+
+
+async def test_a_check_that_fails_asks_even_with_unchecked_cards_off(project, monkeypatch):
+    def boom(**kwargs):
+        raise RecursionError("too deep")
+
+    from anton.core.utils import scratchpad as scratchpad_mod
+
+    monkeypatch.setattr(scratchpad_mod, "find_cell_writes", boom)
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    session._write_gate.unchecked = "off"
+    outcome = await _hold()(session, pad=_Pad(), code="print('hello')")
+    assert elicitor.asked == 1, "a check that read nothing can't clear the cell"
+    assert outcome is not None
 
 
 async def test_each_decision_is_logged_without_the_code(project, caplog):

@@ -16149,6 +16149,7 @@ def find_cell_writes(
     earlier: Sequence[EarlierCell],
     snapshots: Sequence[ProjectSnapshot],
     http_rules: Sequence[HttpWriteRule] = (),
+    carry_unread: bool = True,
 ) -> CellWrites:
     """What `code` would change, read against the conversation's `earlier` cells.
 
@@ -16179,7 +16180,9 @@ def find_cell_writes(
     write may lie past it, a function past `_CALL_DEPTH` calls among them
     (`_Reader.stopped`). Whatever else it read stays on the card. A reset
     of the pad clears its cells, so a hook a cell wrote before one is
-    outside what this reads.
+    outside what this reads. With `carry_unread` False, only code the cell
+    itself runs leaves it unchecked: neither a call to what earlier unread
+    code may have defined nor a restart after a hook write does.
 
     A cell that doesn't parse returns nothing to hold: the runner compiles it
     the same way and refuses it before any of it runs. After a cell that
@@ -16190,7 +16193,8 @@ def find_cell_writes(
         tree = _parse(code)
     except (SyntaxError, ValueError):
         if earlier and earlier[-1].ended_process:
-            return find_cell_writes(code="", earlier=earlier, snapshots=snapshots, http_rules=http_rules)
+            return find_cell_writes(code="", earlier=earlier, snapshots=snapshots, http_rules=http_rules,
+                                    carry_unread=carry_unread)
         return CellWrites()
     except (RecursionError, MemoryError):
         # Too deep for this Python's parser, and the pad may run another Python (remote backend): hold it.
@@ -16320,9 +16324,10 @@ def find_cell_writes(
             deep = deep or bool(maybe.past_cap)
     # A call that reaches what code the check couldn't read may have defined
     # holds the cell only when such code ran.
-    if first_unread is not None:
+    carries = carry_unread and first_unread is not None
+    if carries:
         unread += read.reaches_defined
-    restarts = bool(earlier) and earlier[-1].ended_process and modules.hooks_may_run
+    restarts = carry_unread and bool(earlier) and earlier[-1].ended_process and modules.hooks_may_run
     if restarts:
         # The pad starts a new process before this cell runs, and that start
         # runs the startup hooks a cell wrote, which the check doesn't read.
@@ -16339,7 +16344,7 @@ def find_cell_writes(
     # The reasons only explain the card, so an error building them loses them, not what the check found.
     try:
         causes = [UncheckedCause(kind="runs", code=_quoted(node, reader)) for node in runs]
-        if first_unread is not None and read.reaches_defined:
+        if carries and read.reaches_defined:
             earlier_sites = _unread_code(reader, first_unread.tree, first_unread, read=literal_code,
                                          modules=modules, spelled_only=True)
             earlier_line = _quoted(earlier_sites[0], reader) if earlier_sites else ""
