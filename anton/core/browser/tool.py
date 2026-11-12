@@ -1109,11 +1109,15 @@ async def _gate(session: "ChatSession", *, state: _BrowserState, body: dict, pag
     the page: the tool can't tell which of a frame's controls a point lands
     on, so it can't check that one against the commit list.
 
-    Every body it sends the desktop says whether the person approved that
-    one-step card (``into_frame``). The desktop refuses a press, or a drag's
-    release, that lands in a frame when it is false, so a frame that slides
-    under the point after this read gets no press under a position approval
-    or a commit card. The web's browser holds its own steps and gets none."""
+    Every body it sends the desktop says whether the person approved a
+    one-step card for a step whose point may land in a frame
+    (``into_frame``), whatever held it: a click on a consent page or a drag
+    from a commit control gets the same card for the same step at the same
+    point. The desktop refuses a press, or a drag's release, that lands in a
+    frame when it is false, so a frame that slides under the point after
+    this read gets no press under a position approval, or after a card for a
+    point outside every frame. The web's browser holds its own steps and
+    gets none."""
     key = _step_key(body)
     refused = state.refused.get((page.url, key))
     if refused is not None:
@@ -1127,8 +1131,8 @@ async def _gate(session: "ChatSession", *, state: _BrowserState, body: dict, pag
     if state.position_url is not None and state.position_url != page.url:
         state.position_url = None
     listed = _hold_of(state, body, page)
-    into_frame = listed == "position" and not host_holds and _in_frame(body, page)
-    if into_frame:
+    into_frame = not host_holds and _has_position(body) and _in_frame(body, page)
+    if into_frame and listed == "position":
         listed = "commit"
     if listed == "position":
         if host_holds or state.position_url == page.url:

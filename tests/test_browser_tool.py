@@ -982,9 +982,8 @@ async def test_on_the_desktop_a_step_says_into_frame_only_after_the_one_step_fra
     in a frame unless the step says the person approved it as one step that
     may land there, so a frame that slides under a point after the read
     gets no press under a position approval. into_frame is true only after
-    that card; it is false under a position approval, after a commit card
-    and with no card at all. The web's browser holds its own steps and gets
-    no into_frame."""
+    that card; it is false under a position approval and with no card at
+    all. The web's browser holds its own steps and gets no into_frame."""
     host = FakeHost(pages=[FRAMED])
     session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
     elicit_answers.answers += ["approve"] * 3
@@ -1010,6 +1009,39 @@ async def test_on_the_desktop_a_step_says_into_frame_only_after_the_one_step_fra
     elicit_answers.answers.append("approve")
     await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "x": 200, "y": 350}})
     assert len(web.posted("/action")) == 2 and all("into_frame" not in body for body in web.posted("/action"))
+
+
+async def test_on_the_desktop_a_step_held_for_another_reason_says_into_frame_after_its_one_step_card(elicit_answers):
+    """A step by position that holds for another reason (any click on a
+    consent page, a drag from a commit control) gets the same one-step card
+    as one held because it may land in a frame, and the person approves the
+    same step at the same point. So it says into_frame when its point may
+    land in a frame, and the desktop doesn't refuse a step the person just
+    approved. After the same card, a point outside every frame and a step by
+    element still say false."""
+    consent = {**FRAMED, "url": "https://accounts.example.test/signin/oauth/consent?client_id=x&response_type=code"}
+    host = FakeHost(pages=[consent])
+    session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+    elicit_answers.answers += ["approve"] * 3
+    for step in ({"action": "click", "x": 200, "y": 350}, {"action": "click", "x": 10, "y": 10}, {"action": "click", "element": 2}):
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+        assert result.content.startswith("Done:"), step
+    assert [body["into_frame"] for body in host.posted("/action")] == [True, False, False]
+
+    order = {**FRAMED, "elements": [*PAGE["elements"], {"id": 7, "role": "button", "name": "Place order"}]}
+    host = FakeHost(pages=[order])
+    session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+    elicit_answers.answers += ["approve"] * 2
+    for step in (
+        {"action": "drag", "from": {"element": 7}, "to": {"x": 200, "y": 350}},
+        {"action": "drag", "from": {"element": 7}, "to": {"x": 10, "y": 10}},
+    ):
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+        assert result.content.startswith("Done:"), step
+    assert [body["into_frame"] for body in host.posted("/action")] == [True, False]
+    prompts = elicit_answers.prompts()
+    assert len(prompts) == 5 and all(p.startswith("**Approve this browser step?**") for p in prompts)
+    assert {[o.detail for o in r.options][0] for r in elicit_answers.requests} == {"Take this step once"}
 
 
 async def test_on_a_desktop_that_sends_no_frames_every_click_by_position_gets_the_one_step_card(elicit_answers):
