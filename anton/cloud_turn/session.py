@@ -29,6 +29,7 @@ import os
 import shutil
 import sys
 import tempfile
+import uuid
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
@@ -175,21 +176,102 @@ _SKILLS_ROOT_ENV = "ANTON_CLOUD_SKILLS_ROOT"
 _CLOUD_TURN_ENV = "ANTON_CLOUD_TURN"
 _DATASOURCE_CORRELATION_ENV = "ANTON_CLOUD_DATASOURCE_CORRELATION_ID"
 _DATASOURCE_CONNECTIONS_ENV = "ANTON_CLOUD_DATASOURCE_CONNECTIONS"
+_CUSTOM_API_CORRELATION_ENV = "ANTON_CLOUD_CUSTOM_API_CORRELATION_ID"
+_CUSTOM_API_CONNECTIONS_ENV = "ANTON_CLOUD_CUSTOM_API_CONNECTIONS"
 
 
-def _datasource_workspace_env(request: TurnRequestV1, settings: AntonSettings) -> dict[str, str]:
-    """Build pod-child configuration for a turn, refusing a datasource turn that could not reach the gateway.
+def _carries_this_turns_inference(request: TurnRequestV1, settings: AntonSettings) -> bool:
+    """Whether the child's ``OPENAI_API_KEY`` and base are this turn's own inference connection.
 
-    The scratchpad's datasource helper sends the child's own ``OPENAI_API_KEY``
-    to the gateway at the child's ``OPENAI_BASE_URL``, which is the inference
-    host the gateway is published on. That holds only while both are this turn's
-    own, so the turn fails here when a pod setting such as
-    ``ANTON_OPENAI_API_KEY`` has replaced either, or the base is not https at
-    ``/v1``. Raises ``ValueError`` in those cases.
+    The scratchpad's gateway helpers send the child's key to the child's base,
+    which is the inference host the gateways are published on. That holds only
+    while a pod setting such as ``ANTON_OPENAI_API_KEY`` has replaced neither,
+    and the base is https at ``/v1``. No side effects.
+    """
+    llm = request.llm or {}
+    base = (settings.openai_base_url or "").rstrip("/")
+    parsed = urlsplit(base)
+    return not (
+        llm.get("provider") != "minds-cloud"
+        or not isinstance(llm.get("api_key"), str)
+        or not llm["api_key"]
+        or not hmac.compare_digest(settings.openai_api_key or "", llm["api_key"])
+        or base != str(llm.get("base_url") or "").rstrip("/")
+        or parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path != "/v1"
+        or parsed.query
+        or parsed.fragment
+    )
+
+
+def _is_canonical_uuid(value: object) -> bool:
+    """Whether ``value`` is a UUID in the lowercase hyphenated form the producer sends."""
+    if not isinstance(value, str):
+        return False
+    try:
+        return str(uuid.UUID(value)) == value
+    except ValueError:
+        return False
+
+
+def _cloud_turn_workspace_env(request: TurnRequestV1, settings: AntonSettings) -> dict[str, str]:
+    """Build pod-child configuration for a turn, refusing a gateway turn that could not reach its gateway.
+
+    Input: the parsed request and the turn's settings. Output: the overlay for
+    every scratchpad child, which marks a cloud turn and, per block, carries the
+    datasource or custom API connections by id and version only, with the
+    correlation id. Raises ``ValueError`` when a datasource or custom API turn's
+    child would not send this turn's own key to this turn's inference host,
+    when the custom API block's key is not that key, or when the correlation id
+    is missing (or, for custom API calls, not a UUID). No side effects.
     """
     overlay = {_CLOUD_TURN_ENV: "1"}
-    if request.datasource is None:
-        return overlay
+    if request.datasource is not None:
+        if not _carries_this_turns_inference(request, settings):
+            raise ValueError("the turn's inference connection cannot carry datasource reads")
+        if not request.correlation_id:
+            raise ValueError("datasource turn credentials are unavailable")
+        overlay.update(
+            {
+                _DATASOURCE_CORRELATION_ENV: request.correlation_id,
+                _DATASOURCE_CONNECTIONS_ENV: json.dumps(
+                    [
+                        {
+                            "connection_id": ref.connection_id,
+                            "credential_version": ref.credential_version,
+                        }
+                        for ref in request.datasource.connections
+                    ],
+                    separators=(",", ":"),
+                ),
+            }
+        )
+    if request.custom_api is not None:
+        if not _carries_this_turns_inference(request, settings) or not hmac.compare_digest(
+            request.custom_api.turn_key.encode(), request.llm["api_key"].encode()
+        ):
+            raise ValueError("the turn's inference connection cannot carry custom API calls")
+        if not _is_canonical_uuid(request.correlation_id):
+            raise ValueError("custom API turn credentials are unavailable")
+        overlay.update(
+            {
+                _CUSTOM_API_CORRELATION_ENV: request.correlation_id,
+                _CUSTOM_API_CONNECTIONS_ENV: json.dumps(
+                    [
+                        {
+                            "connection_id": ref.connection_id,
+                            "credential_version": ref.credential_version,
+                        }
+                        for ref in request.custom_api.connections
+                    ],
+                    separators=(",", ":"),
+                ),
+            }
+        )
+    return overlay
     llm = request.llm or {}
     base = (settings.openai_base_url or "").rstrip("/")
     parsed = urlsplit(base)
@@ -1107,7 +1189,7 @@ def build_cloud_chat_session(
         mcp_sessions=mcp_sessions,           # closed in ChatSession.close()
         background_memory=False,            # one turn per pod: no end-of-turn LLM passes
         runtime_factory=local_scratchpad_runtime_factory,
-        workspace_env_overlay=_datasource_workspace_env(request, settings),
+        workspace_env_overlay=_cloud_turn_workspace_env(request, settings),
         web_search_enabled=False,
         web_fetch_enabled=False,
         browser=request.browser,
