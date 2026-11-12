@@ -1251,11 +1251,12 @@ async def _gate(
     one-step card for a step whose point may land in a frame
     (``into_frame``), whatever held it: a click on a consent page or a drag
     from a commit control gets the same card for the same step at the same
-    point. The desktop refuses a press, or a drag's release, that lands in a
-    frame when it is false, so a frame that slides under the point after
+    point. The desktop refuses a mouse press, or a drag's release, that lands
+    in a frame when it is false, so a frame that slides under the point after
     this read gets no press under a position approval, or after a card for a
     point outside every frame. With it true, the desktop presses only into
-    the frame under the point when the step starts.
+    the frame under the point when the step starts. A focused type has no
+    point, so into_frame never stops it.
 
     The desktop binds an approved step to nothing else the card showed: it
     runs the step on whatever page is there when the step starts, and keeps
