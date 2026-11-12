@@ -1104,6 +1104,87 @@ async def test_on_the_desktop_a_frame_that_changes_under_the_point_while_the_car
     assert len(elicit_answers.prompts()) == 5 and host.posted("/action") == [sent]
 
 
+async def test_on_the_desktop_a_page_that_moves_on_while_any_card_waits_is_asked_about_again_or_refused(elicit_answers):
+    """The desktop's browser binds an approved step to nothing the card
+    showed: it runs the step on whatever page is there when the step starts,
+    and keeps an element's number while the element lives. So after any
+    Approve there the tool reads the page again. A page that went to another
+    address while the card waited (the person opened another order, or the
+    site moved on by itself) is asked about again on the new read, even when
+    it embeds the same frame at the same box or names the same control; an
+    address that changes again after the second card refuses the step. An
+    element the step names that the page relabeled or removed refuses it, as
+    act refuses one before the card. The web's browser binds its own
+    approval to the page's address and document, and gets no second read."""
+    desktop = BrowserConfig(base_url=LOOPBACK, profile=SID, token="k")
+    again = "The page went to another address after your Approve, so this asks again."
+
+    other = {**FRAMED, "url": "https://shop.example/orders/2/pay", "title": "Pay order 2"}
+    host = FakeHost(pages=[FRAMED, other, other])
+    session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+    elicit_answers.answers += ["approve", "approve"]
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "x": 200, "y": 350}})
+    assert result.content.startswith("Done: click at (200, 350).")
+    prompts = elicit_answers.prompts()
+    assert len(prompts) == 2 and all(p.startswith("**Approve this browser step?**") for p in prompts)
+    assert again not in prompts[0] and again in prompts[1]
+    assert "https://shop.example/orders/2/pay\n" in prompts[1]
+    assert host.posted("/action") == [
+        {"action": "click", "x": 200, "y": 350, "include_page": True, "coords": "screenshot", "into_frame": True},
+    ]
+
+    order = {**CHECKOUT, "url": "https://shop.example/orders/1/checkout"}
+    next_order = {**CHECKOUT, "url": "https://shop.example/orders/2/checkout"}
+    place = {"action": "act", "step": {"action": "click", "element": 7}}
+    host = FakeHost(pages=[order, next_order, next_order])
+    session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+    elicit_answers.answers += ["approve", "approve"]
+    result = await browser_tool.handle_browser(session, place)
+    assert result.content.startswith("Done:")
+    prompts = elicit_answers.prompts()[2:]
+    assert len(prompts) == 2 and again not in prompts[0] and again in prompts[1]
+    assert "https://shop.example/orders/1/checkout\n" in prompts[0] and "https://shop.example/orders/2/checkout\n" in prompts[1]
+    assert host.posted("/action") == [{"action": "click", "element": 7, "include_page": True, "into_frame": False}]
+
+    third = {**CHECKOUT, "url": "https://shop.example/orders/3/checkout"}
+    host = FakeHost(pages=[order, next_order, third])
+    session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+    elicit_answers.answers += ["approve", "approve"]
+    result = await browser_tool.handle_browser(session, place)
+    assert result.ok is False and result.reason == "browser_stale_element"
+    assert "changed again" in result.content and "Nothing was done." in result.content
+    assert len(elicit_answers.prompts()) == 6 and host.posted("/action") == []
+
+    relabeled = {**order, "elements": [{**e, "name": "Delete my account"} if e["id"] == 7 else e for e in order["elements"]]}
+    host = FakeHost(pages=[order, relabeled])
+    session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+    elicit_answers.answers.append("approve")
+    result = await browser_tool.handle_browser(session, place)
+    assert result.ok is False and result.reason == "browser_stale_element"
+    assert 'Element [7] is now button "Delete my account", not the button "Place order"' in result.content
+    assert "Nothing was done." in result.content
+    assert len(elicit_answers.prompts()) == 7 and host.posted("/action") == []
+
+    # The position card approves clicks by position on one address.
+    host = FakeHost(pages=[PAGE, {**PAGE, "url": "https://shop.example/account"}, {**PAGE, "url": "https://shop.example/account"}])
+    session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+    elicit_answers.answers += ["approve", "approve"]
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "x": 10, "y": 10}})
+    assert result.content.startswith("Done: click at (10, 10).")
+    prompts = elicit_answers.prompts()[7:]
+    assert len(prompts) == 2 and all("Approve clicks by position on this page?" in p for p in prompts)
+    assert again not in prompts[0] and again in prompts[1]
+    assert [body["into_frame"] for body in host.posted("/action")] == [False]
+
+    web = FakeHost(pages=[order, next_order])
+    session = make_session(web, elicitor=FakeElicitor())
+    elicit_answers.answers.append("approve")
+    result = await browser_tool.handle_browser(session, place)
+    assert result.content.startswith("Done:")
+    assert len(elicit_answers.prompts()) == 10
+    assert [(m, p) for m, p, _, _ in web.calls if p.endswith("/page")] == [("GET", f"/sessions/{SID}/page")]
+
+
 async def test_on_the_desktop_the_navigate_that_opens_an_address_in_an_open_session_says_into_frame_false():
     """Every step body anton sends the desktop says into_frame, the navigate
     that open or run sends for an address in a session already open too, so

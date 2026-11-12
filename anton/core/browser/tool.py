@@ -1093,8 +1093,11 @@ def _not_approved(body: dict, why: str) -> ToolOutcome:
     )
 
 
-def _card_prompt(*, hold: Hold, url: str, step: str, may_commit: bool = False, frame_changed: bool = False) -> str:
+def _card_prompt(*, hold: Hold, url: str, step: str, may_commit: bool = False, changed: str | None = None) -> str:
+    """The card's text. ``changed`` is what changed after the person's
+    Approve on the card before (``_gate``), which makes this one ask again."""
     shown = _fence(f"{url}\n{step}")
+    again = f"{changed} after your Approve, so this asks again. " if changed else ""
     if hold == "position":
         commits = (
             "It may also commit something for you, such as a purchase, a payment, a message, a deletion or a form. "
@@ -1102,13 +1105,12 @@ def _card_prompt(*, hold: Hold, url: str, step: str, may_commit: bool = False, f
         )
         return (
             "**Approve clicks by position on this page?**\n\n"
-            "This step clicks or drags at a point the page's element list doesn't name, so it can't be "
+            f"{again}This step clicks or drags at a point the page's element list doesn't name, so it can't be "
             f"checked first:\n\n{shown}\n\n{commits}"
             "Approve covers clicks and drags by position on this page until it goes to another address. "
             "A click or drag into an embedded frame still asks each time. "
             "Cancel, Skip or no answer stops it."
         )
-    again = "The frame under this point changed after your Approve, so this asks again. " if frame_changed else ""
     return (
         "**Approve this browser step?**\n\n"
         f"{again}This step may commit something for you, such as a purchase, a payment, a message, a deletion "
@@ -1118,7 +1120,7 @@ def _card_prompt(*, hold: Hold, url: str, step: str, may_commit: bool = False, f
 
 
 async def _gate(
-    session: "ChatSession", *, state: _BrowserState, body: dict, page: Page, risky: bool, frame_changed: bool = False,
+    session: "ChatSession", *, state: _BrowserState, body: dict, page: Page, risky: bool, changed: str | None = None,
 ) -> dict | ToolOutcome:
     """The body to send when the step may be sent on ``page``; otherwise what
     to answer in its place, before anything is sent. ``act`` and ``run`` both
@@ -1146,12 +1148,19 @@ async def _gate(
     frame when it is false, so a frame that slides under the point after
     this read gets no press under a position approval, or after a card for a
     point outside every frame. With it true, the desktop presses only into
-    the frame under the point when the step starts, so after that card the
-    tool reads the page again and, when the frame under the point has
-    another address or box than on the read the card was raised on, asks
-    again on the new read (``frame_changed``), once; a frame that changes
-    again refuses the step. The web's browser holds its own steps and gets
-    none."""
+    the frame under the point when the step starts.
+
+    The desktop binds an approved step to nothing else the card showed: it
+    runs the step on whatever page is there when the step starts, and keeps
+    an element's number while the element lives. So after any Approve there
+    the tool reads the page again. An element the step names that now has
+    another role or name refuses the step (``_moved_element``), as act
+    refuses one before the card. A page that went to another address, or,
+    after a card for a point that may land in a frame, a frame under the
+    point with another address or box, is asked about again on the new read
+    (``changed``), once; a page that changes again refuses the step. The
+    web's browser binds its own approval to the page's address and document,
+    and gets neither the second read nor into_frame."""
     key = _step_key(body)
     refused = state.refused.get((page.url, key))
     if refused is not None:
@@ -1184,7 +1193,7 @@ async def _gate(
     else:
         return send
     cause = await ask_approval_card(
-        session, _card_prompt(hold=hold, url=page.url, step=_step_words(body, element), frame_changed=frame_changed),
+        session, _card_prompt(hold=hold, url=page.url, step=_step_words(body, element), changed=changed),
         approve_detail=approve, cancel_detail="Leave the page as it is", log_label="browser step",
     )
     if cause is not None:
@@ -1192,20 +1201,30 @@ async def _gate(
         return _not_approved(body, refusal_why(cause))
     if hold == "position":
         state.position_url = page.url
-    if not into_frame:
+    if host_holds:
         return send
     now = await state.client.page(session_id=state.session_id)
-    if _frames_under(body, now) == _frames_under(body, page):
-        return {**send, "into_frame": True}
-    if frame_changed:
+    moved = _moved_element(seen=page, current=now, body=body)
+    if moved is not None:
+        return ToolOutcome(
+            content=f"{moved} Nothing was done. The page now:\n\n{_show(state, now)}",
+            ok=False, reason="browser_stale_element",
+        )
+    if now.url != page.url:
+        changed_now = "The page went to another address"
+    elif into_frame and _frames_under(body, now) != _frames_under(body, page):
+        changed_now = "The frame under this point changed"
+    else:
+        return {**send, "into_frame": True} if into_frame else send
+    if changed is not None:
         return ToolOutcome(
             content=(
-                f"The frame under the point changed again after the user approved {_describe(body)} a second "
-                f"time. Nothing was done. The page now:\n\n{_show(state, now)}"
+                f"The page changed again after the user approved {_describe(body)} a second time. "
+                f"Nothing was done. The page now:\n\n{_show(state, now)}"
             ),
             ok=False, reason="browser_stale_element",
         )
-    return await _gate(session, state=state, body=body, page=now, risky=risky, frame_changed=True)
+    return await _gate(session, state=state, body=body, page=now, risky=risky, changed=changed_now)
 
 
 #: What a step can answer that doesn't say whether the browser ran it: no
