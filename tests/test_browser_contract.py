@@ -304,6 +304,18 @@ def test_the_action_fixture_says_how_a_focused_type_reaches_a_field_in_a_frame()
     assert held == {"type into the focused field": None, "type into the focused field and submit": "commit"}
 
 
+def test_the_page_fixture_says_a_frame_left_unread_takes_none_of_frames_read():
+    """Both hosts count the frames they read after their refusals, so a
+    sign-in or covered frame on-screen first never costs a plain one its read."""
+    description = _load("page").description
+    assert "or comes after the first frames_read." not in description
+    assert (
+        "A host reads at most frames_read frames, in the order frames lists them, and a frame it leaves unread for "
+        "any of these reasons takes none of them."
+    ) in description
+    assert "and a host leaves unread a frame it finds the person can't see." in description
+
+
 def test_the_control_fixture_tells_done_by_the_person_from_any_other_agent_record():
     controls = _load("control").examples
     fresh = SessionInfo.model_validate(controls["a session the agent holds"].body).control
