@@ -70,6 +70,17 @@ def withheld_from_env(fields: dict[str, Any], key: str, secure_keys: list[str] |
     return is_secret_key(key, secure_keys)
 
 
+def withheld_fields(record: dict[str, Any] | None) -> list[str]:
+    """The fields of a saved connection that ``withheld_from_env`` keeps out
+    of every environment, so a caller can say which ones an app won't get."""
+    fields = (record or {}).get("fields") or {}
+    secure_keys = (record or {}).get("secure_keys")
+    return sorted(
+        key for key in fields
+        if not key.startswith("_") and withheld_from_env(fields, key, secure_keys)
+    )
+
+
 def _sanitize(value: str) -> str:
     """Strip characters unsafe for file names, keep alphanumeric, dash, underscore."""
     return re.sub(r"[^\w\-]", "_", value).strip("_")
