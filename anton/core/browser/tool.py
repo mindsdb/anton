@@ -59,6 +59,7 @@ from anton.core.browser.models import (
     Element,
     FocusedType,
     FrameBox,
+    FrameElement,
     HeldStep,
     Page,
     SavedTab,
@@ -318,6 +319,13 @@ _MODIFIER_KEYS = frozenset({"alt", "control", "meta", "shift"})
 _KEY_ALIASES = {"enter": "Enter", "return": "Enter", "\n": "Enter", "\r": "Enter", "space": " ", "spacebar": " "}
 _HOLD_RANK = {None: 0, "position": 1, "commit": 2}
 Hold = Literal["commit", "position"]
+#: Keys that change what a radio group or a select has picked: an arrow,
+#: Home, End, PageUp or PageDown checks another radio of the group, which
+#: clicks it, or picks another option, and Space checks the radio that has
+#: the focus.
+_PICKING_KEYS = frozenset({"ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown", " "})
+#: The most controls a card names for a key that may pick one of them.
+_CARD_PICKS = 3
 
 
 @dataclass
@@ -777,7 +785,7 @@ def _element(page: Page, element_id: object) -> Element | None:
     return next((el for el in page.elements if el.id == element_id), None)
 
 
-def _named(el: Element) -> str:
+def _named(el: Element | FrameElement) -> str:
     return f"{el.role} {json.dumps(el.name, ensure_ascii=False)}"
 
 
@@ -930,7 +938,7 @@ def _picks(step: dict) -> list[str]:
     return [str(v) for v in (value if isinstance(value, list) else [value]) if v is not None]
 
 
-def _select_holds(select: Element | None, picks: list[str]) -> bool:
+def _select_holds(select: Element | FrameElement | None, picks: list[str]) -> bool:
     """Whether picking ``picks`` in ``select`` commits something, as the pod
     holds it: by the select's own name when that reads as an action, or as a
     click on each option it picks, unless the select sorts or filters ("Order
@@ -1063,11 +1071,71 @@ def _note_load(state: _BrowserState, asked: str | None, landed: str) -> None:
     state.redirect = (asked, landed) if asked and landed != asked else None
 
 
-def _hold_of(state: _BrowserState, step: dict, page: Page) -> Hold | None:
-    """The strictest hold over every element the step touches."""
+def _key_picks(page: Page, step: dict, *, consent: bool) -> list[str]:
+    """The controls that commit something a press may check or pick with an
+    arrow, Home, End, PageUp, PageDown or Space (``_PICKING_KEYS``), as a card
+    names them; empty for any other step, or when the keys pick nothing that
+    commits.
+
+    The web's browser holds those keys by what they pick, from its own read
+    of the focus, a frame's included. The desktop's browser holds nothing and
+    this tool can't see the focus, so the tool holds them by what the page
+    lists: a radio the commit list holds, or a select whose pick it holds
+    (``_select_holds``), and on a consent page any radio or select. A press
+    that names a radio may check any other radio the page lists, since the
+    page doesn't say which radios share its group. A press with no element
+    goes to whatever has the focus, so it may pick any such control the page
+    or a read frame lists, or one in a frame the host didn't read, or in any
+    frame of a host that doesn't list its frames. Such a press already holds
+    when a key of it types, deletes or is Enter or Space (``_classify``)."""
+    if step.get("action") != "press" or not _PICKING_KEYS.intersection(_chord_keys(step.get("key"))):
+        return []
+
+    def pick(el: Element | FrameElement) -> str | None:
+        """What the card names when a key may commit by picking in ``el``."""
+        if el.role == "radio":
+            return _named(el) if consent or _commit_name(el.name) else None
+        if el.options or el.role in ("combobox", "listbox"):
+            holds = consent or _select_holds(el, [option for option in el.options if option.strip()])
+            return f"an option of {_named(el)}" if holds else None
+        return None
+
+    named = step.get("element")
+    if named is not None:
+        pressed = _element(page, named)
+        if pressed is None or pressed.role != "radio":
+            return []
+        others = [el for el in page.elements if el.role == "radio" and el.id != pressed.id]
+        return [name for name in map(pick, others) if name is not None]
+    in_frames = [el for frame in page.frames or [] if frame.read for el in frame.elements]
+    picks = [name for name in map(pick, [*page.elements, *in_frames]) if name is not None]
+    if page.frames is None:
+        picks.append("a control in a frame the browser didn't list")
+    picks += [
+        f"a control in the frame {json.dumps(frame.url, ensure_ascii=False)} the browser didn't read"
+        for frame in page.frames or [] if not frame.read
+    ]
+    return picks
+
+
+class _Holding(NamedTuple):
+    """What a step needs before it runs on a page (``_hold_of``)."""
+
+    kind: Hold | None
+    #: What its keys may pick that commits something (``_key_picks``).
+    picks: list[str]
+
+
+def _hold_of(state: _BrowserState, step: dict, page: Page) -> _Holding:
+    """The strictest hold over every element the step touches and every
+    control its keys may pick."""
     requested = _requested(state, page)
+    consent = _consent_page(page.url) or (requested is not None and _consent_page(requested))
+    picks = _key_picks(page, step, consent=consent)
     holds = [_classify(step, url=page.url, requested=requested, element=el) for el in _touched(page, step)]
-    return max(holds, key=_HOLD_RANK.__getitem__)
+    if picks:
+        holds.append("commit")
+    return _Holding(kind=max(holds, key=_HOLD_RANK.__getitem__), picks=picks)
 
 
 def _step_key(body: dict) -> str:
@@ -1175,7 +1243,9 @@ async def _gate(
     by position that may land inside a frame (``_in_frame``) gets the
     one-step card every time, even after clicks by position were approved on
     the page: the tool can't tell which of a frame's controls a point lands
-    on, so it can't check that one against the commit list.
+    on, so it can't check that one against the commit list. A press whose
+    arrow, Home, End, PageUp, PageDown or Space may pick a control that
+    commits something gets the one-step card naming it (``_key_picks``).
 
     Every body it sends the desktop says whether the person approved a
     one-step card for a step whose point may land in a frame
@@ -1210,7 +1280,7 @@ async def _gate(
     send = body if host_holds else {**body, "into_frame": False}
     if state.position_url is not None and state.position_url != page.url:
         state.position_url = None
-    listed = _hold_of(state, body, page)
+    listed, picks = _hold_of(state, body, page)
     into_frame = not host_holds and _has_position(body) and _in_frame(body, page)
     if into_frame and listed == "position":
         listed = "commit"
@@ -1229,8 +1299,13 @@ async def _gate(
         approve = "Take this step once"
     else:
         return send
+    words = _step_words(body, element)
+    if picks:
+        shown = list(dict.fromkeys(picks))
+        more = f" or {len(shown) - _CARD_PICKS} more" if len(shown) > _CARD_PICKS else ""
+        words += f", which may pick {' or '.join(shown[:_CARD_PICKS])}{more}"
     cause = await ask_approval_card(
-        session, _card_prompt(hold=hold, url=page.url, step=_step_words(body, element), changed=changed),
+        session, _card_prompt(hold=hold, url=page.url, step=words, changed=changed),
         approve_detail=approve, cancel_detail="Leave the page as it is", log_label="browser step",
     )
     if cause is not None:

@@ -2657,6 +2657,118 @@ def test_an_arrow_on_a_select_holds_as_picking_any_of_its_options():
     )
 
 
+#: A page whose radio group can delete the account.
+CLOSE_ACCOUNT = {
+    **PAGE,
+    "url": "https://shop.example/account/close",
+    "elements": [
+        {"id": 3, "role": "radio", "name": "Keep my account", "checked": True},
+        {"id": 4, "role": "radio", "name": "Delete my account", "checked": False},
+        {"id": 5, "role": "textbox", "name": "Why are you leaving?"},
+    ],
+}
+
+
+def _framed_with(elements: list[dict], *, read: bool = True) -> dict:
+    """PAGE with one frame, read with ``elements`` or left unread."""
+    frame = {"url": "https://forms.example.test/account", "read": read, "box": {"x": 112, "y": 300, "width": 560, "height": 180}}
+    if read:
+        frame |= {"elements": elements, "text": ""}
+    return {**PAGE, "frames": [frame]}
+
+
+async def test_on_the_desktop_a_key_that_may_check_a_commit_radio_waits_for_approve(elicit_answers):
+    """An arrow, Home, End, PageUp or PageDown on a radio group checks
+    another radio of it and clicks it, as the pod holds those keys. The
+    desktop's browser holds nothing, so a key that may check "Delete my
+    account" gets the card a click on it gets: one that names a radio of
+    the group, and one with no element, which goes to whatever has the
+    focus. The page doesn't say which radios share a group, so every radio
+    it lists counts."""
+    host = FakeHost(pages=[CLOSE_ACCOUNT])
+    session = _desktop(host)
+    for step in (
+        {"action": "click", "element": 4},
+        {"action": "press", "element": 3, "key": "ArrowDown"},
+        {"action": "press", "key": "ArrowDown"},
+        {"action": "press", "key": "End"},
+        {"action": "press", "key": "Shift+PageDown"},
+    ):
+        elicit_answers.answers.append("cancel")
+        before = len(elicit_answers.requests)
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+        assert result.reason == "browser_step_not_approved", step
+        assert len(elicit_answers.requests) == before + 1, step
+    assert host.posted("/action") == []
+    prompts = elicit_answers.prompts()
+    assert 'press ArrowDown in radio "Keep my account", which may pick radio "Delete my account"' in prompts[1]
+    assert 'press ArrowDown, which may pick radio "Delete my account"' in prompts[2]
+
+
+@pytest.mark.parametrize("page", [
+    _framed_with([{"role": "radio", "name": "Keep my account", "checked": True}, {"role": "radio", "name": "Delete my account"}]),
+    _framed_with([{"role": "combobox", "name": "With selected", "value": "", "options": ["", "Delete selected"]}]),
+    _framed_with([], read=False),
+    {**PAGE, "frames": None},
+], ids=["commit radio in a read frame", "commit option in a read frame", "unread frame", "host sends no frames"])
+async def test_on_the_desktop_a_key_with_no_element_waits_where_a_frame_may_hold_a_commit_option(elicit_answers, page):
+    """A frame's controls carry no number, so a key into one has no
+    element. It waits when a read frame lists a radio or select option that
+    commits something, and when a frame wasn't read or the host doesn't say
+    where its frames are: the tool can't see what the key would pick there."""
+    host = FakeHost(pages=[page])
+    session = _desktop(host)
+    elicit_answers.answers.append("cancel")
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "press", "key": "ArrowDown"}})
+    assert result.reason == "browser_step_not_approved"
+    assert host.posted("/action") == [] and len(elicit_answers.requests) == 1
+
+
+async def test_on_the_desktop_arrows_in_a_plain_list_run_at_once(elicit_answers):
+    """Arrows, Home, End, PageUp and PageDown where nothing they may pick
+    commits anything run at once, with no element or on a radio of a
+    group that commits nothing, and Tab and Escape run at once on the page
+    with the commit radio too: the card is only where a key may commit."""
+    plain = {
+        **_framed_with([{"role": "radio", "name": "Weekly", "checked": True}, {"role": "radio", "name": "Monthly"}]),
+        "elements": [
+            {"id": 3, "role": "radio", "name": "Small", "checked": True},
+            {"id": 4, "role": "radio", "name": "Large"},
+            {"id": 5, "role": "listbox", "name": "Sort by", "options": ["Newest", "Order date"]},
+        ],
+    }
+    host = FakeHost(pages=[plain])
+    session = _desktop(host)
+    steps = [
+        {"action": "press", "key": "ArrowDown"},
+        {"action": "press", "element": 3, "key": "ArrowDown"},
+        {"action": "press", "key": "PageDown"},
+        {"action": "press", "key": "Home"},
+        {"action": "press", "element": 5, "key": "ArrowUp"},
+    ]
+    for step in steps:
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+        assert result.ok is True and not result.reason, step
+    on_the_commit_page = FakeHost(pages=[CLOSE_ACCOUNT])
+    commit_session = _desktop(on_the_commit_page)
+    for key in ("Tab", "Escape", "Shift+Tab"):
+        result = await browser_tool.handle_browser(commit_session, {"action": "act", "step": {"action": "press", "key": key}})
+        assert result.ok is True and not result.reason, key
+    assert elicit_answers.requests == []
+    assert len(host.posted("/action")) == len(steps) and len(on_the_commit_page.posted("/action")) == 3
+
+
+async def test_on_the_web_the_tool_leaves_an_arrow_on_a_radio_group_to_the_browsers_own_hold(elicit_answers):
+    """The web's browser holds an arrow by what it picks, from its own read of
+    the focus, so the tool sends it on and shows a card only when the
+    browser holds it."""
+    host = FakeHost(pages=[CLOSE_ACCOUNT])
+    session = make_session(host, elicitor=FakeElicitor())
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "press", "key": "ArrowDown"}})
+    assert result.ok is True and elicit_answers.requests == []
+    assert host.posted("/action") == [{"action": "press", "key": "ArrowDown", "include_page": True}]
+
+
 async def test_on_the_desktop_a_position_approval_ends_when_the_page_goes_to_another_address(elicit_answers):
     host = FakeHost(pages=[CHECKOUT])
     session = _desktop(host)
