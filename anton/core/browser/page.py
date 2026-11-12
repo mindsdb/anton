@@ -30,12 +30,17 @@ _CHECK_TEXT = (
     ("recaptcha", ("i'm not a robot", "i am not a robot")),
     ("hcaptcha", ("i am human",)),
 )
-# Only a full-page check names itself in the element list. A reCAPTCHA or
-# hCaptcha frame on an ordinary page is often invisible (a site's background
-# check); the host reports the ones the person can see as `challenges`.
+# A full-page check names itself in the element list. A reCAPTCHA or hCaptcha
+# frame counts only on screen (CAPTCHA_NAME); the host also reports the ones
+# the person can see as `challenges`.
 _CHECK_ELEMENTS = (
     ("cloudflare", "cloudflare security challenge"),
 )
+#: A reCAPTCHA or hCaptcha widget's name. On an on-screen frame it is a check
+#: the person can see even when the host doesn't report it; off-screen, it is
+#: a site's invisible background check.
+CAPTCHA_NAME = re.compile(r"\b(re)?captcha\b|\bhcaptcha\b", re.I)
+_FRAME_ROLES = ("frame", "iframe")
 _CHECK_NAMES = {"cloudflare": "Cloudflare", "recaptcha": "reCAPTCHA", "hcaptcha": "hCaptcha"}
 _ANY_CHECK = "a security check"
 
@@ -47,7 +52,7 @@ def human_check(page: Page) -> str:
     The host's ``challenges`` come first: they name check frames the person
     can see, such as a Turnstile widget embedded in an ordinary page, which
     the element list shows only as a frame. Then the URL, element names and
-    text of a full-page check.
+    text of a full-page check, and an on-screen reCAPTCHA or hCaptcha frame.
     """
     if page.challenges:
         return _CHECK_NAMES.get(page.challenges[0].kind, _ANY_CHECK)
@@ -60,6 +65,9 @@ def human_check(page: Page) -> str:
     for kind, needle in _CHECK_ELEMENTS:
         if needle in names:
             return _CHECK_NAMES[kind]
+    for el in page.elements:
+        if el.role.lower() in _FRAME_ROLES and not el.offscreen and CAPTCHA_NAME.search(el.name):
+            return _CHECK_NAMES["hcaptcha" if "hcaptcha" in el.name.lower() else "recaptcha"]
     for kind, phrases in _CHECK_TEXT:
         if any(phrase in text or phrase in title for phrase in phrases):
             return _CHECK_NAMES[kind]

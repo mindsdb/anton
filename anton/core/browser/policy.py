@@ -5,7 +5,7 @@ what kind of step comes next, which element it acts on, whether a person
 has to act first, and whether the step would commit something hard to undo.
 On a crowded page (more elements than one choice should carry, in several
 parts) it asks which part of the page instead of which element, and a
-second call picks the element within that part.
+second call picks the element within that part and asks the risk again.
 The tool acts on a confident answer and hands anything else back to the
 model, the way the completion verifier uses Jev (see session._jev_verdict).
 """
@@ -35,6 +35,15 @@ ACTIONS = {
     ),
     "done": "The goal is achieved, or all the information the goal asks for is visible or already kept.",
     "unsure": "None of the other options clearly fits.",
+}
+
+RISKY = {
+    "type": "noul",
+    "instructions": (
+        "Would the most likely next step on this page commit something hard to undo on the "
+        "user's behalf: a purchase or payment, sending a message or email, deleting data, "
+        "or submitting a form?"
+    ),
 }
 
 NO_TARGET = "none"
@@ -137,14 +146,7 @@ def step_request(
                 "confirming a payment?"
             ),
         },
-        "risky": {
-            "type": "noul",
-            "instructions": (
-                "Would the most likely next step on this page commit something hard to undo on the "
-                "user's behalf: a purchase or payment, sending a message or email, deleting data, "
-                "or submitting a form?"
-            ),
-        },
+        "risky": RISKY,
     }
     if regions:
         parts = {key: _region_line(part) for key, part in regions.items()}
@@ -191,7 +193,8 @@ def target_request(
     }
     if inputs:
         state["inputs"] = {str(k): str(v) for k, v in inputs.items()}
-    return StepRequest(state=state, questions={"target": _target_question(shown)}, candidates=shown)
+    # Asked again now that the element is known: the first call rated it without one.
+    return StepRequest(state=state, questions={"target": _target_question(shown), "risky": RISKY}, candidates=shown)
 
 
 def parse_target(decision) -> tuple[int | None, float]:
