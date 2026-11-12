@@ -247,7 +247,9 @@ def test_the_action_fixture_says_a_step_that_changed_the_page_in_place_settles_t
     page in place waits for quiet a moment at most. A navigation's cap is
     each host's own: the router's browser lets it run past settle_max_ms
     while the new page loads, and the desktop app's waits for a navigate
-    step's load before the settle and caps every settle at settle_max_ms."""
+    step's load before the settle and caps every settle at settle_max_ms,
+    or sooner inside the step's own time budget, so a navigate whose load
+    took its full 30 s settles for about 2.5 s at most."""
     description = _load("action").description
     assert "answers at once" not in description
     assert "a host may first wait up to settle_quiet_ms" not in description
@@ -268,9 +270,11 @@ def test_the_action_fixture_says_a_step_that_changed_the_page_in_place_settles_t
         "network to go idle too, and stops at the later of settle_max_ms from the settle's start and 1.5 s after "
         "that DOMContentLoaded wait, never past 31.5 s from the step's start.",
         "The desktop app's browser waits for a navigate, back, forward or reload step's page to finish loading, "
-        "up to 30 s, before the settle, and stops every settle, a navigation's too, at settle_max_ms from its start.",
+        "up to 30 s, before the settle, and stops every settle, a navigation's too, at settle_max_ms from its start "
+        "or 0.5 s before the step's 33 s budget ends, whichever comes first.",
     ):
         assert sentence in description, sentence
+    assert "a navigation's too, at settle_max_ms from its start." not in description
 
 
 def test_the_control_fixture_tells_done_by_the_person_from_any_other_agent_record():
