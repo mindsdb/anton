@@ -1,5 +1,5 @@
 {
-  "description": "POST /sessions/{id}/action: one step. x and y with coords \"screenshot\" are pixels on the latest screenshot, which the host scales back to the page. A point wins over an element when a step has both. A step settles before the host answers: when it started a main-frame request or a navigation, the host waits until those requests are done and the page has shown no change for settle_quiet_ms, at most settle_max_ms (a navigation also waits for its new page's network, as before); a step that started neither answers at once. changed says whether the step changed what the page shows: true, false, or null when the host can't tell (a frame, canvas or media element in view or under the step, a closed shadow root, a hover, a wait, a read, or a page it couldn't watch). The answer carries the page after the step when include_page is true.",
+  "description": "POST /sessions/{id}/action: one step. x and y with coords \"screenshot\" are pixels on the latest screenshot, which the host scales back to the page. A point wins over an element when a step has both. A step settles before the host answers: when it started a main-frame request or a navigation, the host waits until those requests are done and the page has shown no change for settle_quiet_ms, at most settle_max_ms (a navigation also waits for its new page's network, as before); a step that started neither answers at once. changed says whether the step changed what the page shows: true, false, or null when the host can't tell (a frame, canvas or media element in view or under the step, a closed shadow root, a hover, a wait, a read, or a page it couldn't watch). The answer carries the page after the step when include_page is true. into_frame is true only when the person approved this one step on a card because it may land in a frame. The desktop app's browser, which holds no steps itself, refuses (409) a press, or a drag's release, that lands in a frame when into_frame is false or missing; the router's browser holds its own steps and ignores it.",
   "limits": {
     "settle_max_ms": 3000,
     "settle_quiet_ms": 400
@@ -60,6 +60,18 @@
         },
         "include_page": true,
         "coords": "screenshot"
+      }
+    },
+    "click at a point the person approved as one step that may land in a frame": {
+      "where": "POST /sessions/{id}/action",
+      "kind": "request",
+      "body": {
+        "action": "click",
+        "x": 200,
+        "y": 350,
+        "include_page": true,
+        "coords": "screenshot",
+        "into_frame": true
       }
     },
     "the answer with the page after": {

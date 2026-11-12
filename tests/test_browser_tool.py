@@ -764,7 +764,7 @@ async def test_on_the_desktop_act_drags_between_an_element_and_a_point(elicit_an
     step = {"action": "drag", "from": {"element": 5}, "to": {"x": 600, "y": 300}}
     result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
     assert result.content.startswith("Done: drag [5] to (600, 300).")
-    assert host.calls[-1][2] == {**step, "coords": "screenshot", "include_page": True}
+    assert host.calls[-1][2] == {**step, "coords": "screenshot", "include_page": True, "into_frame": False}
     # Element to element: nothing to scale, and nothing to approve.
     await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "drag", "from": {"element": 5}, "to": {"element": 6}}})
     assert "coords" not in host.calls[-1][2]
@@ -854,7 +854,7 @@ async def test_on_the_desktop_an_approved_commit_posts_once(elicit_answers):
     elicit_answers.answers.append("approve")
     result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "element": 7}})
     assert result.ok is True and result.content.startswith("Done: click [7].")
-    assert host.posted("/action") == [{"action": "click", "element": 7, "include_page": True}]
+    assert host.posted("/action") == [{"action": "click", "element": 7, "include_page": True, "into_frame": False}]
 
 
 async def test_on_the_desktop_a_commit_step_with_no_one_to_ask_is_refused():
@@ -960,6 +960,41 @@ async def test_on_the_desktop_a_click_by_position_inside_a_frame_gets_the_commit
     assert in_page_px.reason == "browser_step_not_approved"
     assert elicit_answers.prompts()[4].startswith("**Approve this browser step?**")
     assert len(host.posted("/action")) == 3
+
+
+async def test_on_the_desktop_a_step_says_into_frame_only_after_the_one_step_frame_card(elicit_answers):
+    """The desktop's browser refuses a press, or a drag's release, that lands
+    in a frame unless the step says the person approved it as one step that
+    may land there, so a frame that slides under a point after the read
+    gets no press under a position approval. into_frame is true only after
+    that card; it is false under a position approval, after a commit card
+    and with no card at all. The web's browser holds its own steps and gets
+    no into_frame."""
+    host = FakeHost(pages=[FRAMED])
+    session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+    elicit_answers.answers += ["approve"] * 3
+    for step in (
+        {"action": "click", "element": 2},
+        {"action": "click", "x": 10, "y": 10},
+        {"action": "click", "x": 30, "y": 40},
+        {"action": "click", "x": 200, "y": 350},
+        {"action": "drag", "from": {"x": 10, "y": 10}, "to": {"x": 200, "y": 350}},
+    ):
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+        assert result.content.startswith("Done:"), step
+    prompts = elicit_answers.prompts()
+    assert "Approve clicks by position on this page?" in prompts[0]
+    assert all(p.startswith("**Approve this browser step?**") for p in prompts[1:]) and len(prompts) == 3
+    assert [body["into_frame"] for body in host.posted("/action")] == [False, False, False, True, True]
+    assert host.posted("/action")[3] == {
+        "action": "click", "x": 200, "y": 350, "include_page": True, "coords": "screenshot", "into_frame": True,
+    }
+
+    web = FakeHost(pages=[FRAMED])
+    session = make_session(web, elicitor=FakeElicitor())
+    elicit_answers.answers.append("approve")
+    await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "x": 200, "y": 350}})
+    assert len(web.posted("/action")) == 2 and all("into_frame" not in body for body in web.posted("/action"))
 
 
 async def test_on_a_desktop_that_sends_no_frames_every_click_by_position_gets_the_one_step_card(elicit_answers):

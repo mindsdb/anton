@@ -321,6 +321,25 @@ STEPS = {
     "press Enter in an element": {"action": "press", "key": "Enter", "element": 2},
     "drag from an element to a point": {"action": "drag", "from": {"element": 5}, "to": {"x": 600, "y": 300}},
 }
+#: The step the model writes for each action request example the tool's gate
+#: sends to the desktop app's browser once the person approves its card, on
+#: the page with a frame.
+APPROVED_IN_APP_STEPS = {
+    "click at a point the person approved as one step that may land in a frame": {"action": "click", "x": 200, "y": 350},
+}
+
+
+async def _approved_in_app(step: dict, monkeypatch: pytest.MonkeyPatch) -> dict:
+    """The body the gate sends to the desktop app's browser when the person
+    approves the step's card."""
+    async def approve(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(browser_tool, "ask_approval_card", approve)
+    session = SimpleNamespace(_browser_config=BrowserConfig(base_url="http://127.0.0.1:51234", profile=PROFILE, token="k"))
+    state = browser_tool._BrowserState(client=_client(_Recorder()), session_id=PROFILE)
+    page = Page.model_validate(_load("page").examples["a page with a frame"].body)
+    return await browser_tool._gate(session, state=state, body=browser_tool._step_body({"step": step}), page=page, risky=False)
 
 
 @pytest.mark.parametrize(("reason", "sent"), [
@@ -338,15 +357,17 @@ async def test_the_hand_over_reason_fits_the_hosts_utf16_limit(reason, sent):
     assert len(body["reason"].encode("utf-16-le")) // 2 <= client_module.REASON_UNITS
 
 
-def test_every_accepted_request_is_one_the_client_sends():
+def test_every_accepted_request_is_one_the_client_sends(monkeypatch):
     accepted = {(f, n) for f, n, e in _examples("request") if not e.refused}
-    assert accepted == set(REQUESTS) | {("action", n) for n in STEPS}
+    assert accepted == set(REQUESTS) | {("action", n) for n in [*STEPS, *APPROVED_IN_APP_STEPS]}
     for (file, name), call in REQUESTS.items():
         recorder = _Recorder()
         asyncio.run(call(_client(recorder)))
         assert recorder.sent[-1][2] == _load(file).examples[name].body, name
     for name, step in STEPS.items():
         assert browser_tool._step_body({"step": step}) == _load("action").examples[name].body, name
+    for name, step in APPROVED_IN_APP_STEPS.items():
+        assert asyncio.run(_approved_in_app(step, monkeypatch)) == _load("action").examples[name].body, name
 
 
 def test_the_client_never_sends_a_refused_request():

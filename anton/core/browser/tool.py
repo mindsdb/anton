@@ -1090,12 +1090,12 @@ def _card_prompt(*, hold: Hold, url: str, step: str, may_commit: bool = False) -
     )
 
 
-async def _gate(session: "ChatSession", *, state: _BrowserState, body: dict, page: Page, risky: bool) -> ToolOutcome | None:
-    """None when the step may be sent on ``page``; otherwise what to answer in
-    its place, before anything is sent. ``act`` and ``run`` both ask it, in
-    every ``browser_jev`` mode, so a step a page talked the model or Jev into
-    still waits for the user. ``risky`` is Jev rating the step as one that
-    commits something.
+async def _gate(session: "ChatSession", *, state: _BrowserState, body: dict, page: Page, risky: bool) -> dict | ToolOutcome:
+    """The body to send when the step may be sent on ``page``; otherwise what
+    to answer in its place, before anything is sent. ``act`` and ``run`` both
+    ask it, in every ``browser_jev`` mode, so a step a page talked the model
+    or Jev into still waits for the user. ``risky`` is Jev rating the step as
+    one that commits something.
 
     On the web the browser pod holds every step the commit list names, and
     every step by position, whoever sends it, so those go straight to it and
@@ -1105,7 +1105,13 @@ async def _gate(session: "ChatSession", *, state: _BrowserState, body: dict, pag
     by position that may land inside a frame (``_in_frame``) gets the
     one-step card every time, even after clicks by position were approved on
     the page: the tool can't tell which of a frame's controls a point lands
-    on, so it can't check that one against the commit list."""
+    on, so it can't check that one against the commit list.
+
+    Every body it sends the desktop says whether the person approved that
+    one-step card (``into_frame``). The desktop refuses a press, or a drag's
+    release, that lands in a frame when it is false, so a frame that slides
+    under the point after this read gets no press under a position approval
+    or a commit card. The web's browser holds its own steps and gets none."""
     key = _step_key(body)
     refused = state.refused.get((page.url, key))
     if refused is not None:
@@ -1115,26 +1121,28 @@ async def _gate(session: "ChatSession", *, state: _BrowserState, body: dict, pag
     if body.get("action") in ("type", "press") and element is not None and element.secret:
         return _secret_field(body.get("element"))
     host_holds = not session._browser_config.in_app
+    send = body if host_holds else {**body, "into_frame": False}
     if state.position_url is not None and state.position_url != page.url:
         state.position_url = None
     listed = _hold_of(state, body, page)
-    if listed == "position" and not host_holds and _in_frame(body, page):
+    into_frame = listed == "position" and not host_holds and _in_frame(body, page)
+    if into_frame:
         listed = "commit"
     if listed == "position":
         if host_holds or state.position_url == page.url:
-            return None
+            return send
         hold: Hold = "position"
         approve = "Allow clicks by position on this page"
     elif listed == "commit":
         if host_holds:
-            return None
+            return send
         hold = "commit"
         approve = "Take this step once"
     elif risky:
         hold = "commit"
         approve = "Take this step once"
     else:
-        return None
+        return send
     cause = await ask_approval_card(
         session, _card_prompt(hold=hold, url=page.url, step=_step_words(body, element)),
         approve_detail=approve, cancel_detail="Leave the page as it is", log_label="browser step",
@@ -1142,7 +1150,7 @@ async def _gate(session: "ChatSession", *, state: _BrowserState, body: dict, pag
     if cause is None:
         if hold == "position":
             state.position_url = page.url
-        return None
+        return {**send, "into_frame": True} if into_frame else send
     state.refused[(page.url, key)] = refusal_why(cause)
     return _not_approved(body, refusal_why(cause))
 
@@ -1244,10 +1252,10 @@ async def _do_act(session: "ChatSession", tc_input: dict) -> str | ToolOutcome:
             content=f"{moved} Nothing was done. The page now:\n\n{_show(state, current)}",
             ok=False, reason="browser_stale_element",
         )
-    refusal = await _gate(session, state=state, body=body, page=current, risky=False)
-    if refusal is not None:
-        return refusal
-    result = await _send_step(session, state=state, body=body, page=current)
+    gated = await _gate(session, state=state, body=body, page=current, risky=False)
+    if isinstance(gated, ToolOutcome):
+        return gated
+    result = await _send_step(session, state=state, body=gated, page=current)
     if isinstance(result, ToolOutcome):
         return result
     state.steps.append(_describe(body, typed=False))
@@ -1620,13 +1628,13 @@ async def _do_run(session: "ChatSession", tc_input: dict) -> str:
                     "Call action=hand_to_user with a one-line reason.", taken, page,
                 )
 
-            refusal = await _gate(session, state=state, body=body, page=page, risky=step.risky_p >= RISKY_P)
-            if refusal is not None:
-                return _handback(state, f"Paused before {_describe(body)}. {refusal.content}", taken, page)
+            gated = await _gate(session, state=state, body=body, page=page, risky=step.risky_p >= RISKY_P)
+            if isinstance(gated, ToolOutcome):
+                return _handback(state, f"Paused before {_describe(body)}. {gated.content}", taken, page)
 
             before = signature(page)
             before_text = page.text
-            result = await _send_step(session, state=state, body={**body, "include_page": True}, page=page)
+            result = await _send_step(session, state=state, body={**gated, "include_page": True}, page=page)
             if isinstance(result, ToolOutcome):
                 return _handback(state, f"Paused at {_describe(body)}. {result.content}", taken, page)
             acted += 1
