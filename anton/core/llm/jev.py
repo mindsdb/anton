@@ -252,3 +252,90 @@ async def decide(
     except Exception:
         return JevDecision(answers={}, ms=ms, error="malformed")
     return JevDecision(answers=answers, ms=ms, model=str(body.get("model") or ""))
+
+
+# ── which decisions model, if any (ENG-4227) ─────────────────────────
+
+DEFAULT_DECISIONS_MODEL = "jev-1.13.0"
+_DISABLED = ("", "off", "none", "false", "0")
+
+
+def _host(url: str | None) -> str:
+    from urllib.parse import urlsplit
+
+    try:
+        return (urlsplit((url or "").strip()).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _mindshub_host(host: str) -> bool:
+    # A real suffix match: "mindshub.ai.attacker.example" is not MindsHub.
+    return host == "mindshub.ai" or host.endswith(".mindshub.ai")
+
+
+def _mindshub_base(settings) -> str | None:
+    """The MindsHub API base (``https://host/v1``) this configuration talks to, or None.
+
+    MindsHub means the LLM provider is MindsHub (``minds-cloud``, which
+    AntonSettings reads as ``openai-compatible`` on the MindsHub base URL),
+    or a base URL on api.mindshub.ai. The legacy mdb.ai host does not serve
+    decisions.
+    """
+    providers = {str(getattr(settings, f, "") or "").strip().lower().replace("_", "-")
+                 for f in ("planning_provider", "coding_provider")}
+    candidates = [getattr(settings, "openai_base_url", None)]
+    if providers & {"minds-cloud", "openai-compatible"}:
+        candidates.append(getattr(settings, "minds_url", None))
+    for url in candidates:
+        if url and _mindshub_host(_host(url)):
+            base = str(url).strip().rstrip("/")
+            return base if base.endswith("/v1") else base + "/v1"
+    return None
+
+
+def default_decisions_model(settings) -> str | None:
+    """The decisions model when none is configured: Jev on MindsHub, otherwise none."""
+    return DEFAULT_DECISIONS_MODEL if _mindshub_base(settings) else None
+
+
+def decisions_model(settings) -> str | None:
+    """The configured decisions model (``ANTON_DECISIONS_MODEL``), the MindsHub default when unset, or None.
+
+    An explicit empty value (or "off" / "none") disables it.
+    """
+    value = getattr(settings, "decisions_model", None)
+    if value is None:
+        return default_decisions_model(settings)
+    value = str(value).strip()
+    return None if value.lower() in _DISABLED else value
+
+
+def decisions_config(settings) -> tuple[str, str, str] | None:
+    """``(base_url, api_key, model)`` for MindsHub's ``/v1/decisions``, or None when there is no decisions model.
+
+    None when the model is off or unset off MindsHub, or when no MindsHub
+    base URL and key can be found (an explicit model needs them too).
+    """
+    model = decisions_model(settings)
+    if not model:
+        return None
+    base = _mindshub_base(settings)
+    if base is None:
+        minds_url = getattr(settings, "minds_url", None)
+        if not minds_url or not _mindshub_host(_host(minds_url)):
+            return None
+        base = str(minds_url).strip().rstrip("/")
+        base = base if base.endswith("/v1") else base + "/v1"
+    key = getattr(settings, "minds_api_key", None)
+    openai_base = getattr(settings, "openai_base_url", None)
+    if not key and openai_base and _mindshub_host(_host(openai_base)):
+        key = getattr(settings, "openai_api_key", None)
+    if not key:
+        return None
+    return base, str(key), model
+
+
+def decisions_available(settings) -> bool:
+    """Whether the quick-edit bar may route (and so edit directly). False: send every message to the agent."""
+    return decisions_config(settings) is not None

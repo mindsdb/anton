@@ -15,6 +15,12 @@ which is always safe: the agent can edit too (``edit_artifact``), it is only
 slower. The editor itself can still hand a misrouted request back
 (``hand_to_agent``, see ``quick.py``).
 
+Without a decisions model (``ANTON_DECISIONS_MODEL``: Jev by default on
+MindsHub, none elsewhere) the bar must not edit directly: hosts check
+:func:`decisions_available` and send every message to the agent, and
+:func:`route_request` answers ``agent`` / ``no_decisions_model`` without a
+call. The agent's ``edit_artifact`` does not depend on any of this.
+
 Nothing here raises.
 """
 
@@ -26,11 +32,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from anton.core.llm.jev import decisions_available, decisions_config
+
 __all__ = [
     "ACCEPT_P",
     "CRITERIA",
     "INSTRUCTIONS",
     "RouteDecision",
+    "decisions_available",
+    "decisions_config",
     "describe_artifact",
     "route_request",
 ]
@@ -81,8 +91,8 @@ CRITERIA: dict[str, str] = {
 class RouteDecision:
     route: Route
     confidence: float  # probability of the chosen route, 0..1 (0 when nothing answered)
-    # "jev" | "uncertain" | "router_error" | "router_timeout" | "router_disabled" | "empty_artifact"
-    # | "empty_message" | "message_too_long"
+    # "jev" | "uncertain" | "router_error" | "router_timeout" | "router_disabled" | "no_decisions_model"
+    # | "empty_artifact" | "empty_message" | "message_too_long"
     reason: str
     ms: int
 
@@ -163,7 +173,7 @@ async def route_request(
     kind: str,
     base_url: str,
     api_key: str,
-    model: str = "jev-1.13.0",
+    model: str | None = "jev-1.13.0",
     timeout_s: float = 3.0,
     http=None,
     name: str = "",
@@ -173,7 +183,10 @@ async def route_request(
 ) -> RouteDecision:
     """``edit`` when Jev is sure the bar message only needs the artifact's own files; else ``agent``.
 
-    ``files`` are the artifact's content files, ``kind`` its type. ``http`` is
+    ``base_url`` / ``api_key`` / ``model`` normally come from
+    :func:`decisions_config`; with no model (None or empty) the answer is
+    ``agent`` / ``no_decisions_model`` and nothing is sent. ``files`` are the
+    artifact's content files, ``kind`` its type. ``http`` is
     an ``httpx2.AsyncClient`` to reuse (the caller keeps owning it).
 
     Optional context, beyond the shared contract: ``name`` / ``description`` /
@@ -186,6 +199,8 @@ async def route_request(
         return RouteDecision(route, round(float(confidence), 4), reason, int((time.monotonic() - started) * 1000))
 
     try:
+        if not model or not str(model).strip():
+            return done("agent", 0.0, "no_decisions_model")
         text = str(message or "").strip()
         if not text:
             return done("agent", 0.0, "empty_message")
@@ -193,7 +208,7 @@ async def route_request(
             return done("agent", 0.0, "message_too_long")
         if not files:
             return done("agent", 0.0, "empty_artifact")
-        if not base_url or not api_key or not model:
+        if not base_url or not api_key:
             return done("agent", 0.0, "router_disabled")
 
         from anton.core.llm import jev

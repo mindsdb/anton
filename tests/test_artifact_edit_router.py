@@ -183,6 +183,8 @@ async def test_the_retry_stays_inside_the_deadline():
     ({"files": []}, "make it blue", "empty_artifact"),
     ({"api_key": ""}, "make it blue", "router_disabled"),
     ({"base_url": ""}, "make it blue", "router_disabled"),
+    ({"model": None}, "make it blue", "no_decisions_model"),
+    ({"model": ""}, "make it blue", "no_decisions_model"),
     ({}, "   ", "empty_message"),
     ({}, "x" * (MAX_MESSAGE_CHARS + 1), "message_too_long"),
 ])
@@ -229,3 +231,115 @@ def test_describe_artifact_reads_the_name_and_the_data_shape():
 
 def test_describe_artifact_of_an_empty_folder_is_empty(tmp_path):
     assert describe_artifact(tmp_path) == {"name": "", "description": "", "data": ""}
+
+
+# ── is there a decisions model at all? ───────────────────────────────
+
+_PROVIDER_ENV = ("ANTON_DECISIONS_MODEL", "ANTON_PLANNING_PROVIDER", "ANTON_CODING_PROVIDER", "ANTON_MINDS_URL",
+                 "ANTON_MINDS_API_KEY", "ANTON_OPENAI_BASE_URL", "ANTON_OPENAI_API_KEY", "ANTON_ANTHROPIC_API_KEY")
+
+
+@pytest.fixture
+def settings_env(monkeypatch, tmp_path):
+    """AntonSettings built from the environment alone (no ~/.anton/.env)."""
+    from anton.config.settings import AntonSettings
+
+    for name in _PROVIDER_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+    def build(**env):
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        return AntonSettings(_env_file=None)
+
+    return build
+
+
+def mindshub(**extra) -> dict:
+    return {"ANTON_PLANNING_PROVIDER": "minds-cloud", "ANTON_CODING_PROVIDER": "minds-cloud",
+            "ANTON_MINDS_URL": "https://api.mindshub.ai", "ANTON_MINDS_API_KEY": "k-hub", **extra}
+
+
+def test_mindshub_gets_jev_by_default(settings_env):
+    from anton.core.artifact_editor.router import decisions_available, decisions_config
+
+    settings = settings_env(**mindshub())
+    assert settings.decisions_model == "jev-1.13.0"
+    assert decisions_available(settings)
+    assert decisions_config(settings) == ("https://api.mindshub.ai/v1", "k-hub", "jev-1.13.0")
+
+
+@pytest.mark.parametrize("env", [
+    {"ANTON_PLANNING_PROVIDER": "anthropic", "ANTON_ANTHROPIC_API_KEY": "k"},
+    {"ANTON_PLANNING_PROVIDER": "openai", "ANTON_CODING_PROVIDER": "openai", "ANTON_OPENAI_API_KEY": "k"},
+    {"ANTON_PLANNING_PROVIDER": "openai-compatible", "ANTON_CODING_PROVIDER": "openai-compatible",
+     "ANTON_OPENAI_BASE_URL": "https://llm.example.com/v1", "ANTON_OPENAI_API_KEY": "k"},
+    # A look-alike host is not MindsHub.
+    {"ANTON_PLANNING_PROVIDER": "openai-compatible", "ANTON_CODING_PROVIDER": "openai-compatible",
+     "ANTON_OPENAI_BASE_URL": "https://api.mindshub.ai.example.com/v1", "ANTON_OPENAI_API_KEY": "k"},
+    # The legacy mdb.ai host serves no decisions.
+    {"ANTON_PLANNING_PROVIDER": "minds-cloud", "ANTON_CODING_PROVIDER": "minds-cloud",
+     "ANTON_MINDS_URL": "https://mdb.ai", "ANTON_MINDS_API_KEY": "k"},
+])
+def test_without_mindshub_there_is_no_decisions_model(settings_env, env):
+    from anton.core.artifact_editor.router import decisions_available, decisions_config
+
+    settings = settings_env(**env)
+    assert settings.decisions_model is None
+    assert not decisions_available(settings) and decisions_config(settings) is None
+
+
+@pytest.mark.parametrize("value", ["", "off", "none"])
+def test_an_explicit_empty_value_turns_it_off_on_mindshub(settings_env, value):
+    from anton.core.artifact_editor.router import decisions_available
+
+    settings = settings_env(**mindshub(ANTON_DECISIONS_MODEL=value))
+    assert not decisions_available(settings)
+
+
+def test_an_explicit_model_is_used(settings_env):
+    from anton.core.artifact_editor.router import decisions_config
+
+    settings = settings_env(**mindshub(ANTON_DECISIONS_MODEL="jev-2.0.0"))
+    assert settings.decisions_model == "jev-2.0.0"
+    assert decisions_config(settings) == ("https://api.mindshub.ai/v1", "k-hub", "jev-2.0.0")
+
+
+def test_an_explicit_model_with_a_mindshub_key_works_beside_another_llm(settings_env):
+    from anton.core.artifact_editor.router import decisions_config
+
+    settings = settings_env(ANTON_PLANNING_PROVIDER="anthropic", ANTON_ANTHROPIC_API_KEY="k",
+                            ANTON_MINDS_URL="https://api.mindshub.ai", ANTON_MINDS_API_KEY="k-hub",
+                            ANTON_DECISIONS_MODEL="jev-1.13.0")
+    assert decisions_config(settings) == ("https://api.mindshub.ai/v1", "k-hub", "jev-1.13.0")
+
+
+def test_an_explicit_model_without_mindshub_credentials_is_unavailable(settings_env):
+    from anton.core.artifact_editor.router import decisions_available
+
+    settings = settings_env(ANTON_PLANNING_PROVIDER="anthropic", ANTON_ANTHROPIC_API_KEY="k",
+                            ANTON_DECISIONS_MODEL="jev-1.13.0")
+    assert not decisions_available(settings)
+
+
+def test_plain_core_settings_resolve_the_same_way():
+    from types import SimpleNamespace
+
+    from anton.core.artifact_editor.router import decisions_config
+
+    hub = SimpleNamespace(decisions_model=None, planning_provider="openai-compatible", coding_provider="",
+                          openai_base_url="https://api.mindshub.ai/v1", openai_api_key="k-hub",
+                          minds_url=None, minds_api_key=None)
+    assert decisions_config(hub) == ("https://api.mindshub.ai/v1", "k-hub", "jev-1.13.0")
+    assert decisions_config(SimpleNamespace(decisions_model=None)) is None
+
+
+async def test_no_decisions_model_means_no_http_call(settings_env):
+    from anton.core.artifact_editor.router import decisions_config
+
+    settings = settings_env(ANTON_PLANNING_PROVIDER="anthropic", ANTON_ANTHROPIC_API_KEY="k")
+    assert decisions_config(settings) is None
+    jev = FakeJev(answer("edit", 1.0))
+    decision = await route(jev, model=getattr(settings, "decisions_model", None))
+    assert (decision.route, decision.reason, decision.confidence) == ("agent", "no_decisions_model", 0.0)
+    assert jev.requests == []

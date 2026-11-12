@@ -10,7 +10,13 @@ viewer's quick-edit bar (ENG-4227): route a message, then edit directly.
 from anton.core.artifact_editor.checkers import CheckResult, Checker, Finding, select_checker
 from anton.core.artifact_editor.editor import ArtifactEditor, EditUsage, Outcome
 from anton.core.artifact_editor.quick import QuickEditResult, quick_edit_llm_from_settings, run_quick_edit
-from anton.core.artifact_editor.router import RouteDecision, describe_artifact, route_request
+from anton.core.artifact_editor.router import (
+    RouteDecision,
+    decisions_available,
+    decisions_config,
+    describe_artifact,
+    route_request,
+)
 from anton.core.artifact_editor.workspace import (
     ArtifactWorkspace,
     MapEntry,
@@ -33,6 +39,8 @@ __all__ = [
     "SearchHit",
     "Snapshot",
     "WorkspaceError",
+    "decisions_available",
+    "decisions_config",
     "describe_artifact",
     "quick_edit_llm_from_settings",
     "route_request",

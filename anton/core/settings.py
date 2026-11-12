@@ -43,6 +43,13 @@ class CoreSettings(BaseSettings):
     # Which of the client's models edits: "planning" (the agent's own) or
     # "coding" (ANTON_ARTIFACT_EDITOR_ROLE).
     artifact_editor_role: Literal["planning", "coding"] = "planning"
+    # The decisions model (MindsHub's /v1/decisions) that routes a message typed
+    # in the artifact viewer's quick-edit bar (ENG-4227): ANTON_DECISIONS_MODEL.
+    # Unset (None) means automatic: "jev-1.13.0" when the LLM is MindsHub
+    # (api.mindshub.ai), otherwise none. An explicit empty value turns it off.
+    # With none, the bar never edits directly: every message goes to the agent
+    # (whose edit_artifact tool does not need it).
+    decisions_model: str | None = None
     max_tool_rounds: int = 250
     max_continuations: int = 10
     # Skip the completion verifier when a turn used fewer than this many tool
