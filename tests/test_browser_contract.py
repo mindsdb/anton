@@ -39,7 +39,7 @@ from anton.core.browser.models import (
     TabAnswer,
     TabsAnswer,
 )
-from anton.core.browser.page import FRAME_TEXT_HEADING, PAGE_TEXT_HEADING, format_page, human_check
+from anton.core.browser.page import FRAME_TEXT_HEADING, PAGE_TEXT_HEADING, TEXT_PER_FRAME, format_page, human_check
 
 FIXTURES = Path(__file__).parent / "fixtures" / "browser_contract"
 ROUTER = "https://app.example.test/browser"
@@ -172,6 +172,10 @@ def test_the_frame_fixture_reads_as_the_model_sees_it():
     shown = format_page(many)
     assert "Q" * 1000 in shown and "X" * 1000 in shown and "Z" not in shown
     assert 'Frame "https://forms.example.test/form-2" (no numbers: act by pixel):' in shown
+
+
+def test_the_model_reads_as_much_of_a_frame_as_a_host_sends():
+    assert TEXT_PER_FRAME == _load("page").limits["text_per_frame"]
 
 
 def test_a_page_from_a_host_that_predates_frames_says_nothing_about_frames():
