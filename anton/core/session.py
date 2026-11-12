@@ -6867,12 +6867,12 @@ class ChatSession:
             # guard passes the books this turn opened so a late finalizer
             # can't close a newer turn's.
             self._emit_turn_cost(expected=_turn_cost_books, exc=_turn_exc)
-            # close() tidies the browser only after a turn that ended normally
-            # and used it; a cancelled or failed one leaves it as it is.
+            # close() tidies the browser only after a turn that completed and
+            # used it; a cancelled, failed, paused or limit-stopped one leaves it as it is.
             browser = self._browser_state
             self._tidy_browser = bool(
                 browser is not None and browser.used and not _turn_raised
-                and _turn_cost_books.ended_by not in ("cancelled", "error")
+                and _turn_cost_books.ended_by == "completed"
             )
             if browser is not None:
                 browser.used = False

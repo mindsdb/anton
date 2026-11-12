@@ -1339,6 +1339,24 @@ async def test_a_human_check_mid_run_still_hands_back_the_kept_pages(fake_jev, d
     assert session._browser_state.kept == []
 
 
+async def test_a_step_that_fails_mid_run_still_hands_back_the_kept_pages(fake_jev):
+    first = {**PAGE, "url": "https://shop.example/p1", "title": "Prices 1", "text": "MacBook Air $999"}
+    session = make_session(FakeHost(pages=[first]))
+    fake_jev.queue += [jev_answers("collect"), jev_answers("click", target="e99")]
+    result = await browser_tool.handle_browser(session, {"action": "run", "goal": "compare MacBook prices"})
+    assert result.ok is False and result.reason == "browser_stale_element"
+    assert result.content.index("MacBook Air $999") < result.content.index("element 99 is no longer on the page")
+    assert "1. kept Prices 1" in result.content
+    assert session._browser_state.kept == []
+
+
+async def test_run_says_which_element_is_missing_before_the_input(fake_jev):
+    session = make_session(FakeHost())
+    fake_jev.queue.append(jev_answers("type", input_key="search"))
+    result = await browser_tool.handle_browser(session, {"action": "run", "goal": "search", "inputs": {"search": "MacBook Air"}})
+    assert result.content.startswith("Not sure which element to type; take it with action=act.")
+
+
 async def test_run_hands_back_when_jev_is_unsure_which_input_goes_in_the_field(fake_jev):
     host = FakeHost()
     session = make_session(host)
@@ -2000,6 +2018,38 @@ async def test_after_a_turn_jev_may_keep_the_browser_and_close_its_side_tabs(fak
     fake_jev.queue.append(tidy_answers("keep", other_tabs="close"))
     await browser_tool.tidy_after_turn(session)
     assert [u for u in urls if u.startswith("DELETE")] == [f"DELETE /browser/sessions/{SID}/tabs/t2?park=true"]
+
+
+async def test_after_a_turn_side_tabs_stay_while_the_user_watches(fake_jev):
+    host = FakeHost()
+    host.session_extra = {"viewers": 1}
+    host.tabs.append({"id": "t2", "url": "https://docs.example/", "title": "Docs", "active": False})
+    session = turn_session(host)
+    fake_jev.queue.append(tidy_answers("keep", other_tabs="close"))
+    await browser_tool.tidy_after_turn(session)
+    assert not any(c[0] == "DELETE" for c in host.calls)
+
+
+async def test_after_a_turn_nothing_closes_if_the_user_opens_or_takes_the_browser_meanwhile(fake_jev, monkeypatch):
+    decide = jev.decide
+    for change in ("watch", "take"):
+        host = FakeHost()
+        host.tabs.append({"id": "t2", "url": "https://docs.example/", "title": "Docs", "active": False})
+        session = turn_session(host)
+
+        async def deciding(_host=host, _change=change, **kwargs):
+            # While Jev decides, the person opens the browser pane or clicks Take over.
+            if _change == "watch":
+                _host.session_extra = {"viewers": 1}
+            else:
+                _host.set_control("human", "", "person")
+            return await decide(**kwargs)
+
+        monkeypatch.setattr(jev, "decide", deciding)
+        fake_jev.queue.append(tidy_answers("close", other_tabs="close"))
+        await browser_tool.tidy_after_turn(session)
+        assert len(fake_jev.calls) == (1 if change == "watch" else 2)
+        assert not any(c[0] == "DELETE" for c in host.calls), change
 
 
 async def test_after_a_turn_an_unsure_or_failed_decision_closes_nothing(fake_jev):
