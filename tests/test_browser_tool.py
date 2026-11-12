@@ -23,7 +23,7 @@ from anton.core.browser.page import (
     shortlist,
     signature,
 )
-from anton.core.browser.policy import parse_step, signed_in_request, step_request
+from anton.core.browser.policy import parse_step, signed_in_request, step_request, target_request
 from anton.core.interaction.elicit import AskAnswer
 from anton.core.llm import jev
 from anton.core.llm.provider import StreamAskUserAnswered, StreamBrowserSession
@@ -399,11 +399,19 @@ def test_with_a_dialog_open_the_shortlist_is_the_dialog_and_ranks_the_dates_day_
     assert [el.id for el in ranked[:2]] == [37, 77]
 
 
-def test_jev_reads_each_elements_containers():
-    _, questions, _ = step_request(
-        goal="pick the departure date", page=model(CALENDAR), inputs={"depart": "2026-11-27"}, history=[], redact=False,
+def test_on_a_crowded_page_jev_picks_the_part_then_the_element_with_its_containers():
+    request = step_request(goal="pick the departure date", page=model(CALENDAR), inputs={"depart": "2026-11-27"}, history=[])
+    # 62 elements in the dialog, in three parts: the question is which part.
+    assert "target" not in request.questions
+    parts = request.questions["region"]["criteria"]
+    assert parts["r1"].startswith('"Select dates › November 2026": 30 elements, such as "27"')
+    assert set(request.regions) == {"r1", "r2", "r3"} and "none" in parts
+    second = target_request(
+        goal="pick the departure date", page=model(CALENDAR), action="click",
+        part=request.regions["r1"], inputs={"depart": "2026-11-27"}, history=[],
     )
-    assert questions["target"]["criteria"]["e37"] == '[37] button "27" in "Select dates › November 2026" (in the open dialog)'
+    assert second.questions["target"]["criteria"]["e37"] == '[37] button "27" in "Select dates › November 2026" (in the open dialog)'
+    assert second.state["next_step"] == "click"
 
 
 def test_an_invisible_recaptcha_frame_is_no_human_check():
@@ -419,22 +427,11 @@ def test_signature_changes_with_values():
 
 
 def test_step_request_asks_four_questions_plus_inputs():
-    _, questions, candidates = step_request(
-        goal="search for macbook", page=model(PAGE), inputs={"search": "MacBook Air"}, history=[], redact=False,
-    )
+    request = step_request(goal="search for macbook", page=model(PAGE), inputs={"search": "MacBook Air"}, history=[])
+    questions = request.questions
     assert set(questions) == {"next_action", "target", "needs_user", "risky", "input_key"}
     assert "e1" in questions["target"]["criteria"] and "none" in questions["target"]["criteria"]
-    assert len(candidates) == 3
-
-
-def test_a_redacted_request_carries_no_field_values_or_input_values():
-    page = model(CHECKOUT)
-    state, questions, _ = step_request(goal="buy", page=page, inputs={"email": "ada@example.test"}, history=[], redact=True)
-    blob = json.dumps(state) + json.dumps(questions["target"])
-    assert "value=" not in blob and "ada@example.test" not in blob
-    assert "email" in questions["input_key"]["criteria"]
-    signed_in_state, _ = signed_in_request(page)
-    assert "ada@example.test" not in json.dumps(signed_in_state)
+    assert len(request.candidates) == 3 and request.regions == {}
 
 
 def test_parse_step_reads_choices_and_tolerates_junk():
@@ -1227,13 +1224,13 @@ async def test_off_mode_never_calls_jev(fake_jev):
 
 
 async def test_the_jev_opt_out_stops_the_browsers_jev_too(fake_jev):
-    session = make_session(FakeHost(), jev_mode="shadow", verifier_jev="off")
+    session = make_session(FakeHost(), jev_mode="on", verifier_jev="off")
     await browser_tool.handle_browser(session, {"action": "run", "goal": "search"})
     assert fake_jev.calls == []
 
 
 async def test_one_jev_refusal_stops_later_calls(fake_jev):
-    session = make_session(FakeHost(), jev_mode="shadow")
+    session = make_session(FakeHost(), jev_mode="on")
     fake_jev.queue.append(jev.JevDecision(answers={}, error="http_403"))
     await browser_tool.handle_browser(session, {"action": "run", "goal": "search"})
     await browser_tool.handle_browser(session, {"action": "run", "goal": "search"})
@@ -1241,7 +1238,7 @@ async def test_one_jev_refusal_stops_later_calls(fake_jev):
 
 
 async def test_jev_calls_share_one_client_that_closes_with_the_session(fake_jev):
-    session = make_session(FakeHost(), jev_mode="shadow")
+    session = make_session(FakeHost(), jev_mode="on")
     await browser_tool.handle_browser(session, {"action": "run", "goal": "search"})
     await browser_tool.handle_browser(session, {"action": "run", "goal": "search"})
     client = fake_jev.calls[0]["client"]
@@ -1250,7 +1247,7 @@ async def test_jev_calls_share_one_client_that_closes_with_the_session(fake_jev)
     assert client.is_closed and session._browser_state.client._http.is_closed is False  # a passed-in http client is the caller's
 
 
-# ── shadow mode ────────────────────────────────────────────────────────────
+# ── analytics ──────────────────────────────────────────────────────────────
 
 
 @pytest.fixture
@@ -1268,22 +1265,30 @@ def sent_events(monkeypatch):
     return events
 
 
-async def test_shadow_mode_records_agreement_through_posthog(fake_jev, sent_events):
+async def test_retired_shadow_reads_as_off_and_its_event_is_gone(fake_jev):
     import anton.analytics
 
-    host = FakeHost()
-    session = make_session(host, jev_mode="shadow")
-    fake_jev.queue.append(jev_answers("click", target="e2"))
+    session = make_session(FakeHost(), jev_mode="shadow")
     result = await browser_tool.handle_browser(session, {"action": "run", "goal": "search"})
-    assert result.content.startswith("Step-by-step mode")
-    assert host.posted("/action") == []
+    assert result.content.startswith("Step-by-step mode") and fake_jev.calls == []
+    assert "browser_jev_shadow" not in anton.analytics._POSTHOG_EVENTS
 
-    await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "element": 2}})
-    assert sent_events == [("browser_jev_shadow", {
-        "jev_action": "click", "llm_action": "click", "agree_action": "True", "agree_target": "True",
-        "p_action": "0.95", "p_target": "0.95",
-    })]
-    assert {"browser_jev_shadow", "browser_jev_step", "browser_human_check"} <= anton.analytics._POSTHOG_EVENTS
+
+async def test_run_on_a_crowded_page_asks_for_the_part_then_clicks_the_element_in_it(fake_jev):
+    host = FakeHost(pages=[CALENDAR])
+    session = make_session(host)
+    fake_jev.queue += [
+        jev.JevDecision(answers={
+            "next_action": {"choice": "click", "probabilities": {"click": 0.95}},
+            "region": {"choice": "r1", "probabilities": {"r1": 0.9}},
+            "needs_user": {"noul": 0.01}, "risky": {"noul": 0.01},
+        }, ms=10),
+        jev.JevDecision(answers={"target": {"choice": "e37", "probabilities": {"e37": 0.93}}}, ms=8),
+        jev_answers("done"),
+    ]
+    await browser_tool.handle_browser(session, {"action": "run", "goal": "pick the departure date", "inputs": {"depart": "2026-11-27"}})
+    assert set(fake_jev.calls[1]["questions"]) == {"target"}
+    assert host.posted("/action")[0]["element"] == 37
 
 
 async def test_jev_steps_reach_analytics_from_the_run_loop(fake_jev, sent_events):
@@ -1292,30 +1297,6 @@ async def test_jev_steps_reach_analytics_from_the_run_loop(fake_jev, sent_events
     await browser_tool.handle_browser(session, {"action": "run", "goal": "find the footer"})
     steps = [props for name, props in sent_events if name == "browser_jev_step"]
     assert steps[0] == {"jev_action": "scroll_down", "p_action": "0.95", "ms": "12"}
-
-
-async def test_a_shadow_pick_for_another_page_is_never_compared(fake_jev, sent_events):
-    docs = {**PAGE, "url": "https://docs.example/", "title": "Docs"}
-    host = FakeHost(pages=[PAGE, docs])
-    host.tabs.append({"id": "t2", "url": docs["url"], "title": "Docs", "active": False})
-    session = make_session(host, jev_mode="shadow")
-    fake_jev.queue.append(jev_answers("click", target="e2"))
-    await browser_tool.handle_browser(session, {"action": "run", "goal": "search"})
-    await browser_tool.handle_browser(session, {"action": "switch_tab", "tab": "t2"})
-    await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "element": 2}})
-    assert sent_events == []
-
-
-async def test_shadow_mode_sends_jev_no_values_or_typed_text(fake_jev):
-    host = FakeHost(pages=[CHECKOUT])
-    session = make_session(host, jev_mode="shadow")
-    await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "type", "element": 9, "text": "my secret note"}})
-    fake_jev.queue.append(jev_answers("click", target="e7"))
-    await browser_tool.handle_browser(session, {"action": "run", "goal": "check out", "inputs": {"email": "ada@example.test"}})
-    state = fake_jev.calls[0]["state"]
-    blob = json.dumps(state)
-    assert "value=" not in blob and "ada@example.test" not in blob and "my secret note" not in blob
-    assert state["steps_so_far"] == ["type [9]"] and "inputs" not in state
 
 
 # ── hand-overs ─────────────────────────────────────────────────────────────

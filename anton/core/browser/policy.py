@@ -3,16 +3,20 @@
 One ``/v1/decisions`` call per step asks four things about the same page:
 what kind of step comes next, which element it acts on, whether a person
 has to act first, and whether the step would commit something hard to undo.
+On a crowded page (more elements than one choice should carry, in several
+parts) it asks which part of the page instead of which element, and a
+second call picks the element within that part.
 The tool acts on a confident answer and hands anything else back to the
 model, the way the completion verifier uses Jev (see session._jev_verdict).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 
 from anton.core.browser.models import Element, Page
-from anton.core.browser.page import element_line, shortlist
+from anton.core.browser.page import SHORTLIST_SIZE, candidates, element_line, rank
 
 ACTIONS = {
     "click": "Click a link, button, tab, checkbox or menu item to make progress toward the goal.",
@@ -47,41 +51,76 @@ class StepDecision:
     error: str = ""
 
 
-def step_request(
-    *, goal: str, page: Page, inputs: dict | None, history: list[str], redact: bool,
-) -> tuple[dict, dict, list[Element]]:
-    """(state, questions, shortlisted elements) for one step.
+#: The most parts of a page Jev chooses among; the rest go under one "other parts".
+MAX_REGIONS = 30
+#: How many element names stand for a part of the page in its description.
+REGION_SAMPLES = 6
+REST_OF_PAGE = "the rest of the page"
 
-    ``redact`` leaves out what is in the page's fields and the values in
-    ``inputs``, for a call that only measures how often Jev agrees with the
-    model: the ``input_key`` question still lists the inputs by name.
+
+@dataclass(frozen=True)
+class StepRequest:
+    """One step's question to Jev.
+
+    ``regions`` is set on a crowded page (more elements than one choice
+    should carry, in several parts): the request then asks which part of the
+    page the step is in (``region``) instead of which element, and
+    ``target_request`` asks for the element within the part Jev picked.
     """
-    candidates = shortlist(page.elements, goal, inputs)
+
+    state: dict
+    questions: dict
+    candidates: list[Element]
+    regions: dict[str, list[Element]] = field(default_factory=dict)
+
+
+def _regions(ranked: list[Element]) -> dict[str, list[Element]]:
+    """``ranked`` grouped by their containers, the part holding the best
+    element first, as {"r1": [...], ...}; past MAX_REGIONS, the rest share one."""
+    groups: dict[str, list[Element]] = {}
+    for el in ranked:
+        groups.setdefault(el.context, []).append(el)
+    parts = list(groups.values())
+    if len(parts) > MAX_REGIONS:
+        parts = parts[: MAX_REGIONS - 1] + [[el for part in parts[MAX_REGIONS - 1:] for el in part]]
+    return {f"r{i + 1}": part for i, part in enumerate(parts)}
+
+
+def _region_line(part: list[Element]) -> str:
+    contexts = {el.context for el in part}
+    label = part[0].context if len(contexts) == 1 and part[0].context else (
+        REST_OF_PAGE if contexts == {""} else "other parts of the page"
+    )
+    names = ", ".join(json.dumps(el.name, ensure_ascii=False) for el in part[:REGION_SAMPLES] if el.name)
+    return f"{json.dumps(label, ensure_ascii=False)}: {len(part)} elements, such as {names}"
+
+
+def step_request(*, goal: str, page: Page, inputs: dict | None, history: list[str]) -> StepRequest:
+    """The step's question: what kind of step, on which element (or, on a
+    crowded page, in which part of it), whether a person must act, whether
+    it commits something, and which input it types."""
+    ranked = rank(candidates(page.elements), goal, inputs)
+    regions = _regions(ranked) if len(ranked) > SHORTLIST_SIZE else {}
+    if len(regions) < 2:
+        regions = {}
+    shown = ranked[:SHORTLIST_SIZE]
     state = {
         "goal": goal,
         "page": {
             "url": page.url,
             "title": page.title,
-            "elements": [element_line(el, values=not redact) for el in candidates],
+            "elements": [element_line(el) for el in shown],
             "text": page.text[:1500],
         },
         "steps_so_far": history[-8:],
     }
-    if inputs and not redact:
+    if inputs:
         state["inputs"] = {str(k): str(v) for k, v in inputs.items()}
-
-    targets = {f"e{el.id}": element_line(el, values=not redact) for el in candidates}
-    targets[NO_TARGET] = "No listed element is the right one to act on next."
     questions: dict = {
         "next_action": {
             "type": "choice",
             "instructions": "Decide the single next browser step that best advances the goal on this page.",
             "criteria": ACTIONS,
-        },
-        "target": {
-            "type": "choice",
-            "instructions": "Pick the element the next step should act on to advance the goal.",
-            "criteria": targets,
         },
         "needs_user": {
             "type": "noul",
@@ -100,6 +139,16 @@ def step_request(
             ),
         },
     }
+    if regions:
+        parts = {key: _region_line(part) for key, part in regions.items()}
+        parts[NO_TARGET] = "The next step acts on no element."
+        questions["region"] = {
+            "type": "choice",
+            "instructions": "Pick the part of the page that holds the element the next step should act on.",
+            "criteria": parts,
+        }
+    else:
+        questions["target"] = _target_question(shown)
     if inputs:
         keys = {str(k): f"The value provided as {k!r}." for k in inputs}
         keys[NO_INPUT] = "None of the provided values belongs in the field typed into next."
@@ -108,7 +157,40 @@ def step_request(
             "instructions": "Which provided input value belongs in the field the next step types into?",
             "criteria": keys,
         }
-    return state, questions, candidates
+    return StepRequest(state=state, questions=questions, candidates=shown, regions=regions)
+
+
+def _target_question(elements: list[Element]) -> dict:
+    targets = {f"e{el.id}": element_line(el) for el in elements}
+    targets[NO_TARGET] = "No listed element is the right one to act on next."
+    return {
+        "type": "choice",
+        "instructions": "Pick the element the next step should act on to advance the goal.",
+        "criteria": targets,
+    }
+
+
+def target_request(
+    *, goal: str, page: Page, action: str, part: list[Element], inputs: dict | None, history: list[str],
+) -> StepRequest:
+    """The second question on a crowded page: which element, within the part
+    Jev picked, the ``action`` step acts on."""
+    shown = rank(part, goal, inputs)[:SHORTLIST_SIZE]
+    state = {
+        "goal": goal,
+        "next_step": action,
+        "page": {"url": page.url, "title": page.title, "elements": [element_line(el) for el in shown]},
+        "steps_so_far": history[-8:],
+    }
+    if inputs:
+        state["inputs"] = {str(k): str(v) for k, v in inputs.items()}
+    return StepRequest(state=state, questions={"target": _target_question(shown)}, candidates=shown)
+
+
+def parse_target(decision) -> tuple[int | None, float]:
+    """The element a decision's ``target`` picked and its probability."""
+    name, p = decision.choice("target")
+    return (int(name[1:]) if name.startswith("e") and name[1:].isdigit() else None), p
 
 
 def parse_step(decision) -> StepDecision:
@@ -116,10 +198,7 @@ def parse_step(decision) -> StepDecision:
     if decision.error:
         return StepDecision(ms=decision.ms, error=decision.error)
     action, action_p = decision.choice("next_action")
-    target_name, target_p = decision.choice("target")
-    target = None
-    if target_name.startswith("e") and target_name[1:].isdigit():
-        target = int(target_name[1:])
+    target, target_p = parse_target(decision)
     input_key, input_p = decision.choice("input_key")
     return StepDecision(
         action=action if action in ACTIONS else "",

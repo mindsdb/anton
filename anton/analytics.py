@@ -267,13 +267,6 @@ _pending_lock = threading.Lock()
 #                    value as a pre-ENG-2243 build, never as "no parent".
 #                    (anton/core/session.py::_emit_tool_completed)
 #
-#   browser_jev_shadow  jev_action, llm_action, agree_action, agree_target,
-#                    p_action, p_target: in shadow mode, the step Jev picked
-#                    for a page against the step the model then took on that
-#                    same page, and Jev's probabilities. Action names and
-#                    numbers only, never page content
-#                    (anton/core/browser/tool.py::_record_shadow_agreement)
-#
 #   browser_jev_step jev_action, p_action, ms: one step Jev took in `run`
 #                    when browser_jev is "on". Not `action`: send_event's own
 #                    parameter has that name
@@ -296,7 +289,6 @@ _POSTHOG_EVENTS = frozenset(
         "rule_retrieval",
         "scratchpad_package_installed",
         "tool_completed",
-        "browser_jev_shadow",
         "browser_jev_step",
         "browser_human_check",
     }

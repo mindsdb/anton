@@ -131,15 +131,20 @@ def _words(text: str) -> set[str]:
     return words
 
 
-def shortlist(elements: list[Element], goal: str, inputs: dict | None = None, size: int = SHORTLIST_SIZE) -> list[Element]:
-    """The elements most likely to matter for the goal, best first.
+def candidates(elements: list[Element]) -> list[Element]:
+    """The elements a step could act on: enabled ones, and with a dialog open
+    only the dialog's, since the step is about it."""
+    usable = [el for el in elements if not el.disabled]
+    if any(el.in_dialog for el in usable):
+        usable = [el for el in usable if el.in_dialog]
+    return usable
 
-    With a dialog open, only its elements: the step is about it. Ranked by
-    words shared with the goal and the inputs (names and values, a date also
-    as its day, month and weekday), counting each element's name and its
-    containers' names; then on-screen before off-screen, then page order.
-    Disabled elements are dropped: there is nothing to do with them.
-    """
+
+def rank(elements: list[Element], goal: str, inputs: dict | None = None) -> list[Element]:
+    """``elements`` best first for the goal: by words shared with the goal and
+    the inputs (names and values, a date also as its day, month and weekday),
+    counting each element's name twice and its containers' names once; then
+    on-screen before off-screen, then page order."""
     words = _words(goal)
     for key, value in (inputs or {}).items():
         words |= _words(f"{key} {value}")
@@ -148,10 +153,12 @@ def shortlist(elements: list[Element], goal: str, inputs: dict | None = None, si
         index, el = item
         own = _words(f"{el.name} {el.role}")
         around = _words(el.context)
-        # The name matching counts most; the containers tell like-named ones apart.
         return (-(2 * len(words & own) + len(words & around)), el.offscreen, index)
 
-    usable = [(i, el) for i, el in enumerate(elements) if not el.disabled]
-    if any(el.in_dialog for _, el in usable):
-        usable = [(i, el) for i, el in usable if el.in_dialog]
-    return [el for _, el in sorted(usable, key=score)[:size]]
+    return [el for _, el in sorted(enumerate(elements), key=score)]
+
+
+def shortlist(elements: list[Element], goal: str, inputs: dict | None = None, size: int = SHORTLIST_SIZE) -> list[Element]:
+    """The ``size`` elements most likely to matter for the goal, best first
+    (``candidates``, then ``rank``)."""
+    return rank(candidates(elements), goal, inputs)[:size]

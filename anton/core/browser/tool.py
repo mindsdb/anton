@@ -16,13 +16,10 @@ the write gate's card, and clicks by position ask once per page.
 ``browser_jev`` (settings) decides how much Jev does:
 
 - ``on`` (default): ``run`` executes Jev's confident steps itself.
-- ``shadow``: ``run`` only reads the page. Jev's pick is recorded
-  and compared with the step the model then takes, so we can measure
-  agreement before letting Jev act. Jev reads no field values or typed text
-  for it.
-- ``off``: no Jev calls at all. Neither when the session's ``verifier_jev``
-  is off (the organization opted out of Jev) nor after Jev refused this
-  session once.
+- ``off``: no Jev calls; ``run`` only reads the page for the model to act
+  on. Also when the session's ``verifier_jev`` is off (the organization
+  opted out of Jev) and after Jev refused this session once. ``shadow``, a
+  retired mode that only measured Jev's picks, reads as off.
 """
 
 from __future__ import annotations
@@ -33,7 +30,7 @@ import json
 import logging
 import re
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
 from urllib.parse import parse_qs, urlparse
 
@@ -51,8 +48,10 @@ from anton.core.browser.page import format_page, human_check, signature
 from anton.core.browser.policy import (
     StepDecision,
     parse_step,
+    parse_target,
     signed_in_request,
     step_request,
+    target_request,
 )
 from anton.core.tools.registry import ToolOutcome
 from anton.core.utils.scratchpad import _fence, ask_approval_card, ask_approval_choice, refusal_why
@@ -299,17 +298,6 @@ _HOLD_RANK = {None: 0, "position": 1, "commit": 2}
 Hold = Literal["commit", "position"]
 
 
-@dataclass(frozen=True)
-class _ShadowPick:
-    """Jev's pick in shadow mode, for the page with this signature only."""
-
-    signature: str
-    action: str
-    action_p: float
-    target: int | None
-    target_p: float
-
-
 @dataclass
 class _BrowserState:
     """Per-session browser state, kept on the ChatSession."""
@@ -320,7 +308,6 @@ class _BrowserState:
     #: The latest page the tool returned to the model: the page its element
     #: numbers come from.
     page: Page | None = None
-    shadow: _ShadowPick | None = None
     #: Steps taken so far, without typed text: Jev reads them.
     steps: list[str] = field(default_factory=list)
     #: The page address where the user approved clicks by position. Approval
@@ -431,8 +418,7 @@ def _state(session: "ChatSession") -> _BrowserState:
 
 
 def _jev_mode(session: "ChatSession") -> str:
-    mode = str(_setting(session, "browser_jev", "on")).lower()
-    return mode if mode in ("on", "shadow", "off") else "shadow"
+    return "on" if str(_setting(session, "browser_jev", "on")).lower() == "on" else "off"
 
 
 async def _jev(session: "ChatSession", *, jev_state: dict, questions: dict):
@@ -1189,7 +1175,6 @@ async def _do_act(session: "ChatSession", tc_input: dict) -> str | ToolOutcome:
     state = _state(session)
     body = _step_body(tc_input)
     await _ensure_open(session)
-    _record_shadow_agreement(session, state, body)
     # The page as it is now, which is what the host would act on.
     current = await state.client.page(session_id=state.session_id)
     moved = _moved_element(seen=state.page, current=current, body=body)
@@ -1413,28 +1398,6 @@ def _describe(step: dict, *, typed: bool = True) -> str:
     return action
 
 
-def _record_shadow_agreement(session: "ChatSession", state: _BrowserState, body: dict) -> None:
-    """Shadow mode: compare the model's step with what Jev picked for the same
-    page. A pick for any other page (the model switched tabs, or read the page
-    again after it changed) is dropped, never compared."""
-    pick, state.shadow = state.shadow, None
-    if pick is None or state.page is None or signature(state.page) != pick.signature:
-        return
-    llm_action = body.get("action", "")
-    if llm_action == "scroll":
-        llm_action = f"scroll_{body.get('direction', 'down')}"
-    _track(
-        session,
-        "browser_jev_shadow",
-        jev_action=pick.action,
-        llm_action=llm_action,
-        agree_action=pick.action == llm_action,
-        agree_target=pick.target is not None and pick.target == body.get("element"),
-        p_action=f"{pick.action_p:.2f}",
-        p_target=f"{pick.target_p:.2f}",
-    )
-
-
 def _step_from(decision: StepDecision, inputs: dict) -> dict | None:
     """The host action for a confident Jev step, or None when Jev can't take it alone."""
     if decision.action in ("scroll_down", "scroll_up"):
@@ -1486,15 +1449,6 @@ async def _do_run(session: "ChatSession", tc_input: dict) -> str:
         checked = await _unless_human_check(session, page)
         if checked is not None:
             return checked
-        if mode == "shadow":
-            jev_state, questions, _ = step_request(goal=goal, page=page, inputs=inputs, history=state.steps, redact=True)
-            decision = await _jev(session, jev_state=jev_state, questions=questions)
-            if decision is not None and not decision.error:
-                step = parse_step(decision)
-                state.shadow = _ShadowPick(
-                    signature=signature(page), action=step.action, action_p=step.action_p,
-                    target=step.target, target_p=step.target_p,
-                )
         return (
             "Step-by-step mode: read the page and take the next step with action=act, "
             "then repeat until the goal is done.\n\n" + _show(state, page)
@@ -1506,8 +1460,8 @@ async def _do_run(session: "ChatSession", tc_input: dict) -> str:
         checked = await _unless_human_check(session, page)
         if checked is not None:
             return f"{checked}\n\n{_steps_taken(taken)}"
-        jev_state, questions, _ = step_request(goal=goal, page=page, inputs=inputs, history=state.steps, redact=False)
-        decision = await _jev(session, jev_state=jev_state, questions=questions)
+        request = step_request(goal=goal, page=page, inputs=inputs, history=state.steps)
+        decision = await _jev(session, jev_state=request.state, questions=request.questions)
         if decision is None or decision.error:
             reason = "Jev is not available here" if decision is None else f"Jev failed ({decision.error})"
             return _handback(state, f"{reason}; continue step by step with action=act.", taken, page)
@@ -1526,6 +1480,20 @@ async def _do_run(session: "ChatSession", tc_input: dict) -> str:
             return _handback(state, "Jev reports the goal is done. Check the page and answer.", taken, page)
         if step.action_p < min_p or step.action in ("unsure", "done", ""):
             return _handback(state, "Not sure of the next step; take it with action=act.", taken, page)
+
+        if request.regions and step.action in ("click", "type", "select"):
+            # A crowded page: Jev picked a part of it; now the element in that part.
+            part, part_p = decision.choice("region")
+            if part not in request.regions or part_p < min_p:
+                return _handback(state, "Not sure which part of the page to act in; take it with action=act.", taken, page)
+            second = target_request(
+                goal=goal, page=page, action=step.action, part=request.regions[part], inputs=inputs, history=state.steps,
+            )
+            picked = await _jev(session, jev_state=second.state, questions=second.questions)
+            if picked is None or picked.error:
+                return _handback(state, "Not sure which element to act on; take it with action=act.", taken, page)
+            target, target_p = parse_target(picked)
+            step = replace(step, target=target, target_p=target_p)
 
         body = _step_from(step, inputs)
         if body is None:
