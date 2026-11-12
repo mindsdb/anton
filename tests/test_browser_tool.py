@@ -990,6 +990,92 @@ def test_the_prompt_and_the_skill_say_how_to_fill_an_ordinary_field_inside_a_fra
     assert "hand_to_user is only for those." in prompt
 
 
+@pytest.mark.parametrize("config", [
+    BrowserConfig(base_url=BASE, profile=SID), BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"),
+], ids=["web", "desktop"])
+async def test_a_focused_type_fills_a_frames_field_in_one_step_and_waits_only_to_submit(elicit_answers, config):
+    """After a click by pixel puts the focus in a frame's field, one type
+    step with focused true fills it with no card on either host. The host
+    checks the focus is an ordinary text field. With submit it presses Enter,
+    which may send the form, so it waits for the user's Approve: on the
+    desktop the tool's card comes first, on the web the browser holds it."""
+    host = FakeHost(pages=[FRAMED])
+    session = make_session(host, elicitor=FakeElicitor(), config=config)
+    typed = await browser_tool.handle_browser(session, {
+        "action": "act", "step": {"action": "type", "focused": True, "text": "ada@example.test"},
+    })
+    assert typed.ok is True and typed.content.startswith("Done: type 'ada@example.test' into the focused field.")
+    sent = {"action": "type", "focused": True, "text": "ada@example.test", "submit": False, "include_page": True}
+    assert host.posted("/action") == [{**sent, "into_frame": False} if config.in_app else sent]
+    assert elicit_answers.requests == []
+    assert session._browser_state.steps == ["type into the focused field"]
+
+    for step in (
+        {"action": "type", "focused": True, "text": "ada@example.test", "submit": True},
+        {"action": "type", "focused": True, "text": "ada@example.test\n"},
+    ):
+        elicit_answers.answers.append("cancel")
+        before = len(elicit_answers.requests)
+        held = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+        assert held.reason == "browser_step_not_approved", step
+        assert len(elicit_answers.requests) == before + 1, step
+    assert 'type "ada@example.test" into the focused field and press Enter' in elicit_answers.prompts()[0]
+    assert len(host.posted("/action")) == (1 if config.in_app else 3)
+
+
+def test_a_focused_type_is_the_one_type_step_without_an_element():
+    """The step parser sends a focused type in the one shape both hosts take
+    (submit always said), and refuses any other type with no element, so
+    the model learns the shape from the tool, not from a host's 400."""
+    body = browser_tool._step_body({"step": {"action": "type", "focused": True, "text": "a b"}})
+    assert body == {"action": "type", "focused": True, "text": "a b", "submit": False, "include_page": True}
+    assert browser_tool._step_body({"step": {"action": "type", "focused": True, "text": "x", "submit": True}})["submit"] is True
+    for bad in (
+        {"action": "type", "text": "x"},
+        {"action": "type", "focused": True, "element": 4, "text": "x"},
+        {"action": "type", "focused": True, "x": 10, "y": 20, "text": "x"},
+        {"action": "type", "focused": "true", "text": "x"},
+        {"action": "type", "focused": False, "text": "x"},
+        {"action": "type", "focused": True},
+        {"action": "type", "focused": True, "text": 5},
+        {"action": "type", "focused": True, "text": "x", "submit": "yes"},
+        {"action": "type", "focused": True, "text": "x", "clear": False},
+        {"action": "press", "focused": True, "key": "a"},
+    ):
+        with pytest.raises(ValueError):
+            browser_tool._step_body({"step": bad})
+
+
+async def test_act_says_how_to_type_without_an_element():
+    host = FakeHost()
+    session = make_session(host)
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "type", "text": "x"}})
+    assert result.ok is False and result.reason == "browser_bad_input"
+    assert '"focused": true' in result.content
+    assert host.posted("/action") == []
+
+
+@pytest.mark.parametrize(("status", "code", "says"), [
+    (409, "not_a_text_field", "Click the field by pixel first"),
+    (409, "focus_unreadable", "couldn't tell what has the focus"),
+    (403, "password_field", "secret field"),
+])
+async def test_a_hosts_refusal_of_a_focused_type_says_what_to_do(status, code, says):
+    host = FakeHost(pages=[FRAMED])
+    session = make_session(host)
+    original = host.handler
+
+    def handler(request):
+        if request.url.path.endswith("/action"):
+            return httpx.Response(status, json={"error": code, "message": "refused"})
+        return original(request)
+
+    answer_with(session, handler)
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "type", "focused": True, "text": "x"}})
+    assert result.ok is False and says in result.content, code
+    assert "MindsHub" not in result.content
+
+
 #: A page with one read frame, boxed in screenshot pixels.
 FRAMED = {
     **PAGE,

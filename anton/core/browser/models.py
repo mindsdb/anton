@@ -77,8 +77,9 @@ class Element(_ElementFields):
 
 class FrameElement(_ElementFields):
     """An element inside a child frame. It has no number, so a step reaches
-    it only by position, and hosts never send the value of an input, a
-    textarea or an editor (a select keeps its value and options)."""
+    it only by position, and a focused type (``FocusedType``) the field a
+    click there left the focus in. Hosts never send the value of an input,
+    a textarea or an editor (a select keeps its value and options)."""
 
 
 class FrameBox(_Answer):
@@ -219,6 +220,23 @@ class HeldStep(_Answer):
     action: str
     names: list[str] = []
     url: str
+
+
+class FocusedType(BaseModel):
+    """A type step into the field that has the focus, a frame's field
+    included: no element and no point, since a frame's fields have no number.
+    Both hosts type it only when the focus is on a text entry that isn't
+    secret, and otherwise type nothing and refuse it (403 password_field, 409
+    not_a_text_field, 409 focus_unreadable). It types at the caret, as keys
+    do, and clears nothing first. ``submit`` presses Enter after the text; it
+    is always sent, so both hosts read one shape."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    action: Literal["type"]
+    focused: Literal[True]
+    text: str
+    submit: bool = False
 
 
 class StepKey(BaseModel):

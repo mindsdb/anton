@@ -277,6 +277,33 @@ def test_the_action_fixture_says_a_step_that_changed_the_page_in_place_settles_t
     assert "a navigation's too, at settle_max_ms from its start." not in description
 
 
+def test_the_action_fixture_says_how_a_focused_type_reaches_a_field_in_a_frame():
+    """A frame's fields carry no number, so the one type step without an
+    element types into the field that has the focus, wherever it is. Each
+    host types it only into a text entry that isn't secret and refuses
+    anything else with its own code, and into_frame, which is about where a
+    press of the mouse lands, never stops it."""
+    description = _load("action").description
+    for sentence in (
+        "A type step with focused true, its text and submit, and no element or point, types into the field that "
+        "has the focus, inside a frame too.",
+        "The host types it only when that field is a text entry that isn't secret (a text, search, email, url, tel "
+        "or number input, a textarea, or an editor); otherwise it types nothing and refuses it: 403 password_field "
+        "for a secret, card or password field, 409 not_a_text_field for anything else, and 409 focus_unreadable "
+        "when it can't read what has the focus.",
+        "The desktop app's browser, which holds no steps itself, refuses (409) a mouse press, or a drag's release, "
+        "that lands in a frame when into_frame is false or missing; into_frame never stops a focused type, which "
+        "has no point.",
+    ):
+        assert sentence in description, sentence
+    body = _load("action").examples["type into the focused field"].body
+    assert body == {"action": "type", "focused": True, "text": "ada@example.test", "submit": False, "include_page": True}
+    errors = _load("error").examples
+    assert [errors[code].status for code in ("password_field", "not_a_text_field", "focus_unreadable")] == [403, 409, 409]
+    held = {name: e.body["held"] for name, e in _load("commit_steps").examples.items() if e.body["step"].get("focused")}
+    assert held == {"type into the focused field": None, "type into the focused field and submit": "commit"}
+
+
 def test_the_control_fixture_tells_done_by_the_person_from_any_other_agent_record():
     controls = _load("control").examples
     fresh = SessionInfo.model_validate(controls["a session the agent holds"].body).control
@@ -405,6 +432,7 @@ STEPS = {
     "click at a point on the screenshot": {"action": "click", "x": 412, "y": 230},
     "press Enter in an element": {"action": "press", "key": "Enter", "element": 2},
     "drag from an element to a point": {"action": "drag", "from": {"element": 5}, "to": {"x": 600, "y": 300}},
+    "type into the focused field": {"action": "type", "focused": True, "text": "ada@example.test"},
 }
 #: The step the model writes for each action request example the tool's gate
 #: sends to the desktop app's browser once the person approves its card, on
@@ -495,6 +523,8 @@ ERROR_REASONS = {
     "too_many_saved_tabs": "browser_error",
     "browser_starting": "browser_unreachable",
     "too_many_requests": "browser_at_capacity",
+    "not_a_text_field": "browser_bad_input",
+    "focus_unreadable": "browser_bad_input",
 }
 
 

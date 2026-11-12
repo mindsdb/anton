@@ -1,5 +1,5 @@
 {
-  "description": "The commit list: which steps wait for the person's approval. Both hosts' holds and Anton's card read it. url is the page's address; requested, when present, the address the page's navigation asked for before a redirect; element the element the step names, the one under the point for a step by position, or the focused one for a press (null for none); and held is \"commit\" (one approval runs this step once), \"position\" (one approval covers steps by position on this page address) or null (runs at once). A page is a consent page, an OAuth authorization or consent page, when its url or requested address has a query with client_id and response_type or redirect_uri, or a path segment authorize, authorization, oauth, oauth2, openid, openid-connect or login-actions, or one starting with consent. A click holds when the element is named with submit, buy, pay, order, purchase, checkout, check out, send, delete, remove, transfer, confirm, post, publish, authorize or grant (whole words, any case), with pays, paying, payment, payments, sends, sending, submits, submitting, submission or book, or with the same steps in German, French, Spanish, Portuguese, Italian, Dutch, Japanese, Chinese or Korean; when it has no name; and anywhere on a consent page. A drag holds as a click on its element would. type with submit true or a line break, and press of a chord with Enter anywhere in it, hold outside a search field: a textbox, searchbox or combobox with role searchbox or a name that starts with search. press of a chord with Space holds where a click on its element would, outside a textbox, searchbox or combobox. press of a chord with Space or Enter and any other key that is not a modifier (Tab, an arrow, a letter, a second Enter) holds wherever the focus is, since that key goes first and can move the focus onto a commit control. A click or drag with an x and y holds as position unless a click on its element would hold. A host may hold more than this list, never less.",
+  "description": "The commit list: which steps wait for the person's approval. Both hosts' holds and Anton's card read it. url is the page's address; requested, when present, the address the page's navigation asked for before a redirect; element the element the step names, the one under the point for a step by position, or the focused one for a press or a type with focused true (null for none); and held is \"commit\" (one approval runs this step once), \"position\" (one approval covers steps by position on this page address) or null (runs at once). A page is a consent page, an OAuth authorization or consent page, when its url or requested address has a query with client_id and response_type or redirect_uri, or a path segment authorize, authorization, oauth, oauth2, openid, openid-connect or login-actions, or one starting with consent. A click holds when the element is named with submit, buy, pay, order, purchase, checkout, check out, send, delete, remove, transfer, confirm, post, publish, authorize or grant (whole words, any case), with pays, paying, payment, payments, sends, sending, submits, submitting, submission or book, or with the same steps in German, French, Spanish, Portuguese, Italian, Dutch, Japanese, Chinese or Korean; when it has no name; and anywhere on a consent page. A drag holds as a click on its element would. type with submit true or a line break, whether it names its field or has focused true, and press of a chord with Enter anywhere in it, hold outside a search field: a textbox, searchbox or combobox with role searchbox or a name that starts with search. press of a chord with Space holds where a click on its element would, outside a textbox, searchbox or combobox. press of a chord with Space or Enter and any other key that is not a modifier (Tab, an arrow, a letter, a second Enter) holds wherever the focus is, since that key goes first and can move the focus onto a commit control. A click or drag with an x and y holds as position unless a click on its element would hold. A host may hold more than this list, never less.",
   "examples": {
     "a click on Submit": {
       "where": "commit list",
@@ -471,6 +471,42 @@
           "submit": true
         },
         "held": null
+      }
+    },
+    "type into the focused field": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://forms.example.test/newsletter",
+        "element": {
+          "role": "textbox",
+          "name": "Email"
+        },
+        "step": {
+          "action": "type",
+          "focused": true,
+          "text": "ada@example.test",
+          "submit": false
+        },
+        "held": null
+      }
+    },
+    "type into the focused field and submit": {
+      "where": "commit list",
+      "kind": "classification",
+      "body": {
+        "url": "https://forms.example.test/newsletter",
+        "element": {
+          "role": "textbox",
+          "name": "Email"
+        },
+        "step": {
+          "action": "type",
+          "focused": true,
+          "text": "ada@example.test",
+          "submit": true
+        },
+        "held": "commit"
       }
     },
     "press Enter in a message box": {

@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
 from urllib.parse import parse_qs, urlparse
 
 import httpx2 as httpx
+from pydantic import ValidationError
 
 from anton.core.browser.client import (
     FIRST_CALL_TIMEOUT_S,
@@ -53,7 +54,18 @@ from anton.core.browser.client import (
     BrowserError,
     cut_reason,
 )
-from anton.core.browser.models import ActionResult, Element, FrameBox, HeldStep, Page, SavedTab, Site, StepKey, Tab
+from anton.core.browser.models import (
+    ActionResult,
+    Element,
+    FocusedType,
+    FrameBox,
+    HeldStep,
+    Page,
+    SavedTab,
+    Site,
+    StepKey,
+    Tab,
+)
 from anton.core.browser.page import CAPTCHA_NAME, format_page, human_check, signature
 from anton.core.browser.policy import (
     StepDecision,
@@ -732,6 +744,21 @@ def _step_body(tc_input: dict) -> dict:
     step = tc_input.get("step")
     if not isinstance(step, dict) or step.get("action") not in STEP_ACTIONS:
         raise ValueError(f"act needs `step` with an action in {', '.join(STEP_ACTIONS)}")
+    if "focused" in step:
+        try:
+            focused = FocusedType.model_validate(step)
+        except ValidationError as exc:
+            raise ValueError(
+                '`focused` goes only on a type step, as {"action": "type", "focused": true, "text": "…"} with '
+                'optional "submit": true, and no element, point or other field'
+            ) from exc
+        return {**focused.model_dump(), "include_page": True}
+    if step.get("action") == "type" and step.get("element") is None:
+        raise ValueError(
+            'type needs `element`, a number from the latest page, or "focused": true to type into the field that '
+            'has the focus, such as a field inside a frame you clicked by pixel: {"action": "type", "focused": true, '
+            '"text": "…"}'
+        )
     # Hosts read "7" as 7. Only a number is checked against the page below,
     # so only a number goes out.
     if any("element" in end and not _is_id(end["element"]) for end in _ends(step)):
@@ -948,9 +975,15 @@ def _classify(step: dict, *, url: str, requested: str | None = None, element: El
     """What the step needs before it runs, by the commit list: "commit" (one
     approval runs it once), "position" (one approval covers steps by position
     on this page) or None. ``element`` is the element the step names, the one
-    under the point for a step by position, or the focused one for a press.
-    ``requested`` is the address the page's navigation asked for before a
-    redirect."""
+    under the point for a step by position, or the focused one for a press or
+    a focused type. ``requested`` is the address the page's navigation asked
+    for before a redirect.
+
+    A focused type reaches whatever has the focus, which the tool can't see,
+    so its element is None; each host types it only into a text entry that
+    isn't secret and refuses it anywhere else, so it holds only when it
+    submits, types a line break, or tabs on and types a space, as a type into
+    a named text field does."""
     consent = _consent_page(url) or (requested is not None and _consent_page(requested))
     commit_control = element is not None and _commit_name(element.name)
     action = step.get("action")
@@ -1008,7 +1041,9 @@ def _touched(page: Page, step: dict) -> list[Element | None]:
     """The elements a step names on the page: a drag's ends, or the step's own.
     A number the page doesn't list reads as an element with no name, which
     holds: the tool can't tell what it is. A press with no element goes to
-    whatever holds the focus, which the tool can't see either."""
+    whatever holds the focus, which the tool can't see either. A focused
+    type goes there too, but each host types it only into a text entry that
+    isn't secret, so it reads as no element (``_classify``)."""
     unknown = Element(id=-1, role="", name="")
     named = [end["element"] for end in _ends(step) if end.get("element") is not None]
     if named:
@@ -1054,6 +1089,8 @@ def _step_words(body: dict, element: Element | None, held: HeldStep | None = Non
         target = " and ".join(json.dumps(n, ensure_ascii=False) if n.strip() else "an unnamed control" for n in held.names)
         if _has_position(body) or action == "drag":
             return f"{_describe(body)}, on {target}"
+    elif body.get("focused") is True:
+        target = "the focused field"
     elif element is None or _has_position(body):
         return _describe(body)
     else:
@@ -1538,6 +1575,9 @@ def _describe(step: dict, *, typed: bool = True) -> str:
         return f"scroll {step.get('direction', 'down')}"
     if action == "press":
         return f"press {step.get('key', '')}"
+    if action == "type" and step.get("focused") is True:
+        text = f" {step['text']!r}" if typed and "text" in step else ""
+        return f"type{text} into the focused field"
     return action
 
 
@@ -1888,6 +1928,23 @@ def _refused(session: "ChatSession", exc: BrowserError) -> ToolOutcome:
                 "number). Only the user fills those: call action=hand_to_user with a one-line reason."
             ),
             ok=False, reason="browser_secret_field",
+        )
+    if code == "not_a_text_field":
+        return ToolOutcome(
+            content=(
+                "Not typed: what has the focus isn't an ordinary text field (not_a_text_field), so the browser typed "
+                "nothing. Click the field by pixel first (inside a frame) or name its element, then type again."
+            ),
+            ok=False, reason="browser_bad_input",
+        )
+    if code == "focus_unreadable":
+        return ToolOutcome(
+            content=(
+                "Not typed: the browser couldn't tell what has the focus (focus_unreadable), so it typed nothing. "
+                "Click the field by pixel first and type again; a field in a payment or sign-in frame is the user's "
+                "to fill (hand_to_user)."
+            ),
+            ok=False, reason="browser_bad_input",
         )
     if code == "person_only":
         return ToolOutcome(
