@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -787,7 +788,19 @@ def test_the_tool_says_every_path_starts_at_the_host_with_its_version():
         assert "/v2/" in text, where
         assert "includ" in text and "version" in text, where
     assert "(/v2/exchanges, not /exchanges)" in texts["description"]
-    assert "/v2/eod?symbols=AAPL" in texts["usage_notes"]
+    assert "path /v2/eod with query {'symbols': 'AAPL'}" in texts["usage_notes"]
+
+
+def test_no_example_path_for_a_call_carries_its_query():
+    """call_minds_api takes parameters apart from the path; a check path may still carry a query."""
+    tool = connector_draft_tool(ConnectorDraftBox())
+    texts = {
+        "description": tool.description,
+        "usage_notes": tool.input_schema["properties"]["usage_notes"]["description"],
+    }
+
+    for where, text in texts.items():
+        assert re.findall(r"/[A-Za-z0-9_./-]*\?", text) == [], where
 
 
 def test_a_check_path_with_a_host_is_refused_with_a_versioned_example():
