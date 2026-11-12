@@ -1426,7 +1426,8 @@ async def test_run_does_not_stall_on_text_that_arrives_late(fake_jev):
 
 async def test_run_hands_back_when_the_host_says_changed_but_nothing_did(fake_jev):
     """A host's true never resets the stall count by itself, and its false
-    counts a stall even when the text moved (a clock, a carousel)."""
+    counts a stall even when the text moved between the two reads: a clock
+    that ticked while Jev picked the step, outside the step's own watch."""
     host = FakeHost()
     host.changed = True
     session = make_session(host)
@@ -1434,12 +1435,26 @@ async def test_run_hands_back_when_the_host_says_changed_but_nothing_did(fake_je
     result = await browser_tool.handle_browser(session, {"action": "run", "goal": "find the footer"})
     assert "changed nothing" in result.content and len(host.posted("/action")) == browser_tool.MAX_STALLS
 
-    ticking = FakeHost(pages=[{**PAGE, "text": f"12:0{i}"} for i in range(5)])
-    ticking.changed = False
-    session = make_session(ticking)
+    moved_between_steps = FakeHost(pages=[{**PAGE, "text": f"12:0{i}"} for i in range(5)])
+    moved_between_steps.changed = False
+    session = make_session(moved_between_steps)
     fake_jev.queue[:] = [jev_answers("scroll_down")] * 3
     result = await browser_tool.handle_browser(session, {"action": "run", "goal": "find the footer"})
-    assert "changed nothing" in result.content and len(ticking.posted("/action")) == browser_tool.MAX_STALLS
+    assert "changed nothing" in result.content and len(moved_between_steps.posted("/action")) == browser_tool.MAX_STALLS
+
+
+async def test_run_reads_a_clock_that_ticks_during_each_step_as_late_text_and_runs_to_max_steps(fake_jev):
+    """A clock or a carousel in the page's text that changes during the step
+    answers true with new text and the same elements, which is what late
+    text looks like too. The run can't tell them apart, so it counts no
+    stall there and stops at max_steps instead of after MAX_STALLS."""
+    host = FakeHost(pages=[{**PAGE, "text": f"Now 12:00:0{i}"} for i in range(9)])
+    host.changed = True
+    session = make_session(host)
+    fake_jev.queue += [jev_answers("scroll_down")] * 4
+    result = await browser_tool.handle_browser(session, {"action": "run", "goal": "find the footer", "max_steps": 4})
+    assert "changed nothing" not in result.content
+    assert "Stopped after 4 steps without finishing." in result.content and len(host.posted("/action")) == 4
 
 
 async def test_run_clamps_max_steps(fake_jev):

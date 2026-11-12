@@ -1632,8 +1632,10 @@ async def _do_run(session: "ChatSession", tc_input: dict) -> str:
             state.steps.append(_describe(body, typed=False))
             page = result.page or await state.client.page(session_id=state.session_id)
             # Text that arrives late is progress. The host's true never resets the
-            # count by itself: on a page with a clock or a carousel every step
-            # changes something.
+            # count by itself, since a clock or a carousel changes something during
+            # most steps. Their text still resets it when it changes during the
+            # step: that reads the same as late text, so such a page runs on to
+            # max_steps.
             unchanged = signature(page) == before and page.text == before_text
             stalls = stalls + 1 if result.changed is False or unchanged else 0
             if stalls >= MAX_STALLS:
