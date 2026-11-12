@@ -682,8 +682,11 @@ def _has_position(step: dict) -> bool:
 def _in_frame(body: dict, page: Page) -> bool:
     """Whether a step by position may land inside one of the page's frames:
     a point inside a frame's box, or a point the boxes can't rule out (a
-    frame the host couldn't place, a point not in screenshot pixels, which
-    the boxes are in, or a point that isn't two numbers)."""
+    host that sends no ``frames``, a frame the host couldn't place, a point
+    not in screenshot pixels, which the boxes are in, or a point that isn't
+    two numbers)."""
+    if page.frames is None:
+        return True
     if not page.frames:
         return False
     if body.get("coords") != "screenshot" or any(frame.box is None for frame in page.frames):

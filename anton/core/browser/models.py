@@ -127,8 +127,10 @@ class Page(_Answer):
     #: that doesn't say.
     challenges: list[Challenge] | None = None
     #: The page's child frames, on-screen first. Their elements never carry
-    #: a number, so nothing a step names by number is inside one.
-    frames: list[Frame] = []
+    #: a number, so nothing a step names by number is inside one. Both hosts
+    #: always send it (empty when there are none); None from a host that
+    #: predates it, which hasn't said where its frames are.
+    frames: list[Frame] | None = None
 
 
 class ActionResult(_Answer):

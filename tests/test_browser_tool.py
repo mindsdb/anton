@@ -43,6 +43,7 @@ PAGE = {
         {"id": 4, "role": "button", "name": "Disabled thing", "disabled": True},
     ],
     "text": "Welcome to the shop",
+    "frames": [],
 }
 CHECKOUT = {
     "url": "https://shop.example/checkout",
@@ -56,12 +57,14 @@ CHECKOUT = {
         {"id": 10, "role": "searchbox", "name": "Search orders"},
     ],
     "text": "Total $999",
+    "frames": [],
 }
 CHALLENGE = {
     "url": "https://claude.ai/login",
     "title": "Just a moment...",
     "elements": [{"id": 1, "role": "checkbox", "name": "Verify you are human"}],
     "text": "claude.ai\nPerforming security verification\nThis website uses a security service to protect against malicious bots.",
+    "frames": [],
 }
 
 
@@ -957,6 +960,23 @@ async def test_on_the_desktop_a_click_by_position_inside_a_frame_gets_the_commit
     assert in_page_px.reason == "browser_step_not_approved"
     assert elicit_answers.prompts()[4].startswith("**Approve this browser step?**")
     assert len(host.posted("/action")) == 3
+
+
+async def test_on_a_desktop_that_sends_no_frames_every_click_by_position_gets_the_one_step_card(elicit_answers):
+    """An in-app browser that predates ``frames`` doesn't say where its
+    frames are, so any point may land in one: no click by position runs
+    under a position approval for the page there."""
+    older = {key: value for key, value in PAGE.items() if key != "frames"}
+    host = FakeHost(pages=[older])
+    session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+    elicit_answers.answers += ["approve"] * 2
+    for _ in range(2):
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "x": 10, "y": 10}})
+        assert result.content.startswith("Done: click at (10, 10).")
+    prompts = elicit_answers.prompts()
+    assert len(prompts) == 2 and all(p.startswith("**Approve this browser step?**") for p in prompts)
+    assert [o.detail for o in elicit_answers.requests[0].options][0] == "Take this step once"
+    assert len(host.posted("/action")) == 2
 
 
 async def test_on_the_desktop_a_point_on_a_step_that_names_an_element_is_a_position_step(elicit_answers):

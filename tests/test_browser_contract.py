@@ -174,6 +174,14 @@ def test_the_frame_fixture_reads_as_the_model_sees_it():
     assert 'Frame "https://forms.example.test/form-2" (no numbers: act by pixel):' in shown
 
 
+def test_a_page_from_a_host_that_predates_frames_says_nothing_about_frames():
+    """A host that sends no ``frames`` hasn't said the page has none."""
+    body = {key: value for key, value in _load("page").examples["a page with no check"].body.items() if key != "frames"}
+    page = Page.model_validate(body)
+    assert page.frames is None
+    assert "Frame " not in format_page(page)
+
+
 def test_the_action_fixture_says_whether_the_step_changed_anything():
     actions = _load("action").examples
     assert ActionResult.model_validate(actions["a step that changed nothing"].body).changed is False

@@ -144,7 +144,7 @@ def format_page(page: Page, *, max_text: int = 3000) -> str:
     text = page.text[:max_text]
     if text:
         lines += ["", PAGE_TEXT_HEADING, text]
-    lines += _frame_lines(page.frames)
+    lines += _frame_lines(page.frames or [])
     return "\n".join(lines)
 
 
