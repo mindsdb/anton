@@ -1,0 +1,64 @@
+{
+  "request": {
+    "protocol_version": 1,
+    "connection_id": 1,
+    "credential_version": 1,
+    "correlation_id": "33333333-3333-4333-8333-333333333333",
+    "request": {
+      "method": "GET",
+      "path": "/v2/quote",
+      "query": [["symbol", "AAPL"], ["symbol", "MSFT"]],
+      "headers": {"Accept": "application/json"}
+    }
+  },
+  "response": {
+    "protocol_version": 1,
+    "connection_id": 1,
+    "credential_version": 1,
+    "status": 200,
+    "headers": {"content-type": "application/json"},
+    "body": "{\"symbol\": \"AAPL\", \"price\": 1.0}",
+    "body_encoding": "text"
+  },
+  "provider_error_response": {
+    "protocol_version": 1,
+    "connection_id": 1,
+    "credential_version": 1,
+    "status": 401,
+    "headers": {"content-type": "text/plain"},
+    "body": "The API refused the connection's credentials (401). Its message is hidden for security. Check api_key.",
+    "body_encoding": "text"
+  },
+  "client_error_response": {
+    "protocol_version": 1,
+    "connection_id": 1,
+    "credential_version": 1,
+    "status": 404,
+    "headers": {"content-type": "application/json"},
+    "body": "{\"error\": \"unknown symbol ZZZ\"}",
+    "body_encoding": "text"
+  },
+  "binary_response": {
+    "protocol_version": 1,
+    "connection_id": 1,
+    "credential_version": 1,
+    "status": 200,
+    "headers": {"content-type": "application/octet-stream"},
+    "body": "iVBORw0KGgo=",
+    "body_encoding": "base64"
+  },
+  "errors": [
+    {"status": 401, "code": "unauthorized", "meaning": "No turn key, or the Ingress gate did not stamp an identity."},
+    {"status": 503, "code": "gateway_disabled", "meaning": "CUSTOM_API_GATEWAY__ENABLED is off on this deployment."},
+    {"status": 422, "code": "invalid_request", "meaning": "The body is not exactly this shape, or the path, query or headers are refused (including any that carry the turn key); nothing was sent."},
+    {"status": 404, "code": "invalid_connection", "meaning": "auth will not resolve this connection for this turn key, its stored auth section no longer passes the shared rules, or a value it places is over 8 KiB or its scrub set over 1.5 MiB."},
+    {"status": 503, "code": "authorization_unavailable", "meaning": "auth or the call-rate store could not be asked, or auth answered another binding."},
+    {"status": 403, "code": "destination_forbidden", "meaning": "The saved origin is refused, or its host resolves to an address that is not public."},
+    {"status": 502, "code": "redirect_refused", "leaves_as": 503, "meaning": "The API answered 300, 301, 302, 303, 307 or 308."},
+    {"status": 502, "code": "encoding_refused", "leaves_as": 503, "meaning": "The API answered with a Content-Encoding other than identity."},
+    {"status": 504, "code": "timed_out", "leaves_as": 503, "meaning": "The call outlasted its 20 s deadline."},
+    {"status": 502, "code": "response_too_large", "leaves_as": 503, "meaning": "The answer body is over 1 MiB, or echoes connection values so densely that removing them would pass the scrub's budget: each hit costs about six times its form's length plus 128, and all hits of all forms together may cost at most 32 times the bytes searched (the body, or a client error's excerpt window; at least 64 KiB), beyond one search per form. Nothing of the answer is returned."},
+    {"status": 429, "code": "rate_limited", "meaning": "The grant's calls for this 60 s window, auth's resolve rate, or the open calls allowed for this connection, this turn or this process are used up."},
+    {"status": 502, "code": "upstream_unavailable", "leaves_as": 503, "meaning": "The host did not resolve or the send failed."}
+  ]
+}

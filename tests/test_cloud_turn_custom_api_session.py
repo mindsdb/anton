@@ -242,7 +242,8 @@ def test_a_scratchpad_child_holds_nothing_of_a_custom_connection_but_ids_and_ver
     tmp_path, monkeypatch
 ):
     """Done-when 1 at the process level: compared with a plain cloud turn's child, a custom API
-    turn's child gains only the two id-and-version variables, and no name, connector id or key."""
+    turn's child gains only the two id-and-version variables and the helper, and no name, connector
+    id or key."""
     overlay = _captured_config(tmp_path, monkeypatch, _request()).workspace_env_overlay
     plain = _child_report(tmp_path, {"ANTON_CLOUD_TURN": "1"})
     custom = _child_report(tmp_path, overlay)
@@ -255,4 +256,5 @@ def test_a_scratchpad_child_holds_nothing_of_a_custom_connection_but_ids_and_ver
     ]
     for value in [*request_text, _PRODUCED["turn_key"]]:
         assert not [k for k, v in gained.items() if value in v], value
-    assert custom["names"] == plain["names"]
+    assert set(custom["names"]) - set(plain["names"]) == {"call_minds_api"}
+    assert set(plain["names"]) <= set(custom["names"])
