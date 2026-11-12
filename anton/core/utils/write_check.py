@@ -11840,7 +11840,7 @@ class _CodeFiles:
     reads: list[tuple[ast.Call, ast.AST, str]] = dataclasses.field(default_factory=list)
     by_source: dict[int, str] = dataclasses.field(default_factory=dict)
     # Each source of the checked cell the check read, with its text and how the cell records it.
-    subs: dict[int, tuple[ast.AST, str, str, str | None]] = dataclasses.field(default_factory=dict)
+    subs: dict[int, tuple[ast.AST, str, str]] = dataclasses.field(default_factory=dict)
     # What `_stitched_text` read of each source, by its id and the cells counted as stopped early.
     stitched: dict[tuple[int, frozenset[int]], str | None] = dataclasses.field(default_factory=dict)
     # Where one replay of the cells stood before each, by the cells counted as stopped early (`_stitch_before`).
@@ -11852,13 +11852,12 @@ class _CodeFiles:
     def hashes(self) -> dict[str, str]:
         """The SHA-256 of each text the checked cell's sources gave, by path or
         place (`CellWrites.code_files`)."""
-        return {key: _sha256(text) for _source, text, key, _path in self.subs.values()}
+        return {key: _sha256(text) for _source, text, key in self.subs.values()}
 
-    def substitute(self, source: ast.AST, text: str, key: str, path: str | None = None) -> None:
-        """Runs `text` in place of `source`, a source of the checked cell, the
-        file at `path` (as the cell names it) or a script of pieces
-        (`CellWrites.run_code`)."""
-        self.subs[id(source)] = (source, text, key, path)
+    def substitute(self, source: ast.AST, text: str, key: str) -> None:
+        """Runs `text` in place of `source`, a source of the checked cell: a
+        file read or a script of pieces (`CellWrites.run_code`)."""
+        self.subs[id(source)] = (source, text, key)
 
     def text(self, source: ast.AST, reader: _Reader) -> str | None:
         """The text the read `source` hands exec(); None when it isn't one
@@ -11893,7 +11892,7 @@ class _CodeFiles:
         self.read[path] = text
         self.reads.append((call, source, path))
         self.by_source[id(source)] = text
-        self.substitute(source, text, path, source.func.value.args[0].value)
+        self.substitute(source, text, path)
         return text
 
 
@@ -17164,7 +17163,7 @@ def _with_texts(code: str, files: _CodeFiles) -> str | None:
     for line in raw.splitlines(keepends=True):
         starts.append(starts[-1] + len(line))
     spans = sorted(((starts[n.lineno - 1] + n.col_offset, starts[n.end_lineno - 1] + n.end_col_offset, n, text)
-                    for n, text, _key, _path in files.subs.values()), key=lambda span: span[0], reverse=True)
+                    for n, text, _key in files.subs.values()), key=lambda span: span[0], reverse=True)
     for start, end, node, text in spans:
         literal = "(" + repr(text) + "\n" * (node.end_lineno - node.lineno) + ")"
         raw = raw[:start] + literal.encode("utf-8") + raw[end:]
