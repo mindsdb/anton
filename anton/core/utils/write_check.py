@@ -78,9 +78,12 @@ What it finds:
   runs**: a str or bytes literal handed to ``exec``, ``eval`` or
   ``compile``, bytes decoded by their coding comment as Python decodes them,
   a literal statement handed to ``timeit``, ``cProfile.run``,
-  ``profile.run``, ``pdb.run`` or ``pdb.runeval``, and the literal after
-  ``python -c``, each read like one more cell, placed where the call that
-  runs it runs, with its own imports; and in a function a literal exec in
+  ``profile.run``, ``pdb.run`` or ``pdb.runeval``, the literal after
+  ``python -c``, and a ``.py`` file that ``exec``, ``eval`` or ``compile`` at
+  a cell's top level gets as ``open('x.py').read()`` or
+  ``Path('x.py').read_text()``, as that cell's own check read it, unless code
+  may change it before the read; each read like one more cell, placed where
+  the call that runs it runs, with its own imports; and in a function a literal exec in
   an earlier cell defined, where this cell calls it. A program's or
   module's name, or a package pip installs, held in a name bound only to
   literal text, or in a list built from such text or grown in place with
@@ -89,9 +92,9 @@ What it finds:
   ends "This step can't be checked before it runs." That is ``exec``,
   ``eval`` or ``compile`` reached through the builtins however the code
   names them (a builtin function's ``__self__`` and a frame's
-  ``f_builtins`` among them) and handed anything but a literal (a name, a
-  file read, a decode, a join) or a literal too long to read, or passed or stored as a
-  value; code the pad's own process runs through ``runpy``, ``importlib``
+  ``f_builtins`` among them) and handed anything but a literal or a ``.py``
+  file read as above (a name, another file read, a decode, a join) or a
+  literal too long to read, or passed or stored as a value; code the pad's own process runs through ``runpy``, ``importlib``
   (``reload``, a spec or a loader from a file, an import by a name the code
   picks when it runs), ``zipimport``, ``site`` (the ``.pth`` files it reads),
   a code object, or one a function is given as its ``__code__``, an
@@ -188,6 +191,7 @@ import ast
 import bisect
 import builtins
 import copy
+import dataclasses
 import errno
 import fnmatch
 import importlib.machinery
@@ -217,7 +221,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any, Generic, Literal, NamedTuple, Protocol, TypeVar, overload
 
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from anton.core.backends.wire import (
     BOOT_IMPORTS,
@@ -413,6 +417,9 @@ class CellWrites(BaseModel):
     files: tuple[FileChange, ...] = ()
     http: tuple[HttpWrite, ...] = ()
     unchecked: bool = False
+    # The text of each Python file the cell hands exec() by a literal path,
+    # read now; the host keeps it for later checks (`EarlierCell.code_files`).
+    code_files: dict[str, str] = Field(default_factory=dict)
 
     @property
     def held_files(self) -> tuple[FileChange, ...]:
@@ -454,6 +461,9 @@ class EarlierCell(BaseModel):
     errored: bool = False
     stopped_at: int | None = None
     ended_process: bool = False
+    # What its own check read of each Python file it hands exec() by a literal
+    # path (`CellWrites.code_files`), so a later check reads what it ran.
+    code_files: dict[str, str] = Field(default_factory=dict)
 
 
 # What one check read from disk under folders the walk didn't walk: the
@@ -4307,10 +4317,13 @@ class _Reader:
         self, cells: list[_Cell], *, current: _Cell, project_root: Path | None = None,
         errored: frozenset[int] = frozenset(), errored_paths: Literal["any", "unknown"] = "any",
         stopped_early: frozenset[int] = frozenset(), stopped_at: Mapping[int, int] | None = None,
-        tainted_contexts: frozenset[str] = frozenset(),
+        tainted_contexts: frozenset[str] = frozenset(), code_files: _CodeFiles | None = None,
     ) -> None:
         self.cells = cells
         self.current = current
+        # The `.py` files exec() is handed by a literal path, shared by each
+        # reader of one check (`_CodeFiles`).
+        self.code_files = _CodeFiles() if code_files is None else code_files
         # What each name holds where a node reads it, by the name, the node's
         # id and `partly_run`, read once per check (`bindings_of`).
         self._bindings_read: dict[tuple[str, int, bool], tuple[_Binding, ...]] = {}
@@ -8791,10 +8804,12 @@ class _OwnedFiles:
 
     def __init__(
         self, earlier: list[_Cell], snapshots: Sequence[ProjectSnapshot], *, errored: frozenset[int] = frozenset(),
+        code_files: _CodeFiles | None = None,
     ) -> None:
         self._earlier = earlier
         self._snapshots = snapshots
         self._errored = errored
+        self._code_files = code_files
         # The files the earlier cells overwrote: read whole, read with each
         # errored cell as never run, and read with a path through a name an
         # errored cell binds as one the check can't place. Each is read the
@@ -8845,11 +8860,12 @@ class _OwnedFiles:
         # functions count as earlier ones (`_Reader.earlier_function`).
         after = _Cell(ast.Module(body=[], type_ignores=[]), "", len(earlier))
         cells = [*earlier, after]
-        reader = _Reader(cells, current=after, errored=errored, errored_paths="unknown")
+        reader = _Reader(cells, current=after, errored=errored, errored_paths="unknown", code_files=self._code_files)
         unerrored = [c for c in earlier if c.index not in self._errored]
         exec_read = _exec_cells(reader, unerrored, ran_only=True)
         if exec_read.cells:
-            reader = _Reader([*cells, *exec_read.cells], current=after, errored=errored, errored_paths="unknown")
+            reader = _Reader([*cells, *exec_read.cells], current=after, errored=errored, errored_paths="unknown",
+                             code_files=self._code_files)
         changes: list[FileChange] = []
 
         def read_function(callee: _Callee, *, cell: _Cell, at: ast.AST, chain: tuple[int, ...]) -> None:
@@ -11773,6 +11789,97 @@ def _decoded_source(value: bytes) -> str | None:
     return ""
 
 
+@dataclass(eq=False)
+class _CodeFiles:
+    """The Python files exec(), eval() or compile() is handed by a literal
+    path (`_code_file_path`), each read as literal code. An earlier cell's
+    file reads as its own check read it (`recorded`, by the cell's index),
+    not as it is now; the checked cell's is read from disk (`read`, and
+    `reads` for each read). `by_source` keeps each text by the id of the
+    read that gives it. Only a read at a cell's top level counts, so each
+    runs in one cell. Paths are keyed against the project `root`."""
+
+    root: Path | None = None
+    recorded: Mapping[int, Mapping[str, str]] = dataclasses.field(default_factory=dict)
+    read: dict[str, str] = dataclasses.field(default_factory=dict)
+    reads: list[tuple[ast.Call, ast.AST, str]] = dataclasses.field(default_factory=list)
+    by_source: dict[int, str] = dataclasses.field(default_factory=dict)
+
+    def text(self, source: ast.AST, reader: _Reader) -> str | None:
+        """The text the read `source` hands exec(); None when it isn't one
+        this reads, or an earlier check didn't read it."""
+        if id(source) in self.by_source:
+            return self.by_source[id(source)]
+        path = _code_file_path(source, reader)
+        cell = reader.cell_of(source)
+        if path is None or cell.scope_of(source) is not None or cell.host >= reader.current.index:
+            return None
+        return self.recorded.get(cell.host, {}).get(path)
+
+    def read_now(self, call: ast.Call, source: ast.AST, reader: _Reader) -> str | None:
+        """The text the checked cell's read `source` hands exec(), from disk;
+        `_stale_code_files` drops it later if code may change the file first."""
+        path = _code_file_path(source, reader)
+        cell = reader.cell_of(source)
+        if path is None or cell.scope_of(source) is not None or cell.host != reader.current.index:
+            return None
+        text = self.read[path] if path in self.read else _read_code_file(path, reader)
+        if text is None:
+            return None
+        self.read[path] = text
+        self.reads.append((call, source, path))
+        self.by_source[id(source)] = text
+        return text
+
+
+def _code_file_key(path: str, root: Path | None) -> str:
+    """`path` as `_CodeFiles` keys it: POSIX, normalised, and relative to the
+    project `root` when it lies inside it."""
+    key = posixpath.normpath(path.replace("\\", "/"))
+    if root is not None and posixpath.isabs(key):
+        rel = posixpath.relpath(key, root.as_posix())
+        if not rel.startswith(".."):
+            return rel
+    return key
+
+
+def _code_file_path(source: ast.AST, reader: _Reader) -> str | None:
+    """The `.py` file a source handed to exec() reads by a literal path, as
+    `open('helpers.py').read()` or `Path('helpers.py').read_text()` do;
+    None for any other source."""
+    path = _sql_file_path(source, reader) if isinstance(source, ast.Call) else None
+    if path is None or not path.endswith(".py"):
+        return None
+    return _code_file_key(path, reader.code_files.root)
+
+
+def _read_code_file(path: str, reader: _Reader) -> str | None:
+    """The text of the file at `path`, a `_code_file_key`, as UTF-8; None
+    when it's missing, past `_LITERAL_CODE_LIMIT`, doesn't decode, or is
+    relative once a cell changes the working folder."""
+    if posixpath.isabs(path):
+        full = Path(path)
+    elif reader.project_root is None or reader.cwds != ["."]:
+        return None
+    else:
+        full = reader.project_root / path
+    try:
+        if not full.is_file() or full.stat().st_size > 4 * _LITERAL_CODE_LIMIT:
+            return None
+        text = full.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    return text if len(text) <= _LITERAL_CODE_LIMIT else None
+
+
+def _source_text(source: ast.AST, reader: _Reader) -> str | None:
+    """The code a source handed to exec() runs, read now: a literal
+    (`_literal_source`), or a `.py` file read by a literal path
+    (`_CodeFiles`); None for any other."""
+    text = _literal_source(source)
+    return text if text is not None else reader.code_files.text(source, reader)
+
+
 @dataclass(frozen=True, eq=False)
 class _Code:
     """Code the check reads, and the cell it is in: a cell's whole tree, or
@@ -11911,6 +12018,12 @@ class _ExecReading:
                     given = () if runner is None else runner.sources
                     launch = None if runner is not None else _python_launch(node, reader)
                 texts = [t for t in map(_literal_source, given) if t is not None]
+                if builtin and not texts and given:
+                    # A `.py` file read by a literal path, as `open('helpers.py').read()`.
+                    text = reader.code_files.text(given[0], reader)
+                    if text is None and host == reader.current.index:
+                        text = reader.code_files.read_now(node, given[0], reader)
+                    texts = [] if text is None else [text]
                 if launch is not None:
                     texts = list(launch.sources)
                 elif not builtin and len(texts) > 1:
@@ -12438,7 +12551,9 @@ def _made_file(call: ast.Call, reader: _Reader) -> ast.AST | None:
     return None if where is None else where.given(call)
 
 
-def _written_modules(reader: _Reader, cells: Sequence[_Cell]) -> _WrittenModules:
+def _written_modules(
+    reader: _Reader, cells: Sequence[_Cell], *, only: Callable[[_Cell, ast.Call], bool] | None = None,
+) -> _WrittenModules:
     """The modules the pad's cells write: each Python file a write, copy or
     move of a file reaches (`_written_target`), a call that writes the file
     one argument names (`_FILE_MAKERS`), or a file an archive is given by
@@ -12449,7 +12564,7 @@ def _written_modules(reader: _Reader, cells: Sequence[_Cell]) -> _WrittenModules
     module, and each Python file the cell names in a string; the folder it
     unpacks into, or a `git clone` clones into, is kept too. An empty file
     `.touch()` makes counts, as a package's `__init__.py`. Read from
-    `cells`."""
+    `cells`, and with `only`, from the calls it keeps alone."""
     paths: set[str] = set()
     names: set[str] = set()
     unpacked: set[str] = set()
@@ -12459,6 +12574,8 @@ def _written_modules(reader: _Reader, cells: Sequence[_Cell]) -> _WrittenModules
     for cell in cells:
         unplaced = False
         for call in cell.writer_calls:
+            if only is not None and not only(cell, call):
+                continue
             last = _last_name(call.func)
             if last in _WRITER_METHODS and _literal_non_module_args(call):
                 # A frame or a chart saved to a file a literal names, not a module.
@@ -15088,7 +15205,7 @@ def _from_unread(value: ast.AST, at: _Unread) -> bool:
     builtin = reader.exec_builtin(func)
     if builtin is not None:
         source = _exec_source(value, builtin)
-        if source is None or _literal_source(source) is not None:
+        if source is None or _source_text(source, reader) is not None:
             return False
         compiled = isinstance(source, ast.Call) and reader.exec_builtin(source.func) == "compile"
         return _from_unread(source, at) if compiled else True
@@ -15417,7 +15534,8 @@ def _filled_names(node: ast.AST, at: _Unread) -> set[str]:
         source = _exec_source(node, "exec")
         namespace = node.args[1] if len(node.args) > 1 else _keyword(node, "globals")
         root = _namespace_root(namespace)
-        return {root} if source is not None and _literal_source(source) is None and root is not None else set()
+        unread = source is not None and _source_text(source, at.reader) is None
+        return {root} if unread and root is not None else set()
     # A function given code the check can't read, as `run.__code__ = co`.
     swapped = {t.value.id for t in node.targets if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name)
                and _swaps_in_unread_code(t, at.cell)} if isinstance(node, ast.Assign) else set()
@@ -15778,7 +15896,7 @@ def _poisons_namespace(node: ast.AST, reader: _Reader) -> bool:
             source = _exec_source(node, builtin)
             if isinstance(source, ast.Call) and reader.exec_builtin(source.func) == "compile":
                 source = _exec_source(source, "compile")
-            literal = source is not None and _literal_source(source) is not None
+            literal = source is not None and _source_text(source, reader) is not None
             return not literal and any(_cell_namespace(a, reader) for a in args)
     return False
 
@@ -16122,6 +16240,47 @@ class _CellRead:
         return any(v.func == visit.func for v in chain) and self._reread.get(visit.func, 0) >= _REREAD_LIMIT
 
 
+_LOOPS = (ast.For, ast.AsyncFor, ast.While)
+
+
+def _stale_code_files(reader: _Reader) -> bool:
+    """Whether code may change a `.py` file the checked cell reads from disk
+    (`_CodeFiles.reads`) before that read runs: a write the cell, or code it
+    runs, makes ahead of the read, or anywhere in it when a loop may run the
+    read again, or one in a function an earlier cell defined, which the cell
+    may call first. A write the check can't place counts too."""
+    files = reader.code_files
+    current = reader.current
+    for call, _source, path in files.reads:
+        at = reader.position(call)
+        looped = _in_loop(call, reader)
+
+        def first(cell: _Cell, node: ast.Call, *, at: tuple[int, ...] = at, looped: bool = looped) -> bool:
+            if cell.host < current.index:
+                return cell.scope_of(node) is not None
+            return looped or reader.position(node) < at
+
+        written = _written_modules(reader, reader.cells, only=first)
+        if written.anywhere or path in {_code_file_key(p, files.root) for p in written.paths}:
+            return True
+    return False
+
+
+def _in_loop(node: ast.AST, reader: _Reader) -> bool:
+    """Whether a loop may run `node` more than once: one around it in its
+    cell or, for literal code a cell runs, any loop in that cell."""
+    cell = reader.cell_of(node)
+    if cell.index != cell.host:
+        host = next((c for c in reader.cells if c.index == cell.host), None)
+        return host is None or any(isinstance(n, _LOOPS) for n in ast.walk(host.tree))
+    parent = cell.parents.get(node)
+    while parent is not None:
+        if isinstance(parent, _LOOPS):
+            return True
+        parent = cell.parents.get(parent)
+    return False
+
+
 def find_cell_writes(
     *,
     code: str,
@@ -16177,10 +16336,13 @@ def find_cell_writes(
     cells: list[_Cell] = []
     errored: set[int] = set()
     stopped_at: dict[int, int] = {}
+    recorded: dict[int, Mapping[str, str]] = {}
     for given in earlier:
         parsed = _EARLIER_CELLS.get(code=given.code, index=len(cells))
         if parsed is None:
             continue
+        if given.code_files:
+            recorded[parsed.index] = given.code_files
         if given.errored:
             errored.add(parsed.index)
             line = given.stopped_at
@@ -16194,8 +16356,9 @@ def find_cell_writes(
     cells.append(current)
     project = next((s for s in snapshots if s.label == "project"), None)
     project_root = project.root if project is not None else None
+    code_files = _CodeFiles(root=project_root, recorded=recorded)
     reader = _Reader(cells, current=current, project_root=project_root, stopped_early=frozenset(errored),
-                     stopped_at=stopped_at)
+                     stopped_at=stopped_at, code_files=code_files)
     # A literal exec in an earlier cell is read as more cells, placed right
     # after the cell that ran it, so a later call to what it defined is read.
     # Then the literal code the cell runs through exec() and its kin is read
@@ -16221,7 +16384,7 @@ def find_cell_writes(
             return old
         new = _Reader([*old.cells, *read.cells], current=current, project_root=project_root,
                       stopped_early=frozenset(errored), stopped_at=stopped_at,
-                      tainted_contexts=old.tainted_contexts | tainted)
+                      tainted_contexts=old.tainted_contexts | tainted, code_files=code_files)
         new.stopped = old.stopped
         new.made = old.made
         return new
@@ -16232,11 +16395,14 @@ def find_cell_writes(
     errored.update(c.index for c in earlier_exec.cells if c.host in errored)
     exec_read = _exec_cells(reader, [current])
     reader = with_cells(reader, exec_read)
+    # A `.py` file read from disk that code may change before the read
+    # holds the cell unchecked, and isn't kept for later checks.
+    stale_files = _stale_code_files(reader)
     literal_code = _ExecRead.joined([earlier_exec, exec_read])
     ran = exec_read.of(current.tree)
     if any(not s.complete for s in snapshots):
         reader.made = _made(reader=reader)
-    owned = _OwnedFiles(earlier_cells, snapshots, errored=frozenset(errored))
+    owned = _OwnedFiles(earlier_cells, snapshots, errored=frozenset(errored), code_files=code_files)
     conversation = [*earlier_cells, current]
     everything = [*conversation, *literal_code.cells]
     while True:
@@ -16286,7 +16452,7 @@ def find_cell_writes(
         # `_PATH_LIMIT` paths for one value it gives up, and the first read
         # stands alone.
         wide = _Reader(reader.cells, current=current, project_root=project_root, errored=frozenset(errored),
-                       tainted_contexts=reader.tainted_contexts)
+                       tainted_contexts=reader.tainted_contexts, code_files=code_files)
         wide.made = reader.made
         maybe = _CellRead(wide, inputs=inputs, files_only=True)
         maybe.run()
@@ -16308,5 +16474,6 @@ def find_cell_writes(
         http=tuple(sorted(read.http, key=lambda w: w.line)),
         # A depth limit that may have stopped a read short of a write
         # (`_Reader.stopped`) leaves the cell unchecked too.
-        unchecked=bool(unread) or reader.stopped,
+        unchecked=bool(unread) or reader.stopped or stale_files,
+        code_files={} if stale_files else dict(code_files.read),
     )

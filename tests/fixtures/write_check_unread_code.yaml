@@ -260,13 +260,218 @@ cases:
       exec('import requests\nrequests.post("https://{}/api/orders", json={{"qty": 1}})'.format("erp.example.test"))
     card: unchecked
 
-  - name: exec of a file read
+  - name: exec of a py file read by a literal path is read like a literal
     files:
       job.py: |
         import requests
         requests.post("https://erp.example.test/api/orders", json={"qty": 1})
     code: |-
       exec(open("job.py").read())
+    card: read
+    kinds: [http]
+
+  - name: exec of a py file with no write runs with no card
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+    code: |-
+      exec(open('helpers.py').read())
+    card: none
+
+  - name: exec of a py file through Path read_text runs with no card
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+    code: |-
+      from pathlib import Path
+      exec(Path('helpers.py').read_text())
+    card: none
+
+  - name: exec of a compile of a py file runs with no card
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+    code: |-
+      exec(compile(open('helpers.py').read(), 'helpers.py', 'exec'))
+    card: none
+
+  - name: a read of what a py file an earlier exec read made runs with no card
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+    earlier:
+      - code: exec(open('helpers.py').read())
+        code_files:
+          helpers.py: |
+            import pandas as pd
+            def load_orders():
+                return pd.DataFrame({"qty": [1, 2]})
+      - orders = load_orders()
+    code: |-
+      print(orders.mean())
+      print(orders["qty"].sum())
+    card: none
+
+  - name: a copy of what a py file an earlier exec read made runs with no card
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+    earlier:
+      - import pandas as pd
+      - code: exec(open('helpers.py').read())
+        code_files:
+          helpers.py: |
+            import pandas as pd
+            def load_orders():
+                return pd.DataFrame({"qty": [1, 2]})
+      - df = load_orders()
+    code: |-
+      print(pd.DataFrame(df).describe())
+    card: none
+
+  - name: a call to a write a py file an earlier exec read defined is held
+    files:
+      push.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - code: exec(open('push.py').read())
+        code_files:
+          push.py: |
+            import requests
+            def push():
+                requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    code: |-
+      push()
+    card: read
+    kinds: [http]
+
+  - name: an earlier exec of a py file reads as its own check read it, not as the file is now
+    files:
+      push.py: |
+        def push():
+            pass
+    earlier:
+      - code: exec(open('push.py').read())
+        code_files:
+          push.py: |
+            import requests
+            def push():
+                requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    code: |-
+      push()
+    card: read
+    kinds: [http]
+
+  - name: an earlier exec of a py file its own check didn't read leaves what it made unread
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+    earlier:
+      - exec(open('helpers.py').read())
+      - orders = load_orders()
+    code: |-
+      print(orders.mean())
+    card: unchecked
+
+  - name: exec of a py file the cell overwrites first is unchecked
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+    code: |-
+      open('helpers.py', 'w').write('x = 1')
+      exec(open('helpers.py').read())
+    card: unchecked
+
+  - name: exec of a py file in a loop that overwrites it is unchecked
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+    code: |-
+      for i in range(2):
+          exec(open('helpers.py').read())
+          open('helpers.py', 'w').write('x = 1')
+    card: unchecked
+
+  - name: exec of a py file after a call to an earlier function that writes it is unchecked
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+    earlier:
+      - |-
+        def save(text):
+            open('helpers.py', 'w').write(text)
+    code: |-
+      save('x = 1')
+      exec(open('helpers.py').read())
+    card: unchecked
+
+  - name: exec of a py file after a write the check can't place is unchecked
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+    code: |-
+      import sys
+      open(sys.argv[0], 'w').write('x = 1')
+      exec(open('helpers.py').read())
+    card: unchecked
+
+  - name: exec of a py file by a relative path once a cell changed folder is unchecked
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+      sub/helpers.py: x = 1
+    earlier:
+      - import os; os.chdir('sub')
+    code: |-
+      exec(open('helpers.py').read())
+    card: unchecked
+
+  - name: exec of a py file that isn't there is unchecked
+    code: |-
+      exec(open('missing.py').read())
+    card: unchecked
+
+  - name: exec of a file that isn't a py file is unchecked
+    files:
+      job.txt: x = 1
+    code: |-
+      exec(open('job.txt').read())
+    card: unchecked
+
+  - name: exec of a py file inside a function is unchecked
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+    code: |-
+      def setup():
+          exec(open('helpers.py').read())
+      setup()
     card: unchecked
 
   - name: exec of a code object bound in an earlier cell

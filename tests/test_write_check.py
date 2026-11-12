@@ -3699,6 +3699,33 @@ def test_a_decoded_literal_that_is_no_write_stays_free(code, snap):
 # ── SQL read from a file ────────────────────────────────────────────────────
 
 @pytest.fixture
+def helpers(tmp_path: Path, monkeypatch):
+    (tmp_path / "helpers.py").write_text("def load():\n    return 1\n")
+    (tmp_path / "big.py").write_text("x = 1\n" * 20_000)
+    monkeypatch.chdir(tmp_path)
+    return snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+
+
+def test_an_exec_of_a_py_file_returns_the_text_it_read(helpers):
+    absolute = (helpers.root / "helpers.py").as_posix()
+    for code in ("exec(open('helpers.py').read())", f"exec(open({absolute!r}).read())"):
+        writes = find_cell_writes(code=code, earlier=(), snapshots=(helpers,))
+        assert not writes.needs_approval()
+        assert writes.code_files == {"helpers.py": "def load():\n    return 1\n"}
+
+
+def test_a_py_file_the_cell_may_change_first_is_not_kept(helpers):
+    code = "open('helpers.py', 'w').write('x = 1')\nexec(open('helpers.py').read())"
+    writes = find_cell_writes(code=code, earlier=(), snapshots=(helpers,))
+    assert writes.unchecked and writes.code_files == {}
+
+
+def test_a_py_file_past_the_cap_is_unchecked(helpers):
+    writes = find_cell_writes(code="exec(open('big.py').read())", earlier=(), snapshots=(helpers,))
+    assert writes.unchecked and writes.code_files == {}
+
+
+@pytest.fixture
 def sql_files(tmp_path: Path, monkeypatch):
     (tmp_path / "fix.sql").write_text(
         "UPDATE suppliers SET lead_time_days = 21 WHERE supplier_id = 'S005';\nDELETE FROM orders WHERE id = 3;"
