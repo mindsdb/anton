@@ -576,7 +576,8 @@ class TurnRequestV1:
     ui_locale: str | None = None
     #: Per-engine connector data cowork-server resolved for this turn:
     #: {engine: {"usage_notes": str}}. Rendered only for engines the turn's
-    #: vault connects. Absent when no connected engine has notes.
+    #: vault connects and, apart and as data, for the connector ids of the
+    #: ``custom_api`` block. Absent when no connected engine has notes.
     connectors: dict | None = None
     #: Whether this turn may build connector templates with
     #: `create_connector_draft`, sent back on the `connector` event. Anything

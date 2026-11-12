@@ -965,7 +965,7 @@ def build_cloud_chat_session(
     from anton.config.settings import AntonSettings
     from anton.core.backends.local import local_scratchpad_runtime_factory
     from anton.core.llm.client import LLMClient
-    from anton.core.llm.identity import build_runtime_context
+    from anton.core.llm.identity import build_runtime_context, render_custom_api_notes
     from anton.core.session import ChatSession, ChatSessionConfig, SystemPromptContext
     from anton.workspace import Workspace
 
@@ -1124,6 +1124,7 @@ def build_cloud_chat_session(
         extra_tools.append(draft_tool)
         tool_allowlist |= {draft_tool.name}
 
+    custom_api_notes = render_custom_api_notes(request.custom_api, request.connectors)
     config = ChatSessionConfig(
         llm_client=llm_client,
         settings=settings,
@@ -1144,13 +1145,17 @@ def build_cloud_chat_session(
         # configured block is the same one desktop injects; the serving-model
         # line is derived by the session from the provider's response.
         system_prompt_context=SystemPromptContext(
-            runtime_context=build_runtime_context(settings, cloud_datasource=request.datasource),
+            runtime_context=build_runtime_context(
+                settings, cloud_datasource=request.datasource, cloud_custom_api=request.custom_api
+            ),
             # The delivery half and the credential half of the prompt context;
             # the desktop harness injects its own via `_turn_style_context`.
             # Org and team skills cowork marks always-on follow, so they hold
-            # on every turn rather than only when recalled.
+            # on every turn rather than only when recalled. Custom API usage
+            # notes are model-written, so they come first: later is stronger.
             suffix=(
-                (_POD_PROMPT_SUFFIX_WITH_TEMPLATES if connector_drafts is not None else _POD_PROMPT_SUFFIX)
+                (f"{custom_api_notes}\n\n" if custom_api_notes else "")
+                + (_POD_PROMPT_SUFFIX_WITH_TEMPLATES if connector_drafts is not None else _POD_PROMPT_SUFFIX)
                 + render_always_on_skills(_always_on_skills(turn_skills))
             ),
         ),
