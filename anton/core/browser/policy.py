@@ -29,7 +29,11 @@ ACTIONS = {
         "A person has to act before the goal can continue: sign in, solve a CAPTCHA, enter a "
         "two-factor code, accept terms, or confirm a payment."
     ),
-    "done": "The goal is achieved, or the information the goal asks for is visible on this page now.",
+    "collect": (
+        "This page shows information the goal needs, and the goal needs more from other pages: keep what "
+        "this page shows, then go on."
+    ),
+    "done": "The goal is achieved, or all the information the goal asks for is visible or already kept.",
     "unsure": "None of the other options clearly fits.",
 }
 
@@ -95,7 +99,9 @@ def _region_line(part: list[Element]) -> str:
     return f"{json.dumps(label, ensure_ascii=False)}: {len(part)} elements, such as {names}"
 
 
-def step_request(*, goal: str, page: Page, inputs: dict | None, history: list[str]) -> StepRequest:
+def step_request(
+    *, goal: str, page: Page, inputs: dict | None, history: list[str], kept: bool = False,
+) -> StepRequest:
     """The step's question: what kind of step, on which element (or, on a
     crowded page, in which part of it), whether a person must act, whether
     it commits something, and which input it types."""
@@ -120,7 +126,8 @@ def step_request(*, goal: str, page: Page, inputs: dict | None, history: list[st
         "next_action": {
             "type": "choice",
             "instructions": "Decide the single next browser step that best advances the goal on this page.",
-            "criteria": ACTIONS,
+            # A page already kept can't be kept again: the next step moves on.
+            "criteria": {k: v for k, v in ACTIONS.items() if not (kept and k == "collect")},
         },
         "needs_user": {
             "type": "noul",
