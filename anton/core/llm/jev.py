@@ -259,9 +259,12 @@ def detach_conversation(headers: dict[str, str]) -> dict[str, str]:
 # --- Bulk labelling for scratchpad code: classify() and classify_yes_no() ---
 #
 # Questions in one request are evaluated in isolation against a shared state,
-# so each text rides in its own question and the state holds only the task.
-# Texts placed in the state instead would all be context for every question,
-# and neighbours measurably change the labels of borderline texts.
+# so each text rides in its own question and the state holds only the task and
+# the category definitions. Texts placed in the state instead would all be
+# context for every question, and neighbours measurably change the labels of
+# borderline texts. Definitions in the state rather than in every question's
+# criteria cut the tokens per text by more than half, at about one point of
+# agreement with labelling one text per request.
 
 CLASSIFY_MODEL = "jev-1.13.0"
 # The MindsHub edge refuses an IP address for a minute once it sends about 300
@@ -271,7 +274,7 @@ CLASSIFY_CONCURRENCY = 4
 CLASSIFY_TIMEOUT_S = 120.0
 # Jev allows 64k tokens per request; estimate conservatively below it.
 CLASSIFY_BATCH_TOKENS = 48_000
-CLASSIFY_BATCH_ITEMS = 200
+CLASSIFY_BATCH_ITEMS = 500
 # The name of the question in each per-text decision handed back to callers.
 ANSWER = "answer"
 EMPTY_TEXT = "empty_text"
@@ -331,7 +334,21 @@ def item_question(question: dict, item) -> dict:
     return {**question, "instructions": f"{question.get('instructions') or ''}\n\nText:\n{text}"}
 
 
-def _estimate_tokens(question: dict) -> int:
+def shared_definitions(question: dict) -> tuple[str, dict]:
+    """The batch state and the per-text question: a choice question's category
+    descriptions move into the state once, and its criteria keep bare names."""
+    criteria = question.get("criteria")
+    if question.get("type") != "choice" or not isinstance(criteria, dict) or not any(criteria.values()):
+        return BATCH_STATE, question
+    lines = [
+        f"- {name}: {text if isinstance(text, str) else json.dumps(text, ensure_ascii=False)}"
+        for name, text in criteria.items() if text
+    ]
+    state = BATCH_STATE + "\n\nCategory definitions used by every question:\n" + "\n".join(lines)
+    return state, {**question, "criteria": {name: "" for name in criteria}}
+
+
+def _estimate_tokens(question) -> int:
     # About 3 characters a token: an overestimate for English, so batches stay under the limit.
     return len(json.dumps(question, ensure_ascii=False)) // 3 + 1
 
@@ -372,7 +389,8 @@ async def decide_many(
 ) -> list[JevDecision]:
     """Ask ``question`` about every item; one decision per item, in order.
 
-    Items go out in batches, each item in its own question. A batch over Jev's
+    Items go out in batches, each item in its own question; category
+    descriptions go in the shared state (`shared_definitions`). A batch over Jev's
     context limit is split in half until it fits; a single item that still
     does not fit fails alone. Per-item failures come back as decisions with
     ``error`` set; their answers hold the one answer under ``ANSWER``.
@@ -381,6 +399,7 @@ async def decide_many(
     """
     results: list[JevDecision | None] = [None] * len(items)
     counts = {"done": 0, "ok": 0, "failed": 0}
+    state, question = shared_definitions(question)
     questions: dict[int, dict] = {}
     for i, item in enumerate(items):
         if isinstance(item, str) and not item.strip():
@@ -389,7 +408,8 @@ async def decide_many(
             questions[i] = item_question(question, item)
     indexes = list(questions)
     batches = [[indexes[k] for k in batch]
-               for batch in plan_batches([questions[i] for i in indexes], max_tokens=max_batch_tokens)]
+               for batch in plan_batches([questions[i] for i in indexes],
+                                         max_tokens=max_batch_tokens - _estimate_tokens(state))]
     queue: asyncio.Queue = asyncio.Queue()
     for batch in batches:
         queue.put_nowait(batch)
@@ -410,7 +430,7 @@ async def decide_many(
             if wait > 0:
                 await sleep(wait)
             decision = await decide(
-                base_url=base_url, api_key=api_key, model=model, state=BATCH_STATE,
+                base_url=base_url, api_key=api_key, model=model, state=state,
                 questions={f"t{i}": questions[i] for i in batch},
                 timeout_s=timeout_s, client=client, headers=headers,
             )

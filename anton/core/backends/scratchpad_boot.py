@@ -988,7 +988,7 @@ if _scratchpad_model:
             list of names, or a dict of name -> description. Returns one dict per
             text, in order: {"label", "p", "probabilities"}; on a failed item
             "label" is None and "error" says why. Texts go out in batches of up to
-            about 200 per request, each judged on its own.
+            about 500 per request, each judged on its own.
             """
             built = _jev.choice_question(categories, question)
             return [_jev.choice_result(d) for d in _run_decisions(texts, built)]

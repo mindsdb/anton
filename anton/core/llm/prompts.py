@@ -107,8 +107,10 @@ call is synchronous.
 - classify(texts, categories) labels each text with exactly one category (a list of names, \
 or a dict of name -> description) and returns one dict per text, in order, with keys \
 label, p and probabilities. classify_yes_no(texts, question) answers one yes/no question \
-about each text and returns one dict per text with keys yes and p_yes. A failed item has \
-label or yes set to None and an error key. Both run on a dedicated decision model, judge \
+about each text and returns one dict per text with keys yes and p_yes. A text is a string, \
+or a dict of named fields such as {{"title": ..., "body": ...}}: pass separate fields as a \
+dict rather than joining them into one string. A failed item has label or yes set to None \
+and an error key. Both run on a dedicated decision model, judge \
 each text on its own, are synchronous, and label thousands of texts a minute: set \
 estimated_execution_time_seconds to about 30 + texts / 50, and pass all the texts in one \
 call rather than looping over them.
