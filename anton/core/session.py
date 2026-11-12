@@ -2135,6 +2135,7 @@ class ChatSession:
         self._workspace = config.workspace
         self._browser_config = config.browser
         self._browser_state = None
+        self._tidy_browser = False
         self._data_vault = config.data_vault
         self._connector_usage_notes = config.connector_usage_notes
         # Kept so an artifact backend can be given the same project .env the
@@ -3617,6 +3618,10 @@ class ChatSession:
                 # steps above raise, or the pool outlives the process.
                 try:
                     if self._browser_state is not None:
+                        # Jev may close a browser the task is done with; its tabs are noted.
+                        from anton.core.browser.tool import tidy_after_turn
+
+                        await tidy_after_turn(self)
                         await self._browser_state.aclose()
                     if self._jev_http is not None:
                         await self._jev_http.aclose()
@@ -6878,6 +6883,15 @@ class ChatSession:
             # guard passes the books this turn opened so a late finalizer
             # can't close a newer turn's.
             self._emit_turn_cost(expected=_turn_cost_books, exc=_turn_exc)
+            # close() tidies the browser only after a turn that ended normally
+            # and used it; a cancelled or failed one leaves it as it is.
+            browser = self._browser_state
+            self._tidy_browser = bool(
+                browser is not None and browser.used and not _turn_raised
+                and _turn_cost_books.ended_by not in ("cancelled", "error")
+            )
+            if browser is not None:
+                browser.used = False
             if _turn_raised and usage_log_enabled():
                 # A turn that raised starts no end-of-turn work, so it is done now.
                 log_background_done(_turn_trace)

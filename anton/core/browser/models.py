@@ -57,6 +57,11 @@ class Element(_Answer):
     disabled: bool = False
     offscreen: bool = False
     options: list[str] = []
+    #: The names of the containers around it, innermost last ("Select dates ›
+    #: November 2026"): what tells apart elements that share a name.
+    context: str = ""
+    #: Inside an open dialog, which is what a step on that page is about.
+    in_dialog: bool = False
 
     @property
     def secret(self) -> bool:
@@ -79,7 +84,10 @@ class Page(_Answer):
     text: str = ""
     truncated: bool = False
     scroll: Scroll | None = None
-    challenges: list[Challenge] = []
+    #: Check frames the person can see; the router's pod always sends it (empty
+    #: when there are none) and leaves out invisible checks. None from a host
+    #: that doesn't say.
+    challenges: list[Challenge] | None = None
 
 
 class ActionResult(_Answer):
@@ -116,6 +124,17 @@ class SessionInfo(_Answer):
     control: Control
     #: The active tab's address; null before a page loads.
     url: str | None = None
+    #: People watching it now: the router's viewers; None from a host that doesn't say.
+    viewers: int | None = None
+    #: The most tabs the agent may open for this task; None from a host that has no limit.
+    max_tabs: int | None = None
+    #: Tabs a recycled session noted, which reopen only when asked for.
+    parked_tabs: list["ParkedTab"] = []
+
+
+class ParkedTab(_Answer):
+    url: str
+    title: str = ""
 
 
 class Tab(_Answer):

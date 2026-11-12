@@ -193,21 +193,17 @@ def test_scratchpad_package_installed_goes_to_posthog_not_the_collector(monkeypa
 
 
 def test_the_browser_events_go_to_posthog_with_every_property(monkeypatch):
-    """The collector keeps five property names, so the browser's shadow
-    agreement would arrive there with none of its own."""
+    """The collector keeps five property names, so the browser's events would
+    arrive there with none of their own."""
     _clear_ci(monkeypatch)
     captured = _capture_posthog(monkeypatch)
 
-    props = {"jev_action": "click", "llm_action": "click", "agree_action": "True",
-             "agree_target": "False", "p_action": "0.95", "p_target": "0.40"}
-    analytics.send_event(_PosthogSettings(), "browser_jev_shadow", **props)
     analytics.send_event(_PosthogSettings(), "browser_jev_step", jev_action="click", p_action="0.91", ms="12")
     analytics.send_event(_PosthogSettings(), "browser_human_check", kind="Cloudflare")
 
-    assert [body["event"] for _, body in captured] == ["browser_jev_shadow", "browser_jev_step", "browser_human_check"]
-    assert props.items() <= captured[0][1]["properties"].items()
-    assert {"jev_action": "click", "p_action": "0.91", "ms": "12"}.items() <= captured[1][1]["properties"].items()
-    assert captured[2][1]["properties"]["kind"] == "Cloudflare"
+    assert [body["event"] for _, body in captured] == ["browser_jev_step", "browser_human_check"]
+    assert {"jev_action": "click", "p_action": "0.91", "ms": "12"}.items() <= captured[0][1]["properties"].items()
+    assert captured[1][1]["properties"]["kind"] == "Cloudflare"
 
 
 @pytest.mark.parametrize("event", sorted(analytics._POSTHOG_EVENTS))
