@@ -11,12 +11,12 @@ confirmations. Only their Done in the browser hands it back.
 Some steps never run on the model's word alone, whoever proposed them:
 typing into a secret field is refused, and a step that commits something (a
 submit, a purchase, a message, a deletion) waits for the user's Approve on
-the write gate's card. A click or drag by position runs at once unless the
-web's browser finds a commit control under it (or is set to hold every
-one); on the desktop the tool asks once per page, a card the app may
-approve by itself. One that may land in a frame waits for a one-step
-Approve on both: the web's browser holds it as a control it can't read, and
-on the desktop the tool shows the card each time.
+the write gate's card. A click or drag by position runs at once: the web's
+browser holds one only on a commit control (or when set to hold every one),
+and the desktop app approves by itself the card the tool shows for the page
+there, by its Approve line. One that may land in a frame waits for a
+one-step Approve on both: the web's browser holds it as a control it can't
+read, and on the desktop the tool shows the card each time.
 
 ``browser_jev`` (settings) decides how much Jev does:
 

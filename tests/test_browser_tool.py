@@ -903,7 +903,10 @@ async def test_on_the_desktop_sending_text_in_a_message_box_waits_for_approve(el
     assert plain.ok is True and not plain.reason
 
 
-async def test_on_the_desktop_position_steps_ask_once_per_page(elicit_answers):
+async def test_on_the_desktop_one_position_card_covers_the_page_and_carries_the_approve_line_the_app_answers(elicit_answers):
+    """The desktop app approves the card for clicks by position by itself,
+    by its Approve line, so a click by position runs at once there too. The
+    card covers the page until it goes to another address."""
     host = FakeHost(pages=[PAGE])
     session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
     elicit_answers.answers += ["approve", "approve"]
@@ -912,6 +915,7 @@ async def test_on_the_desktop_position_steps_ask_once_per_page(elicit_answers):
     await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "x": 30, "y": 40}})
     assert len(elicit_answers.requests) == 1
     assert "Approve clicks by position on this page?" in elicit_answers.requests[0].prompt
+    assert [o.detail for o in elicit_answers.requests[0].options][0] == "Allow clicks by position on this page"
     # Another address: ask again.
     host.pages = [{**PAGE, "url": "https://shop.example/other"}]
     await browser_tool.handle_browser(session, click)
@@ -921,16 +925,25 @@ async def test_on_the_desktop_position_steps_ask_once_per_page(elicit_answers):
 
 def test_every_line_on_approving_clicks_by_position_says_a_click_into_a_frame_asks_each_time():
     """The position card, the module's account of what waits for the user,
-    the prompt and the skill all say that approving clicks by position for a
-    page leaves a click into a frame asking each time."""
+    the README, the prompt and the skill all say that a click by position
+    runs at once and one that may land in a frame waits for a one-step
+    Approve on both hosts. None says clicks by position ask once per page:
+    the desktop app approves that card by itself."""
     from pathlib import Path
 
     card = browser_tool._card_prompt(hold="position", url=PAGE["url"], step="click at (10, 20)")
     assert "A click or drag into an embedded frame still asks each time." in card
     module = " ".join(browser_tool.__doc__.split())
-    assert "clicks by position ask once per page," not in module
-    assert "A click or drag by position runs at once unless the web's browser finds a commit control under it" in module
+    readme = " ".join((Path(__file__).parents[1] / "README.md").read_text().split())
+    for text in (module, readme):
+        assert "ask once per page" not in text and "asks once per page" not in text
+    assert "A click or drag by position runs at once: the web's browser holds one only on a commit control" in module
+    assert "the desktop app approves by itself the card the tool shows for the page" in module
     assert "One that may land in a frame waits for a one-step Approve on both" in module
+    assert (
+        "a click by position runs at once, except that a click or drag by position that may land in a frame "
+        "(an embedded form or widget) waits for a one-step Approve on both hosts."
+    ) in readme
     assert "Controls inside a frame have no number" in browser_tool.BROWSER_TOOL_PROMPT
     assert "each such step waits for the user's Approve" in browser_tool.BROWSER_TOOL_PROMPT
     skill = (Path(browser_tool.__file__).parents[1] / "memory" / "builtin_skills" / "browser" / "SKILL.md").read_text()
