@@ -1223,7 +1223,9 @@ async def _do_act(session: "ChatSession", tc_input: dict) -> str | ToolOutcome:
     state.steps.append(_describe(body, typed=False))
     page = result.page or await state.client.page(session_id=state.session_id)
     checked = await _unless_human_check(session, page)
-    return f"Done: {_describe(body)}.\n\n{checked or _show(state, page)}"
+    # Only a host's false says so; null is a host that can't tell.
+    note = " The page did not change." if result.changed is False else ""
+    return f"Done: {_describe(body)}.{note}\n\n{checked or _show(state, page)}"
 
 
 async def _do_screenshot(session: "ChatSession", tc_input: dict):
@@ -1591,6 +1593,7 @@ async def _do_run(session: "ChatSession", tc_input: dict) -> str:
                 return _handback(state, f"Paused before {_describe(body)}. {refusal.content}", taken, page)
 
             before = signature(page)
+            before_text = page.text
             result = await _send_step(session, state=state, body={**body, "include_page": True}, page=page)
             if isinstance(result, ToolOutcome):
                 return _handback(state, f"Paused at {_describe(body)}. {result.content}", taken, page)
@@ -1598,7 +1601,11 @@ async def _do_run(session: "ChatSession", tc_input: dict) -> str:
             taken.append(_describe(body))
             state.steps.append(_describe(body, typed=False))
             page = result.page or await state.client.page(session_id=state.session_id)
-            stalls = stalls + 1 if signature(page) == before else 0
+            # Text that arrives late is progress. The host's true never resets the
+            # count by itself: on a page with a clock or a carousel every step
+            # changes something.
+            unchanged = signature(page) == before and page.text == before_text
+            stalls = stalls + 1 if result.changed is False or unchanged else 0
             if stalls >= MAX_STALLS:
                 return _handback(state, "The last steps changed nothing on the page; take over with action=act.", taken, page)
 

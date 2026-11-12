@@ -137,6 +137,9 @@ class ActionResult(_Answer):
 
     ok: bool
     url: str
+    #: Whether the step changed what the page shows; None when the host can't
+    #: tell (a frame, canvas or media element, a hover, a wait) or doesn't say.
+    changed: bool | None = None
     page: Page | None = None
 
 

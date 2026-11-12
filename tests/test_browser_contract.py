@@ -174,6 +174,14 @@ def test_the_frame_fixture_reads_as_the_model_sees_it():
     assert 'Frame "https://forms.example.test/form-2" (no numbers: act by pixel):' in shown
 
 
+def test_the_action_fixture_says_whether_the_step_changed_anything():
+    actions = _load("action").examples
+    assert ActionResult.model_validate(actions["a step that changed nothing"].body).changed is False
+    assert ActionResult.model_validate(actions["the answer with the page after"].body).changed is True
+    # An older host sends no `changed`: the tool can't tell.
+    assert ActionResult.model_validate({"ok": True, "url": "https://shop.example.test/cart"}).changed is None
+
+
 def test_the_control_fixture_tells_done_by_the_person_from_any_other_agent_record():
     controls = _load("control").examples
     fresh = SessionInfo.model_validate(controls["a session the agent holds"].body).control

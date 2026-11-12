@@ -98,6 +98,9 @@ class FakeHost:
         #: What the browser says it holds in an approval_required answer:
         #: none, as an older host answers, unless a test sets it.
         self.held: dict | None = None
+        #: Whether each step changed what the page shows: null, "can't
+        #: tell", unless a test sets it.
+        self.changed: bool | None = None
 
     def page(self):
         self.shown = self.pages[0] if len(self.pages) == 1 else self.pages.pop(0)
@@ -140,7 +143,7 @@ class FakeHost:
             if held is not None:
                 return held
             page = self.page()
-            return httpx.Response(200, json={"ok": True, "url": page["url"], "page": page})
+            return httpx.Response(200, json={"ok": True, "url": page["url"], "changed": self.changed, "page": page})
         if path.endswith("/sites") and request.method == "GET":
             return httpx.Response(200, json={"sites": self.sites})
         if path.endswith("/sites") and request.method == "POST":
@@ -708,6 +711,19 @@ async def test_act_takes_one_step_and_returns_the_page():
     result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "element": 2}})
     assert result.ok and result.content.startswith("Done: click [2].")
     assert ("POST", "/sessions/t-1/action", {"action": "click", "element": 2, "include_page": True}) == host.calls[-1][:3]
+
+
+async def test_act_says_when_the_step_changed_nothing():
+    host = FakeHost()
+    host.changed = False
+    session = make_session(host)
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "element": 2}})
+    assert result.content.startswith("Done: click [2]. The page did not change.\n\n")
+    # Changed, or a host that can't tell: nothing more to say.
+    for changed in (True, None):
+        host.changed = changed
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "element": 2}})
+        assert result.content.startswith("Done: click [2].\n\n")
 
 
 async def test_act_reads_coordinates_as_screenshot_pixels(elicit_answers):
@@ -1314,6 +1330,37 @@ async def test_run_stops_when_steps_change_nothing(fake_jev):
     fake_jev.queue += [jev_answers("scroll_down")] * 3
     result = await browser_tool.handle_browser(session, {"action": "run", "goal": "find the footer"})
     assert "changed nothing" in result.content
+
+
+async def test_run_does_not_stall_on_text_that_arrives_late(fake_jev):
+    """Results that fill in after a click change the text and not the
+    elements; the run goes on."""
+    pages = [{**PAGE, "text": f"Searching… {i} results so far"} for i in range(5)]
+    host = FakeHost(pages=pages)
+    host.changed = True
+    session = make_session(host)
+    fake_jev.queue += [jev_answers("click", target="e2")] * 3 + [jev_answers("done")]
+    result = await browser_tool.handle_browser(session, {"action": "run", "goal": "search for laptops"})
+    assert "changed nothing" not in result.content
+    assert "Jev reports the goal is done" in result.content and len(host.posted("/action")) == 3
+
+
+async def test_run_hands_back_when_the_host_says_changed_but_nothing_did(fake_jev):
+    """A host's true never resets the stall count by itself, and its false
+    counts a stall even when the text moved (a clock, a carousel)."""
+    host = FakeHost()
+    host.changed = True
+    session = make_session(host)
+    fake_jev.queue += [jev_answers("scroll_down")] * 3
+    result = await browser_tool.handle_browser(session, {"action": "run", "goal": "find the footer"})
+    assert "changed nothing" in result.content and len(host.posted("/action")) == browser_tool.MAX_STALLS
+
+    ticking = FakeHost(pages=[{**PAGE, "text": f"12:0{i}"} for i in range(5)])
+    ticking.changed = False
+    session = make_session(ticking)
+    fake_jev.queue[:] = [jev_answers("scroll_down")] * 3
+    result = await browser_tool.handle_browser(session, {"action": "run", "goal": "find the footer"})
+    assert "changed nothing" in result.content and len(ticking.posted("/action")) == browser_tool.MAX_STALLS
 
 
 async def test_run_clamps_max_steps(fake_jev):

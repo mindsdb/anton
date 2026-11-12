@@ -1,5 +1,9 @@
 {
-  "description": "POST /sessions/{id}/action: one step. x and y with coords \"screenshot\" are pixels on the latest screenshot, which the host scales back to the page. A point wins over an element when a step has both. The answer carries the page after the step when include_page is true.",
+  "description": "POST /sessions/{id}/action: one step. x and y with coords \"screenshot\" are pixels on the latest screenshot, which the host scales back to the page. A point wins over an element when a step has both. A step settles before the host answers: when it started a main-frame request or a navigation, the host waits until those requests are done and the page has shown no change for settle_quiet_ms, at most settle_max_ms (a navigation also waits for its new page's network, as before); a step that started neither answers at once. changed says whether the step changed what the page shows: true, false, or null when the host can't tell (a frame, canvas or media element in view or under the step, a closed shadow root, a hover, a wait, a read, or a page it couldn't watch). The answer carries the page after the step when include_page is true.",
+  "limits": {
+    "settle_max_ms": 3000,
+    "settle_quiet_ms": 400
+  },
   "examples": {
     "click an element": {
       "where": "POST /sessions/{id}/action",
@@ -65,6 +69,7 @@
       "body": {
         "ok": true,
         "url": "https://shop.example.test/cart",
+        "changed": true,
         "page": {
           "url": "https://shop.example.test/cart",
           "title": "Your cart",
@@ -93,7 +98,8 @@
           ],
           "truncated": true,
           "text": "Your cart. 1 item. Total $999.",
-          "challenges": []
+          "challenges": [],
+          "frames": []
         }
       }
     },
@@ -103,7 +109,18 @@
       "status": 200,
       "body": {
         "ok": true,
-        "url": "https://shop.example.test/cart"
+        "url": "https://shop.example.test/cart",
+        "changed": true
+      }
+    },
+    "a step that changed nothing": {
+      "where": "POST /sessions/{id}/action",
+      "kind": "response",
+      "status": 200,
+      "body": {
+        "ok": true,
+        "url": "https://shop.example.test/cart",
+        "changed": false
       }
     }
   }
