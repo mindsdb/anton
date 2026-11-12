@@ -2031,6 +2031,14 @@ _STATUS_INSTRUCTIONS = {
 }
 
 
+def _recalled_preferences(session: "ChatSession") -> str:
+    """The rules and identity this conversation recalled from memory, for the
+    page build to read beside the agent's own `user_preferences`. A session
+    double without `recalled_preferences` recalls nothing."""
+    recall = getattr(session, "recalled_preferences", None)
+    return recall().strip() if callable(recall) else ""
+
+
 async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     """Build an already-registered artifact end to end.
 
@@ -2255,6 +2263,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
                     agent_understanding=agent_understanding,
                     known_data=(tc_input.get("known_data") or "").strip(),
                     user_preferences=(tc_input.get("user_preferences") or "").strip(),
+                    recalled_preferences=_recalled_preferences(session),
                     user_language=user_language,
                     primary=artifact.primary,
                     progress=queue,

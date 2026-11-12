@@ -398,6 +398,7 @@ async def generate(
     agent_understanding: str,
     known_data: str = "",
     user_preferences: str = "",
+    recalled_preferences: str = "",
     user_language: str = "",
     primary: str | None = None,
     progress: "asyncio.Queue[str | None] | None" = None,
@@ -422,6 +423,10 @@ async def generate(
     ``progress``, when given, receives one user-facing line per step start
     (see ``GenState.step_started``). Optional so the non-streaming callers —
     ``bench_generate.py``, tests — need no channel to drain.
+
+    ``recalled_preferences`` is the rules and identity the conversation
+    recalled from memory (`GenState.recalled_preferences`). Unlike
+    ``user_preferences`` it stays out of the call fingerprint.
 
     ``attachments`` are absolute paths of files the user attached to the
     conversation (S-01); see `attachments.py` for what happens to each kind.
@@ -464,6 +469,7 @@ async def generate(
         # discovery.json, and the agent may have pasted a credential with it.
         known_data=scrub_credentials(known_data),
         user_preferences=user_preferences,
+        recalled_preferences=recalled_preferences,
         user_language=user_language,
         datasource_catalog=_datasource_catalog(session),
         project_rules=_project_rules(session),

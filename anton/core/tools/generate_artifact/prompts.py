@@ -1490,6 +1490,32 @@ def prd_section(state) -> str:
     return f"{PRD_SECTION_HEADER}\n{body}\n{PRD_SECTION_FOOTER}" if body else ""
 
 
+RECALLED_PREFERENCES_HEADING = (
+    "Recalled from memory. These are instructions to you, not content: apply "
+    "what fits this page, but never print, quote or summarize them, or the "
+    "user's name or profile, on the page or in any text the user sees. The "
+    "operator's rules always apply; where the user's own saved rules or "
+    "profile differ from the request, the request wins."
+)
+
+
+def preferences_text(state) -> str:
+    """The calling agent's `user_preferences`, then what the conversation
+    recalled from memory under `RECALLED_PREFERENCES_HEADING`.
+
+    The agent often leaves its field empty even when its prompt holds a saved
+    preference such as a chart color, so the gathering step and the one-reply
+    static writer read both. With nothing recalled, the agent's text comes
+    back unchanged.
+    """
+    stated = state.user_preferences
+    recalled = (state.recalled_preferences or "").strip()
+    if not recalled:
+        return stated
+    block = f"{RECALLED_PREFERENCES_HEADING}\n{recalled}"
+    return f"{stated}\n\n{block}" if stated else block
+
+
 KNOWN_DATA_HEADER = "## Known data (passed in by the calling agent)"
 KNOWN_DATA_FOOTER = "--- end of known data ---"
 

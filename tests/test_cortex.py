@@ -1764,3 +1764,44 @@ class TestManagedLayer:
         assert "Name: Ada" in (g / "profile.md").read_text()
         assert "Reports go out on Mondays" in (p / "lessons.md").read_text()
         assert _snapshot(managed) == before
+
+
+class TestPromptPreferences:
+    """The rule and identity sections the system prompt held, kept so the page
+    build gets the user's saved preferences even when the agent passes none."""
+
+    async def test_it_keeps_identity_and_rules_but_not_lessons(self, person):
+        g, p = person
+        cortex = Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="autopilot")
+        assert cortex.prompt_preferences == ""
+
+        prompt = await cortex.build_memory_context("hola")
+        kept = cortex.prompt_preferences
+
+        assert "- Name: Ada" in kept
+        assert "- Use httpx" in kept and "- Use the Django ORM" in kept
+        assert "Lessons" not in kept and "CoinGecko" not in kept
+        assert "Datasource Context" not in kept and "Warehouse schema notes" not in kept
+        # The same text the prompt renders, not a second rendering.
+        assert prompt.startswith("\n\n" + kept + "\n\n## Your Memory — Global Lessons")
+
+    async def test_operator_rules_lead_and_operator_lessons_stay_out(self, person, managed):
+        cortex = _managed_cortex(person, managed)
+        await cortex.build_memory_context("hola")
+        kept = cortex.prompt_preferences
+
+        assert kept.startswith("## Operator Memory — Rules\n" + _OPERATOR_WINS)
+        assert "Sales figures are in thousands" not in kept
+        assert "- Name: Ada" in kept
+
+    async def test_with_learned_memory_off_only_operator_rules_are_kept(self, person, managed):
+        cortex = _managed_cortex(person, managed)
+        await cortex.build_memory_context("hola", learned_memory_scope="off")
+        kept = cortex.prompt_preferences
+
+        assert kept.startswith("## Operator Memory — Rules")
+        assert "Name: Ada" not in kept and "Use httpx" not in kept
+
+    async def test_nothing_saved_keeps_nothing(self, cortex):
+        await cortex.build_memory_context("hola")
+        assert cortex.prompt_preferences == ""

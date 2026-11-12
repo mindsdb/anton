@@ -91,6 +91,7 @@ budgets add to the totals below.
 | Method | Purpose |
 |---|---|
 | `build_memory_context()` | Assemble memories for system-prompt injection (~5800-token budget, plus the operator layer's when there is one) |
+| `prompt_preferences` | The rule and identity sections (operator rules, identity, global and project rules; no lessons) the latest `build_memory_context()` rendered. The session pins it with the prompt, and `generate_artifact` hands it to the page build beside the agent's own `user_preferences` |
 | `get_scratchpad_context()` | Combine scratchpad wisdom from both scopes, after the operator's layer when there is one, for the tool-description injection — the channel cerebellum lessons flow through |
 | `encode(engrams)` | Route engrams to the right hippocampus by scope. Called by `memorize`, the consolidator, the cerebellum, and the ACC |
 | `encoding_gate(engram)` | Mode-dependent check: does this engram need user confirmation? |

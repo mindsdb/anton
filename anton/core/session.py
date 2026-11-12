@@ -2589,6 +2589,18 @@ class ChatSession:
         pinned = self._memory_pin().get("read")
         return pinned if pinned is not None else self._cortex.memory_read
 
+    def recalled_preferences(self) -> str:
+        """The rules and identity this conversation's system prompt recalled
+        from memory (Cortex.prompt_preferences, pinned with the prompt).
+
+        "" without a Cortex, before the first turn built its prompt, and when
+        the pin holds no such text.
+        """
+        if self._cortex is None:
+            return ""
+        pinned = self._memory_pin().get("preferences")
+        return pinned if isinstance(pinned, str) else ""
+
     def _memory_pin(self) -> dict:
         """The memory and workspace text this conversation's prompt was first built with, by part.
 
@@ -3231,6 +3243,9 @@ class ChatSession:
                         user_message, learned_memory_scope=learned_memory_scope
                     )
                 self._set_memory_pin("system", memory_section)
+                # Pinned with the prompt it came from, so the page build reads
+                # the same rules the agent was given.
+                self._set_memory_pin("preferences", self._cortex.prompt_preferences)
         elif learned_memory_scope is not None:
             from anton.core.memory.cortex import learned_memory_notice
 

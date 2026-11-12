@@ -493,6 +493,9 @@ class Cortex:
         # from the learned tiers; memory_read combines them.
         self._prompt_read: MemoryRead | None = None
         self._scratchpad_read = 0
+        # The sections of the latest system prompt that say who the user is
+        # and how to work; see prompt_preferences.
+        self._prompt_preferences = ""
 
         self._move_project_identity()
 
@@ -503,6 +506,19 @@ class Cortex:
         if self._prompt_read is None:
             return None
         return replace(self._prompt_read, scratchpad=self._scratchpad_read)
+
+    @property
+    def prompt_preferences(self) -> str:
+        """The rules and identity the latest build_memory_context rendered.
+
+        These are the operator's rules, the user's identity, and the global and
+        project rules, as the same sections the system prompt holds. Lessons
+        and the datasource topic are left out: they record what happened
+        before, not how the user wants the work done. Empty before
+        build_memory_context has run and when no such section applied; with
+        learned memory off or unavailable, only the operator's rules.
+        """
+        return self._prompt_preferences
 
     def _move_project_identity(self) -> None:
         """Move identity lines that landed in project scope up to `global_hc`.
@@ -593,6 +609,8 @@ Do NOT add, modify, or summarize rules — return them verbatim.
                 learned stores while still reading the operator's managed layer.
         """
         sections: list[str] = []
+        # The rule and identity sections, also kept for prompt_preferences.
+        preferences: list[str] = []
         read_learned = learned_memory_scope not in ("off", "unavailable")
         if learned_memory_scope is not None:
             presence = self._learned_memory_presence() if read_learned else "unavailable"
@@ -637,10 +655,11 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         # The lessons get the same budget as each of the person's tiers,
         # counted apart from theirs.
         if managed_engrams:
-            sections.append(
+            preferences.append(
                 f"## Operator Memory — Rules\n{operator_precedence}\n"
                 f"{self._format_rules_engrams(managed_engrams)}"
             )
+            sections.append(preferences[-1])
         if self.managed_hc is not None:
             managed_lessons = self.managed_hc.recall_lessons(
                 token_budget=self._LESSONS_BUDGET_TOKENS, exclude_scratchpad=True
@@ -651,21 +670,25 @@ Do NOT add, modify, or summarize rules — return them verbatim.
 
         if not read_learned:
             self._prompt_read = MemoryRead(learned=False)
+            self._prompt_preferences = "\n\n".join(preferences)
             return "\n\n" + "\n\n".join(sections)
 
         # 2. Identity
         if identity:
-            sections.append(f"## {memory_label} — Identity\n{identity}")
+            preferences.append(f"## {memory_label} — Identity\n{identity}")
+            sections.append(preferences[-1])
 
         # 3. Global rules, then 4. project rules.
         if global_engrams:
-            sections.append(
+            preferences.append(
                 f"## {memory_label} — Global Rules\n{self._format_rules_engrams(global_engrams)}"
             )
+            sections.append(preferences[-1])
         if project_engrams:
-            sections.append(
+            preferences.append(
                 f"## {memory_label} — Project Rules\n{self._format_rules_engrams(project_engrams)}"
             )
+            sections.append(preferences[-1])
             for engram in project_engrams:
                 self._log_read_engram(engram)
 
@@ -710,6 +733,7 @@ Do NOT add, modify, or summarize rules — return them verbatim.
             lessons=lessons,
             profile_lines=profile_lines,
         )
+        self._prompt_preferences = "\n\n".join(preferences)
 
         if not sections:
             return ""

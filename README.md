@@ -160,6 +160,8 @@ When you run `anton` in a directory:
 - `.anton/memory/lessons.md` — factual knowledge: things I've learned (stock API quirks, dashboard patterns, data fetching notes).
 - `.anton/memory/topics/*` — topic-specific lessons: deeper notes organized by subject (dashboard-visualization, stock-data-api, etc.).
 
+When `generate_artifact` builds a page, the discovery steps that draft its brief and PRD, and the one-reply static writer, read the agent's own `user_preferences` first and then the rules and identity the conversation's prompt recalled from memory (the operator's rules, the profile, and the global and project rules; not lessons). A saved preference such as a chart color reaches the build even when the agent leaves `user_preferences` empty. The recalled text is framed as instructions, never page content. The operator's rules always apply, and the request wins over the user's own saved rules where they differ. The later spec and page-writer steps build from the brief and PRD that carry these preferences.
+
 Override the working folder:
 ```bash
 anton --folder /path/to/workspace

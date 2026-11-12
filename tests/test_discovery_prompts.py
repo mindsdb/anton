@@ -21,6 +21,7 @@ from anton.core.tools.generate_artifact.discovery.prompts import (
     step_message,
 )
 from anton.core.tools.generate_artifact import engine
+from anton.core.tools.generate_artifact.prompts import RECALLED_PREFERENCES_HEADING, preferences_text
 from anton.core.tools.generate_artifact.discovery.prompts import (
     SCRATCHPADS_HEADER,
     render_scratchpads_context,
@@ -80,6 +81,40 @@ def test_call_kickoff_carries_the_request_understanding_and_context():
     assert "a live BTC price dashboard" in kickoff
     assert "CoinGecko" in kickoff
     assert "prefers dark mode" in kickoff
+
+
+_TEAL = "## Your Memory — Global Rules\n## Always\n- Always use teal (#008080) for chart bars"
+_OPERATOR = "## Operator Memory — Rules\n## Never\n- Never load scripts from external CDNs"
+
+
+def test_call_kickoff_carries_the_recalled_preferences_after_the_agents_own():
+    kickoff = build_call_kickoff(_state(recalled_preferences=_TEAL))
+    section = kickoff.split("## User preferences\n", 1)[1]
+    assert section.startswith(f"prefers dark mode\n\n{RECALLED_PREFERENCES_HEADING}\n{_TEAL}")
+
+
+def test_call_kickoff_carries_the_recalled_preferences_when_the_agent_passed_none():
+    kickoff = build_call_kickoff(_state(user_preferences="", recalled_preferences=_TEAL))
+    assert f"## User preferences\n{RECALLED_PREFERENCES_HEADING}\n{_TEAL}\n\n" in kickoff
+
+
+def test_nothing_recalled_leaves_the_preferences_as_the_agent_wrote_them():
+    assert preferences_text(_state(recalled_preferences="  \n")) == "prefers dark mode"
+    assert "## User preferences\n(none known)" in build_call_kickoff(_state(user_preferences=""))
+
+
+def test_the_recalled_heading_frames_them_as_instructions_and_keeps_operator_rules_binding():
+    # The heading covers every recalled section, the operator's included, so
+    # "the request wins" must stop at the user's own rules, and nothing of
+    # the user's profile may be printed on a page that can be shared.
+    text = preferences_text(_state(recalled_preferences=f"{_OPERATOR}\n\n{_TEAL}"))
+    assert text.index(RECALLED_PREFERENCES_HEADING) < text.index(_OPERATOR)
+    assert "instructions to you, not content" in RECALLED_PREFERENCES_HEADING
+    assert "never print, quote or summarize them, or the user's name or profile" in RECALLED_PREFERENCES_HEADING
+    assert "The operator's rules always apply" in RECALLED_PREFERENCES_HEADING
+    assert "where the user's own saved rules or profile differ from the request, the request wins" in (
+        RECALLED_PREFERENCES_HEADING
+    )
 
 
 def test_the_gathering_step_asks_for_finish_gathering():
