@@ -47,6 +47,7 @@ from anton.core.session import ChatSession, ChatSessionConfig, _VerifierVerdict
 from anton.core.settings import CoreSettings
 from anton.core.tools.generate_artifact.discovery.engine import _exec_ran
 from anton.core.tools.registry import ToolOutcome
+from anton.core.utils.write_check import parse_http_write_rules
 from tests.conftest import make_mock_llm
 
 UPDATE_CELL = (
@@ -690,6 +691,70 @@ async def test_a_cell_that_runs_code_the_check_cant_read_waits_and_says_so(proje
     snap = snapshot_project_files(root=project, label="project", taken_at=10**10)
     writes = find_cell_writes(code=EXEC_SCRIPT_CELL, earlier=[EarlierCell(code=SCRIPT_CELL)], snapshots=(snap,))
     assert writes.unchecked and writes.needs_approval()
+
+
+EXEC_HELPERS = "exec(open('helpers.py').read())\n"
+HELPERS = "import pandas as pd\ndef load_orders():\n    return pd.DataFrame({'qty': [1, 2]})\n"
+PUSH_HELPERS = (
+    "import requests\n"
+    "def push():\n    requests.post('https://planner.example.com/api/v2/orders/9', json={'qty': 5})\n"
+)
+
+
+async def test_reads_of_what_a_helpers_file_made_raise_no_card(project):
+    """The check reads a `.py` file a cell execs by a literal path, so the
+    exec and the reads after it of what the file made run with no card."""
+    (project / "helpers.py").write_text(HELPERS)
+    cells = (EXEC_HELPERS, "orders = load_orders()\n", "print(orders.mean())\n")
+    harness = _session(project, *cells, http=PLANNER_RULE)
+    seen = await _run(harness=harness, answers=[])
+    assert seen.cards == []
+    assert harness.pad.ran == list(cells)
+
+
+async def test_a_write_a_helpers_file_defines_is_named_where_it_is_defined_and_where_it_runs(project):
+    """As for a def written in the cell: the exec and the call each wait on a
+    card that names the request, not one that says it can't be checked."""
+    (project / "helpers.py").write_text(PUSH_HELPERS)
+    harness = _session(project, EXEC_HELPERS, "push()\n", http=PLANNER_RULE)
+    seen = await _run(harness=harness, answers=[APPROVE, CANCEL])
+    assert len(seen.cards) == 2 and seen.ran_before == [0, 1]
+    for card in seen.cards:
+        assert "This step can't be checked before it runs." not in card.request.prompt
+        assert "planner.example.com" in card.request.prompt
+
+
+async def test_a_later_check_reads_a_helpers_file_as_the_exec_ran_it(project):
+    """What a cell's check read of a file is what later checks read for that
+    cell, so an edit to the file afterwards changes nothing they see."""
+    (project / "helpers.py").write_text(PUSH_HELPERS)
+    elicitor = _AnswersAtOnce(answer=APPROVE)
+    session = await _gated_session(project, elicitor=elicitor)
+    session._write_gate.http_rules = parse_http_write_rules(PLANNER_RULE)
+    pad = _runtime(project)
+    assert await _hold()(session, pad=pad, code=EXEC_HELPERS) is None
+    pad.cells.append(Cell(code=EXEC_HELPERS, stdout="", stderr="", error=None))
+    (project / "helpers.py").write_text("def push():\n    pass\n")
+    assert await _hold()(session, pad=pad, code="push()") is None
+    assert elicitor.asked == 2, "the call still waits: the push that ran posts"
+
+
+async def test_compaction_keeps_what_a_cells_check_read_of_a_helpers_file(project):
+    (project / "helpers.py").write_text(HELPERS)
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    session._write_gate.http_rules = parse_http_write_rules(PLANNER_RULE)
+    pad = _runtime(project)
+    assert await _hold()(session, pad=pad, code=EXEC_HELPERS) is None
+    pad.cells = _runtime(project, EXEC_HELPERS, "orders = load_orders()", *_FILLERS).cells
+    assert pad._compact_cells()
+    assert all(cell.code != EXEC_HELPERS for cell in pad.cells)
+    assert await _hold()(session, pad=pad, code="print(orders.mean())") is None
+    # A session whose checks read nothing of the file can't read what it made.
+    fresh = await _gated_session(project, elicitor=elicitor)
+    fresh._write_gate.http_rules = parse_http_write_rules(PLANNER_RULE)
+    assert await _hold()(fresh, pad=pad, code="print(orders.mean())") is not None
+    assert elicitor.asked == 1
 
 
 @pytest.mark.parametrize("answer", [APPROVE, CANCEL], ids=["approve", "cancel"])
