@@ -178,6 +178,18 @@ def test_the_model_reads_as_much_of_a_frame_as_a_host_sends():
     assert TEXT_PER_FRAME == _load("page").limits["text_per_frame"]
 
 
+def test_the_page_fixture_names_every_frame_limit_the_hosts_hold():
+    """Each host pins its frame constants against these, the time a host
+    gives a read's frames included."""
+    limits = _load("page").limits
+    assert set(limits) == {
+        "frames_read", "elements_per_frame", "text_per_frame", "frame_min_read_px", "frames_phase_ms",
+        "payment_frame_hosts", "sign_in_frame_hosts",
+    }
+    assert limits["frames_phase_ms"] == 2000
+    assert "frames_phase_ms" in _load("page").description
+
+
 def test_a_page_from_a_host_that_predates_frames_says_nothing_about_frames():
     """A host that sends no ``frames`` hasn't said the page has none."""
     body = {key: value for key, value in _load("page").examples["a page with no check"].body.items() if key != "frames"}
