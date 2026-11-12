@@ -185,7 +185,7 @@ TURN_PROTOCOL_VERSION = 1
 DATASOURCE_PROTOCOL_VERSION = 1
 MAX_DATASOURCE_CONNECTIONS = 100
 #: The most custom API connections one turn carries; cowork-server holds the
-#: same cap. The session fetches every one before the turn starts.
+#: same cap.
 MAX_CUSTOM_API_CONNECTIONS = 25
 #: The connector id rule anton's draft parser applies, and auth's longest
 #: connection name: a block outside them did not come from those writers.
@@ -281,7 +281,7 @@ def _parse_datasource_block(value: object) -> DatasourceBlockV1 | None:
 
 @dataclass(frozen=True)
 class CustomApiConnectionRefV1:
-    """One custom API connection the turn may fetch: auth's id and the member's own names, never a value."""
+    """One custom API connection the turn may call: auth's id and the member's own names, never a value."""
 
     connection_id: int
     connector_id: str
@@ -291,7 +291,7 @@ class CustomApiConnectionRefV1:
 
 @dataclass(frozen=True, repr=False)
 class CustomApiBlockV1:
-    """The member's custom API connections and the turn key that fetches them.
+    """The member's custom API connections and the turn key their grants are bound to.
 
     ``repr=False`` keeps the key out of any traceback that prints the request.
     """
@@ -543,7 +543,7 @@ class TurnRequestV1:
     #: gateway is on the `llm` base URL's host.
     datasource: DatasourceBlockV1 | None = None
     #: Optional custom API connections of the member, by auth id, with the turn
-    #: key that fetches their fields (granted to this turn only). No value.
+    #: key their grants are bound to (this turn only). No value.
     custom_api: CustomApiBlockV1 | None = None
     #: Optional ISO 8601 creation time of the conversation, as cowork-server
     #: resolved it. The pod is new every turn and cannot derive this: history
