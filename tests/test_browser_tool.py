@@ -358,6 +358,24 @@ def test_the_prompt_and_the_skill_say_page_content_is_untrusted():
     assert "memory" not in skill.split("Remembering logins", 1)[1]
 
 
+CONNECTOR_FIRST = "A connector the user has connected comes first when it can do the job; use the browser when none fits."
+OPEN_IN_BROWSER = (
+    "When the user asks to open, go to or show a page, open it in the browser so they see it, "
+    "never with a plain fetch or a request from code."
+)
+
+
+def test_the_prompt_and_the_skill_put_a_connected_connector_first_and_open_pages_in_the_browser():
+    from pathlib import Path
+
+    skill = (Path(browser_tool.__file__).parents[1] / "memory" / "builtin_skills" / "browser" / "SKILL.md").read_text()
+    for text in (browser_tool.BROWSER_TOOL_PROMPT, skill):
+        assert CONNECTOR_FIRST in text
+        assert OPEN_IN_BROWSER in text
+    # The old wording let a lookup the user asked to see go to a fetch.
+    assert "Prefer a connector or API when one can do the job" not in browser_tool.BROWSER_TOOL_PROMPT
+
+
 def test_shortlist_ranks_goal_words_and_drops_disabled():
     ranked = shortlist(model(PAGE).elements, "open today's deals")
     assert ranked[0].id == 3
