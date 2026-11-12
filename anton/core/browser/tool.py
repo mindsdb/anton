@@ -20,6 +20,11 @@ the write gate's card, and clicks by position ask once per page.
   on. Also when the session's ``verifier_jev`` is off (the organization
   opted out of Jev) and after Jev refused this session once. ``shadow``, a
   retired mode that only measured Jev's picks, reads as off.
+
+Jev here is whatever decision model the host gave the browser: the
+organization's own (``BrowserConfig.decisions``, or ``decisions_proxy``
+through the host for a cloud turn), else Jev on the session's MindsHub
+connection, for the router and the desktop app's browser alike (``_jev``).
 """
 
 from __future__ import annotations
@@ -427,44 +432,65 @@ def _jev_mode(session: "ChatSession") -> str:
 
 
 async def _jev(session: "ChatSession", *, jev_state: dict, questions: dict):
-    """One Jev decision, or None when Jev is off, refused, or the session isn't on MindsHub.
+    """One decision, or None when there is no decision model to ask.
 
-    Never for the desktop app's own browser: its pages go to no MindsDB
-    service, so the model picks every step there."""
-    if session._browser_config.in_app:
+    The host's own decision model when the config carries one: directly
+    (``BrowserConfig.decisions``, for either browser) or through the host
+    with the session's MindsHub credential (``decisions_proxy``, for a cloud
+    turn, whose pod never holds the model's key). Otherwise Jev on the
+    session's MindsHub connection, for either browser, unless Jev is turned
+    off. None too once the endpoint refused (403)."""
+    if _jev_mode(session) == "off":
         return None
-    if _jev_mode(session) == "off" or _setting(session, "verifier_jev", "on") == "off":
+    config = session._browser_config
+    own, proxy = config.decisions, config.decisions_proxy
+    if own is None and proxy is None and _setting(session, "verifier_jev", "on") == "off":
         return None
     browser = _state(session)
     if browser.jev_refused:
         return None
     connection = _mindshub_connection(session)
-    if connection is None:
-        return None
-    try:
-        api_key = await connection.provider.current_api_key()
-    except Exception:
-        return None
-    if not api_key:
-        return None
+    if own is not None:
+        base_url, url, api_key, model, verify = "", own.url, own.api_key.get_secret_value(), own.model, True
+    elif proxy is not None:
+        # The turn key, which the host checks and maps to the organization.
+        api_key = await _credential(session)
+        if not api_key:
+            return None
+        base_url, url, model = "", proxy.url, proxy.model
+        verify = connection is None or connection.ssl_verify is not False
+    else:
+        if connection is None:
+            return None
+        try:
+            api_key = await connection.provider.current_api_key()
+        except Exception:
+            return None
+        if not api_key:
+            return None
+        base_url, url = connection.base_url, ""
+        model = _setting(session, "verifier_jev_model", "jev-1.13.0")
+        # Same TLS setting as the provider, e.g. behind an intercepting proxy.
+        verify = connection.ssl_verify is not False
     from anton.core.llm import jev
 
     timeout_s = float(_setting(session, "browser_jev_timeout_s", 4.0))
     if browser.jev_http is None:
-        # Same TLS setting as the provider, e.g. behind an intercepting proxy.
-        browser.jev_http = httpx.AsyncClient(timeout=timeout_s, verify=connection.ssl_verify is not False)
+        browser.jev_http = httpx.AsyncClient(timeout=timeout_s, verify=verify)
     decision = await jev.decide(
-        base_url=connection.base_url,
+        base_url=base_url,
+        url=url,
         api_key=api_key,
-        model=_setting(session, "verifier_jev_model", "jev-1.13.0"),
+        model=model,
         state=jev_state,
         questions=questions,
         timeout_s=timeout_s,
         client=browser.jev_http,
     )
     if decision.error == "http_403":
-        # MindsHub refuses Jev to this organization and will refuse every
-        # later call too.
+        # The endpoint refuses this organization (MindsHub's Jev, the
+        # host's own, or the host's proxy to it) and will refuse every later
+        # call too.
         browser.jev_refused = True
     return decision
 

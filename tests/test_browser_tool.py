@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from anton.core.browser import client as browser_client
 from anton.core.browser import tool as browser_tool
 from anton.core.browser.client import BrowserClient
-from anton.core.browser.config import BrowserConfig
+from anton.core.browser.config import BrowserConfig, DecisionsProxy, DecisionsTarget
 from anton.core.browser.models import Page
 from anton.core.browser.page import (
     PAGE_TEXT_HEADING,
@@ -524,6 +524,33 @@ def test_to_dict_never_carries_a_token():
     assert BrowserConfig.from_dict(router.to_dict()) == router
     with pytest.raises(ValueError):
         BrowserConfig(base_url=LOOPBACK, profile=SID, token="secret-key").to_dict()
+
+
+def test_the_hosts_own_decision_model_stays_in_its_process():
+    own = DecisionsTarget(url="https://decide.example.test/v1/systemone", api_key="own-key", model="jev")
+    for config in (
+        BrowserConfig(base_url=BASE, profile=SID, decisions=own),
+        BrowserConfig(base_url=LOOPBACK, profile=SID, token="k", decisions=own),
+    ):
+        assert "own-key" not in repr(config)
+        with pytest.raises(ValueError):
+            config.to_dict()
+    # A turn request can't carry one.
+    block = {"base_url": BASE, "profile": SID, "decisions": {"url": own.url, "api_key": "own-key"}}
+    assert BrowserConfig.from_dict(block).decisions is None
+
+
+def test_a_decisions_target_needs_an_http_url_a_key_and_a_model():
+    assert DecisionsTarget(url="http://localhost:8080/decide", api_key="k", model=" jev ").model == "jev"
+    for bad in (
+        {"url": "ftp://decide.example.test", "api_key": "k"},
+        {"url": "https://user@decide.example.test", "api_key": "k"},
+        {"url": "https://decide.example.test", "api_key": " "},
+        {"url": "https://decide.example.test", "api_key": "k", "model": ""},
+    ):
+        with pytest.raises(ValidationError) as refused:
+            DecisionsTarget(**bad)
+        assert "user@" not in str(refused.value)
 
 
 def test_token_never_in_repr_or_errors():
@@ -1138,11 +1165,96 @@ async def test_on_the_desktop_a_page_an_authorization_request_was_redirected_to_
     assert done.ok is True and len(elicit_answers.requests) == 1
 
 
-async def test_the_desktop_browser_never_calls_jev(fake_jev):
+async def test_the_desktop_browser_asks_jev_on_mindshub(fake_jev):
+    """Local is about needing no browser server: with the LLM on MindsHub,
+    the desktop app's browser asks Jev there, as the router does."""
     session = make_session(FakeHost(), jev_mode="on", config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
-    fake_jev.queue.append(jev_answers("click", target="e2"))
+    fake_jev.queue.append(jev_answers("done"))
+    result = await browser_tool.handle_browser(session, {"action": "run", "goal": "search"})
+    assert "Jev reports the goal is done" in result.content
+    call = fake_jev.calls[0]
+    assert (call["base_url"], call["url"], call["api_key"]) == ("https://api.mindshub.ai/v1", "", "turn-key")
+
+
+async def test_the_desktop_browser_off_mindshub_asks_no_jev(fake_jev):
+    session = make_session(FakeHost(), mindshub=False, config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
     result = await browser_tool.handle_browser(session, {"action": "run", "goal": "search"})
     assert fake_jev.calls == [] and "Jev is not available here" in result.content
+
+
+OWN = DecisionsTarget(url="https://decide.example.test/v1/systemone", api_key="own-key", model="jev-own")
+
+
+@pytest.mark.parametrize("config", [
+    BrowserConfig(base_url=BASE, profile=SID, decisions=OWN),
+    BrowserConfig(base_url=LOOPBACK, profile=SID, token="k", decisions=OWN),
+], ids=["router", "desktop"])
+async def test_the_hosts_own_decision_model_picks_the_steps(fake_jev, config):
+    """With the host's own decision model, every browser asks it at its full
+    URL, whatever the LLM, and even with Jev on MindsHub turned off."""
+    session = make_session(FakeHost(), mindshub=False, verifier_jev="off", config=config)
+    fake_jev.queue.append(jev_answers("done"))
+    result = await browser_tool.handle_browser(session, {"action": "run", "goal": "search"})
+    assert "Jev reports the goal is done" in result.content
+    call = fake_jev.calls[0]
+    assert (call["url"], call["api_key"], call["model"], call["base_url"]) == (OWN.url, "own-key", "jev-own", "")
+    assert session.keys_asked == []
+
+
+PROXY = DecisionsProxy(url="https://cowork.example.test/api/v1/browse/decisions", model="jev-own")
+
+
+async def test_a_cloud_turn_asks_the_hosts_proxy_with_the_turn_key(fake_jev):
+    """The pod never holds the organization's key: it posts to the host's
+    route with the turn key, even with Jev on MindsHub turned off."""
+    session = make_session(FakeHost(), verifier_jev="off", config=BrowserConfig(base_url=BASE, profile=SID, decisions_proxy=PROXY))
+    fake_jev.queue.append(jev_answers("done"))
+    result = await browser_tool.handle_browser(session, {"action": "run", "goal": "search"})
+    assert "Jev reports the goal is done" in result.content
+    call = fake_jev.calls[0]
+    assert (call["url"], call["api_key"], call["model"], call["base_url"]) == (PROXY.url, "turn-key", "jev-own", "")
+
+
+async def test_a_proxy_that_refuses_is_not_asked_again(fake_jev):
+    session = make_session(FakeHost(), config=BrowserConfig(base_url=BASE, profile=SID, decisions_proxy=PROXY))
+    fake_jev.queue.append(jev.JevDecision(answers={}, error="http_403"))
+    await browser_tool.handle_browser(session, {"action": "run", "goal": "search"})
+    await browser_tool.handle_browser(session, {"action": "run", "goal": "search"})
+    assert len(fake_jev.calls) == 1
+
+
+def test_the_decisions_proxy_travels_in_a_turn_request_without_a_key():
+    config = BrowserConfig(base_url=BASE, profile=SID, project="p1", decisions_proxy=PROXY)
+    block = config.to_dict()
+    assert block["decisions_proxy"] == {"url": PROXY.url, "model": "jev-own"}
+    assert "key" not in json.dumps(block)
+    assert BrowserConfig.from_dict(block) == config
+    # A malformed proxy reads as none, and the browser still runs.
+    for bad in (
+        {"url": "http://cowork.example.test/d"},
+        {"url": "https://user@cowork.example.test/d"},
+        {"url": "https://cowork.example.test/d?x=1"},
+        {"url": PROXY.url, "api_key": "own-key"},
+        {"url": PROXY.url, "model": " "},
+        "https://cowork.example.test/d",
+    ):
+        read = BrowserConfig.from_dict({**block, "decisions_proxy": bad})
+        assert read is not None and read.decisions_proxy is None
+    with pytest.raises(ValidationError):
+        BrowserConfig(base_url=LOOPBACK, profile=SID, token="k", decisions_proxy=PROXY)
+
+
+async def test_the_browsers_jev_switch_turns_off_the_hosts_own_model_too(fake_jev):
+    session = make_session(FakeHost(), jev_mode="off", config=BrowserConfig(base_url=BASE, profile=SID, decisions=OWN))
+    result = await browser_tool.handle_browser(session, {"action": "run", "goal": "search"})
+    assert fake_jev.calls == [] and result.content.startswith("Step-by-step mode")
+
+
+async def test_without_a_decision_model_the_model_picks_every_step(fake_jev):
+    for session in (make_session(FakeHost(), mindshub=False), make_session(FakeHost(), verifier_jev="off")):
+        result = await browser_tool.handle_browser(session, {"action": "run", "goal": "search"})
+        assert "Jev is not available here" in result.content
+    assert fake_jev.calls == []
 
 
 async def test_the_hand_over_card_names_the_pages_host(elicit_answers):
@@ -1729,6 +1841,26 @@ async def test_decide_posts_questions_and_never_raises():
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(500))) as client:
         failed = await jev.decide(base_url="https://x", api_key="k", model="jev", state={}, questions={}, timeout_s=2, client=client)
     assert failed.error == "http_500" and failed.answers == {}
+
+
+async def test_decide_posts_to_a_full_url_as_given():
+    """An endpoint of the host's own is its full URL: nothing is appended,
+    and the body is the same."""
+    seen = []
+
+    def handler(request):
+        seen.append((str(request.url), request.headers["authorization"], json.loads(request.content)))
+        return httpx.Response(200, json={"answers": {"risky": {"noul": 0.2}}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        decision = await jev.decide(url="https://decide.example.test/v1/systemone", api_key="own", model="jev",
+                                    state={"a": 1}, questions={"risky": {"type": "noul"}}, timeout_s=2, client=client)
+        await jev.decide(base_url="https://api.mindshub.ai/v1/", api_key="k", model="jev", state={}, questions={},
+                         timeout_s=2, client=client)
+    assert decision.yes("risky") == 0.2
+    assert seen[0] == ("https://decide.example.test/v1/systemone", "Bearer own",
+                       {"model": "jev", "state": {"a": 1}, "questions": {"risky": {"type": "noul"}}})
+    assert seen[1][0] == "https://api.mindshub.ai/v1/decisions"
 
 
 # ── wiring ─────────────────────────────────────────────────────────────────
