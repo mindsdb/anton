@@ -371,6 +371,20 @@ def test_the_prompt_and_the_skill_say_page_content_is_untrusted():
     assert "memory" not in skill.split("Remembering logins", 1)[1]
 
 
+OPEN_IN_BROWSER = (
+    "When the user asks to open, go to or show a page, open it in the browser so they see it, "
+    "never with a plain fetch or a request from code."
+)
+
+
+def test_the_prompt_and_the_skill_open_a_requested_page_in_the_browser():
+    from pathlib import Path
+
+    skill = (Path(browser_tool.__file__).parents[1] / "memory" / "builtin_skills" / "browser" / "SKILL.md").read_text()
+    for text in (browser_tool.BROWSER_TOOL_PROMPT, skill):
+        assert OPEN_IN_BROWSER in text
+
+
 def test_shortlist_ranks_goal_words_and_drops_disabled():
     ranked = shortlist(model(PAGE).elements, "open today's deals")
     assert ranked[0].id == 3
