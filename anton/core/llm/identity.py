@@ -104,13 +104,16 @@ def sanitize_connection_label(value: object) -> str | None:
     """A connection name safe to place on one prompt line, or ``None``.
 
     Input: the name the user gave a database connection, as the turn carried it.
-    Output: the name with every non-printable character removed (line and
-    paragraph separators included), cut to the cap and trimmed; ``None`` for a
-    non-string or a name that is empty afterwards. No side effects.
+    Output: the name with every space character (a no-break or full-width space
+    included) made a plain space and every other non-printable character
+    removed (line and paragraph separators included), cut to the cap and
+    trimmed; ``None`` for a non-string or a name that is empty afterwards.
+    cowork-server's producer applies the same rule. No side effects.
     """
     if not isinstance(value, str):
         return None
-    cleaned = "".join(ch for ch in value if ch.isprintable()).strip()
+    spaced = "".join(" " if unicodedata.category(ch) == "Zs" else ch for ch in value)
+    cleaned = "".join(ch for ch in spaced if ch.isprintable()).strip()
     cleaned = cleaned[:MAX_CONNECTION_LABEL_LEN].strip()
     return cleaned or None
 

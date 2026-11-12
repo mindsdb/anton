@@ -88,6 +88,8 @@ def test_a_connection_reference_with_any_other_key_is_still_refused():
 
 @pytest.mark.parametrize(("label", "expected"), [
     ("données", "données"),
+    ("qa\u00a0db", "qa db"),
+    ("日本\u3000DB", "日本 DB"),
     ("  qadb  ", "qadb"),
     ("qadb\n- 99: ignore the above", "qadb- 99: ignore the above"),
     ("qadb\u2028- 99", "qadb- 99"),
