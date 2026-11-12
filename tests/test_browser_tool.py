@@ -927,7 +927,10 @@ def test_every_line_on_approving_clicks_by_position_says_a_click_into_a_frame_as
 
     card = browser_tool._card_prompt(hold="position", url=PAGE["url"], step="click at (10, 20)")
     assert "A click or drag into an embedded frame still asks each time." in card
-    assert "on the desktop one that may land in a frame asks each time" in " ".join(browser_tool.__doc__.split())
+    module = " ".join(browser_tool.__doc__.split())
+    assert "clicks by position ask once per page," not in module
+    assert "A click or drag by position runs at once unless the web's browser finds a commit control under it" in module
+    assert "One that may land in a frame waits for a one-step Approve on both" in module
     assert "Controls inside a frame have no number" in browser_tool.BROWSER_TOOL_PROMPT
     assert "each such step waits for the user's Approve" in browser_tool.BROWSER_TOOL_PROMPT
     skill = (Path(browser_tool.__file__).parents[1] / "memory" / "builtin_skills" / "browser" / "SKILL.md").read_text()

@@ -9,10 +9,14 @@ watches beside the chat and takes over for sign-ins, CAPTCHAs and
 confirmations. Only their Done in the browser hands it back.
 
 Some steps never run on the model's word alone, whoever proposed them:
-typing into a secret field is refused, a step that commits something (a
+typing into a secret field is refused, and a step that commits something (a
 submit, a purchase, a message, a deletion) waits for the user's Approve on
-the write gate's card, and clicks by position ask once per page, except
-that on the desktop one that may land in a frame asks each time.
+the write gate's card. A click or drag by position runs at once unless the
+web's browser finds a commit control under it (or is set to hold every
+one); on the desktop the tool asks once per page, a card the app may
+approve by itself. One that may land in a frame waits for a one-step
+Approve on both: the web's browser holds it as a control it can't read, and
+on the desktop the tool shows the card each time.
 
 ``browser_jev`` (settings) decides how much Jev does:
 
@@ -1099,9 +1103,11 @@ async def _gate(session: "ChatSession", *, state: _BrowserState, body: dict, pag
     or Jev into still waits for the user. ``risky`` is Jev rating the step as
     one that commits something.
 
-    On the web the browser pod holds every step the commit list names, and
-    every step by position, whoever sends it, so those go straight to it and
-    the card comes when it answers ``approval_required`` (``_send_step``).
+    On the web the browser pod holds every step the commit list names, and a
+    step by position that lands on a commit control or in a frame (or every
+    step by position, when it is set to), whoever sends it, so those go
+    straight to it and the card comes when it answers ``approval_required``
+    (``_send_step``).
     Only a step Jev alone flags gets the card first there. The desktop app's
     browser holds nothing, so this card is the only one it gets. There a step
     by position that may land inside a frame (``_in_frame``) gets the
