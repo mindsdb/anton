@@ -35,6 +35,14 @@ class CoreSettings(BaseSettings):
     # used 34.4M tokens, 171 tool rounds and 6 continuations. Hosts that want a
     # tighter limit set their own. `max_tool_rounds` counts across the whole
     # turn, continuations included.
+    # The artifact editor (ENG-4207): `edit_artifact` changes an existing
+    # artifact with one patch-writing model conversation and checks it in a
+    # browser, instead of scratchpad surgery or a generate_artifact rebuild.
+    # ANTON_ARTIFACT_EDITOR=off removes the tool and its routing prompts.
+    artifact_editor: Literal["off", "on"] = "on"
+    # Which of the client's models edits: "planning" (the agent's own) or
+    # "coding" (ANTON_ARTIFACT_EDITOR_ROLE).
+    artifact_editor_role: Literal["planning", "coding"] = "planning"
     max_tool_rounds: int = 250
     max_continuations: int = 10
     # Skip the completion verifier when a turn used fewer than this many tool

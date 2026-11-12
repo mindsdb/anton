@@ -137,6 +137,17 @@ _SENTINEL_REASONS = {
     "missing_name": (TIER_SELF, "missing_argument"),
     "missing_slug": (TIER_SELF, "missing_argument"),
     "missing_description": (TIER_SELF, "missing_argument"),
+    # `edit_artifact` (ENG-4207). A missing task is the agent's own argument.
+    "missing_task": (TIER_SELF, "missing_argument"),
+    # The editor gave up and put every file back: its patches would not place,
+    # or the model stopped answering. The agent can try again or edit another
+    # way, so it is its own to recover from, never a wall.
+    "edit_not_applied": (TIER_SELF, "edit_not_applied"),
+    # The edit landed but failed its browser check twice, so it was put back.
+    # Self-inflicted: the code the editor wrote is what failed.
+    "edit_check_failed": (TIER_SELF, "edit_check_failed"),
+    # The page has no repair cells left this turn (`_out_of_repairs`).
+    "out_of_repairs": (TIER_SELF, "invalid_argument"),
     "invalid_type": (TIER_SELF, "invalid_argument"),
     "invalid_port": (TIER_SELF, "invalid_argument"),
     "invalid_health_timeout": (TIER_SELF, "invalid_argument"),
