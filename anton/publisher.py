@@ -28,7 +28,7 @@ from anton.core.artifacts.internal_files import (
     is_bytecode_name,
 )
 from anton.core.artifacts.models import Artifact, artifact_key as artifact_key_for
-from anton.core.datasources.data_vault import DataVault, LocalDataVault
+from anton.core.datasources.data_vault import DataVault, LocalDataVault, withheld_fields
 from anton.minds_client import minds_request, minds_request_with_status
 from anton.publish_access import access_from_owner_side
 from anton.utils.datasources import scrub_credentials
@@ -665,16 +665,25 @@ def _collect_datasource_secrets(
     secrets: dict[str, str] = {}
     missing: list[str] = []
     for ref in artifact.datasources:
-        fields = vault.load(ref.engine, ref.name)
-        if not fields:
+        # The same resolver a local launch uses, so launch and publish agree
+        # on what a backend gets: no `_` bookkeeping, no MCP secrets.
+        env = vault.env_for(ref.engine, ref.name)
+        if env is None:
             missing.append(ref.slug)
             continue
-        for key, value in fields.items():
-            if value is None:
-                continue
-            env_name = f"{ref.env_prefix}__{key.upper()}"
-            secrets[env_name] = str(value)
+        secrets.update(env)
     return secrets, missing
+
+
+def _withheld_datasource_secrets(artifact: Artifact, vault: DataVault | None = None) -> list[str]:
+    """The DS_* names an artifact's datasources would have had but don't get
+    (an MCP connection's token), so publishing can say why the backend lacks them."""
+    vault = vault or LocalDataVault()
+    names: list[str] = []
+    for ref in artifact.datasources:
+        for key in withheld_fields(vault.read_record(ref.engine, ref.name)):
+            names.append(f"{ref.env_prefix}__{key.upper()}")
+    return names
 
 
 def publish(
@@ -754,12 +763,14 @@ def publish(
         raise FileNotFoundError(f"Path not found: {file_path}")
 
     payload_dict: dict = {}
+    withheld: list[str] = []
     state_manifest = None
 
     artifact = _load_artifact_metadata(file_path) if file_path.is_dir() else None
     if artifact is not None and artifact.type in FULLSTACK_ARTIFACT_TYPES:
         zipped, _included = _zip_fullstack(file_path)
         secrets, missing = _collect_datasource_secrets(artifact, vault)
+        withheld = _withheld_datasource_secrets(artifact, vault)
         payload_dict["artifact_type"] = artifact.type
         payload_dict["artifact_id"] = artifact.id
         payload_dict["secrets"] = secrets
@@ -851,6 +862,8 @@ def publish(
         _save_state_snapshot(file_path, state_manifest)
     if "password_hash" in access_payload:
         result["password_hash"] = access_payload["password_hash"]
+    if withheld:
+        result["withheld_secrets"] = withheld
     return result
 
 
