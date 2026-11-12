@@ -80,3 +80,14 @@ async def test_a_cancelled_turn_is_not_tidied(workspace, tidied):
     with pytest.raises(asyncio.CancelledError):
         await _turn(_session(workspace, mock_llm))
     assert tidied == [False]
+
+
+async def test_a_turn_stopped_at_the_round_cap_is_not_tidied(workspace, tidied, monkeypatch):
+    # A paused turn's last user text is anton's own "Pause here" note: Jev would read it as the task.
+    from tests.test_turn_ended_event import _round_cap
+
+    monkeypatch.setenv("ANTON_VERIFY_MIN_TOOL_ROUNDS", "1")
+    session = _round_cap(workspace)
+    session._browser_state = SimpleNamespace(used=True, aclose=AsyncMock())
+    await _turn(session)
+    assert tidied == [False]
