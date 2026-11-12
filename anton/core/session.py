@@ -5035,7 +5035,10 @@ class ChatSession:
         ask a person grants anything. With no one to ask (no elicitor that
         takes a choice, or no emitter, as in `turn()`), even a message saying
         "don't stop" grants nothing: it returns False and the caller hands back
-        at the configured limit, so an unattended run never spends past it.
+        at the configured limit. "Can ask" is read from the elicitor the host
+        injects, so this holds for `turn()` and cloud turns, which inject none
+        when no one is there; a host that injects a choice elicitor on an
+        unattended turn still lets that turn's message grant.
         Otherwise, two ways to grant, in order:
 
         1. The message that started this turn already says to keep going or
@@ -5082,8 +5085,9 @@ class ChatSession:
 
     def _can_ask_a_choice(self) -> bool:
         """Whether a "choice" question can reach a person this turn: the same
-        test `elicit` applies before publishing one. A host whose turn has no
-        one to answer must not inject an elicitor."""
+        test `elicit` applies before publishing one. Inferred from what the
+        host injects, so a host whose turn has no one to answer must not
+        inject an elicitor."""
         return (
             self.emitter is not None
             and self.elicitor is not None
