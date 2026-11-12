@@ -720,6 +720,48 @@ cases:
       exec("".join(PARTS))
     card: unchecked
 
+  - name: exec of a py file after imports and literal assignments in the cell runs with no card
+    files:
+      h.py: x = 1
+    code: |-
+      import pandas as pd
+      LIMIT = 10
+      exec(open('h.py').read())
+    card: none
+
+  - name: exec of a py file after any other statement in the cell is unchecked
+    files:
+      h.py: x = 1
+    code: |-
+      import logging
+      logging.basicConfig(filename='h.py', filemode='w', format='%(message)s')
+      exec(open('h.py').read())
+    card: unchecked
+
+  - name: exec of a py file after an earlier cell patched open through mock is unchecked
+    files:
+      h.py: x = 1
+    earlier:
+      - |-
+        from unittest import mock
+        mock.patch('builtins.open', mock.mock_open(read_data='x = 2')).start()
+    code: |-
+      exec(open('h.py').read())
+    card: unchecked
+
+  - name: exec of a py file by an absolute path outside the pad's folder is unchecked
+    code: |-
+      exec(open('/etc/hosts.py').read())
+    card: unchecked
+
+  - name: pieces reached through a function's globals are unchecked
+    earlier:
+      - "PARTS = ['x = 1\\n']\ndef f():\n    return None.PARTS"
+      - "import inspect\ninspect.getclosurevars(f).globals['PARTS'].append('import requests\\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\\n')"
+    code: |-
+      exec("".join(PARTS))
+    card: unchecked
+
   - name: a script of harmless pieces joined over cells runs with no card
     earlier:
       - PARTS = {}

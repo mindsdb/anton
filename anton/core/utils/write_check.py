@@ -11871,6 +11871,8 @@ class _CodeFiles:
             self.may_read = _may_read_now(reader)
         if not self.may_read or not posixpath.isabs(path) and reader.cwds != ["."]:
             return None
+        if cell.index != cell.host or not _read_first(call, cell, reader):
+            return None
         text = self.read[path] if path in self.read else _read_code_file(path, self.root)
         if text is None:
             return None
@@ -11878,6 +11880,37 @@ class _CodeFiles:
         self.reads.append((call, source, path))
         self.by_source[id(source)] = text
         return text
+
+
+# The calls the statement that reads a file for exec() may make, besides the read.
+_READ_STATEMENT_CALLS = frozenset({"exec", "eval", "compile", "open", "read", "read_text", "Path"})
+
+
+def _read_first(call: ast.Call, cell: _Cell, reader: _Reader) -> bool:
+    """Whether nothing in `cell` can run before the read `call` makes but
+    plain statements: imports, assignments of literals and docstrings, so no
+    code the check can't follow may change the file first. The statement
+    that reads may call only exec(), compile() and the read itself."""
+    stmt = _top_statement(call, cell)
+    if stmt is None:
+        return False
+    if any(isinstance(n, ast.Call) and _last_name(n.func) not in _READ_STATEMENT_CALLS for n in ast.walk(stmt)):
+        return False
+    for before in cell.tree.body[: cell.tree.body.index(stmt)]:
+        if isinstance(before, (ast.Import, ast.ImportFrom, ast.Pass)):
+            continue
+        if isinstance(before, ast.Expr) and isinstance(before.value, ast.Constant):
+            continue
+        if isinstance(before, (ast.Assign, ast.AnnAssign)) and before.value is not None and all(
+            isinstance(t, ast.Name) for t in (before.targets if isinstance(before, ast.Assign) else [before.target])
+        ):
+            try:
+                ast.literal_eval(before.value)
+            except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+                return False
+            continue
+        return False
+    return True
 
 
 def _sha256(text: str) -> str:
@@ -11990,7 +12023,17 @@ def _may_read_now(reader: _Reader) -> bool:
 _OPAQUE_NAMES = frozenset({
     "chdir", "fchdir", "gc", "ctypes", "get_objects", "get_referrers", "get_referents", "_getframe",
     "currentframe", "__dict__", "__globals__", "f_globals", "f_locals", "f_back", "modules", "setattr",
-    "delattr",
+    "delattr", "patch", "mock", "monkeypatch", "settrace", "setprofile", "addaudithook", "register_at_fork",
+    "excepthook", "finalize", "setitimer", "alarm", "create_task", "ensure_future", "call_later", "call_soon",
+    "call_at", "run_coroutine_threadsafe", "getclosurevars", "locate", "resolve_name", "dictConfig", "fileConfig",
+})
+# Modules that run code by a name or later, patch what code runs, or reach a
+# namespace: a cell that imports one may change a file or a name unseen.
+_OPAQUE_MODULES = frozenset({
+    "unittest", "mock", "signal", "sched", "atexit", "weakref", "threading", "_thread", "multiprocessing",
+    "concurrent", "asyncio", "inspect", "pickle", "dill", "cloudpickle", "joblib", "pydoc", "pkgutil",
+    "importlib", "runpy", "code", "codeop", "gc", "ctypes", "apscheduler", "schedule", "trio", "anyio",
+    "gevent", "eventlet", "twisted", "pytest", "doctest", "trace", "cProfile", "profile", "pdb", "bdb",
 })
 # Calls that load code by a name or a path, which a cell's own code doesn't show.
 _LOADING_CALLS = frozenset({
@@ -12021,14 +12064,19 @@ def _reaches_opaque(cells: Sequence[_Cell], root: Path | None) -> bool:
         for node in cell.walked:
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
-                if isinstance(node, ast.ImportFrom) and node.level or any(_local_module(n, root) for n in names):
+                if isinstance(node, ast.ImportFrom) and node.level or any(
+                    _local_module(n, root) or n.split(".")[0] in _OPAQUE_MODULES
+                    or n.startswith("logging.config") for n in names
+                ):
                     return True
             elif isinstance(node, ast.Call):
                 last = _last_name(node.func)
                 computed = last == "getattr" and not (len(node.args) > 1 and isinstance(node.args[1], ast.Constant))
                 if last in _LOADING_CALLS or last in _BACKGROUND_CALLS or computed:
                     return True
-            elif isinstance(node, ast.Name) and node in cell.looked_up and _local_module(node.id, root):
+            elif isinstance(node, ast.Name) and node in cell.looked_up and (
+                _local_module(node.id, root) or node.id in _OPAQUE_MODULES
+            ):
                 # A literal `importlib.import_module("w")` or `__import__("w")`, read as the module.
                 return True
             elif isinstance(node, ast.Name) and (node.id in _OPAQUE_NAMES or node.id in _BACKGROUND_CALLS) or (
@@ -12092,6 +12140,9 @@ def _read_code_file(path: str, root: Path | None) -> str | None:
         return None
     full = Path(path) if posixpath.isabs(path) else root / path
     try:
+        # A path that resolves outside the pad's folder may name another file in the pad's process.
+        if not full.resolve().is_relative_to(root.resolve()):
+            return None
         if not full.is_file() or full.stat().st_size > 4 * _LITERAL_CODE_LIMIT:
             return None
         text = full.read_bytes().decode("utf-8")
