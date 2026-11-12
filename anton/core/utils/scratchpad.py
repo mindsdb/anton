@@ -23,9 +23,11 @@ from anton.core.utils.write_check import (
     HttpWriteRule,
     ProjectSnapshot,
     SqlWrite,
+    UncheckedCause,
     find_cell_writes,
     snapshot_project_files,
 )
+from anton.utils.datasources import scrub_output
 
 if TYPE_CHECKING:
     from anton.core.backends.manager import ScratchpadManager
@@ -323,10 +325,11 @@ def _request_lines(request: HttpWrite) -> list[str]:
     return lines
 
 
-def _card_prompt(writes: CellWrites) -> str:
+def _card_prompt(writes: CellWrites, code: str = "") -> str:
     """The card: every statement, file change and request the step would
     make, whole, since one Approve runs them all. Statements, paths, URLs and
-    code go in fences, so Cowork's Markdown shows them as written."""
+    code go in fences, so Cowork's Markdown shows them as written. A step the
+    check can't read also shows its `code`, so the person can judge it."""
     lines = ["**Approve this change?**", ""]
     if writes.sql:
         lines += ["This step would change data in a connected source:", ""]
@@ -356,20 +359,33 @@ def _card_prompt(writes: CellWrites) -> str:
     if writes.unchecked:
         lines += ["This step can't be checked before it runs.", ""]
         lines += _cause_lines(writes)
+        if code.strip():
+            lines += ["The step's code:", "", _fence(scrub_output(code)), ""]
     lines.append("It runs only if you approve. Cancel, Skip or no answer stops it.")
     return "\n".join(lines)
+
+
+_WHOLE_STEP_CAUSES = {
+    "restart": "The scratchpad starts again before this step, and an earlier step may have written a file "
+               "Python runs as it starts.",
+    "limit": "Its code goes too deep for the check to follow all of it.",
+    "changed": "A file it runs may change before it runs.",
+    "failed": "The check failed on this step.",
+}
 
 
 def _cause_lines(writes: CellWrites) -> list[str]:
     """Why the check couldn't read the step, each with the line it quotes."""
     lines: list[str] = []
     for cause in writes.causes:
-        if cause.kind == "uses" and cause.name and cause.earlier:
-            lines += [f"It uses {_code_span(cause.name)}, which comes from code an earlier step ran "
-                      "that couldn't be checked:", "", _fence(cause.earlier), ""]
+        if cause.kind in _WHOLE_STEP_CAUSES:
+            lines += [_WHOLE_STEP_CAUSES[cause.kind], ""]
+        elif cause.kind == "uses" and cause.name and cause.earlier:
+            lines += [f"It uses {_code_span(cause.name)}, which code an earlier step ran may have set. "
+                      "The check couldn't read that code:", "", _fence(cause.earlier), ""]
         elif cause.kind == "uses" and cause.name:
-            lines += [f"It uses {_code_span(cause.name)}, which comes from code an earlier step ran "
-                      "that couldn't be checked.", ""]
+            lines += [f"It uses {_code_span(cause.name)}, which code an earlier step ran may have set. "
+                      "The check couldn't read that code.", ""]
         elif cause.code:
             lines += ["It runs code the check can't read:", "", _fence(cause.code), ""]
     return lines
@@ -392,10 +408,10 @@ def _refusal(writes: CellWrites, cause: RefusalCause) -> ToolOutcome:
     )
 
 
-async def _ask_approval(session: ChatSession, writes: CellWrites) -> RefusalCause | None:
+async def _ask_approval(session: ChatSession, writes: CellWrites, code: str) -> RefusalCause | None:
     """Ask Approve or Cancel for a held cell. None when the user picks Approve, else why not."""
     return await ask_approval_card(
-        session, _card_prompt(writes),
+        session, _card_prompt(writes, code),
         approve_detail="Run this step once", cancel_detail="Leave the data and files as they are",
     )
 
@@ -539,7 +555,7 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
     except Exception as exc:
         # The type only, as for a failed question.
         logger.warning("write approval: the check failed (%s)", type(exc).__name__)
-        writes = CellWrites(unchecked=True)
+        writes = CellWrites(unchecked=True, causes=(UncheckedCause(kind="failed"),))
     # The cell keeps what this check read, so a later check reads the same text.
     if callable(expect):
         expect(code, dict(writes.code_files), writes.run_code)
@@ -558,7 +574,7 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
             _log_decision(writes=writes, status="not_held")
         return None
     try:
-        cause = await _ask_approval(session, writes)
+        cause = await _ask_approval(session, writes, code)
     except asyncio.CancelledError:
         # Stop, or the host ending the turn, while the card waited.
         _log_decision(writes=writes, status="stopped")

@@ -410,13 +410,16 @@ def parse_http_write_rules(text: str) -> tuple[HttpWriteRule, ...]:
 
 class UncheckedCause(BaseModel):
     """Why the check couldn't read all of a step, for its card: it runs code
-    the check can't read (`runs`, the line in `code`), or uses `name`, which
+    the check can't read (`runs`, the line in `code`); uses `name`, which
     code an earlier step ran that the check couldn't read may have made
-    (`uses`, that step's line in `earlier`)."""
+    (`uses`, that step's line in `earlier`); the pad starts again before it
+    once a step may have written a startup hook (`restart`); a depth limit
+    stopped the read (`limit`); a file it runs may change first
+    (`changed`); or the check failed (`failed`)."""
 
     model_config = ConfigDict(frozen=True)
 
-    kind: Literal["runs", "uses"]
+    kind: Literal["runs", "uses", "restart", "limit", "changed", "failed"]
     code: str = ""
     name: str = ""
     earlier: str = ""
@@ -16991,7 +16994,7 @@ def find_cell_writes(
         return CellWrites()
     except (RecursionError, MemoryError):
         # Too deep for this Python's parser, and the pad may run another Python (remote backend): hold it.
-        return CellWrites(unchecked=True)
+        return CellWrites(unchecked=True, causes=(UncheckedCause(kind="limit"),))
     cells: list[_Cell] = []
     errored: set[int] = set()
     stopped_at: dict[int, int] = {}
@@ -17124,7 +17127,8 @@ def find_cell_writes(
     # holds the cell only when such code ran.
     if first_unread is not None:
         unread += read.reaches_defined
-    if earlier and earlier[-1].ended_process and modules.hooks_may_run:
+    restarts = bool(earlier) and earlier[-1].ended_process and modules.hooks_may_run
+    if restarts:
         # The pad starts a new process before this cell runs, and that start
         # runs the startup hooks a cell wrote, which the check doesn't read.
         unread.append(current.tree)
@@ -17135,6 +17139,10 @@ def find_cell_writes(
         earlier_line = _quoted(earlier_sites[0], reader) if earlier_sites else ""
         causes += [UncheckedCause(kind="uses", code=_quoted(site, reader), name=_used_name(site),
                                   earlier=earlier_line) for site in read.reaches_defined]
+    # Reasons about the whole step go first, so the cap on reasons never drops them.
+    whole = [UncheckedCause(kind=kind) for kind, applies in (
+        ("restart", restarts), ("limit", reader.stopped), ("changed", stale_files),
+    ) if applies]
     return CellWrites(
         sql=tuple(sorted(read.sql, key=lambda w: w.line)),
         calls=tuple(sorted(read.calls, key=lambda c: c.line)),
@@ -17146,7 +17154,7 @@ def find_cell_writes(
         # A cell that runs code the check can't read runs as written, the read texts not swapped in.
         code_files={} if stale_files or unread or reader.stopped else code_files.hashes(),
         run_code=None if stale_files or unread or reader.stopped else _with_texts(code, code_files),
-        causes=tuple(dict.fromkeys(c for c in causes if c.code or c.name))[:_CAUSES_SHOWN],
+        causes=(*whole, *dict.fromkeys(c for c in causes if c.code or c.name))[:_CAUSES_SHOWN],
     )
 
 
