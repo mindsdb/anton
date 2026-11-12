@@ -77,6 +77,34 @@ Events written back on stdout (JSONL):
   {"kind": "ask_user_answer_rejected", "id", "answer_id", "reason"}  - a stdin
       answer that did not close its question; reason is invalid_option |
       not_found | already_answered. The question stays open on invalid_option.
+  {"kind": "addon", "type": "response.addon", "addon_id", "state", ...}  - what
+      happened to a message the user added mid-task (stdin `addon` lines
+      below); any turn, never rate limited. `addon_id` is the stdin line's.
+      The controller relays it as a `turn_step` (step "addon"), the way it
+      relays the ask_user kinds; an older controller drops it.
+      {"kind": "addon", "type": "response.addon", "state": "ready"}  - exactly
+      this, no addon_id: emitted once at turn start, before any model call,
+      and only when the stdin addon reader is active. From then on an
+      `addon` line reaches the running turn; before it, one is refused.
+      state "added" | "refused" (+ "text", "decided_by"): the verdict on an
+      `addon` line. Refused when no turn is running yet or any more (a line
+      that lands before the session is built is refused too, not buffered),
+      or past the turn's limits: 20 added messages, 4000 characters each,
+      64 KB in all. cowork-server then keeps the message as the next task.
+      A repeat of a refused `addon_id` is refused again.
+      state "read" (+ "text", "decided_by"): a model call that included it
+      has completed. One that fails, or a turn cancelled first, leaves it
+      unread, so it comes back as "returned".
+      state "returned" (+ "text", "decided_by"): the turn ended before the
+      model saw it; sent before the terminal event on every path (completed,
+      failed, interrupted, ended on an unanswered question), so the host can
+      run it as the next task.
+      state "withdrawn" | "already_read" | "returned" (+ "request_id"): the
+      verdict on an `addon_withdraw` line. "returned" when the message was
+      already returned (it is the next task); "already_read" otherwise,
+      including an unknown or refused id.
+      An `addon` line repeating a known `addon_id` re-reports that message's
+      current state rather than adding it twice.
   {"kind": "browser", "session_id": "..."}  - the browser tool opened (or
       reopened) the person's browser session. cowork shows the browser beside
       the chat, with a viewer link it mints with the person's own credential.
@@ -112,11 +140,26 @@ rendered as an agent message; the pod sends it only when the request set
 `tool_messages`.
 A request with `jev_decisions` set to false never asks Jev, MindsHub's
 decision model, whether the agent finished: the organization opted out.
+A request with `ui_locale` (a tag in `anton.core.llm.ui_locale.UI_LOCALE_NAMES`:
+en, es, pt-BR, de, fr, it, ja, ko, zh-CN) tells the agent which
+language the user's app is set to (ENG-4149); absent or unsupported adds nothing.
 
 Answer lines on stdin (interactive turns only), one JSON object per line,
 at most 64 KB:
   {"kind": "answer", "question_id", "answer_id", "values": [...], "text": "...",
    "skipped": false}
+
+Addon lines on stdin (any turn, same 64 KB bound), ENG-4194:
+  {"kind": "addon", "addon_id", "text", "decided_by"}  - hand the running turn
+      a message (ChatSession.add_user_input); answered by an `addon` event
+      with state "added" or "refused".
+  {"kind": "addon_withdraw", "addon_id", "request_id"}  - take back one the
+      model has not seen (ChatSession.withdraw_user_input); answered by an
+      `addon` event with state "withdrawn", "already_read" or "returned".
+  The model sees each added message as a separate text block (never inside a
+  tool result), wrapped in <user_addition id="..."> with a marker drawn per
+  turn; any user_addition tag inside the text is stripped.
+A stdin line of any other kind, or a malformed one, is logged and skipped.
 """
 
 from __future__ import annotations
@@ -270,9 +313,11 @@ def _is_skill_name(slug: object) -> bool:
 
 
 #: The per-task limits a request may set, with the lowest value each accepts.
-#: A turn-token limit of 0 means no limit to anton, so it is refused here: a
-#: producer bug must not turn the ceiling off.
-TURN_LIMIT_MINIMUMS = {"max_tool_rounds": 1, "max_continuations": 0, "max_turn_tokens": 1}
+#: A turn-token or turn-seconds limit of 0 means no limit to anton, so it is
+#: refused here: a producer bug must not turn the limit off.
+TURN_LIMIT_MINIMUMS = {
+    "max_tool_rounds": 1, "max_continuations": 0, "max_turn_tokens": 1, "max_turn_seconds": 1,
+}
 
 
 def _parse_limits(value: object, conversation_id: str) -> dict[str, int]:
@@ -395,6 +440,13 @@ class TurnRequestV1:
     #: controller that does not forward the field changes nothing; anything
     #: else turns it off, since a malformed opt-out must not read as consent.
     jev_decisions: bool = True
+    #: The language the user's app is set to, a tag in
+    #: `anton.core.llm.ui_locale.UI_LOCALE_NAMES` (en, es, pt-BR, de, fr, it,
+    #: ja, ko, zh-CN), which cowork-server read from the app's
+    #: X-Cowork-UI-Locale header (ENG-4149). The
+    #: session validates it (`anton.core.llm.ui_locale`); absent, or a
+    #: controller that does not forward it, leaves the prompt unchanged.
+    ui_locale: str | None = None
     #: Per-engine connector data cowork-server resolved for this turn:
     #: {engine: {"usage_notes": str}}. Rendered only for engines the turn's
     #: vault connects. Absent when no connected engine has notes.
@@ -410,7 +462,8 @@ class TurnRequestV1:
     #: router, is refused. Absent or malformed means no browser tool this turn.
     browser: BrowserConfig | None = None
     #: The tenant's per-task limits cowork-server resolved: any of
-    #: ``max_tool_rounds``, ``max_continuations``, ``max_turn_tokens``. Each one
+    #: ``max_tool_rounds``, ``max_continuations``, ``max_turn_tokens``,
+    #: ``max_turn_seconds``. Each one
     #: present replaces the pod's own default for this turn; an absent one (or
     #: an older controller that sends no block) leaves the default.
     limits: dict[str, int] = field(default_factory=dict)
@@ -449,6 +502,7 @@ class TurnRequestV1:
             interactive=d.get("interactive") is True,
             tool_messages=d.get("tool_messages") is True,
             jev_decisions=d.get("jev_decisions", True) is True,
+            ui_locale=d.get("ui_locale") if isinstance(d.get("ui_locale"), str) else None,
             # Same defensive isinstance check as oauth/trace.
             connectors=(
                 d.get("connectors") if isinstance(d.get("connectors"), dict) else None
