@@ -960,15 +960,15 @@ def test_every_line_on_approving_clicks_by_position_says_a_click_into_a_frame_as
 
 
 def test_the_prompt_and_the_skill_say_how_to_fill_an_ordinary_field_inside_a_frame():
-    """Both hosts let keys into an ordinary field of an embedded form and
-    refuse a secret one. type needs an element number on both, and a frame's
-    fields have none, so the model fills one by a click by pixel and press
-    steps (one key each, with no element, a shape both hosts take), and hands
-    over only what hand_to_user is for: a sign-in, a two-factor code or a
-    payment. Neither host can name the control in another site's frame that
-    a key goes to, so each holds a key that types or deletes, Enter and Space
-    there, and runs Tab, the arrows and the other keys at once: the text says
-    that, not that every key waits."""
+    """A frame's fields have no number, so the model clicks one by pixel and
+    types into it with a focused type: one step, with no card unless it
+    submits, on both hosts. Keys pressed one at a time go wherever the focus
+    is, and each host holds a different set of them: the desktop app's
+    browser, which can't see the focus, holds every key that types, deletes,
+    presses or may pick a commit option; the web's browser reads the focus,
+    in a frame too, and holds one only where it may commit something. The
+    text says that, not that typing goes key by key or that the arrows
+    always run at once."""
     from pathlib import Path
 
     prompt = " ".join(browser_tool.BROWSER_TOOL_PROMPT.split())
@@ -976,17 +976,22 @@ def test_the_prompt_and_the_skill_say_how_to_fill_an_ordinary_field_inside_a_fra
     for text in (prompt, skill):
         assert "hand the browser over rather than typing" not in text
         assert "A secret, card or sign-in field there is the user's" not in text
-        assert "needs an element number, so to fill an ordinary field inside a frame, click it by pixel, then type into it with" in text
-        assert "each key waits for the user's Approve" not in text
-        assert (
-            "a key that types or deletes, Enter and Space each wait for the user's Approve, and Tab, the arrows "
-            "and other keys run at once."
-        ) in text
-        assert (
-            "The browser refuses keys into a secret field there, as anywhere, and a sign-in, two-factor code or "
-            "payment in a frame is the user's to do"
-        ) in text
-    assert 'press steps, one key each ({"action":"press","key":"a"})' in prompt
+        assert "type into it with press steps" not in text and "one key each" not in text
+        assert "Tab, the arrows and other keys run at once" not in text
+        for sentence in (
+            'To fill an ordinary field inside a frame, click it by pixel (one Approve), then type into it with '
+            '{"action":"type","focused":true,"text":"…"}, which types at the caret of the field that has the focus, '
+            'at once and with no card; with "submit":true it also presses Enter, and waits for the user\'s Approve.',
+            "The browser refuses it when the focus isn't on an ordinary text field.",
+            "A press step with no element goes wherever the focus is: Tab runs at once.",
+            "In the desktop app's browser, Enter, Space and a key that types or deletes each wait for the user's "
+            "Approve, and so does an arrow, Home, End, PageUp or PageDown while the page or a frame lists a radio or "
+            "select option that commits something, or a frame wasn't read; the web's browser reads the focused "
+            "control, even in a frame, and holds such a key only where it may commit something.",
+            "The browser refuses keys and typing into a secret field there, as anywhere, and a sign-in, two-factor "
+            "code or payment in a frame is the user's to do",
+        ):
+            assert sentence in text, sentence
     assert "hand_to_user is only for those." in prompt
 
 
