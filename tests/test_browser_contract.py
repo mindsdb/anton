@@ -194,6 +194,18 @@ def test_the_action_fixture_says_whether_the_step_changed_anything():
     assert ActionResult.model_validate({"ok": True, "url": "https://shop.example.test/cart"}).changed is None
 
 
+def test_the_action_fixture_says_a_step_that_changed_the_page_in_place_settles_too():
+    """Both hosts wait for quiet after a step that changed the page in place,
+    whether or not it started a request, and a host may wait out a page
+    marked aria-busy, so only a step that changed nothing and started
+    nothing answers at once."""
+    description = _load("action").description
+    assert "a step that started neither answers at once" not in description
+    assert "or changed the page in place, the host waits" in description
+    assert "A step that changed nothing and started neither answers at once" in description
+    assert "aria-busy" in description
+
+
 def test_the_control_fixture_tells_done_by_the_person_from_any_other_agent_record():
     controls = _load("control").examples
     fresh = SessionInfo.model_validate(controls["a session the agent holds"].body).control
