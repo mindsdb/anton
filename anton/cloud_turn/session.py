@@ -1097,6 +1097,8 @@ def build_cloud_chat_session(
         # Whether cowork renders a tool's message to the user (UI turns do,
         # channel turns do not); only the request can say.
         tool_messages=request.tool_messages,
+        # The user's UI language (ENG-4149); the session drops a bad value.
+        ui_locale=request.ui_locale,
         cortex=cortex,                      # org memory; writes are reported, not stored
         episodic=None,
         self_awareness=None,

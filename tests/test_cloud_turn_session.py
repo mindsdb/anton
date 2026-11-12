@@ -355,6 +355,13 @@ def test_jev_decisions_set_the_completion_check(tmp_path, monkeypatch, jev_decis
     assert cfg.settings.verifier_jev == verifier_jev
 
 
+@pytest.mark.parametrize("ui_locale", ["es", None])
+def test_ui_locale_reaches_the_session(tmp_path, monkeypatch, ui_locale):
+    """ENG-4149: the request's UI language is the session's."""
+    _, cfg = _build(tmp_path, monkeypatch, ui_locale=ui_locale)
+    assert cfg.ui_locale == ui_locale
+
+
 def test_cloud_session_uses_turn_key_from_request(tmp_path, monkeypatch):
     # No minds env set; the credential must come from the request's llm block.
     monkeypatch.delenv("ANTON_MINDS_API_KEY", raising=False)
@@ -598,7 +605,10 @@ def _real_cloud_session(tmp_path, monkeypatch, **req_overrides):
 
 
 def _hermetic_limits_env(monkeypatch):
-    for name in ("ANTON_MAX_TOOL_ROUNDS", "ANTON_MAX_CONTINUATIONS", "ANTON_MAX_TURN_TOKENS"):
+    for name in (
+        "ANTON_MAX_TOOL_ROUNDS", "ANTON_MAX_CONTINUATIONS", "ANTON_MAX_TURN_TOKENS",
+        "ANTON_MAX_TURN_SECONDS",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -615,6 +625,17 @@ def test_the_tenants_limits_from_the_wire_bound_the_real_session(tmp_path, monke
     assert session._max_tool_rounds == 7
     assert session._max_continuations == 2
     assert session._max_turn_tokens == 4_000_000
+
+
+def test_the_time_limit_from_the_wire_bounds_the_real_session(tmp_path, monkeypatch):
+    _hermetic_limits_env(monkeypatch)
+    line = json.dumps({
+        "protocol_version": 1, "conversation_id": "conv_1", "input": "hi",
+        "limits": {"max_turn_seconds": 3600},
+    })
+    request = TurnRequestV1.from_json(line)
+    session = _real_cloud_session(tmp_path, monkeypatch, limits=request.limits)
+    assert session._max_turn_seconds == 3600
 
 
 def test_a_turn_without_limits_keeps_antons_defaults(tmp_path, monkeypatch):
