@@ -46,6 +46,10 @@ Events written back on stdout (JSONL):
   {"kind": "skill", "entries": [...]}   - pre-terminal; skill drafts the agent
       built this turn, as [{"slug", "files": {name: text}}]. Staged only: cowork
       surfaces a card and the user saves it, so nothing reaches the skill store.
+  {"kind": "connector", "entries": [...]}  - pre-terminal; connector templates
+      the agent built this turn with `create_connector_draft`, at most 3, each
+      as `ConnectorDraft.to_dict()`. Sent only when the request set
+      `connector_drafts`. Staged only: cowork shows a card the user saves.
   {"kind": "history", "rows": [...]}  - pre-terminal; this turn's tool
       block-rows as [{"role", "content"}], where content holds only tool_use
       (assistant) or tool_result (user) blocks. For a turn that did not
@@ -501,6 +505,10 @@ class TurnRequestV1:
     #: {engine: {"usage_notes": str}}. Rendered only for engines the turn's
     #: vault connects. Absent when no connected engine has notes.
     connectors: dict | None = None
+    #: Whether this turn may build connector templates with
+    #: `create_connector_draft`, sent back on the `connector` event. Anything
+    #: but a JSON `true` reads as False, so the tool stays off by default.
+    connector_drafts: bool = False
     #: Optional reasoning effort the user picked for this turn. Applied to the
     #: planning model only; the name is passed to the provider uninterpreted.
     #: Absent, null, blank, or non-string keeps the configured default.
@@ -557,6 +565,7 @@ class TurnRequestV1:
             connectors=(
                 d.get("connectors") if isinstance(d.get("connectors"), dict) else None
             ),
+            connector_drafts=d.get("connector_drafts") is True,
             reasoning_effort=reasoning_effort.strip() or None,
             browser=BrowserConfig.from_dict(d.get("browser")),
             limits=_parse_limits(d.get("limits"), str(d["conversation_id"])),
