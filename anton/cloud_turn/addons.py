@@ -9,8 +9,14 @@ message's ``addon_id``; the controller relays it as a ``turn_step`` reply,
 which cowork-server both matches by ``addon_id`` and relays to the app as a
 ``response.addon`` event.
 
-A line that arrives before the session is built, or before the turn starts
-or after it ends, is refused: ``ChatSession.add_user_input`` takes text only
+Once the turn is taking messages, the pod says so once with a ``ready`` event
+(at turn start, before any model call), so cowork-server knows a line it sends
+from then on reaches the turn.
+
+A line past this turn's limits (``MAX_ADDONS_PER_TURN`` messages,
+``MAX_ADDON_CHARS`` characters each, ``MAX_ADDON_TURN_BYTES`` in all) is
+refused, as is one that arrives before the session is built, or before the
+turn starts or after it ends: ``ChatSession.add_user_input`` takes text only
 while a turn runs, and a refused message is one cowork-server keeps as the
 next task, so nothing is lost. That is simpler than buffering, and a buffer
 would have to be returned anyway when the turn never starts.
@@ -27,6 +33,12 @@ logger = logging.getLogger(__name__)
 EVENT_KIND = "addon"
 EVENT_TYPE = "response.addon"
 
+# Per-turn limits, the same as ChatSession.add_user_input's; checked here too
+# so a session that predates them can't be flooded.
+MAX_ADDONS_PER_TURN = 20
+MAX_ADDON_CHARS = 4000
+MAX_ADDON_TURN_BYTES = 64 * 1024
+
 
 class CloudAddons:
     def __init__(self, emit: Callable[[dict], None]) -> None:
@@ -35,12 +47,29 @@ class CloudAddons:
         # addon_id -> {"text", "decided_by", "state"} for every message the
         # turn took, so later events can carry its text.
         self._addons: dict[str, dict] = {}
+        # Ids refused this turn: a repeat of one is refused again, never added.
+        self._refused: set[str] = set()
+        self._bytes = 0
+        self._ready_sent = False
 
-    def attach(self, session: Any) -> None:
-        """Start taking messages for *session*'s turn."""
+    def attach(self, session: Any, *, announce: bool = False) -> None:
+        """Start taking messages for *session*'s turn. With *announce* (the
+        stdin reader is running), emit ``ready`` once the turn starts taking
+        them: the session calls ``on_user_input_ready`` at turn start, before
+        any model call."""
         self._session = session
         if callable(getattr(session, "add_user_input", None)):
             session.on_user_input_read = self.mark_read
+            if announce:
+                session.on_user_input_ready = self.announce_ready
+
+    def announce_ready(self) -> None:
+        """Tell cowork-server the turn now takes added messages. At most once
+        (contract.py)."""
+        if self._ready_sent:
+            return
+        self._ready_sent = True
+        self._emit({"kind": EVENT_KIND, "type": EVENT_TYPE, "state": "ready"})
 
     def deliver(self, line: dict) -> None:
         """Apply one addon or addon_withdraw line. Runs on the event loop thread."""
@@ -84,8 +113,19 @@ class CloudAddons:
             # instead of handing the turn a second copy.
             self._event(addon_id, known["state"], **self._details(addon_id))
             return
+        if addon_id in self._refused:
+            # Refused stays refused: cowork-server already keeps it as the next task.
+            self._event(addon_id, "refused", text=line["text"], decided_by=line["decided_by"])
+            return
         added = False
+        size = len(line["text"].encode("utf-8", "replace"))
         add = getattr(self._session, "add_user_input", None)
+        if (
+            len(line["text"]) > MAX_ADDON_CHARS
+            or len(self._addons) >= MAX_ADDONS_PER_TURN
+            or self._bytes + size > MAX_ADDON_TURN_BYTES
+        ):
+            add = None
         if callable(add):
             try:
                 added = add(addon_id, line["text"]) is True
@@ -94,8 +134,11 @@ class CloudAddons:
         state = "added" if added else "refused"
         logger.info("addon %s: %s", addon_id, state)
         if added:
+            self._bytes += size
             self._addons[addon_id] = {"text": line["text"],
                                       "decided_by": line["decided_by"], "state": state}
+        else:
+            self._refused.add(addon_id)
         self._event(addon_id, state, text=line["text"], decided_by=line["decided_by"])
 
     def _withdraw(self, line: dict) -> None:
@@ -107,10 +150,17 @@ class CloudAddons:
                 withdrawn = withdraw(addon_id) is True
             except Exception:
                 logger.warning("cloud turn: withdraw_user_input failed", exc_info=True)
-        state = "withdrawn" if withdrawn else "already_read"
+        known = self._addons.get(addon_id)
+        if withdrawn:
+            state = "withdrawn"
+        elif known is not None and known["state"] == "returned":
+            # Too late to take back, but not read either: it is the next task.
+            state = "returned"
+        else:
+            state = "already_read"
         logger.info("addon %s withdraw: %s", addon_id, state)
-        if withdrawn and addon_id in self._addons:
-            self._addons[addon_id]["state"] = state
+        if withdrawn and known is not None:
+            known["state"] = state
         self._event(addon_id, state, request_id=line["request_id"])
 
     def _details(self, addon_id: str) -> dict:

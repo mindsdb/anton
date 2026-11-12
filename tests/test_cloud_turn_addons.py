@@ -13,7 +13,12 @@ import pytest
 
 import anton.cloud_turn.__main__ as entry_mod
 from anton.cloud_turn.__main__ import stream_turn
-from anton.cloud_turn.addons import CloudAddons
+from anton.cloud_turn.addons import (
+    MAX_ADDON_CHARS,
+    MAX_ADDON_TURN_BYTES,
+    MAX_ADDONS_PER_TURN,
+    CloudAddons,
+)
 from anton.cloud_turn.stdin import parse_addon_line, parse_answer_line, start_answer_reader
 from anton.core.llm.provider import StreamTextDelta, StreamTurnEnded
 
@@ -40,6 +45,7 @@ class _Session:
         self._running = False
         self._inputs: list[dict] = []
         self.on_user_input_read = None
+        self.on_user_input_ready = None
         self.calls: list[tuple] = []
         self._script = script
         self.closed = False
@@ -78,9 +84,14 @@ class _Session:
             assert time.monotonic() < deadline, self.calls
             await asyncio.sleep(0.01)
 
-    async def turn_stream(self, user_input, **kwargs):
+    def start_turn(self):
         with self._lock:
             self._running = True
+        if self.on_user_input_ready is not None:
+            self.on_user_input_ready()
+
+    async def turn_stream(self, user_input, **kwargs):
+        self.start_turn()
         try:
             async for event in self._script(self):
                 yield event
@@ -131,9 +142,12 @@ def _run(session, on_event=None, stdin=None, builder=None):
     return events
 
 
+READY = {"kind": "addon", "type": "response.addon", "state": "ready"}
+
+
 def _addon_events(events):
     return [{k: v for k, v in e.items() if k not in ("kind", "type")}
-            for e in events if e["kind"] == "addon"]
+            for e in events if e["kind"] == "addon" and e != READY]
 
 
 def test_added_read_withdrawn_already_read_and_returned_in_one_turn():
@@ -166,6 +180,9 @@ def test_added_read_withdrawn_already_read_and_returned_in_one_turn():
         {"addon_id": "a1", "state": "already_read", "request_id": "r2"},
         {"addon_id": "a2", "state": "returned", "text": "second", "decided_by": "user"},
     ]
+    # Exactly one ready, before anything the turn streamed.
+    assert events.count(READY) == 1
+    assert events.index(READY) < next(i for i, e in enumerate(events) if e["kind"] == "delta")
     assert all(e["type"] == "response.addon" for e in events if e["kind"] == "addon")
     assert events[-1] == {"kind": "turn_completed"}
     # The returned event goes out before the terminal: cowork stops reading at it.
@@ -179,16 +196,21 @@ def test_lines_before_the_turn_starts_are_refused():
     cowork-server keeps the message as the next task."""
     session = _Session(lambda s: _empty())
     stdin = io.BytesIO(_addon("early", "too soon") + _withdraw("early", "r0"))
+    both_answered = threading.Event()
+    seen = []
+
+    def on_event(event, write):
+        seen.append(event)
+        if len(_addon_events(seen)) == 2:
+            both_answered.set()
 
     def builder(req):
-        # Let the reader finish first, so both lines reach the loop before the
-        # build's own completion does.
-        while not stdin.tell() == len(stdin.getvalue()):
-            time.sleep(0.01)
-        time.sleep(0.05)
+        # The build blocks until the loop has answered both lines, so they
+        # land before the session exists.
+        assert both_answered.wait(5)
         return session
 
-    events = _run(session, stdin=stdin, builder=builder)
+    events = _run(session, on_event, stdin=stdin, builder=builder)
     assert _addon_events(events) == [
         {"addon_id": "early", "state": "refused", "text": "too soon", "decided_by": "jev"},
         {"addon_id": "early", "state": "already_read", "request_id": "r0"},
@@ -279,7 +301,7 @@ def test_a_repeated_addon_line_is_not_added_twice():
     events = []
     addons = CloudAddons(events.append)
     session = _Session()
-    session._running = True
+    session.start_turn()
     addons.attach(session)
     line = {"kind": "addon", "addon_id": "a1", "text": "x", "decided_by": "user"}
     addons.deliver(line)
@@ -331,3 +353,122 @@ async def test_reader_without_an_answer_handler_skips_answers():
     await asyncio.to_thread(thread.join, 5)
     await asyncio.sleep(0)
     assert [a["addon_id"] for a in addons] == ["a1"]
+
+
+# ── Self-review fixes ───────────────────────────────────────────────────────
+
+def _line_for(addon_id, text="x"):
+    return {"kind": "addon", "addon_id": addon_id, "text": text, "decided_by": "user"}
+
+
+def _running_addons():
+    events = []
+    addons = CloudAddons(events.append)
+    session = _Session()
+    session.start_turn()
+    addons.attach(session)
+    return addons, session, events
+
+
+def test_cloud_turn_takes_at_most_twenty_messages():
+    addons, session, events = _running_addons()
+    for i in range(MAX_ADDONS_PER_TURN + 1):
+        addons.deliver(_line_for(f"a{i}"))
+    states = [e["state"] for e in events]
+    assert states == ["added"] * MAX_ADDONS_PER_TURN + ["refused"]
+    assert ("add", f"a{MAX_ADDONS_PER_TURN}") not in session.calls
+
+
+def test_cloud_turn_refuses_a_message_over_the_character_limit():
+    addons, session, events = _running_addons()
+    addons.deliver(_line_for("big", "x" * (MAX_ADDON_CHARS + 1)))
+    addons.deliver(_line_for("ok", "x" * MAX_ADDON_CHARS))
+    assert [e["state"] for e in events] == ["refused", "added"]
+
+
+def test_cloud_turn_takes_at_most_64_kb_of_added_text():
+    addons, session, events = _running_addons()
+    for i in range(9):  # 8000 bytes each: the ninth passes 64 KB
+        addons.deliver(_line_for(f"a{i}", "é" * MAX_ADDON_CHARS))
+    assert [e["state"] for e in events] == ["added"] * 8 + ["refused"]
+    assert MAX_ADDON_TURN_BYTES == 64 * 1024
+
+
+def test_a_refused_id_stays_refused():
+    events = []
+    addons = CloudAddons(events.append)
+    session = _Session()
+    addons.attach(session)
+    addons.deliver(_line_for("a1"))  # no turn running yet
+    session.start_turn()
+    addons.deliver(_line_for("a1"))  # the same id again, now that one is
+    assert [e["state"] for e in events] == ["refused", "refused"]
+    assert session.calls == [("add", "a1")]
+    assert session.take_unread_user_inputs() == []
+
+
+def test_withdraw_after_the_message_was_returned_reports_returned():
+    addons, session, events = _running_addons()
+    addons.deliver(_line_for("a1"))
+    addons.return_unread()
+    addons.deliver({"kind": "addon_withdraw", "addon_id": "a1", "request_id": "r1"})
+    assert events[-1] == {"kind": "addon", "type": "response.addon", "addon_id": "a1",
+                          "state": "returned", "request_id": "r1"}
+
+
+def test_no_ready_without_the_stdin_reader():
+    """`ready` invites lines; with no stdin reader nothing would take them."""
+    session = _Session()
+    events = []
+
+    async def script(s):
+        yield StreamTextDelta(text="go")
+
+    session._script = script
+    asyncio.run(stream_turn(REQ, events.append, session_builder=lambda r: session))
+    assert READY not in events
+    assert events[-1] == {"kind": "turn_completed"}
+
+
+def test_ready_comes_once_at_turn_start_before_any_model_call():
+    order = []
+
+    async def script(s):
+        order.append("model call")
+        yield StreamTextDelta(text="go")
+
+    session = _Session(script)
+    events = _run(session, lambda event, write: order.append(event["kind"]))
+    assert events.count(READY) == 1
+    assert order.index("addon") < order.index("model call")
+
+
+async def test_the_session_announces_ready_at_turn_start(tmp_path):
+    """ChatSession calls on_user_input_ready once, before its first model call."""
+    from unittest.mock import MagicMock, patch
+    from tests.conftest import make_mock_llm
+    from anton.core.llm.provider import LLMResponse, StreamComplete, Usage
+    from anton.core.session import ChatSession, ChatSessionConfig
+
+    order = []
+    llm = make_mock_llm()
+    llm.usage_listener = None
+
+    def _plan_stream(**kwargs):
+        async def _gen():
+            order.append("model call")
+            yield StreamComplete(response=LLMResponse(
+                content="hi", tool_calls=[], usage=Usage(input_tokens=1, output_tokens=1),
+                stop_reason="end_turn"))
+        return _gen()
+
+    llm.plan_stream = _plan_stream
+    session = ChatSession(ChatSessionConfig(llm_client=llm, workspace=MagicMock(base=tmp_path)))
+    events = []
+    addons = CloudAddons(lambda e: (events.append(e), order.append("ready")))
+    addons.attach(session, announce=True)
+    with patch("anton.analytics.send_event"):
+        async for _ in session.turn_stream("hello"):
+            pass
+    assert events == [READY]
+    assert order[:2] == ["ready", "model call"]

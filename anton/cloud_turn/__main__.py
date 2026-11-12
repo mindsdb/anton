@@ -318,7 +318,9 @@ async def _stream_turn(
         # the event loop thread so the heartbeat ticker above keeps firing
         # instead of the controller seeing the turn go silent and stall it.
         session = await asyncio.to_thread(build)
-        addons.attach(session)
+        # `ready` goes out at turn start, before any model call, and only when
+        # the stdin reader above is there to take the lines it invites.
+        addons.attach(session, announce=stdin is not None)
         # Fold in any attachments cowork-server staged into the workspace (read
         # off the mount, so image bytes never crossed the stdin wire). Plain
         # string when there are none. Never fail the turn over this — degrade to
