@@ -211,6 +211,18 @@ def test_compare_passes_fewer_cards_with_every_hold_kept():
     assert replay_tool.compare(base, head).passed
 
 
+def test_compare_names_a_freed_unread_cell_without_failing_on_it():
+    def card(unread_card: bool) -> replay_tool.Scorecard:
+        rows = [replay_tool.CellResult(chat="c", cell=0, turn=0, style="t", card=unread_card, crashed=False,
+                                       kinds=["unchecked"] if unread_card else [], causes=[], real_write=False,
+                                       runs_unread=True, pair=None, role=None, secs=0.0)]
+        return replay_tool._score(rows, tree="t", commit="c", signature="earlier", code_root=False, ablations=[],
+                                  corpus_sha256="s", questions=1)
+
+    verdict = replay_tool.compare(card(True), card(False))
+    assert verdict.passed and verdict.freed_unread_cells == ["c #0"]
+
+
 def test_compare_refuses_scorecards_from_different_corpora():
     with pytest.raises(SystemExit, match="different corpora"):
         replay_tool.compare(_card([(True, True)], sha="a"), _card([(True, True)], sha="b"))

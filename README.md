@@ -303,7 +303,7 @@ A request with no `skills` block at all stages no skills, with one rollout fallb
 
 The write check asks the person to approve a cell before it changes a database, a listed endpoint or an existing file. A card on a cell that writes nothing costs a click, or an unattended answer the whole card timeout, so the check is measured both ways: what it catches and what it asks about for no reason.
 
-`scripts/write_check_replay.py` replays `tests/fixtures/write_check_replay_corpus.yaml` through one anton tree's write check, cell by cell with each chat's earlier cells. The corpus holds about 80 synthetic analysis chats. They mix pandas, SQL reads, helper modules, restarts between turns, page builds and real writes, and each cell is labeled by hand. Each must-hold cell is paired with must-stay-free cells that share its `pair` id. The replay prints cards per 100 cells and per 100 questions by kind, real writes carded, cards on cells that write nothing, each pair's result, and the causes the cards name. It takes a few seconds:
+`scripts/write_check_replay.py` replays `tests/fixtures/write_check_replay_corpus.yaml` through one anton tree's write check, cell by cell with each chat's earlier cells. The corpus holds about 100 synthetic analysis chats. They mix pandas, SQL reads, helper modules, restarts between turns, page builds and real writes, and each cell is labeled by hand. Each must-hold cell is paired with must-stay-free cells that share its `pair` id. The replay prints cards per 100 cells and per 100 questions by kind, real writes carded, cards on cells that write nothing, each pair's result, and the causes the cards name. It takes a few seconds:
 
 ```bash
 uv run python -I scripts/write_check_replay.py                         # this tree

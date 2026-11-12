@@ -4094,7 +4094,7 @@ chats:
 - name: S01 weekly ops report, two scheduled runs
   style: sched_report
   files:
-    report_config.json: '{"out_dir": "reports", "slack_webhook": "https://hooks.slack.com/services/T000/B000/XXXX"}'
+    report_config.json: '{"out_dir": "reports", "slack_webhook": "https://hooks.example.test/notify"}'
     reports/latest.html: <html><body><h1>Weekly ops 2026-11-02</h1></body></html>
   cells:
   - code: |-
@@ -5017,3 +5017,509 @@ chats:
     why: the builder's data step POSTs /write/apply
     pair: builder
     role: hold
+- name: T01 orm session
+  style: probe
+  cells:
+  - code: |-
+      import os
+      from sqlalchemy import create_engine, Integer, String, select
+      from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, Session
+      engine = create_engine(os.environ['DS_POSTGRES_PLANNING__URL'])
+      class Base(DeclarativeBase):
+          pass
+      class Adjustment(Base):
+          __tablename__ = 'forecast_adjustments'
+          __table_args__ = {'schema': 'planning'}
+          id: Mapped[int] = mapped_column(Integer, primary_key=True)
+          sku: Mapped[str] = mapped_column(String)
+          delta: Mapped[int] = mapped_column(Integer)
+      with Session(engine) as s:
+          print(s.scalars(select(Adjustment).limit(5)).all())
+    real_write: false
+  - code: |-
+      with Session(engine) as s:
+          s.add_all([Adjustment(sku='P100', delta=5), Adjustment(sku='P200', delta=-3)])
+          s.commit()
+    real_write: true
+  - code: |-
+      with Session(engine) as s:
+          s.query(Adjustment).filter(Adjustment.sku == 'P100').update({'delta': 0})
+          s.commit()
+    real_write: true
+  - code: |-
+      with Session(engine) as s:
+          row = s.get(Adjustment, 1)
+          row.delta = 7
+          s.commit()
+    real_write: true
+  - code: |-
+      from sqlalchemy import delete
+      with engine.begin() as c:
+          c.execute(delete(Adjustment).where(Adjustment.sku == 'P200'))
+    real_write: true
+- name: T02 delete through a module written two turns earlier
+  style: probe
+  cells:
+  - code: |-
+      from pathlib import Path
+      Path('db_utils.py').write_text('''
+      import os
+      from sqlalchemy import create_engine, text
+      engine = create_engine(os.environ["DS_POSTGRES_PLANNING__URL"])
+
+      def counts():
+          with engine.connect() as c:
+              return c.execute(text("SELECT run_id, COUNT(*) FROM planning.forecast_adjustments GROUP BY 1")).fetchall()
+
+      def purge(run_id):
+          with engine.begin() as c:
+              c.execute(text("DELETE FROM planning.forecast_adjustments WHERE run_id = :r"), {"r": run_id})
+      ''')
+    real_write: false
+  - code: |-
+      import db_utils
+      print(db_utils.counts())
+    real_write: false
+    runs_unread: true
+  - code: |-
+      import pandas as pd
+      print(pd.Timestamp.now())
+    real_write: false
+    turn_start: true
+  - code: |-
+      import db_utils
+      db_utils.purge('dryrun')
+    real_write: true
+    turn_start: true
+- name: T03 overwrite a project file through a config path after a restart
+  style: probe
+  files:
+    report_config.json: '{"page": ".anton/artifacts/weekly-ops/index.html", "source": "data/ops.csv"}'
+    data/ops.csv: |
+      week,site,throughput,downtime_h
+      2026-10-26,S01,1200,
+    .anton/artifacts/weekly-ops/metadata.json: '{"type": "html-app", "primary": "index.html"}'
+  cells:
+  - code: |-
+      import json
+      cfg = json.load(open('report_config.json'))
+      P = cfg['page']
+      open(P, 'w').write('<html><body>ops</body></html>')
+    real_write: false
+  - code: |-
+      import json
+      import pandas as pd
+      cfg = json.load(open('report_config.json'))
+      ops = pd.read_csv(cfg['source'])
+      ops['downtime_h'] = ops['downtime_h'].fillna(0)
+      ops.to_csv(cfg['source'], index=False)
+    real_write: true
+    turn_start: true
+- name: T04 http verbs and sessions
+  style: probe
+  cells:
+  - code: |-
+      import requests
+      GW = 'https://erp.example.test'
+      s = requests.Session()
+      s.headers.update({'Accept': 'application/json'})
+      sc = s.get(GW + '/scenarios', timeout=30).json()
+      sid = sc[0]['id']
+    real_write: false
+  - code: |-
+      r = s.put(f'{GW}/scenarios/{sid}', json={'name': 'renamed'}, timeout=30)
+      print(r.status_code)
+    real_write: true
+  - code: |-
+      r = s.delete(f'{GW}/sandbox/{sid}', timeout=30)
+      print(r.status_code)
+    real_write: true
+  - code: |-
+      r = requests.request('DELETE', 'https://crm.internal.example/api/accounts/42', timeout=30)
+      print(r.status_code)
+    real_write: true
+  - code: |-
+      import httpx
+      with httpx.Client(base_url=GW) as hc:
+          print(hc.post('/write/apply', json={'scenario': sid, 'mql': 'SET x = 1'}).status_code)
+    real_write: true
+  - code: |-
+      import urllib.request
+      urllib.request.urlopen(GW + '/write/apply', data=b'{"mql": "SET x = 1"}')
+    real_write: true
+  - code: |-
+      r = s.post(GW + '/write/apply', json={'scenario': sid, 'mql': 'SET y = 2'}, timeout=30)
+      print(r.status_code)
+    real_write: true
+  - code: |-
+      api = requests.Session()
+      api.headers['Authorization'] = 'Bearer x'
+      for page in range(1, 4):
+          rows = api.get('https://crm.internal.example/api/accounts', params={'page': page}, timeout=30).json()
+          print(page, len(rows))
+    real_write: false
+- name: T05 writes in a thread pool and callbacks
+  style: probe
+  cells:
+  - code: |-
+      import requests
+      GW = 'https://erp.example.test'
+      edits = ['SET a = 1', 'SET b = 2']
+    real_write: false
+  - code: |-
+      from concurrent.futures import ThreadPoolExecutor
+      with ThreadPoolExecutor(4) as ex:
+          print(list(ex.map(lambda e: requests.post(GW + '/write/apply', json={'mql': e}, timeout=30).status_code, edits)))
+    real_write: true
+  - code: |-
+      import atexit
+      atexit.register(lambda: requests.post(GW + '/write/apply', json={'mql': 'COMMIT'}, timeout=30))
+    real_write: true
+  - code: |-
+      import os
+      import pandas as pd
+      import psycopg2
+      conn = psycopg2.connect(os.environ['DS_POSTGRES_OPS__DSN'])
+      cur = conn.cursor()
+      stale = pd.read_sql("SELECT order_id FROM ops.orders WHERE status = 'open'", conn)
+    real_write: false
+  - code: |-
+      stale.apply(lambda r: cur.execute("UPDATE ops.orders SET status = 'review' WHERE order_id = %s", (r.order_id,)), axis=1)
+      conn.commit()
+    real_write: true
+  - code: |-
+      import threading
+      t = threading.Thread(target=requests.post, args=(GW + '/write/apply',), kwargs={'json': {'mql': 'SET c = 3'}})
+      t.start(); t.join()
+    real_write: true
+- name: T06 ddl rebound to a function that runs it
+  style: probe
+  files:
+    warehouse.db: ''
+  cells:
+  - code: ddl = 'CREATE TABLE safety_stock (part TEXT, qty INT)'
+    real_write: false
+  - code: |-
+      import sqlite3
+      con = sqlite3.connect('{ROOT}/warehouse.db')
+      def ddl(t):
+          return con.execute(f'CREATE TABLE {t} (part TEXT, qty INT)')
+      print(ddl('safety_stock'))
+    real_write: true
+    pair: c5-ddl
+    role: hold
+- name: T07 ddl printed then run in one cell
+  style: probe
+  files:
+    warehouse.db: ''
+  cells:
+  - code: ddl = 'CREATE TABLE safety_stock (part TEXT, qty INT)'
+    real_write: false
+  - code: |-
+      import sqlite3
+      print(ddl)
+      sqlite3.connect('{ROOT}/warehouse.db').execute(ddl)
+    real_write: true
+    pair: c5-ddl
+    role: hold
+- name: T08 exec of a script that shadows a builtin, then print
+  style: probe
+  files:
+    jobs/h.py: |
+      import urllib.request
+      def min(xs):
+          urllib.request.urlopen(urllib.request.Request('https://erp.example.test/write/apply', data=b'{}', method='POST'))
+          return 0
+  cells:
+  - code: data = [3, 1, 2]
+    real_write: false
+  - code: exec(open('{ROOT}/jobs/h.py').read())
+    real_write: false
+    runs_unread: true
+  - code: print(min(data))
+    real_write: true
+    pair: c2-exec
+    role: hold
+- name: T09 helper alias then folder walk
+  style: probe
+  files:
+    helpers/r_helpers.py: |
+      import json
+      import urllib.request
+      BASE = "https://erp.example.test"
+      def first_row():
+          with urllib.request.urlopen(BASE + "/api/orders?limit=1") as r:
+              return json.load(r)[0]
+      def push(rows):
+          req = urllib.request.Request(BASE + "/write/apply", data=json.dumps(rows).encode(), method="POST")
+          with urllib.request.urlopen(req) as r:
+              return r.status
+  cells:
+  - code: |-
+      import importlib.util
+      spec = importlib.util.spec_from_file_location("R", "{ROOT}/helpers/r_helpers.py")
+      R = importlib.util.module_from_spec(spec)
+      spec.loader.exec_module(R)
+      p = R.push
+    real_write: false
+    runs_unread: true
+  - code: |-
+      import os
+      for dp, dn, fn in os.walk("{ROOT}"):
+          for f in fn:
+              print(os.path.join(dp, f))
+      p([{'order': 7, 'qty': 3}])
+    real_write: true
+    pair: c2-helper
+    role: hold
+- name: T10 big sql read and run in one cell
+  style: probe
+  files:
+    seed.sql:
+      gen: sqlseed
+      bytes: 1200000
+    warehouse.db: ''
+  cells:
+  - code: |-
+      import sqlite3
+      from pathlib import Path
+      con = sqlite3.connect('{ROOT}/warehouse.db')
+      con.executescript(Path('{ROOT}/seed.sql').read_text())
+      con.commit()
+    real_write: true
+- name: T11 big sql read in a cell, run on postgres next cell, literal path
+  style: probe
+  files:
+    seed.sql:
+      gen: sqlseed
+      bytes: 1200000
+  cells:
+  - code: |-
+      import os, psycopg2
+      conn = psycopg2.connect(os.environ['DS_POSTGRES_OPS__DSN'])
+      seed = open('seed.sql').read()
+    real_write: false
+  - code: |-
+      with conn.cursor() as cur:
+          cur.execute(seed)
+      conn.commit()
+    real_write: true
+- name: T12 small sql read then run next cell
+  style: probe
+  files:
+    seed.sql: |
+      INSERT INTO staging.part_master VALUES ('P1', 'S01', 3);
+  cells:
+  - code: |-
+      import os, psycopg2
+      conn = psycopg2.connect(os.environ['DS_POSTGRES_OPS__DSN'])
+      seed = open('seed.sql').read()
+    real_write: false
+  - code: |-
+      with conn.cursor() as cur:
+          cur.execute(seed)
+      conn.commit()
+    real_write: true
+- name: T13 builder data step posts by data=
+  style: probe
+  cells:
+  - code: |-
+      import json, urllib.request
+      urllib.request.urlopen('https://erp.example.test/write/apply', data=json.dumps({'scenario': 'copy'}).encode())
+    real_write: true
+    pair: builder
+    role: hold
+- name: T14 config url post to the listed host
+  style: probe
+  files:
+    report_config.json: '{"erp": "https://erp.example.test", "slack_webhook": "https://hooks.example.test/notify"}'
+  cells:
+  - code: |-
+      import json, requests
+      cfg = json.load(open('report_config.json'))
+      r = requests.post(cfg['erp'] + '/write/apply', json={'mql': 'SET z = 1'}, timeout=30)
+    real_write: true
+- name: T15 restart free re-derives the path
+  style: probe
+  files:
+    cfg.json: '{"page": "page.html"}'
+  cells:
+  - code: |-
+      import json
+      P = json.load(open('cfg.json'))['page']
+    real_write: false
+  - code: open(P, 'w').write('<html></html>')
+    real_write: false
+  - code: |-
+      import json
+      P = json.load(open('cfg.json'))['page']
+      print(len(open(P).read()))
+    real_write: false
+    turn_start: true
+    pair: c7-restart
+    role: free
+- name: T16 sitecustomize via path then restart
+  style: probe
+  cells:
+  - code: |-
+      import os, site
+      hook = os.path.join(site.getusersitepackages(), 'usercustomize.py')
+      os.makedirs(os.path.dirname(hook), exist_ok=True)
+      open(hook, 'w').write("import urllib.request\nurllib.request.urlopen(urllib.request.Request('https://erp.example.test/write/apply', data=b'{}', method='POST'))\n")
+    real_write: false
+  - code: print('next step')
+    real_write: true
+    turn_start: true
+    pair: c7-restart
+    role: hold
+- name: T17 subprocess read-only cli
+  style: probe
+  files:
+    data/orders.csv: |
+      order_id,site,qty
+      1,S01,3
+  cells:
+  - code: |-
+      import subprocess
+      print(subprocess.run(['wc', '-l', 'data/orders.csv'], capture_output=True, text=True).stdout)
+    real_write: false
+  - code: |-
+      import subprocess
+      out = subprocess.check_output(['git', 'log', '--oneline', '-5'], text=True)
+      print(out)
+    real_write: false
+  - code: |-
+      import subprocess
+      subprocess.run(['psql', os.environ.get('PG', ''), '-c', 'DELETE FROM ops.tmp_import'], check=False)
+    real_write: true
+- name: T18 plotly html export and to_sql through helper
+  style: probe
+  files:
+    data/orders.csv: |
+      order_id,site,qty
+      1,S01,3
+  cells:
+  - code: |-
+      import pandas as pd
+      import plotly.express as px
+      df = pd.read_csv('data/orders.csv')
+      fig = px.bar(df, x='site', y='qty')
+      fig.write_html('orders_by_site.html')
+      fig.write_image('orders_by_site.png')
+    real_write: false
+  - code: |-
+      import os
+      from sqlalchemy import create_engine
+      engine = create_engine(os.environ['DS_POSTGRES_PLANNING__URL'])
+      def save(frame, table):
+          frame.to_sql(table, engine, schema='planning', if_exists='append', index=False)
+    real_write: false
+  - code: save(df, 'orders_snapshot')
+    real_write: true
+- name: V1 relative big sql executescript same cell
+  style: probe
+  files:
+    seed.sql:
+      gen: sqlseed
+      bytes: 1200000
+    warehouse.db: ''
+  cells:
+  - code: |-
+      import sqlite3
+      con = sqlite3.connect('warehouse.db')
+      con.executescript(open('seed.sql').read())
+    real_write: true
+- name: V2 big sql on postgres same cell relative
+  style: probe
+  files:
+    seed.sql:
+      gen: sqlseed
+      bytes: 1200000
+  cells:
+  - code: |-
+      import os, psycopg2
+      conn = psycopg2.connect(os.environ['DS_POSTGRES_OPS__DSN'])
+      with conn.cursor() as cur:
+          cur.execute(open('seed.sql').read())
+      conn.commit()
+    real_write: true
+    pair: c8-big
+    role: hold
+- name: V3 big sql 900KB
+  style: probe
+  files:
+    seed.sql:
+      gen: sqlseed
+      bytes: 900000
+  cells:
+  - code: |-
+      import os, psycopg2
+      conn = psycopg2.connect(os.environ['DS_POSTGRES_OPS__DSN'])
+      with conn.cursor() as cur:
+          cur.execute(open('seed.sql').read())
+      conn.commit()
+    real_write: true
+- name: V4 big text posted to listed host
+  style: probe
+  files:
+    docs/manual.txt:
+      gen: pdftext
+      bytes: 1200000
+  cells:
+  - code: |-
+      from pathlib import Path
+      text = Path('docs/manual.txt').read_text(errors='ignore')
+    real_write: false
+  - code: |-
+      import requests
+      requests.post('https://erp.example.test/write/apply', data=text.encode()[:1000], timeout=30)
+    real_write: true
+- name: X1 unread builder save over a project file
+  style: probe
+  files:
+    skills/doc_builder/build.py: |
+      from pathlib import Path
+      def save(text, path):
+          Path(path).write_text(text, encoding='utf-8')
+          return path
+    data/q3.csv: |
+      metric,value
+      revenue,1200000
+  cells:
+  - code: exec(open('skills/doc_builder/build.py').read())
+    real_write: false
+    runs_unread: true
+  - code: save('metric,value\nrevenue,1250000\n', 'data/q3.csv')
+    real_write: true
+- name: X2 errored cells and retries
+  style: probe
+  files:
+    data/orders.csv: |
+      order_id,site,qty
+      1,S01,3
+    out:
+      dir: true
+  cells:
+  - code: |-
+      import pandas as pd
+      df = pd.read_csv('data/orders.csv')
+      path = f"out/{df['region'].iloc[0]}.csv"
+    real_write: false
+    errored: true
+  - code: |-
+      path = 'out/orders_by_site.csv'
+      df.groupby('site')['qty'].sum().to_csv(path)
+    real_write: false
+  - code: |-
+      import json
+      cfg = json.loads(open('missing.json').read())
+      out = cfg['out']
+    real_write: false
+    errored: true
+  - code: |-
+      out = 'out/summary.json'
+      with open(out, 'w') as f:
+          json.dump({'rows': len(df)}, f)
+    real_write: false
+  - code: print(open(out).read())
+    real_write: false

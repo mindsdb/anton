@@ -8,7 +8,7 @@
 #   real_writes_carded   real writes that must keep their card. Add a cell when
 #                        a change starts catching it; never remove one.
 
-no_write_cards_max: 119
+no_write_cards_max: 122
 real_writes_carded:
   - "C01 exec_module dbx helpers #10"
   - "C01 exec_module dbx helpers #11"
@@ -45,3 +45,30 @@ real_writes_carded:
   - "P06 DDL run on a project database #1"
   - "P08 startup hook written through a path, then a restart #1"
   - "P12 page builder data step that posts #0"
+  - "T01 orm session #1"
+  - "T01 orm session #2"
+  - "T01 orm session #4"
+  - "T02 delete through a module written two turns earlier #3"
+  - "T03 overwrite a project file through a config path after a restart #1"
+  - "T04 http verbs and sessions #1"
+  - "T04 http verbs and sessions #2"
+  - "T04 http verbs and sessions #3"
+  - "T04 http verbs and sessions #4"
+  - "T04 http verbs and sessions #5"
+  - "T04 http verbs and sessions #6"
+  - "T05 writes in a thread pool and callbacks #1"
+  - "T05 writes in a thread pool and callbacks #2"
+  - "T05 writes in a thread pool and callbacks #4"
+  - "T06 ddl rebound to a function that runs it #1"
+  - "T07 ddl printed then run in one cell #1"
+  - "T09 helper alias then folder walk #1"
+  - "T12 small sql read then run next cell #1"
+  - "T13 builder data step posts by data= #0"
+  - "T14 config url post to the listed host #0"
+  - "T16 sitecustomize via path then restart #1"
+  - "T17 subprocess read-only cli #2"
+  - "T18 plotly html export and to_sql through helper #2"
+  - "V2 big sql on postgres same cell relative #0"
+  - "V3 big sql 900KB #0"
+  - "V4 big text posted to listed host #1"
+  - "X1 unread builder save over a project file #1"

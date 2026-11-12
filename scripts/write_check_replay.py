@@ -346,6 +346,10 @@ class Verdict(BaseModel):
     lost_holds: list[str]
     new_no_write_cards: list[str]
     no_write_cards: tuple[int, int]
+    # Shown, not failed on: a cell that runs unread code may go free when the check reads that
+    # code, and a pair the base already broke isn't this run's doing.
+    freed_unread_cells: list[str]
+    broken_pairs: list[str]
 
 
 def compare(base: Scorecard, head: Scorecard) -> Verdict:
@@ -359,8 +363,11 @@ def compare(base: Scorecard, head: Scorecard) -> Verdict:
     new = [r.key for r in head.results
            if r.card and not r.real_write and not r.runs_unread and not base_by_key[r.key].card]
     counts = (base.no_write.carded, head.no_write.carded)
+    freed = [r.key for r in head.results
+             if r.runs_unread and not r.real_write and not r.card and base_by_key[r.key].card]
+    broken = [p.pair for p in head.pairs if p.holds.carded < p.holds.cells or p.frees.carded]
     return Verdict(passed=not lost and counts[1] <= counts[0], lost_holds=lost, new_no_write_cards=new,
-                   no_write_cards=counts)
+                   no_write_cards=counts, freed_unread_cells=freed, broken_pairs=broken)
 
 
 def _summary(card: Scorecard) -> str:
@@ -408,6 +415,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  lost hold: {key}")
     for key in verdict.new_no_write_cards:
         print(f"  new card on a cell that writes nothing: {key}")
+    for key in verdict.freed_unread_cells:
+        print(f"  freed a cell that runs code the check can't read (check it reads that code): {key}")
+    if verdict.broken_pairs:
+        print(f"  pairs with an uncarded hold or a carded free cell: {', '.join(verdict.broken_pairs)}")
     print("PASS" if verdict.passed else "FAIL")
     return 0 if verdict.passed else 1
 
