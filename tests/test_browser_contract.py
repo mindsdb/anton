@@ -220,13 +220,18 @@ def test_the_action_fixture_says_whether_the_step_changed_anything():
 def test_the_action_fixture_says_a_step_that_changed_the_page_in_place_settles_too():
     """Both hosts wait for quiet after a step that changed the page in place,
     whether or not it started a request, and a host may wait out a page
-    marked aria-busy, so only a step that changed nothing and started
-    nothing answers at once."""
+    marked aria-busy. A step that changed nothing and started nothing waits
+    for no quiet, though one host first gives it settle_quiet_ms to start a
+    request (a debounced search), and that host lets a navigation's cap run
+    past settle_max_ms while the new page loads."""
     description = _load("action").description
-    assert "a step that started neither answers at once" not in description
+    assert "answers at once" not in description
     assert "or changed the page in place, the host waits" in description
-    assert "A step that changed nothing and started neither answers at once" in description
-    assert "aria-busy" in description
+    assert (
+        "A step that changed nothing and started neither answers without waiting for quiet, though a host may "
+        "first wait up to settle_quiet_ms for a request the step starts, or wait out a page marked aria-busy."
+    ) in description
+    assert "A navigation also waits for its new page's network, and a host may hold its cap past settle_max_ms" in description
 
 
 def test_the_control_fixture_tells_done_by_the_person_from_any_other_agent_record():
