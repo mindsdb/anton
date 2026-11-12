@@ -9,7 +9,7 @@ Anton owns them. `tests/test_browser_contract.py` reads every file through typed
 Each file is one JSON object:
 
 - `description`: what the file covers, in a sentence or two.
-- `limits` (optional): named numbers both hosts hold the same, such as `saved_tabs_per_project`. Each host compares its own constant with it.
+- `limits` (optional): named values both hosts hold the same: a number, such as `saved_tabs_per_project`, or a list of hosts, such as `payment_frame_hosts`. Each host compares its own constant with it.
 - `examples`: named examples. Each one has:
   - `where`: the route (`GET /sessions/{id}/page`), or where the value goes (`params.browser`, `cloud turn stdout`).
   - `kind`: `request` (what Anton sends), `response` (what a host answers), `event` (what the cloud turn writes), `turn_block` (a turn request's `params.browser`) `constructor` (the arguments a host passes to `BrowserConfig` in its own process) or `classification` (a step on a page, and whether it waits for the person's approval).
@@ -22,7 +22,7 @@ Each file is one JSON object:
 | File | Covers |
 |---|---|
 | `sessions.json` | Opening a conversation's session, and the one answer shape both hosts give |
-| `page.json` | The page snapshot: elements, `value_hidden` on secret fields, `challenges` for visible check frames |
+| `page.json` | The page snapshot: elements, `value_hidden` on secret fields, `challenges` for visible check frames, `frames` for child frames |
 | `action.json` | Step requests and the action answer |
 | `control.json` | The control record (`holder`, `reason`, `since`, `seq`, `by`), the hand-over request, and the refused take-back |
 | `tabs.json` | Tab list, open, activate and close |

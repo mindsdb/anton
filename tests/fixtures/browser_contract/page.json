@@ -1,5 +1,42 @@
 {
-  "description": "GET /sessions/{id}/page: the active tab as numbered elements and text. Secret fields (password, one-time code, card) carry value_hidden and never their value. challenges lists only check frames the person can see: a non-empty box in the viewport, not hidden. An element may carry context (the names of up to two containers around it, innermost last, joined by ' › ') and in_dialog (true inside an open dialog).",
+  "description": "GET /sessions/{id}/page: the active tab as numbered elements and text. Secret fields (password, one-time code, card) carry value_hidden and never their value. challenges lists only check frames the person can see: a non-empty box in the viewport, not hidden. An element may carry context (the names of up to two containers around it, innermost last, joined by ' › ') and in_dialog (true inside an open dialog). elements never lists a frame. It keeps page order when every shown element fits; past the cap it lists the on-screen elements first, and truncated says more elements exist than are listed. text is the page's text cut at max_text when the page isn't scrolled or the text fits; otherwise it starts at the top of the view after a leading '…', and the start of the text above the view follows when the budget allows. A secret editor's text is never in text or in any name, and max_text 0 gives ''. frames lists the page's rendered child frames, on-screen first: url (origin and path for http and https, about:blank or about:srcdoc, otherwise the scheme alone), read, box (the frame's content box in screenshot pixels, null when the host can't place it), offscreen (true when it is out of view), and for a read frame its elements, text and truncated. Frame elements are read-only: no id and no field value (a select keeps its value and options), so a step reaches them only by position. A frame is never read when it is a human check, a consent page, on a payment_frame_hosts or sign_in_frame_hosts host or under one, holds a secret, card-named or sign-in field, is under frame_min_read_px either way, or comes after the first frames_read. A read frame lists at most elements_per_frame elements and text_per_frame characters of text.",
+  "limits": {
+    "frames_read": 5,
+    "elements_per_frame": 50,
+    "text_per_frame": 1000,
+    "frame_min_read_px": 32,
+    "payment_frame_hosts": [
+      "stripe.com",
+      "braintreegateway.com",
+      "braintree-api.com",
+      "adyen.com",
+      "checkout.com",
+      "squareup.com",
+      "squarecdn.com",
+      "recurly.com",
+      "chargebee.com",
+      "spreedly.com",
+      "authorize.net",
+      "cybersource.com",
+      "worldpay.com",
+      "paddle.com",
+      "paypal.com",
+      "shopifycs.com",
+      "shopifyinc.com",
+      "pay.google.com",
+      "mollie.com",
+      "razorpay.com",
+      "nmi.com",
+      "klarna.com"
+    ],
+    "sign_in_frame_hosts": [
+      "accounts.google.com",
+      "appleid.apple.com",
+      "login.microsoftonline.com",
+      "login.live.com",
+      "facebook.com"
+    ]
+  },
   "examples": {
     "a sign-in page with a check frame": {
       "where": "GET /sessions/{id}/page",
@@ -66,11 +103,6 @@
             "disabled": true
           },
           {
-            "id": 9,
-            "role": "clickable",
-            "name": "Widget containing a Cloudflare security challenge"
-          },
-          {
             "id": 10,
             "role": "link",
             "name": "Forgot password?",
@@ -90,6 +122,18 @@
           {
             "host": "challenges.cloudflare.com",
             "kind": "cloudflare"
+          }
+        ],
+        "frames": [
+          {
+            "url": "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/turnstile",
+            "read": false,
+            "box": {
+              "x": 362,
+              "y": 420,
+              "width": 300,
+              "height": 65
+            }
           }
         ]
       }
@@ -126,7 +170,76 @@
         ],
         "truncated": true,
         "text": "Your cart. 1 item. Total $999.",
-        "challenges": []
+        "challenges": [],
+        "frames": []
+      }
+    },
+    "a page with a frame": {
+      "where": "GET /sessions/{id}/page",
+      "kind": "response",
+      "status": 200,
+      "body": {
+        "url": "https://news.example.test/article",
+        "title": "Article",
+        "scroll": {
+          "y": 1200,
+          "height": 5200,
+          "viewport": 800
+        },
+        "elements": [
+          {
+            "id": 1,
+            "role": "link",
+            "name": "Home"
+          },
+          {
+            "id": 2,
+            "role": "button",
+            "name": "Share"
+          }
+        ],
+        "truncated": false,
+        "text": "… Sign up below for the weekly digest.",
+        "challenges": [],
+        "frames": [
+          {
+            "url": "https://forms.example.test/newsletter",
+            "read": true,
+            "box": {
+              "x": 112,
+              "y": 300,
+              "width": 560,
+              "height": 180
+            },
+            "elements": [
+              {
+                "role": "textbox",
+                "name": "Email"
+              },
+              {
+                "role": "button",
+                "name": "Subscribe"
+              }
+            ],
+            "text": "Get the weekly digest. Email Subscribe",
+            "truncated": false
+          },
+          {
+            "url": "https://js.stripe.com/v3/elements-inner-card",
+            "read": false,
+            "box": {
+              "x": 112,
+              "y": 520,
+              "width": 560,
+              "height": 44
+            }
+          },
+          {
+            "url": "about:srcdoc",
+            "read": false,
+            "box": null
+          }
+        ]
       }
     }
   }

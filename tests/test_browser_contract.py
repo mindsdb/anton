@@ -28,6 +28,7 @@ from anton.core.browser.models import (
     Control,
     Element,
     ErrorBody,
+    Frame,
     HeldStep,
     Page,
     SavedTabAnswer,
@@ -38,7 +39,7 @@ from anton.core.browser.models import (
     TabAnswer,
     TabsAnswer,
 )
-from anton.core.browser.page import PAGE_TEXT_HEADING, format_page, human_check
+from anton.core.browser.page import FRAME_TEXT_HEADING, PAGE_TEXT_HEADING, format_page, human_check
 
 FIXTURES = Path(__file__).parent / "fixtures" / "browser_contract"
 ROUTER = "https://app.example.test/browser"
@@ -60,7 +61,7 @@ class ContractFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     description: str
-    limits: dict[str, int] = {}
+    limits: dict[str, int | list[str]] = {}
     examples: dict[str, ContractExample]
 
 
@@ -144,6 +145,33 @@ def test_the_page_fixture_reads_as_the_model_sees_it():
     assert PAGE_TEXT_HEADING in text
     assert [el.id for el in signin.elements if el.secret] == [3, 4]
     assert "… more elements not shown" in format_page(cart)
+
+
+def test_the_frame_fixture_reads_as_the_model_sees_it():
+    """A read frame's controls carry no number, its text sits under its own
+    untrusted heading, an unread frame is one line, and all frames together
+    show at most FRAMES_TEXT_CHARS of text."""
+    page = Page.model_validate(_load("page").examples["a page with a frame"].body)
+    text = format_page(page)
+    form = text.index('Frame "https://forms.example.test/newsletter" (no numbers: act by pixel):')
+    assert text.index('- textbox "Email"', form) < text.index('- button "Subscribe"', form)
+    heading = text.index(FRAME_TEXT_HEADING, form)
+    assert text.index("Get the weekly digest. Email Subscribe", heading) == heading + len(FRAME_TEXT_HEADING) + 1
+    assert 'Frame "https://js.stripe.com/v3/elements-inner-card" (not read)' in text
+    assert 'Frame "about:srcdoc" (not read)' in text
+    # Frame controls are reached only by position, so none carries a number.
+    assert not [line for line in text.splitlines() if line.startswith("- [")]
+    assert all(not hasattr(el, "id") for frame in page.frames for el in frame.elements)
+    # The sign-in page lists its check frame under frames, not as an element.
+    signin = Page.model_validate(_load("page").examples["a sign-in page with a check frame"].body)
+    assert [f.read for f in signin.frames] == [False] and len({el.id for el in signin.elements}) == len(signin.elements)
+
+    many = page.model_copy(update={"frames": [
+        Frame(url=f"https://forms.example.test/form-{i}", read=True, text=letter * 1000) for i, letter in enumerate("QXZ")
+    ]})
+    shown = format_page(many)
+    assert "Q" * 1000 in shown and "X" * 1000 in shown and "Z" not in shown
+    assert 'Frame "https://forms.example.test/form-2" (no numbers: act by pixel):' in shown
 
 
 def test_the_control_fixture_tells_done_by_the_person_from_any_other_agent_record():

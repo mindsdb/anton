@@ -42,10 +42,10 @@ class Challenge(_Answer):
     kind: str
 
 
-class Element(_Answer):
-    """One numbered element of a page, as the agent reads and acts on it."""
+class _ElementFields(_Answer):
+    """What an element of the page and an element inside a frame share:
+    everything but the number a step names it by."""
 
-    id: int
     role: str
     name: str
     value: str | None = None
@@ -69,6 +69,44 @@ class Element(_Answer):
         return self.type == "password" or self.value_hidden
 
 
+class Element(_ElementFields):
+    """One numbered element of a page, as the agent reads and acts on it."""
+
+    id: int
+
+
+class FrameElement(_ElementFields):
+    """An element inside a child frame. It has no number, so a step reaches
+    it only by position, and hosts never send the value of an input, a
+    textarea or an editor (a select keeps its value and options)."""
+
+
+class FrameBox(_Answer):
+    """A frame's content box in the latest screenshot's pixels."""
+
+    x: int
+    y: int
+    width: int
+    height: int
+
+
+class Frame(_Answer):
+    """A rendered child frame of the page. Hosts read a frame's elements and
+    text only when it is safe to (``read``): never a human check, a payment,
+    consent or sign-in frame, or one that holds a secret field."""
+
+    #: Origin and path for http and https, ``about:blank`` or ``about:srcdoc``,
+    #: otherwise the scheme alone.
+    url: str
+    read: bool = False
+    #: None when the host can't place the frame on the screenshot.
+    box: FrameBox | None = None
+    offscreen: bool = False
+    elements: list[FrameElement] = []
+    text: str = ""
+    truncated: bool = False
+
+
 class Scroll(_Answer):
     y: int
     height: int
@@ -88,6 +126,9 @@ class Page(_Answer):
     #: when there are none) and leaves out invisible checks. None from a host
     #: that doesn't say.
     challenges: list[Challenge] | None = None
+    #: The page's child frames, on-screen first. Their elements never carry
+    #: a number, so nothing a step names by number is inside one.
+    frames: list[Frame] = []
 
 
 class ActionResult(_Answer):
