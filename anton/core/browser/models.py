@@ -57,6 +57,11 @@ class Element(_Answer):
     disabled: bool = False
     offscreen: bool = False
     options: list[str] = []
+    #: The names of the containers around it, innermost last ("Select dates ›
+    #: November 2026"): what tells apart elements that share a name.
+    context: str = ""
+    #: Inside an open dialog, which is what a step on that page is about.
+    in_dialog: bool = False
 
     @property
     def secret(self) -> bool:

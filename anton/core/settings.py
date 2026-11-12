@@ -48,7 +48,7 @@ class CoreSettings(BaseSettings):
     # how much Jev steers it ("on" takes its confident steps, "shadow" only
     # records its picks against the model's, "off" never asks), the bar a Jev
     # step must clear, Jev's time limit, and the most steps one `run` takes.
-    browser_jev: Literal["on", "shadow", "off"] = "shadow"
+    browser_jev: Literal["on", "shadow", "off"] = "on"
     browser_jev_min_p: float = 0.8
     browser_jev_timeout_s: float = 4.0
     browser_max_steps: int = 15

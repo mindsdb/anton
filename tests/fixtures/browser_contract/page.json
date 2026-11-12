@@ -1,5 +1,5 @@
 {
-  "description": "GET /sessions/{id}/page: the active tab as numbered elements and text. Secret fields (password, one-time code, card) carry value_hidden and never their value. challenges lists only check frames the person can see: a non-empty box in the viewport, not hidden.",
+  "description": "GET /sessions/{id}/page: the active tab as numbered elements and text. Secret fields (password, one-time code, card) carry value_hidden and never their value. challenges lists only check frames the person can see: a non-empty box in the viewport, not hidden. An element may carry context (the names of up to two containers around it, innermost last, joined by ' › ') and in_dialog (true inside an open dialog).",
   "examples": {
     "a sign-in page with a check frame": {
       "where": "GET /sessions/{id}/page",
@@ -75,6 +75,13 @@
             "role": "link",
             "name": "Forgot password?",
             "offscreen": true
+          },
+          {
+            "id": 9,
+            "role": "button",
+            "name": "27",
+            "context": "Select dates › November 2026",
+            "in_dialog": true
           }
         ],
         "truncated": false,

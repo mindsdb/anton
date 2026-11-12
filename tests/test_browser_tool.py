@@ -377,6 +377,42 @@ def test_shortlist_ranks_goal_words_and_drops_disabled():
     assert 4 not in [el.id for el in ranked]
 
 
+CALENDAR = {
+    "url": "https://www.kayak.com/", "title": "KAYAK",
+    "elements": [
+        {"id": 1, "role": "textbox", "name": "From", "value": "San Francisco (SFO)"},
+        {"id": 2, "role": "button", "name": "Search", "context": "Flight search"},
+        *[{"id": 10 + d, "role": "button", "name": str(d), "context": "Select dates › November 2026", "in_dialog": True}
+          for d in range(1, 31)],
+        *[{"id": 50 + d, "role": "button", "name": str(d), "context": "Select dates › December 2026", "in_dialog": True}
+          for d in range(1, 32)],
+        {"id": 90, "role": "button", "name": "Select these dates", "in_dialog": True},
+    ],
+    "text": "",
+}
+
+
+def test_with_a_dialog_open_the_shortlist_is_the_dialog_and_ranks_the_dates_day_by_its_month():
+    ranked = shortlist(model(CALENDAR).elements, "pick the departure date", {"depart": "2026-11-27"})
+    assert all(el.in_dialog for el in ranked)
+    # November's 27 first: its name is the day and its month is around it; December's 27 next.
+    assert [el.id for el in ranked[:2]] == [37, 77]
+
+
+def test_jev_reads_each_elements_containers():
+    _, questions, _ = step_request(
+        goal="pick the departure date", page=model(CALENDAR), inputs={"depart": "2026-11-27"}, history=[], redact=False,
+    )
+    assert questions["target"]["criteria"]["e37"] == '[37] button "27" in "Select dates › November 2026" (in the open dialog)'
+
+
+def test_an_invisible_recaptcha_frame_is_no_human_check():
+    page = model({**PAGE, "elements": [*PAGE["elements"], {"id": 9, "role": "frame", "name": "reCAPTCHA"}]})
+    assert human_check(page) == ""
+    shown = model({**PAGE, "challenges": [{"host": "www.google.com", "kind": "recaptcha"}]})
+    assert human_check(shown) == "reCAPTCHA"
+
+
 def test_signature_changes_with_values():
     changed = {**PAGE, "elements": [{**PAGE["elements"][0], "value": "mac"}, *PAGE["elements"][1:]]}
     assert signature(model(PAGE)) != signature(model(changed))

@@ -15,8 +15,8 @@ the write gate's card, and clicks by position ask once per page.
 
 ``browser_jev`` (settings) decides how much Jev does:
 
-- ``on``: ``run`` executes Jev's confident steps itself.
-- ``shadow`` (default): ``run`` only reads the page. Jev's pick is recorded
+- ``on`` (default): ``run`` executes Jev's confident steps itself.
+- ``shadow``: ``run`` only reads the page. Jev's pick is recorded
   and compared with the step the model then takes, so we can measure
   agreement before letting Jev act. Jev reads no field values or typed text
   for it.
@@ -431,7 +431,7 @@ def _state(session: "ChatSession") -> _BrowserState:
 
 
 def _jev_mode(session: "ChatSession") -> str:
-    mode = str(_setting(session, "browser_jev", "shadow")).lower()
+    mode = str(_setting(session, "browser_jev", "on")).lower()
     return mode if mode in ("on", "shadow", "off") else "shadow"
 
 
@@ -1936,7 +1936,8 @@ BROWSER: you and the user share a real browser. The user sees it beside this cha
 - The browser is the last resort. Use a connected connector or API first (Gmail, Calendar, Slack, a CRM). If the service has a connector that isn't connected, offer to connect it instead of browsing; its connect form also lets the user choose the browser.
 - Use the browser when there is no connector, when the user asks for it, when fetching the page in the scratchpad fails, or for what sites do better than APIs: booking tickets, travel and reservations, shopping and checkout.
 - Only open sites the user named or that the task plainly needs. Never invent URLs.
-- Start a task with action=run and a goal; give values to type in `inputs`. run takes the steps it is sure of and hands back with the page when it isn't.
+- When a site takes its search in the address (most travel, shopping and search sites, e.g. kayak.com/flights/SFO-WAS/2026-11-27/2026-11-29), open the results address directly instead of filling the form.
+- Otherwise start with action=run, a goal, and every value it will need in `inputs` (dates as YYYY-MM-DD). run takes the steps it is sure of quickly and hands back with the page when it isn't; then continue with action=act.
 - To act yourself, use action=act with a step: {"action":"click","element":17}, {"action":"type","element":4,"text":"…","submit":true}, {"action":"select","element":9,"value":"Blue"}, {"action":"scroll","direction":"down"}, {"action":"press","element":4,"key":"Enter"}, {"action":"back"}, {"action":"navigate","url":"…"}. Element numbers come from the latest page.
 - Where the page list has nothing to point at (a canvas, a drawing, a map), use pixels from your latest screenshot: {"action":"click","x":412,"y":230}. Clicks also take "button":"right" and "clicks":2. Drag with {"action":"drag","from":{"element":5} or {"x":…,"y":…},"to":{…}}; that's how shapes get drawn, sliders moved and items reordered.
 - Never ask for, read out, or type a password, one-time code, or card number; the tool refuses to type into a secret field. For sign-ins, CAPTCHAs, two-factor codes and payments, call action=hand_to_user with a short reason and let the user do it in the browser.
