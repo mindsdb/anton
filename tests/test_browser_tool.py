@@ -1562,6 +1562,28 @@ async def test_run_hands_back_from_a_dead_button_on_a_page_whose_clock_ticks_dur
     assert len(host.posted("/action")) == browser_tool.MAX_STALLS + 1
 
 
+async def test_on_the_desktop_run_sends_each_step_with_into_frame_false_and_hands_back_from_a_dead_button(fake_jev, monkeypatch):
+    """When a decision model picks the desktop browser's steps, run sends
+    each through the gate. Run picks steps by element, scroll and back,
+    never a point, so none may land in a frame and each says into_frame
+    false. A dead button on a page whose clock ticks hands back after
+    MAX_STALLS repeats there, as on the web."""
+    async def decide(session, *, jev_state, questions):
+        return await jev.decide(state=jev_state, questions=questions)
+
+    # The queue answers for whichever decision model the host gives the desktop's browser.
+    monkeypatch.setattr(browser_tool, "_jev", decide)
+    host = FakeHost(pages=[{**FRAMED, "text": f"Now 12:00:0{i}"} for i in range(9)])
+    host.changed = True
+    session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+    fake_jev.queue += [jev_answers("scroll_down"), *[jev_answers("click", target="e2")] * 6]
+    result = await browser_tool.handle_browser(session, {"action": "run", "goal": "search", "max_steps": 8})
+    assert "changed nothing" in result.content
+    posted = host.posted("/action")
+    assert len(posted) == 1 + browser_tool.MAX_STALLS + 1
+    assert [body["into_frame"] for body in posted] == [False] * len(posted)
+
+
 async def test_run_clamps_max_steps(fake_jev):
     pages = [{**PAGE, "url": f"https://shop.example/{i}"} for i in range(40)]
     host = FakeHost(pages=pages)
