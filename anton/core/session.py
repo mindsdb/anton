@@ -4973,8 +4973,7 @@ class ChatSession:
         first check, before any tool had been dispatched, and the turn still
         paid for two calls. Measured at a 100k ceiling with 190k contexts: zero
         tools run, 400k spent, 300% over the number the user asked for. The cap
-        binds only below ~2x the reserve; at the 1.25M default it changes
-        nothing.
+        binds only below ~2x the reserve; at the default it changes nothing.
 
         The bound this produces is close, not exact: the reserve is derived from
         `peak_context_tokens` (input + cache_read + cache_creation) but compared
@@ -5086,15 +5085,26 @@ class ChatSession:
 
         `limit` is "spend_ceiling", "round_cap" or "time_limit". Yields
         ``("event", ev)``, then ``("result", granted)``. Granted raises that
-        limit for the rest of the turn (`_grant_limit`). Two ways to grant, in order:
+        limit for the rest of the turn (`_grant_limit`). Only a turn that can
+        ask a person grants anything. With no one to ask (no elicitor that
+        takes a choice, or no emitter, as in `turn()`), even a message saying
+        "don't stop" grants nothing: it returns False and the caller hands back
+        at the configured limit. "Can ask" is read from the elicitor the host
+        injects, so this holds for `turn()` and cloud turns, which inject none
+        when no one is there; a host that injects a choice elicitor on an
+        unattended turn still lets that turn's message grant.
+        Otherwise, two ways to grant, in order:
 
         1. The message that started this turn already says to keep going or
            finish. Honored once per limit per turn, with a progress line
            naming the limit, so the user is not asked what they just said.
         2. A "Keep going / Stop here" question naming the limit. "Stop
-           here", Skip, a timeout, or a host that cannot ask returns False
-           and the caller hands back as before.
+           here", Skip or a timeout returns False and the caller hands back
+           as before.
         """
+        if not self._can_ask_a_choice():
+            yield "result", False
+            return
         if limit == "time_limit" and self._max_turn_seconds > 0 and (
             self._time_limit_continued_s
             >= _TIME_LIMIT_MAX_CONTINUES * _TIME_LIMIT_CONTINUE_MULTIPLIER * self._max_turn_seconds
@@ -5103,7 +5113,7 @@ class ChatSession:
             return
         # The time limit always asks: "don't stop" in the message can't speak
         # for the extra hour, and the host extends the turn's credentials only
-        # when the question is answered. With nobody to ask it hands back.
+        # when the question is answered.
         if limit != "time_limit" and limit not in self._limits_passed_by_message and await self._user_authorized_finishing(
             user_message
         ):
@@ -5116,11 +5126,6 @@ class ChatSession:
             yield "event", StreamTaskProgress(phase="analyzing", message=note)
             yield "result", True
             return
-        if self.emitter is None:
-            # `turn()` runs without an emitter, so there is no one to ask and
-            # nothing to drain; the caller hands back as it always did.
-            yield "result", False
-            return
         inner = self._run_draining(self._continue_question(limit))
         try:
             async for kind, item in inner:
@@ -5131,6 +5136,17 @@ class ChatSession:
                 yield kind, item
         finally:
             await inner.aclose()
+
+    def _can_ask_a_choice(self) -> bool:
+        """Whether a "choice" question can reach a person this turn: the same
+        test `elicit` applies before publishing one. Inferred from what the
+        host injects, so a host whose turn has no one to answer must not
+        inject an elicitor."""
+        return (
+            self.emitter is not None
+            and self.elicitor is not None
+            and "choice" in self.elicitor.supported_kinds
+        )
 
     async def _user_authorized_finishing(self, user_message: str) -> bool:
         """Whether this turn's own message tells the agent to keep going.
@@ -5234,7 +5250,7 @@ class ChatSession:
     def _spend_ceiling_notice(self) -> str:
         """The SYSTEM injection for a ceiling stop.
 
-        Mirrors the 25-round cap's pause-and-ask wording deliberately: the user
+        Mirrors the round cap's pause-and-ask wording deliberately: the user
         already meets that shape when a long turn stops, and two different
         "I stopped, shall I go on?" behaviours would read as two different
         products. `Do NOT retry automatically` is what keeps this a question
