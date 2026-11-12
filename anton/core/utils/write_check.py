@@ -11840,7 +11840,7 @@ class _CodeFiles:
     reads: list[tuple[ast.Call, ast.AST, str]] = dataclasses.field(default_factory=list)
     by_source: dict[int, str] = dataclasses.field(default_factory=dict)
     # Each source of the checked cell the check read, with its text and how the cell records it.
-    subs: dict[int, tuple[ast.AST, str, str]] = dataclasses.field(default_factory=dict)
+    subs: dict[int, tuple[ast.AST, str, str, str | None]] = dataclasses.field(default_factory=dict)
     # What `_stitched_text` read of each source, by its id and the cells counted as stopped early.
     stitched: dict[tuple[int, frozenset[int]], str | None] = dataclasses.field(default_factory=dict)
     # Where one replay of the cells stood before each, by the cells counted as stopped early (`_stitch_before`).
@@ -11852,11 +11852,13 @@ class _CodeFiles:
     def hashes(self) -> dict[str, str]:
         """The SHA-256 of each text the checked cell's sources gave, by path or
         place (`CellWrites.code_files`)."""
-        return {key: _sha256(text) for _source, text, key in self.subs.values()}
+        return {key: _sha256(text) for _source, text, key, _path in self.subs.values()}
 
-    def substitute(self, source: ast.AST, text: str, key: str) -> None:
-        """Runs `text` in place of `source`, a source of the checked cell (`CellWrites.run_code`)."""
-        self.subs[id(source)] = (source, text, key)
+    def substitute(self, source: ast.AST, text: str, key: str, path: str | None = None) -> None:
+        """Runs `text` in place of `source`, a source of the checked cell, the
+        file at `path` (as the cell names it) or a script of pieces
+        (`CellWrites.run_code`)."""
+        self.subs[id(source)] = (source, text, key, path)
 
     def text(self, source: ast.AST, reader: _Reader) -> str | None:
         """The text the read `source` hands exec(); None when it isn't one
@@ -11883,13 +11885,15 @@ class _CodeFiles:
             self.may_read = _may_read_now(reader)
         if not self.may_read or not posixpath.isabs(path) and reader.cwds != ["."] or cell.index != cell.host:
             return None
+        if _in_fstring(source, cell):
+            return None
         text = self.read[path] if path in self.read else _read_code_file(path, self.root)
         if text is None:
             return None
         self.read[path] = text
         self.reads.append((call, source, path))
         self.by_source[id(source)] = text
-        self.substitute(source, text, path)
+        self.substitute(source, text, path, source.func.value.args[0].value)
         return text
 
 
@@ -12053,6 +12057,8 @@ def _stitched_text(source: ast.AST, reader: _Reader) -> str | None:
     # Only a local pad runs the text the check read in place of the source (`CellWrites.run_code`).
     if files.root is None or cell.index != cell.host or stmt is None:
         return None
+    if cell.scope_of(source) is not None or _in_fstring(source, cell):
+        return None
     want = None
     if cell.host < reader.current.index:
         # An earlier cell ran the text its own check read only when it recorded it.
@@ -12062,6 +12068,8 @@ def _stitched_text(source: ast.AST, reader: _Reader) -> str | None:
     elif cell.host != reader.current.index:
         return None
     replay = _stitch_before(reader, cell, errored)
+    if replay is None:
+        return None
     replay.run(cell, cell.tree.body[: cell.tree.body.index(stmt)], errored=False)
     if replay.dead or replay.unsafe_in(cell, stmt, source):
         return None
@@ -12082,7 +12090,7 @@ def _script_key(source: ast.AST) -> str:
     return f"@{source.lineno}:{source.col_offset}"
 
 
-def _stitch_before(reader: _Reader, cell: _Cell, errored: frozenset[int]) -> _Stitch:
+def _stitch_before(reader: _Reader, cell: _Cell, errored: frozenset[int]) -> _Stitch | None:
     """A replay of every cell before `cell`, from one pass over the cells per
     check that keeps where it stood before each (`_CodeFiles.stitch_states`)."""
     states = reader.code_files.stitch_states.get(errored)
@@ -12090,10 +12098,13 @@ def _stitch_before(reader: _Reader, cell: _Cell, errored: frozenset[int]) -> _St
         states = {}
         replay = _Stitch(reader)
         for each in sorted((c for c in reader.cells if c.index == c.host), key=lambda c: c.index):
-            states[each.index] = replay.state()
+            # Only a cell that hands exec() code may hold a stitched source.
+            if each.hands_literal_code or each.index == reader.current.index:
+                states[each.index] = replay.state()
             replay.run(each, each.tree.body, errored=each.index in errored)
         reader.code_files.stitch_states[errored] = states
-    return _Stitch(reader, state=states.get(cell.index))
+    state = states.get(cell.index)
+    return None if state is None else _Stitch(reader, state=state)
 
 
 def _top_statement(node: ast.AST, cell: _Cell) -> ast.stmt | None:
@@ -12231,9 +12242,11 @@ class _Stitch:
             name = stmt.target.id
             held = env.get(name) if name not in self.poisoned else None
             more = self.value(stmt.value, fresh=True)
-            if isinstance(held, str) and isinstance(more, str) or isinstance(held, bytes) and isinstance(more, bytes):
+            if (isinstance(held, str) and isinstance(more, str) or isinstance(held, bytes) and isinstance(more, bytes)) and (
+                len(held) + len(more) <= _LITERAL_CODE_LIMIT
+            ):
                 env[name] = held + more
-            elif isinstance(held, list) and isinstance(more, list):
+            elif isinstance(held, list) and isinstance(more, list) and len(held) + len(more) <= _STITCH_RANGE_LIMIT:
                 held.extend(more)
             else:
                 self._poison(name)
@@ -12247,9 +12260,11 @@ class _Stitch:
                 held = env.get(name) if name not in self.poisoned else None
                 consumed.add(id(func.value))
                 more = self.value(call.args[0], fresh=True)
-                if isinstance(held, list) and func.attr == "append" and isinstance(more, (str, bytes)):
+                room = isinstance(held, list) and len(held) + (len(more) if isinstance(more, list) else 1) <= (
+                    _STITCH_RANGE_LIMIT)
+                if room and func.attr == "append" and isinstance(more, (str, bytes)):
                     held.append(more)
-                elif isinstance(held, list) and func.attr == "extend" and isinstance(more, list):
+                elif room and func.attr == "extend" and isinstance(more, list):
                     held.extend(more)
                 elif name in env:
                     self._poison(name)
@@ -12266,6 +12281,10 @@ class _Stitch:
                 if isinstance(node, (ast.Global, ast.Nonlocal)):
                     for name in node.names:
                         self._poison(name)
+            # A walrus in a default or a decorator binds in the cell, as the def runs.
+            for node in ast.walk(stmt):
+                if isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
+                    self._poison(node.target.id)
             consumed.update(id(n) for n in ast.walk(stmt) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store))
             return True
         return isinstance(stmt, ast.Pass)
@@ -12288,6 +12307,10 @@ class _Stitch:
             elif isinstance(node, (ast.Global, ast.Nonlocal)):
                 for name in node.names:
                     self._poison(name)
+            elif isinstance(node, (ast.MatchAs, ast.MatchStar, ast.ExceptHandler)) and node.name:
+                self._poison(node.name)
+            elif isinstance(node, ast.MatchMapping) and node.rest:
+                self._poison(node.rest)
             elif isinstance(node, (ast.Subscript, ast.Attribute)) and not isinstance(node.ctx, ast.Load):
                 root = _root_of(node)
                 if isinstance(root, ast.Name) and id(root) not in skip:
@@ -12325,7 +12348,9 @@ class _Stitch:
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
             left = self.value(node.left, local=local)
             right = self.value(node.right, local=local)
-            if isinstance(left, str) and isinstance(right, str) or isinstance(left, bytes) and isinstance(right, bytes):
+            if (isinstance(left, str) and isinstance(right, str) or isinstance(left, bytes) and isinstance(right, bytes)) and (
+                len(left) + len(right) <= _LITERAL_CODE_LIMIT
+            ):
                 return left + right
             return None
         if isinstance(node, (ast.List, ast.Tuple)) and fresh:
@@ -16853,7 +16878,8 @@ def _stale_code_files(reader: _Reader) -> bool:
             return looped or reader.position(node) < at
 
         written = _written_modules(reader, reader.cells, only=first)
-        if written.anywhere or path in {_code_file_key(p, files.root) for p in written.paths}:
+        # Case may not tell two names apart where the file system folds it.
+        if written.anywhere or path.casefold() in {_code_file_key(p, files.root).casefold() for p in written.paths}:
             return True
         if _imports_local_code_before(at, reader):
             return True
@@ -17109,22 +17135,49 @@ def find_cell_writes(
     )
 
 
+# What a cell whose read gives other text than the check read stops with.
+_CHANGED_FILE = "{} changed after the write check read it. Run the cell again so the check reads it as it is now."
+_CHANGED_SCRIPT = "The script this cell builds isn't the one the write check read. Run the cell again."
+# Hands back the checked text when the read gives it, and stops otherwise:
+# whatever the read gives, nothing but the checked text runs.
+_CHECKED = "(lambda __t, __ok, __m: __t if __ok else (_ for _ in ()).throw(RuntimeError(__m)))"
+
+
 def _with_texts(code: str, files: _CodeFiles) -> str | None:
-    """`code` with each source the check read replaced by its text, as a
-    literal that keeps the lines it spanned; None when it read none."""
+    """`code` with each source the check read replaced by an expression that
+    gives the checked text, keeping the lines it spanned: a file's when the
+    file still hashes to it as the cell reads it, a script's when the cell's
+    own expression still builds it; it stops the cell otherwise, so a change
+    the check didn't see reruns the check. None when it read none."""
     if not files.subs:
         return None
-    lines = code.encode("utf-8").splitlines(keepends=True)
-    starts = [0]
-    for line in lines:
-        starts.append(starts[-1] + len(line))
     raw = code.encode("utf-8")
-    spans = sorted(((starts[n.lineno - 1] + n.col_offset, starts[n.end_lineno - 1] + n.end_col_offset, text, n)
-                    for n, text, _key in files.subs.values()), key=lambda span: span[0], reverse=True)
-    for start, end, text, node in spans:
-        literal = "(" + repr(text) + "\n" * (node.end_lineno - node.lineno) + ")"
-        raw = raw[:start] + literal.encode("utf-8") + raw[end:]
+    starts = [0]
+    for line in raw.splitlines(keepends=True):
+        starts.append(starts[-1] + len(line))
+    spans = sorted(((starts[n.lineno - 1] + n.col_offset, starts[n.end_lineno - 1] + n.end_col_offset, n, text, path)
+                    for n, text, _key, path in files.subs.values()), key=lambda span: span[0], reverse=True)
+    for start, end, node, text, path in spans:
+        if path is not None:
+            ok = f"__import__('hashlib').sha256(open({path!r}, 'rb').read()).hexdigest() == {_sha256(text)!r}"
+            message = _CHANGED_FILE.format(path)
+            replaced = f"{_CHECKED}({text!r}, {ok}, {message!r}" + "\n" * (node.end_lineno - node.lineno) + ")"
+        else:
+            built = raw[start:end].decode("utf-8")
+            ok = f"(lambda __v: (__v.decode('utf-8', 'replace') if isinstance(__v, bytes) else __v) == {text!r})({built})"
+            replaced = f"{_CHECKED}({text!r}, {ok}, {_CHANGED_SCRIPT!r})"
+        raw = raw[:start] + replaced.encode("utf-8") + raw[end:]
     return raw.decode("utf-8")
+
+
+def _in_fstring(node: ast.AST, cell: _Cell) -> bool:
+    """Whether `node` sits in an f-string, where a backslash may not go before Python 3.12."""
+    parent = cell.parents.get(node)
+    while parent is not None:
+        if isinstance(parent, ast.JoinedStr):
+            return True
+        parent = cell.parents.get(parent)
+    return False
 
 
 # How many reasons a card gives for a step the check couldn't read.

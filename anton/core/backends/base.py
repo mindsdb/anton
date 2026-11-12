@@ -208,8 +208,9 @@ class ScratchpadRuntime(ABC):
         output.
         """
         scrubbed = scrub_cell(cell)
-        pending, self._pending_code_files = getattr(self, "_pending_code_files", None), None
+        pending = getattr(self, "_pending_code_files", None)
         if pending is not None and pending[0] == scrubbed.code:
+            self._pending_code_files = None
             scrubbed.code_files = dict(pending[1])
         self.cells.append(scrubbed)
         return scrubbed
