@@ -3769,36 +3769,46 @@ def test_a_py_file_the_cell_may_change_first_is_not_kept(helpers):
 
 
 def test_the_pad_runs_only_the_text_the_check_read_in_place_of_the_read(helpers):
-    """What runs is what was checked: while the file still holds that text
-    the cell runs it, and once anything changed it the cell stops, so the
-    check reads it again, and never runs the changed text."""
+    """What runs is what was checked: a change to the file after the check,
+    by anything, doesn't reach the cell."""
     code = "x = 0\nexec(open(\n    'helpers.py'\n).read())\ny = load()"
     writes = find_cell_writes(code=code, earlier=(), snapshots=(helpers,), code_root=helpers.root)
     assert not writes.needs_approval() and writes.run_code is not None
     assert writes.run_code.count("\n") == code.count("\n"), "a traceback's lines still match the cell's"
+    (helpers.root / "helpers.py").write_text("def load():\n    return 'changed'\n")
     namespace: dict = {}
     exec(writes.run_code, namespace)
     assert namespace["y"] == 1
-    (helpers.root / "helpers.py").write_text("def load():\n    return 'changed'\n")
-    namespace = {}
-    with pytest.raises(RuntimeError, match="helpers.py changed after the write check read it"):
-        exec(writes.run_code, namespace)
-    assert "load" not in namespace
+
+
+def test_a_cell_that_catches_errors_around_the_exec_still_runs_the_checked_text(helpers):
+    """No check runs in place of the read, so there is no error a `try` can
+    swallow to skip the exec the check took to have run."""
+    (helpers.root / "safe.py").write_text("def go():\n    print('safe')\n")
+    earlier = ["def go():\n    open('data.csv', 'w').write('CLOBBERED')"]
+    code = "try:\n    exec(open('safe.py').read())\nexcept Exception:\n    pass\ngo()"
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(helpers,), code_root=helpers.root)
+    assert not writes.needs_approval() and writes.run_code is not None
+    (helpers.root / "safe.py").unlink()
+    namespace: dict = {}
+    exec(earlier[0], namespace)
+    exec(writes.run_code, namespace)
+    assert not (helpers.root / "data.csv").exists()
+
+
+def test_a_program_started_before_the_read_leaves_the_cell_unchecked(helpers):
+    """It may regenerate the file, and the cell would run the old text."""
+    code = "import subprocess\nsubprocess.run(['sh', 'gen.sh'])\nexec(open('helpers.py').read())"
+    writes = find_cell_writes(code=code, earlier=(), snapshots=(helpers,), code_root=helpers.root)
+    assert writes.unchecked and writes.run_code is None
 
 
 def test_the_pad_runs_only_the_script_the_check_built_from_pieces(helpers):
     earlier = ["P = []", "P.append('z = 41\\n')", "P.append('z += 1\\n')"]
     writes = find_cell_writes(code="exec(''.join(P))", earlier=_earlier(earlier), snapshots=(helpers,),
                               code_root=helpers.root)
-    assert list(writes.code_files) == ["@1:5"] and writes.run_code is not None
-    namespace: dict = {"P": ["z = 41\n", "z += 1\n"]}
-    exec(writes.run_code, namespace)
-    assert namespace["z"] == 42
-    # Pieces changed where the check couldn't see stop the cell instead of running.
-    namespace = {"P": ["z = 41\n", "z += 1\n", "z = 'unseen'\n"]}
-    with pytest.raises(RuntimeError, match="isn't the one the write check read"):
-        exec(writes.run_code, namespace)
-    assert "z" not in namespace
+    assert writes.run_code == "exec(('z = 41\\nz += 1\\n'))"
+    assert list(writes.code_files) == ["@1:5"]
 
 
 def test_a_script_doubled_past_the_cap_is_not_built(helpers):

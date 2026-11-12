@@ -16881,8 +16881,24 @@ def _stale_code_files(reader: _Reader) -> bool:
         # Case may not tell two names apart where the file system folds it.
         if written.anywhere or path.casefold() in {_code_file_key(p, files.root).casefold() for p in written.paths}:
             return True
-        if _imports_local_code_before(at, reader):
+        if _imports_local_code_before(at, reader) or _launches_before(at, reader):
             return True
+    return False
+
+
+def _launches_before(at: tuple[int, ...], reader: _Reader) -> bool:
+    """Whether the checked cell, or code it runs, starts a program or edits a
+    file in place (`fileinput`) before `at`: either may regenerate the file,
+    and the cell would then run the text the check read, not the new one."""
+    for cell in _all_cells(reader):
+        if cell.host != reader.current.index:
+            continue
+        for node in cell.calls:
+            if reader.position(node) >= at:
+                continue
+            name = reader.module_member(node.func) or reader.dotted(node.func)
+            if _last_name(node.func) in _LAUNCH_NAMES or name.startswith("fileinput."):
+                return True
     return False
 
 
@@ -17135,38 +17151,23 @@ def find_cell_writes(
     )
 
 
-# What a cell whose read gives other text than the check read stops with.
-_CHANGED_FILE = "{} changed after the write check read it. Run the cell again so the check reads it as it is now."
-_CHANGED_SCRIPT = "The script this cell builds isn't the one the write check read. Run the cell again."
-# Hands back the checked text when the read gives it, and stops otherwise:
-# whatever the read gives, nothing but the checked text runs.
-_CHECKED = "(lambda __t, __ok, __m: __t if __ok else (_ for _ in ()).throw(RuntimeError(__m)))"
-
-
 def _with_texts(code: str, files: _CodeFiles) -> str | None:
-    """`code` with each source the check read replaced by an expression that
-    gives the checked text, keeping the lines it spanned: a file's when the
-    file still hashes to it as the cell reads it, a script's when the cell's
-    own expression still builds it; it stops the cell otherwise, so a change
-    the check didn't see reruns the check. None when it read none."""
+    """`code` with each source the check read replaced by its text, as a
+    literal that keeps the lines it spanned, so exec() can get nothing but
+    the checked text, whatever ran before it; None when it read none. No
+    check runs in its place: an error there could be caught and the exec
+    skipped, which the check took to have run."""
     if not files.subs:
         return None
     raw = code.encode("utf-8")
     starts = [0]
     for line in raw.splitlines(keepends=True):
         starts.append(starts[-1] + len(line))
-    spans = sorted(((starts[n.lineno - 1] + n.col_offset, starts[n.end_lineno - 1] + n.end_col_offset, n, text, path)
-                    for n, text, _key, path in files.subs.values()), key=lambda span: span[0], reverse=True)
-    for start, end, node, text, path in spans:
-        if path is not None:
-            ok = f"__import__('hashlib').sha256(open({path!r}, 'rb').read()).hexdigest() == {_sha256(text)!r}"
-            message = _CHANGED_FILE.format(path)
-            replaced = f"{_CHECKED}({text!r}, {ok}, {message!r}" + "\n" * (node.end_lineno - node.lineno) + ")"
-        else:
-            built = raw[start:end].decode("utf-8")
-            ok = f"(lambda __v: (__v.decode('utf-8', 'replace') if isinstance(__v, bytes) else __v) == {text!r})({built})"
-            replaced = f"{_CHECKED}({text!r}, {ok}, {_CHANGED_SCRIPT!r})"
-        raw = raw[:start] + replaced.encode("utf-8") + raw[end:]
+    spans = sorted(((starts[n.lineno - 1] + n.col_offset, starts[n.end_lineno - 1] + n.end_col_offset, n, text)
+                    for n, text, _key, _path in files.subs.values()), key=lambda span: span[0], reverse=True)
+    for start, end, node, text in spans:
+        literal = "(" + repr(text) + "\n" * (node.end_lineno - node.lineno) + ")"
+        raw = raw[:start] + literal.encode("utf-8") + raw[end:]
     return raw.decode("utf-8")
 
 
