@@ -296,7 +296,7 @@ def _check_path(value: Any) -> str:
         or not is_printable_ascii(text, space=False)
         or any(c in text for c in "\\#{}%")
     ):
-        raise ConnectorDraftError("check.path must be a path such as /v1/me, with no host.")
+        raise ConnectorDraftError("check.path must be a path from the host, with any version, such as /v2/me, and no host.")
     segments = text.split("?", 1)[0].split("/")
     if any(segment in (".", "..") for segment in segments):
         raise ConnectorDraftError("check.path must not have . or .. segments.")

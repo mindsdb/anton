@@ -737,6 +737,13 @@ def test_the_tool_says_every_path_starts_at_the_host_with_its_version():
         assert "only" in text and "host" in text, where
         assert "/v2/" in text, where
         assert "includ" in text and "version" in text, where
+    assert "(/v2/exchanges, not /exchanges)" in texts["description"]
+    assert "/v2/eod?symbols=AAPL" in texts["usage_notes"]
+
+
+def test_a_check_path_with_a_host_is_refused_with_a_versioned_example():
+    with pytest.raises(ConnectorDraftError, match=r"from the host, with any version, such as /v2/me"):
+        parse_connector_draft(_draft(check={"path": "https://api.example.com/v2/me"}))
 
 
 def _union_keywords(schema):
