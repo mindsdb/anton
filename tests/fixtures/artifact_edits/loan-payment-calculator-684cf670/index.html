@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Loan Payment Calculator</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0d1117;
+      color: #e6edf3;
+      font-synthesis: none;
+      text-rendering: optimizeLegibility;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      background: #0d1117;
+      color: #e6edf3;
+    }
+    main {
+      width: min(100% - 40px, 1060px);
+      margin: 0 auto;
+      padding: 48px 0 64px;
+    }
+    h1 {
+      margin: 0 0 28px;
+      font-size: clamp(1.7rem, 4vw, 2.2rem);
+      line-height: 1.2;
+      letter-spacing: -0.035em;
+      font-weight: 650;
+    }
+    h2 {
+      margin: 0;
+      font-size: 1.05rem;
+      letter-spacing: -0.01em;
+      font-weight: 600;
+    }
+    .panel {
+      background: #111820;
+      border: 1px solid #27313c;
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.12);
+    }
+    .input-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 22px;
+    }
+    label {
+      display: block;
+      margin-bottom: 8px;
+      color: #aab6c3;
+      font-size: 0.86rem;
+      font-weight: 550;
+    }
+    input {
+      width: 100%;
+      min-height: 46px;
+      border: 1px solid #35414e;
+      border-radius: 7px;
+      padding: 10px 12px;
+      background: #0d1117;
+      color: #e6edf3;
+      font: inherit;
+      font-size: 1rem;
+      outline: none;
+      transition: border-color 140ms ease, box-shadow 140ms ease;
+    }
+    input:focus {
+      border-color: #58a6ff;
+      box-shadow: 0 0 0 3px rgba(56, 139, 253, 0.2);
+    }
+    .form-actions {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-top: 22px;
+    }
+    button {
+      min-height: 42px;
+      border: 1px solid #2f81f7;
+      border-radius: 7px;
+      padding: 9px 17px;
+      background: #1f6feb;
+      color: #fff;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 140ms ease, transform 140ms ease;
+    }
+    button:hover { background: #388bfd; }
+    button:active { transform: translateY(1px); }
+    button:focus-visible {
+      outline: 3px solid rgba(88, 166, 255, 0.55);
+      outline-offset: 2px;
+    }
+    #form-error {
+      margin: 0;
+      color: #ff8e8e;
+      font-size: 0.9rem;
+    }
+    #results-section { margin-top: 24px; }
+    .result-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+    .result-card {
+      min-height: 132px;
+      padding: 21px 22px;
+      border: 1px solid #27313c;
+      border-radius: 11px;
+      background: #111820;
+    }
+    .result-label {
+      color: #aab6c3;
+      font-size: 0.9rem;
+      font-weight: 550;
+    }
+    .result-value {
+      margin-top: 15px;
+      color: #e6edf3;
+      font-size: clamp(1.7rem, 4vw, 2.15rem);
+      line-height: 1.12;
+      letter-spacing: -0.035em;
+      font-weight: 650;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+    #amortization-section { margin-top: 34px; }
+    .section-heading {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 7px;
+    }
+    .section-note {
+      margin: 0 0 16px;
+      color: #8b98a7;
+      font-size: 0.88rem;
+    }
+    .table-scroll {
+      overflow-x: auto;
+      border: 1px solid #27313c;
+      border-radius: 10px;
+      background: #111820;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: right;
+      font-size: 0.92rem;
+    }
+    thead { background: #161f29; }
+    th, td {
+      padding: 13px 16px;
+      border-bottom: 1px solid #27313c;
+    }
+    th {
+      color: #aab6c3;
+      font-size: 0.82rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    td {
+      color: #d7dee7;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    tbody tr:last-child td { border-bottom: 0; }
+    th:first-child, td:first-child {
+      text-align: left;
+      padding-left: 18px;
+    }
+    tbody tr:hover { background: rgba(177, 186, 196, 0.045); }
+    @media (max-width: 680px) {
+      main {
+        width: min(100% - 28px, 1060px);
+        padding: 30px 0 42px;
+      }
+      .panel { padding: 19px 16px; }
+      .input-grid { grid-template-columns: 1fr; gap: 15px; }
+      .result-grid { grid-template-columns: 1fr; gap: 12px; }
+      .result-card { min-height: 112px; padding: 18px; }
+      .result-value { margin-top: 12px; }
+      .section-heading { align-items: flex-start; }
+      th, td { padding: 12px 13px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { transition-duration: 0.01ms !important; }
+    }
+  </style>
+  <script>
+    const viewSetups = new Map(); function defineView(name, setup) { viewSetups.set(name, viewSetups.has(name) ? () => { throw new Error('two scripts defined this view'); } : setup); } function runView(name, el) { const fail = (err) => { const why = err && err.message ? err.message : String(err); if (el) { el.setAttribute('data-view-failed', name); el.textContent = name + ' could not load.'; } console.error(name + ' failed: ' + why); if (typeof reportError === 'function') reportError(new Error(name + ': ' + why)); }; const setup = viewSetups.get(name); if (typeof setup !== 'function') { fail(new Error('no script defined this view')); return; } try { const done = setup(el); if (done && typeof done.then === 'function') done.catch(fail); } catch (err) { fail(err); } }
+  </script>
+</head>
+<body>
+  <main id="calculator-main">
+    <header>
+      <h1>Loan payment calculator</h1>
+    </header>
+
+    <section class="panel" id="loan-input-section" aria-labelledby="inputs-heading">
+      <h2 id="inputs-heading">Loan details</h2>
+      <form id="loan-form" onsubmit="return calculateLoan(event)" novalidate>
+        <div class="input-grid" id="loan-input-grid">
+          <div id="amount-field">
+            <label for="loan-amount">Loan amount (USD)</label>
+            <input id="loan-amount" name="loan-amount" type="number" inputmode="decimal" min="0.01" step="0.01" value="250000" required>
+          </div>
+          <div id="rate-field">
+            <label for="annual-rate">Annual interest rate (%)</label>
+            <input id="annual-rate" name="annual-rate" type="number" inputmode="decimal" min="0" step="0.01" value="6.5" required>
+          </div>
+          <div id="term-field">
+            <label for="term-years">Loan term (years)</label>
+            <input id="term-years" name="term-years" type="number" inputmode="numeric" min="1" step="1" value="30" required>
+          </div>
+        </div>
+        <div class="form-actions" id="form-actions">
+          <button type="submit">Calculate</button>
+          <p id="form-error" role="alert" aria-live="polite"></p>
+        </div>
+      </form>
+    </section>
+
+    <section id="results-section" aria-label="Loan payment results">
+      <div class="result-grid" id="result-grid">
+        <div class="result-card" id="monthly-payment-card">
+          <div class="result-label">Monthly payment</div>
+          <div class="result-value" id="monthly-payment" aria-live="polite">$1,580.17</div>
+        </div>
+        <div class="result-card" id="total-interest-card">
+          <div class="result-label">Total interest</div>
+          <div class="result-value" id="total-interest" aria-live="polite">$318,861.22</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="amortization-section" aria-labelledby="amortization-heading">
+      <div class="section-heading" id="amortization-title-row">
+        <h2 id="amortization-heading">Yearly amortization</h2>
+      </div>
+      <p class="section-note">Payments are grouped into 12-month years.</p>
+      <div class="table-scroll" id="amortization-view">
+        <table id="amortization-table">
+          <thead>
+            <tr>
+              <th scope="col">Year</th>
+              <th scope="col">Principal paid</th>
+              <th scope="col">Interest paid</th>
+              <th scope="col">Remaining balance</th>
+            </tr>
+          </thead>
+          <tbody id="amortization-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    let calculatedRows = [];
+    const usdFormatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+    function buildSchedule(amount, annualRatePercent, years) {
+      const months = years * 12;
+      const monthlyRate = annualRatePercent / 100 / 12;
+      const monthlyPayment = monthlyRate === 0
+        ? amount / months
+        : amount * monthlyRate / (1 - Math.pow(1 + monthlyRate, -months));
+      let balance = amount;
+      let totalInterest = 0;
+      const rows = [];
+
+      for (let year = 1; year <= years; year += 1) {
+        let principalPaid = 0;
+        let interestPaid = 0;
+        for (let month = 1; month <= 12; month += 1) {
+          const paymentNumber = (year - 1) * 12 + month;
+          const interest = balance * monthlyRate;
+          let principal = monthlyPayment - interest;
+          if (paymentNumber === months) principal = balance;
+          principal = Math.min(balance, Math.max(0, principal));
+          balance = Math.max(0, balance - principal);
+          principalPaid += principal;
+          interestPaid += interest;
+          totalInterest += interest;
+        }
+        rows.push({
+          year: year,
+          principalPaid: principalPaid,
+          interestPaid: interestPaid,
+          remainingBalance: year === years ? 0 : balance
+        });
+      }
+      return { monthlyPayment: monthlyPayment, totalInterest: totalInterest, rows: rows };
+    }
+
+    function showResults(result) {
+      calculatedRows = result.rows;
+      document.getElementById('monthly-payment').textContent = usdFormatter.format(result.monthlyPayment);
+      document.getElementById('total-interest').textContent = usdFormatter.format(result.totalInterest);
+      const error = document.getElementById('form-error');
+      error.textContent = '';
+      error.style.display = 'none';
+    }
+
+    function calculateLoan(event) {
+      if (event) event.preventDefault();
+      const amountInput = document.getElementById('loan-amount');
+      const rateInput = document.getElementById('annual-rate');
+      const termInput = document.getElementById('term-years');
+      const amount = Number(amountInput.value);
+      const rate = Number(rateInput.value);
+      const years = Number(termInput.value);
+      let message = '';
+
+      if (!Number.isFinite(amount) || amount <= 0) {
+        message = 'Enter a loan amount greater than $0.';
+      } else if (!Number.isFinite(rate) || rate < 0) {
+        message = 'Enter an annual interest rate of 0% or more.';
+      } else if (!Number.isInteger(years) || years <= 0) {
+        message = 'Enter a whole-number loan term greater than 0 years.';
+      }
+
+      const error = document.getElementById('form-error');
+      if (message) {
+        error.textContent = message;
+        error.style.display = 'block';
+        return false;
+      }
+
+      showResults(buildSchedule(amount, rate, years));
+      runView('Yearly amortization', document.getElementById('amortization-view'));
+      return false;
+    }
+  </script>
+
+  <script>
+    defineView('Yearly amortization', (el) => {
+      const body = el.querySelector('#amortization-body');
+      body.replaceChildren();
+      for (const row of calculatedRows) {
+        const tr = document.createElement('tr');
+        const values = [
+          String(row.year),
+          usdFormatter.format(row.principalPaid),
+          usdFormatter.format(row.interestPaid),
+          usdFormatter.format(row.remainingBalance)
+        ];
+        for (const value of values) {
+          const td = document.createElement('td');
+          td.textContent = value;
+          tr.appendChild(td);
+        }
+        body.appendChild(tr);
+      }
+    });
+  </script>
+
+  <script>
+    addEventListener('DOMContentLoaded', () => {
+      showResults(buildSchedule(250000, 6.5, 30));
+      runView('Yearly amortization', document.getElementById('amortization-view'));
+    });
+  </script>
+</body>
+</html>

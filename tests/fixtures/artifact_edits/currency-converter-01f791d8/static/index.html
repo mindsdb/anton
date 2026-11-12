@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="api-base" content="">
+  <title>Currency Converter</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0d1117;
+      color: #e6edf3;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #0d1117; }
+    main { width: min(100% - 32px, 880px); margin: 0 auto; padding: 58px 0 72px; }
+    h1 { margin: 0 0 34px; font-size: clamp(2rem, 6vw, 2.7rem); letter-spacing: -0.045em; }
+    h2 { margin: 0; font-size: 1.2rem; letter-spacing: -0.02em; }
+    .panel {
+      background: #151b23;
+      border: 1px solid #303a47;
+      border-radius: 16px;
+      padding: 24px;
+      margin-bottom: 22px;
+    }
+    .form-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 18px;
+      margin-top: 22px;
+    }
+    label { display: block; color: #b8c3d0; font-size: .9rem; font-weight: 600; }
+    input, select {
+      width: 100%;
+      min-height: 48px;
+      margin-top: 8px;
+      padding: 10px 12px;
+      border: 1px solid #3b4655;
+      border-radius: 9px;
+      background: #0d1117;
+      color: #e6edf3;
+      font: inherit;
+    }
+    input:focus, select:focus, button:focus-visible {
+      outline: 2px solid #58a6ff;
+      outline-offset: 2px;
+    }
+    .amount-field { grid-column: 1 / -1; }
+    button {
+      min-height: 46px;
+      margin-top: 20px;
+      padding: 0 22px;
+      border: 0;
+      border-radius: 9px;
+      background: #2f81f7;
+      color: #fff;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button:hover:not(:disabled) { background: #4493ff; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .result {
+      min-height: 76px;
+      margin-top: 18px;
+      padding: 17px 18px;
+      border: 1px solid #303a47;
+      border-radius: 10px;
+      background: #10161e;
+      display: flex;
+      align-items: center;
+      color: #aebac8;
+    }
+    .result.has-value { display: block; color: #e6edf3; }
+    .result-number { display: block; font-size: clamp(1.6rem, 5vw, 2.15rem); font-weight: 700; letter-spacing: -.03em; }
+    .result-detail { display: block; margin-top: 5px; color: #aebac8; font-size: .92rem; }
+    .error { color: #ff8b8b; }
+    .table-heading { margin-bottom: 16px; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; text-align: left; }
+    th, td { padding: 13px 12px; border-bottom: 1px solid #303a47; }
+    th { color: #9daab8; font-size: .85rem; font-weight: 600; }
+    td { color: #e6edf3; }
+    td.numeric { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    th.numeric { text-align: right; }
+    tbody tr:last-child td { border-bottom: 0; }
+    @media (max-width: 560px) {
+      main { width: min(100% - 24px, 880px); padding-top: 34px; }
+      .panel { padding: 18px; }
+      .form-grid { grid-template-columns: 1fr; gap: 14px; }
+      .amount-field { grid-column: auto; }
+      button { width: 100%; }
+    }
+  </style>
+  <script>
+    const viewSetups = new Map(); function defineView(name, setup) { viewSetups.set(name, viewSetups.has(name) ? () => { throw new Error('two scripts defined this view'); } : setup); } function runView(name, el) { const fail = (err) => { const why = err && err.message ? err.message : String(err); if (el) { el.setAttribute('data-view-failed', name); el.textContent = name + ' could not load.'; } console.error(name + ' failed: ' + why); if (typeof reportError === 'function') reportError(new Error(name + ': ' + why)); }; const setup = viewSetups.get(name); if (typeof setup !== 'function') { fail(new Error('no script defined this view')); return; } try { const done = setup(el); if (done && typeof done.then === 'function') done.catch(fail); } catch (err) { fail(err); } }
+  </script>
+</head>
+<body>
+  <main id="converter-app">
+    <h1>Currency Converter</h1>
+
+    <section class="panel" id="conversion-panel" aria-labelledby="conversion-heading">
+      <h2 id="conversion-heading">Convert an amount</h2>
+      <form id="conversion-form">
+        <div class="form-grid" id="conversion-fields">
+          <label class="amount-field" for="amount">Amount
+            <input id="amount" name="amount" type="number" min="0" step="any" inputmode="decimal" placeholder="Enter an amount" required>
+          </label>
+          <label for="from-currency">From
+            <select id="from-currency" name="from" disabled required></select>
+          </label>
+          <label for="to-currency">To
+            <select id="to-currency" name="to" disabled required></select>
+          </label>
+        </div>
+        <button id="convert-button" type="submit" disabled>Convert</button>
+      </form>
+      <div class="result" id="conversion-result" role="status" aria-live="polite">Loading supported currencies…</div>
+    </section>
+
+    <section class="panel" id="rates-panel" aria-labelledby="rates-heading">
+      <div class="table-heading" id="rates-table-heading">
+        <h2 id="rates-heading">Supported currency rates</h2>
+      </div>
+      <div class="table-wrap" id="rates-table-wrap">
+        <table id="rates-table">
+          <thead>
+            <tr><th scope="col">Currency</th><th scope="col" class="numeric">Rate (currency units per 1 USD)</th></tr>
+          </thead>
+          <tbody id="rates-body">
+            <tr><td colspan="2">Loading rates…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const API_BASE = document.querySelector('meta[name="api-base"]')?.content || "";
+    const api = (path) => `${API_BASE}${path}`;
+
+    const form = document.getElementById('conversion-form');
+    const amountInput = document.getElementById('amount');
+    const fromSelect = document.getElementById('from-currency');
+    const toSelect = document.getElementById('to-currency');
+    const convertButton = document.getElementById('convert-button');
+    const resultBox = document.getElementById('conversion-result');
+    const ratesBody = document.getElementById('rates-body');
+
+    const numberFormat = new Intl.NumberFormat('en-US', {
+      maximumFractionDigits: 6
+    });
+    const rateFormat = new Intl.NumberFormat('en-US', {
+      maximumFractionDigits: 4
+    });
+
+    function showError(element, message) {
+      element.textContent = message;
+      element.classList.add('error');
+    }
+
+    async function loadRates() {
+      try {
+        const response = await fetch(api('/api/rates'));
+        if (!response.ok) throw new Error('Unable to load currency rates. Please try again.');
+        const data = await response.json();
+        if (!data || !Array.isArray(data.rates)) throw new Error('The rates response was invalid.');
+
+        fromSelect.replaceChildren();
+        toSelect.replaceChildren();
+        ratesBody.replaceChildren();
+
+        for (const item of data.rates) {
+          const fromOption = document.createElement('option');
+          fromOption.value = item.currency;
+          fromOption.textContent = item.currency;
+          fromSelect.appendChild(fromOption);
+
+          const toOption = document.createElement('option');
+          toOption.value = item.currency;
+          toOption.textContent = item.currency;
+          toSelect.appendChild(toOption);
+
+          const row = document.createElement('tr');
+          const currencyCell = document.createElement('td');
+          currencyCell.textContent = item.currency;
+          const rateCell = document.createElement('td');
+          rateCell.className = 'numeric';
+          rateCell.textContent = rateFormat.format(item.rate);
+          row.append(currencyCell, rateCell);
+          ratesBody.appendChild(row);
+        }
+
+        fromSelect.value = 'USD';
+        toSelect.value = 'EUR';
+        fromSelect.disabled = false;
+        toSelect.disabled = false;
+        convertButton.disabled = false;
+        resultBox.textContent = 'Enter an amount and choose currencies to convert.';
+      } catch (error) {
+        const message = error && error.message ? error.message : 'Unable to load currency rates.';
+        showError(resultBox, message);
+        ratesBody.replaceChildren();
+        const row = document.createElement('tr');
+        const cell = document.createElement('td');
+        cell.colSpan = 2;
+        cell.className = 'error';
+        cell.textContent = message;
+        row.appendChild(cell);
+        ratesBody.appendChild(row);
+      }
+    }
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      resultBox.classList.remove('error');
+      resultBox.classList.remove('has-value');
+
+      const amount = Number(amountInput.value);
+      if (!Number.isFinite(amount) || amount < 0) {
+        showError(resultBox, 'Enter a valid amount of zero or more.');
+        return;
+      }
+
+      convertButton.disabled = true;
+      resultBox.textContent = 'Converting…';
+      try {
+        const params = new URLSearchParams({
+          amount: String(amount),
+          from: fromSelect.value,
+          to: toSelect.value
+        });
+        const response = await fetch(api('/api/convert?' + params.toString()));
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data && data.detail ? data.detail : 'Conversion could not be completed.');
+        }
+
+        resultBox.replaceChildren();
+        resultBox.classList.add('has-value');
+        const converted = document.createElement('span');
+        converted.className = 'result-number';
+        converted.textContent = `${numberFormat.format(data.converted_amount)} ${data.to}`;
+        const detail = document.createElement('span');
+        detail.className = 'result-detail';
+        detail.textContent = `${numberFormat.format(data.amount)} ${data.from} → ${data.to}`;
+        resultBox.append(converted, detail);
+      } catch (error) {
+        showError(resultBox, error && error.message ? error.message : 'Conversion could not be completed.');
+      } finally {
+        convertButton.disabled = false;
+      }
+    });
+
+    loadRates();
+  </script>
+</body>
+</html>
