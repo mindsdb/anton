@@ -360,8 +360,24 @@ def _card_prompt(writes: CellWrites) -> str:
                   "and `\\\\` a backslash.", ""]
     if writes.unchecked:
         lines += ["This step can't be checked before it runs.", ""]
+        lines += _cause_lines(writes)
     lines.append("It runs only if you approve. Cancel, Skip or no answer stops it.")
     return "\n".join(lines)
+
+
+def _cause_lines(writes: CellWrites) -> list[str]:
+    """Why the check couldn't read the step, each with the line it quotes."""
+    lines: list[str] = []
+    for cause in writes.causes:
+        if cause.kind == "uses" and cause.name and cause.earlier:
+            lines += [f"It uses {_code_span(cause.name)}, which comes from code an earlier step ran "
+                      "that couldn't be checked:", "", _fence(cause.earlier), ""]
+        elif cause.kind == "uses" and cause.name:
+            lines += [f"It uses {_code_span(cause.name)}, which comes from code an earlier step ran "
+                      "that couldn't be checked.", ""]
+        elif cause.code:
+            lines += ["It runs code the check can't read:", "", _fence(cause.code), ""]
+    return lines
 
 
 def _refusal(writes: CellWrites, cause: RefusalCause) -> ToolOutcome:

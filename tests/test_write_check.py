@@ -535,6 +535,40 @@ def test_cells_that_run_code_the_check_cant_read(case: "_UnreadCase", tmp_path, 
         assert kind not in writes.kinds()
 
 
+def _unchecked_card(code: str, earlier: Sequence[str] = ()) -> str:
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(),
+                              http_rules=parse_http_write_rules(_UNREAD_CODE_RULE))
+    assert writes.unchecked
+    return _card_prompt(writes)
+
+
+def test_the_card_names_what_a_step_uses_and_the_earlier_line_that_made_it():
+    card = _unchecked_card("print(orders.mean())", earlier=(
+        "SCRIPT = open('job.txt').read()", "exec(SCRIPT)", "orders = load_orders()",
+    ))
+    assert ("It uses `orders`, which comes from code an earlier step ran that couldn't be checked:"
+            "\n\n```\nexec(SCRIPT)\n```") in card
+
+
+def test_the_card_quotes_the_line_that_runs_code_the_check_cant_read():
+    card = _unchecked_card("import runpy\nrunpy.run_path('job.py')")
+    assert "It runs code the check can't read:\n\n```\nrunpy.run_path('job.py')\n```" in card
+    # Inside literal code a step hands exec(), the step's own line is quoted.
+    card = _unchecked_card('exec("import runpy\\nrunpy.run_path(\'job.py\')")')
+    assert "```\nexec(\"import runpy\\nrunpy.run_path('job.py')\")\n```" in card
+
+
+def test_the_card_gives_at_most_three_reasons_once_each():
+    card = _unchecked_card("\n".join(["import runpy", *(f"runpy.run_path('job{i}.py')" for i in range(5)),
+                                      "runpy.run_path('job0.py')"]))
+    assert card.count("It runs code the check can't read:") == 3
+
+
+def test_the_card_scrubs_a_credential_in_a_line_it_quotes():
+    card = _unchecked_card('exec(fetch("https://x", token="sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"))')
+    assert "sk-ant-api03" not in card and "[REDACTED_API_KEY]" in card
+
+
 class _EverydayContext(BaseModel):
     """What ran before an everyday cell (`write_check_everyday_cells.yaml`)."""
 

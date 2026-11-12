@@ -405,6 +405,20 @@ def parse_http_write_rules(text: str) -> tuple[HttpWriteRule, ...]:
     return tuple(rules)
 
 
+class UncheckedCause(BaseModel):
+    """Why the check couldn't read all of a step, for its card: it runs code
+    the check can't read (`runs`, the line in `code`), or uses `name`, which
+    code an earlier step ran that the check couldn't read may have made
+    (`uses`, that step's line in `earlier`)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["runs", "uses"]
+    code: str = ""
+    name: str = ""
+    earlier: str = ""
+
+
 class CellWrites(BaseModel):
     """What a cell would change. ``unchecked`` means the check couldn't read
     all the code the cell runs: code it hands ``exec`` or a runner, a module
@@ -424,6 +438,8 @@ class CellWrites(BaseModel):
     # The text of each Python file the cell hands exec() by a literal path,
     # read now; the host keeps it for later checks (`EarlierCell.code_files`).
     code_files: dict[str, str] = Field(default_factory=dict)
+    # Why it is `unchecked`, where the check can say: at most `_CAUSES_SHOWN`.
+    causes: tuple[UncheckedCause, ...] = ()
 
     @property
     def held_files(self) -> tuple[FileChange, ...]:
@@ -16845,6 +16861,7 @@ def find_cell_writes(
     files = read.files
     # Where the cell runs code the check can't read (`_unread_code`).
     unread = read.unread
+    runs = list(read.unread)
     if _errored_names_read(reader.cells, errored=frozenset(errored)):
         # Read again with each errored cell as maybe stopped anywhere, for
         # the files only that reading holds. Nothing else is taken from it:
@@ -16859,6 +16876,7 @@ def find_cell_writes(
         if not wide.past_limit:
             files += _added_holds(found=files, maybe=maybe.files)
             unread += maybe.past_cap
+            runs += maybe.past_cap
     # A call that reaches what code the check couldn't read may have defined
     # holds the cell only when such code ran.
     if first_unread is not None:
@@ -16867,6 +16885,13 @@ def find_cell_writes(
         # The pad starts a new process before this cell runs, and that start
         # runs the startup hooks a cell wrote, which the check doesn't read.
         unread.append(current.tree)
+    causes = [UncheckedCause(kind="runs", code=_quoted(node, reader)) for node in runs]
+    if first_unread is not None and read.reaches_defined:
+        earlier_sites = _unread_code(reader, first_unread.tree, first_unread, read=literal_code, modules=modules,
+                                     spelled_only=True)
+        earlier_line = _quoted(earlier_sites[0], reader) if earlier_sites else ""
+        causes += [UncheckedCause(kind="uses", code=_quoted(site, reader), name=_used_name(site),
+                                  earlier=earlier_line) for site in read.reaches_defined]
     return CellWrites(
         sql=tuple(sorted(read.sql, key=lambda w: w.line)),
         calls=tuple(sorted(read.calls, key=lambda c: c.line)),
@@ -16876,4 +16901,29 @@ def find_cell_writes(
         # (`_Reader.stopped`) leaves the cell unchecked too.
         unchecked=bool(unread) or reader.stopped or stale_files,
         code_files={} if stale_files else dict(code_files.read),
+        causes=tuple(dict.fromkeys(c for c in causes if c.code or c.name))[:_CAUSES_SHOWN],
     )
+
+
+# How many reasons a card gives for a step the check couldn't read.
+_CAUSES_SHOWN = 3
+
+
+def _quoted(node: ast.AST, reader: _Reader) -> str:
+    """The line of a step `node` sits on, for the card, credentials
+    scrubbed: for code a step hands exec(), the step's own line that runs
+    it. Empty for a whole cell."""
+    cell = reader.cell_of(node)
+    if isinstance(node, ast.Module):
+        return ""
+    if cell.index != cell.host and cell.host_line is not None:
+        host = next((c for c in reader.cells if c.index == cell.host), None)
+        if host is not None and 0 < cell.host_line <= len(host.lines):
+            return scrub_output(host.lines[cell.host_line - 1].strip())
+    return scrub_output(cell.source(node).strip())
+
+
+def _used_name(site: ast.AST) -> str:
+    """The name a use of what unread code made starts from: `orders` in `orders.mean()`."""
+    head = _root_of(site.func if isinstance(site, ast.Call) else site)
+    return head.id if isinstance(head, ast.Name) else ""
