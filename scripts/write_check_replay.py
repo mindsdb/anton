@@ -12,8 +12,9 @@ asks when it can't clear a cell.
 
 The tree may be any anton commit: the replay reads `find_cell_writes`'
 signature and calls the `earlier=` form or the older `earlier_code=` one. It
-imports the write check from `--tree` only, and exits 2 when Python imported
-it from anywhere else.
+imports the write check from `--tree` only. It exits 2 when it refuses to
+score: Python imported the write check from anywhere else, it can't import
+one under `--tree`, or two scorecards replayed different corpora.
 
 With `--compare <scorecard.json>`, the run is held to the bar a release
 check uses: it fails (exit 1) when a real write the base carded loses its
@@ -40,7 +41,7 @@ import tempfile
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NoReturn
 
 import yaml
 from pydantic import BaseModel, Field
@@ -50,6 +51,13 @@ DEFAULT_CORPUS = HERE.parent / "tests" / "fixtures" / "write_check_replay_corpus
 KINDS = ("unchecked", "sql", "sql_file", "http", "files")
 FILE_ACTIONS = frozenset({"delete", "rename", "move", "overwrite", "append"})
 EMPTY_VALUES = {"list": list, "tuple": tuple, "none": lambda: None, "false": lambda: False}
+REFUSED = 2
+
+
+def _refuse(message: str) -> NoReturn:
+    """Stop without a score, with an exit code a failed `--compare` (1) never uses."""
+    print(f"refused: {message}", file=sys.stderr)
+    raise SystemExit(REFUSED)
 
 
 # ── corpus ──────────────────────────────────────────────────────────────────
@@ -80,7 +88,7 @@ class Chat(BaseModel):
     style: str
     files: dict[str, str | GeneratedFile | FolderSpec] = Field(default_factory=dict)
     tmp_files: dict[str, str | GeneratedFile | FolderSpec] = Field(default_factory=dict)
-    cells: list[CorpusCell]
+    cells: list[CorpusCell] = Field(min_length=1)
 
 
 class Corpus(BaseModel):
@@ -209,21 +217,24 @@ class WriteCheck:
 
     def __init__(self, tree: Path, *, code_root: bool, ablations: list[str]) -> None:
         sys.path.insert(0, str(tree))
-        wc = importlib.import_module("anton.core.utils.write_check")
+        try:
+            wc = importlib.import_module("anton.core.utils.write_check")
+        except ModuleNotFoundError as missing:
+            _refuse(f"can't import the write check under --tree {tree}: {missing}")
         imported = Path(wc.__file__).resolve()
         if not imported.is_relative_to(tree):
-            raise SystemExit(f"refused: the write check came from {imported}, not from --tree {tree}")
+            _refuse(f"the write check came from {imported}, not from --tree {tree}")
         for spec in ablations:
             name, _, empty = spec.partition("=")
             if not hasattr(wc, name) or empty not in EMPTY_VALUES:
-                raise SystemExit(f"refused: can't ablate {spec!r} on this tree")
+                _refuse(f"can't ablate {spec!r} on this tree")
             make = EMPTY_VALUES[empty]
             setattr(wc, name, lambda *a, _make=make, **k: _make())
         self.wc = wc
         params = inspect.signature(wc.find_cell_writes).parameters
         self.signature: Literal["earlier", "earlier_code"] = "earlier" if "earlier" in params else "earlier_code"
         if code_root and "code_root" not in params:
-            raise SystemExit("refused: --code-root needs a tree whose find_cell_writes takes code_root")
+            _refuse("--code-root needs a tree whose find_cell_writes takes code_root")
         self.code_root = code_root
         self.earlier_fields = set(getattr(wc, "EarlierCell").model_fields) if self.signature == "earlier" else set()
 
@@ -357,7 +368,7 @@ def compare(base: Scorecard, head: Scorecard) -> Verdict:
     and cards on cells that write nothing may not rise. Both must come from
     the same corpus, or the comparison means nothing."""
     if base.corpus_sha256 != head.corpus_sha256:
-        raise SystemExit("refused: the two scorecards replayed different corpora")
+        _refuse("the two scorecards replayed different corpora")
     base_by_key = {r.key: r for r in base.results}
     lost = [r.key for r in head.results if r.real_write and not r.card and base_by_key[r.key].card]
     new = [r.key for r in head.results

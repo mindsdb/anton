@@ -1233,7 +1233,7 @@ chats:
               cur.execute(sql)
               return pd.DataFrame(cur.fetchall(), columns=[c[0] for c in cur.description])
 
-      def first_row():
+      def sample_record():
           return query("SELECT * FROM main.supply.orders LIMIT 1").iloc[0].to_dict()
   cells:
   - code: |-
@@ -1241,7 +1241,7 @@ chats:
       spec = importlib.util.spec_from_file_location('R', 'helpers/dbx_helpers.py')
       R = importlib.util.module_from_spec(spec)
       spec.loader.exec_module(R)
-      p = R.first_row()
+      p = R.sample_record()
       print(p)
     real_write: false
     why: runs helpers/dbx_helpers.py, which only reads
@@ -1519,7 +1519,7 @@ chats:
 - name: C05 exec open gateway skill
   style: helper_load
   files:
-    skills/planning_gw/client.py: |2
+    skills/erp_client/client.py: |2
 
       import json
       import requests
@@ -1531,35 +1531,35 @@ chats:
           r.raise_for_status()
           return r.json()
 
-      def create_sandbox(name, base='BASE'):
-          r = requests.post(GW + '/sandbox/create', json={'name': name, 'from': base}, timeout=120)
+      def create_draft(name, base='BASE'):
+          r = requests.post(GW + '/api/drafts', json={'name': name, 'from': base}, timeout=120)
           r.raise_for_status()
           return r.json()
 
-      def apply_edit(scenario, mql):
-          r = requests.post(GW + '/write/apply', data=json.dumps({'scenario': scenario, 'mql': mql}),
+      def apply_change(draft, change):
+          r = requests.post(GW + '/api/changes', data=json.dumps({'draft': draft, 'change': change}),
                             headers={'Content-Type': 'application/json'}, timeout=120)
           r.raise_for_status()
           return r.json()
   cells:
   - code: |-
-      exec(open('skills/planning_gw/client.py').read())
+      exec(open('skills/erp_client/client.py').read())
       print('client loaded')
     real_write: false
     why: runs the skill client, which only defines functions
     runs_unread: true
   - code: |-
-      scenarios = gw_get('/scenarios')
-      print(len(scenarios))
+      drafts = gw_get('/drafts')
+      print(len(drafts))
     real_write: false
     why: calls the unread client's GET
   - code: |-
       import pandas as pd
-      sc = pd.DataFrame(scenarios)
+      sc = pd.DataFrame(drafts)
       print(sc[['id', 'name', 'owner', 'updated_at']].head(10))
     real_write: false
   - code: |-
-      plan = pd.DataFrame(gw_get('/plan', scenario='BASE', horizon=12))
+      plan = pd.DataFrame(gw_get('/plan', draft='BASE', horizon=12))
       print(plan.shape)
     real_write: false
     why: calls the unread client's GET
@@ -1572,17 +1572,17 @@ chats:
       print('\n'.join(edits))
     real_write: false
   - code: |-
-      sb = create_sandbox('capacity-plus-10')
+      sb = create_draft('capacity-plus-10')
       print(sb)
     real_write: true
-    why: POSTs /sandbox/create on the listed gateway through the helper
+    why: POSTs /api/drafts on the listed gateway through the helper
   - code: |-
-      results = [apply_edit(sb['id'], e) for e in edits]
+      results = [apply_change(sb['id'], e) for e in edits]
       print(results)
     real_write: true
-    why: POSTs /write/apply on the listed gateway through the helper
+    why: POSTs /api/changes on the listed gateway through the helper
   - code: |-
-      after = pd.DataFrame(gw_get('/plan', scenario=sb['id'], horizon=12))
+      after = pd.DataFrame(gw_get('/plan', draft=sb['id'], horizon=12))
       print(after.shape)
     real_write: false
     why: calls the unread client's GET
@@ -2195,13 +2195,13 @@ chats:
 - name: E01 pdf guide text export
   style: big_text
   files:
-    docs/planning_guide.pdf.txt:
+    docs/manual_export.txt:
       gen: pdftext
       bytes: 1800000
   cells:
   - code: |-
       from pathlib import Path
-      text = Path('docs/planning_guide.pdf.txt').read_text(errors='ignore')
+      text = Path('docs/manual_export.txt').read_text(errors='ignore')
       print(len(text), len(text.splitlines()))
     real_write: false
     why: 'issue cause 8: a large text export read by a literal path'
@@ -2628,13 +2628,13 @@ chats:
   - code: |-
       import requests
       GW = 'https://erp.example.test'
-      r = requests.get(f'{GW}/scenarios', timeout=30)
+      r = requests.get(f'{GW}/drafts', timeout=30)
       r.raise_for_status()
       print([s['name'] for s in r.json()][:20])
     real_write: false
   - code: |-
       import pandas as pd
-      plan = pd.DataFrame(requests.get(f'{GW}/plan', params={'scenario': 'BASE', 'horizon': 12}, timeout=60).json())
+      plan = pd.DataFrame(requests.get(f'{GW}/plan', params={'draft': 'BASE', 'horizon': 12}, timeout=60).json())
       print(plan.shape)
     real_write: false
   - code: |-
@@ -2648,23 +2648,23 @@ chats:
       print(edits)
     real_write: false
   - code: |-
-      resp = requests.post(f'{GW}/sandbox/create', json={'from': 'BASE', 'name': 'capacity-what-if'}, timeout=60)
+      resp = requests.post(f'{GW}/api/drafts', json={'from': 'BASE', 'name': 'capacity-what-if'}, timeout=60)
       resp.raise_for_status()
       print(resp.json())
     real_write: true
-    why: POST /sandbox/create on the listed gateway
+    why: POST /api/drafts on the listed gateway
   - code: |-
-      SCP = resp.json()['id']
-      print('sandbox', SCP)
+      draft_id = resp.json()['id']
+      print('sandbox', draft_id)
     real_write: false
   - code: |-
       for e in edits:
-          r = requests.post(GW + '/write/apply', json={'scenario': SCP, 'mql': e}, timeout=60)
+          r = requests.post(GW + '/api/changes', json={'draft': draft_id, 'change': e}, timeout=60)
           print(e, r.status_code)
     real_write: true
-    why: POST /write/apply on the listed gateway, in a loop
+    why: POST /api/changes on the listed gateway, in a loop
   - code: |-
-      after = pd.DataFrame(requests.get(f'{GW}/plan', params={'scenario': SCP, 'horizon': 12}, timeout=60).json())
+      after = pd.DataFrame(requests.get(f'{GW}/plan', params={'draft': draft_id, 'horizon': 12}, timeout=60).json())
       print(after['constrained'].sum(), 'constrained weeks vs', plan['constrained'].sum())
     real_write: false
   - code: print(after.groupby('site')['constrained'].sum().sub(plan.groupby('site')['constrained'].sum(), fill_value=0))
@@ -2676,14 +2676,14 @@ chats:
       def body(d):
           return json.dumps(d)
 
-      EDIT = "SET calendar.S02 OVERTIME SATURDAYS"
-      r = requests.post(BASE + "/write/apply", data=body({"scenario": SCP, "mql": EDIT}), headers={'Content-Type': 'application/json'}, timeout=60)
+      CHANGE = "SET calendar.S02 OVERTIME SATURDAYS"
+      r = requests.post(BASE + "/api/changes", data=body({"draft": draft_id, "change": CHANGE}), headers={'Content-Type': 'application/json'}, timeout=60)
       print(r.status_code)
     real_write: true
-    why: POST /write/apply through a URL alias and a body helper
-  - code: 'print(requests.get(GW + ''/jobs/status'', params={''scenario'': SCP}, timeout=30).json())'
+    why: POST /api/changes through a URL alias and a body helper
+  - code: 'print(requests.get(GW + ''/jobs/status'', params={''draft'': draft_id}, timeout=30).json())'
     real_write: false
-  - code: 'print(f"Sandbox {SCP}: {len(edits) + 1} edits applied.")'
+  - code: 'print(f"Sandbox {draft_id}: {len(edits) + 1} edits applied.")'
     real_write: false
 - name: F05 sqlite project db
   style: real_writes
@@ -3082,7 +3082,7 @@ chats:
 
       import csv
 
-      def first_row(path='data/orders.csv'):
+      def sample_record(path='data/orders.csv'):
           with open(path) as f:
               return next(csv.DictReader(f))
     data/orders.csv: |
@@ -3103,7 +3103,7 @@ chats:
       spec = importlib.util.spec_from_file_location('R', 'helpers/r_helpers.py')
       R = importlib.util.module_from_spec(spec)
       spec.loader.exec_module(R)
-      p = R.first_row()
+      p = R.sample_record()
       print(p)
     real_write: false
     why: runs a helper that only reads a csv row
@@ -3132,7 +3132,7 @@ chats:
   - code: print(df.groupby('site')['qty'].sum())
     real_write: false
   - code: |-
-      rows = [R.first_row(f) for f in ['data/orders.csv', 'data/stock.csv']]
+      rows = [R.sample_record(f) for f in ['data/orders.csv', 'data/stock.csv']]
       print(rows)
     real_write: false
     why: calls the unread helper, which reads
@@ -3221,7 +3221,7 @@ chats:
               cur.execute(sql)
               return pd.DataFrame(cur.fetchall(), columns=[c[0] for c in cur.description])
 
-      def first_row():
+      def sample_record():
           return query("SELECT * FROM main.supply.orders LIMIT 1").iloc[0].to_dict()
   cells:
   - code: |-
@@ -3306,7 +3306,7 @@ chats:
 - name: H02 gateway client rows into containers
   style: helper_alive
   files:
-    skills/planning_gw/client.py: |2
+    skills/erp_client/client.py: |2
 
       import json
       import requests
@@ -3318,25 +3318,25 @@ chats:
           r.raise_for_status()
           return r.json()
 
-      def create_sandbox(name, base='BASE'):
-          r = requests.post(GW + '/sandbox/create', json={'name': name, 'from': base}, timeout=120)
+      def create_draft(name, base='BASE'):
+          r = requests.post(GW + '/api/drafts', json={'name': name, 'from': base}, timeout=120)
           r.raise_for_status()
           return r.json()
 
-      def apply_edit(scenario, mql):
-          r = requests.post(GW + '/write/apply', data=json.dumps({'scenario': scenario, 'mql': mql}),
+      def apply_change(draft, change):
+          r = requests.post(GW + '/api/changes', data=json.dumps({'draft': draft, 'change': change}),
                             headers={'Content-Type': 'application/json'}, timeout=120)
           r.raise_for_status()
           return r.json()
   cells:
   - code: |-
-      exec(open('skills/planning_gw/client.py').read())
+      exec(open('skills/erp_client/client.py').read())
       print('client loaded')
     real_write: false
     why: runs the skill client, which only defines functions
     runs_unread: true
   - code: |-
-      scen = gw_get('/scenarios')
+      scen = gw_get('/drafts')
       print(len(scen))
     real_write: false
     why: the client's GET
@@ -3364,7 +3364,7 @@ chats:
     real_write: false
   - code: |-
       import pandas as pd
-      plan = pd.DataFrame(gw_get('/plan', scenario='BASE', horizon=12))
+      plan = pd.DataFrame(gw_get('/plan', draft='BASE', horizon=12))
       print(plan.columns.tolist())
     real_write: false
     why: the client's GET into a frame
@@ -3379,12 +3379,12 @@ chats:
   - code: |-
       rows = []
       for sc in recent[:3]:
-          p = pd.DataFrame(gw_get('/plan', scenario=sc['id'], horizon=12))
-          rows.append({'scenario': sc['name'], 'max_util': p['utilization'].max(),
+          p = pd.DataFrame(gw_get('/plan', draft=sc['id'], horizon=12))
+          rows.append({'draft': sc['name'], 'max_util': p['utilization'].max(),
                        'over': int((p['utilization'] > 1).sum())})
       print(rows)
     real_write: false
-    why: the client's GET per recent scenario
+    why: the client's GET per recent draft
   - code: |-
       cmp = pd.DataFrame(rows).sort_values('max_util')
       print(cmp.to_string(index=False))
@@ -3581,17 +3581,17 @@ chats:
               r.raise_for_status()
               return r.json()
 
-          def scenarios(self):
-              return self.get('/scenarios')
+          def drafts(self):
+              return self.get('/drafts')
 
-          def plan(self, scenario, horizon=12):
-              return self.get('/plan', scenario=scenario, horizon=horizon)
+          def plan(self, draft, horizon=12):
+              return self.get('/plan', draft=draft, horizon=horizon)
 
-          def exceptions(self, scenario):
-              return self.get('/exceptions', scenario=scenario)
+          def exceptions(self, draft):
+              return self.get('/exceptions', draft=draft)
 
-          def apply(self, scenario, mql):
-              r = self.s.post(self.base + '/write/apply', json={'scenario': scenario, 'mql': mql}, timeout=self.timeout)
+          def apply(self, draft, change):
+              r = self.s.post(self.base + '/api/changes', json={'draft': draft, 'change': change}, timeout=self.timeout)
               r.raise_for_status()
               return r.json()
   cells:
@@ -3606,7 +3606,7 @@ chats:
     why: runs the skill client, which only defines a class
     runs_unread: true
   - code: |-
-      sc = client.scenarios()
+      sc = client.drafts()
       print(len(sc))
     real_write: false
     why: the client's GET
@@ -3637,7 +3637,7 @@ chats:
       plans = {i: pd.DataFrame(client.plan(i)) for i in ids}
       print({i: p.shape for i, p in plans.items()})
     real_write: false
-    why: the client's GET per what-if scenario
+    why: the client's GET per what-if draft
   - code: |-
       peak = {i: p['utilization'].max() for i, p in plans.items()}
       print(sorted(peak.items(), key=lambda kv: kv[1]))
@@ -3651,7 +3651,7 @@ chats:
       res = client.apply('what-if-capacity', edit)
       print(res)
     real_write: true
-    why: POSTs /write/apply on the listed gateway through the client
+    why: POSTs /api/changes on the listed gateway through the client
   - code: |-
       after = pd.DataFrame(client.plan('what-if-capacity'))
       print(after['utilization'].max())
@@ -4776,13 +4776,13 @@ chats:
       BASE = "https://erp.example.test"
 
 
-      def first_row():
+      def sample_record():
           with urllib.request.urlopen(BASE + "/api/orders?limit=1") as r:
               return json.load(r)[0]
 
 
       def push(rows):
-          req = urllib.request.Request(BASE + "/write/apply", data=json.dumps(rows).encode(), method="POST")
+          req = urllib.request.Request(BASE + "/api/changes", data=json.dumps(rows).encode(), method="POST")
           with urllib.request.urlopen(req) as r:
               return r.status
   cells:
@@ -4791,7 +4791,7 @@ chats:
       spec = importlib.util.spec_from_file_location("R", "{ROOT}/helpers/r_helpers.py")
       R = importlib.util.module_from_spec(spec)
       spec.loader.exec_module(R)
-      p = R.first_row()
+      p = R.sample_record()
     real_write: false
     why: loads the helper module the check can't read
     runs_unread: true
@@ -4799,7 +4799,7 @@ chats:
       status = R.push([{'order': 7, 'qty': 3}])
       print(status)
     real_write: true
-    why: POSTs /write/apply on the listed host through the helper
+    why: POSTs /api/changes on the listed host through the helper
     pair: c2-helper
     role: hold
 - name: 'P02 helper module: walk the folder after it'
@@ -4812,13 +4812,13 @@ chats:
       BASE = "https://erp.example.test"
 
 
-      def first_row():
+      def sample_record():
           with urllib.request.urlopen(BASE + "/api/orders?limit=1") as r:
               return json.load(r)[0]
 
 
       def push(rows):
-          req = urllib.request.Request(BASE + "/write/apply", data=json.dumps(rows).encode(), method="POST")
+          req = urllib.request.Request(BASE + "/api/changes", data=json.dumps(rows).encode(), method="POST")
           with urllib.request.urlopen(req) as r:
               return r.status
   cells:
@@ -4827,7 +4827,7 @@ chats:
       spec = importlib.util.spec_from_file_location("R", "{ROOT}/helpers/r_helpers.py")
       R = importlib.util.module_from_spec(spec)
       spec.loader.exec_module(R)
-      p = R.first_row()
+      p = R.sample_record()
     real_write: false
     why: loads the helper module the check can't read
     runs_unread: true
@@ -4865,7 +4865,7 @@ chats:
       import urllib.request
 
       def go():
-          urllib.request.urlopen(urllib.request.Request('https://erp.example.test/write/apply', data=b'{}', method='POST'))
+          urllib.request.urlopen(urllib.request.Request('https://erp.example.test/api/changes', data=b'{}', method='POST'))
   cells:
   - code: exec(open('{ROOT}/jobs/push.py').read())
     real_write: false
@@ -4873,7 +4873,7 @@ chats:
     runs_unread: true
   - code: go()
     real_write: true
-    why: calls a function the unread script defined; it POSTs /write/apply
+    why: calls a function the unread script defined; it POSTs /api/changes
     pair: c2-exec
     role: hold
 - name: P05 DDL text printed
@@ -4915,11 +4915,11 @@ chats:
 - name: P07 page written through a path, read after a restart
   style: pairs
   files:
-    cfg.json: '{"page": "page.html"}'
+    settings.json: '{"out": "page.html"}'
   cells:
   - code: |-
       import json
-      P = json.load(open('cfg.json'))['page']
+      P = json.load(open('settings.json'))['out']
     real_write: false
   - code: open(P, 'w').write('<html></html>')
     real_write: false
@@ -4938,12 +4938,12 @@ chats:
   - code: |-
       import os, site
       hook = os.path.join(site.getsitepackages()[0], 'zz_boot.pth')
-      open(hook, 'w').write("import urllib.request; urllib.request.urlopen(urllib.request.Request('https://erp.example.test/write/apply', data=b'{}', method='POST'))\n")
+      open(hook, 'w').write("import urllib.request; urllib.request.urlopen(urllib.request.Request('https://erp.example.test/api/changes', data=b'{}', method='POST'))\n")
     real_write: false
     why: writes a .pth hook that POSTs whenever Python starts
   - code: print('next step')
     real_write: true
-    why: 'new turn: the new process runs the hook, which POSTs /write/apply'
+    why: 'new turn: the new process runs the hook, which POSTs /api/changes'
     turn_start: true
     pair: c7-restart
     role: hold
@@ -5011,10 +5011,10 @@ chats:
   cells:
   - code: |-
       import json, urllib.request
-      req = urllib.request.Request('https://erp.example.test/write/apply', data=json.dumps({'scenario': 'copy'}).encode(), method='POST')
+      req = urllib.request.Request('https://erp.example.test/api/changes', data=json.dumps({'draft': 'copy'}).encode(), method='POST')
       urllib.request.urlopen(req)
     real_write: true
-    why: the builder's data step POSTs /write/apply
+    why: the builder's data step POSTs /api/changes
     pair: builder
     role: hold
 - name: T01 orm session
@@ -5090,6 +5090,7 @@ chats:
       import db_utils
       db_utils.purge('dryrun')
     real_write: true
+    runs_unread: true
     turn_start: true
 - name: T03 overwrite a project file through a config path after a restart
   style: probe
@@ -5123,15 +5124,15 @@ chats:
       GW = 'https://erp.example.test'
       s = requests.Session()
       s.headers.update({'Accept': 'application/json'})
-      sc = s.get(GW + '/scenarios', timeout=30).json()
+      sc = s.get(GW + '/drafts', timeout=30).json()
       sid = sc[0]['id']
     real_write: false
   - code: |-
-      r = s.put(f'{GW}/scenarios/{sid}', json={'name': 'renamed'}, timeout=30)
+      r = s.put(f'{GW}/drafts/{sid}', json={'name': 'renamed'}, timeout=30)
       print(r.status_code)
     real_write: true
   - code: |-
-      r = s.delete(f'{GW}/sandbox/{sid}', timeout=30)
+      r = s.delete(f'{GW}/api/drafts/{sid}', timeout=30)
       print(r.status_code)
     real_write: true
   - code: |-
@@ -5141,14 +5142,14 @@ chats:
   - code: |-
       import httpx
       with httpx.Client(base_url=GW) as hc:
-          print(hc.post('/write/apply', json={'scenario': sid, 'mql': 'SET x = 1'}).status_code)
+          print(hc.post('/api/changes', json={'draft': sid, 'change': 'SET x = 1'}).status_code)
     real_write: true
   - code: |-
       import urllib.request
-      urllib.request.urlopen(GW + '/write/apply', data=b'{"mql": "SET x = 1"}')
+      urllib.request.urlopen(GW + '/api/changes', data=b'{"change": "SET x = 1"}')
     real_write: true
   - code: |-
-      r = s.post(GW + '/write/apply', json={'scenario': sid, 'mql': 'SET y = 2'}, timeout=30)
+      r = s.post(GW + '/api/changes', json={'draft': sid, 'change': 'SET y = 2'}, timeout=30)
       print(r.status_code)
     real_write: true
   - code: |-
@@ -5169,11 +5170,11 @@ chats:
   - code: |-
       from concurrent.futures import ThreadPoolExecutor
       with ThreadPoolExecutor(4) as ex:
-          print(list(ex.map(lambda e: requests.post(GW + '/write/apply', json={'mql': e}, timeout=30).status_code, edits)))
+          print(list(ex.map(lambda e: requests.post(GW + '/api/changes', json={'change': e}, timeout=30).status_code, edits)))
     real_write: true
   - code: |-
       import atexit
-      atexit.register(lambda: requests.post(GW + '/write/apply', json={'mql': 'COMMIT'}, timeout=30))
+      atexit.register(lambda: requests.post(GW + '/api/changes', json={'change': 'COMMIT'}, timeout=30))
     real_write: true
   - code: |-
       import os
@@ -5189,7 +5190,7 @@ chats:
     real_write: true
   - code: |-
       import threading
-      t = threading.Thread(target=requests.post, args=(GW + '/write/apply',), kwargs={'json': {'mql': 'SET c = 3'}})
+      t = threading.Thread(target=requests.post, args=(GW + '/api/changes',), kwargs={'json': {'change': 'SET c = 3'}})
       t.start(); t.join()
     real_write: true
 - name: T06 ddl rebound to a function that runs it
@@ -5228,7 +5229,7 @@ chats:
     jobs/h.py: |
       import urllib.request
       def min(xs):
-          urllib.request.urlopen(urllib.request.Request('https://erp.example.test/write/apply', data=b'{}', method='POST'))
+          urllib.request.urlopen(urllib.request.Request('https://erp.example.test/api/changes', data=b'{}', method='POST'))
           return 0
   cells:
   - code: data = [3, 1, 2]
@@ -5247,11 +5248,11 @@ chats:
       import json
       import urllib.request
       BASE = "https://erp.example.test"
-      def first_row():
+      def sample_record():
           with urllib.request.urlopen(BASE + "/api/orders?limit=1") as r:
               return json.load(r)[0]
       def push(rows):
-          req = urllib.request.Request(BASE + "/write/apply", data=json.dumps(rows).encode(), method="POST")
+          req = urllib.request.Request(BASE + "/api/changes", data=json.dumps(rows).encode(), method="POST")
           with urllib.request.urlopen(req) as r:
               return r.status
   cells:
@@ -5325,7 +5326,7 @@ chats:
   cells:
   - code: |-
       import json, urllib.request
-      urllib.request.urlopen('https://erp.example.test/write/apply', data=json.dumps({'scenario': 'copy'}).encode())
+      urllib.request.urlopen('https://erp.example.test/api/changes', data=json.dumps({'draft': 'copy'}).encode())
     real_write: true
     pair: builder
     role: hold
@@ -5337,22 +5338,22 @@ chats:
   - code: |-
       import json, requests
       cfg = json.load(open('report_config.json'))
-      r = requests.post(cfg['erp'] + '/write/apply', json={'mql': 'SET z = 1'}, timeout=30)
+      r = requests.post(cfg['erp'] + '/api/changes', json={'change': 'SET z = 1'}, timeout=30)
     real_write: true
 - name: T15 restart free re-derives the path
   style: probe
   files:
-    cfg.json: '{"page": "page.html"}'
+    settings.json: '{"out": "page.html"}'
   cells:
   - code: |-
       import json
-      P = json.load(open('cfg.json'))['page']
+      P = json.load(open('settings.json'))['out']
     real_write: false
   - code: open(P, 'w').write('<html></html>')
     real_write: false
   - code: |-
       import json
-      P = json.load(open('cfg.json'))['page']
+      P = json.load(open('settings.json'))['out']
       print(len(open(P).read()))
     real_write: false
     turn_start: true
@@ -5365,7 +5366,7 @@ chats:
       import os, site
       hook = os.path.join(site.getusersitepackages(), 'usercustomize.py')
       os.makedirs(os.path.dirname(hook), exist_ok=True)
-      open(hook, 'w').write("import urllib.request\nurllib.request.urlopen(urllib.request.Request('https://erp.example.test/write/apply', data=b'{}', method='POST'))\n")
+      open(hook, 'w').write("import urllib.request\nurllib.request.urlopen(urllib.request.Request('https://erp.example.test/api/changes', data=b'{}', method='POST'))\n")
     real_write: false
   - code: print('next step')
     real_write: true
@@ -5389,6 +5390,7 @@ chats:
       print(out)
     real_write: false
   - code: |-
+      import os
       import subprocess
       subprocess.run(['psql', os.environ.get('PG', ''), '-c', 'DELETE FROM ops.tmp_import'], check=False)
     real_write: true
@@ -5472,7 +5474,7 @@ chats:
     real_write: false
   - code: |-
       import requests
-      requests.post('https://erp.example.test/write/apply', data=text.encode()[:1000], timeout=30)
+      requests.post('https://erp.example.test/api/changes', data=text.encode()[:1000], timeout=30)
     real_write: true
 - name: X1 unread builder save over a project file
   style: probe

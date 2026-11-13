@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "write_check_replay.py"
@@ -45,6 +46,11 @@ def test_the_write_check_stays_within_its_card_budget(own_scorecard):
 
 def test_the_replay_never_crashes_the_check(own_scorecard):
     assert own_scorecard.crashes == 0, [r.key for r in own_scorecard.results if r.crashed]
+
+
+def test_a_chat_with_no_cells_is_refused_by_the_corpus_model():
+    with pytest.raises(ValidationError, match="cells"):
+        replay_tool.Corpus.model_validate({"rule": "", "chats": [{"name": "empty", "style": "t", "cells": []}]})
 
 
 def test_every_pair_has_a_hold_and_a_free_cell():
@@ -157,17 +163,19 @@ def test_an_older_tree_is_called_with_earlier_code(tmp_path):
 def test_a_tree_without_the_write_check_is_refused(tmp_path):
     (tmp_path / "not_anton").mkdir()
     done = _run("--tree", str(tmp_path / "not_anton"), "--corpus", str(replay_tool.DEFAULT_CORPUS))
-    assert done.returncode != 0
-    assert "refused" in done.stderr or "No module named" in done.stderr
+    assert done.returncode == replay_tool.REFUSED, done.stderr
+    assert "refused:" in done.stderr
 
 
-def test_a_write_check_imported_from_elsewhere_is_refused(tmp_path, monkeypatch):
+def test_a_write_check_imported_from_elsewhere_is_refused(tmp_path, monkeypatch, capsys):
     # Once this process holds ROOT's write check, a replay here of any other
     # tree would score ROOT's check; the guard must refuse it.
     importlib.import_module("anton.core.utils.write_check")
     monkeypatch.setattr(sys, "path", list(sys.path))
-    with pytest.raises(SystemExit, match="refused: the write check came from"):
+    with pytest.raises(SystemExit) as stopped:
         replay_tool.WriteCheck(_fake_tree(tmp_path, NEW_API).resolve(), code_root=False, ablations=[])
+    assert stopped.value.code == replay_tool.REFUSED
+    assert "refused: the write check came from" in capsys.readouterr().err
 
 
 def test_code_root_is_refused_on_a_tree_that_cannot_take_it(tmp_path):
@@ -175,7 +183,7 @@ def test_code_root_is_refused_on_a_tree_that_cannot_take_it(tmp_path):
     corpus = tmp_path / "c.yaml"
     corpus.write_text(yaml.safe_dump(CORPUS))
     done = _run("--tree", str(tree), "--corpus", str(corpus), "--code-root")
-    assert done.returncode != 0 and "code_root" in done.stderr
+    assert done.returncode == replay_tool.REFUSED and "code_root" in done.stderr
 
 
 # ── the bar ─────────────────────────────────────────────────────────────────
@@ -223,6 +231,8 @@ def test_compare_names_a_freed_unread_cell_without_failing_on_it():
     assert verdict.passed and verdict.freed_unread_cells == ["c #0"]
 
 
-def test_compare_refuses_scorecards_from_different_corpora():
-    with pytest.raises(SystemExit, match="different corpora"):
+def test_compare_refuses_scorecards_from_different_corpora(capsys):
+    with pytest.raises(SystemExit) as stopped:
         replay_tool.compare(_card([(True, True)], sha="a"), _card([(True, True)], sha="b"))
+    assert stopped.value.code == replay_tool.REFUSED
+    assert "different corpora" in capsys.readouterr().err
