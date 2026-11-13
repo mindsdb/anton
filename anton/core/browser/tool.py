@@ -954,9 +954,12 @@ def _frames_moved(seen: Page, current: Page) -> bool:
     the column's scroll while its box stays put. at puts neither frame in
     its place, and the boxes put both there. A frame that moved down an
     inner column's content by exactly the column's scroll keeps its box
-    too, so it reads as in its place. A frame that came or went moved
-    before either comparison runs, and one that changed address or size
-    moved by both.
+    too, so it reads as in its place. A sticky element that starts holding
+    one frame partway through the page's scroll while another frame
+    scrolls on moves the two boxes by different rows, so the boxes say a
+    frame moved, and at says so too: that scroll moved the frames. A frame
+    that came or went moved before either comparison runs, and one that
+    changed address or size moved by both.
 
     The boxes are in screenshot pixels and the list goes on-screen first, so
     a scroll moves every box and may reorder the list. The frames are

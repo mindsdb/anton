@@ -848,12 +848,14 @@ async def test_a_hosts_password_field_refusal_reads_as_a_secret_field():
 async def test_the_prompt_the_skill_and_each_secret_field_refusal_name_a_payment_card_and_not_any_card():
     """Both hosts take a field for a card's secret only when it may name a
     payment card: a field whose name, id, aria-label and placeholder name
-    only a gift, loyalty, library or ID card's number, with no payment word,
-    is an ordinary field, read and typed into for the person (page.json's
-    card_field_exempt and card_field_payment). A field named cardNumber is
-    still a payment card's, even where its aria-label says gift card, and so
-    is one labeled for a credit or gift card, or for a benefits card's
-    number, so the hosts refuse a type into it. The prompt and the skill say
+    only a gift, loyalty, library or identity card's number, with no word
+    for a payment card, is an ordinary field, read and typed into for the
+    person, in a checkout's payment section too (page.json's
+    card_field_exempt, card_field_conjunction and card_field_payment). A
+    field named cardNumber is still a payment card's, even where its
+    aria-label says gift card, and so is one labeled for a credit or gift
+    card, for a card or gift card, or for a benefits card's number, so the
+    hosts refuse a type into it. The prompt and the skill say
     a gift, loyalty or library card's field is usually ordinary, and to hand
     it over when the browser refuses it. Both refusals of a type into a
     secret field say the browser took the card number for a payment card's,
@@ -1382,7 +1384,10 @@ async def test_on_the_desktop_a_step_to_the_focus_compares_frames_by_their_place
     the column's content by exactly the column's scroll, since no read tells
     it from a frame stuck in the column. A frame that moved within the
     column's content otherwise, or came, went, or changed address or size,
-    refuses the step, a sticky one too. A read without at compares the boxes
+    refuses the step, a sticky one too. So does the page's scroll while a
+    sticky element starts holding one frame and another frame scrolls on:
+    the two boxes move by different rows, and the held frame's at moves by
+    only part of the scroll. A read without at compares the boxes
     alone, which reads an inner column's scroll as a frame that moved."""
     desktop = BrowserConfig(base_url=LOOPBACK, profile=SID, token="k")
     # The desktop's screenshot at 0.8 of the view, edges rounded outward.
@@ -1440,6 +1445,9 @@ async def test_on_the_desktop_a_step_to_the_focus_compares_frames_by_their_place
         ),
         "a frame that went while a sticky element held another in an inner column": (
             at(0, pinned, chat), at(0, moved(pinned, on_page={"y": 400})),
+        ),
+        "the page's scroll while a sticky element starts holding a frame and another frame scrolls on": (
+            at(0, sidebar, video), at(600, moved(sidebar, y=0, on_page={"y": 600}), moved(video, y=420)),
         ),
         "an inner column's scroll on reads that carry no at": (at(0, bare(form)), at(0, bare(moved(form, y=180)))),
         "an inner column's scroll on a read that carries no at": (at(0, form), at(0, bare(moved(form, y=180)))),
