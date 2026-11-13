@@ -86,3 +86,17 @@ def test_split_sanitizes_images_inside_tool_results():
     assert rows[1]["content"][0]["content"] == [
         {"type": "text", "text": REPLAY_IMAGE_PLACEHOLDER}
     ]
+
+
+def test_split_drops_text_beside_a_tool_result():
+    slice_ = [
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "scratchpad", "input": {"code": "1"}}]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "BODY"},
+            {"type": "text", "text": "self-check note"},
+        ]},
+    ]
+    rows = split_turn_into_rows(slice_)
+    assert rows[1] == {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": "BODY"}]}
