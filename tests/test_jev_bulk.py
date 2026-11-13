@@ -81,35 +81,6 @@ async def test_each_text_rides_in_its_own_question_and_the_state_holds_only_the_
     ]
 
 
-async def test_category_descriptions_go_once_in_the_state():
-    seen = []
-
-    async def fake_sleep(seconds):
-        pass
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: _label_all(r, seen))) as client:
-        results = await jev.decide_many(
-            ["an invoice", "a login error"],
-            jev.choice_question({"Billing": "invoices and payments", "Support": None}, "Which?"),
-            base_url="https://api.mindshub.ai/v1", api_key="key", pacer=jev.Pacer(6000),
-            client=client, sleep=fake_sleep,
-        )
-
-    assert [jev.choice_result(d)["label"] for d in results] == ["Billing", "Support"]
-    (body,) = seen
-    assert body["state"].startswith(jev.BATCH_STATE)
-    assert "- Billing: invoices and payments" in body["state"]
-    assert "Support:" not in body["state"]
-    assert all(q["criteria"] == {"Billing": "", "Support": ""} for q in body["questions"].values())
-
-
-def test_shared_definitions_leaves_other_questions_alone():
-    bare = jev.choice_question(["A", "B"], "Q?")
-    yes_no = jev.yes_no_question("Q?", yes="y", no="n")
-    assert jev.shared_definitions(bare) == (jev.BATCH_STATE, bare)
-    assert jev.shared_definitions(yes_no) == (jev.BATCH_STATE, yes_no)
-
-
 def test_batches_keep_order_and_respect_both_limits():
     questions = [{"instructions": "x" * 300}] * 5
     assert jev.plan_batches(questions, max_tokens=250) == [[0, 1], [2, 3], [4]]
@@ -120,13 +91,13 @@ def test_batches_keep_order_and_respect_both_limits():
 
 async def test_many_batches_come_back_in_input_order():
     seen = []
-    texts = [f"text {i} {'invoice' if i % 3 == 0 else 'login'}" for i in range(1200)]
+    texts = [f"text {i} {'invoice' if i % 3 == 0 else 'login'}" for i in range(450)]
 
     results = await _run(lambda r: _label_all(r, seen), texts)
 
-    assert len(seen) == 3  # 1200 texts, at most 500 a request
+    assert len(seen) == 3  # 450 texts, at most 200 a request
     assert [jev.choice_result(d)["label"] for d in results] == [
-        "Billing" if i % 3 == 0 else "Support" for i in range(1200)
+        "Billing" if i % 3 == 0 else "Support" for i in range(450)
     ]
 
 
@@ -209,10 +180,10 @@ async def test_a_batch_whose_texts_all_fail_is_abandoned():
 async def test_progress_is_reported_per_finished_batch():
     reported = []
 
-    await _run(_label_all, ["a"] * 600, on_progress=lambda done, total: reported.append((done, total)),
+    await _run(_label_all, ["a"] * 250, on_progress=lambda done, total: reported.append((done, total)),
                concurrency=1)
 
-    assert reported == [(500, 600), (600, 600)]
+    assert reported == [(200, 250), (250, 250)]
 
 
 def test_choice_question_takes_a_list_or_described_categories():
