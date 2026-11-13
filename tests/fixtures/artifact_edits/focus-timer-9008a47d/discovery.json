@@ -1,0 +1,17 @@
+{
+  "request_fingerprint": "ecdd6e76bb42d54ce66b7adccbe9854b8d1ce94ec8fa83a982083ac8d70b66c6",
+  "call_fingerprint": "03f221f0422d3b34690ad4976ae165214a4ec7ffcf72b5c4583483c594fcb7bc",
+  "pipeline_stage": "generated",
+  "artifact_type": "html-app",
+  "gathering_complete": true,
+  "declared_sources": [],
+  "unverified_sources": [],
+  "brief_markdown": "",
+  "data_notes": "",
+  "web_notes": "",
+  "assumptions": [],
+  "open_points": [],
+  "attachments": [],
+  "known_data": "",
+  "known_data_verified": []
+}

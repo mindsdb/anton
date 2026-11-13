@@ -1,0 +1,181 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Currency Converter API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/api/rates": {
+      "get": {
+        "summary": "Get supported currency rates",
+        "responses": {
+          "200": {
+            "description": "Currency rates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "rates": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "currency": {
+                            "type": "string",
+                            "enum": [
+                              "USD",
+                              "EUR",
+                              "GBP",
+                              "JPY",
+                              "CAD",
+                              "AUD",
+                              "CHF"
+                            ]
+                          },
+                          "rate": {
+                            "type": "number",
+                            "description": "Currency units per 1 USD"
+                          }
+                        },
+                        "required": [
+                          "currency",
+                          "rate"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "rates"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/convert": {
+      "get": {
+        "summary": "Convert an amount between supported currencies",
+        "parameters": [
+          {
+            "name": "amount",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "USD",
+                "EUR",
+                "GBP",
+                "JPY",
+                "CAD",
+                "AUD",
+                "CHF"
+              ]
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "USD",
+                "EUR",
+                "GBP",
+                "JPY",
+                "CAD",
+                "AUD",
+                "CHF"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Conversion result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "amount": {
+                      "type": "number"
+                    },
+                    "from": {
+                      "type": "string",
+                      "enum": [
+                        "USD",
+                        "EUR",
+                        "GBP",
+                        "JPY",
+                        "CAD",
+                        "AUD",
+                        "CHF"
+                      ]
+                    },
+                    "to": {
+                      "type": "string",
+                      "enum": [
+                        "USD",
+                        "EUR",
+                        "GBP",
+                        "JPY",
+                        "CAD",
+                        "AUD",
+                        "CHF"
+                      ]
+                    },
+                    "converted_amount": {
+                      "type": "number",
+                      "description": "Amount in the target currency"
+                    }
+                  },
+                  "required": [
+                    "amount",
+                    "from",
+                    "to",
+                    "converted_amount"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid amount or unsupported currency",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

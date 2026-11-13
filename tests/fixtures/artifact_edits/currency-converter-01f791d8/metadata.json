@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "id": "01f791d8099743d3a8ffc53e391f2348",
+  "slug": "currency-converter-01f791d8",
+  "createdAt": "2026-11-12T08:36:29+00:00",
+  "updatedAt": "2026-11-12T08:38:02+00:00",
+  "name": "Currency Converter",
+  "description": "Build a stateless fullstack currency converter with a small Python API that serves the specified fixed synthetic USD-based rates and computes conversions, plus a frontend with amount and currency inputs, a result, and a rates table. No external services.",
+  "type": "fullstack-stateless-app",
+  "primary": "index.html",
+  "datasources": [],
+  "files": [
+    {
+      "path": "backend.py",
+      "bytes": 2946,
+      "modifiedAt": "2026-11-12T08:37:43+00:00"
+    },
+    {
+      "path": "requirements.txt",
+      "bytes": 22,
+      "modifiedAt": "2026-11-12T08:37:46+00:00"
+    },
+    {
+      "path": "static/index.html",
+      "bytes": 10318,
+      "modifiedAt": "2026-11-12T08:37:59+00:00"
+    }
+  ],
+  "provenance": [
+    {
+      "conversation": "gen-ws_fullstack",
+      "title": null,
+      "turns": [
+        {
+          "index": 1,
+          "timestamp": "2026-11-12T08:36:29+00:00",
+          "summary": "Created artifact: Currency Converter",
+          "files_touched": []
+        },
+        {
+          "index": 1,
+          "timestamp": "2026-11-12T08:38:02+00:00",
+          "summary": "Generated artifact files",
+          "files_touched": []
+        }
+      ]
+    }
+  ]
+}
