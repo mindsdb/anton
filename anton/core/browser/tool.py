@@ -1003,10 +1003,9 @@ def _classify(step: dict, *, url: str, requested: str | None = None, element: El
     clicks_it = step.get("element") is not None and not _is_text_entry(element) and (consent or commit_control)
     if action == "type":
         text = str(step.get("text", ""))
-        # A line break typed key by key presses Enter too. Both hosts' typeText
-        # (the pod host's browser/src/input.js, the desktop app's
-        # src/main/browser-input.ts) insert a tab as text and never press the
-        # Tab key, so a typed tab keeps the focus in its field.
+        # A line break typed key by key presses Enter too. The pod host and the
+        # desktop app both insert a typed tab as text and never press the Tab
+        # key, so a typed tab keeps the focus in its field.
         sends = step.get("submit") is True or "\n" in text or "\r" in text
         return "commit" if (sends and not _is_search(element)) or clicks_it else None
     if action == "press":
