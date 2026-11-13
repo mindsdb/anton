@@ -1,6 +1,0 @@
-{
-  "name": "Night Sky",
-  "type": "html-app",
-  "primary": "index.html",
-  "description": "An animated night sky: twinkling stars, a glowing moon and flying unicorns, drawn on a canvas."
-}

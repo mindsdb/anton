@@ -210,81 +210,17 @@ async def test_a_base_url_without_v1_still_reaches_the_decisions_route():
     assert str(jev.requests[0].url) == "https://hub.example/v1/decisions"
 
 
-async def test_optional_context_and_recent_turns_from_both_sides_are_sent():
+async def test_optional_context_and_only_the_users_recent_messages_are_sent():
     jev = FakeJev(answer("edit", 0.9))
-    history = []
-    for i in range(5):
-        history += [{"role": "user", "text": f"ask {i}"}, {"role": "assistant", "text": f"did {i}"}]
-    history.append({"role": "system", "text": "ignored"})
+    history = [{"role": "user", "text": f"message {i}"} for i in range(6)]
+    history.insert(3, {"role": "assistant", "text": "Made the title blue."})
     await route(jev, "bigger", name="Sales", data='{"rows": [3 x {"region": "North"}]}', history=history,
                 files=[f"f{i}.html" for i in range(50)])
     state = jev.body()["state"]
-    assert state["earlier_messages"] == ["user: ask 2", "assistant: did 2", "user: ask 3", "assistant: did 3",
-                                         "user: ask 4", "assistant: did 4"]
+    assert state["earlier_messages"] == ["message 2", "message 3", "message 4", "message 5"]
     assert state["artifact"]["name"] == "Sales"
     assert state["artifact"]["data"].startswith('{"rows"')
     assert len(state["artifact"]["files"]) == 40 and state["artifact"]["more_files"] == 10
-    assert "outline" not in state["artifact"] and "recent_changes" not in state["artifact"] and "chat" not in state
-
-
-async def test_outline_recent_changes_and_chat_reach_jev_clipped():
-    jev = FakeJev(answer("edit", 0.95))
-    changes = [f"Quick edit: change {i} " + "x" * 300 for i in range(9)]
-    chat = [{"role": "user", "text": f"chat {i}"} for i in range(6)] + [{"role": "assistant", "text": "y" * 900}]
-    decision = await route(jev, "make the unicorns poop rainbow", outline="o" * 3000, recent_changes=changes,
-                           chat=chat)
-    assert decision.route == "edit"
-    state = jev.body()["state"]
-    assert len(state["artifact"]["outline"]) <= 1500
-    assert len(state["artifact"]["recent_changes"]) == 6
-    assert state["artifact"]["recent_changes"][-1].startswith("Quick edit: change 8")
-    assert all(len(c) <= 200 for c in state["artifact"]["recent_changes"])
-    assert state["chat"][:3] == ["user: chat 3", "user: chat 4", "user: chat 5"]
-    assert len(state["chat"]) == 4 and len(state["chat"][-1]) <= 300 + len("assistant: ")
-    instructions = jev.body()["questions"]["route"]["instructions"]
-    assert "state.artifact.outline" in instructions and "recent_changes" in instructions
-
-
-def test_the_outline_shows_what_the_page_contains():
-    from anton.core.artifact_editor.router import artifact_outline
-
-    sky = artifact_outline(FIXTURES / "night-sky-unicorns-5b2e91c4")
-    assert sky.startswith("files: index.html; title: Night Sky")
-    for part in ("canvas", "animation", "moon-breathe", "drawUnicorn", "UNICORN_SPEED", "STAR_TWINKLE_SPEED"):
-        assert part in sky
-    timer = artifact_outline(FIXTURES / "focus-timer-9008a47d")
-    assert "One thing at a time." in timer and "startButton" in timer and len(timer) <= 1500
-
-
-def test_a_component_page_is_outlined_from_its_program_not_the_runtime():
-    from anton.core.artifact_editor.router import artifact_outline
-
-    sales = artifact_outline(FIXTURES / "regional-sales-dashboard-58f1c05b")
-    assert sales.startswith("files: presentation-program.js")
-    assert "Regional Sales Dashboard" in sales and "Monthly revenue" in sales
-    assert "cowork-figure-checks" not in sales
-
-
-def test_the_outline_leaves_out_embedded_data_and_housekeeping(tmp_path):
-    from anton.core.artifact_editor.router import artifact_outline
-
-    (tmp_path / "index.html").write_text(
-        '<html><head><title>T</title></head><body><h1>Hello</h1>'
-        '<script type="application/json" id="cowork-observed-json">{"secret_value": "ROW-DATA-XYZ"}</script>'
-        '</body></html>')
-    (tmp_path / "metadata.json").write_text('{"name": "n"}')
-    (tmp_path / ".hidden").mkdir()
-    (tmp_path / ".hidden" / "x.js").write_text("function sneaky() {}")
-    outline = artifact_outline(tmp_path)
-    assert "Hello" in outline and "ROW-DATA-XYZ" not in outline
-    assert "metadata.json" not in outline and "sneaky" not in outline
-
-
-def test_the_outline_of_an_empty_or_missing_folder_is_empty(tmp_path):
-    from anton.core.artifact_editor.router import artifact_outline
-
-    assert artifact_outline(tmp_path) == ""
-    assert artifact_outline(tmp_path / "missing") == ""
 
 
 def test_describe_artifact_reads_the_name_and_the_data_shape():
@@ -294,12 +230,7 @@ def test_describe_artifact_reads_the_name_and_the_data_shape():
 
 
 def test_describe_artifact_of_an_empty_folder_is_empty(tmp_path):
-    assert describe_artifact(tmp_path) == {"name": "", "description": "", "data": "", "outline": ""}
-
-
-def test_describe_artifact_includes_the_outline():
-    described = describe_artifact(FIXTURES / "night-sky-unicorns-5b2e91c4")
-    assert "drawUnicorn" in described["outline"] and described["name"] == "Night Sky"
+    assert describe_artifact(tmp_path) == {"name": "", "description": "", "data": ""}
 
 
 # ── is there a decisions model at all? ───────────────────────────────

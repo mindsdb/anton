@@ -4,11 +4,10 @@ Two parts, both live against MindsHub:
 
 * ``--routing``: :func:`route_request` on every message of
   ``tests/fixtures/artifact_edits/routing.json`` (labelled ``edit`` or
-  ``agent``), in variants: ``contract`` (message, files and kind only, as
-  the shared contract has it), ``no-outline`` (plus the artifact's name, the
-  shape of its embedded data and the bar's earlier messages) and ``context``
-  (plus the page's outline and its recent changes, from
-  :func:`describe_artifact`). Accuracy, the confusion matrix, latency.
+  ``agent``), in two variants: ``contract`` (message, files and kind only, as
+  the shared contract has it) and ``context`` (plus the artifact's name and
+  the shape of its embedded data, from :func:`describe_artifact`, and the bar's
+  earlier messages). Accuracy, the confusion matrix, latency.
 * ``--e2e``: the bar end to end on the routing set's messages that are the
   #790 benchmark's 28 edit tasks: ``route_request`` then, when routed to edit,
   ``run_quick_edit`` with the same checker the #790 benchmark's arm C used
@@ -84,13 +83,9 @@ async def _route(item: dict, folder: Path, *, variant: str, http=None):
 
     kind = _meta(folder).get("type", "html-app")
     extra = {}
-    if variant in ("context", "no-outline"):
+    if variant == "context":
         described = describe_artifact(folder)
-        extra = {"name": described["name"], "data": described["data"], "history": item.get("history"),
-                 "chat": item.get("chat")}
-        if variant == "context":
-            # The page's own content, and what recent edits did to it.
-            extra.update(outline=described["outline"], recent_changes=item.get("recent_changes"))
+        extra = {"name": described["name"], "data": described["data"], "history": item.get("history")}
     return await route_request(
         item["message"], files=_files(folder, kind), kind=kind, base_url=_base_url(),
         api_key=os.environ["ANTON_MINDS_API_KEY"], model=JEV_MODEL, http=http, **extra,
@@ -383,7 +378,7 @@ def main() -> None:
     parser.add_argument("--e2e", action="store_true")
     parser.add_argument("--escalation", action="store_true")
     parser.add_argument("--summarize", action="store_true", help="re-summarize what is in --out")
-    parser.add_argument("--variants", default="contract,no-outline,context")
+    parser.add_argument("--variants", default="contract,context")
     parser.add_argument("--variant", default="context", help="the router variant the e2e runs use")
     parser.add_argument("--model", default="mindshub_air")
     parser.add_argument("--runs", type=int, default=2)

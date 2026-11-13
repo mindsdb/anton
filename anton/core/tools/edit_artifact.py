@@ -102,10 +102,7 @@ def _check_lines(outcome: "Outcome", label: str) -> list[str]:
     if check.status == "passed":
         lines = [f"{label} — loaded in a browser ({check.channel}): no problems found."]
     elif check.status == "unverified":
-        # Internal: why nothing could load the page here. Not something to relay.
-        why = f" ({check.note})" if check.note else ""
-        lines = [f"{label} — the page could not be checked in a browser from here{why}; the user's open viewer "
-                 "reloads with the change and shows any errors itself."]
+        lines = [f"{label} — not verified in a browser: {check.note or 'no browser check is available here'}."]
     else:
         lines = [f"{label} — the {check.channel} check failed:"]
         lines += [f"  {finding.line()}" for finding in check.findings[:8]]
@@ -312,14 +309,8 @@ async def handle_edit_artifact(session: "ChatSession", tc_input: dict):
     live_lines = await _relaunch_live_apps(session, store, before, after=after)
     check = outcome.check
     status = check.status if check is not None else "unverified"
-    # A page-level record only for a page; non-web artifacts have none. An
-    # unverified check of a page that was not failing records nothing: on a
-    # sandboxed deployment every recorded non-pass becomes a "may not display
-    # correctly" line under the reply, and the user's own viewer shows the
-    # page anyway. A failing page's record is replaced, so a repair the check
-    # could not see still counts as one.
-    unremarkable = status == "unverified" and not was_failing
-    if kind in ("html-app", "fullstack-stateless-app", "fullstack-stateful-app") and not unremarkable:
+    # A page-level record only for a page; non-web artifacts have none.
+    if kind in ("html-app", "fullstack-stateless-app", "fullstack-stateful-app"):
         record_page_checks(
             session, checks={key: status}, repaired=frozenset({key}) if was_failing else frozenset(),
         )
@@ -344,10 +335,9 @@ async def handle_edit_artifact(session: "ChatSession", tc_input: dict):
             "report. Say \"browser-verified\" only of what the check names.")
     else:
         lines.append(
-            "The change is applied. It could not be checked in a browser from here; the user's open viewer "
-            "reloads with it and shows any errors there. Tell the user what changed. Do not bring up checks, "
-            "verification or browser availability (mention a check only when it found a problem), and never say "
-            "the change was tested or verified. Do not open the files looking for problems.")
+            "The change is applied, but no browser verified it: your reply MUST say it was not verified in a "
+            "browser and may not display correctly in the preview; never say it works or was tested. Do not "
+            "open the files looking for problems.")
     yield ToolOutcome("\n".join(lines), ok=True)
 
 

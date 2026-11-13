@@ -837,16 +837,13 @@ def _connector_usage_notes(connectors: dict | None) -> dict[str, str]:
 
 
 def build_cloud_chat_session(
-    request: TurnRequestV1, elicitor: "Elicitor | None" = None, preview_checker=None,
+    request: TurnRequestV1, elicitor: "Elicitor | None" = None
 ) -> "ChatSession":
     """Assemble a cloud-safe ChatSession for one turn.
 
     History is DB-authoritative (from the request). The workspace path is the
     trusted pod mount, NOT ``request.workspace_path``. *elicitor* is given only
     for an interactive turn; it is what makes ``ask_user`` available.
-    *preview_checker* (``cloud_turn/preview_check.py``) is given only when the
-    request set ``preview_checks``: it checks an edited artifact in the user's
-    open preview.
     """
     from anton.config.settings import AntonSettings
     from anton.core.backends.local import local_scratchpad_runtime_factory
@@ -1044,7 +1041,6 @@ def build_cloud_chat_session(
         initial_history=list(request.history) if request.history else None,
         console=None,                       # headless
         elicitor=elicitor,                  # interactive turns only; None = no ask_user
-        preview_checker=preview_checker,    # requests with preview_checks only; None = unverified
         # Whether cowork renders a tool's message to the user (UI turns do,
         # channel turns do not); only the request can say.
         tool_messages=request.tool_messages,
