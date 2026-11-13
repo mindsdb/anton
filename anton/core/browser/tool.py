@@ -934,15 +934,29 @@ def _frames_moved(seen: Page, current: Page) -> bool:
 
     When every placed frame of both reads carries at, which no scroll moves,
     the page's or an inner column's, for a frame that scrolls with the
-    content or one fixed to the view, the frames are compared as a multiset
-    keyed by address, at and size, a pixel of rounding apart
+    content or one fixed to the view, the frames are first compared as a
+    multiset keyed by address, at and size, a pixel of rounding apart
     (``_same_place``). A frame a sticky element holds stuck to the view
     keeps its screenshot box while its at moves down the page by the page's
     scroll, and is in its place too (``_stuck_to_view``); it is paired only
     after the frames that kept their at, so a scroll that puts it exactly
-    where another frame of its address sits pairs each with its own.
-    Otherwise the place on the page is inferred from the boxes and the
-    page's scroll, as follows.
+    where another frame of its address sits pairs each with its own. When
+    that puts every frame in its place, no frame moved. Otherwise, and on a
+    read without at, the place on the page is inferred from the boxes and
+    the page's scroll, as follows, and a frame moved only when the boxes
+    say so.
+
+    So at only clears a step the boxes refuse, such as one after an inner
+    column's scroll, and never refuses a step the boxes clear. A sticky
+    element that starts or stops holding a frame stuck to the view partway
+    through the page's scroll moves the frame's at by only part of the
+    scroll. One that holds a frame stuck in an inner column moves its at by
+    the column's scroll while its box stays put. at puts neither frame in
+    its place, and the boxes put both there. A frame that moved down an
+    inner column's content by exactly the column's scroll keeps its box
+    too, so it reads as in its place. A frame that came or went moved
+    before either comparison runs, and one that changed address or size
+    moved by both.
 
     The boxes are in screenshot pixels and the list goes on-screen first, so
     a scroll moves every box and may reorder the list. The frames are
@@ -976,7 +990,8 @@ def _frames_moved(seen: Page, current: Page) -> bool:
     if places is not None and places_now is not None:
         places, places_now = _unpaired(places, places_now, _same_place)
         places, places_now = _unpaired(places, places_now, lambda was, now: _stuck_to_view(was, now, scrolled))
-        return bool(places or places_now)
+        if not places and not places_now:
+            return False
     if _scrolled_in_place(before, now, scrolled):
         return False
     stayed = Counter(before) & Counter(now)
@@ -999,8 +1014,14 @@ def _moved_focus(*, seen: Page, current: Page, body: dict) -> str | None:
     to compare. A frame that came or went, or changed address, size or place
     on the page (``_frames_moved``), says a page or a frame may have moved
     the focus, or the focused frame navigated, which keeps its element's
-    token. A scroll alone, and text that changes inside the same frame (a
-    clock), say nothing."""
+    token. Text that changes inside the same frame (a clock) says nothing.
+    Nor does a scroll, the page's or an inner column's, when the boxes read
+    it as one scroll or at puts every frame in its place (``_frames_moved``).
+    So a sticky element that starts holding a frame partway through the
+    page's scroll, or holds one stuck in a scrolling column, runs the step.
+    A scroll that the boxes and at both take for a move refuses it, as on a
+    read without at: one during which a sticky element starts holding one
+    frame while another frame scrolls on."""
     to_focus = body.get("focused") is True or (body.get("action") == "press" and body.get("element") is None)
     if not to_focus:
         return None
@@ -1483,9 +1504,10 @@ async def _gate(
     another role or name refuses the step (``_moved_element``), as act
     refuses one before the card. So does, for a step that goes to the focus
     (a press with no element, a focused type), a focus token that changed,
-    came or went, or a frame that came or went, or changed address, size or place on the
-    page, on the same address (``_moved_focus``); a scroll alone moves
-    neither. A page that went to another address, or,
+    came or went, or a frame that came or went, or changed address, size or
+    place on the page, on the same address (``_moved_focus``). A scroll
+    alone moves neither, and refuses the step only where ``_moved_focus``
+    can't tell it from a frame that moved. A page that went to another address, or,
     after a card for a point that may land in a frame, a frame under the
     point with another address or box, is asked about again on the new read
     (``changed``), once; a page that changes again refuses the step. The

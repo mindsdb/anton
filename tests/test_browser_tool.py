@@ -1366,12 +1366,21 @@ async def test_on_the_desktop_a_step_to_the_focus_compares_frames_by_their_place
     widget) keeps its box and its at, inside a scrolling column too, since
     only the scrolls of its containing-block chain count. A frame a sticky
     element holds stuck to the view (a sticky ad) keeps its box while its at
-    moves down the page by the page's scroll, and is in its place too. A
-    frame that moved within the column's content, even by exactly the
-    column's scroll so its box stayed put, or came, went, or changed
-    address or size, refuses the step. A read without at falls back to
-    comparing boxes against the page's scroll, which reads an inner
-    column's scroll as a frame that moved."""
+    moves down the page by the page's scroll, and is in its place too.
+
+    at only ever lets a step run. When it doesn't put every frame in its
+    place, the tool compares the boxes against the page's scroll, as on a
+    read without at, and refuses the step only when the boxes say a frame
+    moved too. A sticky element that starts or stops holding a frame stuck
+    to the view partway through the page's scroll moves the frame's at by
+    only part of the scroll. One that holds a frame stuck in an inner column
+    moves its at by the column's scroll while its box stays put. The boxes
+    read both as in place, so the step runs. So does a frame that moved down
+    the column's content by exactly the column's scroll, since no read tells
+    it from a frame stuck in the column. A frame that moved within the
+    column's content otherwise, or came, went, or changed address or size,
+    refuses the step, a sticky one too. A read without at compares the boxes
+    alone, which reads an inner column's scroll as a frame that moved."""
     desktop = BrowserConfig(base_url=LOOPBACK, profile=SID, token="k")
     # The desktop's screenshot at 0.8 of the view, edges rounded outward.
     form = {**FRAMED["frames"][0], "box": {"x": 112, "y": 300, "width": 448, "height": 144}, "at": {"x": 140, "y": 375}}
@@ -1380,6 +1389,12 @@ async def test_on_the_desktop_a_step_to_the_focus_compares_frames_by_their_place
     ad = {"url": "https://ads.example.test/slot", "read": False, "box": {"x": 20, "y": 100, "width": 300, "height": 250}, "at": {"x": 25, "y": 125}}
     # The pod's screenshot at the view's own size, edges rounded to the nearest pixel.
     pod_form = {**form, "box": {"x": 140, "y": 375, "width": 560, "height": 180}}
+    # A sidebar ad a sticky element holds stuck to the top of the view once
+    # the page has scrolled 300 px, read in real Chrome at 0.8 of the view.
+    sidebar = {"url": "https://ads.example.test/sidebar", "read": False, "box": {"x": 496, "y": 240, "width": 240, "height": 200}, "at": {"x": 620, "y": 300}}
+    # A frame a sticky element holds stuck to the top of an app's scrolling
+    # column, read in real Chrome before the column scrolls 400 px.
+    pinned = {"url": "https://ads.example.test/sidebar", "read": False, "box": {"x": 416, "y": 0, "width": 240, "height": 200}, "at": {"x": 520, "y": 0}}
 
     def at(scroll_y: int, *frames: dict) -> dict:
         return {**FRAMED, "scroll": {"y": scroll_y, "height": 2400, "viewport": 800}, "frames": list(frames)}
@@ -1392,9 +1407,6 @@ async def test_on_the_desktop_a_step_to_the_focus_compares_frames_by_their_place
 
     changed = {
         "a frame that moved down the column's content": (at(0, form), at(0, moved(form, y=348, on_page={"y": 435}))),
-        "a frame that moved down the column's content by the column's scroll": (
-            at(0, form), at(0, moved(form, on_page={"y": 525})),
-        ),
         "a frame that moved sideways in the column while it scrolled": (
             at(0, form), at(0, moved(form, x=144, y=180, on_page={"x": 180})),
         ),
@@ -1410,6 +1422,21 @@ async def test_on_the_desktop_a_step_to_the_focus_compares_frames_by_their_place
         ),
         "a frame whose at moved by the scroll while its box moved on the screen": (
             at(0, form, chat), at(200, moved(form, y=140), moved(chat, y=560, on_page={"y": 950})),
+        ),
+        "a frame with another address after a sticky element started holding it": (
+            at(0, sidebar), at(600, {**moved(sidebar, y=0, on_page={"y": 600}), "url": "https://ads.example.test/slot"}),
+        ),
+        "a frame that grew as a sticky element started holding it": (
+            at(0, sidebar), at(600, moved(sidebar, y=0, height=260, on_page={"y": 600})),
+        ),
+        "a frame stuck in an inner column that grew while the column scrolled": (
+            at(0, pinned), at(0, moved(pinned, height=260, on_page={"y": 400})),
+        ),
+        "a frame that came while a sticky element started holding another": (
+            at(0, sidebar), at(600, moved(sidebar, y=0, on_page={"y": 600}), chat),
+        ),
+        "a frame that went while a sticky element held another in an inner column": (
+            at(0, pinned, chat), at(0, moved(pinned, on_page={"y": 400})),
         ),
         "an inner column's scroll on reads that carry no at": (at(0, bare(form)), at(0, bare(moved(form, y=180)))),
         "an inner column's scroll on a read that carries no at": (at(0, form), at(0, bare(moved(form, y=180)))),
@@ -1437,6 +1464,18 @@ async def test_on_the_desktop_a_step_to_the_focus_compares_frames_by_their_place
             at(0, ad, moved(ad, y=600, on_page={"y": 750})), at(625, moved(ad, on_page={"y": 750}), moved(ad, y=-400)),
         ),
         "the page's scroll on a read that carries no at": (at(0, form), at(120, bare(moved(form, y=204)))),
+        "the page's scroll while a sticky element starts holding a frame stuck to the view": (
+            at(0, sidebar), at(600, moved(sidebar, y=0, on_page={"y": 600})),
+        ),
+        "the page's scroll while a sticky element stops holding a frame stuck to the view": (
+            at(600, moved(sidebar, y=0, on_page={"y": 600})), at(0, sidebar),
+        ),
+        "an inner column's scroll beside a frame a sticky element holds stuck in that column": (
+            at(0, pinned), at(0, moved(pinned, on_page={"y": 400})),
+        ),
+        "a frame that moved down the column's content by exactly the column's scroll": (
+            at(0, form), at(0, moved(form, on_page={"y": 525})),
+        ),
     }
     for step in ({"action": "press", "key": "Enter"}, {"action": "type", "focused": True, "text": "ada@example.test", "submit": True}):
         for what, (seen, after) in changed.items():
