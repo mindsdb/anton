@@ -969,7 +969,8 @@ def test_the_prompt_and_the_skill_say_how_to_fill_an_ordinary_field_inside_a_fra
     the web's browser reads the focus, in a frame too, and holds one only
     where it may commit something: a key that types or deletes into a
     frame's text field runs at once there, Enter and Space wait, and so does
-    a chord with Tab before another key. The text says that, not that typing
+    a chord with Tab before a key that picks or edits (Tab+Tab, Tab+Escape
+    and Tab+Shift run at once there). The text says that, not that typing
     goes key by key or that the arrows always run at once."""
     from pathlib import Path
 
@@ -981,6 +982,7 @@ def test_the_prompt_and_the_skill_say_how_to_fill_an_ordinary_field_inside_a_fra
         assert "type into it with press steps" not in text and "one key each" not in text
         assert "Tab, the arrows and other keys run at once" not in text
         assert "any radio in a list it cut short" not in text
+        assert "a chord with Tab before another key" not in text
         for sentence in (
             'To fill an ordinary field inside a frame, click it by pixel (one Approve), then type into it with '
             '{"action":"type","focused":true,"text":"…"}, which types at the caret of the field that has the focus, '
@@ -993,8 +995,8 @@ def test_the_prompt_and_the_skill_say_how_to_fill_an_ordinary_field_inside_a_fra
             "web's browser reads the focused "
             "control, even in a frame, and holds such a key only where it may commit something.",
             "In the web's browser a key that types or deletes into a frame's text field runs at once, Enter and Space "
-            "there wait, and so does a chord with Tab before another key (Tab+ArrowDown), which the desktop app's "
-            "browser refuses.",
+            "there wait, and so does a chord with Tab before a key that picks or edits (Tab+ArrowDown, Tab+a), which "
+            "the desktop app's browser refuses.",
             "The browser refuses keys and typing into a secret field there, as anywhere, and a sign-in, two-factor "
             "code or payment in a frame is the user's to do",
         ):
