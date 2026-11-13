@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Literal, NamedTuple
 from pydantic import BaseModel, ConfigDict
 
 from anton.core.backends.sandbox import cell_sandbox_of, validate_pad_name
+from anton.core.settings import UncheckedMode
 from anton.core.tools.registry import ToolOutcome
 from anton.core.utils.write_check import (
     PACKAGE_FILE_SUFFIXES,
@@ -71,11 +72,11 @@ def fill_in_scratchpad_action(tc_input: dict) -> None:
         tc_input["action"] = "exec"
 
 
-UncheckedMode = Literal["all", "own", "off"]
 RefusalCause = Literal["cancelled", "timeout", "unavailable", "error", "unanswered_earlier"]
 # What a logged decision says came of a held cell: "stopped" when the turn
-# ended while its card waited, so no refusal went back to the model.
-DecisionStatus = RefusalCause | Literal["approved", "not_held", "stopped"]
+# ended while its card waited, so no refusal went back to the model;
+# "not_held_unchecked" when `write_approval_unchecked` let it run with no card.
+DecisionStatus = RefusalCause | Literal["approved", "not_held", "not_held_unchecked", "stopped"]
 
 _WHY = {
     "cancelled": "they declined it",
@@ -145,6 +146,10 @@ class WriteApprovalDecision(BaseModel):
     kinds: tuple[str, ...]
     count: int
     status: DecisionStatus
+    # For "not_held_unchecked": the setting's value, and the kinds of the
+    # reasons the card would have given.
+    mode: UncheckedMode | None = None
+    causes: tuple[str, ...] = ()
 
 
 def _inert(text: str) -> str:
@@ -377,7 +382,7 @@ def _card_prompt(writes: CellWrites, code: str = "") -> str:
 _WHOLE_STEP_CAUSES = {
     "restart": "The scratchpad starts again before this step, and an earlier step may have written a file "
                "Python runs as it starts.",
-    "limit": "Its code is nested deeper than the check follows.",
+    "limit": "Its code goes too deep for the check to follow all of it.",
     "failed": "The check failed on this step.",
 }
 
@@ -388,6 +393,8 @@ def _cause_lines(writes: CellWrites) -> list[str]:
     for cause in writes.causes:
         if cause.kind in _WHOLE_STEP_CAUSES:
             lines += [_WHOLE_STEP_CAUSES[cause.kind], ""]
+            if cause.code:
+                lines += ["The check stopped at:", "", _fence(cause.code), ""]
         elif cause.kind == "uses" and cause.name and cause.earlier:
             lines += [f"It uses {_code_span(cause.name)}, which code an earlier step ran may have set. "
                       "The check couldn't read that code:", "", _fence(cause.earlier), ""]
@@ -502,19 +509,35 @@ async def ask_approval_choice(
     return ApprovalChoice(None, "error")
 
 
-def _log_decision(*, writes: CellWrites, status: DecisionStatus) -> None:
+def _log_decision(*, writes: CellWrites, status: DecisionStatus, mode: UncheckedMode | None = None) -> None:
     """Log what came of a cell: for one that ran with no card, the changes
-    it was let make (appends, and overwrites of the agent's own files);
-    otherwise what its card held."""
-    if status == "not_held":
+    it was let make (appends, and overwrites of the agent's own files),
+    and, for one `write_approval_unchecked` let run (`mode`), the setting
+    and the kinds of its reasons; otherwise what its card held."""
+    if status in ("not_held", "not_held_unchecked"):
         kinds = tuple(sorted({f.action for f in writes.not_held_files}))
         count = len(writes.not_held_files)
     else:
         kinds, count = writes.kinds(), len(writes.sql) + len(writes.calls) + len(writes.held_files) + len(writes.http)
-    decision = WriteApprovalDecision(kinds=kinds, count=count, status=status)
+    causes = tuple(dict.fromkeys(c.kind for c in writes.causes)) if mode is not None else ()
+    decision = WriteApprovalDecision(kinds=kinds, count=count, status=status, mode=mode, causes=causes)
     # WARNING: hosts log at WARNING by default, and this line is the record of
-    # a held write.
-    logger.warning("write approval: %s", decision.model_dump_json())
+    # a held write. `mode` and `causes` show only on a "not_held_unchecked" line.
+    logger.warning("write approval: %s", decision.model_dump_json(exclude_defaults=True))
+
+
+def _unchecked_hold_dropped(writes: CellWrites, mode: UncheckedMode) -> bool:
+    """Whether `write_approval_unchecked` lets a cell held because the check
+    can't read all of it run with no card: under `own`, when the hold is
+    carried from code an earlier cell ran or from a restart, not code the
+    cell itself runs; under `off`, whatever it comes from. Never when the
+    check stopped short (`CellWrites.stopped`), and never when the cell
+    holds for anything else, so a card that shows, shows whole."""
+    if mode == "all" or not writes.unchecked or writes.stopped:
+        return False
+    if mode == "own" and writes.unread_here:
+        return False
+    return not writes.model_copy(update={"unchecked": False, "causes": ()}).needs_approval()
 
 
 async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> ToolOutcome | None:
@@ -524,6 +547,8 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
 
     Only sessions with a `WriteGate` (the `write_approval` setting) check
     anything. A check that fails asks too, since it can't clear the cell.
+    `write_approval_unchecked` lets a cell held only because the check
+    can't read all of it run (`_unchecked_hold_dropped`).
     """
     gate = getattr(session, "_write_gate", None)
     if not isinstance(gate, WriteGate):
@@ -553,14 +578,12 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
             earlier = (*earlier[:-1], earlier[-1].model_copy(update={"ended_process": True}))
         writes = await asyncio.to_thread(
             find_cell_writes, code=code, earlier=earlier, snapshots=gate.snapshots, http_rules=gate.http_rules,
-            carry_unread=gate.unchecked == "all",
         )
-        if gate.unchecked == "off" and writes.unchecked:
-            writes = writes.model_copy(update={"unchecked": False, "causes": ()})
     except Exception as exc:
         # The type only, as for a failed question.
         logger.warning("write approval: the check failed (%s)", type(exc).__name__)
-        writes = CellWrites(unchecked=True, causes=(UncheckedCause(kind="failed"),))
+        # `stopped`: a check that read nothing can't clear the cell, whatever the setting.
+        writes = CellWrites(unchecked=True, stopped=True, causes=(UncheckedCause(kind="failed"),))
     if gate.relayed_hosts and writes.http:
         # The write relay holds a request to a host it relays and raises its
         # own card through approve_held_write, so a second card here would
@@ -571,6 +594,11 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
 
         kept = tuple(w for w in writes.http if not held_by_relay(w, gate.relayed_hosts))
         writes = writes.model_copy(update={"http": kept})
+    # After the relay's requests are left out: a request the relay holds
+    # doesn't keep the cell's card on its own.
+    if _unchecked_hold_dropped(writes, gate.unchecked):
+        _log_decision(writes=writes, status="not_held_unchecked", mode=gate.unchecked)
+        return None
     if not writes.needs_approval():
         if writes.not_held_files:
             _log_decision(writes=writes, status="not_held")

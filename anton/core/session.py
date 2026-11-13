@@ -156,7 +156,7 @@ from anton.core.utils.scratchpad import (
     scratchpad_action,
 )
 from anton.core.utils.write_check import parse_http_write_rules
-from anton.core.utils.write_hold import parse_relay_hosts
+from anton.core.utils.write_hold import parse_relay_hosts, unchecked_mode
 # Artifact-edit tracking + lint and the scratchpad observer hooks: shared with
 # handle_scratchpad's own exec branch (tool_handlers.py) rather than duplicated
 # here, since this inline streaming exec bypasses that handler entirely.
@@ -2292,11 +2292,15 @@ class ChatSession:
             # The relayed hosts count only with a relay to hold their writes,
             # so a stray hosts setting never drops a card.
             relayed = getattr(s, "write_relay_hosts", "") if self._write_relay_url else ""
-            unchecked = getattr(s, "write_approval_unchecked", "all")
+            http_rules = parse_http_write_rules(listed if isinstance(listed, str) else "")
+            relayed_hosts = parse_relay_hosts(relayed if isinstance(relayed, str) else "")
             self._write_gate = WriteGate(
-                http_rules=parse_http_write_rules(listed if isinstance(listed, str) else ""),
-                relayed_hosts=parse_relay_hosts(relayed if isinstance(relayed, str) else ""),
-                unchecked=unchecked if unchecked in ("own", "off") else "all",
+                http_rules=http_rules,
+                relayed_hosts=relayed_hosts,
+                unchecked=unchecked_mode(
+                    getattr(s, "write_approval_unchecked", "all"), relay_url=self._write_relay_url,
+                    relayed_hosts=relayed_hosts, http_rules=http_rules,
+                ),
             )
 
         coding_provider = config.llm_client.coding_provider
