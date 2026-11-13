@@ -63,6 +63,34 @@ back.
 The setup is documented below so the numbers can be reproduced. The criteria were written
 before this run and not tuned on it.
 
+## Routing with page context (outline, recent changes): partial run
+
+A user's "make the unicorns poop rainbow", on a page whose quick edits had added flying unicorns, went to the
+agent: Jev only knew the artifact's name, description and data shape. `route_request` now also takes the
+page's outline (`describe_artifact()["outline"]`: headings, labels, ids, classes, keyframes, function and constant
+names, features such as canvas or charts), its recent revision summaries, both sides of the bar's last 6 turns
+and the last 4 messages of the artifact's chat, and its instructions say a request about things on the page is
+an edit. The set grew to 84 messages: 12 about page content (50 edit / 34 agent overall), 8 of them on a new
+synthetic canvas page (night sky, stars, moon, unicorns) with recent changes and bar history attached.
+
+**The live re-run stopped early.** Partway through, MindsHub began answering every decision with HTTP 402
+`wallet_empty` ("no free decision allowance left") for the account the benchmark uses. `route_request` read
+each of those as `router_error` and routed to the agent, as designed, so they are excluded. What completed
+before that (`artifact-quick-edit-2026-11/routing-v2-partial.jsonl`):
+
+| Variant (new instructions) | N | Accuracy | agent→edit | Median ms |
+|---|---|---|---|---|
+| contract (message, files, kind) | 84 (1 run) | 81/84 | 1 ("add a filter by customer segment", as before) | 601 |
+| no-outline (+ name, data shape, history) | 16 (1 run, partial) | 16/16 | 0 | 594 |
+| **context** (+ outline, recent changes) | 0 | not measured | | |
+
+On the 12 page-content messages, even the contract variant, with the new instructions only, routed 11
+correctly: "make the unicorns poop rainbow" went to edit (p 0.98), "slow down the stars" (0.93), "make the
+unicorns bigger and leave a sparkle trail" (0.99), and the two agent requests on that page (real star catalog
+data, page view counts) went to the agent (0.94, 1.00). The miss was "can they flap their wings?", which it was
+uncertain about (p 0.76 edit) and sent to the agent. The full-context variant still needs a run once the
+account has decision allowance again.
+
 ## End to end: the bar vs #790's numbers (`mindshub_air`, the same 28 tasks)
 
 | Path | N | Median (s) | p90 (s) | Assertions pass |
