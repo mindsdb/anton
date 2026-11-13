@@ -2735,8 +2735,8 @@ async def test_on_the_desktop_a_key_that_may_check_a_radio_a_cut_list_left_out_w
     frame_cut["frames"][0]["truncated"] = True
     for page, step, may_pick in (
         (CLOSE_ACCOUNT_CUT, {"action": "press", "element": 3, "key": "ArrowDown"}, "a radio the page didn't list"),
-        (CLOSE_ACCOUNT_CUT, {"action": "press", "key": "ArrowDown"}, "a radio the page didn't list"),
-        (frame_cut, {"action": "press", "key": "End"}, 'a radio the frame "https://forms.example.test/account" didn\'t list'),
+        (CLOSE_ACCOUNT_CUT, {"action": "press", "key": "ArrowDown"}, "a radio or an option the page didn't list"),
+        (frame_cut, {"action": "press", "key": "End"}, 'a radio or an option the frame "https://forms.example.test/account" didn\'t list'),
     ):
         host = FakeHost(pages=[page])
         session = _desktop(host)
@@ -2747,16 +2747,33 @@ async def test_on_the_desktop_a_key_that_may_check_a_radio_a_cut_list_left_out_w
         assert f"which may pick {may_pick}" in elicit_answers.prompts()[-1], step
 
 
-async def test_on_the_desktop_keys_on_a_cut_list_with_no_radio_run_at_once(elicit_answers):
-    """A cut list that lists no radio leaves no group to cut, so PageDown,
-    an arrow and End with no element run at once on a long page."""
+async def test_on_the_desktop_a_key_with_no_element_waits_on_any_cut_list_whatever_it_lists(elicit_answers):
+    """Past its cap the desktop leaves elements out (300 on the page,
+    on-screen first, and 50 in a read frame), a whole radio group or select
+    included, and Tab steps run at once, so the focus may sit on a control
+    the cut list doesn't show. An arrow, Home, End, PageUp or PageDown with
+    no element then waits wherever the page's list or a read frame's list
+    was cut, though the cut list shows no radio or select. Tab, and a key
+    that names a listed link, run at once."""
     long_page = {**PAGE, "elements": [{"id": n, "role": "link", "name": f"Story {n}"} for n in range(1, 301)], "truncated": True}
-    host = FakeHost(pages=[long_page])
-    session = _desktop(host)
-    for key in ("PageDown", "ArrowDown", "End"):
-        result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "press", "key": key}})
-        assert result.ok is True and not result.reason, key
-    assert elicit_answers.requests == [] and len(host.posted("/action")) == 3
+    frame_cut = _framed_with([{"role": "link", "name": "Terms"}])
+    frame_cut["frames"][0]["truncated"] = True
+    for page, where in ((long_page, "the page"), (frame_cut, 'the frame "https://forms.example.test/account"')):
+        host = FakeHost(pages=[page])
+        session = _desktop(host)
+        for key in ("PageDown", "ArrowDown", "End"):
+            elicit_answers.answers.append("cancel")
+            before = len(elicit_answers.requests)
+            result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "press", "key": key}})
+            assert result.reason == "browser_step_not_approved", (where, key)
+            assert len(elicit_answers.requests) == before + 1, (where, key)
+            assert f"which may pick a radio or an option {where} didn't list" in elicit_answers.prompts()[-1], (where, key)
+        before = len(elicit_answers.requests)
+        for step in ({"action": "press", "key": "Tab"}, {"action": "press", "element": 1, "key": "ArrowDown"}):
+            result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+            assert result.ok is True and not result.reason, (where, step)
+        assert len(elicit_answers.requests) == before
+        assert [body["key"] for body in host.posted("/action")] == ["Tab", "ArrowDown"], where
 
 
 @pytest.mark.parametrize("page", [

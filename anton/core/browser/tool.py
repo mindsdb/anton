@@ -1084,10 +1084,13 @@ def _key_picks(page: Page, step: dict, *, consent: bool) -> list[str]:
     goes to whatever has the focus, so it may pick any such control the page
     or a read frame lists, or one in a frame the host didn't read, or in any
     frame of a host that doesn't list its frames. Past its cap a host leaves
-    elements out (``truncated``), so where a cut list holds a radio, its group
-    may hold a radio the list left out, and the press may check that one too.
-    Such a press already holds when a key of it types, deletes or is Enter
-    or Space (``_classify``)."""
+    elements out (``truncated``), a radio of a listed radio's group or a
+    whole radio group or select among them. So a press that names a radio on
+    a cut page may check a radio the page left out. A press with no element
+    on a cut page, or with a cut read frame, may pick in a control a list
+    left out, whatever the list shows: Tab steps run at once and may have
+    put the focus there. Such a press already holds when a key of it types,
+    deletes or is Enter or Space (``_classify``)."""
     if step.get("action") != "press" or not _PICKING_KEYS.intersection(_chord_keys(step.get("key"))):
         return []
 
@@ -1100,9 +1103,9 @@ def _key_picks(page: Page, step: dict, *, consent: bool) -> list[str]:
             return f"an option of {_named(el)}" if holds else None
         return None
 
-    def cut_radio(listed: list[Element] | list[FrameElement], truncated: bool, where: str) -> list[str]:
-        """The radio a cut list may have left out of a listed radio's group."""
-        return [f"a radio {where} didn't list"] if truncated and any(el.role == "radio" for el in listed) else []
+    def left_out(what: str, truncated: bool, where: str) -> list[str]:
+        """What a cut list may have left out that the key may pick."""
+        return [f"{what} {where} didn't list"] if truncated else []
 
     named = step.get("element")
     if named is not None:
@@ -1110,13 +1113,13 @@ def _key_picks(page: Page, step: dict, *, consent: bool) -> list[str]:
         if pressed is None or pressed.role != "radio":
             return []
         others = [el for el in page.elements if el.role == "radio" and el.id != pressed.id]
-        return [name for name in map(pick, others) if name is not None] + cut_radio(page.elements, page.truncated, "the page")
+        return [name for name in map(pick, others) if name is not None] + left_out("a radio", page.truncated, "the page")
     read = [frame for frame in page.frames or [] if frame.read]
     in_frames = [el for frame in read for el in frame.elements]
     picks = [name for name in map(pick, [*page.elements, *in_frames]) if name is not None]
-    picks += cut_radio(page.elements, page.truncated, "the page")
+    picks += left_out("a radio or an option", page.truncated, "the page")
     for frame in read:
-        picks += cut_radio(frame.elements, frame.truncated, f"the frame {json.dumps(frame.url, ensure_ascii=False)}")
+        picks += left_out("a radio or an option", frame.truncated, f"the frame {json.dumps(frame.url, ensure_ascii=False)}")
     if page.frames is None:
         picks.append("a control in a frame the browser didn't list")
     picks += [
