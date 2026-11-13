@@ -765,6 +765,7 @@ _HISTORY_TURN = [
 
 _EXPECTED_ROWS = [
     {"role": "assistant", "content": [
+        {"type": "text", "text": "looking"},
         {"type": "tool_use", "id": "t1", "name": "recall_skill", "input": {"name": "pdf"}}]},
     {"role": "user", "content": [
         {"type": "tool_result", "tool_use_id": "t1", "content": "BODY"}]},
