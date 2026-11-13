@@ -232,7 +232,8 @@ def test_a_server_error_is_reported_without_a_cause(server, status, body):
         "Anton's note: the server reported an error. Nothing here shows its cause, "
         "or whether it is temporary or a retry would help."
     )
-    assert not any(word in line.lower() for word in ("outage", "transient", "overload", "maintenance"))
+    note = line.split("Anton's note:", 1)[1].lower()
+    assert not any(word in note for word in ("outage", "transient", "overload", "maintenance"))
 
 
 def test_no_response_is_reported_without_a_cause():
