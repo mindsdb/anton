@@ -116,7 +116,12 @@ def test_the_readme_describes_the_card_field_rule_s_limits_and_examples():
         "a host compares with its own pattern's source and reads ignoring case, or a list, such as "
         "`payment_frame_hosts`."
     ) in readme
+    assert (
+        "`card_field_word_breaks` is a list of regular expressions' sources, which a host compares with its own and "
+        "reads case-sensitive."
+    ) in readme
     assert "or a field's attribute values, and whether they name the field for a card" in readme
+    assert "`value_hidden` on secret fields, `focus` for the focused node, `challenges` for visible check frames" in readme
     assert "`frames` for child frames, and the card-field rule both hosts hold" in readme
 
 
@@ -217,7 +222,7 @@ def test_the_page_fixture_names_every_frame_limit_the_hosts_hold():
     limits = _load("page").limits
     assert set(limits) == {
         "frames_read", "elements_per_frame", "text_per_frame", "frame_min_read_px", "frames_phase_ms",
-        "payment_frame_hosts", "sign_in_frame_hosts", "card_field_name", "card_field_attributes",
+        "payment_frame_hosts", "sign_in_frame_hosts", "card_field_name", "card_field_word_breaks", "card_field_attributes",
     }
     assert limits["frames_phase_ms"] == 2000
     assert "frames_phase_ms" in _load("page").description
@@ -225,47 +230,85 @@ def test_the_page_fixture_names_every_frame_limit_the_hosts_hold():
 
 #: The one card-field rule both hosts hold, character for character: a field
 #: is named for a card when this, ignoring case, matches its attributes'
-#: values joined with spaces.
+#: values joined with spaces, or that joined value split into words.
 CARD_FIELD_NAME = (
-    r"(^|[^a-z0-9]|card|cc)(cvc|cvv2?|csc)([^a-z0-9]|$)|card[\s._-]*(number|num|no)(?![a-z])"
-    r"|(^|[^a-z0-9])cc[\s._-]*(number|num)(?![a-z])|security[\s._-]*code"
+    r"(^|[^a-z0-9]|card|cc)(cvc|cvv2?|csc)([^a-z0-9]|$)|card[\s._-]*(numbers?|num|no)(?![a-z])"
+    r"|(^|[^a-z0-9])cc[\s._-]*(numbers?|num)(?![a-z])|security[\s._-]*code"
 )
+#: The word breaks both hosts split the joined value at, applied in order and
+#: case-sensitive, each replacing every match with its group and a space
+#: (JavaScript's "$1 "): cardNumberInput reads as card Number Input, and
+#: CVVCode as CVV Code.
+CARD_FIELD_WORD_BREAKS = [r"([a-z0-9])(?=[A-Z])", r"([A-Z])(?=[A-Z][a-z])"]
 #: The attributes both hosts read a field's name from, in the order they join them.
 CARD_FIELD_ATTRIBUTES = ["name", "id", "aria-label", "placeholder"]
-#: Names that must stay named for a card (a focused type answers 403
-#: password_field, and a frame holding one is never read) and names that
+#: Names that must stay named for a card (on the page its value is hidden and
+#: a type, select or editing key answers 403 password_field, a focused type
+#: answers the same, and a frame holding one is never read) and names that
 #: must not, so a host types into them.
 CARD_NAMED = [
     "cardnumber", "card_number", "card.number", "cardNo", "card_no", "cc_num", "cc-number", "cvc", "CVC", "cvv2",
     "card_cvc", "cardCvc", "cc_cvv", "billing_cvv2", "cvv_code", "csc", "security_code", "Card number", "Security code",
+    "cardNumberInput", "CardNumberTextBox", "ctl00_Main_CardNumberTextBox", "ccNumberInput", "creditCardNumberInput",
+    "cardNumberField", "cardNumbers", "cvvInput", "txtCVV", "CVVCode", "CCNumber",
 ]
 NOT_CARD_NAMED = [
     "name", "email", "acc_number", "account_number", "cardholder_name", "card_type", "cardnotes", "discount_code",
     "promo_code", "postal_code", "recv_count", "Name on card",
+    "cardholderName", "cardNotes", "cardNoteText", "cardType", "CardHolder",
 ]
+#: Card names the pattern alone misses on the joined value: only its
+#: word-split form names them, so a host that skips the split types into them.
+#: CVVCode needs the second break.
+NAMED_ONLY_WHEN_SPLIT = [
+    "cardNumberInput", "CardNumberTextBox", "ctl00_Main_CardNumberTextBox", "ccNumberInput", "creditCardNumberInput",
+    "cardNumberField", "cvvInput", "txtCVV", "CVVCode",
+]
+
+
+def _word_split(value: str, breaks: list[str]) -> str:
+    """The value with each word break applied in order, case-sensitive, every
+    match replaced by its group and a space."""
+    for pattern in breaks:
+        value = re.sub(pattern, r"\1 ", value)
+    return value
 
 
 def _card_named(attributes: dict[str, str]) -> bool:
     """The rule as page.json gives it: the pattern, ignoring case, on the
-    attributes' values joined in order with a space, a missing one empty."""
+    attributes' values joined in order with a space, a missing one empty, or
+    on that joined value's word-split form."""
     limits = _load("page").limits
     joined = " ".join(attributes.get(name, "") for name in limits["card_field_attributes"])
-    return re.search(limits["card_field_name"], joined, re.IGNORECASE) is not None
+    forms = (joined, _word_split(joined, limits["card_field_word_breaks"]))
+    return any(re.search(limits["card_field_name"], form, re.IGNORECASE) for form in forms)
 
 
 def test_the_page_fixture_pins_the_one_card_field_rule_both_hosts_hold():
-    """Both hosts refuse a focused type into a field named for a card and
+    """Both hosts hide a card-named field's value, refuse a type into it and
     never read a frame that holds one, by this one rule, so a name gets the
     same answer on either host. Each value is named for a card, or not, in
     any of the attributes alone, and one field is named only by two
-    attributes together, which pins the join."""
+    attributes together, which pins the join. The camelCase names an ASP.NET
+    or React form gives its card fields are named only by the word split."""
     page = _load("page")
     assert page.limits["card_field_name"] == CARD_FIELD_NAME
+    assert page.limits["card_field_word_breaks"] == CARD_FIELD_WORD_BREAKS
     assert page.limits["card_field_attributes"] == CARD_FIELD_ATTRIBUTES
     assert (
-        "A field is card-named when card_field_name, ignoring case, matches the values of its card_field_attributes "
         "(name, id, aria-label and placeholder) joined in that order with a space, a missing one as empty."
+    ) not in page.description
+    assert (
+        "A field is card-named when card_field_name, ignoring case, matches the values of its card_field_attributes "
+        "(name, id, aria-label and placeholder) joined in that order with a space, a missing one as empty, or that "
+        "joined value's word-split form: each of card_field_word_breaks applied in order, case-sensitive, replacing "
+        "every match with its first group and a space ($1 ), so cardNumberInput reads as card Number Input and "
+        "CVVCode as CVV Code."
     ) in page.description
+    for value in NAMED_ONLY_WHEN_SPLIT:
+        assert re.search(CARD_FIELD_NAME, value, re.IGNORECASE) is None, value
+        assert re.search(CARD_FIELD_NAME, _word_split(value, CARD_FIELD_WORD_BREAKS), re.IGNORECASE), value
+    assert re.search(CARD_FIELD_NAME, _word_split("CVVCode", CARD_FIELD_WORD_BREAKS[:1]), re.IGNORECASE) is None
     named = page.examples["values that name a field for a card"]
     unnamed = page.examples["values that don't name a field for a card"]
     for example, card_named, required in ((named, True, CARD_NAMED), (unnamed, False, NOT_CARD_NAMED)):
@@ -281,6 +324,58 @@ def test_the_page_fixture_pins_the_one_card_field_rule_both_hosts_hold():
     attributes = together.body["attributes"]
     assert _card_named(attributes)
     assert not any(_card_named({name: value}) for name, value in attributes.items())
+
+
+def test_a_card_named_field_on_the_page_is_a_secret_field():
+    """A field the card rule names is secret on the page itself, on both
+    hosts, as a cc- autocomplete field is: its value never reaches a read,
+    and a type, a select or an editing key into it answers 403
+    password_field. The checkout example's Card field is <input
+    name=card_number aria-label=Card>, named for a card by its name alone,
+    and the tool refuses a type into it before a host sees it."""
+    fixture = _load("page")
+    assert "A type with focused true never types into a card-named field (403 password_field)." not in fixture.description
+    assert (
+        "A card-named field is a secret field: it carries value_hidden and never its value, and a type into it, by "
+        "element or with focused true, a select of it or a press of a key that edits text in it answers 403 "
+        "password_field."
+    ) in fixture.description
+    checkout = fixture.examples["a checkout page with a card field named card_number"]
+    assert (checkout.where, checkout.kind, checkout.status) == ("GET /sessions/{id}/page", "response", 200)
+    assert _card_named({"name": "card_number", "aria-label": "Card"})
+    assert not _card_named({"aria-label": "Card"}) and not _card_named({"aria-label": "Name on card"})
+    raw = {el["name"]: el for el in checkout.body["elements"]}
+    assert raw["Card"] == {"id": 3, "role": "textbox", "name": "Card", "value_hidden": True}
+    page = Page.model_validate(checkout.body)
+    card, holder = (next(el for el in page.elements if el.name == name) for name in ("Card", "Name on card"))
+    assert card.secret and card.value is None
+    assert not holder.secret and holder.value
+    shown = format_page(page)
+    assert '[3] textbox "Card" (secret field)' in shown
+    assert f'[{holder.id}] textbox "Name on card" value={json.dumps(holder.value)}' in shown
+    assert _load("error").examples["password_field"].status == 403
+
+    session = SimpleNamespace(_browser_config=BrowserConfig(base_url=ROUTER, profile=PROFILE))
+    state = browser_tool._BrowserState(client=_client(_Recorder()), session_id=PROFILE)
+    body = browser_tool._step_body({"step": {"action": "type", "element": card.id, "text": "4242"}})
+    outcome = asyncio.run(browser_tool._gate(session, state=state, body=body, page=page, risky=False))
+    assert isinstance(outcome, browser_tool.ToolOutcome) and outcome.reason == "browser_secret_field"
+
+
+def test_the_page_fixture_lets_a_host_name_the_focused_node():
+    """A page may carry focus, an opaque token for the node that has the
+    focus, followed down through frames. The desktop app's browser sends it,
+    so the tool can tell that the focus moved while a card waited; the web's
+    browser, which reads the focus again when a step runs, leaves it out."""
+    fixture = _load("page")
+    assert (
+        "A page may carry focus: an opaque token naming the focused node, the deepest one through frames. Equal "
+        "tokens mean the same node, and a host may omit focus."
+    ) in fixture.description
+    framed = fixture.examples["a page with a frame"].body
+    assert isinstance(framed["focus"], str) and framed["focus"]
+    assert "focus" not in fixture.examples["a page with no check"].body
+    Page.model_validate(framed)
 
 
 def test_the_page_fixture_gives_the_element_order_both_hosts_use():
