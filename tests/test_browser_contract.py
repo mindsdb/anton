@@ -423,6 +423,20 @@ def test_the_page_fixture_lets_a_host_list_the_frames_inside_a_frame_it_read():
     ) in description
 
 
+def test_the_page_model_says_what_the_page_fixture_says_of_its_frames():
+    """Page.frames says what page.json says: the page's rendered child frames,
+    on-screen first, and after them, unread, the frames inside a frame the
+    host read."""
+    import inspect
+
+    source = " ".join(line.strip().removeprefix("#:").strip() for line in inspect.getsource(Page).splitlines())
+    assert "The page's child frames, on-screen first. Their" not in source
+    assert (
+        "The page's rendered child frames, on-screen first, and after them a host may list, unread, the frames "
+        "inside a frame it read."
+    ) in source
+
+
 def test_the_control_fixture_tells_done_by_the_person_from_any_other_agent_record():
     controls = _load("control").examples
     fresh = SessionInfo.model_validate(controls["a session the agent holds"].body).control

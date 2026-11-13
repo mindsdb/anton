@@ -92,9 +92,11 @@ class FrameBox(_Answer):
 
 
 class Frame(_Answer):
-    """A rendered child frame of the page. Hosts read a frame's elements and
-    text only when it is safe to (``read``): never a human check, a payment,
-    consent or sign-in frame, or one that holds a secret field."""
+    """A rendered child frame of the page, or a frame inside a frame the host
+    read, listed unread after them (``Page.frames``). Hosts read a frame's
+    elements and text only when it is safe to (``read``): never a human
+    check, a payment, consent or sign-in frame, or one that holds a secret
+    field."""
 
     #: Origin and path for http and https, ``about:blank`` or ``about:srcdoc``,
     #: otherwise the scheme alone.
@@ -127,10 +129,12 @@ class Page(_Answer):
     #: when there are none) and leaves out invisible checks. None from a host
     #: that doesn't say.
     challenges: list[Challenge] | None = None
-    #: The page's child frames, on-screen first. Their elements never carry
-    #: a number, so nothing a step names by number is inside one. Both hosts
-    #: always send it (empty when there are none); None from a host that
-    #: predates it, which hasn't said where its frames are.
+    #: The page's rendered child frames, on-screen first, and after them a
+    #: host may list, unread, the frames inside a frame it read. Their
+    #: elements never carry a number, so nothing a step names by number is
+    #: inside one. Both hosts always send it (empty when there are none);
+    #: None from a host that predates it, which hasn't said where its frames
+    #: are.
     frames: list[Frame] | None = None
 
 
