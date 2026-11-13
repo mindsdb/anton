@@ -76,22 +76,26 @@ Don't suggest personal data analysis if the user's question is purely informatio
 with no personal angle.
 
 SCRATCHPAD:
+- The scratchpad is a persistent Python process that you drive cell by cell, like a \
+Jupyter notebook without the UI. Each scratchpad has a name and its own virtual \
+environment; keep one name for the whole task. A cell is the code you send with the exec \
+action. Cells run one at a time in the same process, so variables, imports and loaded data \
+stay in memory for later cells until you reset the scratchpad or a cell is killed. The \
+working directory is the workspace folder, so relative paths point into it. After each \
+cell you see only what it printed, its stderr, and the traceback if it raised; unlike a \
+notebook, the value of the last line is not shown, so print() what you need.
 - Use the scratchpad for computation, data analysis, web scraping, plotting, writing \
 files, shell commands, and anything that needs precise execution.
 - To read a text file (an artifact's source, a project file, an attachment), use \
 `read_text_file` (`end_line=-1` returns the whole file), and read several files in one step. Read \
 in the scratchpad only data your code will compute on (CSV, Excel, parquet) or a file that \
 needs special parsing: printed scratchpad output stops at 10,000 characters.
-- Each scratchpad has its own isolated environment — use the install action to add \
-libraries on the fly.
 - When you need to count characters, do math, parse data, or transform text — use the \
 scratchpad tool instead of guessing or doing it in your head.
 - Before counting, totalling or ranking rows from a query or API, check whether the result \
 was cut: a truncation flag, a next-page token or cursor, or a row count equal to the page or \
 row limit. If it was, page or split the query until you have every row, or say the figure is \
 partial.
-- Variables, imports, and data persist across cells — like a notebook you drive \
-programmatically. Use this for both quick one-off calculations and multi-step analysis.
 - get_llm() returns a pre-configured LLM client — use llm.complete(system=..., messages=[...]) \
 for AI-powered computation within scratchpad code. The call is synchronous.
 - llm.generate_object(MyModel, system=..., messages=[...]) extracts structured data into \
@@ -143,11 +147,10 @@ during internal connection test snippets. Do not assume they exist during \
 normal chat/runtime execution.
 - When the user asks how you solved something or wants to see your work, use the scratchpad \
 dump action — it shows a clean notebook-style summary without wasting tokens on reformatting.
-- Always use print() to produce output — scratchpad captures stdout.
-- IMPORTANT: The scratchpad starts with a clean namespace — nothing is pre-imported. \
-Always include all necessary imports at the top of each cell that uses them. \
-Re-importing is a no-op in Python so there is zero cost, and it guarantees the cell \
-works even if earlier cells failed or state was lost.
+- IMPORTANT: Apart from the helpers listed above, nothing is pre-imported: import every \
+module a cell uses (pandas, json, os, ...) at the top of that cell. Re-importing is a \
+no-op in Python, so it costs nothing, and the cell still works after a reset, a killed \
+cell or a failed earlier cell.
 - IMPORTANT: Cells are kept alive automatically while they are working — deliberate \
 sleeps and blocking calls (e.g. a throttled batch loop) are safe in ONE cell, and one \
 cell per batch is the preferred shape. For every exec call, provide \
@@ -715,7 +718,7 @@ NO_INTERNET_CHAT_SYSTEM_PROMPT = cut_spans(
     CHAT_SYSTEM_PROMPT,
     ("- **Internet access**: You DO have access", "- **Scratchpad execution**", ""),
     # Up to SCRATCHPAD, so the follow-up suggestions about public datasets go too.
-    ("INTERNET & LIVE INFORMATION:\n", "SCRATCHPAD:\n- Use the scratchpad", NO_INTERNET_DATA_SOURCES),
+    ("INTERNET & LIVE INFORMATION:\n", "SCRATCHPAD:\n", NO_INTERNET_DATA_SOURCES),
     ("web scraping, ", "plotting", ""),
     ("- web_search(query) answers", "- classify(texts, categories) labels", ""),
     (
