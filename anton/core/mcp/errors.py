@@ -28,6 +28,15 @@ class McpPermanentError(McpError):
     """A rejected or expired credential — surface as "reconnect {engine}", never retried."""
 
 
+class McpTokenRejected(McpPermanentError):
+    """The MCP server answered 401 or 403: the token is expired, revoked or
+    not allowed (for example, a workspace admin hasn't approved the app)."""
+
+    def __init__(self, status_code: int, message: str = "") -> None:
+        super().__init__(message or f"MCP server rejected the token (HTTP {status_code})")
+        self.status_code = status_code
+
+
 #: HTTP status codes that mean the credential itself was rejected, not that
 #: something transient went wrong in transit. OAuth Bearer auth is checked
 #: at the HTTP transport layer (before a request ever reaches JSON-RPC
@@ -52,7 +61,7 @@ def classify_mcp_error(exc: Exception) -> McpError:
     if isinstance(exc, McpError):
         return exc
     if isinstance(exc, httpx2.HTTPStatusError) and exc.response.status_code in _AUTH_FAILURE_STATUS_CODES:
-        return McpPermanentError(str(exc))
+        return McpTokenRejected(exc.response.status_code, str(exc))
     if isinstance(exc, mcp.MCPError):
         # `mcp.MCPError.code` is a JSON-RPC error code — the SDK's own
         # reserved range is -32000..-32700 (PARSE_ERROR, INVALID_PARAMS,

@@ -10,6 +10,8 @@ Two layers:
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import os
 import subprocess
@@ -33,6 +35,7 @@ from anton.cloud_turn.session import (
     _ARTIFACTS_ROOT_ENV,
     _WORKSPACE_PATH_ENV,
     build_cloud_chat_session,
+    drain_pending_connectors,
     resolve_trusted_artifacts_root,
     resolve_trusted_workspace_path,
 )
@@ -359,6 +362,13 @@ def test_jev_classify_sets_the_scratchpad_classify(tmp_path, monkeypatch, jev_cl
     assert cfg.settings.classify_jev == classify_jev
 
 
+@pytest.mark.parametrize("ui_locale", ["es", None])
+def test_ui_locale_reaches_the_session(tmp_path, monkeypatch, ui_locale):
+    """ENG-4149: the request's UI language is the session's."""
+    _, cfg = _build(tmp_path, monkeypatch, ui_locale=ui_locale)
+    assert cfg.ui_locale == ui_locale
+
+
 def test_cloud_session_uses_turn_key_from_request(tmp_path, monkeypatch):
     # No minds env set; the credential must come from the request's llm block.
     monkeypatch.delenv("ANTON_MINDS_API_KEY", raising=False)
@@ -602,7 +612,10 @@ def _real_cloud_session(tmp_path, monkeypatch, **req_overrides):
 
 
 def _hermetic_limits_env(monkeypatch):
-    for name in ("ANTON_MAX_TOOL_ROUNDS", "ANTON_MAX_CONTINUATIONS", "ANTON_MAX_TURN_TOKENS"):
+    for name in (
+        "ANTON_MAX_TOOL_ROUNDS", "ANTON_MAX_CONTINUATIONS", "ANTON_MAX_TURN_TOKENS",
+        "ANTON_MAX_TURN_SECONDS",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -619,6 +632,17 @@ def test_the_tenants_limits_from_the_wire_bound_the_real_session(tmp_path, monke
     assert session._max_tool_rounds == 7
     assert session._max_continuations == 2
     assert session._max_turn_tokens == 4_000_000
+
+
+def test_the_time_limit_from_the_wire_bounds_the_real_session(tmp_path, monkeypatch):
+    _hermetic_limits_env(monkeypatch)
+    line = json.dumps({
+        "protocol_version": 1, "conversation_id": "conv_1", "input": "hi",
+        "limits": {"max_turn_seconds": 3600},
+    })
+    request = TurnRequestV1.from_json(line)
+    session = _real_cloud_session(tmp_path, monkeypatch, limits=request.limits)
+    assert session._max_turn_seconds == 3600
 
 
 def test_a_turn_without_limits_keeps_antons_defaults(tmp_path, monkeypatch):
@@ -723,6 +747,33 @@ def test_final_tool_set_equals_allowlist_after_real_build(tmp_path, monkeypatch)
     )
 
 
+def test_connector_drafts_add_only_the_draft_tool(tmp_path, monkeypatch):
+    _, cfg = _build(tmp_path, monkeypatch, connector_drafts=True)
+    assert cfg.tool_allowlist == CLOUD_TOOL_ALLOWLIST | {"create_connector_draft"}
+    assert [t.name for t in cfg.tools] == ["create_connector_draft"]
+
+
+def test_without_connector_drafts_there_is_no_draft_tool(tmp_path, monkeypatch):
+    session, cfg = _build(tmp_path, monkeypatch)
+    assert "create_connector_draft" not in cfg.tool_allowlist
+    assert cfg.tools == []
+    assert drain_pending_connectors(session) == []
+
+
+def test_a_real_turn_with_connector_drafts_registers_and_drains_the_tool(tmp_path, monkeypatch):
+    session = _real_cloud_session(tmp_path, monkeypatch, connector_drafts=True)
+    session._build_tools()
+    names = {t.name for t in session.tool_registry.get_tool_defs()}
+    assert names == set(CLOUD_TOOL_ALLOWLIST) | {"create_connector_draft"}
+
+    draft = {
+        "connector_id": "acme", "label": "Acme", "fields": [{"name": "api_key", "label": "Key"}],
+        "auth": {"type": "header", "headers": {"Authorization": "Bearer {api_key}"}},
+    }
+    tool = next(t for t in session._extra_tools if t.name == "create_connector_draft")
+    assert asyncio.run(tool.handler(session, draft)).ok is True
+    assert [d["connector_id"] for d in drain_pending_connectors(session)] == ["acme"]
+    assert drain_pending_connectors(session) == []
 # ── the browser: only the router block a turn carries ───────────────────────
 
 _ROUTER = "https://app.example.test/browser"
@@ -1624,6 +1675,53 @@ def test_the_credential_context_states_parity_with_its_caveat(tmp_path, monkeypa
     assert "Cowork Desktop App" in suffix
     assert "not readable from this conversation" in suffix
     assert "does not make it usable in this conversation" in suffix
+
+
+#: sha256 of the credential block and the whole suffix as they read before a
+#: turn could build connector templates. A turn without the tool keeps them.
+_CREDENTIAL_CONTEXT_SHA256 = "196e8bd8c4c555fd1f5b99a0771454a40cd3a46fb52ffa2802c9573be5929552"
+_POD_SUFFIX_SHA256 = "a61d2d5379b5dd2b4d5252931a8049cc116de52a5c5dfc8a16a0d863394408f0"
+
+
+def test_without_connector_drafts_the_credential_text_is_unchanged(tmp_path, monkeypatch):
+    from anton.cloud_turn.session import _CREDENTIAL_CONTEXT
+
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert hashlib.sha256(_CREDENTIAL_CONTEXT.encode()).hexdigest() == _CREDENTIAL_CONTEXT_SHA256
+    assert hashlib.sha256(cfg.system_prompt_context.suffix.encode()).hexdigest() == _POD_SUFFIX_SHA256
+    assert "create_connector_draft" not in cfg.system_prompt_context.suffix
+
+
+def test_with_connector_drafts_the_turn_is_told_to_build_a_template(tmp_path, monkeypatch):
+    _, cfg = _build(tmp_path, monkeypatch, connector_drafts=True)
+    suffix = cfg.system_prompt_context.suffix
+
+    assert "build its template with create_connector_draft" in suffix
+    assert "still never ask for a value" in suffix
+    assert "saves the template from its card" in suffix
+    assert "credentials for it in Connect Apps and Data" in suffix
+    # Drivers and redirect sign-ins still go to the desktop app, with the caveat.
+    assert "a database that needs a driver" in suffix
+    assert "Cowork Desktop App" in suffix
+    assert "not readable from this conversation" in suffix
+    # The rest of the rule is the same text.
+    assert "Never ask the user to type a password" in suffix
+    assert "no tool call, no file and no store" in suffix
+    assert "If the user reports that the connector they need is not offered, say" not in suffix
+
+
+def test_the_template_guidance_reaches_the_built_prompt(tmp_path, monkeypatch):
+    from anton.core.llm.prompt_builder import ChatSystemPromptBuilder
+
+    _, cfg = _build(tmp_path, monkeypatch, connector_drafts=True)
+    prompt = ChatSystemPromptBuilder().build(
+        conversation_started="2026-09-10T12:00:00+00:00",
+        system_prompt_context=cfg.system_prompt_context,
+        proactive_dashboards=False,
+        output_dir="",
+        tool_defs=[],
+    )
+    assert "build its template with create_connector_draft" in prompt
 
 
 def test_the_credential_context_names_no_connector(tmp_path, monkeypatch):

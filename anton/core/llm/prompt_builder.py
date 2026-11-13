@@ -194,6 +194,7 @@ class ChatSystemPromptBuilder:
         direct_reports: bool = True,
         internet_research: bool = True,
         classify: bool = True,
+        ui_locale_context: str = "",
     ) -> str:
         """``fullstack_offered`` False (`live_app_slots.fullstack_offered`)
         leaves out the fullstack types, the backend section and the backend
@@ -202,7 +203,9 @@ class ChatSystemPromptBuilder:
         (`ChatSessionConfig.internet_research_enabled`) swaps the internet
         guidance for "use the connected data only" and leaves out the
         public-data-sources skill's line. ``classify`` False leaves out the
-        scratchpad's classify() and classify_yes_no()."""
+        scratchpad's classify() and classify_yes_no(). ``ui_locale_context`` is
+        the language line (`anton.core.llm.ui_locale.ui_locale_line`); empty
+        adds nothing."""
         direct_generation = any(getattr(tool, "name", "") == "generate_artifact"
                                 and "name" in tool.input_schema.get("properties", {})
                                 for tool in tool_defs or [])
@@ -303,6 +306,12 @@ class ChatSystemPromptBuilder:
         suffix = system_prompt_context.suffix.strip()
         if suffix:
             session += f"\n\n{suffix}"
+
+        # The user's UI language (ENG-4149). Per user, so not in the shared
+        # part; fixed for the session, so ahead of the volatile tail; last of
+        # the stable lines, so switching language re-caches the least.
+        if ui_locale_context:
+            session += f"\n\n{ui_locale_context}"
 
         # Volatile tail — LAST so everything above can be cached. Only the
         # relevance-filtered memory snapshot remains here; it changes every turn.
