@@ -8,7 +8,7 @@ import httpx2 as httpx
 import inspect
 import random
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 import json
@@ -1987,6 +1987,13 @@ class ChatSessionConfig:
     # browser, and the cloud pod for the MindsHub browser router. None means no
     # browser tool, and nothing falls back to settings or the environment.
     browser: "BrowserConfig | None" = None
+    # Asks the user's open preview of an artifact whether it runs (ENG-4207):
+    # `await preview_checker(artifact_slug, timeout_s)` returns the host's
+    # answer, `{"status": "passed" | "failed" | "unavailable", "errors": [...],
+    # "ms": int}`, or None when no preview answered. `edit_artifact` asks it
+    # after its own checks; None or "unavailable" counts as unverified, never
+    # as passed. None (the default) asks no preview.
+    preview_checker: "Callable[[str, float], Awaitable[dict | None]] | None" = None
 
 
 class ChatSession:
@@ -2021,6 +2028,7 @@ class ChatSession:
         # ``external_search_provider`` / ``exa_api_key`` via getattr so the
         # session stays decoupled from the host's settings shape.
         self._settings = config.settings
+        self._preview_checker = config.preview_checker
         self._max_tool_rounds = s.max_tool_rounds
         self._max_continuations = s.max_continuations
         self._verify_min_tool_rounds = s.verify_min_tool_rounds
@@ -3600,6 +3608,17 @@ class ChatSession:
             )
             if fullstack:
                 self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
+            # The artifact editor (ENG-4207): changes to an existing artifact go
+            # to edit_artifact, and generate_artifact keeps rebuilds.
+            from anton.core.tools.edit_artifact import (
+                EDIT_ARTIFACT_TOOL,
+                editor_enabled,
+                route_edits_to_editor,
+            )
+
+            if editor_enabled(self._settings):
+                generate = route_edits_to_editor(generate)
+                self.tool_registry.register_tool(EDIT_ARTIFACT_TOOL)
             self.tool_registry.register_tool(generate)
 
         # The shared browser: only when the host gave one. The credential is

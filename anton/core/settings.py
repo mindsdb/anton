@@ -35,6 +35,21 @@ class CoreSettings(BaseSettings):
     # used 34.4M tokens, 171 tool rounds and 6 continuations. Hosts that want a
     # tighter limit set their own. `max_tool_rounds` counts across the whole
     # turn, continuations included.
+    # The artifact editor (ENG-4207): `edit_artifact` changes an existing
+    # artifact with one patch-writing model conversation and checks it in a
+    # browser, instead of scratchpad surgery or a generate_artifact rebuild.
+    # ANTON_ARTIFACT_EDITOR=off removes the tool and its routing prompts.
+    artifact_editor: Literal["off", "on"] = "on"
+    # Which of the client's models edits: "planning" (the agent's own) or
+    # "coding" (ANTON_ARTIFACT_EDITOR_ROLE).
+    artifact_editor_role: Literal["planning", "coding"] = "planning"
+    # The decisions model (MindsHub's /v1/decisions) that routes a message typed
+    # in the artifact viewer's quick-edit bar (ENG-4227): ANTON_DECISIONS_MODEL.
+    # Unset (None) means automatic: "jev-1.13.0" when the LLM is MindsHub
+    # (api.mindshub.ai), otherwise none. An explicit empty value turns it off.
+    # With none, the bar never edits directly: every message goes to the agent
+    # (whose edit_artifact tool does not need it).
+    decisions_model: str | None = None
     max_tool_rounds: int = 250
     max_continuations: int = 10
     # Skip the completion verifier when a turn used fewer than this many tool

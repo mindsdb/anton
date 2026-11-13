@@ -1,0 +1,20 @@
+{
+  "request_fingerprint": "1872fc5ff7c69ee04d2510345e11898502232ee6a5e166267a9755a733f26b21",
+  "call_fingerprint": "01441cfda2ab613e92d3b249e0710bbb0757c823836c325b7afdd049af4d4f39",
+  "pipeline_stage": "generated",
+  "artifact_type": "html-app",
+  "gathering_complete": true,
+  "declared_sources": [],
+  "unverified_sources": [],
+  "brief_markdown": "",
+  "data_notes": "",
+  "web_notes": "",
+  "assumptions": [
+    "Milestones are shown in chronological order (implied by timeline presentation).",
+    "The app can use the supplied milestone list as embedded static data; no external source is needed."
+  ],
+  "open_points": [],
+  "attachments": [],
+  "known_data": "",
+  "known_data_verified": []
+}

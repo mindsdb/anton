@@ -1,0 +1,254 @@
+{
+  "source": {
+    "path": "/workspace/inventory.csv",
+    "format": "CSV"
+  },
+  "filters": {
+    "none": "All rows in supplied inventory CSV"
+  },
+  "time_scope": "Not time-based; supplied inventory snapshot",
+  "units": {
+    "on_hand": "units",
+    "reorder_point": "units",
+    "unit_cost_usd": "USD per unit",
+    "total_stock_value": "USD"
+  },
+  "fields": [
+    "sku",
+    "item",
+    "category",
+    "location",
+    "on_hand",
+    "reorder_point",
+    "unit_cost_usd"
+  ],
+  "rows": [
+    {
+      "sku": "SKU-1001",
+      "item": "Hex Bolts",
+      "category": "Hardware",
+      "location": "Warehouse A",
+      "on_hand": 118,
+      "reorder_point": 75,
+      "unit_cost_usd": 22.53
+    },
+    {
+      "sku": "SKU-1002",
+      "item": "Desk Lamp",
+      "category": "Office",
+      "location": "Warehouse B",
+      "on_hand": 301,
+      "reorder_point": 20,
+      "unit_cost_usd": 25.12
+    },
+    {
+      "sku": "SKU-1003",
+      "item": "Stapler",
+      "category": "Kitchen",
+      "location": "Warehouse A",
+      "on_hand": 74,
+      "reorder_point": 50,
+      "unit_cost_usd": 49.04
+    },
+    {
+      "sku": "SKU-1004",
+      "item": "Kettle",
+      "category": "Garden",
+      "location": "Warehouse C",
+      "on_hand": 289,
+      "reorder_point": 50,
+      "unit_cost_usd": 85.87
+    },
+    {
+      "sku": "SKU-1005",
+      "item": "Trowel",
+      "category": "Hardware",
+      "location": "Warehouse C",
+      "on_hand": 263,
+      "reorder_point": 75,
+      "unit_cost_usd": 59.64
+    },
+    {
+      "sku": "SKU-1006",
+      "item": "Cable Ties",
+      "category": "Office",
+      "location": "Warehouse C",
+      "on_hand": 27,
+      "reorder_point": 50,
+      "unit_cost_usd": 81.16
+    },
+    {
+      "sku": "SKU-1007",
+      "item": "Notebook",
+      "category": "Kitchen",
+      "location": "Warehouse C",
+      "on_hand": 286,
+      "reorder_point": 50,
+      "unit_cost_usd": 37.03
+    },
+    {
+      "sku": "SKU-1008",
+      "item": "Chef Knife",
+      "category": "Garden",
+      "location": "Warehouse B",
+      "on_hand": 53,
+      "reorder_point": 50,
+      "unit_cost_usd": 57.82
+    },
+    {
+      "sku": "SKU-1009",
+      "item": "Hose Reel",
+      "category": "Hardware",
+      "location": "Warehouse A",
+      "on_hand": 97,
+      "reorder_point": 20,
+      "unit_cost_usd": 88.65
+    },
+    {
+      "sku": "SKU-1010",
+      "item": "Drill Bits",
+      "category": "Office",
+      "location": "Warehouse B",
+      "on_hand": 83,
+      "reorder_point": 20,
+      "unit_cost_usd": 31.92
+    },
+    {
+      "sku": "SKU-1011",
+      "item": "Paper Clips",
+      "category": "Kitchen",
+      "location": "Warehouse A",
+      "on_hand": 52,
+      "reorder_point": 20,
+      "unit_cost_usd": 51.88
+    },
+    {
+      "sku": "SKU-1012",
+      "item": "Mug Set",
+      "category": "Garden",
+      "location": "Warehouse C",
+      "on_hand": 51,
+      "reorder_point": 50,
+      "unit_cost_usd": 56.01
+    },
+    {
+      "sku": "SKU-1013",
+      "item": "Pruning Shears",
+      "category": "Hardware",
+      "location": "Warehouse A",
+      "on_hand": 106,
+      "reorder_point": 75,
+      "unit_cost_usd": 35.11
+    },
+    {
+      "sku": "SKU-1014",
+      "item": "Wrench",
+      "category": "Office",
+      "location": "Warehouse C",
+      "on_hand": 129,
+      "reorder_point": 50,
+      "unit_cost_usd": 55.0
+    },
+    {
+      "sku": "SKU-1015",
+      "item": "Whiteboard",
+      "category": "Kitchen",
+      "location": "Warehouse B",
+      "on_hand": 62,
+      "reorder_point": 20,
+      "unit_cost_usd": 76.71
+    },
+    {
+      "sku": "SKU-1016",
+      "item": "Toaster",
+      "category": "Garden",
+      "location": "Warehouse B",
+      "on_hand": 245,
+      "reorder_point": 50,
+      "unit_cost_usd": 29.44
+    },
+    {
+      "sku": "SKU-1017",
+      "item": "Seed Tray",
+      "category": "Hardware",
+      "location": "Warehouse A",
+      "on_hand": 52,
+      "reorder_point": 75,
+      "unit_cost_usd": 32.15
+    },
+    {
+      "sku": "SKU-1018",
+      "item": "Tape Measure",
+      "category": "Office",
+      "location": "Warehouse B",
+      "on_hand": 245,
+      "reorder_point": 75,
+      "unit_cost_usd": 16.21
+    },
+    {
+      "sku": "SKU-1019",
+      "item": "Pen Pack",
+      "category": "Kitchen",
+      "location": "Warehouse A",
+      "on_hand": 105,
+      "reorder_point": 75,
+      "unit_cost_usd": 33.83
+    },
+    {
+      "sku": "SKU-1020",
+      "item": "Colander",
+      "category": "Garden",
+      "location": "Warehouse C",
+      "on_hand": 278,
+      "reorder_point": 20,
+      "unit_cost_usd": 68.72
+    },
+    {
+      "sku": "SKU-1021",
+      "item": "Rake",
+      "category": "Hardware",
+      "location": "Warehouse B",
+      "on_hand": 329,
+      "reorder_point": 20,
+      "unit_cost_usd": 63.27
+    },
+    {
+      "sku": "SKU-1022",
+      "item": "Sandpaper",
+      "category": "Office",
+      "location": "Warehouse B",
+      "on_hand": 265,
+      "reorder_point": 50,
+      "unit_cost_usd": 81.93
+    },
+    {
+      "sku": "SKU-1023",
+      "item": "Folder Set",
+      "category": "Kitchen",
+      "location": "Warehouse B",
+      "on_hand": 395,
+      "reorder_point": 20,
+      "unit_cost_usd": 48.87
+    },
+    {
+      "sku": "SKU-1024",
+      "item": "Blender",
+      "category": "Garden",
+      "location": "Warehouse C",
+      "on_hand": 168,
+      "reorder_point": 75,
+      "unit_cost_usd": 21.63
+    }
+  ],
+  "aggregates": {
+    "total_stock_value_usd": 203549.22,
+    "calculation": "sum(on_hand × unit_cost_usd) over all inventory rows",
+    "row_count": 24,
+    "categories": [
+      "Garden",
+      "Hardware",
+      "Kitchen",
+      "Office"
+    ]
+  }
+}

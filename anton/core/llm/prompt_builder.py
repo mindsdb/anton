@@ -225,6 +225,11 @@ class ChatSystemPromptBuilder:
             from .static_artifact_prompt import ARTIFACTS, STATIC_ARTIFACTS
 
             artifacts_section = ARTIFACTS if fullstack_offered else STATIC_ARTIFACTS
+        # With the artifact editor offered (ENG-4207), changes and repairs go to it.
+        if any(getattr(tool, "name", "") == "edit_artifact" for tool in tool_defs or []):
+            from anton.core.tools.edit_artifact import route_section_to_editor
+
+            artifacts_section = route_section_to_editor(artifacts_section)
 
         prompt = ""
 
