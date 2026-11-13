@@ -11,6 +11,7 @@ from anton.core.backends.wire import (
     CELL_DELIM,
     CELL_FILENAME,
     CELL_TRACE_MARKER,
+    CLASSIFY_ENV,
     EXPLAINABILITY_QUERIES_NAME,
     INTERNET_RESEARCH_ENV,
     MISSING_MODULE_HINT,
@@ -917,6 +918,131 @@ if _scratchpad_model:
             "web_search",
             _web_search_off if os.environ.get(INTERNET_RESEARCH_ENV) == "off" else web_search,
         )
+
+        from anton.core.llm import jev as _jev
+        from anton.core.llm.endpoints import ENDPOINT_MINDSHUB, classify_base_url
+        from anton.core.llm.tracing import JEV_CALL_ROLE
+
+        # Jev is served by the MindsHub gateway only.
+        _jev_ready = _scratchpad_provider_name in (
+            "openai", "openai-compatible"
+        ) and classify_base_url(_llm_base_url or "") == ENDPOINT_MINDSHUB
+        # One budget for the whole pad, shared by concurrent calls.
+        _jev_pacer = _jev.Pacer(_jev.CLASSIFY_PER_MINUTE)
+        _JEV_PROGRESS_INTERVAL = 10.0
+        _JEV_OFF = (
+            "classify() and classify_yes_no() need the MindsHub gateway, and this "
+            "session's model runs elsewhere. Label the texts with get_llm() instead, "
+            "many texts per generate_object call."
+        )
+
+        def _run_decisions(texts, question):
+            items = list(texts)
+            if any(not isinstance(item, (str, dict)) for item in items):
+                raise TypeError("each text must be a str (or a dict of fields)")
+            if not items:
+                return []
+            api_key = _current_llm_api_key() or _llm_provider_kwargs.get("api_key")
+            if not api_key:
+                raise RuntimeError("No MindsHub key is available to this scratchpad.")
+
+            async def run():
+                trace_token = set_trace_context(_cell_trace)
+                try:
+                    with call_role(JEV_CALL_ROLE):
+                        headers = _jev.detach_conversation(_llm_provider.trace_headers())
+                finally:
+                    reset_trace_context(trace_token)
+                import time
+
+                last = [time.monotonic()]
+
+                def on_progress(done, total):
+                    now = time.monotonic()
+                    if now - last[0] >= _JEV_PROGRESS_INTERVAL:
+                        last[0] = now
+                        progress(f"Classified {done}/{total}")
+
+                import httpx2
+
+                async with httpx2.AsyncClient(
+                    timeout=_jev.CLASSIFY_TIMEOUT_S, verify=_llm_ssl_verify
+                ) as client:
+                    return await _jev.decide_many(
+                        items,
+                        question,
+                        base_url=_llm_base_url,
+                        api_key=api_key,
+                        pacer=_jev_pacer,
+                        headers=headers,
+                        client=client,
+                        on_progress=on_progress,
+                    )
+
+            return _llm_asyncio.run(run())
+
+        def classify(texts, categories, *, question="Which category does this text belong to?"):
+            """Label each text with exactly one of ``categories``, using Jev.
+
+            ``texts``: a list of strings (or dicts of fields). ``categories``: a
+            list of names, or a dict of name -> description. Returns one dict per
+            text, in order: {"label", "p", "probabilities"}; on a failed item
+            "label" is None and "error" says why. Texts go out in batches of up to
+            about 200 per request, each judged on its own.
+            """
+            built = _jev.choice_question(categories, question)
+            return [_jev.choice_result(d) for d in _run_decisions(texts, built)]
+
+        def classify_yes_no(texts, question, *, yes=None, no=None):
+            """Answer one yes/no ``question`` about each text, using Jev.
+
+            ``yes`` / ``no`` optionally describe each outcome. Returns one dict per
+            text, in order: {"yes", "p_yes"}; on a failed item "yes" is None and
+            "error" says why. Batched like classify().
+            """
+            built = _jev.yes_no_question(question, yes=yes, no=no)
+            return [_jev.yes_no_result(d) for d in _run_decisions(texts, built)]
+
+        def _classify_off(*args, **kwargs):
+            raise RuntimeError(_JEV_OFF)
+
+        def _classify_turned_off(*args, **kwargs):
+            raise RuntimeError(
+                "classify() and classify_yes_no() are turned off for this session. Label the "
+                "texts with get_llm() instead, many texts per generate_object call."
+            )
+
+        if os.environ.get(CLASSIFY_ENV) == "off":
+            _classify_helper = _classify_yes_no_helper = _classify_turned_off
+        elif _jev_ready:
+            _classify_helper, _classify_yes_no_helper = classify, classify_yes_no
+        else:
+            _classify_helper = _classify_yes_no_helper = _classify_off
+
+        import logging
+
+        _jev_url_prefix = f"{(_llm_base_url or '').rstrip('/')}/decisions"
+
+        class _DropDecisionRequestLogs(logging.Filter):
+            """Drop httpx2's per-request INFO line for decision calls.
+
+            The pad captures INFO logs into the cell output, where a long
+            labelling run would add one line per request.
+            """
+
+            def filter(self, record):
+                args = record.args if isinstance(record.args, tuple) else ()
+                return not (
+                    str(record.msg).startswith("HTTP Request")
+                    and len(args) > 1
+                    and str(args[1]).startswith(_jev_url_prefix)
+                )
+
+        if _classify_helper is classify:
+            logging.getLogger("httpx2").addFilter(_DropDecisionRequestLogs())
+
+        _inject_helper("classify", _classify_helper)
+        _inject_helper("classify_yes_no", _classify_yes_no_helper)
     except Exception:
         pass  # LLM not available — not fatal (e.g. anthropic not installed)
 

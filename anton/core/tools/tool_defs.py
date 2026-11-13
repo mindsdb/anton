@@ -82,13 +82,20 @@ SCRATCHPAD_TOOL = ToolDef(
         "agentic_loop(system=..., user_message=..., tools=[...], handle_tool=fn) "
         "runs a tool-call loop where the LLM reasons and calls your tools iteratively. "
         "handle_tool(name, inputs) -> str is a plain sync function.\n"
+        "classify(texts, categories) labels each text with one of the categories and "
+        "returns [{'label', 'p', 'probabilities'}, ...]; classify_yes_no(texts, question) "
+        "returns [{'yes', 'p_yes'}, ...]. Use them, not get_llm(), to classify texts. "
+        "They run on a dedicated decision model, thousands of texts a minute; describe each "
+        "category rather than passing bare names. Take their labels as the result; re-check "
+        "only borderline texts (p below about 0.9), not the whole set.\n"
         "web_search(query) routes a natural-language query (e.g. 'latest SpaceX IPO "
         "news') through the configured LLM's native web search and returns the "
         "model's narrative answer with source links, as a string.\n"
         "sample(var) inspects any variable with type-aware formatting — DataFrames get "
         "shape/dtypes/head, dicts get keys/values, lists get length/items. "
         "Defaults to 'preview' mode (compact); use sample(var, mode='full') for complete dump.\n"
-        "get_llm, agentic_loop, web_search, sample, and progress are already available "
+        "get_llm, agentic_loop, classify, classify_yes_no, web_search, sample, and progress "
+        "are already available "
         "as globals in the scratchpad — do not import them.\n"
         "All .anton/.env secrets are available as environment variables (os.environ).\n"
         "Never print a credential or a token endpoint's response: keep the token in a "
@@ -141,9 +148,35 @@ SCRATCHPAD_TOOL = ToolDef(
 NO_INTERNET_SCRATCHPAD_TOOL = replace(SCRATCHPAD_TOOL, description=cut_spans(
     SCRATCHPAD_TOOL.description,
     ("web_search(query) routes", "sample(var) inspects", ""),
-    ("get_llm, agentic_loop, web_search, sample, and progress", " are already", "get_llm, agentic_loop, sample, and progress"),
+    (
+        "get_llm, agentic_loop, classify, classify_yes_no, web_search, sample, and progress",
+        " are already",
+        "get_llm, agentic_loop, classify, classify_yes_no, sample, and progress",
+    ),
 ))
 
+
+
+def _without_classify(tool: ToolDef) -> ToolDef:
+    """``tool`` with classify() and classify_yes_no() left out of its description."""
+    text = tool.description
+    start = text.index("classify(texts, categories) labels each text")
+    end = text.index("\n", text.index("not the whole set.", start)) + 1
+    text = text[:start] + text[end:]
+    if text.count("classify, classify_yes_no, ") != 1:
+        raise ValueError("the scratchpad globals list no longer names classify()")
+    return replace(tool, description=text.replace("classify, classify_yes_no, ", ""))
+
+
+NO_CLASSIFY_SCRATCHPAD_TOOL = _without_classify(SCRATCHPAD_TOOL)
+NO_INTERNET_NO_CLASSIFY_SCRATCHPAD_TOOL = _without_classify(NO_INTERNET_SCRATCHPAD_TOOL)
+
+
+def scratchpad_tool(*, internet_research: bool = True, classify: bool = True) -> ToolDef:
+    """The scratchpad tool for a session with or without internet research and classify()."""
+    if internet_research:
+        return SCRATCHPAD_TOOL if classify else NO_CLASSIFY_SCRATCHPAD_TOOL
+    return NO_INTERNET_SCRATCHPAD_TOOL if classify else NO_INTERNET_NO_CLASSIFY_SCRATCHPAD_TOOL
 
 MEMORIZE_TOOL = ToolDef(
     name="memorize",

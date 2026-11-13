@@ -125,7 +125,6 @@ from anton.core.tools.tool_defs import (
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
-    NO_INTERNET_SCRATCHPAD_TOOL,
     READ_IMAGE_TOOL,
     READ_TEXT_FILE_TOOL,
     RECALL_TOOL,
@@ -138,6 +137,7 @@ from anton.core.tools.tool_defs import (
     STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
     STATIC_UPDATE_ARTIFACT_METADATA_TOOL,
     UPDATE_ARTIFACT_METADATA_TOOL,
+    scratchpad_tool as _scratchpad_tool_def,
     ToolDef,
 )
 from anton.core.interaction.elicit import Elicitor
@@ -2314,6 +2314,11 @@ class ChatSession:
         if not inspect.iscoroutinefunction(key_supplier):
             key_supplier = None
         self._internet_research_enabled = config.internet_research_enabled
+        # classify() labels texts with Jev, which only the MindsHub gateway serves.
+        self._classify_enabled = (
+            getattr(s, "classify_jev", "on") == "on"
+            and classify_base_url(coding_conn.base_url or "") == ENDPOINT_MINDSHUB
+        )
         self._scratchpads = ScratchpadManager(
             runtime_factory=config.runtime_factory,
             coding_provider=coding_conn.provider,
@@ -2329,6 +2334,7 @@ class ChatSession:
             workspace_env_overlay=config.workspace_env_overlay,
             cell_sandbox=config.cell_sandbox,
             internet_research_enabled=config.internet_research_enabled,
+            classify_enabled=self._classify_enabled,
         )
         # Sandboxed without live apps, nothing starts an app backend, so the
         # artifact tools and the prompt offer html-apps only.
@@ -3305,6 +3311,7 @@ class ChatSession:
             deployment_identity=getattr(self, "_deployment_identity", None),
             fullstack_offered=getattr(self, "_fullstack_offered", True),
             internet_research=getattr(self, "_internet_research_enabled", True),
+            classify=getattr(self, "_classify_enabled", True),
             direct_reports=self._direct_reports_enabled(),
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
@@ -3456,8 +3463,10 @@ class ChatSession:
         # Copy — SCRATCHPAD_TOOL is a module-level singleton; mutating its
         # .description in place would leak across every session/user sharing
         # this process instead of resetting per session.
-        scratchpad_tool = replace(SCRATCHPAD_TOOL if getattr(self, "_internet_research_enabled", True)
-                                  else NO_INTERNET_SCRATCHPAD_TOOL)
+        scratchpad_tool = replace(_scratchpad_tool_def(
+            internet_research=getattr(self, "_internet_research_enabled", True),
+            classify=getattr(self, "_classify_enabled", True),
+        ))
         pkg_list = self._scratchpads.available_packages
         if pkg_list:
             notable = sorted(p for p in pkg_list if p.lower() in self._NOTABLE_PACKAGES)
@@ -5323,15 +5332,9 @@ class ChatSession:
         # own role: it runs on Jev, not on any of the session's model slots.
         with call_role(JEV_CALL_ROLE):
             headers = provider.trace_headers()
-        # Kept out of the conversation's session: the console marks a conversation
-        # failed when any call in it fails, and a refused check is one the turn
-        # recovers from. The conversation rides in the metadata instead, so the
-        # check can still be joined to it.
-        conversation_id = headers.pop("Langfuse-Session-Id", None)
-        if conversation_id and "Langfuse-Metadata" in headers:
-            metadata = json.loads(headers["Langfuse-Metadata"])
-            metadata["conversation_id"] = conversation_id
-            headers["Langfuse-Metadata"] = json.dumps(metadata)
+        # Kept out of the conversation's session, so a refused check does not
+        # mark the conversation failed.
+        headers = _jev.detach_conversation(headers)
         if self._jev_http is None:
             # Same TLS setting as the provider, e.g. behind an intercepting proxy.
             self._jev_http = httpx.AsyncClient(timeout=self._jev_timeout_s, verify=info.ssl_verify is not False)

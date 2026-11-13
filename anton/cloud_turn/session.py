@@ -942,6 +942,9 @@ def build_cloud_chat_session(
         # The organization opted out of Jev: the completion check uses the
         # LLM verifier alone.
         settings.verifier_jev = "off"
+    if not request.jev_classify:
+        # The organization turned off labelling texts with Jev.
+        settings.classify_jev = "off"
     # The tenant's limits replace anton's own defaults, as the desktop harness
     # overlays them for an in-process turn. Without them a web turn stopped at
     # the defaults whatever the tenant set.

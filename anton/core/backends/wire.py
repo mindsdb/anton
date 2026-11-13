@@ -24,6 +24,9 @@ USAGE_MARKER_ENV = "ANTON_SCRATCHPAD_USAGE"
 # "off" when the session has internet research turned off: the pad's
 # web_search() then raises instead of searching.
 INTERNET_RESEARCH_ENV = "ANTON_SCRATCHPAD_INTERNET_RESEARCH"
+# "off" when the session does not label texts with Jev: the pad's classify()
+# and classify_yes_no() then raise instead of calling it.
+CLASSIFY_ENV = "ANTON_SCRATCHPAD_CLASSIFY"
 # A cell's stdout limit, and how much more the worker sends for the parent to
 # scrub before it cuts, so a secret across the limit can still match whole.
 MAX_OUTPUT = 10_000
@@ -63,7 +66,10 @@ MISSING_MODULE_HINT = (
 # cell runs, by name. The host's write check reads a call to one as a call
 # to a name the pad binds.
 INJECTED_HELPER_NAMES = frozenset(
-    {"get_llm", "agentic_loop", "web_search", "query_minds_data", "progress", "sample"}
+    {
+        "get_llm", "agentic_loop", "classify", "classify_yes_no", "web_search",
+        "query_minds_data", "progress", "sample",
+    }
 )
 # The list the boot binds in the cell namespace for the data helpers to
 # record their queries in.

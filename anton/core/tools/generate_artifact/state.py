@@ -502,6 +502,7 @@ class GenState:
 
             self._pipeline_tools = pipeline_tool_schemas(
                 self.buildable_types, internet_research=self.internet_research,
+                classify=self.classify,
             )
         return self._pipeline_tools
 
@@ -512,6 +513,11 @@ class GenState:
         public-data-sources catalog in this run. A session object without the
         attribute (a test double) keeps them."""
         return getattr(self.session, "_internet_research_enabled", True) is not False
+
+    @property
+    def classify(self) -> bool:
+        """False when the session's scratchpad has no classify() to offer."""
+        return getattr(self.session, "_classify_enabled", True) is not False
 
     @property
     def buildable_types(self) -> tuple[str, ...]:

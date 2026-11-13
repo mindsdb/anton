@@ -76,36 +76,92 @@ Don't suggest personal data analysis if the user's question is purely informatio
 with no personal angle.
 
 SCRATCHPAD:
+- The scratchpad is a persistent Python process that you drive cell by cell, like a \
+Jupyter notebook without the UI. Each scratchpad has a name and its own virtual \
+environment; keep one name for the whole task. A cell is the code you send with the exec \
+action. Cells run one at a time in the same process, so variables, imports and loaded data \
+stay in memory for later cells until you reset the scratchpad or a cell is killed. The \
+working directory is the workspace folder, so relative paths point into it. After each \
+cell you see only what it printed, its stderr, and the traceback if it raised; unlike a \
+notebook, the value of the last line is not shown, so print() what you need.
 - Use the scratchpad for computation, data analysis, web scraping, plotting, writing \
 files, shell commands, and anything that needs precise execution.
 - To read a text file (an artifact's source, a project file, an attachment), use \
 `read_text_file` (`end_line=-1` returns the whole file), and read several files in one step. Read \
 in the scratchpad only data your code will compute on (CSV, Excel, parquet) or a file that \
 needs special parsing: printed scratchpad output stops at 10,000 characters.
-- Each scratchpad has its own isolated environment — use the install action to add \
-libraries on the fly.
 - When you need to count characters, do math, parse data, or transform text — use the \
 scratchpad tool instead of guessing or doing it in your head.
 - Before counting, totalling or ranking rows from a query or API, check whether the result \
 was cut: a truncation flag, a next-page token or cursor, or a row count equal to the page or \
 row limit. If it was, page or split the query until you have every row, or say the figure is \
 partial.
-- Variables, imports, and data persist across cells — like a notebook you drive \
-programmatically. Use this for both quick one-off calculations and multi-step analysis.
-- get_llm() returns a pre-configured LLM client — use llm.complete(system=..., messages=[...]) \
-for AI-powered computation within scratchpad code. The call is synchronous.
-- llm.generate_object(MyModel, system=..., messages=[...]) extracts structured data into \
+- The scratchpad has built-in helper functions. They are always available as globals, so \
+do not import them; use them freely in scratchpad code. All of them are synchronous.
+  - get_llm() returns a pre-configured LLM client — use llm.complete(system=..., messages=[...]) \
+for AI-powered computation within scratchpad code.
+  - llm.generate_object(MyModel, system=..., messages=[...]) extracts structured data into \
 Pydantic models. Define a class with BaseModel, and the LLM fills it. Supports list[Model] too.
-- agentic_loop(system=..., user_message=..., tools=[...], handle_tool=fn) runs an LLM \
+  - agentic_loop(system=..., user_message=..., tools=[...], handle_tool=fn) runs an LLM \
 tool-call loop inside scratchpad code. The LLM reasons and calls your tools iteratively. \
 handle_tool(name, inputs) is a plain sync function returning a string result. Use this for \
-multi-step AI workflows like classification, extraction, or analysis with structured outputs.
-- web_search(query) answers a natural-language query (e.g. "latest SpaceX IPO news") using \
+multi-step AI workflows like extraction or analysis with structured outputs.
+  - web_search(query) answers a natural-language query (e.g. "latest SpaceX IPO news") using \
 the configured LLM's native web search and returns the model's narrative answer with source \
-links as a string. Use it for current/real-time information from within scratchpad code. The \
-call is synchronous.
-- get_llm, agentic_loop, and web_search are already available as globals inside \
-scratchpad code — do not import them.
+links as a string. Use it for current/real-time information from within scratchpad code.
+  - classify(texts, categories, *, question=...) labels each text with exactly one category \
+(a list of names, or a dict of name -> description) and returns one dict per text, in order, \
+with keys label, p and probabilities. A failed item has label set to None and an error key. \
+Example:
+      ```python
+      res = classify(
+          ["Refund still not received after 2 weeks",
+           {{"title": "Export", "body": "How do I export a report to PDF?"}}],
+          {{"Billing": "invoices, payments, refunds; not how a feature works",
+           "Support": "how to use the product, errors, setup"}},
+          question="Which team should handle this ticket?",
+      )
+      # [{{"label": "Billing", "p": 0.97, "probabilities": {{"Billing": 0.97, "Support": 0.03}}}},
+      #  {{"label": "Support", "p": 0.94, "probabilities": {{"Billing": 0.06, "Support": 0.94}}}}]
+      ```
+  - classify_yes_no(texts, question, *, yes=None, no=None) answers one yes/no question about \
+each text (yes and no optionally describe each outcome) and returns one dict per text, in \
+order, with keys yes and p_yes. A failed item has yes set to None and an error key. Example:
+      ```python
+      res = classify_yes_no(
+          ["Package arrived two weeks late and the box was crushed", "Great sound quality", ""],
+          "Does the review mention a delivery problem?",
+          yes="late, lost or damaged delivery",
+          no="any other topic, including product defects",
+      )
+      # [{{"yes": True, "p_yes": 0.98}}, {{"yes": False, "p_yes": 0.03}},
+      #  {{"yes": None, "p_yes": None, "error": "empty_text"}}]
+      ```
+  - For both classify() and classify_yes_no():
+    - Each text is a string, or a dict of named fields such as {{"title": ..., "body": ...}}: \
+pass separate fields as a dict rather than joining them into one string. Both run on a \
+dedicated decision model, judge each text on its own, and label thousands of texts a minute: \
+set estimated_execution_time_seconds to about 30 + texts / 50, and pass all the texts in one \
+call rather than looping over them.
+    - To sort texts into known categories or test each text against a yes/no condition, use \
+classify() or classify_yes_no(), not get_llm() or agentic_loop(). Use classify() when every \
+text belongs to one of several categories (add a fallback such as "Other" if the list may \
+not cover every text), and classify_yes_no() when only one condition matters.
+    - Labels follow the descriptions much more closely than bare names, so pass categories as \
+a dict and describe each one, or the yes and no outcomes: what belongs there, typical \
+examples, and which nearby cases belong elsewhere, e.g. {{"Billing": "invoices, payments, \
+refunds; not questions about how a feature works", ...}}. When the categories come from a \
+source (the user's definitions, a data dictionary, a known taxonomy), describe them the way \
+that source does.
+    - Settle the descriptions before labelling and label every text with the same ones: do \
+not change them midway and re-label only part of the texts. Narrow the texts with the data \
+first, so you label only the ones the answer needs.
+    - Take the labels as the result: do not label the same texts again with get_llm() or \
+another classify() run to confirm them. A p below about 0.9 marks a borderline text; if the \
+borderline texts could change the answer, you may re-check only those with get_llm(), many \
+per generate_object call.
+    - If they raise because the decision model is unavailable, label with get_llm() instead, \
+many texts per generate_object call.
 - All .anton/.env variables are available as environment variables (os.environ).
 - Connected data source credentials are injected as namespaced environment \
 variables in the form DS_<ENGINE>_<NAME>__<FIELD> \
@@ -117,11 +173,10 @@ during internal connection test snippets. Do not assume they exist during \
 normal chat/runtime execution.
 - When the user asks how you solved something or wants to see your work, use the scratchpad \
 dump action — it shows a clean notebook-style summary without wasting tokens on reformatting.
-- Always use print() to produce output — scratchpad captures stdout.
-- IMPORTANT: The scratchpad starts with a clean namespace — nothing is pre-imported. \
-Always include all necessary imports at the top of each cell that uses them. \
-Re-importing is a no-op in Python so there is zero cost, and it guarantees the cell \
-works even if earlier cells failed or state was lost.
+- IMPORTANT: Apart from the helpers listed above, nothing is pre-imported: import every \
+module a cell uses (pandas, json, os, ...) at the top of that cell. Re-importing is a \
+no-op in Python, so it costs nothing, and the cell still works after a reset, a killed \
+cell or a failed earlier cell.
 - IMPORTANT: Cells are kept alive automatically while they are working — deliberate \
 sleeps and blocking calls (e.g. a throttled batch loop) are safe in ONE cell, and one \
 cell per batch is the preferred shape. For every exec call, provide \
@@ -650,7 +705,7 @@ SCRATCHPAD_INSTALL_NUDGE = (
     f"\n\n{ANTON_NOTE} This scratchpad cell keeps failing on a missing module, not "
     "on its logic — imports never install anything. Do not shrink or split "
     "the cell. Question the import itself first: get_llm, agentic_loop, "
-    "web_search, sample and progress are already globals (no import), and a "
+    "classify, classify_yes_no, web_search, sample and progress are already globals (no import), and a "
     "name recovered from a failing import may not be a real package at all. "
     "Install a package only when you can name the real PyPI distribution "
     "this task needs; if an install fails or times out, tell the user "
@@ -692,14 +747,9 @@ NO_INTERNET_CHAT_SYSTEM_PROMPT = cut_spans(
     CHAT_SYSTEM_PROMPT,
     ("- **Internet access**: You DO have access", "- **Scratchpad execution**", ""),
     # Up to SCRATCHPAD, so the follow-up suggestions about public datasets go too.
-    ("INTERNET & LIVE INFORMATION:\n", "SCRATCHPAD:\n- Use the scratchpad", NO_INTERNET_DATA_SOURCES),
+    ("INTERNET & LIVE INFORMATION:\n", "SCRATCHPAD:\n", NO_INTERNET_DATA_SOURCES),
     ("web scraping, ", "plotting", ""),
-    ("- web_search(query) answers", "- get_llm, agentic_loop, and web_search", ""),
-    (
-        "- get_llm, agentic_loop, and web_search are already available",
-        " as globals",
-        "- get_llm and agentic_loop are already available",
-    ),
+    ("- web_search(query) answers", "- classify(texts, categories", ""),
     ("(HTTP 403, import error", ", pause", "(an error, a timeout, an empty result, etc.)"),
     (
         "- Try creative workarounds first:",
@@ -708,6 +758,19 @@ NO_INTERNET_CHAT_SYSTEM_PROMPT = cut_spans(
         "alternate libraries, another of the connected data sources, retrying with backoff, etc.",
     ),
 )
+
+def without_classify(prompt: str) -> str:
+    """``prompt`` without the scratchpad's classify() and classify_yes_no().
+
+    For a session where they are off, or whose coding model is not on MindsHub.
+    Works on the full and the no-internet chat prompt alike.
+    """
+    # The classify item and its sub-items are the last helpers before the .env bullet.
+    return cut_spans(prompt, ("  - classify(texts, categories", "- All .anton/.env", ""))
+
+
+NO_CLASSIFY_CHAT_SYSTEM_PROMPT = without_classify(CHAT_SYSTEM_PROMPT)
+NO_INTERNET_NO_CLASSIFY_CHAT_SYSTEM_PROMPT = without_classify(NO_INTERNET_CHAT_SYSTEM_PROMPT)
 
 NO_INTERNET_RESILIENCE_NUDGE = cut_spans(
     RESILIENCE_NUDGE,

@@ -60,6 +60,9 @@ class CoreSettings(BaseSettings):
     # and every BYOK setup, uses the LLM verifier as before. "off" is the kill switch.
     verifier_jev: Literal["on", "off"] = "on"
     verifier_jev_model: str = "jev-1.13.0"
+    # "off": the scratchpad's classify() and classify_yes_no() are not offered,
+    # and the prompt leaves them out. They also need the coding model on MindsHub.
+    classify_jev: Literal["on", "off"] = "on"
     verifier_jev_timeout_s: float = 2.0
     # Minimum probability of Jev's COMPLETE/WAITING for it to decide without the LLM.
     verifier_jev_min_p: float = 0.8
