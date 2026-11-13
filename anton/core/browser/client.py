@@ -199,12 +199,20 @@ class BrowserClient:
         """Who holds the browser. Answers even while the person holds it."""
         return (await self.session_info(session_id=session_id)).control
 
-    async def hand_to_person(self, *, session_id: str, reason: str) -> Control:
+    async def hand_to_person(self, *, session_id: str, reason: str, wait_for: dict | None = None) -> Control:
         """Give the browser to the person. While they hold it the host refuses
         the agent's actions and page reads, and shows them it's their turn.
         Only the person hands it back, with Done in the browser; the agent
-        never asks for it back."""
-        body = {"holder": "human", "reason": cut_reason(reason)}
+        never asks for it back.
+
+        ``wait_for`` names what the person is there to do: ``{"element": N,
+        "state": "checked" | "filled"}`` or ``{"page": "changes"}``. A host
+        that watches for it hands the browser back by itself, as the person's
+        Done, once they did it and left the page alone for a few seconds. It
+        never carries a value."""
+        body: dict = {"holder": "human", "reason": cut_reason(reason)}
+        if wait_for is not None:
+            body["wait_for"] = wait_for
         return await self._read(Control, "POST", f"/sessions/{quote(session_id)}/control", json=body)
 
     async def tabs(self, *, session_id: str) -> list[Tab]:
