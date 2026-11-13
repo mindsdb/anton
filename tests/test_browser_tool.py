@@ -1203,6 +1203,45 @@ async def test_on_the_desktop_a_frame_that_changes_under_the_point_while_the_car
     assert len(elicit_answers.prompts()) == 5 and host.posted("/action") == [sent]
 
 
+async def test_on_the_desktop_a_step_to_the_focus_is_refused_when_a_frame_changes_while_its_card_waits(elicit_answers):
+    """A press with no element and a focused type go wherever the focus is
+    when the step starts, and the desktop binds an approved step to nothing
+    the card showed. While the card waits, a page or a frame can move the
+    focus into another frame, or navigate the focused frame, so the
+    approved Enter would land on a control the card never showed. So after
+    the Approve the tool reads the page again and refuses the step when a
+    frame has another address or box, or a frame came or went, as it
+    refuses an element number that names another element now. Text that
+    changes inside the same frame (a clock) changes no frame, and the step
+    runs."""
+    desktop = BrowserConfig(base_url=LOOPBACK, profile=SID, token="k")
+    frame = FRAMED["frames"][0]
+    changed = {
+        "a frame with another address": {**FRAMED, "frames": [{**frame, "url": "https://ads.example.test/slot"}]},
+        "a frame with another box": {**FRAMED, "frames": [{**frame, "box": {**frame["box"], "y": 320}}]},
+        "a frame that came": {**FRAMED, "frames": [frame, {"url": "https://forms.example.test/pay", "read": False, "box": None}]},
+        "a frame that went": {**FRAMED, "frames": []},
+    }
+    ticking = {**FRAMED, "frames": [{**frame, "text": "Get the weekly digest. 12:01"}]}
+    for step in ({"action": "press", "key": "Enter"}, {"action": "type", "focused": True, "text": "ada@example.test", "submit": True}):
+        for what, after in changed.items():
+            host = FakeHost(pages=[FRAMED, after])
+            session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+            elicit_answers.answers.append("approve")
+            before = len(elicit_answers.requests)
+            result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+            assert result.ok is False and result.reason == "browser_stale_element", (step, what)
+            assert "so the focus may now be on a control the card didn't show. Nothing was done." in result.content, (step, what)
+            assert len(elicit_answers.requests) == before + 1, (step, what)
+            assert host.posted("/action") == [], (step, what)
+        host = FakeHost(pages=[FRAMED, ticking])
+        session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+        elicit_answers.answers.append("approve")
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+        assert result.ok is True and result.content.startswith("Done:"), step
+        assert host.posted("/action") == [{**browser_tool._step_body({"step": step}), "into_frame": False}], step
+
+
 async def test_on_the_desktop_a_page_that_moves_on_while_any_card_waits_is_asked_about_again_or_refused(elicit_answers):
     """The desktop's browser binds an approved step to nothing the card
     showed: it runs the step on whatever page is there when the step starts,

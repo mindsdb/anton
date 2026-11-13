@@ -811,6 +811,27 @@ def _moved_element(*, seen: Page | None, current: Page, body: dict) -> str | Non
     return None
 
 
+def _frame_places(page: Page) -> tuple[_FrameAt, ...] | None:
+    """Each frame's address and box, in the order the page lists them; None
+    from a host that sends no ``frames``."""
+    return None if page.frames is None else tuple(_FrameAt(frame.url, frame.box) for frame in page.frames)
+
+
+def _moved_focus(*, seen: Page, current: Page, body: dict) -> str | None:
+    """Why the focus a step goes to may not be the one the card showed, or
+    None when nothing says so.
+
+    A press with no element and a focused type go wherever the focus is when
+    the step starts. Neither host's page read says where the focus is, so a
+    frame with another address or box, or a frame that came or went, says a
+    page or a frame may have moved the focus, or the focused frame navigated.
+    Text that changes inside the same frame (a clock) says nothing."""
+    to_focus = body.get("focused") is True or (body.get("action") == "press" and body.get("element") is None)
+    if not to_focus or _frame_places(current) == _frame_places(seen):
+        return None
+    return "The page's frames changed while the card waited, so the focus may now be on a control the card didn't show."
+
+
 def _is_text_entry(el: Element | None) -> bool:
     return el is not None and el.role in _TEXT_ENTRY_ROLES
 
@@ -1274,7 +1295,10 @@ async def _gate(
     an element's number while the element lives. So after any Approve there
     the tool reads the page again. An element the step names that now has
     another role or name refuses the step (``_moved_element``), as act
-    refuses one before the card. A page that went to another address, or,
+    refuses one before the card. So does, for a step that goes to the focus
+    (a press with no element, a focused type), a frame with another address
+    or box, or a frame that came or went, on the same address
+    (``_moved_focus``). A page that went to another address, or,
     after a card for a point that may land in a frame, a frame under the
     point with another address or box, is asked about again on the new read
     (``changed``), once; a page that changes again refuses the step. The
@@ -1329,6 +1353,8 @@ async def _gate(
         return send
     now = await state.client.page(session_id=state.session_id)
     moved = _moved_element(seen=page, current=now, body=body)
+    if moved is None and now.url == page.url:
+        moved = _moved_focus(seen=page, current=now, body=body)
     if moved is not None:
         return ToolOutcome(
             content=f"{moved} Nothing was done. The page now:\n\n{_show(state, now)}",
