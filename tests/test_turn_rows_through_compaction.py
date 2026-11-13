@@ -52,6 +52,7 @@ def _row_ids(rows: list[dict]) -> list[tuple[str, str]]:
         (row["role"], block.get("id") or block.get("tool_use_id"))
         for row in rows
         for block in row["content"]
+        if block.get("type") in ("tool_use", "tool_result")
     ]
 
 
