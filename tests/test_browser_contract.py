@@ -418,8 +418,9 @@ CARD_RULE = (
     "forms joined the same way, and the field is card-named when card_field_name, ignoring case, matches either name "
     "form. The exempt pattern matches the number of a card that isn't a payment card, such as a gift, loyalty, "
     "library, insurance or identity card. The payment pattern matches a word for a payment card with no letter right "
-    "before or after it: credit, debit, prepaid, payment, bank, charge, a card network's name, EBT, HSA or FSA. So a "
-    "field that names a card number is ordinary only when the exempt pattern takes out each card number its values "
+    "before or after it: credit, debit, prepaid, payment, bank, charge, EBT, HSA or FSA, or one of the card networks "
+    "Visa, Mastercard, Amex, American Express, Discover, Diners, JCB, UnionPay and Maestro. So a field that names a "
+    "card number is ordinary only when the exempt pattern takes out each card number its values "
     "name and no value holds a payment word: giftCardNumber, 'Library card number' and 'ID card number' are ordinary "
     "fields, while giftCardCvv, a benefits card's number, 'Credit card or gift card number', creditOrGiftCardNumber, "
     "a field named giftCardNumber with the placeholder 'Card number', one named cardNumber with the aria-label 'Gift "
@@ -626,6 +627,26 @@ def test_a_payment_word_in_any_attribute_keeps_the_field_s_card_number():
 
     for value in PAYMENT_WORD_LOOKALIKES:
         assert payment_check_inside_words({"aria-label": value}), value
+
+
+def test_the_card_rule_lists_each_payment_word_its_pattern_holds_and_no_other():
+    """Both hosts' docs copy the card rule's sentence, so it lists the words
+    card_field_payment holds, each card network by name. A sentence that says
+    any card network's name tells a reader 'RuPay or gift card number' is
+    card-named, while the pattern reads it as ordinary. Each listed word
+    matches exactly one of the pattern's words, and each of the pattern's
+    words is listed exactly once."""
+    page = _load("page")
+    payment = page.limits["card_field_payment"]
+    lead = "The payment pattern matches a word for a payment card with no letter right before or after it: "
+    clause = page.description.split(lead, 1)[1].split(". ", 1)[0]
+    listed = re.split(r", or one of the card networks |, | or | and ", clause)
+    held = re.fullmatch(r"\(\?<!\[a-z\]\)\((.*)\)\(\?!\[a-z\]\)", payment).group(1).split("|")
+    for word in listed:
+        assert re.fullmatch(payment, word, re.IGNORECASE), word
+        assert len([one for one in held if re.fullmatch(one, word, re.IGNORECASE)]) == 1, word
+    for one in held:
+        assert len([word for word in listed if re.fullmatch(one, word, re.IGNORECASE)]) == 1, one
 
 
 def test_a_card_named_field_on_the_page_is_a_secret_field():
