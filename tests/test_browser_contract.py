@@ -222,18 +222,30 @@ def test_the_page_fixture_names_every_frame_limit_the_hosts_hold():
     limits = _load("page").limits
     assert set(limits) == {
         "frames_read", "elements_per_frame", "text_per_frame", "frame_min_read_px", "frames_phase_ms",
-        "payment_frame_hosts", "sign_in_frame_hosts", "card_field_name", "card_field_word_breaks", "card_field_attributes",
+        "payment_frame_hosts", "sign_in_frame_hosts", "card_field_name", "card_field_exempt", "card_field_word_breaks",
+        "card_field_attributes",
     }
     assert limits["frames_phase_ms"] == 2000
     assert "frames_phase_ms" in _load("page").description
 
 
 #: The one card-field rule both hosts hold, character for character: a field
-#: is named for a card when this, ignoring case, matches its attributes'
-#: values joined with spaces, or that joined value split into words.
+#: is named for a card when this, ignoring case, matches what is left of its
+#: attributes' values joined with spaces, or of that joined value split into
+#: words, once CARD_FIELD_EXEMPT's matches are taken out.
 CARD_FIELD_NAME = (
     r"(^|[^a-z0-9]|card|cc)(cvc|cvv2?|csc)([^a-z0-9]|$)|card[\s._-]*(numbers?|num|no)(?![a-z])"
     r"|(^|[^a-z0-9])cc[\s._-]*(numbers?|num)(?![a-z])|security[\s._-]*code"
+)
+#: The number of a card that isn't a payment card (a gift, loyalty, library or
+#: insurance card), read ignoring case. In each form every match is replaced
+#: with a space before CARD_FIELD_NAME is tested, so a card's CVV, or a card
+#: number in another attribute, still names the field. A qualifier needs no
+#: word boundary, so none may occur in a payment card's name
+#: (PAYMENT_CARD_NAMES): club is left out, since Diners Club is a payment card.
+CARD_FIELD_EXEMPT = (
+    r"(gift|loyalty|rewards?|library|members?(hip)?|insurance|health|medicare|medicaid|student|transit|benefits?|sim"
+    r"|national[\s._-]*id)[\s._-]*card[\s._-]*(numbers?|num|no)(?![a-z])"
 )
 #: The word breaks both hosts split the joined value at, applied in order and
 #: case-sensitive, each replacing every match with its group and a space
@@ -252,10 +264,31 @@ CARD_NAMED = [
     "cardNumberInput", "CardNumberTextBox", "ctl00_Main_CardNumberTextBox", "ccNumberInput", "creditCardNumberInput",
     "cardNumberField", "cardNumbers", "cvvInput", "txtCVV", "CVVCode", "CCNumber",
 ]
+#: Payment cards' names, each card-named on both hosts. None holds a match of
+#: CARD_FIELD_EXEMPT in either form: its qualifiers need no word boundary, so a
+#: qualifier inside one of these would take a payment card for an ordinary
+#: card. giftCardCvv is a gift card's CVV, which the exempt pattern never takes.
+PAYMENT_CARD_NAMES = [
+    "creditCardNumber", "prepaidCardNumber", "storeCardNumber", "fleetCardNumber", "businessCardNumber",
+    "debitCardNumber", "cardNumberInput", "giftCardCvv", "paymentCardNumber", "virtualCardNumber",
+    "corporateCardNumber", "bankCardNumber", "chargeCardNumber", "purchasingCardNumber", "procurementCardNumber",
+    "travelCardNumber", "cc-number", "card_number", "visaCardNumber", "mastercardNumber", "amexCardNumber",
+    "discoverCardNumber", "dinersClubCardNumber", "Diners Club card number", "jcbCardNumber", "unionPayCardNumber",
+    "maestroCardNumber", "ebtCardNumber",
+]
 NOT_CARD_NAMED = [
     "name", "email", "acc_number", "account_number", "cardholder_name", "card_type", "cardnotes", "discount_code",
     "promo_code", "postal_code", "recv_count", "Name on card",
     "cardholderName", "cardNotes", "cardNoteText", "cardType", "CardHolder",
+]
+#: Numbers of cards that aren't payment cards, which a host reads and types
+#: into: at least one for each qualifier of CARD_FIELD_EXEMPT, in the casings
+#: forms give their fields.
+ORDINARY_CARD_NUMBERS = [
+    "giftCardNumber", "txtGiftCardNumber", "ctl00_Main_GiftCardNumberTextBox", "loyalty_card_number",
+    "Library card number", "membershipCardNumber", "insuranceCardNumber", "nationalIdCardNumber", "rewardsCardNumber",
+    "memberCardNo", "health_card_number", "Medicare card number", "medicaidCardNumber", "studentCardNumber",
+    "transitCardNum", "benefitsCardNumber", "simCardNumber",
 ]
 #: Card names the pattern alone misses on the joined value: only its
 #: word-split form names them, so a host that skips the split types into them.
@@ -274,14 +307,22 @@ def _word_split(value: str, breaks: list[str]) -> str:
     return value
 
 
-def _card_named(attributes: dict[str, str]) -> bool:
-    """The rule as page.json gives it: the pattern, ignoring case, on the
-    attributes' values joined in order with a space, a missing one empty, or
-    on that joined value's word-split form."""
+def _name_forms(attributes: dict[str, str]) -> tuple[str, str]:
+    """A field's two name forms as page.json gives them: the attributes'
+    values joined in order with a space, a missing one empty, and that joined
+    value's word-split form."""
     limits = _load("page").limits
     joined = " ".join(attributes.get(name, "") for name in limits["card_field_attributes"])
-    forms = (joined, _word_split(joined, limits["card_field_word_breaks"]))
-    return any(re.search(limits["card_field_name"], form, re.IGNORECASE) for form in forms)
+    return joined, _word_split(joined, limits["card_field_word_breaks"])
+
+
+def _card_named(attributes: dict[str, str]) -> bool:
+    """The rule as page.json gives it: in each name form, every match of the
+    exempt pattern replaced with a space, ignoring case, then the card
+    pattern, ignoring case, on what is left of either form."""
+    limits = _load("page").limits
+    left = (re.sub(limits["card_field_exempt"], " ", form, flags=re.IGNORECASE) for form in _name_forms(attributes))
+    return any(re.search(limits["card_field_name"], form, re.IGNORECASE) for form in left)
 
 
 def test_the_page_fixture_pins_the_one_card_field_rule_both_hosts_hold():
@@ -293,17 +334,23 @@ def test_the_page_fixture_pins_the_one_card_field_rule_both_hosts_hold():
     or React form gives its card fields are named only by the word split."""
     page = _load("page")
     assert page.limits["card_field_name"] == CARD_FIELD_NAME
+    assert page.limits["card_field_exempt"] == CARD_FIELD_EXEMPT
     assert page.limits["card_field_word_breaks"] == CARD_FIELD_WORD_BREAKS
     assert page.limits["card_field_attributes"] == CARD_FIELD_ATTRIBUTES
     assert (
         "(name, id, aria-label and placeholder) joined in that order with a space, a missing one as empty."
     ) not in page.description
+    assert "A field is card-named when card_field_name, ignoring case, matches the values of" not in page.description
     assert (
-        "A field is card-named when card_field_name, ignoring case, matches the values of its card_field_attributes "
-        "(name, id, aria-label and placeholder) joined in that order with a space, a missing one as empty, or that "
-        "joined value's word-split form: each of card_field_word_breaks applied in order, case-sensitive, replacing "
-        "every match with its first group and a space ($1 ), so cardNumberInput reads as card Number Input and "
-        "CVVCode as CVV Code."
+        "A field's two name forms are the values of its card_field_attributes (name, id, aria-label and placeholder) "
+        "joined in that order with a space, a missing one as empty, and that joined value's word-split form: each of "
+        "card_field_word_breaks applied in order, case-sensitive, replacing every match with its first group and a "
+        "space ($1 ), so cardNumberInput reads as card Number Input and CVVCode as CVV Code. In each form, every "
+        "match of card_field_exempt, ignoring case, is replaced with a space, and the field is card-named when "
+        "card_field_name, ignoring case, matches what is left of either form. The exempt pattern matches the number "
+        "of a card that isn't a payment card, such as a gift, loyalty, library or insurance card, so giftCardNumber "
+        "and 'Library card number' are ordinary fields, while giftCardCvv and a field named cardNumber with the "
+        "aria-label 'Gift card number' stay card-named."
     ) in page.description
     for value in NAMED_ONLY_WHEN_SPLIT:
         assert re.search(CARD_FIELD_NAME, value, re.IGNORECASE) is None, value
@@ -311,7 +358,10 @@ def test_the_page_fixture_pins_the_one_card_field_rule_both_hosts_hold():
     assert re.search(CARD_FIELD_NAME, _word_split("CVVCode", CARD_FIELD_WORD_BREAKS[:1]), re.IGNORECASE) is None
     named = page.examples["values that name a field for a card"]
     unnamed = page.examples["values that don't name a field for a card"]
-    for example, card_named, required in ((named, True, CARD_NAMED), (unnamed, False, NOT_CARD_NAMED)):
+    for example, card_named, required in (
+        (named, True, CARD_NAMED + PAYMENT_CARD_NAMES),
+        (unnamed, False, NOT_CARD_NAMED + ORDINARY_CARD_NUMBERS),
+    ):
         assert (example.kind, example.where) == ("classification", "a field's name, id, aria-label or placeholder")
         assert example.body["card_named"] is card_named
         values = example.body["values"]
@@ -324,6 +374,38 @@ def test_the_page_fixture_pins_the_one_card_field_rule_both_hosts_hold():
     attributes = together.body["attributes"]
     assert _card_named(attributes)
     assert not any(_card_named({name: value}) for name, value in attributes.items())
+
+
+def test_the_exempt_pattern_takes_out_only_an_ordinary_card_s_number_and_never_a_payment_card_s_name():
+    """A gift, loyalty, library or insurance card's number is an ordinary
+    field on both hosts: readable, and typed into. The exempt pattern's
+    qualifiers need no word boundary (txtGiftCardNumber), so each payment
+    name in page.json is checked for a match in both forms: with club among
+    the qualifiers, Diners Club's names failed here. A host that skips the
+    exempt step reads giftCardNumber as card-named; one that skips it on the
+    split form reads ctl00_Main_GiftCardNumberTextBox so; one that drops the
+    field when the exempt pattern matches anywhere, instead of taking the
+    match out, misses cardNumber beside the label 'Gift card number'."""
+    page = _load("page")
+    exempt = page.limits["card_field_exempt"]
+    for value in page.examples["values that name a field for a card"].body["values"]:
+        for attribute in CARD_FIELD_ATTRIBUTES:
+            for form in _name_forms({attribute: value}):
+                assert re.search(exempt, form, re.IGNORECASE) is None, (attribute, value, form)
+    for value in ORDINARY_CARD_NUMBERS:
+        assert any(re.search(exempt, form, re.IGNORECASE) for form in _name_forms({"name": value})), value
+    assert re.search(CARD_FIELD_NAME, "giftCardNumber", re.IGNORECASE)
+    joined, split = _name_forms({"name": "ctl00_Main_GiftCardNumberTextBox"})
+    assert re.search(exempt, joined, re.IGNORECASE) is None and re.search(CARD_FIELD_NAME, split, re.IGNORECASE)
+
+    beside = page.examples["a card field whose aria-label names a gift card"]
+    assert (beside.kind, beside.where) == ("classification", "a field's name, id, aria-label or placeholder")
+    assert beside.body == {
+        "card_named": True, "attributes": {"name": "cardNumber", "aria-label": "Gift card number"},
+    }
+    assert _card_named(beside.body["attributes"])
+    assert _card_named({"name": "cardNumber"}) and not _card_named({"aria-label": "Gift card number"})
+    assert any(re.search(exempt, form, re.IGNORECASE) for form in _name_forms(beside.body["attributes"]))
 
 
 def test_a_card_named_field_on_the_page_is_a_secret_field():
@@ -364,13 +446,19 @@ def test_a_card_named_field_on_the_page_is_a_secret_field():
 
 def test_the_page_fixture_lets_a_host_name_the_focused_node():
     """A page may carry focus, an opaque token for the node that has the
-    focus, followed down through frames. The desktop app's browser sends it,
-    so the tool can tell that the focus moved while a card waited; the web's
+    focus, followed down through the frames the host can read. Inside a frame
+    it can't read (a payment frame, another site's frame inside another
+    site's), the token names that frame's element, so a focus that moves into
+    such a frame, or from one to another, changes the token where an omitted
+    focus would have read the same. The desktop app's browser sends it, so the
+    tool can tell that the focus moved while a card waited; the web's
     browser, which reads the focus again when a step runs, leaves it out."""
     fixture = _load("page")
+    assert "through frames. Equal tokens mean the same node, and a host may omit" not in fixture.description
     assert (
-        "A page may carry focus: an opaque token naming the focused node, the deepest one through frames. Equal "
-        "tokens mean the same node, and a host may omit focus."
+        "A page may carry focus: an opaque token naming the focused node, the deepest one through frames that the "
+        "host can read; when the focus is inside a frame the host can't read, the token names that frame's element. "
+        "Equal tokens mean the same node. A host may omit focus, and omits it when nothing is focused."
     ) in fixture.description
     framed = fixture.examples["a page with a frame"].body
     assert isinstance(framed["focus"], str) and framed["focus"]
@@ -518,6 +606,33 @@ def test_the_page_fixture_lets_a_host_list_the_frames_inside_a_frame_it_read():
         "Each frame has url (origin and path for http and https, about:blank or about:srcdoc, otherwise the scheme "
         "alone), read, box"
     ) in description
+
+
+def test_the_page_fixture_places_each_frame_on_its_page_whatever_scrolls():
+    """A frame's box is where it is on the screenshot, so the page's scroll
+    and an inner column's both move it. at is where the frame element sits in
+    its document, so neither does, and it tells a frame that moved on the
+    page from one that only scrolled. A host sends it with every frame it
+    places, in whole CSS pixels, and a frame with no box carries none."""
+    fixture = _load("page")
+    assert (
+        "A host sends at with every frame whose box isn't null: the frame element's top-left {x, y} in its "
+        "document's content coordinates, in CSS pixels rounded to whole ones, which is its top-left in the viewport "
+        "plus the page's scroll plus the scroll offset of every scrolling element it sits in, so no scroll, the "
+        "page's or an inner column's, changes it."
+    ) in fixture.description
+    placed = 0
+    for name, example in fixture.examples.items():
+        for frame in example.body.get("frames", []) if example.kind == "response" else []:
+            if frame["box"] is None:
+                assert "at" not in frame, (name, frame["url"])
+                continue
+            placed += 1
+            assert set(frame["at"]) == {"x", "y"}, (name, frame["url"])
+            assert all(type(frame["at"][axis]) is int for axis in ("x", "y")), (name, frame["url"])
+    assert placed == 3
+    framed = fixture.examples["a page with a frame"].body
+    assert [frame.get("at") for frame in framed["frames"]] == [{"x": 112, "y": 1500}, {"x": 112, "y": 1720}, None]
 
 
 def test_the_page_model_says_what_the_page_fixture_says_of_its_frames():
