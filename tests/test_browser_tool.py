@@ -2555,19 +2555,42 @@ async def test_a_human_check_waits_for_the_page_to_change(fake_jev, done_in_the_
     assert host.posted("/control")[0]["wait_for"] == {"page": "changes"}
 
 
-async def test_a_field_hand_over_never_carries_or_reports_the_value(done_in_the_browser, sent_events):
-    filled = {**POLICY, "elements": [*POLICY["elements"][:3], {**POLICY["elements"][3], "value_hidden": True}]}
+async def test_a_secret_field_hand_over_never_carries_the_value_or_says_whether_it_is_filled(done_in_the_browser, sent_events):
+    """A host marks every secret field value_hidden, filled or empty, so a
+    page read can't say whether the person filled one. After Done the tool
+    says that, not "filled in": here the person clicked Done on a page that
+    never changed, and the security code is still empty."""
     host = FakeHost(pages=[POLICY])
     session = make_session(host, elicitor=FakeElicitor())
-    handed_back_after(host, session, 2, then=filled)
+    handed_back_after(host, session, 2, then=POLICY)
     await read(session, host, POLICY)
     result = await browser_tool.handle_browser(session, {
         "action": "hand_to_user", "reason": "Enter the security code", "wait_for": {"element": 15, "state": "filled"},
     })
     assert host.posted("/control")[0]["wait_for"] == {"element": 15, "state": "filled"}
-    assert "is filled in now" in result.content
+    assert (
+        'Element [15] (textbox "Security code") is a secret field: the page never shows its value, so it can\'t '
+        "say whether it's filled in."
+    ) in result.content
+    assert "is filled in now" not in result.content and "still empty" not in result.content
     assert "value" not in json.dumps(host.posted("/control"))
     assert all("value" not in json.dumps(props) for _, props in sent_events)
+
+
+@pytest.mark.parametrize(("then", "says"), [
+    ({**POLICY, "elements": [*POLICY["elements"][:2], {**POLICY["elements"][2], "value": "+1 555 0100"}, POLICY["elements"][3]]}, "is filled in now"),
+    (POLICY, "is still empty now"),
+], ids=["filled", "empty"])
+async def test_an_ordinary_field_hand_over_says_whether_it_is_filled_and_never_the_value(done_in_the_browser, then, says):
+    host = FakeHost(pages=[POLICY])
+    session = make_session(host, elicitor=FakeElicitor())
+    handed_back_after(host, session, 2, then=then)
+    await read(session, host, POLICY)
+    result = await browser_tool.handle_browser(session, {
+        "action": "hand_to_user", "reason": "Enter the guardian's phone", "wait_for": {"element": 14, "state": "filled"},
+    })
+    assert f'Element [14] (textbox "Guardian\'s phone") {says}.' in result.content
+    assert "555 0100" not in result.content.split("\n\n")[0]
 
 
 @pytest.mark.parametrize(("wait_for", "says"), [

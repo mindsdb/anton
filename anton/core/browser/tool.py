@@ -1652,7 +1652,9 @@ def _wait_for(state: _BrowserState, raw: object) -> dict | None:
 
 
 def _waited_for(wait_for: dict | None, page: Page) -> str:
-    """What the page shows of what the hand-over waited for, never a value."""
+    """What the page shows of what the hand-over waited for, never a value.
+    A host marks every secret field value_hidden, filled or empty, so the
+    page can't say whether the person filled one."""
     if not wait_for or "element" not in wait_for:
         return ""
     el = _element(page, wait_for["element"])
@@ -1660,7 +1662,9 @@ def _waited_for(wait_for: dict | None, page: Page) -> str:
         return f"Element [{wait_for['element']}] isn't on the page now: the user moved on from it."
     if wait_for["state"] == "checked":
         return f"Element [{el.id}] ({_named(el)}) is {'checked' if el.checked else 'not checked'} now."
-    return f"Element [{el.id}] ({_named(el)}) is {'filled in' if (el.value or el.value_hidden) else 'still empty'} now."
+    if el.secret:
+        return f"Element [{el.id}] ({_named(el)}) is a secret field: the page never shows its value, so it can't say whether it's filled in."
+    return f"Element [{el.id}] ({_named(el)}) is {'filled in' if el.value else 'still empty'} now."
 
 
 def _no_wait_for(exc: BrowserError) -> bool:
