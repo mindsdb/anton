@@ -476,7 +476,10 @@ def _http_failure_hint(status: int) -> str:
         return "nothing answers at that URL for this key; check the URL and the id in it."
     if 400 <= status < 500:
         return "the server refused the request."
-    return "the server reported an error; nothing here shows its cause."
+    return (
+        "the server reported an error. Nothing here shows its cause, or whether "
+        "it is temporary or a retry would help."
+    )
 
 
 def test_llm(
