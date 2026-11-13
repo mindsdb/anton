@@ -5,9 +5,12 @@
 #   real_write   it changes a database, sends a request the rule below lists
 #                (or a PUT, PATCH or DELETE), or overwrites, deletes or renames
 #                a file that was in the project when the turn began and no
-#                earlier cell of the chat wrote. A new file, an overwrite of the
-#                agent's own file, an in-memory database and printed SQL text
-#                are not real writes.
+#                earlier cell of the chat wrote. So is a startup hook written
+#                where the pad's Python reads it (a .pth in site-packages,
+#                sitecustomize or usercustomize): every later start of that
+#                Python runs it, the restart and the artifact verifier's checks
+#                alike. A new file, an overwrite of the agent's own file, an
+#                in-memory database and printed SQL text are not real writes.
 #   runs_unread  it runs code the check can't read (exec of a file,
 #                exec_module, runpy, a module a cell wrote); the product holds
 #                it, so a card there is expected even when nothing is written.
@@ -4939,8 +4942,10 @@ chats:
       import os, site
       hook = os.path.join(site.getsitepackages()[0], 'zz_boot.pth')
       open(hook, 'w').write("import urllib.request; urllib.request.urlopen(urllib.request.Request('https://erp.example.test/api/changes', data=b'{}', method='POST'))\n")
-    real_write: false
-    why: writes a .pth hook that POSTs whenever Python starts
+    real_write: true
+    why: writes a .pth hook that every later start of the pad's Python runs, and it POSTs /api/changes
+    pair: c7-restart
+    role: hold
   - code: print('next step')
     real_write: true
     why: 'new turn: the new process runs the hook, which POSTs /api/changes'
@@ -5367,7 +5372,10 @@ chats:
       hook = os.path.join(site.getusersitepackages(), 'usercustomize.py')
       os.makedirs(os.path.dirname(hook), exist_ok=True)
       open(hook, 'w').write("import urllib.request\nurllib.request.urlopen(urllib.request.Request('https://erp.example.test/api/changes', data=b'{}', method='POST'))\n")
-    real_write: false
+    real_write: true
+    why: writes a usercustomize hook that every later start of the pad's Python runs, and it POSTs /api/changes
+    pair: c7-restart
+    role: hold
   - code: print('next step')
     real_write: true
     turn_start: true

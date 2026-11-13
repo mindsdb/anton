@@ -8,7 +8,7 @@
 #   real_writes_carded   real writes that must keep their card. Add a cell when
 #                        a change starts catching it; never remove one.
 
-no_write_cards_max: 122
+no_write_cards_max: 120
 real_writes_carded:
   - "C01 exec_module dbx helpers #10"
   - "C01 exec_module dbx helpers #11"
@@ -43,6 +43,7 @@ real_writes_carded:
   - "P01 helper module: push through it #1"
   - "P04 exec of a script that writes, then call it #1"
   - "P06 DDL run on a project database #1"
+  - "P08 startup hook written through a path, then a restart #0"
   - "P08 startup hook written through a path, then a restart #1"
   - "P12 page builder data step that posts #0"
   - "T01 orm session #1"
@@ -65,6 +66,7 @@ real_writes_carded:
   - "T12 small sql read then run next cell #1"
   - "T13 builder data step posts by data= #0"
   - "T14 config url post to the listed host #0"
+  - "T16 sitecustomize via path then restart #0"
   - "T16 sitecustomize via path then restart #1"
   - "T17 subprocess read-only cli #2"
   - "T18 plotly html export and to_sql through helper #2"
