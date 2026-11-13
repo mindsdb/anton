@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal, NamedTuple
@@ -222,8 +223,8 @@ def test_the_page_fixture_names_every_frame_limit_the_hosts_hold():
     limits = _load("page").limits
     assert set(limits) == {
         "frames_read", "elements_per_frame", "text_per_frame", "frame_min_read_px", "frames_phase_ms",
-        "payment_frame_hosts", "sign_in_frame_hosts", "card_field_name", "card_field_exempt", "card_field_payment",
-        "card_field_word_breaks", "card_field_attributes",
+        "payment_frame_hosts", "sign_in_frame_hosts", "card_field_name", "card_field_exempt", "card_field_conjunction",
+        "card_field_payment", "card_field_word_breaks", "card_field_attributes",
     }
     assert limits["frames_phase_ms"] == 2000
     assert "frames_phase_ms" in _load("page").description
@@ -232,36 +233,64 @@ def test_the_page_fixture_names_every_frame_limit_the_hosts_hold():
 #: The one card-field rule both hosts hold, character for character: a field
 #: is named for a card when this, ignoring case, matches its attributes'
 #: values joined with spaces, or their split forms joined so, once
-#: CARD_FIELD_EXEMPT's matches are taken out of each value on its own, unless
-#: CARD_FIELD_PAYMENT matches one of them.
+#: CARD_FIELD_EXEMPT's matches are taken out of each value on its own (but
+#: those CARD_FIELD_CONJUNCTION keeps), unless CARD_FIELD_PAYMENT matches one
+#: of them.
 CARD_FIELD_NAME = (
     r"(^|[^a-z0-9]|card|cc)(cvc|cvv2?|csc)([^a-z0-9]|$)|card[\s._-]*(numbers?|num|no)(?![a-z])"
     r"|(^|[^a-z0-9])cc[\s._-]*(numbers?|num)(?![a-z])|security[\s._-]*code"
 )
+#: CARD_FIELD_EXEMPT's qualifiers: the words that name a card that isn't a
+#: payment card. A qualifier needs no word boundary, so none may occur in a
+#: payment card's name (PAYMENT_CARD_NAMES): club is left out, since Diners
+#: Club is a payment card, and benefits, since an EBT, FSA or HSA benefits card
+#: is one. An id counts only with no letter or digit right before it, so
+#: prepaid's id never does. resident covers a permanent resident card. green
+#: is a green card's: Green Dot's card holds no match (Dot sits between), and
+#: a label that names Amex's Green Card holds amex, a payment word.
+_EXEMPT_QUALIFIERS = (
+    r"(gift|loyalty|rewards?|library|members?(hip)?|insurance|health|medicare|medicaid|student|transit|sim"
+    r"|national[\s._-]*id|identity|(?<![a-z0-9])id|green|residen(t|ce|cy)|social[\s._-]*security|aadhaa?r"
+    r"|citizen(ship)?|voter)"
+)
 #: The number of a card that isn't a payment card (a gift, loyalty, library,
 #: insurance or identity card), read ignoring case. Each match is replaced with
 #: a space in each value and its split form before the join, so a card's CVV,
-#: or a card number in another attribute, still names the field. A qualifier
-#: needs no word boundary, so none may occur in a payment card's name
-#: (PAYMENT_CARD_NAMES): club is left out, since Diners Club is a payment card,
-#: and benefits, since an EBT, FSA or HSA benefits card is one. An id counts
-#: only with no letter or digit right before it, so prepaid's id never does.
-CARD_FIELD_EXEMPT = (
-    r"(gift|loyalty|rewards?|library|members?(hip)?|insurance|health|medicare|medicaid|student|transit|sim"
-    r"|national[\s._-]*id|identity|(?<![a-z0-9])id)[\s._-]*card[\s._-]*(numbers?|num|no)(?![a-z])"
+#: or a card number in another attribute, still names the field.
+CARD_FIELD_EXEMPT = _EXEMPT_QUALIFIERS + r"[\s._-]*card[\s._-]*(numbers?|num|no)(?![a-z])"
+#: A conjunction: or or and with no letter or digit right before it, &, +, /
+#: or a comma.
+_CONJUNCTION = r"((?<![a-z0-9])(or|and)|[&+/,])"
+#: An exempt card's name and the conjunction after it: one of the exempt
+#: pattern's qualifiers, alone or followed by card or a card number.
+_EXEMPT_NAME_AND_CONJUNCTION = (
+    _EXEMPT_QUALIFIERS + r"([\s._-]*card([\s._-]*(numbers?|num|no))?)?[\s._-]*" + _CONJUNCTION + r"[\s._-]*"
 )
-#: A payment word with no letter right before or after it, read ignoring
-#: case. When it matches any of a field's values or their split forms, the
-#: field skips the exempt step, so 'Credit card or gift card number' keeps its
-#: card number.
+#: The text before an exempt match that keeps it, read ignoring case: text
+#: that ends in a conjunction, unless it reads as text that doesn't end in one
+#: followed by exempt cards' names, each with its conjunction. So 'Card or gift
+#: card number' keeps its card number and 'Gift or loyalty card number' drops
+#: it. Python's re takes only a fixed-width lookbehind, so the pattern is
+#: anchored at both ends of the text before the match and looks ahead.
+CARD_FIELD_CONJUNCTION = (
+    r"^(?!([\s\S]*[^&+/,\s._-](?<!(?<![a-z0-9])or)(?<!(?<![a-z0-9])and))?[\s._-]*("
+    + _EXEMPT_NAME_AND_CONJUNCTION + r")+$)[\s\S]*" + _CONJUNCTION + r"[\s._-]*$"
+)
+#: A word for a payment card with no letter right before or after it, read
+#: ignoring case. When it matches any of a field's values or their split
+#: forms, the field skips the exempt step, so 'Visa gift card number' keeps its
+#: card number. Payment, bank and charge also name a checkout's section, so
+#: they aren't payment words. AmEx and RuPay split to Am Ex and Ru Pay.
 CARD_FIELD_PAYMENT = (
-    r"(?<![a-z])(credit|debit|prepaid|payment|bank|charge|visa|master[\s._-]*card|amex|american[\s._-]*express"
-    r"|discover|diners|jcb|union[\s._-]*pay|maestro|ebt|hsa|fsa)(?![a-z])"
+    r"(?<![a-z])(credit|debit|prepaid|cc|atm|ebt|hsa|fsa|visa|master[\s._-]*card|am[\s._-]*ex"
+    r"|american[\s._-]*express|discover|diners|jcb|union[\s._-]*pay|maestro|ru[\s._-]*pay|interac)(?![a-z])"
 )
-#: The payment words CARD_FIELD_PAYMENT holds, in the spellings a page uses.
+#: The payment words CARD_FIELD_PAYMENT holds, in the spellings a page uses,
+#: and AmEx's and RuPay's split forms.
 PAYMENT_WORDS = [
-    "credit", "debit", "prepaid", "payment", "bank", "charge", "visa", "mastercard", "master card", "amex",
-    "american express", "discover", "diners", "jcb", "unionpay", "union pay", "maestro", "ebt", "hsa", "fsa",
+    "credit", "debit", "prepaid", "cc", "atm", "ebt", "hsa", "fsa", "visa", "mastercard", "master card", "amex",
+    "am ex", "american express", "discover", "diners", "jcb", "unionpay", "union pay", "maestro", "rupay", "ru pay",
+    "interac",
 ]
 #: The word breaks both hosts split the joined value at, applied in order and
 #: case-sensitive, each replacing every match with its group and a space
@@ -293,15 +322,38 @@ PAYMENT_CARD_NAMES = [
     "discoverCardNumber", "dinersClubCardNumber", "Diners Club card number", "jcbCardNumber", "unionPayCardNumber",
     "maestroCardNumber", "ebtCardNumber", "EBT card number", "HSA card number", "hsaCardNumber", "FSA card number",
     "fsaCardNumber", "FSA/HSA benefits card number", "Benefits card number", "benefitsCardNumber",
-    "Transit benefits card number", "Gift card or credit card number",
+    "Transit benefits card number", "Gift card or credit card number", "Green Dot card number",
+    "greenDotCardNumber", "Citizens Bank card number", "Direct Express card number", "ATM card number",
+    "RuPay card number", "Interac card number",
 ]
-#: Labels for a field that takes a payment card or an ordinary one. Each holds
-#: a match of CARD_FIELD_EXEMPT, so only CARD_FIELD_PAYMENT keeps its card
-#: number. A Visa gift card is a prepaid payment card.
+#: An ordinary card's number named for a payment card with no conjunction
+#: between, so only CARD_FIELD_PAYMENT keeps it: a Visa gift card is a prepaid
+#: Visa, and Amex's Green Card is a charge card. AmEx and RuPay name the card
+#: only in their split forms, Am Ex and Ru Pay.
+PAYMENT_GIFT_CARD_LABELS = [
+    "Visa gift card number", "visaGiftCardNumber", "Mastercard gift card number", "prepaidGiftCardNumber",
+    "AmExGiftCardNumber", "RuPayGiftCardNumber", "Amex Green Card number",
+]
+#: Labels for a field that takes a payment card or an ordinary one, joined by a
+#: conjunction and naming the payment card by a payment word, so both
+#: CARD_FIELD_PAYMENT and CARD_FIELD_CONJUNCTION keep the card number. Visa
+#: keeps a travel form's 'Passport, visa or ID card number' card-named.
 COMBINED_PAYMENT_LABELS = [
     "Credit card or gift card number", "Credit/Gift Card Number", "Credit, debit or gift card number",
-    "Visa, Mastercard or gift card number", "creditOrGiftCardNumber", "Payment or rewards card number",
-    "Visa gift card number",
+    "Visa, Mastercard or gift card number", "creditOrGiftCardNumber", "ATM card or gift card number",
+    "CC or gift card number", "ccOrGiftCardNumber", "RuPay or gift card number", "Interac or gift card number",
+    "Passport, visa or ID card number",
+]
+#: Labels that join an ordinary card's number by a conjunction (or, and, &, +,
+#: / or a comma) to a card the exempt pattern doesn't name and no payment word
+#: names, so only CARD_FIELD_CONJUNCTION keeps the card number. A chain keeps
+#: it too when its first card isn't exempt. cardOrGiftCardNumber names it only
+#: in its split form, where Or stands alone.
+CONJOINED_CARD_LABELS = [
+    "Card or gift card number", "Payment or rewards card number", "Bank card or gift card number",
+    "Store card / gift card number", "Card/Gift card number", "cardOrGiftCardNumber", "card_or_gift_card_number",
+    "Store and loyalty card number", "Payment & gift card number", "Card + gift card number",
+    "Store card, gift card number", "Card, gift or loyalty card number", "Store card, gift card or loyalty card number",
 ]
 #: A member ID card's number that stays card-named: a letter sits right before
 #: its Id, so the exempt pattern takes nothing out of the value itself, which
@@ -321,11 +373,33 @@ ORDINARY_CARD_NUMBERS = [
     "Library card number", "membershipCardNumber", "insuranceCardNumber", "nationalIdCardNumber", "rewardsCardNumber",
     "memberCardNo", "health_card_number", "Medicare card number", "medicaidCardNumber", "studentCardNumber",
     "transitCardNum", "simCardNumber", "ID card number", "Identity card number", "Student ID card number",
-    "idCardNumber", "id_card_number", "ID Card No.",
+    "idCardNumber", "id_card_number", "ID Card No.", "Green card number", "greenCardNumber",
+    "Permanent resident card number", "Resident card number", "Residence card number", "residenceCardNumber",
+    "Residency card number", "Social Security card number", "socialSecurityCardNumber", "Aadhaar card number",
+    "Aadhar card number", "aadhaarCardNumber", "Citizen card number", "citizenCardNumber", "Citizenship card number",
+    "Voter card number", "voterCardNo", "Voter ID card number",
 ]
 #: Ordinary cards' numbers whose labels hold a payment word with a letter
-#: right after it (Visalia) or right before it (Riverbank), which isn't one.
-PAYMENT_WORD_LOOKALIKES = ["Visalia Library card number", "Riverbank Library card number"]
+#: right after it (Visalia) or right before it (Rediscover), which isn't one.
+PAYMENT_WORD_LOOKALIKES = ["Visalia Library card number", "Rediscover Rewards card number"]
+#: Ordinary cards' numbers in a checkout's payment section: payment, bank and
+#: charge also name the section, so they aren't payment words.
+PAYMENT_SECTION_GIFT_CARDS = [
+    "payment[gift_card_number]", "paymentGiftCardNumber", "payment_gift_card_number",
+    "checkout-payment-giftcard-number",
+]
+#: Ordinary cards' numbers joined by a conjunction only to other exempt cards'
+#: names, a qualifier alone or followed by card or a card number, so each is
+#: ordinary. A conjunction after the match ('and PIN') changes nothing.
+EXEMPT_CARD_LISTS = [
+    "Gift or loyalty card number", "Gift/Loyalty card number", "Gift card number and PIN",
+    "Gift card or library card number", "Loyalty card or gift card number", "Gift card number or loyalty card number",
+    "Gift, loyalty or rewards card number", "giftOrLoyaltyCardNumber", "Student ID or library card number",
+    "Membership & rewards card number",
+]
+#: Ordinary cards' numbers after a word that ends in or or and, which isn't a
+#: conjunction.
+CONJUNCTION_LOOKALIKES = ["Vendor gift card number", "Brand gift card number"]
 #: Card names the pattern alone misses on the joined value: only its
 #: word-split form names them, so a host that skips the split types into them.
 #: CVVCode needs the second break.
@@ -372,11 +446,23 @@ def _holds_payment_word(pair: _ValueForms) -> bool:
     return any(re.search(payment, form, re.IGNORECASE) for form in pair)
 
 
-def _exempted(pair: _ValueForms) -> _ValueForms:
+def _kept_by_a_conjunction(before: str) -> bool:
+    """Whether page.json's conjunction pattern, ignoring case, matches the text
+    before an exempt match, which keeps the match."""
+    return re.search(_load("page").limits["card_field_conjunction"], before, re.IGNORECASE) is not None
+
+
+def _exempted(pair: _ValueForms, keeps: Callable[[str], bool] = _kept_by_a_conjunction) -> _ValueForms:
     """The value and its split form, each with every match of page.json's
-    exempt pattern, ignoring case, replaced with a space."""
+    exempt pattern, ignoring case, replaced with a space, but a match the text
+    before it keeps (`keeps`, page.json's conjunction pattern), read in the
+    form as it was before any replacement."""
     exempt = _load("page").limits["card_field_exempt"]
-    return _ValueForms(*(re.sub(exempt, " ", form, flags=re.IGNORECASE) for form in pair))
+
+    def take_out(match: re.Match[str]) -> str:
+        return match.group(0) if keeps(match.string[: match.start()]) else " "
+
+    return _ValueForms(*(re.sub(exempt, take_out, form, flags=re.IGNORECASE) for form in pair))
 
 
 def _joined(forms: list[_ValueForms]) -> _NameForms:
@@ -392,9 +478,10 @@ def _names_a_card(forms: _NameForms) -> bool:
 
 def _name_forms(attributes: dict[str, str]) -> _NameForms:
     """A field's two name forms as page.json gives them: unless the payment
-    pattern matches one of its values or split forms, every exempt match is
-    replaced with a space in each value and each split form on its own; then
-    the values are joined in order with a space, and the split forms so."""
+    pattern matches one of its values or split forms, every exempt match the
+    conjunction pattern doesn't keep is replaced with a space in each value and
+    each split form on its own; then the values are joined in order with a
+    space, and the split forms so."""
     forms = _value_forms(attributes)
     if not any(_holds_payment_word(pair) for pair in forms):
         forms = [_exempted(pair) for pair in forms]
@@ -413,19 +500,30 @@ CARD_RULE = (
     "case-sensitive, replacing every match with its first group and a space ($1 ), so cardNumberInput reads as card "
     "Number Input and CVVCode as CVV Code. Then every match of card_field_exempt, ignoring case, is replaced with a "
     "space in each value and in each split form on its own, so an exempt match never runs from one attribute into "
-    "the next. A field skips that step when card_field_payment, ignoring case, matches any of its values or their "
-    "split forms. The field's two name forms are then its values joined in that order with a space and its split "
-    "forms joined the same way, and the field is card-named when card_field_name, ignoring case, matches either name "
-    "form. The exempt pattern matches the number of a card that isn't a payment card, such as a gift, loyalty, "
-    "library, insurance or identity card. The payment pattern matches a word for a payment card with no letter right "
-    "before or after it: credit, debit, prepaid, payment, bank, charge, EBT, HSA or FSA, or one of the card networks "
-    "Visa, Mastercard, Amex, American Express, Discover, Diners, JCB, UnionPay and Maestro. So a field that names a "
-    "card number is ordinary only when the exempt pattern takes out each card number its values "
-    "name and no value holds a payment word: giftCardNumber, 'Library card number' and 'ID card number' are ordinary "
-    "fields, while giftCardCvv, a benefits card's number, 'Credit card or gift card number', creditOrGiftCardNumber, "
-    "a field named giftCardNumber with the placeholder 'Card number', one named cardNumber with the aria-label 'Gift "
-    "card number' and one with the id member and the placeholder 'Card number' stay card-named. A select labeled "
-    "'Credit or debit card' names no card number, so it isn't card-named."
+    "the next, but a match stays when card_field_conjunction, ignoring case, matches the text before it in its form, "
+    "read before any replacement. A field skips that step when card_field_payment, ignoring case, matches any of its "
+    "values or their split forms. The field's two name forms are then its values joined in that order with a space "
+    "and its split forms joined the same way, and the field is card-named when card_field_name, ignoring case, "
+    "matches either name form. The exempt pattern matches the number of a card that isn't a payment card, such as a "
+    "gift, loyalty, library or insurance card or an identity card (an ID, green, residence, Social Security, Aadhaar, "
+    "citizen or voter card). The conjunction pattern matches text that ends in a conjunction (or, and, &, +, / or a "
+    "comma, then only spaces or separators: . _ -), unless the text reads as text that doesn't end in one followed "
+    "by exempt cards' names, each with a conjunction after it. An exempt card's name is one of the exempt pattern's "
+    "qualifiers, alone or followed by card or a card number, and or and and count only with no letter or digit "
+    "right before them. So a conjunction keeps the card number in 'Card or gift card number', 'Payment or rewards "
+    "card number' and 'Card, gift or loyalty card number', where it joins an ordinary card to one the exempt pattern "
+    "doesn't name, and not in 'Gift or loyalty card number', 'Gift card or library card number' or 'Gift card number "
+    "and PIN'. The payment pattern matches a word for a payment card with no letter right before or after it: "
+    "credit, debit, prepaid, CC, ATM, EBT, HSA or FSA, or one of the card networks Visa, Mastercard, Amex, American "
+    "Express, Discover, Diners, JCB, UnionPay, Maestro, RuPay and Interac. Payment, bank and charge aren't payment "
+    "words, since they also name a checkout's section. So a field that names a card number is ordinary only when "
+    "the exempt pattern takes out each card number its values name and no value holds a payment word: "
+    "giftCardNumber, payment[gift_card_number], 'Library card number', 'ID card number' and 'Green card number' are "
+    "ordinary fields, while giftCardCvv, a benefits card's number, 'Credit card or gift card number', "
+    "creditOrGiftCardNumber, 'Visa gift card number', 'Green Dot card number', a field named giftCardNumber with the "
+    "placeholder 'Card number', one named cardNumber with the aria-label 'Gift card number' and one with the id "
+    "member and the placeholder 'Card number' stay card-named. A select labeled 'Credit or debit card' names no card "
+    "number, so it isn't card-named."
 )
 
 
@@ -449,6 +547,7 @@ def test_the_page_fixture_pins_the_one_card_field_rule_both_hosts_hold():
     page = _load("page")
     assert page.limits["card_field_name"] == CARD_FIELD_NAME
     assert page.limits["card_field_exempt"] == CARD_FIELD_EXEMPT
+    assert page.limits["card_field_conjunction"] == CARD_FIELD_CONJUNCTION
     assert page.limits["card_field_payment"] == CARD_FIELD_PAYMENT
     assert page.limits["card_field_word_breaks"] == CARD_FIELD_WORD_BREAKS
     assert page.limits["card_field_attributes"] == CARD_FIELD_ATTRIBUTES
@@ -457,6 +556,7 @@ def test_the_page_fixture_pins_the_one_card_field_rule_both_hosts_hold():
         "A field is card-named when card_field_name, ignoring case, matches the values of",
         "In each form, every match of card_field_exempt, ignoring case, is replaced with a space",
         "such as a gift, loyalty, library or insurance card, so giftCardNumber",
+        "credit, debit, prepaid, payment, bank, charge, EBT, HSA or FSA",
     ):
         assert gone not in page.description, gone
     assert CARD_RULE in page.description
@@ -467,8 +567,10 @@ def test_the_page_fixture_pins_the_one_card_field_rule_both_hosts_hold():
     named = page.examples["values that name a field for a card"]
     unnamed = page.examples["values that don't name a field for a card"]
     for example, card_named, required in (
-        (named, True, CARD_NAMED + PAYMENT_CARD_NAMES + COMBINED_PAYMENT_LABELS + [MEMBER_ID_CARD_NO]),
-        (unnamed, False, NOT_CARD_NAMED + ORDINARY_CARD_NUMBERS + PAYMENT_WORD_LOOKALIKES),
+        (named, True, CARD_NAMED + PAYMENT_CARD_NAMES + PAYMENT_GIFT_CARD_LABELS + COMBINED_PAYMENT_LABELS
+         + CONJOINED_CARD_LABELS + [MEMBER_ID_CARD_NO]),
+        (unnamed, False, NOT_CARD_NAMED + ORDINARY_CARD_NUMBERS + PAYMENT_WORD_LOOKALIKES + PAYMENT_SECTION_GIFT_CARDS
+         + EXEMPT_CARD_LISTS + CONJUNCTION_LOOKALIKES),
     ):
         assert (example.kind, example.where) == ("classification", "a field's name, id, aria-label or placeholder")
         assert example.body["card_named"] is card_named
@@ -500,7 +602,9 @@ def test_the_exempt_pattern_takes_out_only_an_ordinary_card_s_number_and_never_a
     as ordinary."""
     page = _load("page")
     exempt = page.limits["card_field_exempt"]
-    named_despite_an_exempt_match = COMBINED_PAYMENT_LABELS + [MEMBER_ID_CARD_NO]
+    named_despite_an_exempt_match = (
+        PAYMENT_GIFT_CARD_LABELS + COMBINED_PAYMENT_LABELS + CONJOINED_CARD_LABELS + [MEMBER_ID_CARD_NO]
+    )
     for value in page.examples["values that name a field for a card"].body["values"]:
         if value in named_despite_an_exempt_match:
             continue
@@ -523,7 +627,7 @@ def test_the_exempt_pattern_takes_out_only_an_ordinary_card_s_number_and_never_a
     beside_forms = _value_forms(beside.body["attributes"])
     assert any(re.search(exempt, form, re.IGNORECASE) for pair in beside_forms for form in pair)
 
-    unbounded = exempt.replace("|(?<![a-z0-9])id)", "|id)")
+    unbounded = exempt.replace("|(?<![a-z0-9])id|", "|id|")
     assert unbounded != exempt
     left = re.sub(unbounded, " ", "prepaidCardNumber", flags=re.IGNORECASE)
     assert re.search(CARD_FIELD_NAME, left, re.IGNORECASE) is None
@@ -566,16 +670,18 @@ def test_the_exempt_step_runs_on_each_attribute_value_on_its_own():
 
 
 def test_a_payment_word_in_any_attribute_keeps_the_field_s_card_number():
-    """A label that takes a payment card or a gift card names a payment card,
-    so a payment word anywhere in the field skips the exempt step: in any
-    attribute, in its split form (creditOrGiftCardNumber reads credit only
-    once split), and only with no letter right before or after it. A host that
-    skips the payment check reads each combined label as ordinary; one that
-    checks only the values reads creditOrGiftCardNumber so; one that skips the
-    exempt step only in the attribute that holds the payment word reads a gift
-    card's id beside the label 'Credit or gift card' so; and one that matches
-    the word inside a longer one reads 'Visalia Library card number' as
-    card-named. A payment word alone names no card number."""
+    """A label that names a payment card over an ordinary card's number names
+    a payment card, so a payment word anywhere in the field skips the exempt
+    step: in any attribute, in its split form (visaGiftCardNumber reads visa
+    only once split), and only with no letter right before or after it. A host
+    that skips the payment check reads 'Visa gift card number' as ordinary;
+    one that checks only the values reads visaGiftCardNumber so; one that skips
+    the exempt step only in the attribute that holds the payment word reads a
+    gift card's id beside the label 'Credit or gift card' so; and one that
+    matches the word inside a longer one reads 'Visalia Library card number' as
+    card-named. A combined label with a conjunction keeps its card number by
+    the payment word and by the conjunction alike, so only a host that skips
+    both reads it as ordinary. A payment word alone names no card number."""
     limits = _load("page").limits
     payment = limits["card_field_payment"]
     for word in PAYMENT_WORDS:
@@ -598,12 +704,23 @@ def test_a_payment_word_in_any_attribute_keeps_the_field_s_card_number():
         forms = _value_forms(attributes)
         return _names_a_card(_joined([pair if _holds_payment_word(pair) else _exempted(pair) for pair in forms]))
 
-    for label in COMBINED_PAYMENT_LABELS:
+    def without_payment_check_or_conjunction(attributes: dict[str, str]) -> bool:
+        forms = _value_forms(attributes)
+        return _names_a_card(_joined([_exempted(pair, keeps=lambda before: False) for pair in forms]))
+
+    for label in PAYMENT_GIFT_CARD_LABELS:
         for attribute in CARD_FIELD_ATTRIBUTES:
             assert _card_named({attribute: label}), (attribute, label)
             assert not without_payment_check({attribute: label}), (attribute, label)
-    assert re.search(payment, "creditOrGiftCardNumber", re.IGNORECASE) is None
-    assert not payment_check_on_values_only({"name": "creditOrGiftCardNumber"})
+    for label in COMBINED_PAYMENT_LABELS:
+        for attribute in CARD_FIELD_ATTRIBUTES:
+            assert _card_named({attribute: label}), (attribute, label)
+            assert any(_holds_payment_word(pair) for pair in _value_forms({attribute: label})), (attribute, label)
+            assert without_payment_check({attribute: label}), (attribute, label)
+            assert not without_payment_check_or_conjunction({attribute: label}), (attribute, label)
+    for value in ("visaGiftCardNumber", "AmExGiftCardNumber", "RuPayGiftCardNumber"):
+        assert re.search(payment, value, re.IGNORECASE) is None, value
+        assert not payment_check_on_values_only({"name": value}), value
     _attribute_example(
         "a gift card's id on a field labeled for a credit or gift card",
         True, {"id": "giftCardNumber", "aria-label": "Credit or gift card"},
@@ -614,7 +731,7 @@ def test_a_payment_word_in_any_attribute_keeps_the_field_s_card_number():
         "a payment-type select labeled for a credit or debit card",
         False, {"name": "payment_type", "aria-label": "Credit or debit card"},
     )
-    assert _holds_payment_word(_value_forms({"name": "payment_type"})[0])
+    assert _holds_payment_word(_value_forms({"aria-label": "Credit or debit card"})[2])
 
     inside_words = payment.removeprefix("(?<![a-z])").removesuffix("(?![a-z])")
     assert inside_words != payment
@@ -632,10 +749,10 @@ def test_a_payment_word_in_any_attribute_keeps_the_field_s_card_number():
 def test_the_card_rule_lists_each_payment_word_its_pattern_holds_and_no_other():
     """Both hosts' docs copy the card rule's sentence, so it lists the words
     card_field_payment holds, each card network by name. A sentence that says
-    any card network's name tells a reader 'RuPay or gift card number' is
-    card-named, while the pattern reads it as ordinary. Each listed word
-    matches exactly one of the pattern's words, and each of the pattern's
-    words is listed exactly once."""
+    any card network's name tells a reader 'Elo gift card number' is
+    card-named, while the rule reads it as ordinary. Each listed word matches
+    exactly one of the pattern's words, and each of the pattern's words is
+    listed exactly once."""
     page = _load("page")
     payment = page.limits["card_field_payment"]
     lead = "The payment pattern matches a word for a payment card with no letter right before or after it: "
@@ -647,6 +764,171 @@ def test_the_card_rule_lists_each_payment_word_its_pattern_holds_and_no_other():
         assert len([one for one in held if re.fullmatch(one, word, re.IGNORECASE)]) == 1, word
     for one in held:
         assert len([word for word in listed if re.fullmatch(one, word, re.IGNORECASE)]) == 1, one
+    assert not _card_named({"placeholder": "Elo gift card number"})
+
+
+def _kept_as_worded(before: str) -> bool:
+    """The conjunction rule as page.json words it, read plainly: the text
+    before an exempt match keeps it when it ends in a conjunction and doesn't
+    read as text that doesn't end in one followed by exempt cards' names, each
+    with a conjunction after it."""
+    ends_in_one = re.compile(_CONJUNCTION + r"[\s._-]*$", re.IGNORECASE)
+    names = re.compile(r"[\s._-]*(" + _EXEMPT_NAME_AND_CONJUNCTION + r")+", re.IGNORECASE)
+    return ends_in_one.search(before) is not None and not any(
+        names.fullmatch(before, start) and not ends_in_one.search(before[:start]) for start in range(len(before))
+    )
+
+
+def _card_named_keeping(attributes: dict[str, str], keeps: Callable[[str], bool]) -> bool:
+    """The rule as page.json gives it, but with `keeps` in place of the
+    conjunction pattern."""
+    forms = _value_forms(attributes)
+    if any(_holds_payment_word(pair) for pair in forms):
+        return _names_a_card(_joined(forms))
+    return _names_a_card(_joined([_exempted(pair, keeps=keeps) for pair in forms]))
+
+
+def test_a_conjunction_keeps_an_ordinary_card_s_number_joined_to_a_card_the_exempt_pattern_doesn_t_name():
+    """A label that joins a gift card's number to another card by or, and, &,
+    +, / or a comma takes that other card too, so unless it is an exempt card
+    as well, the exempt match stays and the field is card-named: 'Card or gift
+    card number' and 'Payment or rewards card number' name a payment card with
+    no payment word. The conjunction pattern reads the text before each exempt
+    match in its form, as the form was before any replacement, and holds the
+    exempt pattern's own qualifiers. A host that skips it reads each conjoined
+    label as ordinary; one that keeps a match after any conjunction reads 'Gift
+    or loyalty card number' as card-named; one that looks only at the word
+    right before the last conjunction reads 'Card, gift or loyalty card number'
+    as ordinary and 'Gift card or library card number' as card-named; one that
+    reads or and and inside a longer word reads 'Vendor gift card number' as
+    card-named; and one that reads the text before a match after the earlier
+    matches are taken out reads 'Gift card number or loyalty card number' so."""
+    limits = _load("page").limits
+    conjunction = limits["card_field_conjunction"]
+    assert CARD_FIELD_EXEMPT.startswith(_EXEMPT_QUALIFIERS)
+    assert conjunction.count(_EXEMPT_QUALIFIERS) == 1 and limits["card_field_exempt"].startswith(_EXEMPT_QUALIFIERS)
+    for label in CONJOINED_CARD_LABELS:
+        for attribute in CARD_FIELD_ATTRIBUTES:
+            forms = _value_forms({attribute: label})
+            assert _card_named({attribute: label}), (attribute, label)
+            assert not any(_holds_payment_word(pair) for pair in forms), (attribute, label)
+            assert not _card_named_keeping({attribute: label}, lambda before: False), (attribute, label)
+    for word in ("or", "and", "&", "+", "/", ","):
+        assert _kept_by_a_conjunction(f"Card {word} ") and _kept_by_a_conjunction(f"Card_{word}_"), word
+        assert not _kept_by_a_conjunction(f"Gift {word} ") and not _kept_by_a_conjunction(f"Gift card {word} "), word
+    for word in ("&", "+", "/", ","):
+        assert _kept_by_a_conjunction(f"Card{word}") and not _kept_by_a_conjunction(f"Gift{word}"), word
+    for word in ("or", "and"):
+        assert not _kept_by_a_conjunction(f"Card{word} "), word
+    assert not _kept_by_a_conjunction("cardOr") and _kept_by_a_conjunction("card Or ")
+    assert not _kept_by_a_conjunction("") and not _kept_by_a_conjunction("Enter the ")
+
+    after_any_conjunction = re.compile(_CONJUNCTION + r"[\s._-]*$", re.IGNORECASE).search
+    assert _card_named_keeping({"aria-label": "Gift or loyalty card number"}, after_any_conjunction)
+    last_word_only = re.compile(
+        r"^(?![\s\S]*" + _EXEMPT_QUALIFIERS + r"[\s._-]*" + _CONJUNCTION + r"[\s._-]*$)[\s\S]*" + _CONJUNCTION
+        + r"[\s._-]*$", re.IGNORECASE,
+    ).search
+    assert not _card_named_keeping({"aria-label": "Card, gift or loyalty card number"}, last_word_only)
+    assert _card_named_keeping({"aria-label": "Gift card or library card number"}, last_word_only)
+    inside_words = conjunction.replace("(?<![a-z0-9])(or|and)", "(or|and)")
+    assert inside_words != conjunction
+    for label in CONJUNCTION_LOOKALIKES:
+        assert _card_named_keeping({"aria-label": label}, lambda before: bool(re.search(inside_words, before, re.I)))
+
+    def taken_out_in_turn(form: str) -> str:
+        exempt = re.compile(limits["card_field_exempt"], re.IGNORECASE)
+        start = 0
+        while match := exempt.search(form, start):
+            if _kept_by_a_conjunction(form[: match.start()]):
+                start = match.end()
+            else:
+                form, start = form[: match.start()] + " " + form[match.end():], match.start() + 1
+        return form
+
+    label = "Gift card number or loyalty card number"
+    assert not _card_named({"aria-label": label})
+    assert _names_a_card(_NameForms(*(taken_out_in_turn(form) for form in _value_forms({"aria-label": label})[2])))
+
+    exempt = re.compile(limits["card_field_exempt"], re.IGNORECASE)
+    befores = {"Card, gift card or ", "Card or national ID or ", "xgift or ", "Gift card no. & ", "gift_or_", "Gift or\n"}
+    for example in _load("page").examples.values():
+        if example.kind != "classification":
+            continue
+        fields = [{"name": value} for value in example.body.get("values", [])] + [example.body.get("attributes", {})]
+        for field in fields:
+            for form in (form for pair in _value_forms(field) for form in pair):
+                befores |= {form[: match.start()] for match in exempt.finditer(form)}
+    assert len(befores) > 20
+    for before in befores:
+        assert _kept_by_a_conjunction(before) is _kept_as_worded(before), before
+
+
+def test_a_checkout_s_payment_section_leaves_a_gift_card_s_field_ordinary():
+    """Payment, bank and charge also name a checkout's section, so they aren't
+    payment words, and a gift card's field in that section is ordinary, as it
+    was before the payment check: payment[gift_card_number] or
+    paymentGiftCardNumber with the placeholder 'Gift card number'. A host that
+    keeps payment among the payment words reads each as card-named."""
+    payment = _load("page").limits["card_field_payment"]
+    for word in ("payment", "bank", "charge", "PAYMENT", "Bank", "Payment card"):
+        assert re.search(payment, word, re.IGNORECASE) is None, word
+    _attribute_example(
+        "a gift card's field in a checkout's payment section",
+        False, {"name": "payment[gift_card_number]", "placeholder": "Gift card number"},
+    )
+    _attribute_example(
+        "a gift card's id in a checkout's payment section",
+        False, {"id": "paymentGiftCardNumber", "placeholder": "Gift card number"},
+    )
+    with_payment = payment.replace("(credit|", "(credit|payment|")
+    assert with_payment != payment
+    for value in PAYMENT_SECTION_GIFT_CARDS:
+        forms = _value_forms({"name": value, "placeholder": "Gift card number"})
+        assert any(re.search(with_payment, form, re.IGNORECASE) for pair in forms for form in pair), value
+        assert _names_a_card(_joined(forms)), value
+
+
+def _alternatives(group: str) -> list[str]:
+    """The top-level alternatives of a parenthesized pattern group."""
+    found, depth, part = [], 0, ""
+    for char in group[1:-1]:
+        depth += {"(": 1, ")": -1}.get(char, 0)
+        if char == "|" and depth == 0:
+            found, part = [*found, part], ""
+        else:
+            part += char
+    return [*found, part]
+
+
+def test_an_identity_card_s_number_is_ordinary_and_no_qualifier_takes_a_payment_card_s_name():
+    """A green, permanent resident, residence, Social Security, Aadhaar,
+    citizen or voter card's number is an identity card's, so it is ordinary on
+    both hosts, and each qualifier of the exempt pattern has an ordinary
+    example that needs it. No qualifier occurs in a payment card's name in
+    either form, checked for every card-named value in page.json: Green Dot's
+    card stays card-named, with Dot between green and card, and a label naming
+    Amex's Green Card keeps its card number by amex. A travel form's
+    'Passport, visa or ID card number' stays card-named by visa."""
+    qualifiers = _alternatives(_EXEMPT_QUALIFIERS)
+    assert "green" in qualifiers and "residen(t|ce|cy)" in qualifiers and "voter" in qualifiers
+    for qualifier in qualifiers:
+        without = CARD_FIELD_EXEMPT.replace(
+            _EXEMPT_QUALIFIERS, "(" + "|".join(one for one in qualifiers if one != qualifier) + ")",
+        )
+        needs_it = [
+            value for value in ORDINARY_CARD_NUMBERS
+            if _names_a_card(_NameForms(*(
+                re.sub(without, " ", form, flags=re.IGNORECASE) for form in _value_forms({"name": value})[0]
+            )))
+        ]
+        assert needs_it, qualifier
+    exempt = _load("page").limits["card_field_exempt"]
+    for value in ("Green Dot card number", "greenDotCardNumber"):
+        assert _card_named({"placeholder": value}) and re.search(exempt, value, re.IGNORECASE) is None, value
+    for value in ("Amex Green Card number", "Passport, visa or ID card number"):
+        assert re.search(exempt, value, re.IGNORECASE) and _holds_payment_word(_value_forms({"name": value})[0])
+        assert _card_named({"placeholder": value}), value
 
 
 def test_a_card_named_field_on_the_page_is_a_secret_field():

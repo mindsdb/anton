@@ -1,5 +1,5 @@
 {
-  "description": "GET /sessions/{id}/page: the active tab as numbered elements and text. Secret fields (password, one-time code, card) carry value_hidden and never their value. challenges lists only check frames the person can see: a non-empty box in the viewport, not hidden. An element may carry context (the names of up to two containers around it, innermost last, joined by ' › ') and in_dialog (true inside an open dialog). elements never lists a frame. Past the cap it lists the on-screen elements ahead of the off-screen ones, each group in page order, and truncated says more elements exist than are listed; when every shown element fits, a host may keep page order or use the same order. A host may list an open dialog's elements (in_dialog) ahead of both groups. A page may carry focus: an opaque token naming the focused node, the deepest one through frames that the host can read; when the focus is inside a frame the host can't read, the token names that frame's element. Equal tokens mean the same node. A host may omit focus, and omits it when nothing is focused. text is the page's text cut at max_text when the page isn't scrolled or the text fits; otherwise it starts at the top of the view after a leading '…', and the start of the text above the view follows when the budget allows. A secret editor's text is never in text or in any name, and max_text 0 gives ''. frames lists the page's rendered child frames, on-screen first, and a host may list after them, unread, the frames inside a frame it read. Each frame has url (origin and path for http and https, about:blank or about:srcdoc, otherwise the scheme alone), read, box (the frame's content box in screenshot pixels, null when the host can't place it), offscreen (true when it is out of view), and for a read frame its elements, text and truncated. A host sends at with every frame whose box isn't null: the top-left {x, y} of the frame element's content box (the box that box gives in screenshot pixels) in its document's content coordinates, in CSS pixels rounded to whole ones. That is the box's top-left in the viewport plus the scroll offset of each element in the frame element's containing-block chain, plus its document's scroll unless that chain ends at an element fixed to the view. The chain holds the elements whose scroll moves it: an element in flow (static, relative or sticky) moves with its parent's scroll, and an absolute or fixed one with its containing block's as CSS defines it (an absolute one's nearest positioned ancestor, a fixed one's nearest ancestor with a transform, a filter or the like, else none), and so on up from each. So no scroll, its document's or an inner column's, changes the at of a frame that scrolls with the content, or of one fixed to the view. A frame that a sticky element holds stuck to the view keeps its box as its document scrolls, so its at moves by the scroll. Frame elements are read-only: no id and no field value (a select keeps its value and options), so a step reaches them only by position, and a type with focused true reaches the field the focus is in. A frame is never read when it is a human check, a consent page, on a payment_frame_hosts or sign_in_frame_hosts host or under one, holds a secret, card-named or sign-in field, or is under frame_min_read_px either way, and a host leaves unread a frame it finds the person can't see. A host reads at most frames_read frames, in the order frames lists them, and a frame it leaves unread for any of these reasons takes none of them. A field's card rule reads each value of its card_field_attributes (name, id, aria-label and placeholder), a missing one as empty, and that value's word-split form: each of card_field_word_breaks applied in order, case-sensitive, replacing every match with its first group and a space ($1 ), so cardNumberInput reads as card Number Input and CVVCode as CVV Code. Then every match of card_field_exempt, ignoring case, is replaced with a space in each value and in each split form on its own, so an exempt match never runs from one attribute into the next. A field skips that step when card_field_payment, ignoring case, matches any of its values or their split forms. The field's two name forms are then its values joined in that order with a space and its split forms joined the same way, and the field is card-named when card_field_name, ignoring case, matches either name form. The exempt pattern matches the number of a card that isn't a payment card, such as a gift, loyalty, library, insurance or identity card. The payment pattern matches a word for a payment card with no letter right before or after it: credit, debit, prepaid, payment, bank, charge, EBT, HSA or FSA, or one of the card networks Visa, Mastercard, Amex, American Express, Discover, Diners, JCB, UnionPay and Maestro. So a field that names a card number is ordinary only when the exempt pattern takes out each card number its values name and no value holds a payment word: giftCardNumber, 'Library card number' and 'ID card number' are ordinary fields, while giftCardCvv, a benefits card's number, 'Credit card or gift card number', creditOrGiftCardNumber, a field named giftCardNumber with the placeholder 'Card number', one named cardNumber with the aria-label 'Gift card number' and one with the id member and the placeholder 'Card number' stay card-named. A select labeled 'Credit or debit card' names no card number, so it isn't card-named. A card-named field is a secret field: it carries value_hidden and never its value, and a type into it, by element or with focused true, a select of it or a press of a key that edits text in it answers 403 password_field. A read frame lists at most elements_per_frame elements and text_per_frame characters of text. A host that places and reads frames apart from the page's own read gives them at most frames_phase_ms from the read's start; a frame that doesn't answer in time is listed unread, with box null.",
+  "description": "GET /sessions/{id}/page: the active tab as numbered elements and text. Secret fields (password, one-time code, card) carry value_hidden and never their value. challenges lists only check frames the person can see: a non-empty box in the viewport, not hidden. An element may carry context (the names of up to two containers around it, innermost last, joined by ' › ') and in_dialog (true inside an open dialog). elements never lists a frame. Past the cap it lists the on-screen elements ahead of the off-screen ones, each group in page order, and truncated says more elements exist than are listed; when every shown element fits, a host may keep page order or use the same order. A host may list an open dialog's elements (in_dialog) ahead of both groups. A page may carry focus: an opaque token naming the focused node, the deepest one through frames that the host can read; when the focus is inside a frame the host can't read, the token names that frame's element. Equal tokens mean the same node. A host may omit focus, and omits it when nothing is focused. text is the page's text cut at max_text when the page isn't scrolled or the text fits; otherwise it starts at the top of the view after a leading '…', and the start of the text above the view follows when the budget allows. A secret editor's text is never in text or in any name, and max_text 0 gives ''. frames lists the page's rendered child frames, on-screen first, and a host may list after them, unread, the frames inside a frame it read. Each frame has url (origin and path for http and https, about:blank or about:srcdoc, otherwise the scheme alone), read, box (the frame's content box in screenshot pixels, null when the host can't place it), offscreen (true when it is out of view), and for a read frame its elements, text and truncated. A host sends at with every frame whose box isn't null: the top-left {x, y} of the frame element's content box (the box that box gives in screenshot pixels) in its document's content coordinates, in CSS pixels rounded to whole ones. That is the box's top-left in the viewport plus the scroll offset of each element in the frame element's containing-block chain, plus its document's scroll unless that chain ends at an element fixed to the view. The chain holds the elements whose scroll moves it: an element in flow (static, relative or sticky) moves with its parent's scroll, and an absolute or fixed one with its containing block's as CSS defines it (an absolute one's nearest positioned ancestor, a fixed one's nearest ancestor with a transform, a filter or the like, else none), and so on up from each. So no scroll, its document's or an inner column's, changes the at of a frame that scrolls with the content, or of one fixed to the view. A frame that a sticky element holds stuck to the view keeps its box as its document scrolls, so its at moves by the scroll. Frame elements are read-only: no id and no field value (a select keeps its value and options), so a step reaches them only by position, and a type with focused true reaches the field the focus is in. A frame is never read when it is a human check, a consent page, on a payment_frame_hosts or sign_in_frame_hosts host or under one, holds a secret, card-named or sign-in field, or is under frame_min_read_px either way, and a host leaves unread a frame it finds the person can't see. A host reads at most frames_read frames, in the order frames lists them, and a frame it leaves unread for any of these reasons takes none of them. A field's card rule reads each value of its card_field_attributes (name, id, aria-label and placeholder), a missing one as empty, and that value's word-split form: each of card_field_word_breaks applied in order, case-sensitive, replacing every match with its first group and a space ($1 ), so cardNumberInput reads as card Number Input and CVVCode as CVV Code. Then every match of card_field_exempt, ignoring case, is replaced with a space in each value and in each split form on its own, so an exempt match never runs from one attribute into the next, but a match stays when card_field_conjunction, ignoring case, matches the text before it in its form, read before any replacement. A field skips that step when card_field_payment, ignoring case, matches any of its values or their split forms. The field's two name forms are then its values joined in that order with a space and its split forms joined the same way, and the field is card-named when card_field_name, ignoring case, matches either name form. The exempt pattern matches the number of a card that isn't a payment card, such as a gift, loyalty, library or insurance card or an identity card (an ID, green, residence, Social Security, Aadhaar, citizen or voter card). The conjunction pattern matches text that ends in a conjunction (or, and, &, +, / or a comma, then only spaces or separators: . _ -), unless the text reads as text that doesn't end in one followed by exempt cards' names, each with a conjunction after it. An exempt card's name is one of the exempt pattern's qualifiers, alone or followed by card or a card number, and or and and count only with no letter or digit right before them. So a conjunction keeps the card number in 'Card or gift card number', 'Payment or rewards card number' and 'Card, gift or loyalty card number', where it joins an ordinary card to one the exempt pattern doesn't name, and not in 'Gift or loyalty card number', 'Gift card or library card number' or 'Gift card number and PIN'. The payment pattern matches a word for a payment card with no letter right before or after it: credit, debit, prepaid, CC, ATM, EBT, HSA or FSA, or one of the card networks Visa, Mastercard, Amex, American Express, Discover, Diners, JCB, UnionPay, Maestro, RuPay and Interac. Payment, bank and charge aren't payment words, since they also name a checkout's section. So a field that names a card number is ordinary only when the exempt pattern takes out each card number its values name and no value holds a payment word: giftCardNumber, payment[gift_card_number], 'Library card number', 'ID card number' and 'Green card number' are ordinary fields, while giftCardCvv, a benefits card's number, 'Credit card or gift card number', creditOrGiftCardNumber, 'Visa gift card number', 'Green Dot card number', a field named giftCardNumber with the placeholder 'Card number', one named cardNumber with the aria-label 'Gift card number' and one with the id member and the placeholder 'Card number' stay card-named. A select labeled 'Credit or debit card' names no card number, so it isn't card-named. A card-named field is a secret field: it carries value_hidden and never its value, and a type into it, by element or with focused true, a select of it or a press of a key that edits text in it answers 403 password_field. A read frame lists at most elements_per_frame elements and text_per_frame characters of text. A host that places and reads frames apart from the page's own read gives them at most frames_phase_ms from the read's start; a frame that doesn't answer in time is listed unread, with box null.",
   "limits": {
     "frames_read": 5,
     "elements_per_frame": 50,
@@ -38,8 +38,9 @@
       "facebook.com"
     ],
     "card_field_name": "(^|[^a-z0-9]|card|cc)(cvc|cvv2?|csc)([^a-z0-9]|$)|card[\\s._-]*(numbers?|num|no)(?![a-z])|(^|[^a-z0-9])cc[\\s._-]*(numbers?|num)(?![a-z])|security[\\s._-]*code",
-    "card_field_exempt": "(gift|loyalty|rewards?|library|members?(hip)?|insurance|health|medicare|medicaid|student|transit|sim|national[\\s._-]*id|identity|(?<![a-z0-9])id)[\\s._-]*card[\\s._-]*(numbers?|num|no)(?![a-z])",
-    "card_field_payment": "(?<![a-z])(credit|debit|prepaid|payment|bank|charge|visa|master[\\s._-]*card|amex|american[\\s._-]*express|discover|diners|jcb|union[\\s._-]*pay|maestro|ebt|hsa|fsa)(?![a-z])",
+    "card_field_exempt": "(gift|loyalty|rewards?|library|members?(hip)?|insurance|health|medicare|medicaid|student|transit|sim|national[\\s._-]*id|identity|(?<![a-z0-9])id|green|residen(t|ce|cy)|social[\\s._-]*security|aadhaa?r|citizen(ship)?|voter)[\\s._-]*card[\\s._-]*(numbers?|num|no)(?![a-z])",
+    "card_field_conjunction": "^(?!([\\s\\S]*[^&+/,\\s._-](?<!(?<![a-z0-9])or)(?<!(?<![a-z0-9])and))?[\\s._-]*((gift|loyalty|rewards?|library|members?(hip)?|insurance|health|medicare|medicaid|student|transit|sim|national[\\s._-]*id|identity|(?<![a-z0-9])id|green|residen(t|ce|cy)|social[\\s._-]*security|aadhaa?r|citizen(ship)?|voter)([\\s._-]*card([\\s._-]*(numbers?|num|no))?)?[\\s._-]*((?<![a-z0-9])(or|and)|[&+/,])[\\s._-]*)+$)[\\s\\S]*((?<![a-z0-9])(or|and)|[&+/,])[\\s._-]*$",
+    "card_field_payment": "(?<![a-z])(credit|debit|prepaid|cc|atm|ebt|hsa|fsa|visa|master[\\s._-]*card|am[\\s._-]*ex|american[\\s._-]*express|discover|diners|jcb|union[\\s._-]*pay|maestro|ru[\\s._-]*pay|interac)(?![a-z])",
     "card_field_word_breaks": [
       "([a-z0-9])(?=[A-Z])",
       "([A-Z])(?=[A-Z][a-z])"
@@ -405,6 +406,37 @@
           "Payment or rewards card number",
           "Gift card or credit card number",
           "Visa gift card number",
+          "Green Dot card number",
+          "greenDotCardNumber",
+          "Citizens Bank card number",
+          "Direct Express card number",
+          "ATM card number",
+          "RuPay card number",
+          "Interac card number",
+          "visaGiftCardNumber",
+          "Mastercard gift card number",
+          "prepaidGiftCardNumber",
+          "AmExGiftCardNumber",
+          "RuPayGiftCardNumber",
+          "Amex Green Card number",
+          "ATM card or gift card number",
+          "CC or gift card number",
+          "ccOrGiftCardNumber",
+          "RuPay or gift card number",
+          "Interac or gift card number",
+          "Passport, visa or ID card number",
+          "Card or gift card number",
+          "Bank card or gift card number",
+          "Store card / gift card number",
+          "Card/Gift card number",
+          "cardOrGiftCardNumber",
+          "card_or_gift_card_number",
+          "Store and loyalty card number",
+          "Payment & gift card number",
+          "Card + gift card number",
+          "Store card, gift card number",
+          "Card, gift or loyalty card number",
+          "Store card, gift card or loyalty card number",
           "memberIdCardNo"
         ]
       }
@@ -468,7 +500,41 @@
           "id_card_number",
           "ID Card No.",
           "Visalia Library card number",
-          "Riverbank Library card number"
+          "Rediscover Rewards card number",
+          "Green card number",
+          "greenCardNumber",
+          "Permanent resident card number",
+          "Resident card number",
+          "Residence card number",
+          "residenceCardNumber",
+          "Residency card number",
+          "Social Security card number",
+          "socialSecurityCardNumber",
+          "Aadhaar card number",
+          "Aadhar card number",
+          "aadhaarCardNumber",
+          "Citizen card number",
+          "citizenCardNumber",
+          "Citizenship card number",
+          "Voter card number",
+          "voterCardNo",
+          "Voter ID card number",
+          "payment[gift_card_number]",
+          "paymentGiftCardNumber",
+          "payment_gift_card_number",
+          "checkout-payment-giftcard-number",
+          "Gift or loyalty card number",
+          "Gift/Loyalty card number",
+          "Gift card number and PIN",
+          "Gift card or library card number",
+          "Loyalty card or gift card number",
+          "Gift card number or loyalty card number",
+          "Gift, loyalty or rewards card number",
+          "giftOrLoyaltyCardNumber",
+          "Student ID or library card number",
+          "Membership & rewards card number",
+          "Vendor gift card number",
+          "Brand gift card number"
         ]
       }
     },
@@ -548,6 +614,28 @@
         "attributes": {
           "name": "payment_type",
           "aria-label": "Credit or debit card"
+        }
+      }
+    },
+    "a gift card's field in a checkout's payment section": {
+      "where": "a field's name, id, aria-label or placeholder",
+      "kind": "classification",
+      "body": {
+        "card_named": false,
+        "attributes": {
+          "name": "payment[gift_card_number]",
+          "placeholder": "Gift card number"
+        }
+      }
+    },
+    "a gift card's id in a checkout's payment section": {
+      "where": "a field's name, id, aria-label or placeholder",
+      "kind": "classification",
+      "body": {
+        "card_named": false,
+        "attributes": {
+          "id": "paymentGiftCardNumber",
+          "placeholder": "Gift card number"
         }
       }
     }
