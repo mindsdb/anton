@@ -2948,6 +2948,33 @@ async def test_on_the_desktop_a_key_with_no_element_waits_where_a_frame_may_hold
     assert host.posted("/action") == [] and len(elicit_answers.requests) == 1
 
 
+async def test_on_the_desktop_a_key_with_no_element_waits_where_a_secret_select_hides_its_options(elicit_answers):
+    """Both hosts send a secret select (a card-named one such as
+    name=card_no, or a cc- autocomplete one) with value_hidden and none of
+    its options, so the tool can't tell whether a key at the focus would
+    pick "Remove this card". An arrow, Home, End, PageUp, PageDown or Space
+    with no element then waits, as a key does where a frame wasn't read,
+    whatever the select's name; the card says the browser didn't list its
+    options. A press that names the select is refused as a key into a secret
+    field, before any card."""
+    saved_card = {"id": 5, "role": "combobox", "name": "Saved card", "value_hidden": True}
+    payment = {**PAGE, "url": "https://shop.example/account/payment", "elements": [*PAGE["elements"], saved_card]}
+    host = FakeHost(pages=[payment])
+    session = _desktop(host)
+    for key in ("ArrowDown", "End", " "):
+        elicit_answers.answers.append("cancel")
+        before = len(elicit_answers.requests)
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "press", "key": key}})
+        assert result.reason == "browser_step_not_approved", key
+        assert len(elicit_answers.requests) == before + 1, key
+        assert 'which may pick an option of combobox "Saved card", which the browser didn\'t list' in elicit_answers.prompts()[-1], key
+    before = len(elicit_answers.requests)
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "press", "element": 5, "key": "ArrowDown"}})
+    assert result.ok is False and result.reason == "browser_secret_field"
+    assert len(elicit_answers.requests) == before
+    assert host.posted("/action") == []
+
+
 async def test_on_the_desktop_arrows_in_a_plain_list_run_at_once(elicit_answers):
     """Arrows, Home, End, PageUp and PageDown where nothing they may pick
     commits anything run at once, with no element or on a radio of a

@@ -1175,7 +1175,9 @@ def _key_picks(page: Page, step: dict, *, consent: bool) -> list[str]:
     its read names the focus only by a token (``Page.focus``), which says
     whether the focus moved but not what it is on, so the tool holds them by
     what the page lists: a radio the commit list holds, or a select whose pick it holds
-    (``_select_holds``), and on a consent page any radio or select. A press
+    (``_select_holds``), and on a consent page any radio or select. A secret
+    select (``value_hidden``) comes with none of its options, so it holds
+    whatever its name, as a frame the host didn't read does. A press
     that names a radio may check any other radio the page lists, since the
     page doesn't say which radios share its group. A press with no element
     goes to whatever has the focus, so it may pick any such control the page
@@ -1196,6 +1198,10 @@ def _key_picks(page: Page, step: dict, *, consent: bool) -> list[str]:
         if el.role == "radio":
             return _named(el) if consent or _commit_name(el.name) else None
         if el.options or el.role in ("combobox", "listbox"):
+            # A host sends a secret select with none of its options, so any
+            # of them may commit, as in a frame it didn't read.
+            if el.value_hidden:
+                return f"an option of {_named(el)}, which the browser didn't list"
             holds = consent or _select_holds(el, [option for option in el.options if option.strip()])
             return f"an option of {_named(el)}" if holds else None
         return None
