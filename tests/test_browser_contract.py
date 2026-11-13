@@ -374,8 +374,10 @@ def test_the_page_fixture_lets_a_host_name_the_focused_node():
     ) in fixture.description
     framed = fixture.examples["a page with a frame"].body
     assert isinstance(framed["focus"], str) and framed["focus"]
-    assert "focus" not in fixture.examples["a page with no check"].body
-    Page.model_validate(framed)
+    unchecked = fixture.examples["a page with no check"].body
+    assert "focus" not in unchecked
+    assert Page.model_validate(framed).focus == framed["focus"]
+    assert Page.model_validate(unchecked).focus is None
 
 
 def test_the_page_fixture_gives_the_element_order_both_hosts_use():

@@ -1290,6 +1290,65 @@ async def test_on_the_desktop_a_step_to_the_focus_is_refused_when_a_frame_change
             assert host.posted("/action") == [{**browser_tool._step_body({"step": step}), "into_frame": False}], (step, what)
 
 
+async def test_on_the_desktop_a_step_to_the_focus_is_refused_when_the_focus_moves_while_its_card_waits(elicit_answers):
+    """The desktop's page read names the focused node (``focus``, an opaque
+    token, the deepest node through frames), and leaves it out when nothing
+    has the focus or it can't read it. A page whose own UI moves the focus
+    while the card waits, as a confirm dialog that takes it on its Delete
+    button, moves no frame, so after the Approve the tool compares the token
+    too: another token, or one that came or went, refuses a press with no
+    element or a focused type. The same token, a scroll included, runs the
+    step, and so do two reads that both leave it out, as the web's browser
+    does. A step that names its element goes to that element, whatever had
+    the focus."""
+    desktop = BrowserConfig(base_url=LOOPBACK, profile=SID, token="k")
+    form = {**FRAMED, "scroll": {"y": 0, "height": 2400, "viewport": 800}, "focus": "4F1A:31"}
+    frame = FRAMED["frames"][0]
+    bare = {key: value for key, value in form.items() if key != "focus"}
+    changed = {
+        "another node": (form, {**form, "focus": "4F1A:58"}),
+        "a node in another frame": (form, {**form, "focus": "9C02:7"}),
+        "a focus that came": (bare, form),
+        "a focus that went": (form, bare),
+    }
+    unchanged = {
+        "the same node": (form, {**form, "frames": [{**frame, "text": "Get the weekly digest. 12:01"}]}),
+        "the same node after a scroll": (
+            form, {**form, "scroll": {**form["scroll"], "y": 120}, "frames": [{**frame, "box": {**frame["box"], "y": 180}}]},
+        ),
+        "no token on either read": (FRAMED, FRAMED),
+    }
+    for step in ({"action": "press", "key": "Enter"}, {"action": "type", "focused": True, "text": "ada@example.test", "submit": True}):
+        for what, (seen, after) in changed.items():
+            host = FakeHost(pages=[seen, after])
+            session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+            elicit_answers.answers.append("approve")
+            before = len(elicit_answers.requests)
+            result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+            assert result.ok is False and result.reason == "browser_stale_element", (step, what)
+            assert (
+                "The focus moved while the card waited, so it may now be on a control the card didn't show. "
+                "Nothing was done."
+            ) in result.content, (step, what)
+            assert len(elicit_answers.requests) == before + 1, (step, what)
+            assert host.posted("/action") == [], (step, what)
+        for what, (seen, after) in unchanged.items():
+            host = FakeHost(pages=[seen, after])
+            session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+            elicit_answers.answers.append("approve")
+            result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+            assert result.ok is True and result.content.startswith("Done:"), (step, what, result.content)
+            assert host.posted("/action") == [{**browser_tool._step_body({"step": step}), "into_frame": False}], (step, what)
+
+    named = {**CHECKOUT, "focus": "4F1A:31"}
+    host = FakeHost(pages=[named, {**named, "focus": "4F1A:58"}])
+    session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+    elicit_answers.answers.append("approve")
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "element": 7}})
+    assert result.ok is True and result.content.startswith("Done:")
+    assert host.posted("/action") == [{"action": "click", "element": 7, "include_page": True, "into_frame": False}]
+
+
 async def test_on_the_desktop_a_page_that_moves_on_while_any_card_waits_is_asked_about_again_or_refused(elicit_answers):
     """The desktop's browser binds an approved step to nothing the card
     showed: it runs the step on whatever page is there when the step starts,

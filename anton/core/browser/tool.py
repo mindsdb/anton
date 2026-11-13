@@ -888,15 +888,23 @@ def _moved_focus(*, seen: Page, current: Page, body: dict) -> str | None:
     None when nothing says so.
 
     A press with no element and a focused type go wherever the focus is when
-    the step starts. Neither host's page read says where the focus is, so a
-    frame that came or went, or changed address, size or place on the page
+    the step starts. The desktop's page read names the focused node
+    (``Page.focus``), so another token, or one that came or went, says the
+    focus moved: a page's own UI moved it inside its document (a confirm
+    dialog that takes it on its Delete button) or into a frame. A frame that
+    came or went, or changed address, size or place on the page
     (``_frames_moved``), says a page or a frame may have moved the focus, or
-    the focused frame navigated. A scroll alone, and text that changes
-    inside the same frame (a clock), say nothing."""
+    the focused frame navigated, which a read that can't name the focus
+    misses. A scroll alone, and text that changes inside the same frame (a
+    clock), say nothing."""
     to_focus = body.get("focused") is True or (body.get("action") == "press" and body.get("element") is None)
-    if not to_focus or not _frames_moved(seen, current):
+    if not to_focus:
         return None
-    return "The page's frames changed while the card waited, so the focus may now be on a control the card didn't show."
+    if current.focus != seen.focus:
+        return "The focus moved while the card waited, so it may now be on a control the card didn't show."
+    if _frames_moved(seen, current):
+        return "The page's frames changed while the card waited, so the focus may now be on a control the card didn't show."
+    return None
 
 
 def _is_text_entry(el: Element | None) -> bool:
@@ -1164,8 +1172,9 @@ def _key_picks(page: Page, step: dict, *, consent: bool) -> list[str]:
 
     The web's browser holds those keys by what they pick, from its own read
     of the focus, a frame's included. The desktop's browser holds nothing and
-    this tool can't see the focus, so the tool holds them by what the page
-    lists: a radio the commit list holds, or a select whose pick it holds
+    its read names the focus only by a token (``Page.focus``), which says
+    whether the focus moved but not what it is on, so the tool holds them by
+    what the page lists: a radio the commit list holds, or a select whose pick it holds
     (``_select_holds``), and on a consent page any radio or select. A press
     that names a radio may check any other radio the page lists, since the
     page doesn't say which radios share its group. A press with no element
@@ -1363,10 +1372,10 @@ async def _gate(
     the tool reads the page again. An element the step names that now has
     another role or name refuses the step (``_moved_element``), as act
     refuses one before the card. So does, for a step that goes to the focus
-    (a press with no element, a focused type), a frame that came or went, or
-    changed address, size or place on the page, on the same address
-    (``_moved_focus``); a scroll alone moves no frame there. A page that
-    went to another address, or,
+    (a press with no element, a focused type), a focus token that changed,
+    or a frame that came or went, or changed address, size or place on the
+    page, on the same address (``_moved_focus``); a scroll alone moves
+    neither. A page that went to another address, or,
     after a card for a point that may land in a frame, a frame under the
     point with another address or box, is asked about again on the new read
     (``changed``), once; a page that changes again refuses the step. The
