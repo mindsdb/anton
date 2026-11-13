@@ -1284,7 +1284,7 @@ def _step_words(body: dict, element: Element | None, held: HeldStep | None = Non
 def _secret_field(element_id: object) -> ToolOutcome:
     return ToolOutcome(
         content=(
-            f"Not typed: element [{element_id}] is a secret field (a password, a code or a card number). "
+            f"Not done: element [{element_id}] is a secret field (a password, a code or a card number). "
             "Only the user fills those: call action=hand_to_user with a one-line reason."
         ),
         ok=False,
@@ -1386,8 +1386,10 @@ async def _gate(
     if refused is not None:
         return _not_approved(body, f"{refused} when it was asked earlier in this turn")
     element = _element(page, body.get("element"))
-    # Keys pressed into a secret field type into it just the same.
-    if body.get("action") in ("type", "press") and element is not None and element.secret:
+    # Keys pressed into a secret field type into it just the same, and a
+    # select fills it as surely; both hosts refuse all three (403
+    # password_field).
+    if body.get("action") in ("type", "press", "select") and element is not None and element.secret:
         return _secret_field(body.get("element"))
     host_holds = not session._browser_config.in_app
     send = body if host_holds else {**body, "into_frame": False}

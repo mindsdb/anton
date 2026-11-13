@@ -809,15 +809,22 @@ async def test_act_refuses_an_element_that_changed_since_the_model_read_it():
 
 
 async def test_typing_into_a_secret_field_is_refused():
-    host = FakeHost(pages=[CHECKOUT])
+    """A type, a key or a select into a field the host marks secret
+    (value_hidden: a password, a one-time code, a cc- autocomplete field or a
+    card-named one such as name=card_number) is refused before anything is
+    sent, as both hosts refuse it with 403 password_field."""
+    expiry = {"id": 11, "role": "combobox", "name": "Expiry month", "value_hidden": True}
+    host = FakeHost(pages=[{**CHECKOUT, "elements": [*CHECKOUT["elements"], expiry]}])
     session = make_session(host)
     for step in (
         {"action": "type", "element": 6, "text": "hunter2"},
         {"action": "type", "element": 8, "text": "4111 1111 1111 1111"},
         {"action": "press", "key": "h", "element": 6},
+        {"action": "select", "element": 11, "value": "04"},
     ):
         result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
         assert result.ok is False and result.reason == "browser_secret_field", step
+        assert f"element [{step['element']}] is a secret field" in result.content, step
         assert "hand_to_user" in result.content
     assert host.posted("/action") == []
 
