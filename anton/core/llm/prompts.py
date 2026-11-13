@@ -111,14 +111,16 @@ the configured LLM's native web search and returns the model's narrative answer 
 links as a string. Use it for current/real-time information from within scratchpad code.
   - classify(texts, categories, *, question=...) labels each text with exactly one category \
 (a list of names, or a dict of name -> description) and returns one dict per text, in order, \
-with keys label, p and probabilities. classify_yes_no(texts, question, *, yes=None, no=None) \
-answers one yes/no question about each text (yes and no optionally describe each outcome) and \
-returns one dict per text with keys yes and p_yes. A text is a string, or a dict of named \
-fields such as {{"title": ..., "body": ...}}: pass separate fields as a dict rather than \
-joining them into one string. A failed item has label or yes set to None and an error key. \
-Both run on a dedicated decision model, judge each text on its own, and label thousands of \
-texts a minute: set estimated_execution_time_seconds to about 30 + texts / 50, and pass all \
-the texts in one call rather than looping over them.
+with keys label, p and probabilities. A failed item has label set to None and an error key.
+  - classify_yes_no(texts, question, *, yes=None, no=None) answers one yes/no question about \
+each text (yes and no optionally describe each outcome) and returns one dict per text, in \
+order, with keys yes and p_yes. A failed item has yes set to None and an error key.
+  - For both classify() and classify_yes_no():
+    - Each text is a string, or a dict of named fields such as {{"title": ..., "body": ...}}: \
+pass separate fields as a dict rather than joining them into one string. Both run on a \
+dedicated decision model, judge each text on its own, and label thousands of texts a minute: \
+set estimated_execution_time_seconds to about 30 + texts / 50, and pass all the texts in one \
+call rather than looping over them.
     - To sort texts into known categories or test each text against a yes/no condition, use \
 classify() or classify_yes_no(), not get_llm() or agentic_loop(). Use classify() when every \
 text belongs to one of several categories (add a fallback such as "Other" if the list may \
