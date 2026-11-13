@@ -89,6 +89,12 @@ class CoreSettings(BaseSettings):
     # URL the code picks when it runs matches whatever it could fill. A bad
     # entry is skipped with a WARNING.
     write_approval_http: str = ""
+    # Which cells that run code the write check can't read wait on a card
+    # (ANTON_WRITE_APPROVAL_UNCHECKED). "all": the cell that runs it, a later
+    # cell that may call what it defined, and the first cell after a restart
+    # once a cell may have written a startup hook. "own": only the cell that
+    # runs it. "off": none, while SQL, file and HTTP writes still wait.
+    write_approval_unchecked: Literal["all", "own", "off"] = "all"
     # The write relay's control address, where anton reads and cancels the
     # requests it holds (ANTON_WRITE_RELAY_URL, as in
     # "http://write-relay:8090"). When set, a session that can ask the user
